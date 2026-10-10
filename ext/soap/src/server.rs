@@ -1977,14 +1977,7 @@ fn store_session_object(req: &mut Request, value: Owner<Value>) -> Res<Option<Ow
             return Err(thrown.into());
         }
     };
-    let key = match PhpString::new(req, SESSION_KEY) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown.into());
-        }
-    };
-    arr.set(req, key, value)?;
+    arr.set_str(req, SESSION_KEY, value)?;
     Ok(None)
 }
 

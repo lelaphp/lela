@@ -454,9 +454,7 @@ fn groups(
             Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
             None => Owner::bool(false),
         };
-        let key = new_string(req, &name)?;
-        let key = Key::from_string(req, key);
-        out.set(req, key, value)?;
+        out.set_symtable_str(req, &name, value)?;
     }
     Ok(out)
 }
@@ -762,9 +760,7 @@ fn replace(
                         Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
                         None => Owner::bool(false),
                     };
-                    let key = new_string(req, &name)?;
-                    let key = Key::from_string(req, key);
-                    subpats.set(req, key, value)?;
+                    subpats.set_symtable_str(req, &name, value)?;
                 }
                 let returned = php_ext::call::call(req, callback, &[Value::array(*subpats)]);
                 subpats.give_up(req);

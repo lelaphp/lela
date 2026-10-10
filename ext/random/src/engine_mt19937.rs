@@ -445,8 +445,7 @@ impl Mt19937 {
         let mut out = crate::members(req, this)?;
         if let Some(fields) = crate::with_serial(req, this, |s| s.serialize()) {
             let state = crate::fields(req, &fields)?;
-            let key = PhpString::new(req, b"__states")?;
-            out.set(req, key.into_key(), state.into_value())?;
+            out.set_str(req, b"__states", state.into_value())?;
         }
         Ok(out)
     }

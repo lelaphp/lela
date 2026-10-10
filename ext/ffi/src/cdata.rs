@@ -1487,15 +1487,8 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
     match &t.kind {
         Kind::Void => return Ok(None),
         _ if t.scalar().is_some() => {
-            let key = PhpString::new(req, b"cdata")?.into_key();
-            let value = match to_value(req, None, v.ptr, v.ty, Fetch::Read, true, false, false) {
-                Ok(value) => value,
-                Err(thrown) => {
-                    key.give_up(req);
-                    return Err(thrown);
-                }
-            };
-            table.set(req, key, value)?;
+            let value = to_value(req, None, v.ptr, v.ty, Fetch::Read, true, false, false)?;
+            table.set_str(req, b"cdata", value)?;
         }
         Kind::Pointer(to) => {
             let value = ffi::read::<usize>(v.ptr);
@@ -1514,9 +1507,8 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
                 let Some(key) = key else {
                     continue;
                 };
-                let key = PhpString::new(req, key)?.into_key();
                 let value = if field.bits == 0 {
-                    let read = to_value(
+                    to_value(
                         req,
                         None,
                         v.ptr.wrapping_add(field.offset),
@@ -1525,19 +1517,12 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
                         true,
                         false,
                         union,
-                    );
-                    match read {
-                        Ok(value) => value,
-                        Err(thrown) => {
-                            key.give_up(req);
-                            return Err(thrown);
-                        }
-                    }
+                    )?
                 } else {
                     let bits = bit_field_value(req, v.ptr, field);
                     Owner::take(req, bits)
                 };
-                table.set(req, key, value)?;
+                table.set_str(req, key, value)?;
             }
         }
         Kind::Array { of, len } => {

@@ -194,9 +194,8 @@ fn arguments(
         (b"extSubSystem", &members.ext_sub_system),
     ];
     for (key, member) in rows {
-        let key = PhpString::new(req, key)?.into_key();
         let value = string_or_null(req, member.as_deref())?;
-        context.set(req, key, value)?;
+        context.set_str(req, key, value)?;
     }
     Ok([public, system, context.into_value()])
 }

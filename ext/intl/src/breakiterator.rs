@@ -880,14 +880,11 @@ impl ObjectHandlers for Handlers {
             _ => (false, Value::null(), ""),
         };
         let mut table = PhpArray::new(req)?;
-        let key = PhpString::new(req, b"valid")?.into_key();
-        table.set(req, key, Owner::bool(valid))?;
+        table.set_str(req, b"valid", Owner::bool(valid))?;
         if valid {
-            let key = PhpString::new(req, b"text")?.into_key();
-            table.set(req, key, Owner::take(req, text))?;
+            table.set_str(req, b"text", Owner::take(req, text))?;
             let kind = PhpString::new(req, kind.as_bytes())?.into_value();
-            let key = PhpString::new(req, b"type")?.into_key();
-            table.set(req, key, kind)?;
+            table.set_str(req, b"type", kind)?;
         }
         Ok(Some(DebugInfo::from(table)))
     }

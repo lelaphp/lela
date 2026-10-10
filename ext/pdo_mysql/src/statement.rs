@@ -496,11 +496,10 @@ impl Statement for Stmt {
         };
         let mut meta = PhpArray::new(req)?;
         let mut flags = PhpArray::new(req)?;
-        let set =
-            |req: &mut Request, meta: &mut Owner<PhpArray>, key: &[u8], value: Owner<Value>| {
-                let key = PhpString::new(req, key)?.into_key();
-                meta.set(req, key, value)
-            };
+        let set = |req: &mut Request,
+                   meta: &mut Owner<PhpArray>,
+                   key: &[u8],
+                   value: Owner<Value>| { meta.set_str(req, key, value) };
         if let Some(def) = &field.def {
             let text = string_init(req, def)?;
             set(req, &mut meta, b"mysql:def", text)?;

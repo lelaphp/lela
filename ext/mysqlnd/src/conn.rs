@@ -134,9 +134,8 @@ impl ConnectAttr {
     fn add(&mut self, req: &mut Request, key: &[u8], value: &[u8]) -> Result<(), Thrown> {
         match self {
             ConnectAttr::Heap(attrs) => {
-                let key = PhpString::new(req, key)?.into_key();
                 let value = PhpString::new(req, value)?.into_value();
-                attrs.set(req, key, value)
+                attrs.set_str(req, key, value)
             }
             ConnectAttr::Malloc(attrs) => {
                 match attrs.iter_mut().find(|(k, _)| k == key) {

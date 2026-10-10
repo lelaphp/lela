@@ -994,9 +994,8 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
             if !attrs.is_empty() {
                 let mut list = PhpArray::new(req)?;
                 for (name, value) in attrs {
-                    let key = PhpString::new(req, &name)?.into_key();
                     let value = string(req, &value)?;
-                    list.set(req, key, value)?;
+                    list.set_str(req, &name, value)?;
                 }
                 add_row(&mut rows, b"@attributes", list.into_value());
             }

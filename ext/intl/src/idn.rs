@@ -120,8 +120,7 @@ fn convert(
             (b"errors", Value::int(i64::from(converted.errors))),
         ];
         for (key, value) in pairs {
-            let key = PhpString::new(req, key)?;
-            info.set(req, key.into_key(), Owner::take(req, value))?;
+            info.set_str(req, key, Owner::take(req, value))?;
         }
         if let Err(thrown) = idna_info.set(req, Untyped(info.into_value())) {
             text.give_up(req);

@@ -8,7 +8,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject};
 use php_ext_pdo_sqlite::ffi::{SQLITE_OK, Stmt};
 
-use crate::conn::{Taken, column_key, column_value, fail, give_back, not_ready, remove_stmt, take};
+use crate::conn::{Taken, column_value, fail, give_back, not_ready, remove_stmt, take};
 use crate::stmt::{self, Step, last_error, place};
 
 /// Where a `SQLite3Result`'s statement came from, `is_prepared_statement`: a
@@ -110,8 +110,7 @@ fn fetch_one(
         }
         if mode & ASSOC != 0 {
             let name = names.get(column).cloned().unwrap_or_default();
-            let key = column_key(req, &name)?;
-            row.set(req, key, value)?;
+            row.set_symtable_str(req, &name, value)?;
         } else {
             value.give_up(req);
         }

@@ -314,9 +314,8 @@ fn assoc(
     key: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, key)?.into_key();
     let value = text(req, value)?;
-    array.set(req, key, value)
+    array.set_str(req, key, value)
 }
 
 /// `locale_get_keywords`: the keywords as `name => value`, `null` where

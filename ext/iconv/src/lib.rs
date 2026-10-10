@@ -846,10 +846,9 @@ fn iconv_get_encoding(
     if kind.eq_ignore_ascii_case(b"all") {
         let mut out = PhpArray::new(req)?;
         for kind in Kind::ALL {
-            let key = PhpString::new(req, kind.name().as_bytes())?;
             let charset = encoding(req, kind);
             let value = PhpString::new(req, &charset)?;
-            out.set(req, key.into_key(), value.into_value())?;
+            out.set_str(req, kind.name().as_bytes(), value.into_value())?;
         }
         return Ok(OrFalse::Value(Union::A(out)));
     }

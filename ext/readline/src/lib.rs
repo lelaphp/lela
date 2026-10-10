@@ -260,8 +260,7 @@ fn readline_info(
             ),
         ];
         for (key, row) in rows {
-            let key = PhpString::new(req, key)?.into_key();
-            array.set(req, key, row)?;
+            array.set_str(req, key, row)?;
         }
         return Ok(array.into_value());
     };

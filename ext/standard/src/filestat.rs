@@ -172,11 +172,9 @@ fn realpath_cache_get(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
             ),
             (b"expires", Owner::int(entry.expires)),
         ] {
-            let name = PhpString::new(req, name)?.into_key();
-            row.set(req, name, value)?;
+            row.set_str(req, name, value)?;
         }
-        let path = PhpString::new(req, &entry.path)?.into_key();
-        all.set(req, path, row.into_value())?;
+        all.set_str(req, &entry.path, row.into_value())?;
     }
     Ok(all)
 }
@@ -489,8 +487,7 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Owner<Valu
                 out.append(req, Owner::int(field))?;
             }
             for (name, field) in STAT_NAMES.iter().zip(sb) {
-                let key = PhpString::new(req, name)?.into_key();
-                out.set(req, key, Owner::int(field))?;
+                out.set_str(req, name, Owner::int(field))?;
             }
             return Ok(out.into_value());
         }

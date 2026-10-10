@@ -57,7 +57,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s
 /// order, as the oracle's OpenSSL 3 build declares them (no `MD2`, no
@@ -184,14 +184,7 @@ pub(crate) fn put(
     name: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name) {
-        Ok(key) => Key::from_string(req, key),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_symtable_str(req, name, value)
 }
 
 /// `add_assoc_stringl`: bytes as a string under a string key.

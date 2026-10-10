@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error, while_pending,
 };
 use php_ext::request::{Foreign, Request, Resolve, Streams as _};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
     self, Conn as Connection, Db, Function, Handler, Registration, SQLITE_BUSY, SQLITE_LOCKED,
@@ -250,13 +250,6 @@ pub(crate) fn column_value(
         _ => return Ok(PhpString::new(req, &stmt.column_blob(column))?.into_value()),
     };
     Ok(Owner::take(req, value))
-}
-
-/// `sqlite3_column_name` as the key `add_assoc_zval` and
-/// `zend_symtable_update` file a column under.
-pub(crate) fn column_key(req: &mut Request, name: &[u8]) -> Result<Owner<Key>, Thrown> {
-    let name = PhpString::new(req, name)?;
-    Ok(Key::from_string(req, name))
 }
 
 /// `SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE`.
@@ -529,8 +522,8 @@ fn query_single(
             let mut row = PhpArray::new(req)?;
             for column in 0..stmt.data_count() {
                 let value = column_value(req, stmt, column)?;
-                let key = column_key(req, &stmt.column_name(column).unwrap_or_default())?;
-                row.set(req, key, value)?;
+                let name = stmt.column_name(column).unwrap_or_default();
+                row.set_symtable_str(req, &name, value)?;
             }
             row.into_value()
         }
@@ -823,10 +816,8 @@ impl SQLite3 {
     fn version(req: &mut Request) -> Answer<Owner<PhpArray>> {
         let mut out = PhpArray::new(req)?;
         let version = PhpString::new(req, ffi::version().as_bytes())?.into_value();
-        let key = PhpString::new(req, b"versionString")?.into_key();
-        out.set(req, key, version)?;
-        let key = PhpString::new(req, b"versionNumber")?.into_key();
-        out.set(req, key, Owner::int(ffi::version_number()))?;
+        out.set_str(req, b"versionString", version)?;
+        out.set_str(req, b"versionNumber", Owner::int(ffi::version_number()))?;
         Ok(out)
     }
 

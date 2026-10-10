@@ -389,8 +389,7 @@ impl ObjectHandlers for Handlers {
         }
         let text = held(req, object, |n| n.to_text(10));
         let num = PhpString::new(req, &text)?;
-        let key = PhpString::new(req, b"num")?;
-        table.set(req, key.into_key(), num.into_value())?;
+        table.set_str(req, b"num", num.into_value())?;
         Ok(Some(table.into()))
     }
 

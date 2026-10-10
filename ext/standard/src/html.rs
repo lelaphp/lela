@@ -827,10 +827,8 @@ fn write_row(
         entity.push(b'&');
         entity.extend_from_slice(name.as_bytes());
         entity.push(b';');
-        let key = PhpString::new(req, key)?;
-        let key = php_ext::values::Key::from_string(req, key);
         let value = PhpString::new(req, &entity)?.into_value();
-        array.set(req, key, value)
+        array.set_symtable_str(req, key, value)
     };
     match row {
         Row::One(name) => put(req, key, name),

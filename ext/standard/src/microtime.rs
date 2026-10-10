@@ -80,8 +80,7 @@ fn getrusage(
     };
     let mut usage = PhpArray::new(req)?;
     for (name, value) in fields {
-        let key = PhpString::new(req, name.as_bytes())?.into_key();
-        usage.set(req, key, Owner::int(value))?;
+        usage.set_str(req, name.as_bytes(), Owner::int(value))?;
     }
     Ok(OrFalse::Value(usage))
 }
@@ -194,8 +193,7 @@ fn gettimeofday(
         (b"dsttime", i64::from(offset.is_dst)),
     ];
     for (name, value) in rows {
-        let key = PhpString::new(req, name)?.into_key();
-        array.set(req, key, Owner::int(value))?;
+        array.set_str(req, name, Owner::int(value))?;
     }
     Ok(Union::A(array))
 }

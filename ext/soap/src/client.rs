@@ -918,18 +918,11 @@ fn context_options(
 fn show_typemap(req: &mut Request, this: PhpObject, typemap: &Typemap) -> Res<()> {
     let mut shown = PhpArray::new(req)?;
     for (k, _) in typemap.iter() {
-        if let crate::table::Key::Str(name) = k {
-            let key = match PhpString::new(req, name) {
-                Ok(name) => name.into_key(),
-                Err(thrown) => {
-                    shown.give_up(req);
-                    return Err(thrown.into());
-                }
-            };
-            if let Err(thrown) = shown.set(req, key, Owner::null()) {
-                shown.give_up(req);
-                return Err(thrown.into());
-            }
+        if let crate::table::Key::Str(name) = k
+            && let Err(thrown) = shown.set_str(req, name, Owner::null())
+        {
+            shown.give_up(req);
+            return Err(thrown.into());
         }
     }
     set_client_slot(req, this, ClientSlot::Typemap, shown.into_value())?;

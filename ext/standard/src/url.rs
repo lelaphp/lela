@@ -174,8 +174,7 @@ fn add_header(
     }
     let value = PhpString::new(req, &line[start..])?.into_value();
     let Some(previous) = headers.find(&line[..at]) else {
-        let name = PhpString::new(req, &line[..at])?.into_key();
-        return headers.set(req, name, value);
+        return headers.set_symtable_str(req, &line[..at], value);
     };
     if let Some(list) = previous.as_array() {
         let mut list = *list;
@@ -184,8 +183,7 @@ fn add_header(
     let mut list = PhpArray::new(req)?;
     list.append(req, Owner::take(req, previous))?;
     list.append(req, value)?;
-    let name = PhpString::new(req, &line[..at])?.into_key();
-    headers.set(req, name, list.into_value())
+    headers.set_str(req, &line[..at], list.into_value())
 }
 
 /// `php_url`: the components `php_url_parse_ex2` found.
@@ -594,8 +592,7 @@ fn parse_url(
                 None => continue,
             }
         };
-        let key = PhpString::new(req, name)?.into_key();
-        array.set(req, key, value)?;
+        array.set_str(req, name, value)?;
     }
     Ok(Some(OrFalse::Value(Union::B(Union::A(array)))))
 }

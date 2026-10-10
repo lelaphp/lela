@@ -2533,8 +2533,7 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<Ph
         b"ArrayObject"
     };
     let name = [b"\0".as_slice(), base, b"\0storage"].concat();
-    let name = PhpString::new(req, &name)?;
-    out.set(req, name.into_key(), storage)?;
+    out.set_str(req, &name, storage)?;
     Ok(out)
 }
 

@@ -5,7 +5,7 @@
 use php_ext::abi::{Ref, Untyped};
 use php_ext::coerce::with_string;
 use php_ext::request::Request;
-use php_ext::values::{Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Value, walk};
+use php_ext::values::{Owner, PhpArray, PhpObject, Value, walk};
 use php_ext_libxml::ffi::{Kind, Node};
 
 use crate::encoding::{Cx, encode_finish, encode_reset_ns, master_to_zval};
@@ -429,9 +429,8 @@ fn read_body(
                             }
                         },
                     };
-                    let key = PhpString::new(req, param.param_name.as_deref().unwrap_or_default())?;
-                    let key = PhpKey::from_string(req, key);
-                    return_value.set(req, key, tmp)?;
+                    let name = param.param_name.as_deref().unwrap_or_default();
+                    return_value.set_symtable_str(req, name, tmp)?;
                     param_count += 1;
                 }
             }
@@ -454,22 +453,16 @@ fn read_body(
                             if let Some(arr) = existing.deref().as_array().copied() {
                                 let mut arr = Owner::take(req, arr);
                                 arr.append(req, tmp)?;
-                                let key = PhpString::new(req, &name)?;
-                                let key = PhpKey::from_string(req, key);
-                                return_value.set(req, key, arr.into_value())?;
+                                return_value.set_str(req, &name, arr.into_value())?;
                             } else {
                                 tmp.give_up(req);
                             }
                         } else if v.next().is_some() && get_node(v.next(), &name, None).is_some() {
                             let mut arr = PhpArray::new(req)?;
                             arr.append(req, tmp)?;
-                            let key = PhpString::new(req, &name)?;
-                            let key = PhpKey::from_string(req, key);
-                            return_value.set(req, key, arr.into_value())?;
+                            return_value.set_symtable_str(req, &name, arr.into_value())?;
                         } else {
-                            let key = PhpString::new(req, &name)?;
-                            let key = PhpKey::from_string(req, key);
-                            return_value.set(req, key, tmp)?;
+                            return_value.set_symtable_str(req, &name, tmp)?;
                         }
                     } else {
                         return_value.append(req, tmp)?;
@@ -520,15 +513,7 @@ fn read_body(
                             return Err(err);
                         }
                     };
-                    let key = match PhpString::new(req, &t.name()) {
-                        Ok(key) => PhpKey::from_string(req, key),
-                        Err(thrown) => {
-                            val.give_up(req);
-                            headers.give_up(req);
-                            return Err(thrown.into());
-                        }
-                    };
-                    if let Err(thrown) = headers.set(req, key, val) {
+                    if let Err(thrown) = headers.set_symtable_str(req, &t.name(), val) {
                         headers.give_up(req);
                         return Err(thrown.into());
                     }

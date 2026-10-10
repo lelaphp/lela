@@ -17,7 +17,7 @@ use php_ext::coerce::{compare, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value};
 
 use crate::{Countable, Iterator};
 
@@ -882,10 +882,8 @@ fn release(req: &mut Request, elem: Elem) {
 fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Owner<Value>, Thrown> {
     if flags & SplPriorityQueue::EXTR_BOTH == SplPriorityQueue::EXTR_BOTH {
         let mut out = PhpArray::new(req)?;
-        let data = PhpString::new(req, b"data")?;
-        out.set(req, data.into_key(), Owner::take(req, elem.0.deref()))?;
-        let priority = PhpString::new(req, b"priority")?;
-        out.set(req, priority.into_key(), Owner::take(req, elem.1.deref()))?;
+        out.set_str(req, b"data", Owner::take(req, elem.0.deref()))?;
+        out.set_str(req, b"priority", Owner::take(req, elem.1.deref()))?;
         return Ok(out.into_value());
     }
     if flags & SplPriorityQueue::EXTR_PRIORITY != 0 {
@@ -998,10 +996,8 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         b"SplHeap"
     };
     let mangled = |field: &[u8]| [b"\0".as_slice(), base, b"\0", field].concat();
-    let name = PhpString::new(req, &mangled(b"flags"))?;
-    out.set(req, name.into_key(), Owner::int(flags))?;
-    let name = PhpString::new(req, &mangled(b"isCorrupted"))?;
-    out.set(req, name.into_key(), Owner::bool(corrupted))?;
+    out.set_str(req, &mangled(b"flags"), Owner::int(flags))?;
+    out.set_str(req, &mangled(b"isCorrupted"), Owner::bool(corrupted))?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
@@ -1011,8 +1007,7 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         };
         heap.append(req, value)?;
     }
-    let name = PhpString::new(req, &mangled(b"heap"))?;
-    out.set(req, name.into_key(), heap.into_value())?;
+    out.set_str(req, &mangled(b"heap"), heap.into_value())?;
     Ok(out)
 }
 
@@ -1030,8 +1025,7 @@ fn serialize(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thro
     let props = crate::members(req, this)?;
     out.append(req, props.into_value())?;
     let mut state = PhpArray::new(req)?;
-    let key = PhpString::new(req, b"flags")?;
-    state.set(req, key.into_key(), Owner::int(flags))?;
+    state.set_str(req, b"flags", Owner::int(flags))?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
@@ -1041,8 +1035,7 @@ fn serialize(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thro
         };
         heap.append(req, value)?;
     }
-    let key = PhpString::new(req, b"heap_elements")?;
-    state.set(req, key.into_key(), heap.into_value())?;
+    state.set_str(req, b"heap_elements", heap.into_value())?;
     out.append(req, state.into_value())?;
     Ok(out)
 }

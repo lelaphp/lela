@@ -432,8 +432,7 @@ fn password_get_info(req: &mut Request, hash: PhpString) -> Result<Owner<PhpArra
     let ident = extract_ident(hash);
     let algo = ident.and_then(Algo::find).filter(|algo| algo.valid(hash));
     let set = |req: &mut Request, array: &mut Owner<PhpArray>, name: &str, value: Owner<Value>| {
-        let key = PhpString::new(req, name.as_bytes())?.into_key();
-        array.set(req, key, value)
+        array.set_str(req, name.as_bytes(), value)
     };
     if let (Some(algo), Some(ident)) = (algo, ident) {
         {

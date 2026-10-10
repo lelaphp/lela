@@ -101,14 +101,7 @@ fn unset_zval_property(req: &mut Request, object: &Value, name: &[u8]) -> Res<()
 
 /// `add_assoc_zval`: `val` is the array's from here.
 fn add_assoc(req: &mut Request, arr: &mut PhpArray, name: &[u8], val: Owner<Value>) -> Res<()> {
-    let key = match PhpString::new(req, name) {
-        Ok(name) => Key::from_string(req, name),
-        Err(thrown) => {
-            val.give_up(req);
-            return Err(thrown.into());
-        }
-    };
-    Ok(arr.set(req, key, val)?)
+    Ok(arr.set_symtable_str(req, name, val)?)
 }
 
 /// `array_init` with one element, `val`.
@@ -205,9 +198,7 @@ fn any_step(
         let mut arr = PhpArray::new(req)?;
         match name.as_deref() {
             Some(nm) => {
-                let key = PhpString::new(req, nm)?;
-                let key = Key::from_string(req, key);
-                arr.set(req, key, a)?;
+                arr.set_symtable_str(req, nm, a)?;
             }
             None => arr.append(req, a)?,
         }
@@ -242,9 +233,7 @@ fn any_step(
         None => {
             if let Some(nm) = name.take() {
                 let mut arr = PhpArray::new(req)?;
-                let key = PhpString::new(req, &nm)?;
-                let key = Key::from_string(req, key);
-                arr.set(req, key, val)?;
+                arr.set_symtable_str(req, &nm, val)?;
                 *any = Some(arr.into_value());
             } else {
                 *any = Some(val);

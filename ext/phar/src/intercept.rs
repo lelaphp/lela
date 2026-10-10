@@ -567,8 +567,7 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
                 out.append(req, Owner::int(field))?;
             }
             for (name, field) in NAMES.iter().zip(sb) {
-                let key = PhpString::new(req, name)?.into_key();
-                out.set(req, key, Owner::int(field))?;
+                out.set_str(req, name, Owner::int(field))?;
             }
             Ok(())
         })?

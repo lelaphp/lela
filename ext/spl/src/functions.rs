@@ -13,7 +13,7 @@ use php_ext::coerce::{callable_checked, truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::{State, Traversable};
 
@@ -63,20 +63,11 @@ fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<OrFalse<Owner<P
     let mut out = PhpArray::new(req)?;
     for class in classes {
         let name = crate::class_name(req, *class);
-        let key = PhpString::new(req, &name)?;
-        if out.contains(&Key::lookup(*key)) {
-            key.give_up(req);
+        if out.find(&name).is_some() {
             continue;
         }
-        let key = Key::from_string(req, key);
-        let value = match crate::string_value(req, &name) {
-            Ok(value) => value,
-            Err(thrown) => {
-                key.give_up(req);
-                return Err(thrown);
-            }
-        };
-        out.set(req, key, value)?;
+        let value = crate::string_value(req, &name)?;
+        out.set_str(req, &name, value)?;
     }
     Ok(OrFalse::Value(out))
 }
@@ -577,14 +568,7 @@ fn spl_classes(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in SPL_CLASSES {
         let value = crate::string_value(req, name.as_bytes())?;
-        let key = match PhpString::new(req, name.as_bytes()) {
-            Ok(key) => Key::from_string(req, key),
-            Err(thrown) => {
-                value.give_up(req);
-                return Err(thrown);
-            }
-        };
-        out.set(req, key, value)?;
+        out.set_str(req, name.as_bytes(), value)?;
     }
     Ok(out)
 }

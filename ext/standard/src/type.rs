@@ -305,8 +305,7 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
             // the object an array of that one row casts to.
             _ => {
                 let mut row = PhpArray::new(req)?;
-                let key = PhpString::new(req, b"scalar")?.into_key();
-                row.set(req, key, now)?;
+                row.set_str(req, b"scalar", now)?;
                 let object = to_object(req, &Value::array(*row));
                 row.give_up(req);
                 object?.into_value()

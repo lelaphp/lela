@@ -26,14 +26,7 @@ impl Assoc {
         key: &str,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        let key = match PhpString::new(req, key.as_bytes()) {
-            Ok(key) => key.into_key(),
-            Err(thrown) => {
-                value.give_up(req);
-                return Err(thrown);
-            }
-        };
-        self.0.set(req, key, value)
+        self.0.set_str(req, key.as_bytes(), value)
     }
 
     /// `add_assoc_string`.

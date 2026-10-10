@@ -156,7 +156,7 @@ use php_ext::request::{
     WrapperOp,
 };
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 /// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which
 /// every stream made while it is on starts detecting its line endings
@@ -1180,8 +1180,7 @@ pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Owner<Value>, Thro
         out.append(req, Owner::int(field))?;
     }
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = PhpString::new(req, name)?.into_key();
-        out.set(req, key, Owner::int(field))?;
+        out.set_str(req, name, Owner::int(field))?;
     }
     Ok(out.into_value())
 }
@@ -2730,10 +2729,8 @@ fn meta_tags(
                     } else {
                         Vec::new()
                     };
-                    let key = PhpString::new(req, &key)?;
-                    let key = Key::from_string(req, key);
                     let content = PhpString::new(req, &content)?.into_value();
-                    array.set(req, key, content)?;
+                    array.set_symtable_str(req, &key, content)?;
                 }
                 name = None;
                 value = None;

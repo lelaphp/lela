@@ -911,10 +911,8 @@ fn bzerrstr(req: &mut Request, bz: Stream) -> Result<Owner<PhpString>, Thrown> {
 fn bzerror(req: &mut Request, bz: Stream) -> Result<Owner<PhpArray>, Thrown> {
     let code = last_error(req, bz)?;
     let mut array = PhpArray::new(req)?;
-    let errno = PhpString::new(req, b"errno")?;
-    array.set(req, errno.into_key(), Owner::int(code.number()))?;
-    let errstr = PhpString::new(req, b"errstr")?;
+    array.set_str(req, b"errno", Owner::int(code.number()))?;
     let text = PhpString::new(req, error_text(code).as_bytes())?;
-    array.set(req, errstr.into_key(), text.into_value())?;
+    array.set_str(req, b"errstr", text.into_value())?;
     Ok(array)
 }

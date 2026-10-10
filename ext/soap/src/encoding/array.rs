@@ -5,7 +5,7 @@
 use php_ext::call::{iterate, lookup_class};
 use php_ext::coerce::key_of;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Node, Ns};
 
 use super::{
@@ -983,10 +983,8 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
             }
         };
         let k = match key.as_ref() {
-            ValueRef::Str(s) => {
-                let s = PhpString::new(req, s.as_bytes())?;
-                Some(Key::from_string(req, s))
-            }
+            // `zend_symtable_update` under the string the key decoded to.
+            ValueRef::Str(s) => Some(Owner::take(req, Key::lookup(*s))),
             ValueRef::Int(n) => Some(Owner::index(n)),
             _ => None,
         };

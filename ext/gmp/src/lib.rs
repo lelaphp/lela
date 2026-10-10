@@ -1067,8 +1067,7 @@ fn gmp_gcdext(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Php
     let mut array = PhpArray::new(req)?;
     for (name, n) in [(b"g", gcd), (b"s", s), (b"t", t)] {
         let value = made(req, n)?.into_value();
-        let key = PhpString::new(req, name)?;
-        array.set(req, key.into_key(), value)?;
+        array.set_str(req, name, value)?;
     }
     Ok(array)
 }

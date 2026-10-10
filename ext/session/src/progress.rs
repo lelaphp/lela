@@ -322,8 +322,7 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
         let cancel = cancelled(req, vars, &key);
         with(req, |progress| progress.cancel_upload |= cancel);
         let data = rendered(req)?;
-        let key = PhpString::new(req, &key)?.into_key();
-        vars.set(req, key, data)?;
+        vars.set_str(req, &key, data)?;
     }
     session::flush(req, true)?;
     Ok(())
@@ -404,14 +403,7 @@ fn set(
     name: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, name, value)
 }
 
 /// `MULTIPART_EVENT_END`: the progress taken out of the session under

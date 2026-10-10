@@ -458,13 +458,12 @@ impl Compat {
         let Some(mut index) = info.separate_array(req)? else {
             return Ok(());
         };
-        let key = PhpString::new(req, name)?.into_key();
-        let mut list = match index.get(&key).and_then(|v| v.deref().as_array().copied()) {
+        let mut list = match index.find(name).and_then(|v| v.deref().as_array().copied()) {
             Some(list) => separate_owned(req, list)?,
             None => PhpArray::new(req)?,
         };
         list.append(req, Owner::int(i64::from(curtag)))?;
-        index.set(req, key, list.into_value())?;
+        index.set_str(req, name, list.into_value())?;
         if let Some(p) = self.parser(req) {
             p.curtag += 1;
         }
@@ -549,14 +548,7 @@ fn set(
     name: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, name, value)
 }
 
 /// An array read out of another taken as one owner of its own and

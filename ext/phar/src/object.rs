@@ -917,9 +917,8 @@ impl Phar {
         };
         let mut out = PhpArray::new(req)?;
         for (key, value) in [(&b"hash"[..], hash), (b"hash_type", kind.into_bytes())] {
-            let key = PhpString::new(req, key)?.into_key();
             let value = string(req, &value)?;
-            out.set(req, key, value)?;
+            out.set_str(req, key, value)?;
         }
         Ok(OrFalse::Value(out))
     }

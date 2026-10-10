@@ -575,8 +575,7 @@ fn stat_array(req: &mut Request, st: &za::Stat) -> Result<Owner<PhpArray>, Throw
         ),
     ];
     for (k, v) in rows {
-        let key = string(req, k)?.into_key();
-        out.set(req, key, Owner::take(req, v))?;
+        out.set_str(req, k, Owner::take(req, v))?;
     }
     name.give_up(req);
     Ok(out)

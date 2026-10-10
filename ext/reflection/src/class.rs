@@ -1385,8 +1385,7 @@ impl ReflectionClass {
                     return Err(thrown);
                 }
             };
-            let key = PhpString::new(req, &decl.name.0)?;
-            constants.set(req, key.into_key(), value)?;
+            constants.set_str(req, &decl.name.0, value)?;
         }
         Ok(constants)
     }
@@ -1518,8 +1517,7 @@ impl ReflectionClass {
         for interface in linked {
             let name = class_name_of(req, interface);
             let object = reflection_class_factory(req, interface)?;
-            let key = PhpString::new(req, &name)?;
-            interfaces.set(req, key.into_key(), object.into_value())?;
+            interfaces.set_str(req, &name, object.into_value())?;
         }
         Ok(interfaces)
     }
@@ -1618,8 +1616,7 @@ impl ReflectionClass {
             };
             let name = class_name_of(req, at);
             let object = reflection_class_factory(req, at)?;
-            let key = PhpString::new(req, &name)?;
-            found.set(req, key.into_key(), object.into_value())?;
+            found.set_str(req, &name, object.into_value())?;
         }
         Ok(found)
     }
@@ -1713,8 +1710,7 @@ impl ReflectionClass {
             named.extend_from_slice(b"::");
             named.extend_from_slice(&method.method.0);
             let value = string_value(req, &named)?;
-            let key = PhpString::new(req, &alias.0)?;
-            aliases.set(req, key.into_key(), value)?;
+            aliases.set_str(req, &alias.0, value)?;
         }
         Ok(aliases)
     }
@@ -2417,8 +2413,7 @@ impl ReflectionClass {
                 value.give_up(req);
                 continue;
             }
-            let key = PhpString::new(req, &property.name.0)?.into_key();
-            properties.set(req, key, value)?;
+            properties.set_str(req, &property.name.0, value)?;
         }
         Ok(properties)
     }
@@ -2699,8 +2694,7 @@ impl ReflectionClass {
                     None if property.ty.is_some() => continue,
                     None => Owner::null(),
                 };
-                let key = PhpString::new(req, &property.name.0)?.into_key();
-                defaults.set(req, key, value)?;
+                defaults.set_str(req, &property.name.0, value)?;
             }
         }
         Ok(defaults)

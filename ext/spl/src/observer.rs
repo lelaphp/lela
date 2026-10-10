@@ -1069,18 +1069,11 @@ impl SplObjectStorage {
         let mut storage = PhpArray::new(req)?;
         for (object, inf) in rows {
             let mut row = PhpArray::new(req)?;
-            let key = PhpString::new(req, b"obj")?;
-            row.set(
-                req,
-                key.into_key(),
-                Owner::take(req, object.as_value().deref()),
-            )?;
-            let key = PhpString::new(req, b"inf")?;
-            row.set(req, key.into_key(), Owner::take(req, inf.deref()))?;
+            row.set_str(req, b"obj", Owner::take(req, object.as_value().deref()))?;
+            row.set_str(req, b"inf", Owner::take(req, inf.deref()))?;
             storage.append(req, row.into_value())?;
         }
-        let name = PhpString::new(req, b"\0SplObjectStorage\0storage")?;
-        out.set(req, name.into_key(), storage.into_value())?;
+        out.set_str(req, b"\0SplObjectStorage\0storage", storage.into_value())?;
         Ok(out)
     }
 }

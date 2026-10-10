@@ -1443,8 +1443,7 @@ fn digest_authorization(
         .find(b"nc")
         .and_then(|v| v.as_int())
         .map_or(1, |n| n.wrapping_add(1));
-    let key = PhpString::new(req, b"nc")?.into_key();
-    digest.set(req, key, Owner::int(count))?;
+    digest.set_str(req, b"nc", Owner::int(count))?;
     // `snprintf(nc, sizeof(nc), "%08" ZEND_LONG_FMT_SPEC, ...)`, or
     // `"00000001"` for a count it adds.
     let mut nc = format!("{count:08}").into_bytes();
@@ -1764,10 +1763,8 @@ fn digest_challenge(req: &mut Request, this: PhpObject, headers: &[u8]) -> R<boo
             Some(array) => array,
             None => digest.insert(PhpArray::new(req)?),
         };
-        let key = PhpString::new(req, name)?;
-        let key = Key::from_string(req, key);
         let value = string(req, val)?;
-        array.set(req, key, value)?;
+        array.set_symtable_str(req, name, value)?;
     }
     let Some(digest) = digest else {
         return Ok(false);

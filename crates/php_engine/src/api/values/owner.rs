@@ -681,6 +681,17 @@ impl Owner<PhpArray> {
         self.written(|view| view.set_str(req, name, value))
     }
 
+    /// [`PhpArray::set_symtable_str`].
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_symtable_str(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        self.written(|view| view.set_symtable_str(req, name, value))
+    }
+
     /// [`PhpArray::add_new`].
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn add_new(

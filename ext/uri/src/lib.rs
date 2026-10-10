@@ -594,8 +594,7 @@ const URI_FIELD: &[u8] = b"uri";
 fn serialize<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let uri = recompose::<P>(req, this, Recomposition::RawAscii)?;
     let mut state = PhpArray::new(req)?;
-    let key = PhpString::new(req, URI_FIELD)?;
-    state.set(req, key.into_key(), uri.into_value())?;
+    state.set_str(req, URI_FIELD, uri.into_value())?;
     let mut out = PhpArray::new(req)?;
     out.append(req, state.into_value())?;
     out.append(req, Owner::take(req, Value::array(PhpArray::empty())))?;
@@ -733,14 +732,7 @@ fn put(
     name: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, name, value)
 }
 
 /// Core's `Exception`, `Uri\UriException`'s parent.

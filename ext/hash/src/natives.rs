@@ -1831,9 +1831,8 @@ impl HashContext {
     fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let algo = this.object().native::<Context>(req).and_then(|c| c.algo);
         let mut out = PhpArray::new(req)?;
-        let key = PhpString::new(req, b"algo")?;
         let name = PhpString::new(req, algo.map_or("", |a| a.label).as_bytes())?;
-        out.set(req, key.into_key(), name.into_value())?;
+        out.set_str(req, b"algo", name.into_value())?;
         Ok(out)
     }
 }

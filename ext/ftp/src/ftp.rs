@@ -1469,8 +1469,7 @@ pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<Owner<P
     };
     let mut entry = PhpArray::new(req)?;
     let name = PhpString::new(req, &line[blank + 1..])?;
-    let key = PhpString::new(req, b"name")?.into_key();
-    entry.set(req, key, name.into_value())?;
+    entry.set_str(req, b"name", name.into_value())?;
     let mut facts = &line[..blank];
     while !facts.is_empty() {
         let fact = facts.iter().position(|&b| b == b';').and_then(|semi| {
@@ -1482,9 +1481,8 @@ pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<Owner<P
             entry.give_up(req);
             return Ok(None);
         };
-        let key = PhpString::new(req, &facts[..eq])?.into_key();
         let value = PhpString::new(req, &facts[eq + 1..semi])?;
-        entry.set(req, key, value.into_value())?;
+        entry.set_str(req, &facts[..eq], value.into_value())?;
         facts = &facts[semi + 1..];
     }
     Ok(Some(entry))

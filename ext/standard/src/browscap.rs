@@ -439,9 +439,8 @@ fn get_browser(
     }
     let mut array = PhpArray::new(req)?;
     for (key, value) in rows {
-        let key = PhpString::new(req, &key)?.into_key();
         let value = PhpString::new(req, &value)?.into_value();
-        array.set(req, key, value)?;
+        array.set_str(req, &key, value)?;
     }
     if return_array {
         return Ok(Union::B(OrFalse::Value(array)));

@@ -1867,15 +1867,12 @@ impl PDOStatement {
         .flatten();
         if let Some((name, max_len, precision)) = info {
             // `add_assoc_str(..., zend_string_copy(col->name))`.
-            let key = PhpString::new(req, b"name")?.into_key();
-            meta.set(req, key, Owner::take(req, name).into_value())?;
-            let key = PhpString::new(req, b"len")?.into_key();
+            meta.set_str(req, b"name", Owner::take(req, name).into_value())?;
             // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(req, key, Owner::int(max_len as i64))?;
-            let key = PhpString::new(req, b"precision")?.into_key();
+            meta.set_str(req, b"len", Owner::int(max_len as i64))?;
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(req, key, Owner::int(precision as i64))?;
+            meta.set_str(req, b"precision", Owner::int(precision as i64))?;
         }
         Ok(OrFalse::Value(meta))
     }
