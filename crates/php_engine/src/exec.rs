@@ -19,7 +19,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use php_heap::{Fatal, FrameRef, MapPtr, MapTable, Zval};
+use php_heap::{Fatal, FrameRef, Zval};
 use php_unit::decl::HookKind;
 use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 
@@ -27,6 +27,10 @@ use crate::api::call::Function;
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
+
+mod caches;
+
+pub(crate) use caches::{CacheAt, RuntimeCaches, op_arrays_mut};
 
 /// The VM stack a request or a fiber runs on, its frames' headers the
 /// engine's ([`php_heap::VmStack`]).
@@ -453,7 +457,7 @@ pub(crate) struct Header {
     /// activation ([`init_runtime_cache`]) and kept until request end, so
     /// a function called twice reads on its second call what its first
     /// primed.
-    run_time_cache: u32,
+    run_time_cache: CacheAt,
     /// What the frame owns beyond words, where it owns anything.
     pub(crate) annex: Option<AnnexId>,
     /// `ZEND_CALL_INFO`: the frame's flags.
@@ -476,7 +480,7 @@ impl Header {
             identity: Cell::new(None),
             opline: 0,
             num_args: 0,
-            run_time_cache: code.runtime_cache,
+            run_time_cache: CacheAt::of(code.runtime_cache),
             annex: None,
             info: CallInfo::default(),
         }
@@ -498,7 +502,7 @@ impl Header {
             identity: Cell::new(None),
             opline: 0,
             num_args: count,
-            run_time_cache: 0,
+            run_time_cache: CacheAt::default(),
             annex: None,
             info,
         }
@@ -506,7 +510,7 @@ impl Header {
 
     /// A call made a user frame over `code`, `i_init_func_execute_data`:
     /// the opline it stands at and the runtime cache it reads.
-    pub(crate) fn activate(&mut self, run_time_cache: u32, opline: u32) {
+    pub(crate) fn activate(&mut self, run_time_cache: CacheAt, opline: u32) {
         self.run_time_cache = run_time_cache;
         self.opline = opline;
         self.info.set(CallInfo::CALL | CallInfo::BUILDING, false);
@@ -535,9 +539,9 @@ impl Header {
         self.this
     }
 
-    /// `EX(run_time_cache)` typed.
-    pub(crate) fn runtime_cache(&self) -> MapPtr<RuntimeCache> {
-        MapPtr::new(self.run_time_cache)
+    /// `EX(run_time_cache)`.
+    pub(crate) fn runtime_cache(&self) -> CacheAt {
+        self.run_time_cache
     }
 }
 
@@ -1023,23 +1027,16 @@ impl RuntimeCache {
     }
 }
 
-/// `ZEND_MAP_PTR(op_array->run_time_cache)` typed: where the op array's
-/// runtime cache stands in a request's map table, the offset the engine
-/// assigned the op array at publication ([`OpArray::runtime_cache`]).
-pub(crate) fn runtime_cache_of(code: &OpArray) -> MapPtr<RuntimeCache> {
-    MapPtr::new(code.runtime_cache)
-}
-
 /// `ZEND_OBSERVER_DATA(function)` reached through the function rather
 /// than a frame, as `zend_observer_add_begin_handler` and its kin reach
 /// it: the observer slot of `code`'s runtime cache in the request's map
 /// table, none where the cache was never laid down, php's
 /// `RUN_TIME_CACHE` still `NULL`.
 pub(crate) fn observer_slot_of<'map>(
-    map: &'map mut MapTable<RuntimeCache>,
+    map: &'map mut RuntimeCaches,
     code: &OpArray,
 ) -> Option<&'map mut crate::observer::Slot> {
-    let ptr = runtime_cache_of(code);
+    let ptr = CacheAt::of(code.runtime_cache);
     map.get(ptr)?.slots.as_ref()?;
     Some(&mut map.map(ptr).observer)
 }
@@ -1083,8 +1080,8 @@ pub(crate) fn observer_slot_of<'map>(
 /// not, so [`Cached::ClassAndCallee`] carries the scope it was resolved
 /// from and answers no other. The day a slot here holds a property
 /// offset, a rebound closure takes its own cache there.
-pub(crate) fn init_runtime_cache(map: &mut MapTable<RuntimeCache>, code: &OpArray, body: Body) {
-    let at = runtime_cache_of(code);
+pub(crate) fn init_runtime_cache(map: &mut RuntimeCaches, code: &OpArray, body: Body) {
+    let at = CacheAt::of(code.runtime_cache);
     if body == Body::Main {
         map.map(at).lay_down(code.cache_size);
     } else {
@@ -1096,11 +1093,7 @@ pub(crate) fn init_runtime_cache(map: &mut MapTable<RuntimeCache>, code: &OpArra
 /// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
 /// the function's first activation in the request, found laid down by
 /// every one after.
-pub(crate) fn lay_runtime_cache(
-    map: &mut MapTable<RuntimeCache>,
-    at: MapPtr<RuntimeCache>,
-    cache_size: u32,
-) {
+pub(crate) fn lay_runtime_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) {
     let cache = map.map(at);
     if cache.slots.is_none() {
         cache.lay_down(cache_size);
@@ -1564,12 +1557,7 @@ impl Vm {
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, read off the request's map table
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
-    pub(crate) fn cached(
-        &self,
-        map: &MapTable<RuntimeCache>,
-        frame: FrameRef,
-        slot: CacheSlot,
-    ) -> Cached {
+    pub(crate) fn cached(&self, map: &RuntimeCaches, frame: FrameRef, slot: CacheSlot) -> Cached {
         self.at(frame)
             .and_then(|header| map.get(header.runtime_cache()))
             .map_or(Cached::Unprimed, |cache| cache.get(slot))
@@ -1580,7 +1568,7 @@ impl Vm {
     /// ([`RuntimeCache::set`]).
     pub(crate) fn prime(
         &self,
-        map: &mut MapTable<RuntimeCache>,
+        map: &mut RuntimeCaches,
         frame: FrameRef,
         slot: CacheSlot,
         value: Cached,
@@ -1595,7 +1583,7 @@ impl Vm {
     /// that stands nowhere.
     pub(crate) fn observer_slot(
         &self,
-        map: &MapTable<RuntimeCache>,
+        map: &RuntimeCaches,
         frame: FrameRef,
     ) -> crate::observer::Slot {
         self.observer_slot_held(map, frame)
@@ -1607,7 +1595,7 @@ impl Vm {
     /// read one handler of it at a time.
     pub(crate) fn observer_slot_held<'map>(
         &self,
-        map: &'map MapTable<RuntimeCache>,
+        map: &'map RuntimeCaches,
         frame: FrameRef,
     ) -> Option<&'map crate::observer::Slot> {
         self.at(frame)
@@ -1619,7 +1607,7 @@ impl Vm {
     /// `slot` (`zend_observer_fcall_install`).
     pub(crate) fn set_observer_slot(
         &self,
-        map: &mut MapTable<RuntimeCache>,
+        map: &mut RuntimeCaches,
         frame: FrameRef,
         slot: crate::observer::Slot,
     ) {
@@ -2526,31 +2514,34 @@ fn stays_in_split_loop(code: &OpArray, range: &php_unit::LiveRange, catch_op: u3
         .is_some_and(|to_end| catch_op < range.end.0.saturating_add(to_end))
 }
 
-/// `zend_unfinished_execution_gc_ex` (`Z/Zend/zend_execute.c:4658`):
+/// `zend_unfinished_execution_gc_ex` (`Z/Zend/zend_execute.c:4968`):
 /// what one frame that is not running holds, named for the collector.
-/// The receiver and the closure its call released, the CVs, the extra
-/// arguments and the extra named ones, the calls it was building
-/// ([`unfinished_calls_gc`]), the temporaries and loop variables live
-/// where it stands, and what its symbol table holds beside the CVs
-/// attached to it. Every frame the collector reads is walked here, a
-/// suspended generator's and each frame of a suspended fiber alike.
+/// The receiver and the closure its call released, the CVs where it has
+/// no symbol table, the extra arguments and the extra named ones, the
+/// calls it was building ([`unfinished_calls_gc`]) and the temporaries
+/// and loop variables live where it stands; and its symbol table, which
+/// php returns for its caller to hand the collector as a table, the CVs
+/// reached through its `IS_INDIRECT` rows. Every frame the collector
+/// reads is walked here, a suspended generator's and each frame of a
+/// suspended fiber alike.
 pub(crate) fn unfinished_execution_gc(
     state: FrameAt<'_>,
     calls: &[FrameAt<'_>],
     visit: &mut dyn FnMut(Value),
-) {
+) -> Option<TableId> {
     if let Some(this) = state.receiver().and_then(Receiver::owned) {
         visit(this.as_value());
     }
     if let Some(closure) = state.closure() {
         visit(closure.as_value());
     }
-    let Some(code) = state.code() else {
-        return;
-    };
+    let code = state.code()?;
     let slot = |at: u32| Value::of_zval(state.frame.slot(php_heap::Slot(at)));
-    for cv in 0..code.num_cvs {
-        visit(slot(cv));
+    let table = state.symbol_table();
+    if table.is_none() {
+        for cv in 0..code.num_cvs {
+            visit(slot(cv));
+        }
     }
     for extra in state.extra_args() {
         visit(extra);
@@ -2575,9 +2566,7 @@ pub(crate) fn unfinished_execution_gc(
             }
         }
     }
-    if let Some(table) = state.symbol_table() {
-        state.req.gc_symbol_table(table, visit);
-    }
+    table
 }
 
 /// `zend_unfinished_calls_gc`: the calls a frame was building,
@@ -2652,10 +2641,10 @@ pub(crate) fn cached_class(
 mod tests {
     use std::sync::Arc;
 
-    use php_heap::{FrameRef, MapTable};
-    use php_unit::{CacheSlot, OpArray, Unit};
+    use php_heap::FrameRef;
+    use php_unit::{CacheSlot, MapPtrOffset, OpArray, Unit};
 
-    use super::{Body, Cached, code_of, init_runtime_cache, runtime_cache_of};
+    use super::{Body, CacheAt, Cached, RuntimeCaches, code_of, init_runtime_cache};
     use crate::api::call::Function;
     use crate::api::request::Request;
     use crate::engine::{Engine, RequestDescription};
@@ -2722,12 +2711,12 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = with_cache(8);
-        let mut map = MapTable::new();
+        let mut map = RuntimeCaches::default();
         let code = code_of(&unit);
         for _ in 0..2 {
             init_runtime_cache(&mut map, code, Body::Function(0));
         }
-        let ptr = runtime_cache_of(code);
+        let ptr = CacheAt::of(code.runtime_cache);
         let laid = map.get(ptr).and_then(|cache| cache.slots.as_ref());
         assert_eq!(
             laid.map(|slots| slots.len()),
@@ -2755,5 +2744,75 @@ mod tests {
         );
         req.prime(FrameRef(7), CacheSlot(0), Cached::Hit);
         assert_eq!(req.cached(FrameRef(7), CacheSlot(0)), Cached::Unprimed);
+    }
+
+    /// A unit compiled for the request alone takes a number of the
+    /// request's for each op array and none of the engine's offsets, and
+    /// once nothing holds it, the next such unit takes its numbers again,
+    /// over caches emptied as php frees a heap cache with its op array.
+    #[test]
+    fn a_request_only_unit_s_numbers_are_the_request_s_and_handed_out_again() {
+        let one_function = || Unit {
+            main: OpArray {
+                cache_size: 8,
+                ..OpArray::default()
+            },
+            functions: vec![(
+                php_unit::decl::FunctionDecl {
+                    name: php_unit::decl::Name::from("f"),
+                    parameters: Vec::new(),
+                    return_type: None,
+                    returns_by_ref: false,
+                    is_generator: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    file: php_unit::decl::Name::default(),
+                    line: 0,
+                    end_line: 0,
+                    frameless: Vec::new(),
+                },
+                OpArray {
+                    cache_size: 8,
+                    ..OpArray::default()
+                },
+            )],
+            ..Unit::default()
+        };
+        let mut caches = RuntimeCaches::default();
+        let first = caches.take(one_function());
+        let numbers = |unit: &Unit| {
+            std::iter::once(&unit.main)
+                .chain(unit.functions.iter().map(|(_, code)| code))
+                .map(|code| code.runtime_cache)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            numbers(&first),
+            [MapPtrOffset::Request(0), MapPtrOffset::Request(1)]
+        );
+        init_runtime_cache(&mut caches, code_of(&first), Body::Function(0));
+        let at = CacheAt::of(first.main.runtime_cache);
+        caches.map(at).set(CacheSlot(0), Cached::Hit);
+        let second = caches.take(one_function());
+        assert_eq!(
+            numbers(&second),
+            [MapPtrOffset::Request(2), MapPtrOffset::Request(3)],
+            "a unit still held keeps its numbers"
+        );
+        drop(first);
+        let third = caches.take(one_function());
+        let mut taken = numbers(&third);
+        taken.sort_by_key(|at| match at {
+            MapPtrOffset::Engine(n) | MapPtrOffset::Request(n) => *n,
+        });
+        assert_eq!(
+            taken,
+            [MapPtrOffset::Request(0), MapPtrOffset::Request(1)],
+            "the numbers of a unit nothing holds are handed out again"
+        );
+        assert!(
+            caches.get(at).is_some_and(|cache| cache.slots.is_none()),
+            "over a cache emptied"
+        );
     }
 }

@@ -200,7 +200,8 @@ pub(crate) enum Formattable {
 
 /// `umsg_open`: the pattern, or null where none is given, as php hands
 /// ICU a pattern it never converted. ICU answers the format it made
-/// whether or not the pattern parsed, its failure in `status`.
+/// whether or not the pattern parsed, its failure in `status`; a format
+/// beside a failure is closed here ([`Code::built`]).
 pub(crate) fn open(
     pattern: Option<&[u16]>,
     locale: &CStr,
@@ -212,14 +213,16 @@ pub(crate) fn open(
     });
     // SAFETY: the pattern is len UChars or null with zero, the locale
     // NUL-terminated, the parse error a live struct or none.
-    unsafe { sys::umsg_open(ptr, len, locale.as_ptr(), parse_error, status) }
+    let made = unsafe { sys::umsg_open(ptr, len, locale.as_ptr(), parse_error, status) };
+    status.built(made)
 }
 
 impl MessageFormat {
     /// `umsg_clone`.
     pub(crate) fn try_clone(&self, status: &mut Code) -> Option<MessageFormat> {
         // SAFETY: the format is open.
-        unsafe { sys::umsg_clone(self, status) }
+        let made = unsafe { sys::umsg_clone(self, status) };
+        status.built(made)
     }
 
     /// `umsg_applyPattern`.

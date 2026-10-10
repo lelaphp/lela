@@ -11,7 +11,7 @@ A compiled, immutable PHP program: its declarations, op arrays, literal tables a
 _Avoid_: module, script, compilation result
 
 **Published**:
-The engine-owned form of one cached unit: the immutable unit beside the engine's `Func` for each of its op arrays, their safepoint words, and the map-pointer offsets assigned at publication. What a request, a trace and a claim hold to keep an op array alive; the unit cache stores these.
+The engine-owned form of one cached unit: the immutable unit beside the engine's `Func` for each of its op arrays and their safepoint words. The map-pointer offset assigned at publication is each op array's own, carried on the op array as php's `zend_op_array` carries it. What a request, a trace and a claim hold to keep an op array alive; the unit cache stores these.
 _Avoid_: cache entry, loaded unit, `Func` table
 
 **Declaration model**:

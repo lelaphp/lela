@@ -19,6 +19,7 @@ Level
 Level::bit
 LiveKind
 LiveRange
+MapPtrOffset
 MethodBody
 OpArray
 OpArray::dimension_written

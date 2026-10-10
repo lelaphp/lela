@@ -75,6 +75,7 @@ FreshStr::is_empty
 FreshStr::len
 FreshStr::set_len
 GcStatus
+GcTable
 Heap
 Heap::addref
 Heap::array
@@ -198,6 +199,7 @@ HeapHooks::gc_children
 HeapHooks::gc_collect_cycles
 HeapHooks::gc_destructors_in_fiber
 HeapHooks::gc_live_temporaries
+HeapHooks::gc_overflow
 HeapHooks::gc_weakly_keyed
 HeapHooks::gc_weakmap_entries
 HeapHooks::has_destructor

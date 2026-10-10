@@ -164,6 +164,7 @@ abi::FromArgument::declared
 abi::FromArgument::from_default
 abi::FromArgument::from_value
 abi::FromArgument::hold
+abi::GcTable
 abi::Header
 abi::Header::header
 abi::Header::register
@@ -1164,6 +1165,7 @@ values::Emalloc::free
 values::Emalloc::is_empty
 values::Emalloc::len
 values::Emalloc::new
+values::Emalloc::printf_buffer
 values::Emalloc::resize
 values::FreshString
 values::FreshString::bytes

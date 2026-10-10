@@ -6,7 +6,8 @@
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This, Variadic,
+    GcTable, Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This,
+    Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
@@ -352,7 +353,12 @@ impl ObjectHandlers for Handlers {
 
     /// `dbh_get_gc`: the constructor arguments and what the connector
     /// holds.
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(dbh) = state(req, object) {
             if let Some(args) = &dbh.stmt_args {
                 visit(Value::array(**args));
@@ -361,6 +367,7 @@ impl ObjectHandlers for Handlers {
                 conn.gc(visit);
             }
         }
+        GcTable::Properties
     }
 
     /// `dbh_method_get`: the class's own method, else one the connection's

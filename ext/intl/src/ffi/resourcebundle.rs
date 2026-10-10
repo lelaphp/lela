@@ -78,7 +78,8 @@ fn copied<T: Copy>(ptr: *const T, n: i32) -> Vec<T> {
 
 impl Bundle {
     /// `ures_open`, or `ures_openDirect` where no fallback is wanted: the
-    /// bundle of `package` (ICU's own data for none) for `locale`.
+    /// bundle of `package` (ICU's own data for none) for `locale`; none
+    /// beside a failure ([`Code::built`]).
     pub(crate) fn open(
         package: Option<&CStr>,
         locale: &CStr,
@@ -86,13 +87,14 @@ impl Bundle {
         status: &mut Code,
     ) -> Option<Bundle> {
         let package = package.map_or(std::ptr::null(), CStr::as_ptr);
-        if fallback {
+        let made = if fallback {
             // SAFETY: both names are NUL-terminated or the package null.
             unsafe { sys::ures_open(package, locale.as_ptr(), status) }
         } else {
             // SAFETY: as above.
             unsafe { sys::ures_openDirect(package, locale.as_ptr(), status) }
-        }
+        };
+        status.built(made)
     }
 
     /// `ures_getByKey`.

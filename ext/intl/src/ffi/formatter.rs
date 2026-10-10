@@ -90,7 +90,7 @@ pub(crate) fn iso3_language(locale: &CStr) -> &'static str {
 }
 
 impl NumberFormat {
-    /// `unum_open`.
+    /// `unum_open`, none beside a failure ([`Code::built`]).
     pub(crate) fn open(
         style: i32,
         pattern: Option<&[u16]>,
@@ -101,13 +101,14 @@ impl NumberFormat {
             pattern.map_or((null(), 0), |p| (p.as_ptr(), length(p.len()).unwrap_or(0)));
         // SAFETY: the pattern is len UChars or null, the locale NUL-terminated.
         let raw = unsafe { sys::unum_open(style, text, len, locale.as_ptr(), null_mut(), status) };
-        NonNull::new(raw).map(NumberFormat)
+        status.built(NonNull::new(raw).map(NumberFormat))
     }
 
-    /// `unum_clone`.
+    /// `unum_clone`, none beside a failure ([`Code::built`]).
     pub(crate) fn try_clone(&self, status: &mut Code) -> Option<NumberFormat> {
         // SAFETY: the format is open.
-        NonNull::new(unsafe { sys::unum_clone(self.0.as_ptr(), status) }).map(NumberFormat)
+        let made = NonNull::new(unsafe { sys::unum_clone(self.0.as_ptr(), status) });
+        status.built(made.map(NumberFormat))
     }
 
     /// `unum_format`, `unum_formatInt64`, `unum_formatDouble` or

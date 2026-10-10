@@ -10,7 +10,9 @@
 
 use std::ops::ControlFlow;
 
-use php_ext::abi::{ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, Std, This, Untyped};
+use php_ext::abi::{
+    ClassIterator, CloneObj, ExtensionBuilder, GcTable, ObjectHandlers, Std, This, Untyped,
+};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
@@ -925,12 +927,18 @@ impl ObjectHandlers for Handlers {
         crate::give_up_all(req, left);
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(l) = object.native::<Llist>(req) {
             for value in l.values() {
                 visit(value);
             }
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

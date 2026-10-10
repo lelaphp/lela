@@ -24,7 +24,7 @@ use super::Request;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Statics {
     Function(Function),
-    Main(u32),
+    Main(php_unit::MapPtrOffset),
 }
 
 /// Where the `static` variables of what a frame runs stand: in a
@@ -201,7 +201,7 @@ impl Request {
     /// The `static` variables of the main op array whose map pointer is
     /// `offset` given up: php compiles a file afresh at each include, so
     /// its main op array's table starts over each time it is entered.
-    pub(super) fn forget_main_statics(&mut self, offset: u32) {
+    pub(super) fn forget_main_statics(&mut self, offset: php_unit::MapPtrOffset) {
         if let Some(table) = self.static_vars.tables.remove(&Statics::Main(offset)) {
             self.release(Value::array(table));
         }

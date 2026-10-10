@@ -29,7 +29,7 @@ use crate::ffi::{
 };
 use crate::format::date_format as format_time;
 use crate::interval::DateInterval;
-use crate::lent::{Lent, lent, release};
+use crate::lent::{Lent, lent};
 use crate::obj::{
     CIVIL, DATE, DateObj, TzKind, WALL, again, check_time, class_id, clone_date, date_fields,
     interval_of, lent_time, new_interval, new_timezone, rows_array, set_time, std_rows, time_of,
@@ -606,7 +606,7 @@ fn timezone_set(req: &mut Request, object: PhpObject, timezone: PhpObject) -> Re
         let sse = time.sse;
         time.unixtime2local(l, sse);
     })?;
-    release(req, kind)
+    kind.release(req)
 }
 
 /// `date_offset_get` and `getOffset` of both classes.

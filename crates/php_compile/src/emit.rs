@@ -120,7 +120,7 @@ use attributes::InternalAttribute;
 use by_name::Symbols;
 use imports::{Imports, Namespacing, Symbol};
 use member::{Member, MethodName, PropName};
-use target::{Source, Target};
+use target::Target;
 use walk::{Class, Closure, Function, Method};
 
 mod args;
@@ -494,10 +494,6 @@ pub(crate) struct Emit<'a> {
     /// php's `CG(memoize_mode)` and `CG(memoized_exprs)`, which a `??=`
     /// opens over its place ([`memo`]).
     memo: memo::Memo,
-    /// The `ZEND_AST_ZNODE`s standing: a node of the tree and the value
-    /// the compiler already holds for it, which [`Self::expr`] answers
-    /// ([`pipe`]).
-    znodes: Vec<(tree::Expr, Where)>,
     /// How the constant expression [`Self::const_expr`] builds is
     /// evaluated, php's `allow_dynamic` ([`Evaluation`]).
     const_evaluation: Evaluation,
@@ -822,6 +818,30 @@ pub(crate) enum Where {
     Returned(u32),
     Temporary(u32),
     Cv(u32),
+}
+
+/// A node a compile is handed where the compiler may stand a value of
+/// its own in, php's `zend_ast` under `ZEND_AST_ZNODE`: an expression of
+/// the tree, compiled where it stands, or a value the compiler already
+/// holds (`zend_ast_create_znode`), which compiles to itself and which no
+/// reader of a node's shape takes for a call, a variable or a constant
+/// written. The values held are a write's (`zend_emit_assign_znode`), a
+/// pipe's argument and callee (`zend_compile_pipe`), and the description
+/// `zend_compile_assert` hands `assert()`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Source {
+    Expr(tree::Expr),
+    Node(Where),
+}
+
+impl Source {
+    /// The tree's node, none for a value held.
+    pub(crate) fn tree(self) -> Option<tree::Expr> {
+        match self {
+            Source::Expr(expr) => Some(expr),
+            Source::Node(_) => None,
+        }
+    }
 }
 
 /// `ZEND_FETCH_DIM_REF` (`Z/Zend/zend_compile.h:1095`), on the last
@@ -1213,7 +1233,6 @@ impl<'a> Emit<'a> {
             short_circuits: Vec::new(),
             chain_inner: None,
             memo: memo::Memo::default(),
-            znodes: Vec::new(),
             const_evaluation: Evaluation::Once,
             substitution: Substitution::Persistent,
             constants: Vec::new(),
@@ -2296,7 +2315,7 @@ impl Emit<'_> {
                     qualified.extend_from_slice(name);
                     return self.call(&qualified, &arguments, fetch);
                 }
-                self.call_var(callee, &arguments)
+                self.call_var(Source::Expr(callee), &arguments)
             }
         }
     }
@@ -4804,7 +4823,7 @@ impl Emit<'_> {
             line_start,
             line_end,
             cache_size: self.cache_slots,
-            runtime_cache: 0,
+            runtime_cache: php_unit::MapPtrOffset::default(),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into_boxed_slice(),
             bound_vars: std::mem::take(&mut self.static_vars).into_boxed_slice(),
             no_receiver: self.fn_flags.is_static,
@@ -5822,48 +5841,14 @@ impl Emit<'_> {
             out.push(self.attribute(attribute, name, declared_at)?);
         }
         self.line = declared_at;
-        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
-        let delayed = out.iter().any(|attribute| {
-            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
-        });
+        let delayed = attributes::delays_validation(&out);
         let mut dynamic_properties = DynamicProperties::default();
-        for (at, attribute) in out.iter().enumerate() {
-            let Some(known) = internal(attribute) else {
+        for at in 0..out.len() {
+            let held =
+                self.attribute_held(&out, at, attributes::TARGET_CLASS, delayed, self.line)?;
+            let Some(known) = held.and_then(|config| config.core) else {
                 continue;
             };
-            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
-            let targets = known.targets();
-            let on_target = targets & attributes::TARGET_CLASS != 0;
-            if !on_target && !delayed {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!(
-                        "Attribute \"{shown}\" cannot target class (allowed targets: {})",
-                        attributes::target_names(targets)
-                    ),
-                    line: self.line,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
-            if out
-                .iter()
-                .enumerate()
-                .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
-            {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!("Attribute \"{shown}\" must not be repeated"),
-                    line: self.line,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
-            if !on_target {
-                continue;
-            }
             // A validator's refusal under `#[\DelayedTargetValidation]`
             // is kept for `ReflectionAttribute::newInstance` and not
             // raised here.
@@ -6122,8 +6107,8 @@ impl Emit<'_> {
         self.line = declared_at;
         for attribute in written {
             let name = self.class_name(&attribute.name);
-            if let Some(known) = InternalAttribute::named(&name) {
-                let targets = known.targets();
+            if let Some(config) = self.attribute_config(&name) {
+                let targets = config.targets();
                 if targets & target == 0 && targets & promoted != 0 {
                     continue;
                 }
@@ -6131,46 +6116,69 @@ impl Emit<'_> {
             out.push(self.attribute(attribute, name, declared_at)?);
         }
         self.line = declared_at;
-        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
-        let delayed = out.iter().any(|attribute| {
-            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
-        });
-        for (at, attribute) in out.iter().enumerate() {
-            let Some(known) = internal(attribute) else {
-                continue;
-            };
-            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
-            let targets = known.targets();
-            if targets & target == 0 && !delayed {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!(
-                        "Attribute \"{shown}\" cannot target {} (allowed targets: {})",
-                        attributes::target_names(target),
-                        attributes::target_names(targets)
-                    ),
-                    line: declared_at,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
-            if out
+        let delayed = attributes::delays_validation(&out);
+        for at in 0..out.len() {
+            self.attribute_held(&out, at, target, delayed, declared_at)?;
+        }
+        Ok(out)
+    }
+
+    /// `zend_internal_attribute_get` over a resolved name: one of Core's
+    /// attributes, or a class of the bundle declared with `#[Attribute]`.
+    fn attribute_config(&self, name: &[u8]) -> Option<attributes::Config> {
+        attributes::Config::named(name, |name| {
+            self.known_classes.find(name).map(|(_, decl)| decl)
+        })
+    }
+
+    /// `zend_compile_attributes`' second loop over the attribute of
+    /// `out` at `at`: an internal one held to the target it stands on,
+    /// unless `#[\DelayedTargetValidation]` defers that, and to standing
+    /// once, unless its class may repeat. What it is where it stands on
+    /// its target, for its validator.
+    fn attribute_held(
+        &self,
+        out: &[Attribute],
+        at: usize,
+        target: u32,
+        delayed: bool,
+        line: u32,
+    ) -> Result<Option<attributes::Config>, CompileError> {
+        let Some(attribute) = out.get(at) else {
+            return Ok(None);
+        };
+        let Some(config) = self.attribute_config(&attribute.name.0) else {
+            return Ok(None);
+        };
+        let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
+        let targets = config.targets();
+        let on_target = targets & target != 0;
+        let refused = |message: String| CompileError {
+            level: Level::Error,
+            message,
+            line,
+            raised: Vec::new(),
+            thrown: false,
+            stage: crate::Stage::Compiling,
+        };
+        if !on_target && !delayed {
+            return Err(refused(format!(
+                "Attribute \"{shown}\" cannot target {} (allowed targets: {})",
+                attributes::target_names(target),
+                attributes::target_names(targets)
+            )));
+        }
+        if !config.repeatable()
+            && out
                 .iter()
                 .enumerate()
                 .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
-            {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!("Attribute \"{shown}\" must not be repeated"),
-                    line: declared_at,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
+        {
+            return Err(refused(format!(
+                "Attribute \"{shown}\" must not be repeated"
+            )));
         }
-        Ok(out)
+        Ok(on_target.then_some(config))
     }
 
     /// `zend_compile_prop_decl`, the same one declarator at a time,
@@ -7628,8 +7636,8 @@ impl Emit<'_> {
                         return Err(self
                             .compile_error("Cannot use positional argument after named argument"));
                     }
-                    args::Arg::Positional(value) => (None, self.const_expr(value)?),
-                    args::Arg::Named(name, value) => {
+                    args::Arg::Positional(Source::Expr(value)) => (None, self.const_expr(value)?),
+                    args::Arg::Named(name, Source::Expr(value)) => {
                         named = true;
                         (Some(Name(name)), self.const_expr(value)?)
                     }
@@ -7638,10 +7646,9 @@ impl Emit<'_> {
                             "Argument unpacking in constant expressions is not supported",
                         ));
                     }
-                    args::Arg::Made(..) => {
-                        return Err(
-                            self.fatal("a constant `new` over an argument the compiler made")
-                        );
+                    args::Arg::Positional(Source::Node(_))
+                    | args::Arg::Named(_, Source::Node(_)) => {
+                        return Err(self.fatal("a constant `new` over a value the compiler holds"));
                     }
                 });
             }
@@ -10600,6 +10607,15 @@ impl Emit<'_> {
         self.expr_under(expr, Fetch::Read)
     }
 
+    /// A [`Source`] compiled: the expression where it stands, or the
+    /// value already held.
+    pub(crate) fn source(&mut self, source: Source) -> Result<Where, CompileError> {
+        match source {
+            Source::Expr(expr) => self.expr(expr),
+            Source::Node(value) => Ok(value),
+        }
+    }
+
     /// [`Self::expr`] where the node stands under a fetch of its own,
     /// php's `zend_compile_var(result, ast, type, …)`: a call among what
     /// a write, an `unset`, a `??` or a by-name argument fetches is
@@ -10608,13 +10624,6 @@ impl Emit<'_> {
     /// calls ([`Self::call`]); every other node is compiled as a read's.
     fn expr_under(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let node = self.peel(expr);
-        // `ZEND_AST_ZNODE`: the value [`Self::pipe`] holds for the node.
-        if let Some(value) = self.znode(node) {
-            if self.chain_inner == Some(node) {
-                self.chain_inner = None;
-            }
-            return Ok(value);
-        }
         if self.memo.mode != memo::MemoMode::None {
             return self.memoized(node);
         }
@@ -10649,7 +10658,7 @@ impl Emit<'_> {
             tree::Expr::InterpolatedStringExpr(id) => self.double_quoted_expr(id, line),
             tree::Expr::HeredocExpr(id) => self.heredoc_expr(id, line),
             tree::Expr::ShellExecExpr(id) => self.shell_exec(id, line),
-            tree::Expr::SimpleVarExpr(id) => self.simple_var_expr(id, line),
+            tree::Expr::SimpleVarExpr(id) => self.simple_var_expr(id, line, fetch),
             tree::Expr::VarVarExpr(id) => {
                 self.operand_of(tree[id].inner, "a variable", Self::var_var)
             }
@@ -10761,17 +10770,19 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_simple_var` through `zend_try_compile_cv`: the
-    /// variable is its CV, and no opline reads it into anything; `$this`
-    /// under `BP_VAR_R` is `FETCH_THIS` into a temporary, and an
-    /// auto-global `FETCH_R (global)` over its name.
+    /// variable is its CV, fetched under `fetch` ([`Self::cv_fetched`]),
+    /// and no opline reads it into anything; `$this` under `BP_VAR_R` is
+    /// `FETCH_THIS` into a temporary, and an auto-global `FETCH_R
+    /// (global)` over its name.
     fn simple_var_expr(
         &mut self,
         id: NodeId<tree::SimpleVarExpr>,
         line: u32,
+        fetch: Fetch,
     ) -> Result<Where, CompileError> {
         match self.simple_var_of(id, line)? {
             SimpleVar::Cv(name) => {
-                self.cv_fetched(&name, Fetch::Read);
+                self.cv_fetched(&name, fetch);
                 Ok(Where::Cv(self.lookup_cv(&name)))
             }
             SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
@@ -11808,11 +11819,34 @@ impl Emit<'_> {
     /// `zend_compile_var` under `BP_VAR_IS`
     /// (`Z/Zend/zend_compile.c:12009`), the read that raises nothing
     /// where what it reads is not there. A `ZEND_AST_VAR` is the CV
-    /// itself, whatever the type, and everything below the four
-    /// variable nodes is `zend_compile_expr`, which is what a call, a
-    /// number as written or an operator is; the three nodes with a
+    /// itself, whatever the type, fetched under `BP_VAR_IS`, which
+    /// raises no deprecation over `$http_response_header`; a call, the
+    /// chain's own or one under it, is compiled under `BP_VAR_IS` too,
+    /// which keeps it from the frameless calls php compiles only for a
+    /// read; and everything else is `zend_compile_expr`, which is what a
+    /// number as written or an operator is. The three nodes with a
     /// fetch of their own are `FETCH_DIM_IS`, `FETCH_OBJ_IS` and
     /// `FETCH_STATIC_PROP_IS`, one per link of the chain.
+    ///
+    /// ```php
+    /// var_dump($http_response_header ?? 1);
+    /// var_dump(isset($http_response_header[0]));
+    /// var_dump($http_response_header[0] ?? 2);
+    /// var_dump(empty($http_response_header));
+    /// var_dump(str_contains("x", "y")["a"] ?? 3);
+    /// echo "--\n";
+    /// var_dump(@$http_response_header);
+    /// ```
+    /// ```expect
+    /// Deprecated: The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead in %s on line 8
+    /// int(1)
+    /// bool(false)
+    /// int(2)
+    /// bool(true)
+    /// int(3)
+    /// --
+    /// NULL
+    /// ```
     ///
     /// php holds each fetch back while the rest of the chain compiles
     /// (`zend_delayed_compile_var`) and flushes them in written order
@@ -11836,7 +11870,7 @@ impl Emit<'_> {
             };
         }
         if !self.is_fetch(expr) {
-            return self.expr(expr);
+            return self.expr_under(expr, Fetch::Is);
         }
         let checkpoint = self.short_circuits.len();
         let mut delayed = Vec::new();
@@ -12016,7 +12050,7 @@ impl Emit<'_> {
             }
             return Ok(Under::Value(self.fetch_this(OperandKind::Var)));
         }
-        Ok(Under::Value(self.chain_link(expr)?))
+        Ok(Under::Value(self.chain_link_under(expr, Fetch::Is)?))
     }
 
     /// The `op1` a link carries: nothing where it reads the link under
@@ -14596,11 +14630,6 @@ impl Emit<'_> {
         // does emit was given.
         let line = expr.line(self.parsed);
         self.check_stack()?;
-        // `zend_eval_const_expr` has no `ZEND_AST_ZNODE` arm: a value the
-        // compiler holds folds nothing.
-        if self.znode(expr).is_some() {
-            return self.no_constant("a value the compiler holds is no constant expression");
-        }
         let eval_const_expr = self.fold == Fold::EvalConstExpr;
         match expr {
             tree::Expr::ParenExpr(id) => self.paren_constant(id),
@@ -15845,9 +15874,9 @@ impl Emit<'_> {
     /// Array callback must have exactly two elements
     /// Object of type stdClass is not callable
     /// ```
-    fn call_var(&mut self, callee: tree::Expr, arguments: &Args) -> Result<Where, CompileError> {
+    fn call_var(&mut self, callee: Source, arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
-        let value = self.expr(callee)?;
+        let value = self.source(callee)?;
         if let Where::Constant(name) = value
             && let Some(name) = name.as_str()
         {
@@ -17426,7 +17455,7 @@ impl Emit<'_> {
     fn frameless_icall(
         &mut self,
         index: usize,
-        arguments: &[tree::Expr],
+        arguments: &[Source],
         into: Option<u32>,
     ) -> Result<Option<Where>, CompileError> {
         let Some(arity) = self.frameless_arity(index, arguments.len()) else {
@@ -17438,7 +17467,7 @@ impl Emit<'_> {
         let mut values = Vec::new();
         for at in 0..arity as usize {
             if let Some(argument) = arguments.get(at) {
-                values.push(self.expr(*argument)?);
+                values.push(self.source(*argument)?);
                 continue;
             }
             let default = self
@@ -18394,14 +18423,23 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_const`: php substitutes a persistent constant's
     /// value where it stands, so a `T_*` of the tokenizer reaches no
     /// opline. The table is the engine's, what its extensions declared
-    /// ([`Options::persistent`]); `INF` and `NAN`, which php reads from
-    /// the table `ext/standard` registers
-    /// (`REGISTER_DOUBLE_CONSTANT("INF", ZEND_INFINITY, CONST_PERSISTENT)`,
-    /// `Z/ext/standard/basic_functions_arginfo.h:3580`), stand here until
-    /// that extension declares them. A constant's name is case-sensitive,
+    /// ([`Options::persistent`]). A constant's name is case-sensitive,
     /// and a leading `\` names the same global constant as none. A
     /// declared value that is no scalar is not folded, as php folds none
     /// whose value is not yet evaluated.
+    ///
+    /// `ext/standard`'s `INF` and `NAN` are two of them, folded where
+    /// they are written:
+    ///
+    /// ```php
+    /// var_dump(INF, -NAN, \INF, -INF);
+    /// ```
+    /// ```expect
+    /// float(INF)
+    /// float(NAN)
+    /// float(INF)
+    /// float(-INF)
+    /// ```
     pub(crate) fn persistent(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
         if self.substitution == Substitution::NoPersistent {
             return Ok(None);
@@ -18411,11 +18449,6 @@ impl Emit<'_> {
             at += 1;
         }
         let name = name.get(at..).unwrap_or(&[]);
-        match name {
-            b"INF" => return Ok(Some(Zval::double(f64::INFINITY))),
-            b"NAN" => return Ok(Some(Zval::double(f64::NAN))),
-            _ => {}
-        }
         let Some((_, declared)) = self.persistent.find(name) else {
             return Ok(None);
         };
@@ -19009,7 +19042,6 @@ mod tests {
             short_circuits: Vec::new(),
             chain_inner: None,
             memo: memo::Memo::default(),
-            znodes: Vec::new(),
             const_evaluation: Evaluation::Once,
             substitution: Substitution::Persistent,
             constants: Vec::new(),

@@ -6,15 +6,14 @@
 //!
 //! php hands the value to the call it builds as a `ZEND_AST_ZNODE`, a node
 //! whose compile is the value the compiler already holds. Here that is
-//! [`Emit::znodes`]: the left side's node beside the value, which
-//! [`Emit::expr`] answers for the node and every reader of an argument's
+//! the argument's [`Source::Node`], which every reader of an argument's
 //! shape takes as no call, no variable and no constant to fold.
 
 use php_syntax::tree;
 use php_unit::{Opcode, OperandKind, Opline};
 
-use super::args::Args;
-use super::{Emit, Where};
+use super::args::{Arg, Args};
+use super::{Emit, Source, Where};
 use crate::CompileError;
 
 impl Emit<'_> {
@@ -82,27 +81,25 @@ impl Emit<'_> {
             }
             Where::Temporary(_) | Where::Constant(_) => compiled,
         };
-        let operand = self.peel(operand);
-        let held = self.znodes.len();
-        self.znodes.push((operand, value));
-        let called = self.pipe_call(operand, callable, compiled);
-        self.znodes.truncate(held);
-        called
+        self.pipe_call(value, callable, compiled)
     }
 
-    /// The call [`Self::pipe`] builds over `operand`, the node standing
-    /// for the value it holds, and before it the `EXT_STMT` over
-    /// `compiled`, what the left side left before any `QM_ASSIGN` copied
-    /// it (`zend_do_extended_stmt(&operand_result)`), after the callable
+    /// The call [`Self::pipe`] builds over `value`, the one argument it
+    /// sends, and before it the `EXT_STMT` over `compiled`, what the left
+    /// side left before any `QM_ASSIGN` copied it
+    /// (`zend_do_extended_stmt(&operand_result)`), after the callable
     /// where one is compiled ([`super::extended`]).
     fn pipe_call(
         &mut self,
-        operand: tree::Expr,
+        value: Where,
         callable: tree::Expr,
         compiled: Where,
     ) -> Result<Where, CompileError> {
         let line = self.line;
-        let arguments = Args::of(&[operand], line);
+        let arguments = Args::Written {
+            list: vec![Arg::Positional(Source::Node(value))],
+            line,
+        };
         let callable = self.peel(callable);
         if let tree::Expr::CallExpr(id) = callable
             && matches!(
@@ -121,7 +118,7 @@ impl Emit<'_> {
                 }
                 callee @ (tree::Expr::SimpleVarExpr(_) | tree::Expr::CallExpr(_)) => {
                     self.ext_stmt_over(Some(compiled));
-                    return self.call_var(callee, &arguments);
+                    return self.call_var(Source::Expr(callee), &arguments);
                 }
                 tree::Expr::ScopedAccessExpr(scoped) => {
                     let class = self.class_spec(self.parsed.tree[scoped].scope);
@@ -142,18 +139,6 @@ impl Emit<'_> {
         // called as the value it left.
         let callee = self.expr(callable)?;
         self.ext_stmt_over(Some(compiled));
-        self.znodes.push((callable, callee));
-        self.call_var(callable, &arguments)
-    }
-
-    /// The value php's `ZEND_AST_ZNODE` holds for `expr`, where
-    /// [`Self::pipe`] stood one in for it.
-    pub(super) fn znode(&self, expr: tree::Expr) -> Option<Where> {
-        let expr = self.peel(expr);
-        self.znodes
-            .iter()
-            .rev()
-            .find(|(node, _)| *node == expr)
-            .map(|&(_, value)| value)
+        self.call_var(Source::Node(callee), &arguments)
     }
 }

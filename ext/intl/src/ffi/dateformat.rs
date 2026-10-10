@@ -110,7 +110,8 @@ fn text(units: Option<&[u16]>) -> (*const u16, i32) {
     })
 }
 
-/// `udat_open` in the styles and locale, with `pattern` where given.
+/// `udat_open` in the styles and locale, with `pattern` where given;
+/// none beside a failure ([`Code::built`]).
 pub(crate) fn open(
     time_style: i32,
     date_style: i32,
@@ -121,7 +122,7 @@ pub(crate) fn open(
     let (pattern, len) = text(pattern);
     // SAFETY: the locale is NUL-terminated, the pattern `len` UChars or
     // null with zero, no zone id.
-    unsafe {
+    let made = unsafe {
         sys::udat_open(
             time_style,
             date_style,
@@ -132,14 +133,16 @@ pub(crate) fn open(
             len,
             status,
         )
-    }
+    };
+    status.built(made)
 }
 
 impl DateFormat {
-    /// `udat_clone`.
+    /// `udat_clone`, none beside a failure ([`Code::built`]).
     pub(crate) fn try_clone(&self, status: &mut Code) -> Option<DateFormat> {
         // SAFETY: the format is open.
-        unsafe { sys::udat_clone(self, status) }
+        let made = unsafe { sys::udat_clone(self, status) };
+        status.built(made)
     }
 
     /// `udat_format` into `out`, the full length answered.

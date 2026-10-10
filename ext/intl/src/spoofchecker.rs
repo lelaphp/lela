@@ -221,7 +221,7 @@ impl Spoofchecker {
             return Err(throw_error(req, "Error", message));
         }
         let mut status = Code::ZERO;
-        let Some(mut checker) = Checker::open(&mut status).filter(|_| !status.is_failure()) else {
+        let Some(mut checker) = Checker::open(&mut status) else {
             let message = "Spoofchecker::__construct(): unable to open ICU Spoof Checker";
             return Err(throw(req, "IntlException", message));
         };

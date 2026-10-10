@@ -79,16 +79,18 @@ mod sys {
 }
 
 impl Checker {
-    /// `uspoof_open`.
+    /// `uspoof_open`, none beside a failure ([`Code::built`]).
     pub(crate) fn open(status: &mut Code) -> Option<Checker> {
         // SAFETY: the call takes a status alone.
-        unsafe { sys::uspoof_open(status) }
+        let made = unsafe { sys::uspoof_open(status) };
+        status.built(made)
     }
 
-    /// `uspoof_clone`.
+    /// `uspoof_clone`, none beside a failure ([`Code::built`]).
     pub(crate) fn try_clone(&self, status: &mut Code) -> Option<Checker> {
         // SAFETY: the checker is open.
-        unsafe { sys::uspoof_clone(self, status) }
+        let made = unsafe { sys::uspoof_clone(self, status) };
+        status.built(made)
     }
 
     /// `uspoof_setRestrictionLevel`, the level one of `URestrictionLevel`'s.
@@ -153,10 +155,11 @@ impl Checker {
 }
 
 impl CheckResult {
-    /// `uspoof_openCheckResult`.
+    /// `uspoof_openCheckResult`, none beside a failure ([`Code::built`]).
     pub(crate) fn open(status: &mut Code) -> Option<CheckResult> {
         // SAFETY: the call takes a status alone.
-        unsafe { sys::uspoof_openCheckResult(status) }
+        let made = unsafe { sys::uspoof_openCheckResult(status) };
+        status.built(made)
     }
 }
 

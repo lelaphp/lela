@@ -40,9 +40,10 @@
 // person sets it false, the module registers nothing and the command
 // hooks alone are exercised; undeclared, the module is on.
 //
-// Types: `/plugin-types` writes types/claude-code.d.ts beside this folder,
-// a tracked file pre-commit rewrites when the plugin is staged (#62), which
-// the tsconfig includes; the import is empty at run time.
+// Types: types/claude-code.d.ts beside this folder is the declarations of
+// the Claude Code this checkout runs, a tracked file the tsconfig includes,
+// kept current at every commit that stages the plugin and failing the
+// type-check loudly when absent (#62, #1736); the import is empty at run time.
 
 import type { EngineInterface, Register, SessionMessage, ToolCallInput } from 'claude-code';
 
