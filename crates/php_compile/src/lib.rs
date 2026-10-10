@@ -49,7 +49,7 @@ pub mod syntax {
 use php_heap::{Fatal, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
-use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
+use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name, Visibility};
 use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
@@ -522,7 +522,7 @@ fn compile_scanned<'p>(
             unit.diagnostics = raised;
             let interned = match options.kind {
                 SourceKind::File => intern_names(&unit, strings),
-                SourceKind::Eval(_) => Ok(()),
+                SourceKind::Eval(_) => intern_declared(&unit, strings),
             };
             match interned {
                 Ok(()) => Ok(unit),
@@ -580,7 +580,39 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
     for name in op_array_names(unit) {
         strings.intern(name)?;
     }
+    intern_declared(unit, strings)
+}
+
+/// The names php's compile interns into whichever home it compiles
+/// into, an `eval`'s among them: each declared property's name with the
+/// key `zend_declare_typed_property` interns as `prop_info->name`,
+/// mangled for a protected or a private one. An object's table keys a
+/// declared row by that key, so a read that lays the table down makes
+/// no string.
+pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
+    for class in &unit.classes {
+        for property in &class.properties {
+            strings.intern(&property.name.0)?;
+            if let Some(prefix) = mangling(property.visibility, &class.name.0) {
+                strings.intern(&[prefix.as_slice(), &property.name.0].concat())?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// `zend_mangle_property_name`'s prefix (`Z/Zend/zend_compile.c`) for a
+/// property `class` declares under `visibility`, what
+/// `zend_declare_typed_property` puts before the name it keys
+/// `prop_info->name` by: none for a public one, `\0*\0` for a protected
+/// one and `\0Class\0` for a private one.
+#[must_use]
+pub fn mangling(visibility: Visibility, class: &[u8]) -> Option<Vec<u8>> {
+    match visibility {
+        Visibility::Public => None,
+        Visibility::Protected => Some(b"\0*\0".to_vec()),
+        Visibility::Private => Some([&b"\0"[..], class, &b"\0"[..]].concat()),
+    }
 }
 
 /// The names a unit's op arrays carry, the ones [`intern_names`]

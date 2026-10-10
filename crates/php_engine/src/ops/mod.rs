@@ -864,6 +864,27 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 /// }
 /// ```
 ///
+/// A declared row is keyed by `prop_info->name`, the mangled name the
+/// class's compile interned as it declared the property
+/// ([`php_compile::intern_declared`]), so a cast costs the table it
+/// lays down and makes no string, the first as every later one; a
+/// subclass's private row of the same name is keyed by its own class:
+///
+/// ```php
+/// class A { protected $pp = 1; private $qq = 2; public $rrr = 3; }
+/// $o = new A;
+/// $m = memory_get_usage(); $x = (array) $o; echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $y = (array) $o; echo memory_get_usage() - $m, "\n";
+/// class B extends A { private $qq = 4; }
+/// $b = new B;
+/// $m = memory_get_usage(); $z = get_mangled_object_vars($b); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 376
+/// 376
+/// 752
+/// ```
+///
 /// php hands the object's own table back where it can
 /// ([`object_symtable`]), and copies it where the class declares a
 /// property, has handlers of its own or is inside a walk of itself; a
