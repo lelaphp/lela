@@ -1013,7 +1013,7 @@ fn ipcs_readable() -> Option<&'static str> {
 }
 
 /// Why the machine's System V tables have no room for what the System V
-/// test makes (#1508), none where they have: three queues, two segments
+/// test makes (#1508), none where they have: two queues, two segments
 /// and a set among the test's program and `perl`, against each table's
 /// limit as `ipcs -Q`, `-M` and `-S` print it and the objects `ipcs -a`
 /// lists. A table full of other programs' objects fails `msg_get_queue`
@@ -1022,7 +1022,7 @@ fn ipcs_readable() -> Option<&'static str> {
 fn no_room() -> Option<String> {
     let stood = ipcs();
     let needs = [
-        ("q", "-Q", "msgmni", 3),
+        ("q", "-Q", "msgmni", 2),
         ("m", "-M", "shmmni", 2),
         ("s", "-S", "semmni", 1),
     ];
@@ -1054,15 +1054,11 @@ fn no_room() -> Option<String> {
 struct Made {
     /// The segment, the set and the keyed queue, each naming its process.
     named: Vec<Ipc>,
-    /// The unused private queue, by the id the program printed; none where
-    /// another run made one in the same moment and it is not told apart.
-    unused: Option<Ipc>,
     /// The ids of `perl`'s segment and keyed queue, a space between.
     perl: String,
 }
 
-/// Wait for the test's program to print its pid and the private queues
-/// that appeared between its two reads of `ipcs -q` at `started`, read
+/// Wait for the test's program to print its pid at `started`, read
 /// its objects off the machine, have `perl` make a keyed segment and a
 /// keyed queue, and mark `made` so the program ends. The segment is keyed
 /// since a private one whose creator is gone is any reclaim's on the
@@ -1082,21 +1078,7 @@ fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let mut words = printed.split_whitespace();
-    let pid = words.next().unwrap_or_default().to_owned();
-    let appeared: Vec<&str> = words.collect();
-    let unused = if let [one] = appeared.as_slice() {
-        Some(Ipc {
-            kind: "q".to_owned(),
-            id: (*one).to_owned(),
-            key: "0x00000000".to_owned(),
-            mode: String::new(),
-            pid: String::new(),
-        })
-    } else {
-        eprintln!("the unused queue is not told apart: {appeared:?}");
-        None
-    };
+    let pid = printed.trim().to_owned();
     let keyed = format!(
         "0x{:08x}",
         0x5a00_0000 + pid.parse::<u64>().unwrap_or(u64::MAX - 0x5a00_0000)
@@ -1120,30 +1102,21 @@ fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
     fs::write(made, "").unwrap();
     Made {
         named,
-        unused,
         perl: String::from_utf8(perl.stdout).unwrap(),
     }
 }
 
 /// A run removes what its own tests leave of System V IPC (#1412): a
 /// shared memory segment, a semaphore set and a message queue a test
-/// creates and leaves are gone after the run, and the reading counts them,
-/// as is a private queue the test makes and never uses, which names no
-/// process, as php's `msg_get_queue(0)` leaves one (#1482); while a
-/// segment another process creates while the test runs, `perl` here,
-/// stands, and so does a keyed queue `perl` makes then as the runner's own
-/// user, naming no process either.
-///
-/// Another run on the machine may make private objects of this user in
-/// the same seconds, which the rule for an object naming no process takes
-/// as this run's, and its own sweep may take this test's private queue
-/// (#1582). So the test counts only the objects its own program made,
-/// each told apart by what it printed: its pid, which names the segment
-/// and the set and is in the keyed queue's key, and the id of the private
-/// queue that appeared between two reads of `ipcs -q` around it. It holds
-/// those gone; the reading's count is at
-/// least the three that name the test's process, which no other run's
-/// sweep can take.
+/// creates and leaves are gone after the run, and the reading counts them;
+/// while a segment another process creates while the test runs, `perl`
+/// here, stands, and so does a keyed queue `perl` makes then as the
+/// runner's own user, naming no process either. The subset holds no
+/// claim, so it takes only what its own processes are named on, and its
+/// count is those three whatever another process makes meanwhile (#2563);
+/// an object that names no process is a System V subset's to take (#1482).
+/// The test tells its program's objects apart by the pid it printed, which
+/// names the segment and the set and is in the keyed queue's key.
 ///
 /// A machine whose tables have no room for what the test makes skips it
 /// and says so (#1508); a miss names what the program printed in the
@@ -1164,7 +1137,7 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     let marks = Tree::new("phpt-sysv-marks").unwrap();
     let (started, made) = (marks.join("started"), marks.join("made"));
     let leaves = format!(
-        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\n$m = shmop_open(0, \"c\", 0604, 64);\n$s = sem_get(0, 1, 0604);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid(), 0604);\nmsg_send($q, 1, \"x\");\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$unused = msg_get_queue(0);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\nfor ($i = 0; $i < 3000 && !file_exists('{}'); $i++) usleep(10000);\necho \"left\";\n--EXPECT--\nleft\n",
+        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\n$m = shmop_open(0, \"c\", 0604, 64);\n$s = sem_get(0, 1, 0604);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid(), 0604);\nmsg_send($q, 1, \"x\");\nfile_put_contents('{}', getmypid());\nfor ($i = 0; $i < 3000 && !file_exists('{}'); $i++) usleep(10000);\necho \"left\";\n--EXPECT--\nleft\n",
         started.display(),
         made.display()
     );
@@ -1195,12 +1168,9 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
         "the test's program made a segment, a set and a keyed queue: {:#?}",
         made.named
     );
-    // The unused queue by the id the program printed, which another run's
-    // sweep may have taken before it was read here.
     let standing: Vec<&Ipc> = made
         .named
         .iter()
-        .chain(&made.unused)
         .filter(|o| after.iter().any(|a| a.kind == o.kind && a.id == o.id))
         .collect();
     assert_eq!(
@@ -1208,9 +1178,10 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
         Vec::<&Ipc>::new(),
         "the run left its test's objects"
     );
-    assert!(
-        count(&reading, "sysv_removed") >= 3,
-        "the run removed the three objects that name its test's process: {reading:#?}"
+    assert_eq!(
+        count(&reading, "sysv_removed"),
+        3,
+        "the run removed the three objects that name its test's process and nothing else: {reading:#?}"
     );
     assert!(
         after.iter().any(|o| o.kind == "m" && o.id == segment),
