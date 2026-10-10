@@ -1923,12 +1923,10 @@ fn inline_send(
     let z = a.read(slots, code, op.op1);
     match a.kind() {
         OperandKind::Const if crate::operand::owns_nothing(z) => {}
-        OperandKind::Tmp | OperandKind::Var
-            if !z.is_undef() && z.kind() != php_heap::ZvalType::Reference =>
-        {
+        OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => {
             *slots.get_mut(a.slot(code, op.op1)?)? = Zval::UNDEF;
         }
-        OperandKind::Cv if !z.is_undef() && z.kind() != php_heap::ZvalType::Reference => {
+        OperandKind::Cv if crate::operand::movable(z) => {
             req.heap_mut().addref(z);
         }
         _ => return None,
@@ -12312,8 +12310,7 @@ fn data_value(
     let z = value.read(slots, code, data.op1);
     let used = op.out_type != OperandKind::Unused;
     let out = exec::temporary_slot(code, op.out) as usize;
-    if z.is_undef()
-        || z.kind() == php_heap::ZvalType::Reference
+    if !crate::operand::movable(z)
         || (value.kind() == OperandKind::Const && !crate::operand::owns_nothing(z))
         || (used && slots.get(out)?.is_refcounted())
     {
@@ -21220,11 +21217,7 @@ fn inline_return<T: Tier>(
     }
     let z = a.read(req.slots_mut(frame), code, op.op1);
     let moved = match a.kind() {
-        OperandKind::Tmp | OperandKind::Var
-            if !z.is_undef() && z.kind() != php_heap::ZvalType::Reference =>
-        {
-            a.slot(code, op.op1)
-        }
+        OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => a.slot(code, op.op1),
         OperandKind::Const | OperandKind::Cv | OperandKind::Tmp | OperandKind::Var
             if crate::operand::owns_nothing(z) =>
         {

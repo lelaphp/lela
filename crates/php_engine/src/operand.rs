@@ -176,3 +176,22 @@ pub(crate) fn owns_nothing(z: Zval) -> bool {
 pub(crate) fn deref(z: Zval) -> Zval {
     z.as_reference().map_or(z, |cell| cell.val())
 }
+
+/// Whether a zval is a value an assignment or a send may take as it
+/// stands, moved or copied with one more owner: anything a variable
+/// may hold but a reference, whose value is what is taken
+/// (`ZVAL_COPY_DEREF`), and nothing that is no value at all, `UNDEF`,
+/// an `IS_INDIRECT` a write fetch left, a constant expression or an
+/// `IS_PTR`.
+#[inline(always)] // a test of the type byte, on an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn movable(z: Zval) -> bool {
+    !matches!(
+        z.kind(),
+        ZvalType::Undef
+            | ZvalType::Reference
+            | ZvalType::Indirect
+            | ZvalType::ConstExpr
+            | ZvalType::Ptr
+    )
+}
