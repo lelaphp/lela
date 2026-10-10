@@ -1055,6 +1055,8 @@ request::WrapperOp
 request::Xport
 request::XportFactory
 request::XportFailure
+request::XportFailure::warning
+request::XportStep
 request::Zone
 request::Zone::date
 request::Zone::midnight

@@ -413,20 +413,20 @@ fn fsockopen_stream(
             }
             Ok(Untyped(OrFalse::Value(stream.into_resource())))
         }
-        Err(XportFailure { code, text }) => {
+        Err(XportFailure { code, text, .. }) => {
             // php prints the host as the C string it holds.
             let shown = format!(
                 "Unable to connect to {}:{port} ({})",
                 String::from_utf8_lossy(crate::basic_functions::c_string(&host)),
-                if text.is_empty() {
-                    "Unknown error"
-                } else {
-                    &text
-                }
+                text.as_deref().unwrap_or("Unknown error")
             );
             docref(req, Level::Warning, &shown);
-            let text = (!text.is_empty()).then_some(text.as_bytes());
-            assign_error(req, error, i64::from(code), text)?;
+            assign_error(
+                req,
+                error,
+                i64::from(code),
+                text.as_deref().map(str::as_bytes),
+            )?;
             Ok(Untyped(OrFalse::False))
         }
     }
@@ -578,19 +578,19 @@ fn stream_socket_client(
         },
     )? {
         Ok(stream) => Ok(Untyped(OrFalse::Value(stream.into_resource()))),
-        Err(XportFailure { code, text }) => {
+        Err(XportFailure { code, text, .. }) => {
             let shown = format!(
                 "Unable to connect to {} ({})",
                 String::from_utf8_lossy(&addslashes(&host)),
-                if text.is_empty() {
-                    "Unknown error"
-                } else {
-                    &text
-                }
+                text.as_deref().unwrap_or("Unknown error")
             );
             docref(req, Level::Warning, &shown);
-            let text = (!text.is_empty()).then_some(text.as_bytes());
-            assign_error(req, error, i64::from(code), text)?;
+            assign_error(
+                req,
+                error,
+                i64::from(code),
+                text.as_deref().map(str::as_bytes),
+            )?;
             Ok(Untyped(OrFalse::False))
         }
     }
@@ -681,19 +681,19 @@ fn stream_socket_server(
     };
     match req.xport_create(&host, xport)? {
         Ok(stream) => Ok(Untyped(OrFalse::Value(stream.into_resource()))),
-        Err(XportFailure { code, text }) => {
+        Err(XportFailure { code, text, .. }) => {
             let shown = format!(
                 "Unable to connect to {} ({})",
                 String::from_utf8_lossy(crate::basic_functions::c_string(&host)),
-                if text.is_empty() {
-                    "Unknown error"
-                } else {
-                    &text
-                }
+                text.as_deref().unwrap_or("Unknown error")
             );
             docref(req, Level::Warning, &shown);
-            let text = (!text.is_empty()).then_some(text.as_bytes());
-            assign_error(req, error, i64::from(code), text)?;
+            assign_error(
+                req,
+                error,
+                i64::from(code),
+                text.as_deref().map(str::as_bytes),
+            )?;
             Ok(Untyped(OrFalse::False))
         }
     }

@@ -214,11 +214,9 @@ impl Net {
         let stream = match made {
             Ok(stream) => stream,
             Err(failure) => {
-                let text = if failure.text.is_empty() {
-                    "Unknown error while connecting".to_owned()
-                } else {
-                    failure.text
-                };
+                let text = failure
+                    .text
+                    .unwrap_or_else(|| "Unknown error while connecting".to_owned());
                 error.client(req, cr::CONNECTION_ERROR, &text)?;
                 return Ok(false);
             }
