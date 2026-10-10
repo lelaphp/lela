@@ -242,7 +242,10 @@ fn socket_select(
     let empty = Vec::new();
     let [r, w, e] = &sets;
     let fds = [r, w, e].map(|set| set.as_ref().unwrap_or(&empty).as_slice());
-    let (count, ready) = match ffi::select(fds, timeout) {
+    // The wait lends the request ([`Request::blocking`]), so a callback C
+    // makes from another thread meanwhile is served in it (#2401); so do
+    // this file's other waits, the reads and the accept.
+    let (count, ready) = match req.blocking(|| ffi::select(fds, timeout)) {
         Ok(answered) => answered,
         Err(errno) => {
             let code = errno as i32;
@@ -345,7 +348,7 @@ fn socket_accept(
     let blocking = sock(req, socket)?.blocking;
     let owner = laid(req)?;
     let object = *owner;
-    let (new, family) = match accept(fd, blocking) {
+    let (new, family) = match req.blocking(|| accept(fd, blocking)) {
         Ok(accepted) => accepted,
         Err(errno) => {
             socket_error(
@@ -646,11 +649,13 @@ fn socket_read(
         return Ok(OrFalse::False);
     }
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX))?;
-    let read = if mode == PHP_NORMAL_READ {
-        read_line(fd, &mut buf)
-    } else {
-        ffi::recv(fd, &mut buf, 0)
-    };
+    let read = req.blocking(|| {
+        if mode == PHP_NORMAL_READ {
+            read_line(fd, &mut buf)
+        } else {
+            ffi::recv(fd, &mut buf, 0)
+        }
+    });
     match read {
         Ok(n) => Ok(OrFalse::Value(PhpString::new(
             req,
@@ -1120,7 +1125,7 @@ fn socket_recv(
         return Ok(OrFalse::False);
     }
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX))?;
-    let got = ffi::recv(fd, &mut buf, c_int(flags));
+    let got = req.blocking(|| ffi::recv(fd, &mut buf, c_int(flags)));
     let value = match got {
         Ok(n) if n > 0 => string(req, &buf[..n])?,
         _ => Owner::null(),
@@ -1233,7 +1238,8 @@ fn socket_recvfrom(
             "Wrong parameter count for socket_recvfrom()",
         ));
     }
-    let (n, from) = match ffi::recvfrom(fd, &mut buf, c_int(flags), family) {
+    let received = req.blocking(|| ffi::recvfrom(fd, &mut buf, c_int(flags), family));
+    let (n, from) = match received {
         Ok(got) => got,
         Err(errno) => {
             let msg = if family == libc::AF_INET6 {

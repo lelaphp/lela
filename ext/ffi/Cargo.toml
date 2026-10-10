@@ -30,7 +30,8 @@ pkg-config = { workspace = true }
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # ext/standard for the natives a callback another thread calls is served
-# around: `usleep`, `shell_exec`, `set_time_limit` and `hrtime`.
+# around: `usleep`, `proc_open` and `proc_close`, `set_time_limit` and
+# `hrtime`.
 php_ext_standard = { path = "../standard" }
 # ext/uri and ext/lexbor, which ext/standard declares required (`standard_deps`).
 php_ext_lexbor = { path = "../lexbor" }

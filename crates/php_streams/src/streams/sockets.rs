@@ -648,7 +648,10 @@ impl Ops for Socket {
 
     fn xport(&mut self, req: &mut Request, op: XportOp<'_>) -> Option<Xported> {
         if let XportOp::Accept { timeout, want_peer } = op {
-            return Some(Xported::Accepted(self.accept(timeout, want_peer)));
+            // `stream_socket_accept`'s wait for a client lends the
+            // request ([`Request::blocking`], #2401).
+            let accepted = req.blocking(|| self.accept(timeout, want_peer));
+            return Some(Xported::Accepted(accepted));
         }
         let sock = self.sock.as_mut()?;
         Some(match op {

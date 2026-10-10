@@ -2528,7 +2528,9 @@ impl Ops for Stdio {
         }
         if let Some(mut child) = self.process.take() {
             use std::os::unix::process::ExitStatusExt;
-            return match child.wait() {
+            // The wait lends the request ([`Request::blocking`]), as
+            // every wait on a child is (#2401).
+            return match req.blocking(|| child.wait()) {
                 Ok(status) => status.code().unwrap_or_else(|| status.into_raw()),
                 Err(_) => -1,
             };
@@ -2621,15 +2623,17 @@ impl Ops for Stdio {
 
     /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_LOCKING`
     /// (`Z/main/streams/plain_wrapper.c:774`): `flock(2)`, `LOCK_SH`,
-    /// `LOCK_EX` or `LOCK_UN`, without blocking under `LOCK_NB`.
-    fn flock(&mut self, _req: &mut Request, operation: i64) -> Option<bool> {
+    /// `LOCK_EX` or `LOCK_UN`, without blocking under `LOCK_NB`; a
+    /// `flock(2)` that waits for another holder lends the request while
+    /// it waits ([`Request::blocking`], #2401).
+    fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
         let nonblocking = operation & LOCK_NB != 0;
         let file = self.file.as_ref()?;
         let taken = match operation & !LOCK_NB {
             LOCK_SH if nonblocking => file.try_lock_shared().is_ok(),
-            LOCK_SH => file.lock_shared().is_ok(),
+            LOCK_SH => req.blocking(|| file.lock_shared()).is_ok(),
             LOCK_EX if nonblocking => file.try_lock().is_ok(),
-            LOCK_EX => file.lock().is_ok(),
+            LOCK_EX => req.blocking(|| file.lock()).is_ok(),
             LOCK_UN => file.unlock().is_ok(),
             _ => false,
         };

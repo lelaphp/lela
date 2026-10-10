@@ -411,10 +411,17 @@ pub fn php_mail(
         body.extend_from_slice(message);
     }
     body.extend_from_slice(line_sep);
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&body).ok();
-    }
-    let status = match child.wait() {
+    // The message written and sendmail waited for with the request lent
+    // ([`Request::blocking`]), as every wait on a child is (#2401); the
+    // pipe closes before the wait, which is sendmail's end of input.
+    let stdin = child.stdin.take();
+    let waited = req.blocking(|| {
+        if let Some(mut stdin) = stdin {
+            stdin.write_all(&body).ok();
+        }
+        child.wait()
+    });
+    let status = match waited {
         Ok(status) => status,
         Err(error) => {
             let code = error.raw_os_error().unwrap_or(0);

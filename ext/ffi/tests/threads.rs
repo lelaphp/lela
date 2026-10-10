@@ -4,7 +4,10 @@
 //! blocks, or ends with the call still posted and C reads zero. The C
 //! side is a Rust function with C's calling convention, reached from
 //! PHP code by `FFI::cast` of its address; its thread writes what the
-//! callback returned to a file of its own, which the test reads.
+//! callback returned to a file of its own, which the test reads. Every
+//! engine native that blocks lends the request (#2401), so the window
+//! in which a call stays posted is held open by a native of this
+//! test's own, `hold_unlent`, which blocks without lending.
 
 #![allow(
     clippy::disallowed_methods,
@@ -14,6 +17,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::attr::php_function;
 use php_ext::test::{Capture, Engine};
 
 /// The callback's type as C sees it.
@@ -44,6 +49,24 @@ extern "C" fn later_ending(callback: Callback) {
     call_later(callback, Duration::from_millis(100), "ending");
 }
 
+extern "C" fn later_closing(callback: Callback) {
+    call_later(callback, Duration::from_millis(100), "closing");
+}
+
+/// `hold_unlent(float $seconds): void`: the request held for that long in
+/// a native that never lends it, as no engine native that blocks is.
+#[php_function]
+fn hold_unlent(seconds: f64) {
+    std::thread::sleep(Duration::from_secs_f64(seconds));
+}
+
+/// The test's own extension, which carries [`hold_unlent`].
+fn holding() -> Extension {
+    ExtensionBuilder::default()
+        .functions(vec![hold_unlent::declared()])
+        .build("ffi_threads_hold")
+}
+
 /// One request that hands `later` a callback, and what the callback
 /// returned to C once the thread wrote it: `None` where the thread was
 /// still waiting ten seconds on.
@@ -61,6 +84,7 @@ fn served(later: extern "C" fn(Callback), name: &str, source: &str) -> (String, 
             php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_ffi::extension(),
+            holding(),
         ])
         .ini("ffi.enable", "1")
         .ini("html_errors", "0")
@@ -98,6 +122,28 @@ echo "slept\n";
     assert_eq!(returned.as_deref(), Some("42"));
 }
 
+/// The thread calls back while the request waits for a child in
+/// `proc_close`: the wait lends the request (#2401), so the callback runs
+/// inside it, on the thread, and C reads what it returned.
+#[test]
+fn a_callback_posted_while_proc_close_waits_is_served_in_the_wait() {
+    let (stdout, returned) = served(
+        later_closing,
+        "closing",
+        r#"$t0 = hrtime(true);
+$later(function ($x) use ($t0) {
+    echo "called $x ", hrtime(true) - $t0 < 600000000 ? "inside" : "after", " the wait\n";
+    return $x * 2;
+});
+$child = proc_open(['sleep', '1.2'], [], $pipes);
+$code = proc_close($child);
+echo "closed $code\n";
+"#,
+    );
+    assert_eq!(stdout, "called 21 inside the wait\nclosed 0\n");
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
 /// The thread calls back while the request is in a native that does not
 /// lend it, and the request reaches its next check only to end there,
 /// on `max_execution_time`: the call is still posted at the request's
@@ -109,7 +155,7 @@ fn a_callback_still_posted_at_the_request_s_end_returns_zero() {
         "ending",
         r#"set_time_limit(1);
 $later(function ($x) { echo "called $x\n"; return $x * 2; });
-shell_exec("sleep 1.5");
+hold_unlent(1.5);
 echo "not reached\n";
 "#,
     );
