@@ -3,15 +3,26 @@
 //! and a write a program makes from inside an interpreter or a built
 //! binary never puts its path on the command line. So before an agent's
 //! `Bash` call `permit` takes the git blob id of every tracked file the
-//! rule scopes, in each checkout the call can reach, the hook's own and the
-//! one the call stands in, and keeps them in the store under the session
-//! and the hook's tool-use id ([`before`]). After the call `permit --after`
-//! takes the ids again ([`after`]): a file whose blob moved, and which the
-//! call's line can write ([`writes::can_write`]: a redirection into it, a
-//! writer handed its path, an interpreter whose program names it), is put
-//! back from the blob kept before, and the call is a `harness.self` denial
-//! with the rule's text and the path, a permit reading like any other, and
-//! the `PostToolUse` hook's block, which the model reads.
+//! rule scopes in the one checkout the call runs in, and keeps them in the
+//! store under the session and the hook's tool-use id ([`before`]). After
+//! the call `permit --after` takes the ids again ([`after`]): a file whose
+//! blob moved, and which the call's line can write ([`writes::can_write`]:
+//! a redirection into it, a writer handed its path, an interpreter whose
+//! program names it), is put back from the blob kept before, and the call
+//! is a `harness.self` denial with the rule's text and the path, a permit
+//! reading like any other, and the `PostToolUse` hook's block, which the
+//! model reads.
+//!
+//! The rule is one: a file is put back only in the checkout the call ran
+//! in, only where its line can write it, and never where an operation in
+//! progress there has staged it; every other file that moved is kept as
+//! it stands and named. The checkout is the call's `cwd`, moved by a
+//! leading `cd`, at the top of its worktree ([`operation::ran_in`]), the
+//! resolution `where = "operating"` reads, and not the hook's own: a
+//! subagent's shell starts in the main checkout and `cd`s into its
+//! worktree, and on 2026-10-10 a builder's `--after`, holding the main
+//! checkout, put back a person's approved registry there under another
+//! session's merge, which it never touched (#2597).
 //!
 //! What it leaves alone, on purpose:
 //!
@@ -29,6 +40,11 @@
 //! - A call with no record of its own: no tool-use id, a record a build
 //!   older than this one never wrote, a record already taken. Nothing is
 //!   put back without the blob it was before, and stderr says so.
+//! - A file the merge, cherry-pick, revert or rebase in progress in the
+//!   checkout has staged, its index entry other than `HEAD`'s
+//!   ([`operation::staged`]): the operation's commit carries it, so even a
+//!   line that can write it does not put it back. It is kept and named,
+//!   and the commit that ends the operation settles the record.
 //! - What the call wrote: it goes into the object database before the file
 //!   is put back, and the denial names its blob, so a person's edit made
 //!   in an editor while a long call ran is a `git cat-file` away, not gone.
@@ -63,6 +79,7 @@ use super::argv;
 use super::audit;
 use super::call::Call;
 use super::kept;
+use super::operation;
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
@@ -152,19 +169,13 @@ pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
         return Ok(());
     }
     prune(&records(root));
-    let mut checkouts = Vec::new();
-    for checkout in reached(root, call) {
-        if let Some(guarded) = guard(&checkout)? {
-            checkouts.push(guarded);
-        }
-    }
-    if checkouts.is_empty() {
+    let Some(guarded) = guard(&ran_in(root, call))? else {
         return Ok(());
-    }
+    };
     let record = Record {
         at: reading::epoch_seconds(&reading::now()?)?,
         command: call.command().unwrap_or_default().to_owned(),
-        checkouts,
+        checkouts: vec![guarded],
     };
     let text = serde_json::to_string(&record).context("rendering the record")?;
     reading::replace(&file, text.as_bytes())
@@ -258,8 +269,19 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
             let approved = writes
                 .then(|| approved(&guarded.checkout, path, was.as_deref(), call))
                 .flatten();
+            let staged = writes
+                .then(|| operation::staged(&guarded.checkout, path))
+                .flatten();
             let (verdict, said) = if let Some(admission) = &approved {
                 (Verdict::Approved, format!("{path}: {}", admission.said()))
+            } else if let Some(operation) = staged {
+                let before = kept::before_the_call(was.as_deref());
+                let said = format!(
+                    "{path}: changed while the call ran, and {operation} in progress in this \
+                     checkout has staged it, so it is kept as it stands for the operation's \
+                     commit; {before}"
+                );
+                (Verdict::Kept, said)
             } else if writes {
                 let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
                 (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
@@ -282,19 +304,21 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
     moved
 }
 
-/// The tracked files of `harness.self`'s scope in `checkout` that the
-/// call's line can write, read where it stands: what an approval must
-/// cover before the line runs (#2247).
-pub(super) fn written(checkout: &Path, call: &Call, line: &argv::Line) -> Vec<String> {
-    let Ok(Some(guarded)) = guard(checkout) else {
-        return Vec::new();
+/// The checkout the call ran in, and the tracked files of `harness.self`'s
+/// scope there that the call's line can write, read where it stands: what
+/// an approval must cover before the line runs (#2247).
+pub(super) fn written(root: &Path, call: &Call, line: &argv::Line) -> (PathBuf, Vec<String>) {
+    let checkout = operation::ran_in(root, Some(line));
+    let Ok(Some(guarded)) = guard(&checkout) else {
+        return (checkout, Vec::new());
     };
-    let cwd = call.cwd.as_deref().map_or(checkout, Path::new);
-    guarded
+    let cwd = call.cwd.as_deref().map_or(root, Path::new);
+    let paths = guarded
         .blobs
         .into_keys()
-        .filter(|path| writes::can_write(line, &OnDisk::new(cwd, checkout, path)))
-        .collect()
+        .filter(|path| writes::can_write(line, &OnDisk::new(cwd, &checkout, path)))
+        .collect();
+    (checkout, paths)
 }
 
 /// The person's approval of the file the call left at `path`, where it
@@ -511,16 +535,12 @@ fn runs_steer(command: &str) -> bool {
         .any(|argv| argv.invokes(&steer))
 }
 
-/// The checkouts a call reaches: the hook's own and the one the call
-/// stands in, once each.
-fn reached(root: &Path, call: &Call) -> Vec<PathBuf> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut checkouts = vec![root.clone()];
-    let stands = call.checkout(&root);
-    if stands != root {
-        checkouts.push(stands);
-    }
-    checkouts
+/// The one checkout a call is held in: the one it ran in, its workspace
+/// moved by a leading `cd` ([`operation::ran_in`]), and never the hook's
+/// own where the call ran elsewhere (#2597).
+fn ran_in(root: &Path, call: &Call) -> PathBuf {
+    let line = call.command().map(argv::Line::read);
+    operation::ran_in(&call.workspace(root), line.as_ref())
 }
 
 /// The rule's text and the blob of every tracked file it scopes and does

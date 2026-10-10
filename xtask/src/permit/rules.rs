@@ -327,11 +327,11 @@ fn admitted(
         let (before, after) = call.rewrite(root, Some(path))?;
         return approvals.admits(path, Some(&before), Some(&after));
     };
-    let written = super::after::written(root, call, line);
+    let (checkout, written) = super::after::written(root, call, line);
     let pending: Option<Vec<Admission>> = written
         .iter()
         .map(|path| {
-            let before = fs::read_to_string(root.join(path)).ok();
+            let before = fs::read_to_string(checkout.join(path)).ok();
             approvals.pending(Path::new(path), before.as_deref())
         })
         .collect();

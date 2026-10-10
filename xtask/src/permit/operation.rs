@@ -277,6 +277,30 @@ fn checkout_of(root: &Path, line: Option<&Line>, argv: &Argv) -> PathBuf {
     dir
 }
 
+/// The checkout a call runs in: `root`, the call's workspace, moved by a
+/// leading `cd` ([`runs_in`]), at the top of its worktree, a linked one's
+/// own; `root` where the `cd` names no checkout. What `permit --after`
+/// holds, and the one checkout it puts a file back in (#2597).
+pub(super) fn ran_in(root: &Path, line: Option<&Line>) -> PathBuf {
+    let top = git::git(
+        &runs_in(root, line),
+        &["rev-parse", "--show-toplevel"],
+        None,
+    );
+    let top = top.map_or_else(|_| root.to_path_buf(), |top| PathBuf::from(top.trim()));
+    fs::canonicalize(&top).unwrap_or(top)
+}
+
+/// The operation standing in `checkout` that has staged `path`, its index
+/// entry other than `HEAD`'s: the operation's commit carries it, so
+/// `permit --after` never puts it back (#2597).
+pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
+    let operation = Operation::in_progress(&git_dir(checkout)?)?;
+    let args = ["diff", "--cached", "--name-only", "-z", "--", path];
+    let differs = git::git(checkout, &args, None).ok()?;
+    (!differs.is_empty()).then_some(operation)
+}
+
 /// The checkout's own git dir, a linked worktree's under the main one's
 /// `worktrees/`, with its links resolved so `/tmp` and `/private/tmp` name
 /// one; `None` outside a repository.

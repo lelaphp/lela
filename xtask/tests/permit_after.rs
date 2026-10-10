@@ -677,3 +677,129 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
         }
     }
 }
+
+/// A linked worktree of the scratch repository at `root`, laid in a
+/// temporary directory of its own as a ticket's is beside the checkout;
+/// the tree that holds it, and its path.
+fn linked_worktree(root: &Path) -> (Tree, std::path::PathBuf) {
+    let base = Tree::new("permit-after-linked").unwrap();
+    let linked = base.join("t1");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "t1",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let linked = linked.canonicalize().unwrap();
+    (base, linked)
+}
+
+/// A merge stopped before its commit in `root`, staging `path` as
+/// `content`: the marker git keeps, the file written and added.
+fn merging_with(root: &Path, path: &str, content: &str) {
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let git_dir = git(root, &["rev-parse", "--absolute-git-dir"]);
+    std::fs::write(Path::new(git_dir.trim()).join("MERGE_HEAD"), head).unwrap();
+    std::fs::write(root.join(path), content).unwrap();
+    git(root, &["add", "--", path]);
+}
+
+/// #2597: a builder's call runs in its worktree, its shell starting in
+/// the main checkout and moved there by a leading `cd`, while another
+/// session's merge in the main checkout stages a person's approved
+/// registry. `--after` holds only the checkout the call ran in, so the
+/// main checkout's working tree is the merge's, byte for byte, whatever
+/// the line's words name.
+#[test]
+fn a_call_in_a_worktree_leaves_the_main_checkout_s_merge_as_it_stands() {
+    let root = scratch("linked-merge");
+    let (_base, linked) = linked_worktree(&root);
+    let merged = format!(
+        "{}\n# a row the person approved\n",
+        read(&root, "docs/divergence.toml")
+    );
+    let command = format!("cd {} && touch docs/divergence.toml", linked.display());
+    let (out, _) = through_the_hooks_while(&root, "toolu_linked_merge", &command, || {
+        merging_with(&root, "docs/divergence.toml", &merged);
+    });
+    assert_eq!(
+        read(&root, "docs/divergence.toml"),
+        merged,
+        "the merge's file stands"
+    );
+    let status = git(
+        &root,
+        &["status", "--porcelain", "--", "docs/divergence.toml"],
+    );
+    assert_eq!(
+        status, "M  docs/divergence.toml\n",
+        "staged, and the working tree with it"
+    );
+    assert!(
+        !out.contains("divergence.toml"),
+        "the main checkout is not judged: {out}"
+    );
+}
+
+/// #2597: a call in the checkout where a merge stands, whose line can
+/// write the registry the merge staged, does not put it back: the
+/// operation's commit carries it, and the change is kept and named.
+#[test]
+fn a_harness_file_a_merge_staged_is_not_put_back() {
+    let root = scratch("merge-staged");
+    let merged = format!(
+        "{}\n# a row the person approved\n",
+        read(&root, "docs/divergence.toml")
+    );
+    let (out, _) = through_the_hooks_while(
+        &root,
+        "toolu_merge_staged",
+        "touch docs/divergence.toml",
+        || {
+            merging_with(&root, "docs/divergence.toml", &merged);
+        },
+    );
+    assert_eq!(
+        read(&root, "docs/divergence.toml"),
+        merged,
+        "the merge's file stands"
+    );
+    let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert!(hook.get("decision").is_none(), "nothing is denied: {out}");
+    let said = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        said.contains("docs/divergence.toml") && said.contains("a merge"),
+        "{said}"
+    );
+}
+
+/// #2597: a call that writes a harness file in its own worktree, its
+/// shell moved there by a leading `cd`, is put back and denied there, in
+/// that checkout's store, and the main checkout is not touched.
+#[test]
+fn a_call_that_writes_its_own_worktree_s_pin_is_put_back_there() {
+    let root = scratch("linked-write");
+    let (_base, linked) = linked_worktree(&root);
+    let was = read(&linked, "oracle.toml");
+    let main = read(&root, "oracle.toml");
+    let command = format!("cd {} && echo '# written' >> oracle.toml", linked.display());
+    let (out, _) = through_the_hooks(&root, "toolu_linked_write", &command);
+    assert_eq!(read(&linked, "oracle.toml"), was, "put back");
+    assert_eq!(read(&root, "oracle.toml"), main);
+    assert!(
+        out.contains("block") && out.contains("oracle.toml"),
+        "{out}"
+    );
+    let reading = Store::of_workspace(&linked)
+        .read("permit", "harness.self")
+        .unwrap()
+        .expect("the denial is the worktree's reading");
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+}
