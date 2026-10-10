@@ -786,6 +786,17 @@ impl UnitCache<'_> {
     pub fn bound(&self, budget: CacheBudget) {
         self.req.shared.units.set_budget(budget);
     }
+
+    /// `CG(map_ptr_last)`: how many map pointers the engine has handed
+    /// the op arrays of the units it published, one each as php's
+    /// `zend_persist_op_array` takes one (design §5.14). A unit compiled
+    /// for one request alone takes none, so a count that moves between
+    /// two requests of one engine serving the same file is a leak of
+    /// slots (GH-8646).
+    #[must_use]
+    pub fn map_ptr_last(&self) -> u32 {
+        (self.req.shared.map_ptr_last).load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// The file cache `file_cache` names, for the build `build`.

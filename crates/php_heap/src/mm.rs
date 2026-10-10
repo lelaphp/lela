@@ -558,6 +558,24 @@ impl Mm {
         self.chunks.contains(&chunk_of(at))
     }
 
+    /// Whether `address` lies anywhere inside one of this heap's chunks
+    /// or huge blocks, what php's `is_zend_ptr` answers: its chunks in
+    /// their walk order, then its huge blocks, each a range of addresses
+    /// compared and nothing at `address` read, so any number is a
+    /// question it can answer. Unlike [`Mm::owns`] it asks of an
+    /// address, not of a block the heap handed out.
+    pub(crate) fn holds(&self, address: usize) -> bool {
+        let within =
+            |start: usize, size: usize| (start..start.saturating_add(size)).contains(&address);
+        self.chunks
+            .iter()
+            .any(|chunk| within(chunk.as_ptr().addr(), CHUNK_SIZE))
+            || self
+                .huge
+                .iter()
+                .any(|block| within(block.at.as_ptr().addr(), block.size))
+    }
+
     /// The bytes the block at `at` can hold, what `zend_mm_size` answers:
     /// its bin's size, its pages, or a huge block's rounded size.
     ///

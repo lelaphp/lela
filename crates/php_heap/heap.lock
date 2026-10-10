@@ -110,6 +110,7 @@ Heap::gc_mem_caches
 Heap::gc_protect
 Heap::gc_startup
 Heap::gc_status
+Heap::holds
 Heap::in_memory_limit_error
 Heap::interned
 Heap::interned_find

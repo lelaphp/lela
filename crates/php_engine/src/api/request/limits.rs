@@ -248,6 +248,27 @@ impl Request {
         self.limits.stack_limit.overflowed()
     }
 
+    /// `EG(stack_limit)`: the address [`Request::stack_overflowed`]
+    /// compares a frame's to, the thread's or, inside a fiber, the
+    /// fiber's own, and zero under `zend.max_allowed_stack_size=-1`,
+    /// where nothing is checked. The thread's own bounds are
+    /// [`Request::call_stack_bounds`].
+    #[must_use]
+    pub fn stack_limit_address(&self) -> usize {
+        self.limits.stack_limit.limit()
+    }
+
+    /// `zend_call_stack_get`: the machine stack of the thread the request
+    /// is served on, as the platform describes it, whose base and size
+    /// request start works [`Request::stack_limit_address`] out from;
+    /// `None` on a thread the platform cannot describe. Inside a fiber it
+    /// is still the thread's, as php's is. Read in `php_heap`'s `unsafe`
+    /// home, never bound a second time in an extension.
+    #[must_use]
+    pub fn call_stack_bounds(&self) -> Option<super::CallStack> {
+        php_heap::call_stack_bounds()
+    }
+
     /// `zend_unset_timeout` then `zend_set_timeout` over
     /// `max_execution_time` as the ini table has it now: at request
     /// start, and again whenever the entry moves, which is php's

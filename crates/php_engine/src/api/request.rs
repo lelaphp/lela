@@ -34,6 +34,9 @@ use crate::output::Output;
 pub use crate::virtual_cwd::Resolve;
 pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
+/// `zend_call_stack`: a thread's machine stack as the platform describes
+/// it, its `base` and `max_size` ([`Request::call_stack_bounds`]).
+pub use php_heap::CallStack;
 pub use unit_cache::{
     CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
 };

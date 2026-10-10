@@ -478,6 +478,14 @@ impl Request {
         self.heap.memory_usage(real)
     }
 
+    /// `is_zend_ptr`: whether `address` lies inside the request heap's
+    /// chunks or huge blocks, which reads no memory, so any number is
+    /// a question it answers.
+    #[must_use]
+    pub fn heap_holds(&self, address: usize) -> bool {
+        self.heap.holds(address)
+    }
+
     /// `memory_get_peak_usage()`: the chunks' high-water mark for
     /// `real == true`, the bin accounting's for `real == false`, the two
     /// the heap keeps apart (design §5.13).

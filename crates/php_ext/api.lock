@@ -530,6 +530,7 @@ request::BuildDefs::system
 request::CacheBudget
 request::CacheStatus
 request::CachedFile
+request::CallStack
 request::Cast
 request::ChainFrame
 request::ChainFrame::filename
@@ -691,6 +692,7 @@ request::Request::buffer_handler
 request::Request::buffer_handler_started
 request::Request::buffer_status
 request::Request::build_defs
+request::Request::call_stack_bounds
 request::Request::called_scope
 request::Request::caller_function_name
 request::Request::caller_preloaded
@@ -777,6 +779,7 @@ request::Request::header_remove
 request::Request::header_remove_prefix
 request::Request::headers_list
 request::Request::headers_sent
+request::Request::heap_holds
 request::Request::holding
 request::Request::host_status
 request::Request::included_files
@@ -806,6 +809,7 @@ request::Request::lend_heap
 request::Request::loaded_env
 request::Request::loaded_extensions
 request::Request::locale_name
+request::Request::log_err_with_severity
 request::Request::made_superglobal
 request::Request::memory_peak
 request::Request::memory_usage
@@ -879,6 +883,7 @@ request::Request::set_response_code
 request::Request::set_shutdown_function
 request::Request::set_time_limit
 request::Request::set_umask
+request::Request::stack_limit_address
 request::Request::stack_overflowed
 request::Request::start_periodic
 request::Request::state
@@ -1048,6 +1053,7 @@ request::UnitCache::bound
 request::UnitCache::compile
 request::UnitCache::holds
 request::UnitCache::invalidate
+request::UnitCache::map_ptr_last
 request::UnitCache::reset
 request::UnitCache::status
 request::Unresolved
