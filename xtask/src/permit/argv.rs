@@ -492,11 +492,12 @@ const DECLARING: [&str; 5] = ["export", "readonly", "declare", "typeset", "local
 
 /// The variables a line assigns in a command of their own, `X=v` or
 /// `export X=v`, by name, each its last value: what `$X` or `${X}`
-/// standing as a later command's program runs. An assignment in front of
-/// a program is that program's environment and not the shell's, which
-/// expands the line before it assigns, so it is none of these. One made
-/// in a subshell or a substitution is read as the line's: the reading is
-/// then stricter than the shell, never looser.
+/// standing as a later command's program runs, and the directory a later
+/// `cd`, `pushd` or git `-C` names by it ([`Argv::directories`]). An
+/// assignment in front of a program is that program's environment and
+/// not the shell's, which expands the line before it assigns, so it is
+/// none of these. One made in a subshell or a substitution is read as
+/// the line's: the reading is then stricter than the shell, never looser.
 struct Assigned(BTreeMap<String, String>);
 
 impl Assigned {
@@ -530,6 +531,22 @@ impl Assigned {
             .unwrap_or(name);
         let value = self.0.get(name)?;
         Some(value.split_whitespace().map(str::to_owned).collect())
+    }
+
+    /// The directory a word names that starts with a variable the line
+    /// assigned, `$X`, `${X}`, `$X/sub` or `${X}/sub`, its value whole,
+    /// since a directory operand is one word whether quoted or not; `None`
+    /// for any other word, or a variable the line never assigned.
+    fn directory(&self, word: &str) -> Option<String> {
+        let rest = word.strip_prefix('$')?;
+        let (name, tail) = match rest.strip_prefix('{') {
+            Some(braced) => braced.split_once('}')?,
+            None => rest.split_at(
+                rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len()),
+            ),
+        };
+        Some(format!("{}{tail}", self.0.get(name)?))
     }
 }
 
@@ -690,7 +707,62 @@ impl Argv {
         if let Some(own) = xtask_own(&words) {
             words.splice(..own, ["xtask".to_owned()]);
         }
-        Some(Argv(words))
+        let mut argv = Argv(words);
+        for at in argv.directory_operands() {
+            if let Some(word) = argv.0.get_mut(at)
+                && let Some(dir) = assigned.directory(word)
+            {
+                *word = dir;
+            }
+        }
+        Some(argv)
+    }
+
+    /// Where the words naming a directory the command moves into stand: a
+    /// `cd`'s or `pushd`'s operand, its first word past its options, and
+    /// each git `-C` among the options before its subcommand, as git reads
+    /// them; a `-C` after the subcommand is the subcommand's own (`git
+    /// commit -C HEAD`).
+    fn directory_operands(&self) -> Vec<usize> {
+        let words = &self.0;
+        match words.first().map(String::as_str) {
+            Some("cd" | "pushd") => {
+                return words
+                    .iter()
+                    .skip(1)
+                    .position(|w| !w.starts_with('-'))
+                    .map(|at| at + 1)
+                    .into_iter()
+                    .collect();
+            }
+            _ if self.program() != "git" => return Vec::new(),
+            _ => {}
+        }
+        let mut operands = Vec::new();
+        let mut at = 1;
+        while let Some(word) = words.get(at) {
+            match word.as_str() {
+                "-C" => {
+                    operands.extend((at + 1 < words.len()).then_some(at + 1));
+                    at += 2;
+                }
+                "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => at += 2,
+                option if option.starts_with('-') => at += 1,
+                _ => break,
+            }
+        }
+        operands
+    }
+
+    /// The directories the command names to move into, in order
+    /// ([`Argv::directory_operands`]): a `cd`'s or `pushd`'s operand, or
+    /// git's `-C`s, each relative to the one before. A variable the line
+    /// assigned is read as its value ([`Assigned`]); one it did not stays
+    /// as written, `$X`.
+    pub(super) fn directories(&self) -> impl Iterator<Item = &str> {
+        self.directory_operands()
+            .into_iter()
+            .filter_map(|at| self.0.get(at).map(String::as_str))
     }
 
     /// The line this command runs in turn: a shell's `-c` argument, or the
@@ -1121,6 +1193,32 @@ mod tests {
         );
         assert_eq!(words("{ git commit; }"), vec![vec!["git", "commit"]]);
         assert_eq!(words("A=1"), Vec::<Vec<String>>::new());
+    }
+
+    /// #2607: the directory a `cd`, `pushd` or git `-C` names by a
+    /// variable the line assigned earlier is the variable's value, whole;
+    /// one the line did not assign, or assigned only in the command's own
+    /// environment, stays as written.
+    #[test]
+    fn a_directory_named_by_a_variable_the_line_assigned_is_its_value() {
+        let dirs = |line: &str| -> Vec<Vec<String>> {
+            commands(line)
+                .iter()
+                .map(|argv| argv.directories().map(str::to_owned).collect())
+                .filter(|dirs: &Vec<String>| !dirs.is_empty())
+                .collect()
+        };
+        assert_eq!(dirs("W='/a b' && cd \"$W\""), vec![vec!["/a b"]]);
+        assert_eq!(dirs("export W=/a; cd ${W}/sub"), vec![vec!["/a/sub"]]);
+        assert_eq!(dirs("W=/a; pushd -q $W"), vec![vec!["/a"]]);
+        assert_eq!(
+            dirs("W=/a && git -c x=y -C $W -C sub commit -C HEAD"),
+            vec![vec!["/a", "sub"]]
+        );
+        assert_eq!(dirs("cd \"$W\""), vec![vec!["$W"]]);
+        assert_eq!(dirs("W=/a cd $W"), vec![vec!["$W"]]);
+        assert_eq!(dirs("cd -"), Vec::<Vec<String>>::new());
+        assert_eq!(dirs("touch $W"), Vec::<Vec<String>>::new());
     }
 
     /// Whether a command of the line is the one `phrase` names.

@@ -5,7 +5,7 @@
 //! line's argv in [`super::argv`].
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use regex_lite::Regex;
@@ -258,7 +258,7 @@ fn evaluate(
         return Ok(None);
     }
     // A rule scoped by `where` judges a call only in the checkout it
-    // names: the call's, moved by a leading `cd` ([`runs_in`]), whose
+    // names: where a command it fires on runs ([`command_runs_in`]), whose
     // branch records a ticket, or where an operation stands that the
     // calling session did not start, which the denial names (#2476).
     let mut foreign = None;
@@ -266,7 +266,7 @@ fn evaluate(
         match rule.within {
             Where::Anywhere => {}
             Where::Ticketed => {
-                if matches!(crate::track::head_ticket(&runs_in(root, line)), Ok(None)) {
+                if !ticketed(root, rule, line) {
                     return Ok(None);
                 }
             }
@@ -293,6 +293,22 @@ fn evaluate(
         }
         finding
     }))
+}
+
+/// Whether a command the rule fires on runs in a checkout whose branch
+/// records a ticket, or one the harness cannot tell does not
+/// ([`fired_in`]); a call with no line, or a line with no command the
+/// rule fires on, is asked where it stands ([`runs_in`]).
+fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
+    let mut checkouts = line.map_or_else(Vec::new, |line| {
+        fired_in(root, line, |argv| fires(rule, argv))
+    });
+    if checkouts.is_empty() {
+        checkouts.push(runs_in(root, line));
+    }
+    checkouts
+        .iter()
+        .any(|dir| !matches!(crate::track::head_ticket(dir), Ok(None)))
 }
 
 /// Whether one command of a shell line is one the rule's argv predicate,
@@ -349,22 +365,109 @@ fn command_around(text: &str, hit: std::ops::Range<usize>) -> &str {
     &text[start..end]
 }
 
-/// The directory a call runs in: its workspace, or the directory a shell
-/// line's leading `cd` moves to, which is how a session whose shell stands
-/// in one checkout runs a command in another. An `export` of assignments
-/// alone before the `cd` moves nothing and is read past, as a bare
-/// assignment is, and `~/` is the home.
-pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> std::path::PathBuf {
-    let declares = |argv: &&super::argv::Argv| {
-        argv.runs("export") && argv.words().iter().skip(1).all(|w| w.contains('='))
-    };
-    let first = line.and_then(|line| line.commands().iter().find(|argv| !declares(argv)));
-    match first.map(super::argv::Argv::words) {
-        Some([cd, dir]) if cd == "cd" => match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(home)) => Path::new(&home).join(rest),
-            _ => root.join(dir),
-        },
-        _ => root.to_path_buf(),
+/// Where a shell line's shell stands once its leading directory changes
+/// have run ([`standing`]), which is how a session whose shell stands in
+/// one checkout runs a command in another.
+pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
+    standing(root, line).0
+}
+
+/// Where one command of `line` runs: where the line stands ([`runs_in`]),
+/// moved, for git, by each `-C` among the options before its subcommand,
+/// as git reads them ([`moved`]).
+pub(super) fn command_runs_in(root: &Path, line: Option<&Line>, argv: &Argv) -> PathBuf {
+    moved(runs_in(root, line), argv)
+}
+
+/// Where each command of `line` that `fires` runs ([`command_runs_in`]):
+/// a rule scoped by `where` judges the commands it fires on there, so
+/// `git -C /wt commit` is judged in `/wt`.
+pub(super) fn fired_in(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Vec<PathBuf> {
+    let dir = runs_in(root, Some(line));
+    line.commands()
+        .iter()
+        .filter(|argv| fires(argv))
+        .map(|argv| moved(dir.clone(), argv))
+        .collect()
+}
+
+/// Where the call acts: where the line stands ([`runs_in`]), or, where
+/// every command past its leading directory changes is git and each
+/// names one directory by its `-C`, that directory ([`moved`]), so `git
+/// -C /wt checkout -- seams.toml` and `git -C /wt add x && git -C /wt
+/// commit` act in `/wt`. git's `-C` moves one command and not the shell,
+/// so a line any of whose other commands runs where the shell stands
+/// (`git -C /wt status && git checkout -- seams.toml`, `touch x && git
+/// -C /wt status`) acts where the shell stands, the call being held in
+/// one checkout.
+pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
+    let (dir, rest) = standing(root, line);
+    let mut named = rest
+        .iter()
+        .map(|argv| (argv.program() == "git").then(|| moved(dir.clone(), argv)));
+    match named.next() {
+        Some(Some(first)) if first != dir && named.all(|other| other.as_ref() == Some(&first)) => {
+            first
+        }
+        _ => dir,
+    }
+}
+
+/// The one reading of where a shell line stands, from which [`runs_in`],
+/// [`command_runs_in`], [`fired_in`] and [`acts_in`] are read, so `where =
+/// "ticketed"`, `where = "operating"`, the checkout `permit --after` holds
+/// and the approvals it reads move together (#2597, #2607): the call's
+/// `root`, moved by each `cd` and `pushd` before the first command that
+/// does anything else and back by each `popd` to where its `pushd` left;
+/// and the commands past those changes.
+///
+/// An `export` of assignments alone moves nothing and is read past, as a
+/// bare assignment is, and `~/` is the home. A `cd` or `pushd` to a
+/// variable the line assigned before it, `W=/wt && cd "$W"` or `export
+/// W=/wt; cd $W/sub`, goes where the value names ([`Argv::directories`]).
+/// A change the line does not say where it goes is not followed, and the
+/// line stands where it stood before it, `root` for the first: a
+/// variable the line did not assign (one the environment holds), `cd`
+/// with no operand or `-`, `pushd` with an option, a stack place (`+1`)
+/// or none, and `popd` with an option or no `pushd` before it.
+fn standing<'a>(root: &Path, line: Option<&'a Line>) -> (PathBuf, &'a [Argv]) {
+    let commands = line.map_or(&[][..], Line::commands);
+    let mut dir = root.to_path_buf();
+    let mut pushed = Vec::new();
+    let known = |to: &str| !to.starts_with(['-', '+', '$']);
+    for (at_command, argv) in commands.iter().enumerate() {
+        let words = argv.words();
+        let to = argv.directories().next().filter(|to| known(to));
+        match (words.first().map(String::as_str), to) {
+            (Some("export"), _) if words.iter().skip(1).all(|w| w.contains('=')) => {}
+            (Some("cd"), Some(to)) => dir = at(&dir, to),
+            (Some("pushd"), Some(to)) if words.len() == 2 => {
+                pushed.push(dir.clone());
+                dir = at(&dir, to);
+            }
+            (Some("popd"), _) if words.len() == 1 && !pushed.is_empty() => {
+                dir = pushed.pop().unwrap_or(dir);
+            }
+            _ => return (dir, commands.get(at_command..).unwrap_or_default()),
+        }
+    }
+    (dir, &[])
+}
+
+/// `dir` moved, for a git command, by each `-C` among its options before
+/// its subcommand ([`Argv::directories`]); any other command runs there.
+fn moved(dir: PathBuf, argv: &Argv) -> PathBuf {
+    if argv.program() != "git" {
+        return dir;
+    }
+    argv.directories().fold(dir, |dir, to| at(&dir, to))
+}
+
+/// `to` read as a directory from `dir`, `~/` as the home.
+fn at(dir: &Path, to: &str) -> PathBuf {
+    match (to.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => Path::new(&home).join(rest),
+        _ => dir.join(to),
     }
 }
 
