@@ -6,9 +6,11 @@
 //! the workspace members, and a second run for the same name refuses, as
 //! one for a name without its row does. The fixture is copied to a scratch
 //! directory first; nothing is generated in place, and the workspace's own
-//! `sapi/` gains no crate.
+//! `sapi/` gains no crate. The stand-ins are held to the real crates: each
+//! public item of one is a public item or a re-export of the workspace's
+//! crate of that name, read from the sources as a lock is (#2544).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::manifest::Manifest;
@@ -20,14 +22,15 @@ fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
+fn fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/new-sapi")
+}
+
 /// A scratch copy of the fixture with one commit, since a reading's stamp
 /// names `HEAD`.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("new-sapi-{name}")).unwrap();
-    copy(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/new-sapi"),
-        &dir,
-    );
+    copy(&fixture(), &dir);
     // The pin is referenced by a path relative to the fixture's place in the tree.
     let seams = std::fs::read_to_string(dir.join("seams.toml")).unwrap();
     let pin = workspace().join("oracle.toml");
@@ -205,6 +208,52 @@ fn the_host_laid_down_passes_the_four_instruments_untouched() {
     let readings = clippy::run(&root, &manifest, &["sapi/demo".to_owned()]).unwrap();
     let demo = of(&readings, "sapi/demo");
     assert_eq!(demo.status, Status::Pass, "{}", demo.message);
+}
+
+/// The public items of the fixture's stand-in for `name` that the
+/// workspace's crate of that name lacks, as lock lines; the sources are
+/// read, nothing is built.
+fn beyond_the_real(fixture: &Path, name: &str) -> Vec<String> {
+    let real =
+        api_check::public_items(&Manifest::load(workspace()).unwrap(), workspace(), name).unwrap();
+    let stand_in =
+        api_check::public_items(&Manifest::load(fixture).unwrap(), fixture, name).unwrap();
+    assert!(
+        !stand_in.is_empty(),
+        "the stand-in for {name} declares nothing"
+    );
+    stand_in.difference(&real).cloned().collect()
+}
+
+#[test]
+fn the_stand_ins_declare_only_what_the_real_facade_and_bundle_declare() {
+    for name in ["php_sapi", "php_bundle"] {
+        let beyond = beyond_the_real(&fixture(), name);
+        assert!(
+            beyond.is_empty(),
+            "{name}: not public in the real crate: {beyond:?}"
+        );
+    }
+
+    // The negative control: an item the real facade lacks, a method of a
+    // type it has, and a function of the bundle it lacks.
+    let root = scratch("stand-ins");
+    for (name, extra) in [
+        (
+            "php_sapi",
+            "pub struct Served;\nimpl Engine {\n    pub fn served(&self) {}\n}\n",
+        ),
+        ("php_bundle", "pub fn registered() {}\n"),
+    ] {
+        let lib = root.join(format!("crates/{name}/src/lib.rs"));
+        let text = std::fs::read_to_string(&lib).unwrap();
+        std::fs::write(&lib, text + extra).unwrap();
+    }
+    assert_eq!(
+        beyond_the_real(&root, "php_sapi"),
+        ["Engine::served", "Served"]
+    );
+    assert_eq!(beyond_the_real(&root, "php_bundle"), ["registered"]);
 }
 
 #[test]

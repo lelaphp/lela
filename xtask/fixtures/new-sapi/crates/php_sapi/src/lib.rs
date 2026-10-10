@@ -1,6 +1,8 @@
 //! The hosts' facade (ADR-0008), stood in for here: the items the template
 //! names, in the shapes it calls them, and nothing behind them, so `clippy`
-//! checks the laid-down crate without building an engine (#2524).
+//! checks the laid-down crate without building an engine (#2524). Each
+//! public item is one of the real facade's, as `tests/new_sapi.rs` holds
+//! (#2544).
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
@@ -13,7 +15,7 @@ pub struct Engine;
 pub struct EngineBuilder;
 
 /// What a request ends with.
-pub struct Served {
+pub struct Observables {
     /// The code the request ended with.
     pub exit_code: i32,
 }
@@ -60,8 +62,12 @@ impl Engine {
     }
 
     /// One request served, here none.
-    pub fn serve(&self, _description: RequestDescription, _sink: &mut dyn OutputSink) -> Served {
-        Served { exit_code: 0 }
+    pub fn serve(
+        &self,
+        _description: RequestDescription,
+        _sink: &mut dyn OutputSink,
+    ) -> Observables {
+        Observables { exit_code: 0 }
     }
 }
 

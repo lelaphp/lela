@@ -1,5 +1,5 @@
 //! The enabled set, stood in for here: the items the template names and
-//! nothing behind them (#2524).
+//! nothing behind them (#2524), each public in the real bundle (#2544).
 #![forbid(unsafe_code)]
 
 /// The enabled set, empty.
