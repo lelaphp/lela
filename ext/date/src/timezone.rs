@@ -13,38 +13,60 @@ use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
 use crate::ffi::{self, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::format_timestamp;
-use crate::lent::{Lent, lent, release};
+use crate::lent::{Lent, lent};
 use crate::obj::{
     TIMEZONE, TzKind, TzObj, class_id, lent_time, new_timezone, rows_array, set_str, set_string,
     set_tz, std_rows, tz_fields, tz_of,
 };
 
+/// Why `timezone_initialize` refuses a zone: the sentence php prints for
+/// it with `spprintf`, naming the zone as it was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// `Timezone offset is out of range (%s)`.
+    OutOfRange,
+    /// `Unknown or bad timezone (%s)`.
+    Unknown,
+}
+
+impl Refusal {
+    /// The sentence up to the zone.
+    fn head(self) -> &'static [u8] {
+        match self {
+            Refusal::OutOfRange => b"Timezone offset is out of range (",
+            Refusal::Unknown => b"Unknown or bad timezone (",
+        }
+    }
+
+    /// The sentence naming `text`, made only once a zone is refused.
+    fn message(self, text: &[u8]) -> Vec<u8> {
+        [self.head(), text, b")"].concat()
+    }
+}
+
 /// `timezone_initialize(tzobj, tz, &warning)`: an identifier, an
-/// abbreviation or an offset, as `timelib_parse_zone` reads it, or the
-/// message php gives for one it cannot use.
-pub(super) fn initialize(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, String> {
-    let shown = String::from_utf8_lossy(text).into_owned();
+/// abbreviation or an offset, as `timelib_parse_zone` reads it, or why
+/// it refuses the text. Nothing is printed here, so a zone it accepts
+/// costs no sentence.
+fn initialize(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, Refusal> {
     let read = ffi::parse_zone(lent, text);
     #[allow(clippy::cast_possible_truncation)]
     let z = i64::from(read.offset as i32);
     if read.offset >= 100 * 60 * 60 || read.offset <= -100 * 60 * 60 {
-        return Err(format!("Timezone offset is out of range ({shown})"));
+        return Err(Refusal::OutOfRange);
     }
     if read.not_found || read.read < text.len() {
-        return Err(format!("Unknown or bad timezone ({shown})"));
+        return Err(Refusal::Unknown);
     }
     match read.zone_type {
-        ZONETYPE_ID => read
-            .zone
-            .map(TzKind::Id)
-            .ok_or_else(|| format!("Unknown or bad timezone ({shown})")),
+        ZONETYPE_ID => read.zone.map(TzKind::Id).ok_or(Refusal::Unknown),
         ZONETYPE_OFFSET => Ok(TzKind::Offset(z)),
         ZONETYPE_ABBR => Ok(TzKind::Abbr {
             utc_offset: z,
             abbr: read.abbr,
             dst: read.dst,
         }),
-        _ => Err(format!("Unknown or bad timezone ({shown})")),
+        _ => Err(Refusal::Unknown),
     }
 }
 
@@ -92,10 +114,11 @@ fn timezone_open(
     req: &mut Request,
     timezone: Path,
 ) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
-    match lent(req, |l| initialize(l, timezone.0.as_bytes()))? {
+    let text = timezone.0.as_bytes();
+    match lent(req, |l| initialize(l, text))? {
         Ok(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
-        Err(message) => {
-            docref(req, Level::Warning, &message);
+        Err(refusal) => {
+            docref(req, Level::Warning, &refusal.message(text));
             Ok(OrFalse::False)
         }
     }
@@ -139,7 +162,7 @@ fn offset_of(req: &mut Request, object: PhpObject, date: PhpObject) -> Result<i6
             utc_offset, dst, ..
         } => utc_offset + i64::from(*dst) * 3600,
     });
-    release(req, kind)?;
+    kind.release(req)?;
     offset
 }
 
@@ -574,13 +597,16 @@ impl DateTimeZone {
     /// 104 112
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
-        match lent(req, |l| initialize(l, timezone.0.as_bytes()))? {
+        let text = timezone.0.as_bytes();
+        match lent(req, |l| initialize(l, text))? {
             Ok(kind) => set_zone(req, this.object(), kind),
-            Err(message) => Err(throw(
-                req,
-                "DateInvalidTimeZoneException",
-                &format!("DateTimeZone::__construct(): {message}"),
-            )),
+            Err(refusal) => {
+                let message = format!(
+                    "DateTimeZone::__construct(): {}",
+                    String::from_utf8_lossy(&refusal.message(text))
+                );
+                Err(throw(req, "DateInvalidTimeZoneException", &message))
+            }
         }
     }
 

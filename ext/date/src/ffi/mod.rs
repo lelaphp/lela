@@ -81,6 +81,24 @@ fn c_string(bytes: &[u8]) -> CString {
     CString::new(&bytes[..end]).unwrap_or_default()
 }
 
+/// `call` handed [`c_string`]'s string of `bytes`, laid on this stack
+/// where it fits, as every zone name does, so a parse that runs once per
+/// call allocates nothing to terminate it.
+fn with_c_string<R>(bytes: &[u8], call: impl FnOnce(&CStr) -> R) -> R {
+    const ROOM: usize = 64;
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    let mut room = [0u8; ROOM];
+    if let Some(slot) = room.get_mut(..end)
+        && end < ROOM
+    {
+        slot.copy_from_slice(&bytes[..end]);
+        if let Ok(text) = CStr::from_bytes_until_nul(&room) {
+            return call(text);
+        }
+    }
+    call(&c_string(bytes))
+}
+
 /// The bytes with the NUL after them that a `zend_string` always has:
 /// timelib is handed a length, but its format parser and its interval
 /// scanner also stop at the terminator.
@@ -598,7 +616,30 @@ impl Drop for Block {
 /// time at.
 struct Lookup<'a, 'b> {
     lent: &'a mut Lent<'b>,
-    answered: Vec<Arc<Zone>>,
+    answered: Answered,
+}
+
+/// The zones one parse's wrapper answered, in the order it answered
+/// them: the first beside the rest, so a zone parse, which asks once,
+/// allocates nothing of its own to keep it.
+#[derive(Default)]
+struct Answered {
+    first: Option<Arc<Zone>>,
+    rest: Vec<Arc<Zone>>,
+}
+
+impl Answered {
+    fn push(&mut self, zone: Arc<Zone>) {
+        if self.first.is_none() {
+            self.first = Some(zone);
+        } else {
+            self.rest.push(zone);
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Arc<Zone>> {
+        self.first.iter().chain(&self.rest)
+    }
 }
 
 impl Lookup<'_, '_> {
@@ -748,18 +789,17 @@ impl Time {
     pub(crate) fn copy(&self, _: &Lent<'_>) -> Time {
         // SAFETY: a live time; the copy answered is ours.
         let raw = unsafe { sys::timelib_time_clone(self.raw.as_ptr()) };
-        Time::adopt(raw, self.zone.clone(), &[])
+        Time::adopt(raw, self.zone.clone(), &Answered::default())
     }
 
     /// A time timelib allocated, with the zone its pointer is known to
     /// name or one of the zones a parse's wrapper `answered`; a null
     /// answer is an allocation failing, which the process does not
     /// outlive.
-    fn adopt(raw: *mut TimeFields, zone: Option<Arc<Zone>>, answered: &[Arc<Zone>]) -> Time {
+    fn adopt(raw: *mut TimeFields, zone: Option<Arc<Zone>>, answered: &Answered) -> Time {
         let raw = NonNull::new(raw).unwrap_or_else(|| std::process::abort());
         let mut time = Time { raw, zone };
-        let known: Vec<&Arc<Zone>> = answered.iter().collect();
-        time.sync(&known);
+        time.sync(answered.iter());
         time
     }
 
@@ -767,7 +807,7 @@ impl Time {
     pub(crate) fn new(_: &Lent<'_>) -> Time {
         // SAFETY: the call takes nothing; the time answered is ours.
         let raw = unsafe { sys::timelib_time_ctor() };
-        Time::adopt(raw, None, &[])
+        Time::adopt(raw, None, &Answered::default())
     }
 
     fn ptr(&self) -> *mut TimeFields {
@@ -782,7 +822,7 @@ impl Time {
     /// `timelib_fill_holes` is always handed `TIMELIB_NO_CLONE`. A pointer
     /// none of them names is a zone nothing here owns, so the process
     /// aborts rather than read or free it, as on an allocation failure.
-    fn sync(&mut self, known: &[&Arc<Zone>]) {
+    fn sync<'z>(&mut self, known: impl IntoIterator<Item = &'z Arc<Zone>>) {
         let now = self.tz_info();
         if now.is_null() {
             self.zone = None;
@@ -791,7 +831,7 @@ impl Time {
         if self.zone.as_ref().is_some_and(|z| z.ptr() == now) {
             return;
         }
-        match known.iter().find(|z| z.ptr() == now) {
+        match known.into_iter().find(|z| z.ptr() == now) {
             Some(found) => self.zone = Some(Arc::clone(found)),
             None => std::process::abort(),
         }
@@ -811,14 +851,14 @@ impl Time {
     pub(crate) fn unixtime2gmt(&mut self, _: &Lent<'_>, ts: i64) {
         // SAFETY: a live time owned by `self`.
         unsafe { sys::timelib_unixtime2gmt(self.ptr(), ts) };
-        self.sync(&[]);
+        self.sync([]);
     }
 
     /// `timelib_unixtime2local`: under the zone the time carries.
     pub(crate) fn unixtime2local(&mut self, _: &Lent<'_>, ts: i64) {
         // SAFETY: a live time whose zone, if any, `self.zone` keeps alive.
         unsafe { sys::timelib_unixtime2local(self.ptr(), ts) };
-        self.sync(&[]);
+        self.sync([]);
     }
 
     /// `t->tz_info = tzi; t->zone_type = TIMELIB_ZONETYPE_ID;`, what php
@@ -835,14 +875,14 @@ impl Time {
     pub(crate) fn set_timezone(&mut self, _: &Lent<'_>, zone: &Arc<Zone>) {
         // SAFETY: a live time and a live zone the `Arc` keeps alive.
         unsafe { sys::timelib_set_timezone(self.ptr(), zone.ptr()) };
-        self.sync(&[zone]);
+        self.sync([zone]);
     }
 
     /// `timelib_set_timezone_from_offset(t, offset)`.
     pub(crate) fn set_timezone_from_offset(&mut self, _: &Lent<'_>, offset: i64) {
         // SAFETY: a live time owned by `self`.
         unsafe { sys::timelib_set_timezone_from_offset(self.ptr(), offset) };
-        self.sync(&[]);
+        self.sync([]);
     }
 
     /// `timelib_set_timezone_from_abbr(t, info)`: timelib copies `abbr`.
@@ -862,7 +902,7 @@ impl Time {
         // SAFETY: a live time; the abbreviation outlives the call, which
         // copies it and writes nothing through it.
         unsafe { sys::timelib_set_timezone_from_abbr(self.ptr(), info) };
-        self.sync(&[]);
+        self.sync([]);
     }
 
     /// `t->tz_abbr = timelib_strdup(abbr)` through the only door timelib
@@ -889,15 +929,14 @@ impl Time {
         let tzi = zone.map_or(ptr::null_mut(), |z| z.ptr());
         // SAFETY: a live time and, where given, a zone the `Arc` keeps alive.
         unsafe { sys::timelib_update_ts(self.ptr(), tzi) };
-        let known: Vec<&Arc<Zone>> = zone.into_iter().collect();
-        self.sync(&known);
+        self.sync(zone);
     }
 
     /// `timelib_update_from_sse`.
     pub(crate) fn update_from_sse(&mut self, _: &Lent<'_>) {
         // SAFETY: a live time whose zone `self.zone` keeps alive.
         unsafe { sys::timelib_update_from_sse(self.ptr()) };
-        self.sync(&[]);
+        self.sync([]);
     }
 
     /// `timelib_fill_holes(t, now, options)`; `now`'s zone is shared, as
@@ -907,8 +946,7 @@ impl Time {
         // `now`'s zone pointer, which `now.zone` keeps alive and `sync`
         // then shares by its `Arc`.
         unsafe { sys::timelib_fill_holes(self.ptr(), now.ptr(), options | NO_CLONE) };
-        let zones: Vec<&Arc<Zone>> = now.zone.iter().collect();
-        self.sync(&zones);
+        self.sync(&now.zone);
     }
 
     /// `timelib_date_to_int`: none where the epoch does not fit.
@@ -949,12 +987,12 @@ impl Time {
         // SAFETY: a live time and a local copy of the interval; the time
         // answered is a clone of ours, sharing our zone.
         let raw = unsafe { f(self.ptr(), &raw mut rel) };
-        let known: Vec<&Arc<Zone>> = self.zone.iter().collect();
+        let known = self.zone.as_ref();
         let mut out = Time {
             raw: NonNull::new(raw).unwrap_or_else(|| std::process::abort()),
             zone: self.zone.clone(),
         };
-        out.sync(&known);
+        out.sync(known);
         out
     }
 
@@ -1016,7 +1054,7 @@ impl Time {
         let mut errors: *mut sys::ErrorContainer = ptr::null_mut();
         let mut lookup = Lookup {
             lent,
-            answered: Vec::new(),
+            answered: Answered::default(),
         };
         let tzdb = lookup.as_tzdb();
         // SAFETY: the bytes, NUL-terminated, and their length, a local
@@ -1044,7 +1082,7 @@ impl Time {
         let mut errors: *mut sys::ErrorContainer = ptr::null_mut();
         let mut lookup = Lookup {
             lent,
-            answered: Vec::new(),
+            answered: Answered::default(),
         };
         let tzdb = lookup.as_tzdb();
         // SAFETY: a NUL-terminated format, the bytes, NUL-terminated, and
@@ -1076,6 +1114,7 @@ pub(crate) struct ZoneRead {
     pub not_found: bool,
     pub read: usize,
     pub zone_type: u32,
+    /// The abbreviation an abbreviation zone keeps; empty for another.
     pub abbr: Vec<u8>,
     pub zone: Option<Arc<Zone>>,
 }
@@ -1084,7 +1123,11 @@ pub(crate) struct ZoneRead {
 /// `s`, into a `timelib_time` on the stack as php's `dummy_t = {0}` is,
 /// whose `tz_abbr` copy is freed after, `timelib_free(dummy_t.tz_abbr)`.
 pub(crate) fn parse_zone(lent: &mut Lent<'_>, s: &[u8]) -> ZoneRead {
-    let text = c_string(s);
+    with_c_string(s, |text| parse_zone_in(lent, text))
+}
+
+/// [`parse_zone`] over the terminated text.
+fn parse_zone_in(lent: &mut Lent<'_>, text: &CStr) -> ZoneRead {
     let start = text.as_ptr();
     let mut at = start;
     let (mut dst, mut not_found): (c_int, c_int) = (0, 0);
@@ -1093,7 +1136,7 @@ pub(crate) fn parse_zone(lent: &mut Lent<'_>, s: &[u8]) -> ZoneRead {
     let mut dummy: TimeFields = unsafe { std::mem::zeroed() };
     let mut lookup = Lookup {
         lent,
-        answered: Vec::new(),
+        answered: Answered::default(),
     };
     let tzdb = lookup.as_tzdb();
     // SAFETY: a NUL-terminated string whose cursor is a local, two
@@ -1115,7 +1158,13 @@ pub(crate) fn parse_zone(lent: &mut Lent<'_>, s: &[u8]) -> ZoneRead {
         .iter()
         .find(|zone| !tz_info.is_null() && zone.ptr() == tz_info)
         .cloned();
-    let abbr = bytes_of(dummy.tz_abbr()).to_vec();
+    // Only an abbreviation zone keeps its abbreviation; an identifier's
+    // copy is the transient php frees unread.
+    let abbr = if dummy.zone_type == ZONETYPE_ABBR {
+        bytes_of(dummy.tz_abbr()).to_vec()
+    } else {
+        Vec::new()
+    };
     let abbr_copy = dummy.tz_abbr();
     if !abbr_copy.is_null() {
         // SAFETY: the copy `timelib_parse_zone` made with `timelib_strdup`
@@ -1178,8 +1227,8 @@ pub(super) fn strtointerval(_: &Lent<'_>, s: &[u8]) -> IsoInterval {
         );
     }
     IsoInterval {
-        begin: (!begin.is_null()).then(|| Time::adopt(begin, None, &[])),
-        end: (!end.is_null()).then(|| Time::adopt(end, None, &[])),
+        begin: (!begin.is_null()).then(|| Time::adopt(begin, None, &Answered::default())),
+        end: (!end.is_null()).then(|| Time::adopt(end, None, &Answered::default())),
         period: (!period.is_null()).then(|| take_rel(period)),
         recurrences,
         errors: ErrorContainer::adopt(errors)

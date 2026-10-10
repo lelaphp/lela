@@ -65,6 +65,19 @@ impl TzKind {
         })
     }
 
+    /// The zone given up. An identifier's `timelib_tzinfo` is dropped
+    /// under a lend where this is its last owner, so what timelib
+    /// allocated goes back to the request's heap (ADR-0014); while the
+    /// request's cache keeps it, as it keeps every zone it parsed, and
+    /// for an offset or an abbreviation, which hold none of timelib's
+    /// memory, the drop frees nothing of timelib's and needs no lend.
+    pub(super) fn release(self, req: &mut Request) -> Result<(), Thrown> {
+        match self {
+            TzKind::Id(zone) if Arc::strong_count(&zone) == 1 => release(req, zone),
+            _ => Ok(()),
+        }
+    }
+
     /// `php_timezone_to_string`.
     pub(super) fn name(&self) -> Vec<u8> {
         match self {
@@ -303,11 +316,13 @@ pub(super) fn set_tz(
         _ => None,
     };
     let Some(payload) = object.native_mut::<TzObj>(req) else {
-        return release(req, kind);
+        return kind.map_or(Ok(()), |kind| kind.release(req));
     };
     let old = std::mem::replace(&mut payload.tz, kind);
     let held = payload.held.take();
-    release(req, old)?;
+    if let Some(old) = old {
+        old.release(req)?;
+    }
     let held = Held::hold(req, held, shape)?;
     if let Some(payload) = object.native_mut::<TzObj>(req) {
         payload.held = held;
@@ -799,8 +814,10 @@ impl ObjectHandlers for TzHandlers {
         if let Some(held) = held {
             held.free(req);
         }
-        // Freeing allocates nothing, so the limit refuses nothing.
-        let _freed = release(req, kind);
+        if let Some(kind) = kind {
+            // Freeing allocates nothing, so the limit refuses nothing.
+            let _freed = kind.release(req);
+        }
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
