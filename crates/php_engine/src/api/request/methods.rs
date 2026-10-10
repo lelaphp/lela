@@ -165,6 +165,35 @@ impl Request {
         self.method_function(row.holder_in(class), row.at)
     }
 
+    /// `ce->constructor`: `__construct` as `class`'s linked record
+    /// resolved it once ([`LinkedClass::constructor`]), its row read by
+    /// position; none for a class with none.
+    ///
+    /// [`LinkedClass::constructor`]: php_link::LinkedClass::constructor
+    pub(crate) fn constructor(&self, class: ClassId) -> Option<Function> {
+        self.resolved_method(class, |record| record.constructor)
+    }
+
+    /// `ce->destructor`, as [`Request::constructor`] reads it.
+    pub(crate) fn destructor(&self, class: ClassId) -> Option<Function> {
+        self.resolved_method(class, |record| record.destructor)
+    }
+
+    /// The method at the position of `class`'s function table `at`
+    /// picks out of its linked record.
+    fn resolved_method(
+        &self,
+        class: ClassId,
+        at: impl FnOnce(&LinkedClass<ClassId>) -> Option<u32>,
+    ) -> Option<Function> {
+        let record = self.linked_class(class)?;
+        let row = record
+            .methods
+            .rows()
+            .get(usize::try_from(at(record)?).ok()?)?;
+        self.method_function(row.holder_in(class), row.at)
+    }
+
     /// [`Request::method_named`] for a method `class` declares itself,
     /// none where the entry under the name is one it inherited.
     fn own_method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {

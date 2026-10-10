@@ -38,6 +38,15 @@ pub struct LinkedClass<H> {
     /// `ce->interfaces`: every interface the class implements, each once
     /// and in php's order, so `instanceof` scans one slice.
     pub interfaces: Box<[H]>,
+    /// `ce->constructor`: the position of `__construct`'s row in
+    /// `methods`, set once where the class is linked, as
+    /// `zend_add_magic_method` sets it for the class's own and
+    /// `zend_do_inheritance` copies the parent's; none for a class with
+    /// none.
+    pub constructor: Option<u32>,
+    /// `ce->destructor`: the position of `__destruct`'s row in
+    /// `methods`, set as [`LinkedClass::constructor`] is.
+    pub destructor: Option<u32>,
 }
 
 impl<H> Default for LinkedClass<H> {
@@ -48,6 +57,8 @@ impl<H> Default for LinkedClass<H> {
             constants: Rows::default(),
             properties: Rows::default(),
             interfaces: Box::default(),
+            constructor: None,
+            destructor: None,
         }
     }
 }

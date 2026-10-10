@@ -5122,7 +5122,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     let mut uncached = false;
     let function = match op.op2_type {
         OperandKind::Unused => {
-            let Some(constructor) = req.method_named(class, b"__construct") else {
+            let Some(constructor) = req.constructor(class) else {
                 let thrown =
                     crate::api::raising::throw_error(req, "Error", "Cannot call constructor");
                 return threw(req, frame, &thrown);

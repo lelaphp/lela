@@ -1896,8 +1896,16 @@ impl<'a, H: Copy> Linker<'a, H> {
     {
         let own = child.methods.len().saturating_sub(abstracts);
         let methods = self.member_rows::<MethodDecl>(child, own)?;
+        let magic = |name: &[u8]| {
+            methods
+                .find_at(name, |row| self.row_member_name::<MethodDecl>(child, row))
+                .and_then(|(at, _)| u32::try_from(at).ok())
+        };
+        let (constructor, destructor) = (magic(b"__construct"), magic(b"__destruct"));
         Some(LinkedClass {
             prototypes: self.prototypes(child, &methods)?,
+            constructor,
+            destructor,
             methods,
             constants: self.member_rows::<ClassConstDecl>(child, usize::MAX)?,
             properties: self.member_rows::<PropertyDecl>(child, usize::MAX)?,

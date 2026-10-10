@@ -519,7 +519,7 @@ impl Request {
     /// ```
     pub(crate) fn destruct(&mut self, object: PhpObject) {
         let class = object.class();
-        let Some(destructor) = self.method_named(class, b"__destruct") else {
+        let Some(destructor) = self.destructor(class) else {
             return;
         };
         // `zend_object_is_lazy`: a lazy object's destructor is not
@@ -559,7 +559,7 @@ impl Request {
         matches!(
             self.object_handlers(object.heap()).dtor_obj(),
             DtorObj::Own(_)
-        ) || self.method_named(object.class(), b"__destruct").is_some()
+        ) || self.destructor(object.class()).is_some()
     }
 
     /// `zend_call_function`'s tail (`Z/Zend/zend_execute_API.c:1069-1076`)
@@ -1113,9 +1113,14 @@ impl Request {
     /// Call to private P::__construct() from global scope
     /// ```
     pub(crate) fn constructor_of(&mut self, object: PhpObject) -> Result<Option<Function>, Thrown> {
-        let Some(constructor) = self.method_named(object.class(), b"__construct") else {
+        let Some(constructor) = self.constructor(object.class()) else {
             return Ok(None);
         };
+        // `!(constructor->op_array.fn_flags & ZEND_ACC_PUBLIC)` is what
+        // asks the scope.
+        if self.method_visibility(constructor) == Visibility::Public {
+            return Ok(Some(constructor));
+        }
         let scope = self.property_scope();
         if self.method_accessible_from(constructor, scope) {
             return Ok(Some(constructor));
