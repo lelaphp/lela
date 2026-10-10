@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -m \"dashboard.yml: the soak job runs xtask soak --nightly on its schedule\" -- .github/workflows/dashboard.yml","description":"Commit with a message that cites the nightly soak"}}

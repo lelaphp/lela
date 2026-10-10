@@ -25,13 +25,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use regex_lite::Regex;
 
-use super::cgi;
 use super::environment::Environment;
 use super::file::{self, Phpt};
 use super::miss::Miss;
 use super::phpdbg;
 use super::redirect::{Item, Redirect, Test};
 use super::{Judged, Judgement, Lane, Subset};
+use super::{cgi, http};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{
@@ -56,11 +56,25 @@ pub(super) struct Adapter<'a> {
 }
 
 /// The hosts beside the binary under test a test of another shape runs
-/// through: the CGI host and the debugger host.
+/// through: the CGI host and the debugger host, and for the served subset
+/// the production server a CGI-shaped test is served to over HTTP in the
+/// CGI host's place (the `http` module, #2348).
 #[derive(Debug, Default)]
 pub(super) struct Hosts {
     pub(super) cgi: Option<PathBuf>,
     pub(super) phpdbg: Option<PathBuf>,
+    pub(super) http: Option<PathBuf>,
+}
+
+impl Hosts {
+    /// How a CGI-shaped test's header names are held: folded where the
+    /// production server writes them (#2570), as written otherwise.
+    fn names(&self) -> cgi::Names {
+        match self.http {
+            Some(_) => cgi::Names::Folded,
+            None => cgi::Names::AsWritten,
+        }
+    }
 }
 
 impl<'a> Adapter<'a> {
@@ -185,7 +199,7 @@ impl<'a> Adapter<'a> {
                     Judged::new(&id, &name, Judgement::Fail, why).keeping(Miss::past_limit())
                 );
             }
-            Err(Stopped::Occupied(why)) => {
+            Err(Stopped::Occupied(why) | Stopped::Unserved(why)) => {
                 let miss = Miss::bork(&why);
                 return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(miss));
             }
@@ -213,7 +227,7 @@ impl<'a> Adapter<'a> {
         };
         let (met, wanted, actual) = cgi::with_headers(
             phpt.text("EXPECTHEADERS").as_deref(),
-            &headers,
+            (&headers, self.hosts.names()),
             (met, expectation.text()),
             actual,
         );
@@ -307,7 +321,9 @@ impl<'a> Adapter<'a> {
     /// program as run-tests.php hands it (run-tests.php:1897, 2342), in
     /// the environment of the request it describes, its body on stdin; a
     /// `--PHPDBG--` test through the debugger host, as the `phpdbg` module
-    /// has it.
+    /// has it; and in the served subset a CGI-shaped test is served to the
+    /// production server over HTTP, as the `http` module has it, a server
+    /// that answered nothing borking it.
     fn run_program(
         &self,
         subset: &Subset,
@@ -340,41 +356,48 @@ impl<'a> Adapter<'a> {
             ..Invocation::new(self.binary, Program::Beside(&program))
         };
         let (dbg_flags, commands) = (phpdbg::FLAGS.map(String::from), phpdbg::stdin(phpt));
-        let ran = match (request, &self.hosts.cgi, &self.hosts.phpdbg) {
-            (_, _, Some(host)) if phpt.has("PHPDBG") => {
-                self.pinned_phpdbg.asserted(self.oracle.pin(), host)?;
-                self.oracle.run_under(&Invocation {
+        let served = request.zip(self.hosts.http.as_deref());
+        let ran = if let Some((request, host)) = served {
+            http::served(&self.oracle.pin().recipe, host, &program, request, ini, env)
+        } else {
+            match (request, &self.hosts.cgi, &self.hosts.phpdbg) {
+                (_, _, Some(host)) if phpt.has("PHPDBG") => {
+                    self.pinned_phpdbg.asserted(self.oracle.pin(), host)?;
+                    self.oracle.run_under(&Invocation {
+                        binary: host,
+                        program: if phpt.has("FILE") {
+                            invocation.program
+                        } else {
+                            Program::Nothing
+                        },
+                        flags: &dbg_flags,
+                        args: &phpdbg::args(phpt),
+                        stdin: Stdin::Pipe(&commands),
+                        ..invocation
+                    })
+                }
+                (Some(request), Some(host), _) => self.oracle.run_under(&Invocation {
                     binary: host,
-                    program: if phpt.has("FILE") {
-                        invocation.program
-                    } else {
-                        Program::Nothing
-                    },
-                    flags: &dbg_flags,
-                    args: &phpdbg::args(phpt),
-                    stdin: Stdin::Pipe(&commands),
+                    flags: &cgi_flags,
+                    args: &request.args,
+                    env: request.env.entries(),
+                    stdin: request
+                        .stdin
+                        .as_deref()
+                        .map_or(invocation.stdin, Stdin::File),
+                    raw: true,
                     ..invocation
-                })
+                }),
+                _ => self.oracle.run_under(&invocation),
             }
-            (Some(request), Some(host), _) => self.oracle.run_under(&Invocation {
-                binary: host,
-                flags: &cgi_flags,
-                args: &request.args,
-                env: request.env.entries(),
-                stdin: request
-                    .stdin
-                    .as_deref()
-                    .map_or(invocation.stdin, Stdin::File),
-                raw: true,
-                ..invocation
-            }),
-            _ => self.oracle.run_under(&invocation),
+            .map(|ran| ran.stdout)
         };
         drop(written);
         let output = match ran {
-            Ok(output) => Ok(output.stdout),
+            Ok(stdout) => Ok(stdout),
             Err(e) => match e.downcast_ref::<PastLimit>() {
                 Some(past) => Err(Stopped::PastLimit(past.to_string())),
+                None if served.is_some() => Err(Stopped::Unserved(format!("{e:#}"))),
                 None => return Err(e.context(format!("running {}", test.file.display()))),
             },
         };
@@ -499,6 +522,8 @@ enum Stopped {
     PastLimit(String),
     /// A file already stood where it goes: a bork.
     Occupied(String),
+    /// The production server answered nothing: a bork.
+    Unserved(String),
 }
 
 /// What a test may not run beside in its run: its conflict keys and the
@@ -586,7 +611,7 @@ fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> 
 /// stands beside the binary, and a debugger's where no debugger host
 /// does, as upstream's runner skips each (run-tests.php:1894-1896, 1914).
 fn unhosted(phpt: &Phpt, hosts: &Hosts) -> Option<String> {
-    if phpt.is_cgi() && hosts.cgi.is_none() {
+    if phpt.is_cgi() && hosts.cgi.is_none() && hosts.http.is_none() {
         return Some("CGI not available".into());
     }
     if phpt.has("PHPDBG") && hosts.phpdbg.is_none() {

@@ -786,6 +786,13 @@ with = ["xtask phpt", "xtask bench"]   # xtask however it is run: the cargo alia
 text = "Nightly lanes run in CI only; run the per-crate subset."
 
 [[rule]]
+id = "lanes.nightly-soak"
+tool = "Bash"
+deny_argv = ["--nightly"]
+with = ["xtask soak"]
+text = "Nightly lanes run in CI only; run the per-crate subset."
+
+[[rule]]
 id = "lanes.builder-subset"
 tool = "Bash"
 where = "ticketed"   # grammar: where, a builder's worktree (branch.<b>.ticket); main's checkout, where the merge check runs the lane, records none (#1145, #1149)

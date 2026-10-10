@@ -70,7 +70,8 @@ impl Profile {
 /// whatever profile the harness itself was built in (harness revision 92,
 /// #2217): a reading's key covers the source and not the profile, so one
 /// key is read off one build, and the `php` the witness lane builds is the
-/// one the phpt lane looks for first.
+/// one the phpt lane looks for first. The one binary built otherwise is a
+/// bench bar's arm, in the bench lane's profile ([`released`]).
 pub(crate) fn build(
     root: &Path,
     package: &str,
@@ -78,7 +79,24 @@ pub(crate) fn build(
     features: Option<&str>,
     into: Option<&Path>,
 ) -> Result<PathBuf> {
-    let profile = LANE;
+    built(root, LANE, (package, binary), features, into)
+}
+
+/// The same in `release`, the bench lane's profile: what a bar's arm of
+/// the engine's own runs, never a correctness lane's build (#2351).
+pub(crate) fn released(root: &Path, package: &str, binary: &str) -> Result<PathBuf> {
+    built(root, Profile::Release, (package, binary), None, None)
+}
+
+/// `binary` of `package` built in `profile`: the cargo line [`build`] and
+/// [`released`] each run in their profile, and where cargo put the binary.
+fn built(
+    root: &Path,
+    profile: Profile,
+    (package, binary): (&str, &str),
+    features: Option<&str>,
+    into: Option<&Path>,
+) -> Result<PathBuf> {
     let status = Command::new(cargo())
         .args([
             "build",

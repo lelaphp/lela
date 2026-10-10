@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask soak","description":"Run the soak's 30-second smoke"}}

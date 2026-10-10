@@ -7,7 +7,8 @@ inherited from the second engine, whose own protocol stands at
 here is the part that binds a run, and §10 says what was left behind and why.
 `xtask bench` is the one instrument that runs it.
 
-Version `1`, the ancestor's. A change to §3, §4 or §5 bumps it; adding a
+Version `2`: the ancestor's `1`, and a request-shaped arm under the same
+paired rule (§3, §5; #2351). A change to §3, §4 or §5 bumps it; adding a
 statement or a recorded field does not.
 
 ## 1. What it refuses
@@ -52,12 +53,21 @@ the verdict and exits 0 (`harness-design.md` §4.2).
 | measured reps per arm | 12 |
 | order within a rep | alternated: even reps run arm A first, odd reps arm B first |
 | processes per rep | one per arm, back to back |
+| requests per rep, a request-shaped arm | one per arm, back to back, to a server started once for the bar |
 
 Twelve paired deltas give a stable interpolated inter-quartile range. The
 response to `NOISE-SWAMPED` is more reps, a quieter machine or a larger
 workload, in that order; re-labelling the verdict is not a response.
 Alternating the order is what keeps a penalty on whichever process runs
 second from being charged to one arm.
+
+A request-shaped arm times a request as its client pays for it: the
+connection, the request and the response read to its end, against a server
+the bar starts before its first rep and ends after its last, the server's
+binary pinned as a program is (§6). It is how the production server is
+measured against php-fpm (#2351); the two arms reach their hosts as each is
+reached, so the bar states its clients, and a server's own A/A control
+stands beside it.
 
 ## 4. The statistics
 
@@ -98,13 +108,16 @@ not signalled, and it is not a claim that the two arms are equal.
 
 ## 5. Correctness before timing
 
-Per rep, never once at the end. The two arms' standard streams are compared
-byte for byte inside the rep that produced them, and a disagreement stops
-the run. How the two streams compared is named in the reading, in three values:
+Per rep, never once at the end. The two arms' standard streams, or a
+request-shaped arm's response body, its head being what each host is, are
+compared byte for byte inside the rep that produced them, and a
+disagreement stops the run. How the two compared is named in the reading,
+in four values:
 
 | value | meaning |
 |---|---|
 | `stdout-bytes` | both arms wrote the same non-empty bytes |
+| `body-bytes` | both arms' responses carried the same non-empty body |
 | `vacuous` | both arms wrote nothing, so nothing was compared |
 | `differ` | the arms disagreed; the run stopped |
 
@@ -161,9 +174,11 @@ self-timed `TOTAL`/`CHECKSUM` contract their PHP prints; an on-disk unit
 cache switch and a second executor, neither of which this engine has; a
 binary-vintage tripwire over build products under the repository root; a
 regression gate holding one run against a baseline of record, with its
-quiet, shared and hosted hardware tiers; and a request-shaped kind whose
-per-arm latency percentiles are descriptive and never signed. Each returns
-here when the engine has the thing it measures, and a geomean over
+quiet, shared and hosted hardware tiers; and the ancestor's request-shaped
+kind, whose per-arm latency percentiles are descriptive and never signed.
+Each returns here when the engine has the thing it measures, as the
+request-shaped arm has, paired under §2 to §5 rather than as percentiles
+(§3, #2351), and a geomean over
 workloads, which inherits the floor — one `NOISE-SWAMPED` constituent and
 the aggregate is published unsigned — returns with the corpus.
 

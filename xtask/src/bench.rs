@@ -13,13 +13,17 @@
 //! pass or fail against the bar — and its exit is 0 whatever the reading
 //! says, recorded through [`Store::record_measurement`], which owes none.
 //!
-//! **What a bar is today.** Every bar the harness declares is an A/A
-//! control: two arms that are one call, whose bar is the protocol's own
-//! verdict, that the rig cannot tell the arm from itself (§2). The one
-//! declared bar is the judge at the tool call, which is the arm the harness
-//! has that runs. A bar whose arms are two different things needs a bound
-//! of its own — a geomean ceiling, a ratio — and that is a number a person
-//! writes in the manifest, not one this instrument invents.
+//! **What a bar is today.** A bar is [`Held`] one of two ways. An A/A
+//! control is two arms that are one call, whose bar is the protocol's own
+//! verdict, that the rig cannot tell the arm from itself (§2): the judge
+//! at the tool call, and makala against itself over each bench workload. A
+//! series is two arms that are two things, the production server against
+//! php-fpm behind a `FastCGI` client over the same workload (#2351,
+//! `makala::bench`), held to no bound: a bound is a number a person writes
+//! in the manifest once the series is read, not one this instrument
+//! invents (#1902's and #2336's rulings), so its reading states the
+//! measurement and the distance still to go to its second arm, harness
+//! §3's "`FastCGI` ≥ php-fpm", and passes whatever they are.
 //!
 //! **Why the A/A verdict is a reading and not a refusal.** §4.3 is a
 //! quartile rule with no confidence level, so it resolves some unmeasured
@@ -133,6 +137,23 @@ impl Bar {
             .with_context(|| format!("reading the bar at {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("{} is not a bar", path.display()))
     }
+
+    /// The bar as the run measures it, an A/A control of two processes.
+    fn declared(self) -> Declared {
+        let Bar { id, about, a, b } = self;
+        Declared {
+            id,
+            about,
+            held: Held::Control,
+            start: Box::new(move || {
+                let spawned = |arm: Arm| -> Result<Box<dyn Side>> {
+                    let program = resolve(&arm.program)?;
+                    Ok(Box::new(Spawned { arm, program }))
+                };
+                Ok(Ok([spawned(a)?, spawned(b)?]))
+            }),
+        }
+    }
 }
 
 /// Seven numbers over one sample, §4.1: the quantiles by linear
@@ -205,8 +226,8 @@ const RESOLVED: &str = "resolved";
 /// A disagreement is not a value here: it stops the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Correctness {
-    /// Both arms wrote the same non-empty bytes.
-    Bytes,
+    /// Both arms wrote the same non-empty bytes on the stream named.
+    Bytes(Stream),
     /// Both arms wrote nothing, so nothing was compared: the timings
     /// stand and the agreement proves nothing.
     Vacuous,
@@ -215,16 +236,103 @@ enum Correctness {
 impl Correctness {
     fn as_str(self) -> &'static str {
         match self {
-            Correctness::Bytes => "stdout-bytes",
+            Correctness::Bytes(Stream::Stdout) => "stdout-bytes",
+            Correctness::Bytes(Stream::Body) => "body-bytes",
             Correctness::Vacuous => "vacuous",
         }
     }
 }
 
-/// One run of one arm: how long it took, and what it wrote.
-struct Sample {
-    ms: f64,
-    wrote: Vec<u8>,
+/// One run of one arm: how long it took, and what it wrote, the bytes the
+/// two arms' runs of one rep are held equal by (§5).
+pub(crate) struct Sample {
+    pub(crate) ms: f64,
+    pub(crate) wrote: Vec<u8>,
+}
+
+/// What an arm's run wrote that the rep holds equal (§5): what a process
+/// wrote on its first stream, or the body of a server's response, its head being
+/// what each host is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stream {
+    Stdout,
+    Body,
+}
+
+/// One arm as a rep runs it: its name, the program pinned for it at both
+/// ends of the run (§6), and one run of it, timed as its caller pays for
+/// it. A process spawned per rep is one; a request sent to a server kept
+/// across the reps is another (`makala::bench`).
+pub(crate) trait Side {
+    /// The arm's name, as its line of the rendering says it.
+    fn name(&self) -> &str;
+    /// The program the arm runs, which the run pins.
+    fn program(&self) -> &Path;
+    /// One run, a nonzero exit or no answer refusing the run, naming the
+    /// arm.
+    fn once(&mut self) -> Result<Sample>;
+    /// What [`Sample::wrote`] holds of the run.
+    fn stream(&self) -> Stream {
+        Stream::Stdout
+    }
+}
+
+/// A bar's two arms as a rep runs them, or why this machine cannot run
+/// them, which is the bar's skip.
+pub(crate) type Sides = Result<[Box<dyn Side>; 2], String>;
+
+/// How a bar's reading is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// An A/A control: a pass while the paired delta's sign is swamped
+    /// (§2, §4.3).
+    Control,
+    /// A series: two arms that differ, held to no bound until a person
+    /// writes one, its reading a pass that states the measurement and the
+    /// distance to go to the second arm (#1902, #2336).
+    Series,
+}
+
+impl Held {
+    /// The reading's status for a paired delta whose sign is `verdict`: a
+    /// control fails where the sign resolved, and a series is held to no
+    /// bound.
+    fn status(self, verdict: &str) -> Status {
+        match self {
+            Held::Control if verdict == RESOLVED => Status::Fail,
+            Held::Control | Held::Series => Status::Pass,
+        }
+    }
+}
+
+/// A bar the run measures: its name, what it measures, how its reading is
+/// held, and its arms, started only once it is measured, so a run of one
+/// bar starts nothing of another's.
+pub(crate) struct Declared {
+    pub(crate) id: String,
+    pub(crate) about: String,
+    pub(crate) held: Held,
+    pub(crate) start: Box<dyn FnOnce() -> Result<Sides>>,
+}
+
+/// A process arm, its program resolved: spawned once a rep.
+struct Spawned {
+    arm: Arm,
+    program: PathBuf,
+}
+
+impl Side for Spawned {
+    fn name(&self) -> &str {
+        &self.arm.name
+    }
+
+    fn program(&self) -> &Path {
+        &self.program
+    }
+
+    fn once(&mut self) -> Result<Sample> {
+        once(&self.arm, &self.program)
+    }
 }
 
 /// What one bar measured: the two arms, their paired delta, the delta as a
@@ -342,29 +450,23 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
 /// held equal inside every rep; the programs pinned at both ends. A byte
 /// disagreement re-reads the pin first, since a program that moved
 /// underneath the run explains one (§6).
-fn measure(bar: &Bar, reps: usize) -> Result<Measured> {
-    if reps == 0 {
-        bail!("--reps must be at least 1");
-    }
-    let programs = [resolve(&bar.a.program)?, resolve(&bar.b.program)?];
+fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Measured> {
+    let programs = [a.program().to_path_buf(), b.program().to_path_buf()];
     let before = [Pin::take(&programs[0])?, Pin::take(&programs[1])?];
     let (mut a_ms, mut b_ms, mut delta) = (Vec::new(), Vec::new(), Vec::new());
     let mut vacuous = false;
     for r in 1..=(WARMUP + reps) {
         let (sa, sb) = if r % 2 == 0 {
-            let sa = once(&bar.a, &programs[0])?;
-            let sb = once(&bar.b, &programs[1])?;
-            (sa, sb)
+            let sa = a.once()?;
+            (sa, b.once()?)
         } else {
-            let sb = once(&bar.b, &programs[1])?;
-            let sa = once(&bar.a, &programs[0])?;
-            (sa, sb)
+            let sb = b.once()?;
+            (a.once()?, sb)
         };
         if sa.wrote != sb.wrote {
             holds(&programs, &before)?;
             bail!(
-                "{}: the two arms wrote different bytes at rep {r}; no timing is read from a bar whose arms disagree ({PROTOCOL} §5)",
-                bar.id
+                "{id}: the two arms wrote different bytes at rep {r}; no timing is read from a bar whose arms disagree ({PROTOCOL} §5)"
             );
         }
         vacuous |= sa.wrote.is_empty();
@@ -375,6 +477,7 @@ fn measure(bar: &Bar, reps: usize) -> Result<Measured> {
         }
     }
     holds(&programs, &before)?;
+    let stream = a.stream();
     let (a, b, delta) = (stats(&a_ms), stats(&b_ms), stats(&delta));
     Ok(Measured {
         a,
@@ -388,7 +491,7 @@ fn measure(bar: &Bar, reps: usize) -> Result<Measured> {
         correctness: if vacuous {
             Correctness::Vacuous
         } else {
-            Correctness::Bytes
+            Correctness::Bytes(stream)
         },
     })
 }
@@ -416,13 +519,14 @@ fn holds(programs: &[PathBuf; 2], before: &[Pin; 2]) -> Result<()> {
 /// expensive half of what the hook pays for.
 const CALL: &str = r#"{"tool_name":"Edit","tool_input":{"file_path":"seams.toml","old_string":"a","new_string":"b"}}"#;
 
-/// The bars the harness declares: one, the A/A control over the judge at
-/// the tool call, whose two arms are one call of `xtask permit` over a
-/// scratch workspace under `target/`, so the denials a shape provokes land
-/// in that store and not this one. It is the arm the harness has that runs;
-/// the gates and the perf bars of harness-design.md §3 join it as the
-/// engine reaches what they measure.
-fn declared(root: &Path) -> Result<Vec<Bar>> {
+/// The bars the harness declares: the A/A control over the judge at the
+/// tool call, whose two arms are one call of `xtask permit` over a scratch
+/// workspace under `target/`, so the denials a shape provokes land in that
+/// store and not this one; and the production server's, makala against
+/// php-fpm and against itself over each bench workload (#2351,
+/// `makala::bench`). The other perf bars of harness-design.md §3 join them
+/// as the engine reaches what they measure.
+fn declared(root: &Path) -> Result<Vec<Declared>> {
     let exe = std::env::current_exe().context("locating this binary")?;
     let scratch = root.join("target").join("harness-bench-aa");
     crate::permit::scratch_workspace(root, &scratch)?;
@@ -436,12 +540,15 @@ fn declared(root: &Path) -> Result<Vec<Bar>> {
         ],
         stdin: CALL.to_owned(),
     };
-    Ok(vec![Bar {
+    let permit = Bar {
         id: "permit".to_owned(),
         about: "the judge at the tool call, arm against arm".to_owned(),
         a: arm("permit-a"),
         b: arm("permit-b"),
-    }])
+    };
+    let mut bars = vec![permit.declared()];
+    bars.extend(crate::makala::bench::declared(root)?);
+    Ok(bars)
 }
 
 /// The variable GitHub sets on every runner: `github-hosted` on its own
@@ -487,8 +594,11 @@ pub fn run(
             label.as_str().to_lowercase()
         );
     }
+    if reps == 0 {
+        bail!("--reps must be at least 1");
+    }
     let mut bars = match from {
-        Some(path) => vec![Bar::read(path)?],
+        Some(path) => vec![Bar::read(path)?.declared()],
         None => declared(root)?,
     };
     if let Some(name) = bar {
@@ -497,23 +607,89 @@ pub fn run(
             bail!("no bar is named {name:?}");
         }
     }
-    let load = load_average();
     let snapshot = Snapshot::disk(root)?;
-    let mut readings = Vec::new();
-    for bar in &bars {
-        let measured = measure(bar, reps)?;
-        print!("{}", rendered(bar, &measured, reps, label, load));
+    let (mut readings, mut refused) = (Vec::new(), Vec::new());
+    for Declared {
+        id,
+        about,
+        held,
+        start,
+    } in bars
+    {
+        // A bar whose arms this machine cannot run is a skip, and one whose
+        // run refused (§1) is a failing reading that names why; either way
+        // the next bar runs, and a refusal is the command's error once all
+        // have run, so a refused run never reads as a measurement.
+        let measured = start().and_then(|sides| match sides {
+            Err(why) => Ok(Err(why)),
+            Ok(mut sides) => {
+                // The load where the bar's reps start, after its arms were
+                // built and started (§7).
+                let load = load_average();
+                Ok(Ok((measure(&id, &mut sides, reps)?, sides, load)))
+            }
+        });
+        let (measured, sides, load) = match measured {
+            Ok(Ok(measured)) => measured,
+            Ok(Err(why)) => {
+                readings.push(unmeasured(&id, Status::Skip, &why, &snapshot)?);
+                continue;
+            }
+            Err(e) => {
+                let why = format!("{e:#}");
+                readings.push(unmeasured(&id, Status::Fail, &why, &snapshot)?);
+                refused.push(format!("{id}: {why}"));
+                continue;
+            }
+        };
+        let bar = Shown {
+            id: &id,
+            about: &about,
+            held,
+            names: [sides[0].name(), sides[1].name()],
+        };
+        print!("{}", rendered(&bar, &measured, reps, label, load));
         readings.push(recorded(
-            bar, &measured, reps, label, note, load, &snapshot,
+            &bar,
+            &measured,
+            (reps, label, note),
+            load,
+            &snapshot,
         )?);
     }
-    store.record_measurement(&readings)
+    store.record_measurement(&readings)?;
+    if !refused.is_empty() {
+        bail!(
+            "{} bar{} refused the run, each recorded as a failing reading: {}",
+            refused.len(),
+            if refused.len() == 1 { "" } else { "s" },
+            refused.join("; ")
+        );
+    }
+    Ok(())
+}
+
+/// A measured bar as its rendering and its reading name it.
+struct Shown<'a> {
+    id: &'a str,
+    about: &'a str,
+    held: Held,
+    names: [&'a str; 2],
+}
+
+/// The reading of a bar that was not measured, with why, printed too.
+fn unmeasured(id: &str, status: Status, why: &str, snapshot: &Snapshot) -> Result<Reading> {
+    println!("bench {id}: {} {why}", status.as_str());
+    let mut reading = Reading::stamped_over(INSTRUMENT, id, snapshot, Path::new("."))?;
+    reading.status = status;
+    reading.message = format!("{id}: not measured: {why}");
+    Ok(reading)
 }
 
 /// What one measured bar prints: the standing and the knobs, a line per
 /// arm, the paired delta with its verdict, and the load beside them all.
 fn rendered(
-    bar: &Bar,
+    bar: &Shown<'_>,
     measured: &Measured,
     reps: usize,
     label: Label,
@@ -526,12 +702,12 @@ fn rendered(
         )
     };
     format!(
-        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}{}  paired delta: median {:.3} ms ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}\n  correctness {}; the bar is the A/A control of {PROTOCOL} §2\n",
+        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}{}  paired delta: median {:.3} ms ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}\n  correctness {}; {}\n",
         bar.id,
         label.as_str(),
         load_text(load),
-        stat(&bar.a.name, &measured.a),
-        stat(&bar.b.name, &measured.b),
+        stat(bar.names[0], &measured.a),
+        stat(bar.names[1], &measured.b),
         measured.delta.median,
         measured.paired_pct,
         measured.delta.iqr,
@@ -539,7 +715,33 @@ fn rendered(
         measured.delta.q3,
         sign_of(&measured.delta),
         measured.correctness.as_str(),
+        held_by(bar, measured),
     )
+}
+
+/// What the bar is held to, as its rendering and its reading say it.
+fn held_by(bar: &Shown<'_>, measured: &Measured) -> String {
+    let series = "a series held to no bound until a person writes one (#1902, #2336)";
+    match (bar.held, to_go(measured)) {
+        (Held::Control, _) => format!("the bar is the A/A control of {PROTOCOL} §2"),
+        (Held::Series, Some(to_go)) => format!(
+            "{series}; {} is {to_go:.2}% to go to {}",
+            bar.names[0], bar.names[1]
+        ),
+        (Held::Series, None) => format!(
+            "{series}; the sign is not established, so no distance to go is stated ({PROTOCOL} §1.2)"
+        ),
+    }
+}
+
+/// How far the first arm's median stands behind the second's, as a
+/// percentage of the second's: the paired delta where its sign is
+/// established and it is the first arm's loss, nothing where the first arm
+/// is ahead, and none where the sign is not established (§1.2) or the
+/// second arm took no time.
+fn to_go(measured: &Measured) -> Option<f64> {
+    (sign_of(&measured.delta) == RESOLVED && measured.paired_pct.is_finite())
+        .then(|| measured.paired_pct.max(0.0))
 }
 
 /// A measured number as the store keeps it: to the microsecond, which is
@@ -564,21 +766,22 @@ fn load_text(load: Option<[f64; 3]>) -> String {
 /// asks no instrument for a bench reading, which is the other half of the
 /// exit rule.
 fn recorded(
-    bar: &Bar,
+    bar: &Shown<'_>,
     measured: &Measured,
-    reps: usize,
-    label: Label,
-    note: &str,
+    (reps, label, note): (usize, Label, &str),
     load: Option<[f64; 3]>,
     snapshot: &Snapshot,
 ) -> Result<Reading> {
     let verdict = sign_of(&measured.delta);
-    let mut reading = Reading::stamped_over(INSTRUMENT, &bar.id, snapshot, Path::new("."))?;
-    reading.status = if verdict == SWAMPED {
-        Status::Pass
-    } else {
-        Status::Fail
-    };
+    let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
+    reading.status = bar.held.status(verdict);
+    if bar.held == Held::Series
+        && let Some(to_go) = to_go(measured)
+    {
+        reading
+            .numbers
+            .insert("to_go_pct".to_owned(), rounded(to_go).into());
+    }
     reading.count("reps", u64::try_from(measured.delta.n)?)?;
     reading.count("warmup_discarded", u64::try_from(WARMUP)?)?;
     let numbers = [
@@ -610,11 +813,12 @@ fn recorded(
         format!(" ({})", note.trim())
     };
     reading.message = format!(
-        "{}: paired delta {:.3} ms ({:+.2}%) over {reps} reps, {verdict}; correctness {}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
+        "{}: paired delta {:.3} ms ({:+.2}%) over {reps} reps, {verdict}; correctness {}; {}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
         bar.about,
         measured.delta.median,
         measured.paired_pct,
         measured.correctness.as_str(),
+        held_by(bar, measured),
         label.as_str(),
         load_text(load),
     );
@@ -623,7 +827,10 @@ fn recorded(
 
 #[cfg(test)]
 mod tests {
-    use super::{RESOLVED, SWAMPED, Stats, refuse_a_hosted_runner, sign_of, stats};
+    use super::{
+        Correctness, Held, Measured, RESOLVED, SWAMPED, Stats, Status, Stream,
+        refuse_a_hosted_runner, sign_of, stats, to_go,
+    };
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
@@ -653,6 +860,32 @@ mod tests {
         assert_eq!(sign_of(&stats(&[-3.0, 0.0, 0.0, 0.0])), SWAMPED);
         assert_eq!(sign_of(&stats(&[-1.0, -1.0, 1.0, 1.0])), SWAMPED);
         assert_eq!(sign_of(&stats(&[-4.0, -3.0, -2.0, -1.0])), RESOLVED);
+    }
+
+    /// A control fails on a resolved sign and passes on a swamped one; a
+    /// series passes either way, and states how far its first arm stands
+    /// behind its second only where the sign is established, nothing where
+    /// it is ahead (#2351, §1.2).
+    #[test]
+    fn a_control_fails_on_a_resolved_sign_and_a_series_states_the_distance_to_go() {
+        assert_eq!(Held::Control.status(RESOLVED), Status::Fail);
+        assert_eq!(Held::Control.status(SWAMPED), Status::Pass);
+        assert_eq!(Held::Series.status(RESOLVED), Status::Pass);
+        let measured = |deltas: &[f64], paired_pct| Measured {
+            a: Stats::default(),
+            b: Stats::default(),
+            delta: stats(deltas),
+            paired_pct,
+            correctness: Correctness::Bytes(Stream::Body),
+        };
+        let behind = [4.0, 5.0, 6.0, 7.0];
+        assert!(close(to_go(&measured(&behind, 250.0)).unwrap(), 250.0));
+        let ahead = [-7.0, -6.0, -5.0, -4.0];
+        assert!(close(to_go(&measured(&ahead, -12.5)).unwrap(), 0.0));
+        let straddles = [-1.0, -1.0, 1.0, 1.0];
+        assert_eq!(to_go(&measured(&straddles, 3.0)), None, "swamped");
+        assert_eq!(to_go(&measured(&behind, f64::NAN)), None);
+        assert_eq!(Correctness::Bytes(Stream::Body).as_str(), "body-bytes");
     }
 
     /// A GitHub-hosted runner is refused, and a machine of ours or one

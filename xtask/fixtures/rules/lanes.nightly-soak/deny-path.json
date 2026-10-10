@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"target/release/xtask soak --nightly --clients 64 > soak.out","description":"Run the nightly soak through the built binary's path"}}
