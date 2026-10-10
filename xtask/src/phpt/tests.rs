@@ -1978,14 +1978,19 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
         "PDO_MYSQL_TEST_DSN".to_owned(),
         "mysql:host=127.0.0.1;port=1;dbname=test".to_owned(),
     );
-    // An engine built after the tree, so the run copies the tree and asks
-    // the server; it never runs a test, the refusal comes first.
+    // An engine no source is newer than, so the run copies the tree and
+    // asks the server; it never runs a test, the refusal comes first. The
+    // workspace is a scratch one with no engine source in it, so this
+    // binary is fresh by construction and never held to the real tree,
+    // whose sources a merge writes after the test binary is built (#2557).
+    let root = Tree::new("phpt-refused-lane").unwrap();
+    crate::permit::scratch_workspace(&workspace(), &root).unwrap();
     let ask = Ask {
         engine: super::Engine::Named(std::env::current_exe().unwrap()),
         jobs: NonZeroUsize::new(1),
         ..Ask::default()
     };
-    let readings = super::run(&workspace(), &manifest, &registry(""), &ask).unwrap();
+    let readings = super::run(&root, &manifest, &registry(""), &ask).unwrap();
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(scopes, ["ext/hollow", "ext/pdo_mysql"], "{readings:#?}");
     assert_eq!(readings[0].status, Status::Skip, "{readings:#?}");

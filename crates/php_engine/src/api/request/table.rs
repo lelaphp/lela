@@ -682,11 +682,10 @@ impl Request {
         visibility: Visibility,
     ) -> Option<Vec<u8>> {
         match visibility {
-            Visibility::Public => None,
-            Visibility::Protected => Some(b"\0*\0".to_vec()),
-            Visibility::Private => self
-                .class_decl(declaring)
-                .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
+            Visibility::Private => {
+                php_compile::mangling(visibility, &self.class_decl(declaring)?.name.0)
+            }
+            Visibility::Public | Visibility::Protected => php_compile::mangling(visibility, &[]),
         }
     }
 }

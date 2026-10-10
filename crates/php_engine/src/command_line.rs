@@ -84,6 +84,10 @@ impl Engine {
                         b"auto_prepend_file",
                         self.shared.loops.entry,
                     );
+                    // `readline_shell` destroys the file's
+                    // `zend_file_handle` once it has run, before the
+                    // shell reads a line.
+                    req.close_served_files();
                     if !req.bailing_out() {
                         req.end_in_exit(0);
                         let status = (shell.serve)(&mut req);

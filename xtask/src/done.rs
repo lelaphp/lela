@@ -54,6 +54,7 @@ use serde_json::{Value, json};
 
 use crate::api_check;
 use crate::carried::Carried;
+use crate::clippy;
 use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
@@ -361,7 +362,10 @@ pub(crate) enum Condition {
     /// partial (#383). `miri` is asked of the crates [`miri::CRATES`]
     /// names, `php_heap`, when a change touches it, `php_heap` depending
     /// on no workspace crate; a fail made only of unsupported operations is
-    /// met, [`miri_unsupported`], and every other is held (#2416). A
+    /// met, [`miri_unsupported`], and every other is held (#2416). A crate
+    /// whose library or binary sources name `debug_assertions` is asked
+    /// for `clippy` twice, at its name and at `<name>/release`, the release
+    /// profile's lint ([`scopes_of`], #2392). A
     /// caller's `--not-run` moves an instrument's missing reading off this
     /// list and onto the notes, as CI's does for the oracle job's two while
     /// that job is skipped (#2477).
@@ -479,6 +483,7 @@ pub fn judge(
             Condition::Fresh => {
                 for krate in &crates {
                     fresh_readings(
+                        root,
                         store,
                         krate,
                         &KeyNow::of(snapshot, krate, &crates)?,
@@ -768,6 +773,7 @@ impl KeyNow {
 /// missing reading of an instrument in `not_run` goes to `not_judged`.
 #[allow(clippy::too_many_arguments)]
 fn fresh_readings(
+    root: &Path,
     store: &Store,
     krate: &Crate,
     now: &KeyNow,
@@ -784,12 +790,16 @@ fn fresh_readings(
     // commit's can be, taken over another key; where it is, the latest
     // one over the key now stands before it, found in the index (#1312).
     // A scope with no file has no reading, whatever the log holds.
-    let mut read = BTreeMap::new();
+    let mut asked = Vec::new();
     for instrument in instruments_of(krate, lock_home, carried) {
-        for scope in scopes_of(instrument, name) {
-            if let Some(reading) = store.read(instrument, &scope)? {
-                read.insert((instrument.to_owned(), scope), reading);
-            }
+        for scope in scopes_of(root, instrument, krate)? {
+            asked.push((instrument, scope));
+        }
+    }
+    let mut read = BTreeMap::new();
+    for (instrument, scope) in &asked {
+        if let Some(reading) = store.read(instrument, scope)? {
+            read.insert(((*instrument).to_owned(), scope.clone()), reading);
         }
     }
     let stale: Vec<(String, String, String)> = read
@@ -798,44 +808,42 @@ fn fresh_readings(
         .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), key.clone()))
         .collect();
     read.extend(store.latest_over_each(&stale, pin)?);
-    for instrument in instruments_of(krate, lock_home, carried) {
-        for scope in scopes_of(instrument, name) {
-            let Some(reading) = read.remove(&(instrument.to_owned(), scope.clone())) else {
-                if not_run.iter().any(|n| n == instrument) {
-                    not_judged.push(format!("{instrument} for {scope}"));
-                } else {
-                    unmet.push(format!("{instrument}: no reading for {scope}"));
-                }
-                continue;
+    for (instrument, scope) in asked {
+        let Some(reading) = read.remove(&(instrument.to_owned(), scope.clone())) else {
+            if not_run.iter().any(|n| n == instrument) {
+                not_judged.push(format!("{instrument} for {scope}"));
+            } else {
+                unmet.push(format!("{instrument}: no reading for {scope}"));
+            }
+            continue;
+        };
+        if !reading.fresh_for(key, pin) {
+            // Over the key now, a reading is stale for its recipe alone.
+            let changed = if reading.key() == key {
+                "oracle.toml".to_owned()
+            } else {
+                now.changed.clone()
             };
-            if !reading.fresh_for(key, pin) {
-                // Over the key now, a reading is stale for its recipe alone.
-                let changed = if reading.key() == key {
-                    "oracle.toml".to_owned()
-                } else {
-                    now.changed.clone()
-                };
-                unmet.push(format!(
-                    "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
-                ));
-                continue;
-            }
-            if reading.status != Status::Pass && !met_without_passing(krate, instrument, &reading) {
-                unmet.push(format!(
-                    "{instrument}: {scope} {}: {}",
-                    reading.status.as_str(),
-                    reading.message
-                ));
-            }
-            if instrument == "witness"
-                && let Some(Number::Int(missing)) = reading.numbers.get("missing")
-                && *missing > 0
-            {
-                let s = plural(usize::try_from(*missing).unwrap_or(usize::MAX));
-                unmet.push(format!(
-                    "witness: {missing} kernel{s} or native{s} in {name} without a witness"
-                ));
-            }
+            unmet.push(format!(
+                "{instrument}: the reading for {scope} is stale; {changed} changed since it was taken"
+            ));
+            continue;
+        }
+        if reading.status != Status::Pass && !met_without_passing(krate, instrument, &reading) {
+            unmet.push(format!(
+                "{instrument}: {scope} {}: {}",
+                reading.status.as_str(),
+                reading.message
+            ));
+        }
+        if instrument == "witness"
+            && let Some(Number::Int(missing)) = reading.numbers.get("missing")
+            && *missing > 0
+        {
+            let s = plural(usize::try_from(*missing).unwrap_or(usize::MAX));
+            unmet.push(format!(
+                "witness: {missing} kernel{s} or native{s} in {name} without a witness"
+            ));
         }
     }
     Ok(())
@@ -847,15 +855,23 @@ fn fresh_readings(
 /// default extension twice and both renderings are one sensor held to the
 /// oracle's bytes, so a default extension whose MINFO table is not php's
 /// is not done any more than one whose declarations are not (harness
-/// §4.5 condition 1, ledger 46; #361).
-pub fn scopes_of(instrument: &str, name: &str) -> Vec<String> {
-    let mut scopes = vec![name.to_owned()];
+/// §4.5 condition 1, ledger 46; #361). For `clippy` they are the scope of
+/// each profile the crate is linted under ([`clippy::Profile::of`]), its
+/// name and, where its sources name `debug_assertions`, `<name>/release`
+/// (#2392).
+pub fn scopes_of(root: &Path, instrument: &str, krate: &Crate) -> Result<Vec<String>> {
+    let name = &krate.name;
+    if instrument == clippy::INSTRUMENT {
+        let profiles = clippy::Profile::of(root, krate)?;
+        return Ok(profiles.into_iter().map(|p| p.scope(name)).collect());
+    }
+    let mut scopes = vec![name.clone()];
     if instrument == "crosscheck"
         && let Some(extension) = name.strip_prefix("ext/")
     {
         scopes.push(crosscheck::Column::Ri.scope(extension));
     }
-    scopes
+    Ok(scopes)
 }
 
 /// Condition 3: a lock that differs is in the diff, and a lock in the diff

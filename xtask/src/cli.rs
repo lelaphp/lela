@@ -256,7 +256,8 @@ pub(crate) enum Command {
         staged: bool,
     },
     /// `cargo clippy` with every warning denied, on every target of each
-    /// crate, as the reading `done` reads; one reading per crate.
+    /// crate and in release where it names `debug_assertions`, as the
+    /// readings `done` reads; one per crate and profile.
     Clippy {
         /// Only these crates, by manifest name; default every crate that exists.
         #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]

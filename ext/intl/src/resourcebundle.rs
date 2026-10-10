@@ -13,8 +13,9 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{internal_iterator, lookup_class, new_object};
-use php_ext::coerce::type_name;
-use php_ext::raising::{Thrown, arg_value_error, argument_error, fatal, throw_error};
+use php_ext::raising::{
+    Thrown, arg_value_error, argument_error, fatal, illegal_container_offset, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -222,15 +223,16 @@ fn unconstructed(status: &mut Code) -> Option<Bundle> {
     None
 }
 
-/// `resourcebundle_ctor`'s arguments: the request's error reset before
-/// they are counted and held.
+/// `resourcebundle_ctor`'s arguments, counted and held where the native
+/// says, the constructor's inside its [`error::constructing`] span; the
+/// request's error was reset before them (`before_args`).
 fn arguments(
     req: &mut Request,
     locale: &Raw<Option<PhpString>>,
     bundle: &Raw<Option<PhpString>>,
     fallback: &Raw<bool>,
 ) -> Result<Given, Thrown> {
-    error::init_vars(req, 2, 3)?;
+    php_ext::raising::arity(req, 2, Some(3))?;
     Ok(Given {
         locale: locale.hold(req)?,
         bundle: bundle.hold(req)?,
@@ -337,11 +339,12 @@ fn create(req: &mut Request, given: &Given) -> Result<Option<Owner<Bundles>>, Th
     }
 }
 
-/// `RESOURCEBUNDLE_METHOD_INIT_VARS` and `RESOURCEBUNDLE_METHOD_FETCH_OBJECT`:
-/// both errors reset, and php's `Error` where no constructor opened a
-/// bundle.
+/// `RESOURCEBUNDLE_METHOD_FETCH_OBJECT`: the object's error reset, the
+/// request's having been reset before the arguments
+/// (`RESOURCEBUNDLE_METHOD_INIT_VARS`, `before_args`), and php's `Error`
+/// where no constructor opened a bundle.
 fn fetch_object(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    error::errors_reset::<BundleObject>(req, object);
+    error::reset_object::<BundleObject>(req, object);
     if bundle(req, object).is_none() {
         return Err(throw_error(
             req,
@@ -360,9 +363,7 @@ fn count(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
 
 /// `resourcebundle_locales`: the locales a bundle's package holds, ICU's
 /// own for an empty name.
-fn locales(req: &mut Request, name: &Raw<PhpString>) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    error::init_vars(req, 1, 1)?;
-    let name = name.hold(req)?;
+fn locales(req: &mut Request, name: PhpString) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let name = name.as_bytes();
     if name.len() >= MAXPATHLEN {
         return Err(argument_error(req, "ValueError", 1, "is too long"));
@@ -477,28 +478,8 @@ fn illegal_offset(
     offset: &Value,
     read: DimensionRead,
 ) -> Thrown {
-    let given = type_name(req, offset);
-    let message = match read {
-        DimensionRead::Silent => format!("Cannot access offset of type {given} in isset or empty"),
-        DimensionRead::Unset => {
-            format!(
-                "Cannot unset offset of type {given} on {}",
-                class_name(req, object)
-            )
-        }
-        _ => format!(
-            "Cannot access offset of type {given} on {}",
-            class_name(req, object)
-        ),
-    };
-    throw_error(req, "TypeError", &message)
-}
-
-/// `ce->name` of the object's class.
-fn class_name(req: &Request, object: PhpObject) -> String {
-    req.class_decl(object.class())
-        .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
-        .unwrap_or_default()
+    let class = req.class_name(object.class());
+    illegal_container_offset(req, &class, offset, read)
 }
 
 /// The `foreach` over a bundle's elements, `ResourceBundle_iterator`:
@@ -655,7 +636,7 @@ type Bundles = Instance<ResourceBundle>;
 #[php_class]
 #[allow(non_snake_case)]
 impl ResourceBundle {
-    #[php(arity = manual)]
+    #[php(arity = manual, before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -670,7 +651,7 @@ impl ResourceBundle {
         })
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, arity = manual, before_args = error::reset)]
     fn create(
         req: &mut Request,
         locale: Raw<Option<PhpString>>,
@@ -691,29 +672,26 @@ impl ResourceBundle {
         fetch(req, this.object(), &offset(&index), fallback, 1)
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        error::init_vars(req, 0, 0)?;
         count(req, this.object())
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getLocales(
         req: &mut Request,
-        bundle: Raw<PhpString>,
+        bundle: PhpString,
     ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-        locales(req, &bundle)
+        locales(req, bundle)
     }
 
-    #[php(tentative, arity = manual)]
-    fn getErrorCode(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        error::init_vars(req, 0, 0)?;
-        Ok(error_code(req, this.object()))
+    #[php(tentative, before_args = error::reset)]
+    fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
+        error_code(req, this.object())
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
-        error::init_vars(req, 0, 0)?;
         error_message(req, this.object())
     }
 
@@ -746,7 +724,7 @@ fn offset(index: &Union<PhpString, i64>) -> Offset<'_> {
 /// string(85) "resourcebundle_create(): Cannot load libICU resource bundle: U_MISSING_RESOURCE_ERROR"
 /// resourcebundle_create(): Argument #2 ($bundle) is too long
 /// ```
-#[php_function(arity = manual)]
+#[php_function(arity = manual, before_args = error::reset)]
 fn resourcebundle_create(
     req: &mut Request,
     locale: Raw<Option<PhpString>>,
@@ -793,10 +771,9 @@ fn resourcebundle_get(
 /// resourcebundle_count(): Argument #1 ($bundle) must be of type ResourceBundle, int given
 /// int(0)
 /// ```
-#[php_function(arity = manual)]
-fn resourcebundle_count(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, Thrown> {
-    let bundle = held(req, &bundle)?;
-    count(req, bundle)
+#[php_function(before_args = error::reset)]
+fn resourcebundle_count(req: &mut Request, bundle: Bundles) -> Result<i64, Thrown> {
+    count(req, bundle.object())
 }
 
 /// `resourcebundle_locales`.
@@ -809,12 +786,12 @@ fn resourcebundle_count(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, 
 /// bool(false)
 /// string(77) "resourcebundle_locales(): Cannot fetch locales list: U_MISSING_RESOURCE_ERROR"
 /// ```
-#[php_function(arity = manual)]
+#[php_function(before_args = error::reset)]
 fn resourcebundle_locales(
     req: &mut Request,
-    bundle: Raw<PhpString>,
+    bundle: PhpString,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    locales(req, &bundle)
+    locales(req, bundle)
 }
 
 /// `resourcebundle_get_error_code`.
@@ -828,10 +805,9 @@ fn resourcebundle_locales(
 /// int(2)
 /// int(0)
 /// ```
-#[php_function(arity = manual)]
-fn resourcebundle_get_error_code(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, Thrown> {
-    let bundle = held(req, &bundle)?;
-    Ok(error_code(req, bundle))
+#[php_function(before_args = error::reset)]
+fn resourcebundle_get_error_code(req: &mut Request, bundle: Bundles) -> i64 {
+    error_code(req, bundle.object())
 }
 
 /// `resourcebundle_get_error_message`.
@@ -846,20 +822,12 @@ fn resourcebundle_get_error_code(req: &mut Request, bundle: Raw<Bundles>) -> Res
 /// string(12) "U_ZERO_ERROR"
 /// string(80) "ResourceBundle::get(): Cannot load resource element -1: U_MISSING_RESOURCE_ERROR"
 /// ```
-#[php_function(arity = manual)]
+#[php_function(before_args = error::reset)]
 fn resourcebundle_get_error_message(
     req: &mut Request,
-    bundle: Raw<Bundles>,
+    bundle: Bundles,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let bundle = held(req, &bundle)?;
-    error_message(req, bundle)
-}
-
-/// `RESOURCEBUNDLE_METHOD_INIT_VARS` and the function's one argument,
-/// `ResourceBundle $bundle`, held after the reset.
-fn held(req: &mut Request, bundle: &Raw<Bundles>) -> Result<PhpObject, Thrown> {
-    error::init_vars(req, 1, 1)?;
-    Ok(bundle.hold(req)?.object())
+    error_message(req, bundle.object())
 }
 
 /// `php_intl.stub.php`'s `resourcebundle_*` block.

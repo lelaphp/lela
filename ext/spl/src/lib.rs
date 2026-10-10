@@ -260,16 +260,6 @@ fn is_a(req: &mut Request, class: ClassId, name: &[u8]) -> bool {
         .is_some_and(|of| req.instance_of(class, of))
 }
 
-/// `zend_zval_type_name`: an object's class name, any other value's
-/// type.
-fn zval_type_name(req: &Request, value: &Value) -> String {
-    let value = value.deref();
-    match value.as_object() {
-        Some(object) => String::from_utf8_lossy(&class_name(req, object.class())).into_owned(),
-        None => value.type_name().to_owned(),
-    }
-}
-
 /// A string value made of `bytes`, one owner, the caller's.
 fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     Ok(PhpString::new(req, bytes)?.into_value())
@@ -472,11 +462,11 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Owner<Key>, Thrown> {
         php_ext::raising::pending(req)?;
         return Ok(PhpString::new(req, b"")?.into_key());
     }
-    let name = zval_type_name(req, key);
-    Err(throw_error(
+    Err(php_ext::raising::illegal_container_offset(
         req,
-        "TypeError",
-        &format!("Cannot access offset of type {name} on array"),
+        "array",
+        key,
+        php_ext::abi::DimensionRead::Write,
     ))
 }
 

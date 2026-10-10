@@ -70,7 +70,6 @@ fn construct(
     object: PhpObject,
     locale: &Raw<Option<PhpString>>,
 ) -> Result<bool, Thrown> {
-    error::reset(req);
     arity(req, 0, Some(1))?;
     let locale = locale.hold(req)?;
     error::reset_object::<GeneratorObject>(req, object);
@@ -146,7 +145,6 @@ fn best_pattern(
     object: PhpObject,
     skeleton: &[u8],
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     error::reset_object::<GeneratorObject>(req, object);
     let units = ffi::to_utf16(skeleton);
     let taken = object
@@ -221,7 +219,7 @@ pub(crate) struct IntlDatePatternGenerator;
 #[php_class]
 #[allow(non_snake_case)]
 impl IntlDatePatternGenerator {
-    #[php(arity = manual)]
+    #[php(arity = manual, before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -231,7 +229,7 @@ impl IntlDatePatternGenerator {
         error::constructing(req, |req| construct(req, object, &locale).map(|_| ()))
     }
 
-    #[php(arity = manual)]
+    #[php(arity = manual, before_args = error::reset)]
     fn create(
         req: &mut Request,
         #[php(default = null)] locale: Raw<Option<PhpString>>,
@@ -239,6 +237,7 @@ impl IntlDatePatternGenerator {
         create(req, &locale)
     }
 
+    #[php(before_args = error::reset)]
     fn getBestPattern(
         req: &mut Request,
         this: This<Self>,

@@ -118,7 +118,7 @@ pub(crate) struct Iterator;
 
 #[php_class]
 impl IntlIterator {
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let object = this.object();
         fetch(req, object)?;
@@ -128,7 +128,7 @@ impl IntlIterator {
         Ok(current)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let object = this.object();
         fetch(req, object)?;
@@ -136,7 +136,7 @@ impl IntlIterator {
         Ok(Value::int(key))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let object = this.object();
         fetch(req, object)?;
@@ -147,14 +147,14 @@ impl IntlIterator {
         })
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let object = this.object();
         fetch(req, object)?;
         with_cursor(req, object, |req, cursor| rewind(req, object, cursor))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let object = this.object();
         fetch(req, object)?;

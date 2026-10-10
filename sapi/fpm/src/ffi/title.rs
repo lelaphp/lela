@@ -177,7 +177,9 @@ static CAPTURE: extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char) = captu
 
 #[cfg(target_os = "linux")]
 extern "C" fn capture(count: c_int, vector: *mut *mut c_char, _environment: *mut *mut c_char) {
-    let _ = ARGS.set((count, vector as usize));
+    // The C runtime calls each `.init_array` function once, so nothing
+    // stands in `ARGS` yet; where something did, the first stands.
+    ARGS.set((count, vector as usize)).ok();
 }
 
 #[cfg(target_os = "linux")]

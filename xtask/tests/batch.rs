@@ -233,6 +233,34 @@ fn one_clippy_run_reads_each_crate_as_a_run_over_it_alone() {
     }
 }
 
+/// The release profile's lint (#2392): a crate whose sources name
+/// `debug_assertions` is linted again in release on its library and
+/// binaries, as `<crate>/release`, and fails there on a lint the dev run
+/// cannot see; a crate naming the word in a comment or a string is not.
+#[test]
+fn a_crate_whose_sources_name_debug_assertions_is_linted_again_in_release() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/clippy/release-cfg");
+    let root = committed(&fixture, "clippy-release");
+    let manifest = Manifest::load(&root).unwrap();
+    let all = clippy::run(&root, &manifest, &[]).unwrap();
+    let scopes: Vec<&str> = all.iter().map(|r| r.scope.as_str()).collect();
+    let dev = ["php_heap", "php_unit", "php_syntax"];
+    assert_eq!(
+        scopes,
+        [&dev[..], &["php_heap/release", "php_syntax/release"]].concat()
+    );
+    for passing in ["php_heap", "php_unit", "php_syntax", "php_syntax/release"] {
+        assert_eq!(of(&all, passing).status, Status::Pass, "{all:#?}");
+    }
+    let heap = of(&all, "php_heap/release");
+    assert_eq!(heap.status, Status::Fail, "{heap:#?}");
+    assert!(
+        heap.message.contains("does not need to be mutable"),
+        "{}",
+        heap.message
+    );
+}
+
 /// A fixture's rule, the crates that fail with what each message names,
 /// and the crates that pass.
 type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);

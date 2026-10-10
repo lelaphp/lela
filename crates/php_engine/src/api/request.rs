@@ -26,7 +26,7 @@ use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, PhpRef, Resource, Value};
+use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
@@ -60,7 +60,7 @@ pub(crate) use constants::halt_offset_key;
 mod diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
 pub use diagnostics::{FormatDate, Syslog};
-pub(crate) use diagnostics::{append_escaped, escape_html, escaped_html_sizes};
+pub(crate) use diagnostics::{append_escaped, escape_html};
 mod ending;
 pub(crate) use ending::{Ending, Phase};
 mod environment;
@@ -104,6 +104,7 @@ pub(crate) mod paths;
 pub use paths::RealpathEntry;
 pub(crate) use paths::is_wrapper_url;
 mod pending;
+pub(crate) use pending::Leaving;
 pub use pending::Raised;
 mod post;
 mod preload;
@@ -503,10 +504,12 @@ pub(crate) enum Symbol {
 #[derive(Debug, Default)]
 pub(crate) struct SymbolTable {
     owner: Option<FrameRef>,
-    entries: Vec<(Vec<u8>, Symbol)>,
-    /// What a rebuilt table holds on the request's heap
-    /// ([`Request::rebuilt_table_bytes`]); `EG(symbol_table)`'s are not
-    /// held.
+    /// Each name with what it holds, the name one owner the table holds:
+    /// a CV's interned name, or the string the program wrote it with.
+    entries: Vec<(PhpString, Symbol)>,
+    /// What the table holds on the request's heap: a rebuilt table's
+    /// ([`Request::rebuilt_table_bytes`]), and `EG(symbol_table)`'s data,
+    /// its `zend_array` being `EG`'s own ([`SymbolTable::global`]).
     bytes: Option<hash_bytes::HashBytes>,
 }
 
@@ -794,7 +797,7 @@ impl Request {
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
             variables: variables::Variables::default(),
-            tables: vec![SymbolTable::default()],
+            tables: vec![SymbolTable::global()],
             included_files: hash_bytes::IncludedFiles::default(),
             hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),

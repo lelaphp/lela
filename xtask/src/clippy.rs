@@ -14,6 +14,15 @@
 //! ([`batch::Run`]), and a crate fails on any. The verdict over a crate is the one `-D warnings`
 //! gave it, and one crate's lint no longer blocks the crates above it.
 //!
+//! A crate whose library or binary sources name `debug_assertions` is
+//! linted a second time, in the release profile on its library and
+//! binaries, as a second reading, `<crate>/release` ([`Profile`], #2392):
+//! the dev run lints one side of the cfg split alone, and the bench lane
+//! and the shipped binaries build the other. The crates are found by a
+//! scan of their sources ([`splits`]), not a list, so the cost is the
+//! split's and not the workspace's. `release-da` would not serve: it
+//! keeps debug assertions on, the dev profile's side of the split.
+//!
 //! The reading is also the sensor of the manifest's `deny_lints` rules
 //! (`lints.no-panic`, `unsafe.one-op`; #1917): a clean run says nothing of
 //! a lint the crate never turned on, so each source a rule's scope covers
@@ -35,13 +44,14 @@ use crate::batch::{Run, Targets, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status, Store};
-use crate::sources;
+use crate::rust;
+use crate::sources::{self, Standing};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "clippy";
 
 /// Run clippy over every crate that exists, or over `only`; one reading
-/// each.
+/// each, and a second, in release, for each crate that [`splits`].
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
     for name in only {
         if manifest.crate_named(name).is_none() {
@@ -57,24 +67,129 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
         .filter(|k| only.is_empty() || only.iter().any(|n| n == &k.name))
         .filter(|k| sources::exists(root, k))
         .collect();
-    if crates.is_empty() {
-        return Ok(Vec::new());
+    let mut release = Vec::new();
+    for krate in &crates {
+        if splits(root, krate)? {
+            release.push(*krate);
+        }
     }
-    let checked = Run::of(root, &["clippy", "--keep-going"], &crates, Targets::All)?;
-    crates
-        .iter()
-        .map(|krate| {
-            let denied = Denied::of(root, manifest, krate)?;
-            reading(&snapshot, krate, &checked, &denied)
+    let mut readings = Vec::new();
+    for (profile, linted) in [(Profile::Dev, crates), (Profile::Release, release)] {
+        if linted.is_empty() {
+            continue;
+        }
+        let checked = Run::of(root, profile.args(), &linted, profile.targets())?;
+        for krate in linted {
+            let denied = match profile {
+                Profile::Dev => Denied::of(root, manifest, krate)?,
+                Profile::Release => Denied::default(),
+            };
+            readings.push(reading(&snapshot, krate, profile, &checked, &denied)?);
+        }
+    }
+    Ok(readings)
+}
+
+/// The profile a reading lints under, the side of the `debug_assertions`
+/// split it reads (#2392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Profile {
+    /// Every target under every feature in the dev profile, the reading
+    /// over the crate's name.
+    Dev,
+    /// The library and binaries, cargo's default targets (`--lib
+    /// --bins`), under every feature in the release profile, the reading
+    /// over `<crate>/release`, for a crate that [`splits`].
+    Release,
+}
+
+impl Profile {
+    /// The profiles `krate` is linted under: dev, and release where its
+    /// sources name `debug_assertions`.
+    pub(crate) fn of(root: &Path, krate: &Crate) -> Result<Vec<Profile>> {
+        Ok(if splits(root, krate)? {
+            vec![Profile::Dev, Profile::Release]
+        } else {
+            vec![Profile::Dev]
         })
-        .collect()
+    }
+
+    /// The scope of the reading over the crate named `name`.
+    pub(crate) fn scope(self, name: &str) -> String {
+        match self {
+            Profile::Dev => name.to_owned(),
+            Profile::Release => format!("{name}/release"),
+        }
+    }
+
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Profile::Dev => &["clippy", "--keep-going"],
+            Profile::Release => &["clippy", "--keep-going", "--release"],
+        }
+    }
+
+    fn targets(self) -> Targets {
+        match self {
+            Profile::Dev => Targets::All,
+            Profile::Release => Targets::Shipped,
+        }
+    }
+}
+
+/// Whether a source of `krate`'s library or binaries, under `src/` and
+/// outside its test modules, names `debug_assertions` in its code: in a
+/// `cfg`, a `cfg_attr` or `cfg!`, and not in a comment or a string.
+fn splits(root: &Path, krate: &Crate) -> Result<bool> {
+    let src = krate.path().join("src");
+    for source in sources::rust(root, krate)? {
+        if !Path::new(&source).starts_with(&src) {
+            continue;
+        }
+        let text =
+            fs::read_to_string(root.join(&source)).with_context(|| format!("reading {source}"))?;
+        if text.contains("debug_assertions") && names_debug_assertions(&text) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `text`'s code, read through the one scanner of what is not
+/// code ([`rust::without_comments_or_literals`]), names `debug_assertions`.
+fn names_debug_assertions(text: &str) -> bool {
+    let code = rust::without_comments_or_literals(text);
+    let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    code.match_indices("debug_assertions").any(|(at, word)| {
+        !ident(code[..at].chars().next_back()) && !ident(code[at + word.len()..].chars().next())
+    })
 }
 
 /// `--staged`: the crates with a staged change, pre-commit's touched
-/// crates (harness-design.md §6), less those whose reading stands for
-/// what is staged (#1143); no readings when none is left.
+/// crates (harness-design.md §6), less those each of whose readings
+/// stands for what is staged (#1143); no readings when none is left.
 pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Reading>> {
-    let measured = sources::for_commit(root, manifest, store, INSTRUMENT)?;
+    let touched = sources::staged_crates(root, manifest)?;
+    if touched.is_empty() {
+        println!("{INSTRUMENT}: no crate has a staged change");
+        return Ok(Vec::new());
+    }
+    let mut scopes = Vec::new();
+    for krate in touched.iter().filter_map(|name| manifest.crate_named(name)) {
+        for profile in Profile::of(root, krate)? {
+            scopes.push((profile.scope(&krate.name), krate.path()));
+        }
+    }
+    let standing = Standing::for_commit_over(root, manifest, store, INSTRUMENT, &scopes)?;
+    let measured: Vec<String> = touched
+        .into_iter()
+        .filter(|name| {
+            let its = [name.clone(), Profile::Release.scope(name)];
+            scopes
+                .iter()
+                .any(|(scope, _)| its.contains(scope) && standing.get(scope).is_none())
+        })
+        .collect();
     if measured.is_empty() {
         return Ok(Vec::new());
     }
@@ -101,8 +216,15 @@ pub(crate) fn command(
 /// One crate's reading: pass when every target was checked and clippy
 /// said nothing of the crate and every `deny_lints` rule reaching it is
 /// met, fail with what was not otherwise.
-fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run, denied: &Denied) -> Result<Reading> {
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
+fn reading(
+    snapshot: &Snapshot,
+    krate: &Crate,
+    profile: Profile,
+    run: &Run,
+    denied: &Denied,
+) -> Result<Reading> {
+    let scope = profile.scope(&krate.name);
+    let mut reading = Reading::stamped_over(INSTRUMENT, &scope, snapshot, &krate.path())?;
     reading.rule = denied.rules.join(", ");
     reading.adr = denied.adrs.join(", ");
     clippy_said(&mut reading, krate, run)?;
@@ -110,7 +232,7 @@ fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run, denied: &Denied) -> Re
         reading.status = Status::Fail;
         reading.message = format!(
             "{}: {}\n{}",
-            krate.name,
+            reading.scope,
             denied.unmet.join("; "),
             reading.message
         );
@@ -120,8 +242,8 @@ fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run, denied: &Denied) -> Re
 
 /// What clippy said of the crate, as the reading's status and message.
 fn clippy_said(reading: &mut Reading, krate: &Crate, run: &Run) -> Result<()> {
-    let name = &krate.name;
-    let Some(checked) = run.crates.get(name) else {
+    let name = reading.scope.clone();
+    let Some(checked) = run.crates.get(&krate.name) else {
         reading.status = Status::Fail;
         reading.message = format!("{name}: clippy did not check it\n{}", tail(&run.stderr, 40));
         return Ok(());
@@ -442,4 +564,28 @@ fn cargo_lints(root: &Path, krate: &Crate) -> Result<Levels> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_debug_assertions;
+
+    #[test]
+    fn the_cfg_is_named_by_its_token_and_not_by_a_comment_or_a_string() {
+        assert!(names_debug_assertions(
+            "#[cfg(debug_assertions)]\nfn f() {}"
+        ));
+        assert!(names_debug_assertions(
+            "fn f() -> bool { cfg!(debug_assertions) }"
+        ));
+        assert!(names_debug_assertions(
+            "#[cfg_attr(debug_assertions, track_caller)]\nfn f() {}"
+        ));
+        assert!(!names_debug_assertions(
+            "// debug_assertions\n/// debug_assertions\nfn f() {}"
+        ));
+        assert!(!names_debug_assertions(
+            "const S: &str = \"debug_assertions\";"
+        ));
+    }
 }

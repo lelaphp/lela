@@ -32,7 +32,7 @@ use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
 use crate::api::values::{
-    ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted,
+    ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted, adopted_some,
 };
 use crate::trampoline::{public_method, variadic};
 
@@ -748,8 +748,12 @@ impl Closure {
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
-        let made = do_closure_bind(req, closure.object(), newThis, NewScope::of(newScope))?;
-        Ok(made.map(|bound| Owner::adopt(bound)))
+        adopted_some(do_closure_bind(
+            req,
+            closure.object(),
+            newThis,
+            NewScope::of(newScope),
+        ))
     }
 
     /// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -819,8 +823,12 @@ impl Closure {
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
-        let made = do_closure_bind(req, this.object(), newThis, NewScope::of(newScope))?;
-        Ok(made.map(|bound| Owner::adopt(bound)))
+        adopted_some(do_closure_bind(
+            req,
+            this.object(),
+            newThis,
+            NewScope::of(newScope),
+        ))
     }
 
     /// `Closure::call(object $newThis, mixed ...$args): mixed`,

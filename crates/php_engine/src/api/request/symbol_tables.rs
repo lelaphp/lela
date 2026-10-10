@@ -10,7 +10,7 @@
 use php_heap::{FrameRef, Slot, Zval, ZvalRef};
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, Owner, PhpArray, PhpRef, PhpString, TypeTag, Value};
+use crate::api::values::{Key, Layout, Owner, PhpArray, PhpRef, PhpString, TypeTag, Value};
 use crate::exec::{self, TableId};
 
 use super::{Request, Symbol, SymbolTable};
@@ -47,10 +47,13 @@ impl Request {
         let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
             return;
         };
-        for (at, name) in self.frame_var_names(frame).into_iter().enumerate() {
+        let Ok(names) = self.frame_var_names(frame) else {
+            return;
+        };
+        for (at, name) in names.into_iter().enumerate() {
             let at = u32::try_from(at).unwrap_or(u32::MAX);
             let found = self.table_mut(table).and_then(|entries| {
-                let index = entries.iter().position(|(key, _)| *key == name)?;
+                let index = position(entries, name.as_bytes())?;
                 Some(std::mem::replace(
                     &mut entries[index].1,
                     Symbol::Indirect(frame, at),
@@ -61,10 +64,7 @@ impl Request {
                 Some(Symbol::Held(cell)) => self.unhold(cell),
                 Some(Symbol::Indirect(other, slot)) => self.take_slot(other, slot),
                 None => {
-                    if let Some(entries) = self.table_mut(table) {
-                        entries.push((name, Symbol::Indirect(frame, at)));
-                        self.table_bytes(table, true, false);
-                    }
+                    self.table_push(table, name, Symbol::Indirect(frame, at));
                     continue;
                 }
             };
@@ -92,10 +92,13 @@ impl Request {
         let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
             return;
         };
-        for (at, name) in self.frame_var_names(frame).into_iter().enumerate() {
+        let Ok(names) = self.frame_var_names(frame) else {
+            return;
+        };
+        for (at, name) in names.into_iter().enumerate() {
             let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
             if value.tag() == TypeTag::Undef {
-                self.symbol_del(table, &name);
+                self.symbol_del(table, name.as_bytes());
             } else {
                 self.symbol_update(table, name, value);
             }
@@ -115,8 +118,12 @@ impl Request {
         if let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) {
             return table;
         }
+        // The names are the interned strings the unit's compile made,
+        // which take no owner; a refusal has ended the request, and the
+        // table it leaves holds nothing.
         let entries = self
             .frame_var_names(frame)
+            .unwrap_or_default()
             .into_iter()
             .enumerate()
             .map(|(at, name)| {
@@ -141,18 +148,63 @@ impl Request {
     }
 
     /// The names of the CVs of the op array `frame` serves, in the
-    /// order the compiler numbered them, `op_array->vars`.
-    pub(super) fn frame_var_names(&self, frame: FrameRef) -> Vec<Vec<u8>> {
-        self.frame_at(frame)
-            .and_then(exec::FrameAt::code)
-            .map(|code| code.vars.iter().map(|name| name.0.to_vec()).collect())
-            .unwrap_or_default()
+    /// order the compiler numbered them, `op_array->vars`: the interned
+    /// strings its unit's compile made of them
+    /// ([`php_compile::intern_declared`]), found where it made them, in
+    /// the engine's table for a published unit and in the request's for
+    /// one of its own, so a symbol table keys a variable by its CV's
+    /// name, as php's `zend_attach_symbol_table` and
+    /// `zend_rebuild_symbol_table` key it by `op_array->vars[i]`. The
+    /// `Err` is the memory limit, met only by a unit no compile
+    /// interned.
+    pub(super) fn frame_var_names(&mut self, frame: FrameRef) -> Result<Vec<PhpString>, Thrown> {
+        let Some((unit, body)) = self
+            .frame_at(frame)
+            .and_then(exec::FrameAt::unit)
+            .map(|(unit, body)| (std::sync::Arc::clone(unit), body))
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(code) = exec::body_of(&unit, body) else {
+            return Ok(Vec::new());
+        };
+        code.vars
+            .iter()
+            .map(|name| self.interned(&name.0))
+            .collect()
     }
 
-    pub(super) fn table_mut(&mut self, table: TableId) -> Option<&mut Vec<(Vec<u8>, Symbol)>> {
+    pub(super) fn table_mut(&mut self, table: TableId) -> Option<&mut Vec<(PhpString, Symbol)>> {
         self.tables
             .get_mut(table.0 as usize)
             .map(|table| &mut table.entries)
+    }
+
+    /// A name added to `table` holding `symbol`, `zend_hash_add_new`:
+    /// the table takes an owner of the name, as php's bucket takes one
+    /// of a key that is not interned, and its bytes grow as php's do.
+    pub(super) fn table_push(&mut self, table: TableId, name: PhpString, symbol: Symbol) {
+        let Some(entries) = self.table_mut(table) else {
+            return;
+        };
+        entries.push((name, symbol));
+        self.addref(&Value::string(name));
+        self.table_bytes(table, true, false);
+    }
+
+    /// The bucket at `at` taken out of `table`, `_zend_hash_del_el`:
+    /// its name given up, what it holds handed back for the caller to
+    /// release.
+    pub(super) fn table_remove(&mut self, table: TableId, at: usize) -> Option<Symbol> {
+        let entries = self.table_mut(table)?;
+        if at >= entries.len() {
+            return None;
+        }
+        let (name, symbol) = entries.remove(at);
+        let last = at == entries.len();
+        self.table_bytes(table, false, last);
+        self.release(Value::string(name));
+        Some(symbol)
     }
 
     /// `zend_clean_and_cache_symbol_table` when the frame that rebuilt a
@@ -255,8 +307,10 @@ impl Request {
         let Some(mut table) = freed else {
             return;
         };
-        for (_, symbol) in std::mem::take(&mut table.entries) {
+        // `zend_hash_destroy`'s order: a bucket's value, then its key.
+        for (name, symbol) in std::mem::take(&mut table.entries) {
             self.release_symbol(symbol);
+            self.release(Value::string(name));
         }
         self.cache_symbol_table(table);
     }
@@ -268,13 +322,13 @@ impl Request {
     /// it, an `UNDEF` there taken as `null`; what stands there made a
     /// reference in place where it is none (`ZVAL_MAKE_REF_EX`); and the
     /// cell handed back with one more owner, the binding's.
-    pub(crate) fn global_cell(&mut self, name: &[u8]) -> Result<PhpRef, Thrown> {
-        let found = self.globals().iter().position(|(key, _)| key == name);
-        let at = found.unwrap_or_else(|| {
-            self.globals()
-                .push((name.to_vec(), Symbol::Value(Value::null())));
+    pub(crate) fn global_cell(&mut self, name: PhpString) -> Result<PhpRef, Thrown> {
+        let at = if let Some(at) = position(self.globals(), name.as_bytes()) {
+            at
+        } else {
+            self.table_push(TableId::GLOBAL, name, Symbol::Value(Value::null()));
             self.globals().len() - 1
-        });
+        };
         let cell = match self.globals()[at].1 {
             Symbol::Held(held) => self.make_ref(held.heap().val_ref())?,
             Symbol::Indirect(frame, slot) => {
@@ -308,14 +362,15 @@ impl Request {
     /// (`pDestructor` then `ZVAL_COPY_VALUE`, `Z/Zend/zend_hash.c:871`),
     /// [`Overwrite::InPlace`]. A bucket that pointed at a CV owned
     /// nothing, and is replaced by the value, as php's update replaces
-    /// the `IS_INDIRECT`.
-    pub(super) fn symbol_update(&mut self, table: TableId, name: Vec<u8>, value: Value) {
+    /// the `IS_INDIRECT`. `name` is the caller's, and a name the table
+    /// adds it takes an owner of.
+    pub(super) fn symbol_update(&mut self, table: TableId, name: PhpString, value: Value) {
         let Some(entries) = self.table_mut(table) else {
+            self.release(value);
             return;
         };
-        let Some(at) = entries.iter().position(|(key, _)| *key == name) else {
-            entries.push((name, Symbol::Value(value)));
-            self.table_bytes(table, true, false);
+        let Some(at) = position(entries, name.as_bytes()) else {
+            self.table_push(table, name, Symbol::Value(value));
             return;
         };
         let held = match entries[at].1 {
@@ -323,7 +378,7 @@ impl Request {
             // The bucket's own place, which a fetch by name holds: the
             // write goes there, as php's goes into the bucket.
             Symbol::Held(_) => {
-                let place = |req: &mut Request| req.held_place(table, &name);
+                let place = |req: &mut Request| req.held_place(table, name.as_bytes());
                 self.overwrite_place(place, value, Overwrite::InPlace);
                 return;
             }
@@ -332,15 +387,19 @@ impl Request {
                 return;
             }
         };
+        // A destructor the release serves can delete the name, the
+        // table's owner of it with it, before the settle reads it.
+        self.addref(&Value::string(name));
         let released = self.release_in_place(held);
         self.symbol_settle(table, name, value, Some(released));
+        self.release(Value::string(name));
     }
 
     /// The place a [`Symbol::Held`] bucket keeps its value in, found by
     /// name; none where the name is gone or holds its value otherwise.
     fn held_place(&mut self, table: TableId, name: &[u8]) -> Option<ZvalRef> {
         let entries = self.table_mut(table)?;
-        match entries.iter().find(|(key, _)| key == name)?.1 {
+        match entries.get(position(entries, name)?)?.1 {
             Symbol::Held(cell) => Some(cell.heap().val_ref()),
             Symbol::Value(_) | Symbol::Indirect(..) => None,
         }
@@ -357,14 +416,14 @@ impl Request {
     fn symbol_settle(
         &mut self,
         table: TableId,
-        name: Vec<u8>,
+        name: PhpString,
         value: Value,
         released: Option<Released>,
     ) {
         let entries = self.table_mut(table);
         let at = entries
             .as_ref()
-            .and_then(|entries| entries.iter().position(|(key, _)| *key == name));
+            .and_then(|entries| position(entries, name.as_bytes()));
         let old = match (entries, at) {
             (None, _) => {
                 if let Some(released) = released {
@@ -373,9 +432,8 @@ impl Request {
                 self.release(value);
                 return;
             }
-            (Some(entries), None) => {
-                entries.push((name, Symbol::Value(value)));
-                self.table_bytes(table, true, false);
+            (Some(_), None) => {
+                self.table_push(table, name, Symbol::Value(value));
                 None
             }
             (Some(entries), Some(at)) => {
@@ -469,16 +527,15 @@ impl Request {
     /// held released; a name the table has not is no error, as php's
     /// delete of a missing key is none.
     pub(super) fn symbol_del(&mut self, table: TableId, name: &[u8]) {
-        let Some(entries) = self.table_mut(table) else {
+        let Some(at) = self
+            .table_mut(table)
+            .and_then(|entries| position(entries, name))
+        else {
             return;
         };
-        let Some(at) = entries.iter().position(|(key, _)| key == name) else {
-            return;
-        };
-        let (_, symbol) = entries.remove(at);
-        let last = at == entries.len();
-        self.table_bytes(table, false, last);
-        self.release_symbol(symbol);
+        if let Some(symbol) = self.table_remove(table, at) {
+            self.release_symbol(symbol);
+        }
     }
 
     /// `zend_unwrap_reference` (`Z/Zend/zend_operators.h:1009`): a
@@ -521,8 +578,7 @@ impl Request {
     pub(crate) fn symbol_unset(&mut self, table: TableId, name: &[u8]) {
         let found = self
             .table_mut(table)
-            .and_then(|entries| entries.iter().find(|(key, _)| key == name))
-            .map(|(_, symbol)| *symbol);
+            .and_then(|entries| Some(entries.get(position(entries, name)?)?.1));
         match found {
             Some(Symbol::Indirect(frame, slot)) => {
                 let value = self.take_attached(table, frame, slot);
@@ -554,6 +610,23 @@ impl Request {
         value
     }
 
+    /// `write` handed the string a symbol table keys `name` by where the
+    /// caller holds no string of its own, `zend_string_init_existing_interned`:
+    /// the interned string the engine or this request holds, an
+    /// auto-global's and a CV's among them, else a new string of the
+    /// request's, which the table keeps where `write` adds the name. The
+    /// `Err` is the memory limit.
+    pub(super) fn with_name<R>(
+        &mut self,
+        name: &[u8],
+        write: impl FnOnce(&mut Request, PhpString) -> R,
+    ) -> Result<R, Thrown> {
+        let name = PhpString::existing_interned(self, name)?;
+        let written = write(self, *name);
+        name.give_up(self);
+        Ok(written)
+    }
+
     /// `EG(symbol_table)`, laid down where nothing has written it yet.
     pub(crate) fn global_table(&mut self) -> TableId {
         let _ = self.globals();
@@ -564,13 +637,8 @@ impl Request {
     /// `IS_INDIRECT` bucket followed to the CV on the stack the table's
     /// frames stand on, what `zend_hash_find_ex_ind` reads.
     pub(super) fn symbol_view(&self, table: TableId, name: &[u8]) -> Option<Value> {
-        let symbol = self
-            .tables
-            .get(table.0 as usize)?
-            .entries
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, symbol)| *symbol)?;
+        let entries = &self.tables.get(table.0 as usize)?.entries;
+        let symbol = entries.get(position(entries, name)?)?.1;
         Some(match symbol {
             Symbol::Value(value) => value,
             Symbol::Held(cell) => cell.get(),
@@ -589,11 +657,8 @@ impl Request {
     /// followed to the CV of the frame attached to it; `None` where the
     /// table has no such name. A view: no owner taken.
     pub(crate) fn symbol_value(&mut self, table: TableId, name: &[u8]) -> Option<Value> {
-        let symbol = self
-            .table_mut(table)?
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, symbol)| *symbol)?;
+        let entries = self.table_mut(table)?;
+        let symbol = entries.get(position(entries, name)?)?.1;
         Some(self.symbol_read(table, symbol))
     }
 
@@ -657,29 +722,25 @@ impl Request {
     pub(super) fn symbol_update_ind(
         &mut self,
         table: TableId,
-        name: &[u8],
+        name: PhpString,
         value: Value,
         order: Overwrite,
     ) {
-        let found = self.table_mut(table).and_then(|entries| {
-            entries
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, symbol)| *symbol)
-        });
+        let bytes = name.as_bytes();
+        let found = self
+            .table_mut(table)
+            .and_then(|entries| Some(entries.get(position(entries, bytes)?)?.1));
         match found {
             Some(Symbol::Indirect(frame, at)) => {
                 self.overwrite_place(|req| req.attached_ptr(table, frame, at), value, order);
             }
             Some(Symbol::Held(_)) => {
-                self.overwrite_place(|req| req.held_place(table, name), value, order);
+                self.overwrite_place(|req| req.held_place(table, bytes), value, order);
             }
             Some(Symbol::Value(held)) if order != Overwrite::InPlace => {
-                let Some(entries) = self.table_mut(table) else {
-                    self.release(value);
-                    return;
-                };
-                let Some(entry) = entries.iter_mut().find(|(key, _)| key == name) else {
+                let Some(entry) = self.table_mut(table).and_then(|entries| {
+                    entries.iter_mut().find(|(key, _)| key.as_bytes() == bytes)
+                }) else {
                     self.release(value);
                     return;
                 };
@@ -689,10 +750,14 @@ impl Request {
                     return;
                 }
                 entry.1 = Symbol::Value(Value::null());
+                // The release can serve a destructor that deletes the
+                // name, as [`Request::symbol_update`]'s can.
+                self.addref(&Value::string(name));
                 self.release(held);
-                self.symbol_settle(table, name.to_vec(), value, None);
+                self.symbol_settle(table, name, value, None);
+                self.release(Value::string(name));
             }
-            _ => self.symbol_update(table, name.to_vec(), value),
+            _ => self.symbol_update(table, name, value),
         }
     }
 
@@ -707,18 +772,17 @@ impl Request {
     pub(crate) fn symbol_place(
         &mut self,
         table: TableId,
-        name: &[u8],
+        name: PhpString,
         add: bool,
     ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
         let Some(entries) = self.table_mut(table) else {
             return Ok(None);
         };
-        let (at, symbol) = match entries.iter().position(|(key, _)| key == name) {
+        let (at, symbol) = match position(entries, name.as_bytes()) {
             Some(at) => (at, entries[at].1),
             None if add => {
-                entries.push((name.to_vec(), Symbol::Value(Value::null())));
-                let at = entries.len() - 1;
-                self.table_bytes(table, true, false);
+                let at = entries.len();
+                self.table_push(table, name, Symbol::Value(Value::null()));
                 (at, Symbol::Value(Value::null()))
             }
             None => return Ok(None),
@@ -738,9 +802,9 @@ impl Request {
     }
 
     /// `EG(symbol_table)`'s buckets, the first table's.
-    pub(super) fn globals(&mut self) -> &mut Vec<(Vec<u8>, Symbol)> {
+    pub(super) fn globals(&mut self) -> &mut Vec<(PhpString, Symbol)> {
         if self.tables.is_empty() {
-            self.tables.push(SymbolTable::default());
+            self.tables.push(SymbolTable::global());
         }
         &mut self.tables[0].entries
     }
@@ -753,8 +817,12 @@ impl Request {
     /// the request by now, `zend_objects_store_call_destructors` having
     /// marked every object, so this frees and serves nothing.
     pub(crate) fn destroy_symbol_table(&mut self) {
-        while let Some((_, symbol)) = self.globals().pop() {
+        while let Some((name, symbol)) = self.globals().pop() {
             self.release_symbol(symbol);
+            self.release(Value::string(name));
+        }
+        if let Some(bytes) = self.tables.first_mut().and_then(|table| table.bytes.take()) {
+            bytes.free(self);
         }
     }
 
@@ -777,12 +845,34 @@ impl Request {
     /// int(2)
     /// int(7)
     /// ```
+    ///
+    /// The copy is `zend_array_dup` at the global table's own size,
+    /// sixty-four as `init_executor` lays it down, where no name reads as
+    /// an integer, and `zend_new_array` over every bucket the table
+    /// holds, an attached name whose variable holds nothing among them,
+    /// where one does, a variable written `${'7'}` among them, which is
+    /// the CV `7` from the compile on; each name is the table's string
+    /// with one more owner, a variable's the interned name of its CV:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $g = $GLOBALS; echo memory_get_usage() - $m, "\n";
+    /// $n = '7'; $$n = 1;
+    /// $m = memory_get_usage(); $h = $GLOBALS; echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 2616
+    /// 696
+    /// ```
     pub(crate) fn symbol_table_array(&mut self) -> Result<PhpArray, Thrown> {
-        let rows = self.symbol_rows(TableId::GLOBAL);
-        let mut array = self.array()?;
-        for (name, value) in rows {
-            let key = PhpString::new(self, &name)?;
-            let key = Key::from_string(self, key);
+        let copied = self.symbol_rows(TableId::GLOBAL);
+        let size = if copied.numeric {
+            u32::try_from(copied.buckets).unwrap_or(u32::MAX)
+        } else {
+            self.table_size(TableId::GLOBAL)
+        };
+        let mut array = self.table_copy(copied.buckets, size)?;
+        for (name, value) in copied.rows {
+            let key = Key::from_string(self, Owner::take(self, name));
             let value = self.dup_value(value, None);
             let value = Owner::adopt(value);
             array.set(self, key, value)?;
@@ -795,24 +885,28 @@ impl Request {
     /// frame's table holds that has a value, in the table's order, each
     /// held as [`Request::dup_value`] holds an element and each name the
     /// string it is; what `get_defined_vars()` answers.
+    ///
+    /// The copy is laid down at the table's own size, a function's
+    /// rebuilt table's or the global table's sixty-four, and each name
+    /// is the table's string with one more owner, a variable's the
+    /// interned name of its CV, so it costs the request nothing:
+    ///
+    /// ```php
+    /// function f() { $aa = 1; $bb = 2; $cc = 3; $m = memory_get_usage(); $v = get_defined_vars(); echo memory_get_usage() - $m, "\n"; }
+    /// f();
+    /// $m = memory_get_usage(); $v = get_defined_vars(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 752
+    /// 2616
+    /// ```
     pub(crate) fn defined_vars(&mut self, frame: FrameRef) -> Result<PhpArray, Thrown> {
         let table = self.rebuild_symbol_table(frame);
-        let rows = self.symbol_rows(table);
-        // `zend_array_dup` lays the copy down at the table's own size,
-        // which a rebuilt table taken from `EG(symtable_cache)` may have
-        // grown past eight.
-        let size = self
-            .tables
-            .get(table.0 as usize)
-            .and_then(SymbolTable::size);
-        let mut array = match size {
-            Some(size) if size > 8 => {
-                PhpArray::sized(self, size, crate::api::values::Layout::Hash)?.hand_on()
-            }
-            _ => self.array()?,
-        };
-        for (name, value) in rows {
-            let key = PhpString::new(self, &name)?.into_key();
+        let copied = self.symbol_rows(table);
+        let size = self.table_size(table);
+        let mut array = self.table_copy(copied.buckets, size)?;
+        for (name, value) in copied.rows {
+            let key = Owner::take(self, name).into_key();
             let value = self.dup_value(value, None);
             let value = Owner::adopt(value);
             array.set(self, key, value)?;
@@ -820,29 +914,68 @@ impl Request {
         Ok(array)
     }
 
+    /// `nTableSize` of `table`, eight where nothing sizes it.
+    fn table_size(&self, table: TableId) -> u32 {
+        self.tables
+            .get(table.0 as usize)
+            .and_then(SymbolTable::size)
+            .unwrap_or(8)
+    }
+
+    /// The array a copy of a symbol table of `buckets` lays down, `size`
+    /// buckets wide: `zend_array_dup`'s uninitialised table where the
+    /// source holds none, else a hash of that size, as `zend_array_dup`
+    /// lays it down and `zend_new_array` does at its first write.
+    fn table_copy(&mut self, buckets: usize, size: u32) -> Result<PhpArray, Thrown> {
+        if buckets == 0 {
+            return self.array();
+        }
+        Ok(PhpArray::sized(self, size, Layout::Hash)?.hand_on())
+    }
+
     /// What a copy of `table` reads, the half of `zend_array_dup_value`
     /// that is the table's: each name in the table's order with what it
     /// holds, an `IS_INDIRECT` bucket followed to its CV and one whose
     /// CV holds nothing left out. Views; no owner taken.
-    fn symbol_rows(&mut self, table: TableId) -> Vec<(Vec<u8>, Value)> {
-        let entries: Vec<(Vec<u8>, Symbol)> = self
+    fn symbol_rows(&mut self, table: TableId) -> Copied {
+        let entries: Vec<(PhpString, Symbol)> = self
             .tables
             .get(table.0 as usize)
             .map(|table| table.entries.clone())
             .unwrap_or_default();
-        let mut rows = Vec::with_capacity(entries.len());
+        let mut copied = Copied {
+            rows: Vec::with_capacity(entries.len()),
+            buckets: entries.len(),
+            numeric: false,
+        };
         for (name, symbol) in entries {
+            copied.numeric |= php_heap::canonical_int(name.as_bytes()).is_some();
             let value = match symbol {
                 Symbol::Value(value) => value,
                 Symbol::Held(cell) => cell.get(),
                 Symbol::Indirect(frame, slot) => self.attached(table, frame, slot),
             };
             if value.tag() != TypeTag::Undef {
-                rows.push((name, value));
+                copied.rows.push((name, value));
             }
         }
-        rows
+        copied
     }
+}
+
+/// What a copy of a symbol table reads ([`Request::symbol_rows`]): the
+/// rows that hold a value, the buckets the table holds,
+/// `zend_hash_num_elements`, and whether a name reads as an integer,
+/// which `zend_proptable_to_symtable` converts the copy for.
+struct Copied {
+    rows: Vec<(PhpString, Value)>,
+    buckets: usize,
+    numeric: bool,
+}
+
+/// The place in `entries` of the bucket named `name`.
+fn position(entries: &[(PhpString, Symbol)], name: &[u8]) -> Option<usize> {
+    entries.iter().position(|(key, _)| key.as_bytes() == name)
 }
 
 /// The order a write gives up what the variable it writes held, each
