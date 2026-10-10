@@ -184,6 +184,35 @@ impl Library {
         })
     }
 
+    /// The calling thread's deprecated parse defaults set as a careless
+    /// library would leave them, what `zend_test_override_libxml_global_state`
+    /// sets through `<libxml/globals.h>` and `<libxml/parser.h>`: external
+    /// DTDs loaded, validation, the pedantic parser, entities substituted,
+    /// line numbers kept and blanks dropped. php's parsers each set their
+    /// own options, so none of it reaches a parse they make
+    /// (GHSA-3qrf-m4j2-pcrr). libxml2 keeps them per thread, and they
+    /// stand for the thread's later requests, as php's stand for its
+    /// process.
+    pub fn override_global_state() {
+        // SAFETY: the address of the thread's own default.
+        let load = unsafe { sys::__xmlLoadExtDtdDefaultValue() };
+        // SAFETY: the thread's own global, written by copy.
+        unsafe { *load = 1 };
+        // SAFETY: as above.
+        let validity = unsafe { sys::__xmlDoValidityCheckingDefaultValue() };
+        // SAFETY: as above.
+        unsafe { *validity = 1 };
+        // SAFETY: no pointer argument; the thread's own default, whose
+        // old value php discards.
+        let _ = unsafe { sys::xmlPedanticParserDefault(1) };
+        // SAFETY: as above.
+        let _ = unsafe { sys::xmlSubstituteEntitiesDefault(1) };
+        // SAFETY: as above.
+        let _ = unsafe { sys::xmlLineNumbersDefault(1) };
+        // SAFETY: as above.
+        let _ = unsafe { sys::xmlKeepBlanksDefault(0) };
+    }
+
     /// `xmlParserVersion`, the library's own version string: `"20913"`.
     #[must_use]
     pub fn loaded_version() -> Vec<u8> {
