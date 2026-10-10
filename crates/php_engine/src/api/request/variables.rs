@@ -20,6 +20,7 @@ use php_unit::AutoGlobal;
 use super::{Overwrite, Request};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
+use crate::c_number::{is_space, strtol};
 use crate::exec::TableId;
 
 /// Where a variable php registers came from, php's `PARSE_*` as
@@ -149,16 +150,6 @@ impl Request {
             }
         }
         Ok(())
-    }
-
-    /// An ini entry read as `OnUpdateBool` reads it.
-    pub(crate) fn ini_flag(&self, name: &[u8]) -> bool {
-        self.ini_get(name).is_some_and(|value| {
-            value.eq_ignore_ascii_case(b"on")
-                || value.eq_ignore_ascii_case(b"yes")
-                || value.eq_ignore_ascii_case(b"true")
-                || atol(value) != 0
-        })
     }
 
     /// A variable of `EG(symbol_table)` read, `zend_hash_find` there
@@ -959,9 +950,9 @@ impl Request {
         }
     }
 
-    /// An ini entry read as `OnUpdateLong` reads it, C's `atol`.
+    /// An ini entry read as `OnUpdateLong` reads it, C's `atol`, which is [`strtol`].
     pub(crate) fn ini_long(&self, name: &[u8]) -> i64 {
-        atol(self.ini_get(name).unwrap_or_default())
+        strtol(self.ini_get(name).unwrap_or_default())
     }
 
     /// `php_register_variable_ex` into `track`, with `cookie` saying the
@@ -1049,7 +1040,8 @@ impl Request {
                 top.give_up(self);
                 value.give_up(self);
                 unset?;
-                if !self.ini_flag(b"display_errors") {
+                if super::diagnostics::display_errors_mode_of(self.ini_get(b"display_errors")) == 0
+                {
                     docref(
                         self,
                         Level::Warning,
@@ -1251,31 +1243,6 @@ fn forbidden(mangled: &[u8], original: &[u8]) -> bool {
     [&b"__Host-"[..], b"__Secure-"]
         .iter()
         .any(|prefix| mangled.starts_with(prefix) && !original.starts_with(prefix))
-}
-
-/// C's `isspace`.
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
-
-/// C's `atol`: leading white space, a sign, the digits that follow, and
-/// zero for none.
-pub(crate) fn atol(bytes: &[u8]) -> i64 {
-    let bytes = &bytes[bytes.iter().take_while(|b| is_space(**b)).count()..];
-    let (negative, digits) = match bytes.first() {
-        Some(b'-') => (true, &bytes[1..]),
-        Some(b'+') => (false, &bytes[1..]),
-        _ => (false, bytes),
-    };
-    let mut value: i64 = 0;
-    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        value = value.wrapping_mul(10).wrapping_add(i64::from(digit - b'0'));
-    }
-    if negative {
-        value.wrapping_neg()
-    } else {
-        value
-    }
 }
 
 /// `php_url_decode` with `plus`, where `+` is a space, and

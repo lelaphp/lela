@@ -15,6 +15,7 @@ use crate::api::raising::{Level, Thrown, docref, throw};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{Owner, PhpArray, PhpString, Value};
+use crate::c_number::is_space;
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;
@@ -244,11 +245,6 @@ fn memstr(haystack: &[u8], needle: &[u8], partial: bool) -> Option<usize> {
 /// The bytes before the first NUL, what C reads of a line.
 fn c_str(bytes: &[u8]) -> &[u8] {
     bytes.split(|b| *b == 0).next().unwrap_or_default()
-}
-
-/// C's `isspace`.
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
 /// `php_ap_getword`: the text up to `stop` outside quotes, a quote's
@@ -698,13 +694,13 @@ fn parts(
                 req.upload_event(&event)?;
             }
             if c_str(&param).eq_ignore_ascii_case(b"MAX_FILE_SIZE") {
-                max_file_size = crate::api::request::atol(&value);
+                max_file_size = crate::c_number::strtol(&value);
             }
             continue;
         }
 
         let mut skip_upload = false;
-        if req.ini_long(b"file_uploads") == 0 {
+        if !req.ini_flag(b"file_uploads") {
             skip_upload = true;
         } else if upload_cnt <= 0 {
             skip_upload = true;

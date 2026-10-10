@@ -182,3 +182,32 @@ fn a_body_declared_over_post_max_size_is_warned_of_and_never_read() {
     );
     assert_eq!(reads, 0);
 }
+
+/// `file_uploads` and `enable_post_data_reading` are `OnUpdateBool` in
+/// php (`Z/main/main.c`), read by `zend_ini_parse_bool`, so either
+/// quoted in a `-d` line as `"yes"` or `"On"`, which the ini syntax keeps
+/// as written, turns it on, and `abc` turns it off; a
+/// multipart form's field is `$_POST` while `enable_post_data_reading`
+/// is on, and its file `$_FILES` while `file_uploads` is on too.
+#[test]
+fn file_uploads_and_enable_post_data_reading_read_as_booleans() {
+    let multipart = b"--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n\
+--b\r\nContent-Disposition: form-data; name=\"u\"; filename=\"u.txt\"\r\n\
+Content-Type: text/plain\r\n\r\nup\r\n--b--\r\n";
+    let under = |file_uploads: &str, reading: &str| {
+        let engine = Engine::cli_builder()
+            .ini("file_uploads", file_uploads)
+            .ini("enable_post_data_reading", reading)
+            .build();
+        posted(
+            &engine,
+            "multipart/form-data; boundary=b",
+            multipart,
+            "<?php echo isset($_POST['f']) ? 1 : 0, ' ', isset($_FILES['u']) ? 1 : 0;",
+        )
+        .0
+    };
+    assert_eq!(under("\"yes\"", "\"On\""), "1 1");
+    assert_eq!(under("abc", "\"true\""), "1 0");
+    assert_eq!(under("\"On\"", "abc"), "0 0");
+}

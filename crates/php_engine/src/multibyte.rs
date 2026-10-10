@@ -10,7 +10,7 @@
 use php_compile::multibyte::{Dummy, Encoding, Multibyte};
 
 use crate::api::abi::{EncodingsHook, Multibyte as Provided};
-use crate::api::request::{Request, ini_truth};
+use crate::api::request::Request;
 use crate::engine::Shared;
 
 /// `zend_multibyte_get_functions`: the functions the last extension in
@@ -66,7 +66,7 @@ pub(crate) fn bound(req: &mut Request, multibyte: bool) -> Option<Bound> {
     if !multibyte {
         return None;
     }
-    let detect_unicode = ini_truth(req.ini_get(b"zend.detect_unicode"));
+    let detect_unicode = req.ini_flag(b"zend.detect_unicode");
     let listed = req
         .script_encodings
         .clone()
@@ -99,7 +99,7 @@ pub(crate) fn bound(req: &mut Request, multibyte: bool) -> Option<Bound> {
 /// string(0) ""
 /// ```
 pub(crate) fn script_encoding(req: &mut Request, value: &[u8]) -> Option<Vec<Encoding>> {
-    if !ini_truth(req.ini_get(b"zend.multibyte")) {
+    if !req.ini_flag(b"zend.multibyte") {
         return None;
     }
     if provider(&req.shared).is_none() || value.is_empty() {
@@ -123,7 +123,7 @@ pub(crate) fn startup(req: &mut Request) -> (Vec<Encoding>, Startup) {
     if value.is_empty() {
         return (Vec::new(), Startup::Taken);
     }
-    if !ini_truth(req.ini_get(b"zend.multibyte")) {
+    if !req.ini_flag(b"zend.multibyte") {
         return (Vec::new(), Startup::Refused);
     }
     let listed = script_encoding(req, &value).unwrap_or_default();

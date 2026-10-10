@@ -1108,44 +1108,25 @@ fn update_response_code(req: &mut Request, code: i64) {
 }
 
 /// `sapi_extract_response_code` (`Z/main/SAPI.c:572`): the number after
-/// the first space that a second space does not follow, 200 without one.
+/// the first space that a second space does not follow, 200 without one,
+/// read by C's `atoi`, so a number past `int` is cut to its low 32 bits
+/// and one past the long is `LONG_MAX`'s `-1`.
+///
+/// ```php
+/// $r = []; foreach (["HTTP/1.1 4294967497 OK", "HTTP/1.1 99999999999999999999 X", "HTTP/1.0 \x0b302 Found"] as $h) { header($h); $r[] = http_response_code(); } echo implode(" ", $r);
+/// ```
+/// ```expect
+/// 201 -1 302
+/// ```
 fn extract_response_code(line: &[u8]) -> i64 {
     let mut code = 200;
     for (at, byte) in line.iter().enumerate() {
         if *byte == b' ' && line.get(at + 1) != Some(&b' ') {
-            code = atoi(&line[at + 1..]);
+            code = i64::from(crate::c_number::atoi(&line[at + 1..]));
             break;
         }
     }
     code
-}
-
-/// C's `atoi`: leading whitespace, an optional sign, the digits that
-/// follow, and zero for none.
-fn atoi(bytes: &[u8]) -> i64 {
-    let mut at = 0;
-    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
-        at += 1;
-    }
-    let negative = match bytes.get(at) {
-        Some(b'-') => {
-            at += 1;
-            true
-        }
-        Some(b'+') => {
-            at += 1;
-            false
-        }
-        _ => false,
-    };
-    let mut value: i64 = 0;
-    while let Some(digit) = bytes.get(at).filter(|b| b.is_ascii_digit()) {
-        value = value
-            .saturating_mul(10)
-            .saturating_add(i64::from(digit - b'0'));
-        at += 1;
-    }
-    if negative { -value } else { value }
 }
 
 /// `sapi_apply_default_charset` (`Z/main/SAPI.c:365`): a `text/` type

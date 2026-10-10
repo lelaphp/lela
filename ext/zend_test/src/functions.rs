@@ -1064,20 +1064,26 @@ fn throw_from_dtor(req: &mut Request, _resource: Resource) -> Result<(), Thrown>
     ))
 }
 
-/// `get_open_basedir(): ?string`, `PG(open_basedir)`.
+/// `get_open_basedir(): ?string`, `PG(open_basedir)`: the list the
+/// guard reads, expanded where `ini_set()` set it, beside the value as
+/// set that `ini_get()` answers.
 ///
 /// ```php
 /// var_dump(get_open_basedir());
 /// ini_set('open_basedir', __DIR__);
 /// var_dump(get_open_basedir() === __DIR__);
+/// ini_set('open_basedir', __DIR__ . '/./a/..');
+/// var_dump(get_open_basedir() === __DIR__, ini_get('open_basedir') === __DIR__ . '/./a/..');
 /// ```
 /// ```expect
 /// string(0) ""
 /// bool(true)
+/// bool(true)
+/// bool(true)
 /// ```
 #[php_function]
 fn get_open_basedir(req: &mut Request) -> Result<Option<Owner<PhpString>>, Thrown> {
-    match req.ini_get(b"open_basedir") {
+    match req.open_basedir() {
         Some(dir) => {
             let dir = dir.to_vec();
             PhpString::new(req, &dir).map(Some)

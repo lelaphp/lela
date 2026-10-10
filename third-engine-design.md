@@ -641,13 +641,13 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | unit | unit.lock | 98 |  |
 | link | link.lock | 48 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1423 | 1500 |
+| api | api.lock | 1424 | 1500 |
 | sapi | sapi.lock | 47 |  |
 | tier | tier.lock | 32 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 400 |  |
 
-<!-- /computed in=93fd82df5a1292697e970e32793e6cb2eadc28b2a6aececdd6494c28012464f6 out=31eb33be7736172e4ac864350259bce4884c5a9929d492e5715f1ff5f2dbce09 -->
+<!-- /computed in=b734a8459b0025a4208662cd890d3778b74f47337a0e710ddc3c38367128f610 out=6bb9a2778d99489d08f25e53bb24b566cb13281c04ffb0174cec758f4954a8ef -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 

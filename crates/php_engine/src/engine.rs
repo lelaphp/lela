@@ -2583,7 +2583,7 @@ fn startup_directives(req: &mut Request, shared: &Shared) {
 fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     if req
         .ini_get(b"report_memleaks")
-        .is_some_and(|v| !crate::api::request::ini_truth(Some(v)))
+        .is_some_and(|v| !Request::ini_parse_bool(v))
     {
         let message = "Directive 'report_memleaks' is deprecated";
         crate::api::raising::docref(req, Level::Deprecated, message);

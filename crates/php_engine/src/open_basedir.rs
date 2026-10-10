@@ -74,14 +74,6 @@ fn host(bytes: &[u8]) -> &Path {
 }
 
 impl Request {
-    /// `PG(open_basedir)` where it holds a list, `None` where it is
-    /// unset or empty and nothing is guarded.
-    fn open_basedir(&self) -> Option<Vec<u8>> {
-        self.ini_get(b"open_basedir")
-            .filter(|list| !list.is_empty())
-            .map(<[u8]>::to_vec)
-    }
-
     /// `php_check_open_basedir_ex(path, warn)`
     /// (`Z/main/fopen_wrappers.c:291`): with `open_basedir` set, a path of
     /// `MAXPATHLEN` bytes or more is php's warning that it is too long and
@@ -107,7 +99,13 @@ impl Request {
     /// bool(true)
     /// ```
     pub fn check_open_basedir(&mut self, path: &[u8], warn: bool) -> Result<HostPath, Refused> {
-        if let Some(list) = self.open_basedir() {
+        // `PG(open_basedir) && *PG(open_basedir)`: an empty list guards
+        // nothing.
+        let list = self
+            .open_basedir()
+            .filter(|list| !list.is_empty())
+            .map(<[u8]>::to_vec);
+        if let Some(list) = list {
             if path.len() > MAXPATHLEN - 1 {
                 let text = format!(
                     "File name is longer than the maximum allowed path length on this platform ({MAXPATHLEN}): {}",
@@ -239,9 +237,10 @@ impl Request {
     /// `OnUpdateBaseDir` at runtime (`Z/main/fopen_wrappers.c:88-131`): a
     /// new list is taken only where it is no wider than the one in force,
     /// each of its directories expanded and let through by the guard
-    /// without a word; the list kept is the expanded one. `None` refuses
-    /// it, the empty list among them, which `ini_set()` answers `false`
-    /// to. At startup any value is taken as it is written.
+    /// without a word; the expanded list is what `PG(open_basedir)` keeps
+    /// ([`Request::open_basedir`]), and the entry the value as set. `None`
+    /// refuses it, the empty list among them, which `ini_set()` answers
+    /// `false` to. At startup any value is taken as it is written.
     pub(crate) fn tighter_open_basedir(&mut self, value: &[u8]) -> Option<Vec<u8>> {
         if value.is_empty() {
             return None;

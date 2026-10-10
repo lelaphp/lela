@@ -87,15 +87,13 @@ const OS_FAMILY: &str = if cfg!(target_os = "macos") {
     "Unknown"
 };
 
-/// `MAXPATHLEN`: `PATH_MAX` of the host's headers, 1024 on macOS and
-/// the BSDs, 4096 on Linux, `_MAX_PATH` on Windows.
-const MAXPATHLEN: i64 = if cfg!(target_os = "linux") {
-    4096
-} else if cfg!(windows) {
-    260
-} else {
-    1024
-};
+/// `PHP_MAXPATHLEN`: [`crate::virtual_cwd::MAXPATHLEN`] as a long, the
+/// one value the path checks read too.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "MAXPATHLEN is at most 4096, far inside a long"
+)]
+const MAXPATHLEN: i64 = crate::virtual_cwd::MAXPATHLEN as i64;
 
 /// `sapi_module.name` of php's hosts, which `PHP_SAPI` says and the
 /// engine interns at build: the CLI, `cgi-fcgi`, the development

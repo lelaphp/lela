@@ -7,7 +7,7 @@
 //! beside it, `CWDG(realpath_cache)`, which every absolute path resolved
 //! under `CWD_FILEPATH` or `CWD_REALPATH` is entered in and read from,
 //! and which `realpath_cache_get()` and `realpath_cache_size()` show. The
-//! separator is `/` alone and `MAXPATHLEN` is the host's 1024. The cache
+//! separator is `/` alone and [`MAXPATHLEN`] is the host's. The cache
 //! is the request's, where php's is the thread's: a request starts with
 //! none, as php's CLI does.
 
@@ -15,8 +15,15 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-/// `MAXPATHLEN` on this host.
-pub(crate) const MAXPATHLEN: usize = 1024;
+/// `MAXPATHLEN` (`Z/Zend/zend_virtual_cwd.h:39`), the host's
+/// `PATH_MAX`: 4096 on Linux, 1024 on macOS and the BSDs. The one value
+/// the path checks, `open_basedir`, `include` and `dl()` read and
+/// `PHP_MAXPATHLEN` says.
+pub(crate) const MAXPATHLEN: usize = if cfg!(target_os = "linux") {
+    4096
+} else {
+    1024
+};
 
 /// `LINK_MAX` as `zend_virtual_cwd.c` redefines it: how many links one
 /// resolution follows before it gives up.
@@ -473,4 +480,16 @@ pub(crate) fn virtual_file_ex(
         len += 1;
     }
     Some(buf.head(len))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Linux's `PATH_MAX` is 4096, which php's `MAXPATHLEN` and so
+    /// `PHP_MAXPATHLEN` are there; the macOS oracle, at 1024, cannot
+    /// show it, so no witness holds it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn maxpathlen_is_linux_path_max() {
+        assert_eq!(super::MAXPATHLEN, 4096);
+    }
 }

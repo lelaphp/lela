@@ -18,6 +18,7 @@ use super::{
 use crate::api::abi::{IniStage, IniVerdict, OnModify};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpString, Value, adopted_some};
+use crate::c_number::{atoi, strtol};
 use crate::engine::{Configured, ConfiguredKey};
 
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
@@ -63,6 +64,11 @@ pub(super) struct Ini {
     /// The entries a hot path reads, typed, as the request holds them
     /// now ([`TypedIni`]).
     typed: TypedIni,
+    /// `PG(open_basedir)` where `OnUpdateBaseDir` set it at runtime, the
+    /// list `ini_set()` took with each directory expanded
+    /// (`PG(open_basedir_modified)`); `None` where it is the entry's value
+    /// as set, at startup and once the request's end restored it.
+    open_basedir: Option<Vec<u8>>,
 }
 
 impl Ini {
@@ -75,6 +81,7 @@ impl Ini {
             locked: Vec::new(),
             stage: IniStage::Runtime,
             typed,
+            open_basedir: None,
         }
     }
 }
@@ -159,25 +166,22 @@ impl TypedIni {
 
     /// The entry `name` holding `value` now, `None` where it holds php's
     /// `NULL`, read as its `OnUpdate*` reads it; an entry not typed here
-    /// changes nothing.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "php's `(int) ZEND_ATOL(...)`, which cuts a value past `int`"
-    )]
+    /// changes nothing. php's `(int) ZEND_ATOL(...)` is C's `atoi`, which
+    /// cuts a value past `int`.
     pub(crate) fn update(&mut self, name: &[u8], value: Option<&[u8]>) {
         let text = value.unwrap_or_default();
         match name {
-            b"precision" => self.precision = ini_atol(text) as i32,
-            b"serialize_precision" => self.serialize_precision = ini_atol(text) as i32,
+            b"precision" => self.precision = atoi(text),
+            b"serialize_precision" => self.serialize_precision = atoi(text),
             b"zend.exception_ignore_args" => {
                 self.exception_ignore_args = Request::ini_parse_bool(text);
             }
             b"zend.exception_string_param_max_len" => {
-                self.exception_string_param_max_len = usize::try_from(ini_atol(text)).unwrap_or(0);
+                self.exception_string_param_max_len = usize::try_from(strtol(text)).unwrap_or(0);
             }
             b"short_open_tag" => self.short_open_tag = Request::ini_parse_bool(text),
             b"zend.assertions" => self.assertions = Request::ini_parse_bytes(text),
-            b"zend.multibyte" => self.multibyte = ini_truth(Some(text)),
+            b"zend.multibyte" => self.multibyte = Request::ini_parse_bool(text),
             _ => {}
         }
     }
@@ -216,6 +220,35 @@ impl Request {
         match self.ini.changed.iter().find(|(n, ..)| n.as_slice() == name) {
             Some((_, value, _)) => value.as_deref(),
             None => self.shared.ini_default_value(name),
+        }
+    }
+
+    /// `PG(open_basedir)`, the list the `open_basedir` guard reads
+    /// ([`Request::check_open_basedir`]): the entry's value as it was set
+    /// at startup, and, once `ini_set()` or a `.user.ini` tightened it, the
+    /// list it took with each directory expanded (`OnUpdateBaseDir`,
+    /// `Z/main/fopen_wrappers.c:74`), where `ini_get()` still answers the
+    /// value as set. `None` where the entry holds php's `NULL`.
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $msg) { echo str_replace(__DIR__, 'DIR', $msg), "\n"; return true; });
+    /// ini_set('open_basedir', __DIR__ . '/./a/..' . PATH_SEPARATOR . __DIR__ . '/b/../');
+    /// var_dump(str_replace(__DIR__, 'DIR', ini_get('open_basedir')), fopen('/', 'r'));
+    /// var_dump(str_replace(__DIR__, 'DIR', ini_set('open_basedir', __DIR__ . '/.')), str_replace(__DIR__, 'DIR', ini_get('open_basedir')));
+    /// ```
+    /// ```expect
+    /// fopen(): open_basedir restriction in effect. File(/) is not within the allowed path(s): (DIR:DIR/)
+    /// fopen(/): Failed to open stream: Operation not permitted
+    /// string(20) "DIR/./a/..:DIR/b/../"
+    /// bool(false)
+    /// string(20) "DIR/./a/..:DIR/b/../"
+    /// string(5) "DIR/."
+    /// ```
+    #[must_use]
+    pub fn open_basedir(&self) -> Option<&[u8]> {
+        match &self.ini.open_basedir {
+            Some(expanded) => Some(expanded),
+            None => self.ini_value(b"open_basedir"),
         }
     }
 
@@ -396,17 +429,13 @@ impl Request {
         {
             return Ok(None);
         }
-        let tightened;
-        let value = if name == b"open_basedir" {
-            match self.tighter_open_basedir(value) {
-                Some(list) => {
-                    tightened = list;
-                    tightened.as_slice()
-                }
-                None => return Ok(None),
-            }
+        let expanded = if name == b"open_basedir" {
+            let Some(list) = self.tighter_open_basedir(value) else {
+                return Ok(None);
+            };
+            Some(list)
         } else {
-            value
+            None
         };
         let limited;
         let value = if name == b"memory_limit" {
@@ -420,7 +449,7 @@ impl Request {
         } else {
             value
         };
-        if name == b"report_memleaks" && !ini_truth(Some(value)) {
+        if name == b"report_memleaks" && !Request::ini_parse_bool(value) {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
         }
@@ -436,10 +465,12 @@ impl Request {
         }
         self.ini_hold_string(name, value, string);
         match name {
+            b"open_basedir" => self.ini.open_basedir = expanded,
             b"max_execution_time" => self.arm_timer(),
             b"error_reporting" => self.update_error_reporting(),
             b"zend.enable_gc" => {
-                self.heap.gc_enable(ini_truth(value));
+                self.heap
+                    .gc_enable(value.is_some_and(Request::ini_parse_bool));
             }
             b"display_errors" => self.reset_display_errors_word(),
             _ => {}
@@ -606,6 +637,9 @@ impl Request {
                 let master = self.shared.ini_default(&name);
                 self.ini.typed.update(&name, master);
             }
+            if name == b"open_basedir" {
+                self.ini.open_basedir = None;
+            }
             if name == b"error_reporting" {
                 self.update_error_reporting();
             }
@@ -763,7 +797,7 @@ impl Request {
         match name {
             // `OnSetPrecision` and `OnSetSerializePrecision`
             // (`Z/main/main.c:120-141`): nothing below -1.
-            b"precision" | b"serialize_precision" if ini_atol(value) < -1 => IniVerdict::Rejected,
+            b"precision" | b"serialize_precision" if strtol(value) < -1 => IniVerdict::Rejected,
             b"arg_separator.output"
             | b"arg_separator.input"
             | b"extension_dir"
@@ -776,9 +810,7 @@ impl Request {
             {
                 IniVerdict::Rejected
             }
-            b"zend.exception_string_param_max_len"
-                if !(0..=1_000_000).contains(&ini_atol(value)) =>
-            {
+            b"zend.exception_string_param_max_len" if !(0..=1_000_000).contains(&strtol(value)) => {
                 IniVerdict::Rejected
             }
             b"default_charset" | b"default_mimetype"
@@ -834,15 +866,44 @@ impl Request {
             .collect()
     }
 
-    /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
+    /// `zend_ini_parse_bool` (`Z/Zend/zend_ini.c:563`), the one rule
+    /// every `OnUpdateBool` entry is read by: `on`, `yes` and `true` in
+    /// any case are on, and any other text is on where C's `atoi` reads
+    /// a number other than zero from it, so `abc` and `00` are off,
+    /// `-1`, ` 1` and `1abc` are on, and `4294967296`, whose `int` is
+    /// zero, is off.
+    ///
+    /// ```php
+    /// foreach (['abc', '00', '4294967296', '-1', '1abc', ' 1', 'TRUE'] as $v) { ini_set('html_errors', $v); trigger_error($v); }
+    /// ```
+    /// ```expect
+    /// Notice: abc in %s on line 2
+    ///
+    /// Notice: 00 in %s on line 2
+    ///
+    /// Notice: 4294967296 in %s on line 2
+    /// <br />
+    /// <b>Notice</b>:  -1 in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:  1abc in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:   1 in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:  TRUE in <b>%s</b> on line <b>2</b><br />
+    /// ```
     #[must_use]
     pub fn ini_parse_bool(value: &[u8]) -> bool {
-        let lower = value.to_ascii_lowercase();
-        matches!(lower.as_slice(), b"1" | b"on" | b"yes" | b"true")
-            || lower.iter().all(u8::is_ascii_digit)
-                && String::from_utf8_lossy(&lower)
-                    .parse::<i64>()
-                    .is_ok_and(|n| n != 0)
+        value.eq_ignore_ascii_case(b"true")
+            || value.eq_ignore_ascii_case(b"yes")
+            || value.eq_ignore_ascii_case(b"on")
+            || atoi(value) != 0
+    }
+
+    /// The entry `name` read as its `OnUpdateBool` reads it, by
+    /// [`Request::ini_parse_bool`]; an entry that holds php's `NULL` or
+    /// is not registered is off.
+    pub(crate) fn ini_flag(&self, name: &[u8]) -> bool {
+        self.ini_get(name).is_some_and(Request::ini_parse_bool)
     }
 
     /// `cfg_get_entry` as `get_cfg_var()` hands it back
@@ -1686,50 +1747,6 @@ impl IniDisplayer {
 enum IniCell {
     Value(String),
     Displayed(String),
-}
-
-/// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",
-/// "no", "false" and "" are off beside "0" and everything else is on.
-pub(crate) fn ini_truth(value: Option<&[u8]>) -> bool {
-    let Some(value) = value else { return false };
-    let text = value.to_ascii_lowercase();
-    !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
-}
-
-/// `ZEND_ATOL`, which is `atoll` (`Z/Zend/zend_long.h:77`): leading
-/// whitespace skipped, one sign, the digits up to the first byte that is
-/// not one, and zero where there are none; a number past `i64` saturates
-/// as `strtoll` does.
-pub(crate) fn ini_atol(value: &[u8]) -> i64 {
-    let mut bytes = value
-        .iter()
-        .skip_while(|b| b.is_ascii_whitespace())
-        .peekable();
-    let negative = match bytes.peek() {
-        Some(b'-') => {
-            bytes.next();
-            true
-        }
-        Some(b'+') => {
-            bytes.next();
-            false
-        }
-        _ => false,
-    };
-    let mut n: i64 = 0;
-    for digit in bytes.take_while(|b| b.is_ascii_digit()) {
-        let digit = i64::from(digit - b'0');
-        n = if negative {
-            n.checked_mul(10)
-                .and_then(|n| n.checked_sub(digit))
-                .unwrap_or(i64::MIN)
-        } else {
-            n.checked_mul(10)
-                .and_then(|n| n.checked_add(digit))
-                .unwrap_or(i64::MAX)
-        };
-    }
-    n
 }
 
 #[cfg(test)]
