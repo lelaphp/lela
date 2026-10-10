@@ -18699,13 +18699,83 @@ pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op
 /// string(1) "b"
 /// string(1) "a"
 /// ```
-pub(crate) fn concat<T: Tier>(
+pub(crate) fn concat<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_concat(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     concat_into(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_CONCAT` and `ZEND_FAST_CONCAT` over two
+/// strings (`Z/Zend/zend_vm_def.h:382-431`, `:3293-3341`), the arm
+/// [`concat_into`] takes for them read off the zvals as they stand: a
+/// left temporary's string grown where it stands
+/// ([`Request::string_append`]), any other left side joined into a new
+/// string ([`crate::ops::join`]), the right side given up where it is a
+/// temporary, and the string into the temporary. `None`, with nothing
+/// touched, for anything but two strings, an empty side that is no
+/// constant, which hands the other on, and a temporary holding an
+/// owner. What the join refuses, the memory limit or php's
+/// `String size overflow`, is raised at this opline, as the kernel's.
+///
+/// ```php
+/// $a = "ab"; $b = "cd"; $e = "";
+/// for ($i = 0; $i < 2; $i++) { echo $a . $b, "|", "x$a", "|", $a . "", "|", $a . $e, "|", strtoupper($a) . $b, "\n"; }
+/// ```
+/// ```expect
+/// abcd|xab|ab|ab|ABcd
+/// abcd|xab|ab|ab|ABcd
+/// ```
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_concat(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (left, right) = (a.read(slots, code, op.op1), b.read(slots, code, op.op2));
+    let (x, y) = (left.as_str()?, right.as_str()?);
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if (a.kind() != OperandKind::Const && x.is_empty())
+        || (b.kind() != OperandKind::Const && y.is_empty())
+        || slots.get(out)?.is_refcounted()
+    {
+        return None;
+    }
+    let (x, y) = (PhpString::of(x), PhpString::of(y));
+    let joined = if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) {
+        // The temporary's owner is the append's now.
+        *slots.get_mut(a.slot(code, op.op1)?)? = Zval::UNDEF;
+        req.string_append(x, y)
+    } else {
+        crate::ops::join(req, x, y)
+    };
+    if matches!(b.kind(), OperandKind::Tmp | OperandKind::Var) {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    Some(match joined {
+        Ok(joined) => {
+            if let Some(into) = req.slots_mut(frame).get_mut(out) {
+                *into = Zval::string(joined.heap());
+            }
+            Ok(advanced())
+        }
+        Err(thrown) => {
+            req.vm_mut().stand(frame, at);
+            threw(req, frame, &thrown)
+        }
+    })
 }
 
 /// The body `CONCAT` and `FAST_CONCAT` share, php's arms for two
@@ -18751,6 +18821,7 @@ pub(crate) fn concat<T: Tier>(
 /// Warning: Undefined variable $v in %s on line 2
 /// |
 /// ```
+#[inline(never)]
 fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     // Each operand is read once: a `CV` that is undefined warns where
     // it is read.
@@ -18816,12 +18887,17 @@ fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
 /// Stack trace:
 /// #0 {main}
 /// ```
-pub(crate) fn fast_concat<T: Tier>(
+pub(crate) fn fast_concat<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_concat(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     concat_into(req, frame, code, op)
 }
 
