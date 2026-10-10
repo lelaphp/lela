@@ -829,6 +829,43 @@ impl Request {
 /// by re-reading `EG(objects_store)` after `dtor_obj`.
 struct Hooks<'a>(&'a mut Request);
 
+impl Hooks<'_> {
+    /// A class's `dtor_obj` or `free_obj` served by a release. A stream
+    /// it closed whose user-space wrapper threw parks the throwable for
+    /// the native that asked to raise once it returns
+    /// ([`Request::stream_thrown`]); a release is no native, so what the
+    /// step parked is left pending here, for the release to raise, as
+    /// php's `EG(exception)` is.
+    ///
+    /// ```php
+    /// class W {
+    ///   public $context;
+    ///   function stream_open($p, $m, $o, &$op) { return true; }
+    ///   function stream_read($n) { return ''; }
+    ///   function stream_eof() { return true; }
+    ///   function stream_stat() { return []; }
+    ///   function url_stat($p, $f) { return ["mode" => 0100644]; }
+    ///   function stream_close() { echo "close\n"; throw new Exception("close"); }
+    /// }
+    /// stream_wrapper_register('ww', 'W');
+    /// $f = new SplFileObject('ww://x');
+    /// try { $f = null; echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// close
+    /// caught close
+    /// end
+    /// ```
+    fn released(&mut self, step: impl FnOnce(&mut Request)) {
+        let parked = self.0.stream_thrown.is_some();
+        step(self.0);
+        if !parked && let Some(thrown) = self.0.stream_thrown.take() {
+            self.0.leave_pending(&thrown);
+        }
+    }
+}
+
 impl HeapHooks for Hooks<'_> {
     fn heap(&mut self) -> &mut Heap {
         &mut self.0.heap
@@ -841,17 +878,19 @@ impl HeapHooks for Hooks<'_> {
         linked.then(|| self.0.gc_collect())
     }
 
-    /// `dtor_obj`, through the table of the object's class (design §5.4).
+    /// `dtor_obj`, through the table of the object's class (design §5.4),
+    /// as a release serves it ([`Hooks::released`]).
     fn destruct(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
-        table.dtor_obj().serve(self.0, PhpObject::of(obj));
+        self.released(|req| table.dtor_obj().serve(req, PhpObject::of(obj)));
     }
 
-    /// `free_obj`, through the table: the payload's release is the
-    /// class's, and the drop after it is the heap's.
+    /// `free_obj`, through the table, as a release serves it
+    /// ([`Hooks::released`]): the payload's release is the class's, and
+    /// the drop after it is the heap's.
     fn free_native(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
-        table.free_obj(self.0, PhpObject::of(obj));
+        self.released(|req| table.free_obj(req, PhpObject::of(obj)));
         self.0.free_beside(PhpObject::of(obj));
     }
 

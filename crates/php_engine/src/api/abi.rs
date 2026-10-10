@@ -2305,7 +2305,9 @@ pub trait ObjectHandlers: Send + Sync {
     /// handlers call `zend_object_std_dtor` last; a table whose php
     /// handler calls it first, as `spl_array_object_free_storage` does,
     /// calls `Std.free_obj` where php's does, and nothing is left to free
-    /// after.
+    /// after. What PHP code the release serves throws is left pending
+    /// with [`crate::api::raising::leave_pending`], for the release that
+    /// freed the object to raise.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         req.free_members(object);
     }

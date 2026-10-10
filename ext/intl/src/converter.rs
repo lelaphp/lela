@@ -7,7 +7,7 @@
 use php_ext::abi::{CloneObj, ObjectHandlers, OrFalse, Ref, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, lookup_class};
-use php_ext::raising::{Thrown, arg_value_error, clear, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, leave_pending, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
 
@@ -105,11 +105,12 @@ impl Pending {
         }
     }
 
-    /// What is pending given up, where it has nowhere to go; a fatal or
-    /// an `exit` is the request's already.
-    fn give_up(self, req: &mut Request) {
+    /// What is pending left in php's `EG(exception)` where the step that
+    /// served it answers nothing, a free, for the release that freed the
+    /// object to raise; a fatal or an `exit` is the request's already.
+    fn leave(self, req: &mut Request) {
         if let Some(thrown) = self.0 {
-            clear(req, thrown).ok();
+            leave_pending(req, thrown);
         }
     }
 }
@@ -126,7 +127,35 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `php_converter_free_object`: each converter closed, a subclass's
-    /// callbacks told (`UCNV_CLOSE`) while the object still holds it.
+    /// callbacks told (`UCNV_CLOSE`) while the object still holds it and
+    /// its members, which are freed after; what a callback threw is left
+    /// pending, for the release that freed the object to raise.
+    ///
+    /// ```php
+    /// class C extends UConverter {
+    ///   public $tag = 'x';
+    ///   function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { echo UConverter::reasonText($reason), " ", $this->tag ?? '?', "\n"; return null; }
+    /// }
+    /// $c = new C('ascii', 'utf-8');
+    /// unset($c);
+    /// ```
+    /// ```expect
+    /// REASON_CLOSE x
+    /// REASON_CLOSE x
+    /// ```
+    ///
+    /// ```php
+    /// class T extends UConverter {
+    ///   function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null { if ($reason == UConverter::REASON_CLOSE) throw new Exception("close"); return null; }
+    /// }
+    /// $c = new T('ascii', 'utf-8');
+    /// try { $c = null; echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// caught close
+    /// end
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let (src, dest) = converters(req, object);
         let mut pending = Pending::default();
@@ -141,9 +170,7 @@ impl ObjectHandlers for Handlers {
         for converter in given_up.into_iter().flatten().flatten() {
             converter.close(req);
         }
-        // php leaves what a callback threw in `EG(exception)`, raised after
-        // the free; a free here has no way to, so it is given up (#2275).
-        pending.give_up(req);
+        pending.leave(req);
     }
 }
 
