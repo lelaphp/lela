@@ -16,9 +16,10 @@
 //! What the template is exercised on is the fixture at
 //! `xtask/fixtures/new-sapi`, whose own `seams.toml` carries the
 //! `[[crate]]` row for `sapi/demo`: `cargo test -p xtask --test new_sapi`
-//! lays the crate down there and holds it to `budget`, `unsafe-audit` and
-//! `api-check`, the shipped manifest carrying no row for a name nobody
-//! ships.
+//! lays the crate down there and holds it to `budget`, `unsafe-audit`,
+//! `api-check` and `clippy`, the last against the fixture's stand-ins for
+//! the facade and the bundle, the shipped manifest carrying no row for a
+//! name nobody ships.
 //!
 //! Four refusals, each before anything is written: a name with no
 //! `[[crate]]` row (the ceiling is the manifest's, and the row is a
@@ -78,6 +79,8 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
         bail!("{row} exists; new-sapi lays a crate down once and never overwrites");
     }
     let package = layout::package(&row);
+    // The lints the manifest denies under the row, at both crate roots.
+    let lints = lint_attributes(manifest, &row);
 
     let mut laid = Laid {
         dir: dir.clone(),
@@ -86,8 +89,8 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
     };
     for (rel, text) in [
         ("Cargo.toml", cargo_toml(name, &package, &bin)),
-        ("src/lib.rs", lib_rs(manifest, name, &bin)),
-        ("src/main.rs", main_rs(&package, &bin)),
+        ("src/lib.rs", lib_rs(&lints, name, &bin)),
+        ("src/main.rs", main_rs(&lints, &package, &bin)),
         ("tests/serve.rs", serve_rs(name, &bin)),
     ] {
         let path = dir.join(rel);
@@ -149,8 +152,7 @@ fn cargo_toml(name: &str, package: &str, bin: &str) -> String {
 }
 
 /// The crate root: the host's name, its `main` and the template's sink.
-pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
-    let lints = lint_attributes(manifest, &format!("sapi/{name}"));
+fn lib_rs(lints: &str, name: &str, bin: &str) -> String {
     format!(
         "//! php's `{name}` host, `php-src/sapi/{name}`, as one crate under `sapi/`\n\
          //! (ADR-0008): the binary `{bin}`, reaching the engine through `php_sapi`\n\
@@ -173,9 +175,10 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
          /// process ending with the code the request ended with.\n\
          pub fn main() -> ExitCode {{\n\
          \x20   let Some(file) = std::env::args_os().nth(1) else {{\n\
-         \x20       let _ = std::io::stderr()\n\
+         \x20       std::io::stderr()\n\
          \x20           .lock()\n\
-         \x20           .write_all(b\"Usage: {bin} <file>\\n\");\n\
+         \x20           .write_all(b\"Usage: {bin} <file>\\n\")\n\
+         \x20           .ok();\n\
          \x20       return php_sapi::exit_code(1);\n\
          \x20   }};\n\
          \x20   let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();\n\
@@ -202,34 +205,36 @@ pub(crate) fn lib_rs(manifest: &Manifest, name: &str, bin: &str) -> String {
          \n\
          impl OutputSink for Streams {{\n\
          \x20   fn write(&mut self, bytes: &[u8]) -> Result<(), php_sapi::Aborted> {{\n\
-         \x20       let _ = std::io::stdout().lock().write_all(bytes);\n\
+         \x20       std::io::stdout().lock().write_all(bytes).ok();\n\
          \x20       Ok(())\n\
          \x20   }}\n\
          \n\
          \x20   fn flush(&mut self) {{\n\
-         \x20       let _ = std::io::stdout().lock().flush();\n\
+         \x20       std::io::stdout().lock().flush().ok();\n\
          \x20   }}\n\
          \n\
          \x20   fn send_headers(&mut self, _head: &ResponseHead) {{}}\n\
          \n\
          \x20   fn log(&mut self, entry: &[u8]) {{\n\
          \x20       let mut stderr = std::io::stderr().lock();\n\
-         \x20       let _ = stderr.write_all(entry);\n\
-         \x20       let _ = stderr.write_all(b\"\\n\");\n\
+         \x20       stderr.write_all(entry).ok();\n\
+         \x20       stderr.write_all(b\"\\n\").ok();\n\
          \x20   }}\n\
          \n\
          \x20   fn write_stderr(&mut self, bytes: &[u8]) {{\n\
-         \x20       let _ = std::io::stderr().lock().write_all(bytes);\n\
+         \x20       std::io::stderr().lock().write_all(bytes).ok();\n\
          \x20   }}\n\
          }}\n"
     )
 }
 
-/// The binary: the host's `main`, and nothing else.
-fn main_rs(package: &str, bin: &str) -> String {
+/// The binary: the host's `main`, and nothing else, under the lints the
+/// library's root carries too (#2524).
+fn main_rs(lints: &str, package: &str, bin: &str) -> String {
     format!(
         "//! `{bin}`, the binary (design §4.1; ADR-0008): [`{package}::main`].\n\
          #![forbid(unsafe_code)]\n\
+         {lints}\
          \n\
          use std::process::ExitCode;\n\
          \n\
@@ -255,7 +260,7 @@ fn serve_rs(name: &str, bin: &str) -> String {
          \x20       .arg(&file)\n\
          \x20       .output()\n\
          \x20       .unwrap();\n\
-         \x20   let _ = std::fs::remove_file(&file);\n\
+         \x20   std::fs::remove_file(&file).ok();\n\
          \x20   assert_eq!(String::from_utf8_lossy(&out.stdout), \"{name}\\n\");\n\
          \x20   assert!(out.status.success(), \"{{out:?}}\");\n\
          }}\n"
