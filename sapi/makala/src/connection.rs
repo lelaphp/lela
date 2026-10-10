@@ -4,10 +4,13 @@
 //! anything that blocks off the schedulers that own sockets
 //! (research/production-server.r2.md §4.10, M2 and M4). A request goes to
 //! the request side whole, on the bounded queue: while the queue is full
-//! its connection waits for room, which is where the backpressure of
-//! #2342 stands. The body follows on a bounded channel as hyper reads it,
-//! and the response comes back on two: the head once, then the body
-//! piece by piece, which hyper frames chunked on HTTP/1.1 and
+//! its connection waits for room. That and the connection cap are the
+//! backpressure (#2342), Ranch's (research/production-server.r2.md M7):
+//! at the cap the accept loop stops accepting, so new clients wait in
+//! the kernel's listen queue and none is refused. The body follows on a
+//! bounded channel as hyper reads it, and the response comes back on
+//! two: the head once, then the body piece by piece, which hyper frames
+//! chunked on HTTP/1.1 and
 //! close-delimited on HTTP/1.0 where PHP set no length. A `HEAD`
 //! response has none: PHP writes no body for one (php's `headers_only`),
 //! and hyper sends none.
@@ -39,11 +42,11 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use php_sapi::ResponseHead;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 
 use crate::framing;
 use crate::options::{Limits, Options};
-use crate::request::{Head, Job, Sink};
+use crate::request::{Head, Job, Sink, Written};
 use crate::socket::{Socket, Watch};
 
 /// How many pieces of a request's body wait for the request to read them.
@@ -57,12 +60,14 @@ const LEAST_BUFFER: usize = 8192;
 
 /// The connection side, on this thread for as long as the process serves:
 /// every connection accepted on `listener` served on its own task, its
-/// requests put on `queue`. It returns only where it could not start; the
-/// drain that ends it is #2344's.
+/// requests put on `queue`. It returns only with what failed: a runtime
+/// or listener that could not start, or the connection slots closed,
+/// which nothing does; the drain that ends it is #2344's.
 ///
 /// # Errors
 ///
-/// What the runtime or the listener could not start with.
+/// What the runtime or the listener could not start with, or the slots
+/// closed.
 pub(crate) fn run(
     options: &Options,
     listener: std::net::TcpListener,
@@ -76,7 +81,11 @@ pub(crate) fn run(
 }
 
 /// The accept loop: each connection on a task of its own, its requests
-/// served in order, as HTTP/1.1 keeps them.
+/// served in order, as HTTP/1.1 keeps them. A connection holds one of
+/// [`Limits::connections`] slots until its socket has lingered and
+/// closed; with none free the loop waits for one before it accepts
+/// again, as Ranch's acceptor sleeps at its cap, and the kernel's listen
+/// queue holds the clients that come meanwhile.
 async fn accept(
     limits: Limits,
     listener: std::net::TcpListener,
@@ -85,11 +94,18 @@ async fn accept(
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
     let local = listener.local_addr()?;
+    let slots = Arc::new(Semaphore::new(
+        limits.connections.min(Semaphore::MAX_PERMITS),
+    ));
     loop {
+        let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
+            return Err(std::io::Error::other("the connection slots were closed"));
+        };
         // A connection that failed before it was accepted, or a process
         // out of descriptors: the next is tried after a pause, so a full
         // table does not spin the loop.
         let Ok((stream, peer)) = listener.accept().await else {
+            drop(slot);
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             continue;
         };
@@ -102,7 +118,8 @@ async fn accept(
             begun: AtomicU32::new(0),
             cut: Notify::new(),
         });
-        tokio::spawn(drive(connection, stream));
+        let socket = Socket::new(stream, Arc::clone(&connection.watch), limits, slot);
+        tokio::spawn(drive(connection, socket));
     }
 }
 
@@ -125,7 +142,7 @@ struct Connection {
 }
 
 /// One connection, its requests served until it ends or is cut.
-async fn drive(connection: Arc<Connection>, stream: tokio::net::TcpStream) {
+async fn drive(connection: Arc<Connection>, socket: Socket) {
     let limits = connection.limits;
     let service = {
         let connection = Arc::clone(&connection);
@@ -143,7 +160,6 @@ async fn drive(connection: Arc<Connection>, stream: tokio::net::TcpStream) {
             .saturating_add(4)
             .max(LEAST_BUFFER),
     );
-    let socket = Socket::new(stream, Arc::clone(&connection.watch), limits);
     let served = builder.serve_connection(TokioIo::new(socket), service);
     // A connection's end, the client's close among them, is nothing the
     // server acts on until its logs (#2345).
@@ -198,7 +214,8 @@ async fn hand_over(connection: &Arc<Connection>, request: Request<Incoming>) -> 
     }
     let (feed, body) = mpsc::channel(BODY_PIECES);
     let (head_sent, head) = oneshot::channel();
-    let (out, written) = mpsc::channel(RESPONSE_PIECES);
+    let (out, pieces) = mpsc::channel(RESPONSE_PIECES);
+    let (whole_sent, whole) = oneshot::channel();
     let head_read = Head {
         method: parts.method.as_str().as_bytes().to_vec(),
         target: parts.uri.path_and_query().map_or_else(
@@ -221,7 +238,7 @@ async fn hand_over(connection: &Arc<Connection>, request: Request<Incoming>) -> 
     let job = Job {
         head: head_read,
         body,
-        sink: Sink::new(head_sent, out),
+        sink: Sink::new(head_sent, out, whole_sent),
     };
     if connection.queue.send(job).await.is_err() {
         return plain(connection, StatusCode::SERVICE_UNAVAILABLE);
@@ -237,7 +254,7 @@ async fn hand_over(connection: &Arc<Connection>, request: Request<Incoming>) -> 
             if fault.try_recv().is_ok() {
                 connection.cut.notify_one();
             }
-            response(connection, &head, written)
+            response(connection, &head, Written { pieces, whole })
         }
         Answer::Broke(fault) => closing(connection, fault.status()),
         Answer::Headless => plain(connection, StatusCode::INTERNAL_SERVER_ERROR),
@@ -400,11 +417,7 @@ async fn pump(
 /// The response for the head a request sent: its code, 200 where it set
 /// none, and its header lines in order, each one hyper cannot carry left
 /// out; the body what the request writes after it.
-fn response(
-    connection: &Connection,
-    head: &ResponseHead,
-    written: mpsc::Receiver<Bytes>,
-) -> Response<Reply> {
+fn response(connection: &Connection, head: &ResponseHead, written: Written) -> Response<Reply> {
     let mut response = Response::new(Reply {
         written: Some(written),
         watch: Arc::clone(&connection.watch),
@@ -451,28 +464,46 @@ fn closing(connection: &Connection, status: StatusCode) -> Response<Reply> {
 }
 
 /// A response's body: what a request writes, piece by piece as it writes
-/// it, ending when its sink is dropped with the request; or none, the
-/// server's own answer. hyper lets go of it when the response has ended,
-/// and the connection waits for its next request from then.
+/// it, ending when its sink is dropped with the request, and failing
+/// where the request ended in a panic, so hyper drops the connection
+/// rather than end a chunked body cut short as a whole one (on HTTP/1.0
+/// with no length the close ends the body either way); or none, the
+/// server's own answer. hyper lets go of it when the response has ended, and the
+/// connection waits for its next request from then.
 pub(crate) struct Reply {
-    written: Option<mpsc::Receiver<Bytes>>,
+    written: Option<Written>,
     watch: Arc<Watch>,
 }
 
+/// A response body that a request's panic left unfinished.
+#[derive(Debug)]
+pub(crate) struct Unfinished;
+
+impl std::fmt::Display for Unfinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the request panicked while its response was under way")
+    }
+}
+
+impl std::error::Error for Unfinished {}
+
 impl hyper::body::Body for Reply {
     type Data = Bytes;
-    type Error = Infallible;
+    type Error = Unfinished;
 
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-        match &mut self.get_mut().written {
-            Some(written) => written
-                .poll_recv(cx)
-                .map(|piece| piece.map(|piece| Ok(Frame::data(piece)))),
-            None => Poll::Ready(None),
+    ) -> Poll<Option<Result<Frame<Bytes>, Unfinished>>> {
+        let Some(written) = &mut self.get_mut().written else {
+            return Poll::Ready(None);
+        };
+        if let Some(piece) = std::task::ready!(written.pieces.poll_recv(cx)) {
+            return Poll::Ready(Some(Ok(Frame::data(piece))));
         }
+        Pin::new(&mut written.whole)
+            .poll(cx)
+            .map(|whole| whole.err().map(|_| Err(Unfinished)))
     }
 
     fn is_end_stream(&self) -> bool {

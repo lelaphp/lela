@@ -33,8 +33,8 @@
 //! the response's end, and what the client still sends is read and
 //! dropped until it closes its side or [`LINGER`] has passed. A socket
 //! let go outside the runtime, which only the process's end does, closes
-//! at once. A lingering socket holds its descriptor for that second
-//! beyond its connection.
+//! at once. A lingering socket holds its descriptor, and its connection's
+//! slot under the cap, for that second beyond its connection.
 
 use std::io;
 use std::pin::Pin;
@@ -44,6 +44,7 @@ use std::time::{Duration, SystemTime};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Instant, Sleep};
 
 use crate::options::{Limits, MinDataRate};
@@ -150,6 +151,9 @@ pub(crate) struct Socket {
     /// The keep-alive idle or header timeout's wake-up, while a read waits.
     read_timer: Option<Pin<Box<Sleep>>>,
     writes: WriteClock,
+    /// The connection's slot under the cap, held until the socket has
+    /// lingered and closed.
+    slot: Option<OwnedSemaphorePermit>,
 }
 
 /// The response's minimum data rate over a connection's writes.
@@ -171,13 +175,19 @@ struct WriteClock {
 impl Socket {
     /// The socket of a connection just accepted, its clocks read from
     /// `watch` and `limits`.
-    pub(crate) fn new(stream: TcpStream, watch: Arc<Watch>, limits: Limits) -> Socket {
+    pub(crate) fn new(
+        stream: TcpStream,
+        watch: Arc<Watch>,
+        limits: Limits,
+        slot: OwnedSemaphorePermit,
+    ) -> Socket {
         Socket {
             stream: Some(stream),
             watch,
             limits,
             read_timer: None,
             writes: WriteClock::default(),
+            slot: Some(slot),
         }
     }
 
@@ -401,14 +411,14 @@ impl Drop for Socket {
         if let (Some(stream), Ok(runtime)) =
             (self.stream.take(), tokio::runtime::Handle::try_current())
         {
-            runtime.spawn(linger(stream));
+            runtime.spawn(linger(stream, self.slot.take()));
         }
     }
 }
 
 /// The write side shut, then what the client still sends read and
 /// dropped until it closes or [`LINGER`] passes, and the socket closed.
-async fn linger(mut stream: TcpStream) {
+async fn linger(mut stream: TcpStream, slot: Option<OwnedSemaphorePermit>) {
     std::future::poll_fn(|cx| Pin::new(&mut stream).poll_shutdown(cx))
         .await
         .ok();
@@ -426,4 +436,5 @@ async fn linger(mut stream: TcpStream) {
         }
     };
     tokio::time::timeout(LINGER, drained).await.ok();
+    drop(slot);
 }

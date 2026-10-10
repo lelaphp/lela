@@ -70,7 +70,7 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(1);
         }
     };
-    let (queue, pool) = match request::Pool::start(&engine, &options) {
+    let (queue, pool) = match request::Pool::start(&options, request::serving(&engine, &options)) {
         Ok(started) => started,
         Err(e) => {
             say(&format!("makala: cannot start a request thread: {e}\n"));
