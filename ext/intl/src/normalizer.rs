@@ -53,7 +53,7 @@ impl Normalizer {
     const FORM_KC_CF: i64 = 48;
     const NFKC_CF: i64 = 48;
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn normalize(
         req: &mut Request,
         string: PhpString,
@@ -62,7 +62,7 @@ impl Normalizer {
         normalize(req, string, form)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn isNormalized(
         req: &mut Request,
         string: PhpString,
@@ -71,7 +71,7 @@ impl Normalizer {
         is_normalized(req, string, form)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getRawDecomposition(
         req: &mut Request,
         string: PhpString,
@@ -116,7 +116,7 @@ fn failed<T>(req: &mut Request, code: Code, message: &str) -> Result<OrFalse<T>,
 /// bool(false)
 /// string(85) "normalizer_normalize(): Error converting input string to UTF-16: U_INVALID_CHAR_FOUND"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn normalizer_normalize(
     req: &mut Request,
     string: PhpString,
@@ -130,7 +130,6 @@ fn normalize(
     string: PhpString,
     form: i64,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     let form = checked_form(req, form)?;
     let text = match ffi::to_utf16(string.as_bytes()) {
         Ok(text) => text,
@@ -159,7 +158,7 @@ fn normalize(
 /// bool(false)
 /// int(10)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn normalizer_is_normalized(
     req: &mut Request,
     string: PhpString,
@@ -169,7 +168,6 @@ fn normalizer_is_normalized(
 }
 
 fn is_normalized(req: &mut Request, string: PhpString, form: i64) -> Result<bool, Thrown> {
-    error::reset(req);
     let form = checked_form(req, form)?;
     let text = match ffi::to_utf16(string.as_bytes()) {
         Ok(text) => text,
@@ -204,7 +202,7 @@ fn is_normalized(req: &mut Request, string: PhpString, form: i64) -> Result<bool
 /// string(85) "normalizer_get_raw_decomposition(): Code point out of range: U_ILLEGAL_ARGUMENT_ERROR"
 /// string(0) ""
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn normalizer_get_raw_decomposition(
     req: &mut Request,
     string: PhpString,
@@ -218,7 +216,6 @@ fn raw_decomposition(
     string: PhpString,
     form: i64,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     let bytes = string.as_bytes();
     let mut offset = 0;
     let c = utf8::next(bytes, &mut offset);

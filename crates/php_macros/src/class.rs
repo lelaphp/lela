@@ -502,6 +502,7 @@ const METHOD_KEYS: &[(&str, Form)] = &[
     ("tentative", Form::Flag),
     ("implementation", Form::Eq),
     ("arity", Form::Eq),
+    ("before_args", Form::Eq),
     ("deprecated", Form::FlagOrList),
     ("no_discard", Form::FlagOrList),
     ("attribute", Form::List),
@@ -801,14 +802,14 @@ fn property_decl(
 
 /// The entry of a method with a body: the prologue, the receiver, the
 /// body, the return.
-fn method_entry(class: &Ident, method: &Method, entry: &Ident, manual: bool) -> Tokens {
+fn method_entry(class: &Ident, method: &Method, entry: &Ident, reads: &function::Reads) -> Tokens {
     let root = root();
     let ident = &method.sig.ident;
     let cfg = &method.cfg;
     let prologue = function::prologue(
         &method.signature.params,
         &quote!(Some(<#class as #root::abi::Class>::NAME)),
-        manual,
+        reads,
         (Some(class), ident),
     );
     let mut arguments = Vec::new();
@@ -851,7 +852,7 @@ fn method_pieces(
     let structor =
         php.eq_ignore_ascii_case("__construct") || php.eq_ignore_ascii_case("__destruct");
     let implementation = method.keys.eq("implementation");
-    let manual = function::manual(&method.keys)?;
+    let reads = function::Reads::of(&method.keys)?;
     if method.body && implementation.is_some() {
         return Err(error(
             method.keys.span("implementation"),
@@ -921,6 +922,6 @@ fn method_pieces(
     });
     let entry = method
         .body
-        .then(|| method_entry(class, method, &entry_ident, manual));
+        .then(|| method_entry(class, method, &entry_ident, &reads));
     Ok((declaration, entry, checks))
 }

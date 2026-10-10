@@ -308,7 +308,9 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// which is how `ext/standard`'s natives raise most of what they raise
 /// (`chr(): Providing a value not in-between 0 and 255 is deprecated,
 /// ...`). The docref itself, php's link into the manual, is off in the
-/// CLI's ini and is not rendered here.
+/// CLI's ini and is not rendered here. The message is bytes, as php's
+/// `"%s"` prints a `char *`, so a text that is not UTF-8 is raised as it
+/// is; ext/intl's error raised at `intl.error_level` is the witness.
 ///
 /// Where no native is active, `php_verror` names the code being served,
 /// as `get_active_function_name` and `get_active_class_name` name it,
@@ -333,30 +335,19 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 ///
 /// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 5
 /// ```
-pub fn docref(req: &mut Request, level: Level, message: &str) {
+pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Sized)) {
+    let message = message.as_ref();
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
     // A fatal in flight is no native served: `_zend_bailout` empties
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
     if req.ini_stage() == crate::api::abi::IniStage::Startup {
-        return verror(
-            req,
-            level,
-            Origin::Phase("PHP Startup"),
-            b"",
-            message.as_bytes(),
-        );
+        return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
     }
     if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
         let function = req.active_native();
-        return verror(
-            req,
-            level,
-            Origin::Function(&function),
-            b"",
-            message.as_bytes(),
-        );
+        return verror(req, level, Origin::Function(&function), b"", message);
     }
     let phase = match req.phase() {
         crate::api::request::Phase::Startup => "PHP Request Startup",
@@ -364,7 +355,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         // `get_active_function_name` does when a handler raises it.
         crate::api::request::Phase::Running if !req.bailing_out() => {
             if let Some(name) = req.active_user_function() {
-                return verror(req, level, Origin::Function(&name), b"", message.as_bytes());
+                return verror(req, level, Origin::Function(&name), b"", message);
             }
             "Unknown"
         }
@@ -374,7 +365,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         }
         crate::api::request::Phase::EngineEnd => "PHP Shutdown",
     };
-    verror(req, level, Origin::Phase(phase), b"", message.as_bytes());
+    verror(req, level, Origin::Phase(phase), b"", message);
 }
 
 /// `php_error_docref1(NULL, param, level, ...)`: [`docref`] from a native
@@ -839,6 +830,49 @@ fn throwable_at(
     let line = Owner::int(i64::from(line));
     write_prop(req, &object, b"line", line)?;
     Ok(object)
+}
+
+/// `zend_illegal_container_offset` (`Z/Zend/zend.c:1846`): the one
+/// sentence every container throws for an offset it refuses, named as
+/// `zend_zval_type_name` names the offset and `container` as php prints
+/// `ce->name` (or `array`, `string`): "Cannot access offset of type T in
+/// isset or empty" for the read an `isset`, an `empty` or a `??` makes,
+/// "Cannot unset offset of type T on C" for an unset (and php's `Error`
+/// "Cannot unset string offsets" for a string), and "Cannot access
+/// offset of type T on C" for every other fetch.
+///
+/// ```php
+/// $a = [1]; $o = new ArrayObject([1]);
+/// foreach ([fn() => $a[[]], fn() => isset($a[new stdClass]), function () use ($a) { unset($a[[]]); },
+///           fn() => $o[[]], fn() => isset($o[[]]), function () use ($o) { unset($o[new stdClass]); }] as $f) {
+///     try { $f(); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// TypeError: Cannot access offset of type array on array
+/// TypeError: Cannot access offset of type stdClass in isset or empty
+/// TypeError: Cannot unset offset of type array on array
+/// TypeError: Cannot access offset of type array on ArrayObject
+/// TypeError: Cannot access offset of type array in isset or empty
+/// TypeError: Cannot unset offset of type stdClass on ArrayObject
+/// ```
+pub fn illegal_container_offset(
+    req: &mut Request,
+    container: &str,
+    offset: &Value,
+    read: crate::api::abi::DimensionRead,
+) -> Thrown {
+    use crate::api::abi::DimensionRead;
+    let given = crate::ops::zval_type_name(req, &offset.deref());
+    let message = match read {
+        DimensionRead::Silent => format!("Cannot access offset of type {given} in isset or empty"),
+        DimensionRead::Unset if container == "string" => {
+            return throw_error(req, "Error", "Cannot unset string offsets");
+        }
+        DimensionRead::Unset => format!("Cannot unset offset of type {given} on {container}"),
+        _ => format!("Cannot access offset of type {given} on {container}"),
+    };
+    throw_error(req, "TypeError", &message)
 }
 
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of

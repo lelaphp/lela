@@ -114,7 +114,7 @@ impl Transliterator {
         ))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn create(
         req: &mut Request,
         id: PhpString,
@@ -123,7 +123,7 @@ impl Transliterator {
         create(req, id.as_bytes(), direction)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createFromRules(
         req: &mut Request,
         rules: PhpString,
@@ -132,7 +132,7 @@ impl Transliterator {
         create_from_rules(req, rules.as_bytes(), direction)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createInverse(
         req: &mut Request,
         this: This<Self>,
@@ -140,12 +140,12 @@ impl Transliterator {
         create_inverse(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn listIDs(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
         list_ids(req)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn transliterate(
         req: &mut Request,
         this: This<Self>,
@@ -153,16 +153,15 @@ impl Transliterator {
         #[php(default = 0)] start: i64,
         #[php(default = -1)] end: i64,
     ) -> Answer<OrFalse<Owner<PhpString>>> {
-        error::reset(req);
         transliterate(req, this.object(), string.as_bytes(), start, end, 0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
         error_code(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         error_message(req, this.object())
     }
@@ -178,7 +177,7 @@ impl Transliterator {
 /// NULL
 /// string(88) "transliterator_create(): unable to open ICU transliterator with id "[\x8F": U_INVALID_ID"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn transliterator_create(
     req: &mut Request,
     id: PhpString,
@@ -199,7 +198,7 @@ fn transliterator_create(
 /// string(101) "transliterator_create_from_rules(): String conversion of rules to UTF-16 failed: U_INVALID_CHAR_FOUND"
 /// transliterator_create_from_rules(): Argument #2 ($direction) must be either Transliterator::FORWARD or Transliterator::REVERSE
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn transliterator_create_from_rules(
     req: &mut Request,
     rules: PhpString,
@@ -217,7 +216,7 @@ fn transliterator_create_from_rules(
 /// bool(true)
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn transliterator_list_ids(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
     list_ids(req)
 }
@@ -230,7 +229,7 @@ fn transliterator_list_ids(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>
 /// ```expect
 /// string(11) "Greek-Latin"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn transliterator_create_inverse(
     req: &mut Request,
     transliterator: Instance<Transliterator>,
@@ -256,7 +255,7 @@ fn transliterator_create_inverse(
 /// transliterator_transliterate(): Argument #3 ($start) must be greater than or equal to 0
 /// transliterator_transliterate(): Argument #4 ($end) must be greater than or equal to -1
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn transliterator_transliterate(
     req: &mut Request,
     transliterator: Union<Instance<Transliterator>, PhpString>,
@@ -264,7 +263,6 @@ fn transliterator_transliterate(
     #[php(default = 0)] start: i64,
     #[php(default = -1)] end: i64,
 ) -> Answer<OrFalse<Owner<PhpString>>> {
-    error::reset(req);
     let id = match transliterator {
         Union::A(object) => {
             return transliterate(req, object.object(), string.as_bytes(), start, end, 1);
@@ -295,7 +293,7 @@ fn transliterator_transliterate(
 /// int(10)
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn transliterator_get_error_code(
     req: &mut Request,
     transliterator: Instance<Transliterator>,
@@ -315,7 +313,7 @@ fn transliterator_get_error_code(
 /// string(12) "U_ZERO_ERROR"
 /// string(159) "Transliterator::transliterate(): Neither "start" nor the "end" arguments can exceed the number of UTF-16 code units (in this case, 1): U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn transliterator_get_error_message(
     req: &mut Request,
     transliterator: Instance<Transliterator>,
@@ -390,7 +388,6 @@ fn create_from_rules(
     rules: &[u8],
     dir: i64,
 ) -> Answer<Option<Owner<Instance<Transliterator>>>> {
-    error::reset(req);
     let dir = direction(req, dir)?;
     let urules = match to_utf16(rules) {
         Ok(urules) => urules,
@@ -419,7 +416,6 @@ fn create_inverse(
     req: &mut Request,
     object: PhpObject,
 ) -> Answer<Option<Owner<Instance<Transliterator>>>> {
-    error::reset(req);
     match with(req, object, Trans::inverse)? {
         Ok(utrans) => made(req, utrans),
         Err(code) => {
@@ -432,7 +428,6 @@ fn create_inverse(
 
 /// `transliterator_list_ids`: every id ICU registers.
 fn list_ids(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
-    error::reset(req);
     let mut all = match ids() {
         Ok(all) => all,
         Err(code) => {
@@ -542,14 +537,12 @@ fn fail(
 
 /// `transliterator_get_error_code`: the object's code, its error kept.
 fn error_code(req: &mut Request, object: PhpObject) -> i64 {
-    error::reset(req);
     i64::from(error::object_code::<TransObject>(req, object).0)
 }
 
 /// `transliterator_get_error_message`: the object's message, its error
 /// kept.
 fn error_message(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     let message = error::object_message::<TransObject>(req, object);
     PhpString::new(req, &message)
 }

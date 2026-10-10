@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 
 use php_ext::abi::OrFalse;
 use php_ext::call::write_prop;
-use php_ext::raising::{Level, Thrown, docref, throw, throw_chained};
+use php_ext::raising::{Level, Thrown, docref, throw, throw_chained, while_pending};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, PhpString};
 
@@ -63,18 +63,50 @@ fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
     [req.active_function_name().as_bytes(), b"(): ", message].concat()
 }
 
-/// `intl_error_reset(NULL)`.
+/// `intl_error_reset(NULL)`. A native whose php counterpart resets the
+/// request's error ahead of its ZPP (`INTL_METHOD_INIT_VARS` and the
+/// area macros built on it) names this as its `before_args`, so an
+/// argument's `TypeError` or `ArgumentCountError` leaves no earlier
+/// failure standing; `IntlListFormatter` and the `grapheme_*` functions
+/// reset nothing there, and the failure stands.
+///
+/// ```php
+/// $cal = IntlCalendar::createInstance('UTC'); $col = new Collator('en'); $bi = IntlBreakIterator::createWordInstance('en');
+/// $nf = new NumberFormatter('en', NumberFormatter::DECIMAL); $tz = IntlTimeZone::createTimeZone('UTC'); $df = new IntlDateFormatter('en');
+/// $lf = new IntlListFormatter('en'); $pg = new IntlDatePatternGenerator('en'); $x = $y = 0;
+/// $calls = [
+///     'calendar' => fn() => $cal->get([]), 'collator' => fn() => $col->compare([], 'a'),
+///     'breakiterator' => fn() => $bi->following([]), 'formatter' => fn() => $nf->format([]),
+///     'timezone' => fn() => $tz->getOffset([], true, $x, $y), 'normalizer' => fn() => normalizer_normalize([]),
+///     'locale' => fn() => locale_get_display_name([]), 'transliterator' => fn() => transliterator_transliterate([], 'a'),
+///     'dateformat' => fn() => $df->format([]), 'listformatter' => fn() => $lf->format(1),
+///     'datepatterngenerator' => fn() => $pg->getBestPattern([]), 'idn' => fn() => idn_to_ascii([]),
+///     'grapheme' => fn() => grapheme_strlen([]), 'iterator' => fn() => $bi->getPartsIterator()->key(1),
+/// ];
+/// foreach ($calls as $area => $f) {
+///     IntlChar::isalpha(0x110000);
+///     try { $f(); } catch (TypeError|ArgumentCountError $e) {}
+///     echo $area, ' ', intl_get_error_code(), "\n";
+/// }
+/// ```
+/// ```expect
+/// calendar 0
+/// collator 0
+/// breakiterator 0
+/// formatter 0
+/// timezone 0
+/// normalizer 0
+/// locale 0
+/// transliterator 0
+/// dateformat 0
+/// listformatter 1
+/// datepatterngenerator 0
+/// idn 0
+/// grapheme 1
+/// iterator 0
+/// ```
 pub(crate) fn reset(req: &mut Request) {
     global(req).reset();
-}
-
-/// `INTL_METHOD_INIT_VARS` before the arguments are parsed, as most of
-/// php's natives reset the request's error: the reset, then the count of
-/// arguments held to `min..=max`; the native holds each one itself
-/// (`arity = manual`).
-pub(crate) fn init_vars(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    reset(req);
-    php_ext::raising::arity(req, min, Some(max))
 }
 
 /// `intl_error_set_code(NULL, code)`.
@@ -136,19 +168,71 @@ pub(crate) fn constructing<T>(req: &mut Request, f: impl FnOnce(&mut Request) ->
 
 /// `intl_error_set_custom_msg(NULL, msg)`: raised at `intl.error_level`,
 /// thrown as `IntlException` under `intl.use_exceptions`, and kept as
-/// the request's message.
+/// the request's message. The warning prints the message's bytes, as
+/// php's `php_error_docref(NULL, level, "%s", msg)` does, a key that is
+/// not UTF-8 included:
+///
+/// ```php
+/// ini_set('intl.error_level', E_WARNING);
+/// set_error_handler(function ($n, $m) { echo bin2hex($m), "\n"; return true; });
+/// (new MessageFormatter('en', '{0}'))->format(["\xffk" => 1]);
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): Using a value different than 0 for intl.error_level is deprecated, as the intl.error_level INI setting is deprecated. Instead the intl.use_exceptions INI setting should be enabled to throw exceptions on errors or intl_get_error_code()/intl_get_error_message() should be used to manually deal with errors in %s on line 2
+/// 4d657373616765466f726d61747465723a3a666f726d617428293a20496e76616c6964205554462d38206461746120696e20617267756d656e74206b65793a2027ff6b27
+/// ```
 pub(crate) fn set_custom_msg(req: &mut Request, message: impl AsRef<[u8]>) -> Result<(), Thrown> {
     custom_msg(req, None, message.as_ref())
 }
 
 /// [`set_custom_msg`] where `pending` may already be thrown, as php's C
 /// goes on past a throw: the `IntlException` chained to it, and it
-/// handed on where nothing more is thrown.
+/// handed on where nothing more is thrown. What an error handler throws
+/// from the level's warning is pending from there on, so the
+/// `IntlException` chains over it as `zend_throw_exception_internal`
+/// chains over `EG(exception)`:
+///
+/// ```php
+/// ini_set('intl.error_level', E_WARNING);
+/// ini_set('intl.use_exceptions', 1);
+/// set_error_handler(function ($n, $m) { throw new RuntimeException($m); });
+/// try { IntlChar::isalpha(0x110000); } catch (Throwable $e) { for (; $e; $e = $e->getPrevious()) echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ini_set('intl.use_exceptions', 0);
+/// try { IntlChar::isalpha(0x110000); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): Using a value different than 0 for intl.error_level is deprecated, as the intl.error_level INI setting is deprecated. Instead the intl.use_exceptions INI setting should be enabled to throw exceptions on errors or intl_get_error_code()/intl_get_error_message() should be used to manually deal with errors in %s on line 2
+/// IntlException: IntlChar::isalpha(): Codepoint out of range
+/// RuntimeException: IntlChar::isalpha(): Codepoint out of range
+/// RuntimeException: IntlChar::isalpha(): Codepoint out of range
+/// ```
+///
+/// The later errors of a call that goes on past a throw hand no handler
+/// their warning, and chain over what the first one's handler threw:
+///
+/// ```php
+/// ini_set('intl.error_level', E_WARNING);
+/// ini_set('intl.use_exceptions', 1);
+/// set_error_handler(function ($n, $m) { echo "handler: $m\n"; throw new RuntimeException($m); });
+/// $f = new IntlDateFormatter('en_US', IntlDateFormatter::SHORT, IntlDateFormatter::SHORT, 'UTC');
+/// try { $f->format(['tm_year' => 'x', 'tm_mon' => 1.5]); } catch (Throwable $e) {
+///     for (; $e; $e = $e->getPrevious()) echo get_class($e), ': ', $e->getMessage(), "\n";
+/// }
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): Using a value different than 0 for intl.error_level is deprecated, as the intl.error_level INI setting is deprecated. Instead the intl.use_exceptions INI setting should be enabled to throw exceptions on errors or intl_get_error_code()/intl_get_error_message() should be used to manually deal with errors in %s on line 2
+/// handler: IntlDateFormatter::format(): parameter array contains a non-integer element for key 'tm_year'
+/// IntlException: IntlDateFormatter::format(): date formatting failed
+/// IntlException: IntlDateFormatter::format(): error cloning calendar
+/// IntlException: IntlDateFormatter::format(): parameter array contains a non-integer element for key 'tm_year'
+/// RuntimeException: IntlDateFormatter::format(): parameter array contains a non-integer element for key 'tm_year'
+/// ```
 fn custom_msg(req: &mut Request, pending: Option<Thrown>, message: &[u8]) -> Result<(), Thrown> {
     let text = prefixed(req, message);
-    if let Some(level) = error_level(req) {
-        docref(req, level, &String::from_utf8_lossy(message));
-    }
+    let pending = match error_level(req) {
+        Some(level) => raise(req, pending, level, message),
+        None => pending,
+    };
     let thrown = if use_exceptions(req) {
         Some(intl_exception(req, pending, &text))
     } else {
@@ -156,6 +240,24 @@ fn custom_msg(req: &mut Request, pending: Option<Thrown>, message: &[u8]) -> Res
     };
     global(req).message = Some(Box::new(text));
     thrown.map_or(Ok(()), Err)
+}
+
+/// `php_error_docref(NULL, level, "%s", msg)`: the warning raised, and
+/// what an error handler threw from it pending from there on. Where a
+/// throwable is pending already, php's `zend_call_function` hands no
+/// handler the warning, and it is raised while that one stands.
+fn raise(
+    req: &mut Request,
+    pending: Option<Thrown>,
+    level: Level,
+    message: &[u8],
+) -> Option<Thrown> {
+    if let Some(pending) = pending {
+        while_pending(req, &pending, |req| docref(req, level, message));
+        return Some(pending);
+    }
+    docref(req, level, message);
+    php_ext::raising::pending(req).err()
 }
 
 /// `zend_throw_exception(IntlException, text)`, chained to what is

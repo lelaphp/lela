@@ -18,9 +18,11 @@ use inline::Arith;
 
 use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
-use crate::api::abi::{PropertiesFor, PropertyPurpose};
+use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
-use crate::api::raising::{Level, Thrown, deprecated, none_pending, throw, throw_error, warning};
+use crate::api::raising::{
+    Level, Thrown, deprecated, illegal_container_offset, none_pending, throw, throw_error, warning,
+};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
@@ -4262,7 +4264,12 @@ pub(crate) fn string_dim_offset(
             // `if (type == BP_VAR_IS) { ZVAL_NULL(result); return; }`,
             // the one arm that stands before `zend_illegal_string_offset`.
             _ if mode == DimRead::Silent => Ok(None),
-            _ => Err(illegal_offset(req, "access", &dim, "on string")),
+            _ => Err(illegal_container_offset(
+                req,
+                "string",
+                &dim,
+                DimensionRead::Warning,
+            )),
         },
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
             if mode == DimRead::Warning {
@@ -4277,7 +4284,12 @@ pub(crate) fn string_dim_offset(
         ValueRef::Array(_)
         | ValueRef::Object(_)
         | ValueRef::Resource(_)
-        | ValueRef::Reference(_) => Err(illegal_offset(req, "access", &dim, "on string")),
+        | ValueRef::Reference(_) => Err(illegal_container_offset(
+            req,
+            "string",
+            &dim,
+            DimensionRead::Warning,
+        )),
     }
 }
 
@@ -4411,9 +4423,12 @@ pub(crate) fn array_offset(
             Ok(php_heap::Key::Long(id))
         }
         ValueRef::Undef => empty(req),
-        ValueRef::Array(_) | ValueRef::Object(_) => {
-            Err(illegal_offset(req, "access", offset, "on array"))
-        }
+        ValueRef::Array(_) | ValueRef::Object(_) => Err(illegal_container_offset(
+            req,
+            "array",
+            offset,
+            DimensionRead::Warning,
+        )),
     }
 }
 
@@ -4635,9 +4650,12 @@ pub(crate) fn isset_offset(
     // and the type's for everything else.
     let held = offset.deref();
     match held.as_ref() {
-        ValueRef::Array(_) | ValueRef::Object(_) => {
-            Err(illegal_offset(req, "access", &held, "in isset or empty"))
-        }
+        ValueRef::Array(_) | ValueRef::Object(_) => Err(illegal_container_offset(
+            req,
+            "array",
+            &held,
+            DimensionRead::Silent,
+        )),
         _ => array_offset(req, &held, constant),
     }
 }
@@ -4748,7 +4766,12 @@ pub(crate) fn unset_dim(
             return Ok(());
         }
         ValueRef::Array(_) | ValueRef::Object(_) => {
-            return Err(illegal_offset(req, "unset", &offset.deref(), "on array"));
+            return Err(illegal_container_offset(
+                req,
+                "array",
+                offset,
+                DimensionRead::Unset,
+            ));
         }
         // `deref` followed the reference already.
         ValueRef::Reference(_) => return Ok(()),
@@ -4819,24 +4842,11 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
 /// Unsupported operand types: ArrayObject | int
 /// Unsupported operand types: array - bool
 /// ```
-fn zval_type_name(req: &Request, value: &Value) -> String {
+pub(crate) fn zval_type_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
         ValueRef::Object(o) => req.class_name(o.class()),
         _ => String::from(value.type_name()),
     }
-}
-
-/// `zend_illegal_container_offset` (`Z/Zend/zend.c:1846`):
-/// php's `TypeError` over an offset no container takes, an array or an
-/// object, named as `zend_zval_type_name` names it, `verb` the access
-/// and `container` what it was taken against.
-fn illegal_offset(req: &mut Request, verb: &str, offset: &Value, container: &str) -> Thrown {
-    let name = zval_type_name(req, offset);
-    throw_error(
-        req,
-        "TypeError",
-        &format!("Cannot {verb} offset of type {name} {container}"),
-    )
 }
 
 /// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:108`): `SIZE_MAX` less the

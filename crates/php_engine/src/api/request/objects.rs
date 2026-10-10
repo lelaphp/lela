@@ -1143,7 +1143,10 @@ impl Request {
     /// `zend_std_cast_object_tostring`: `__toString` for a string, its
     /// value where it is one and php's `Error` where it is not; `true`
     /// for a bool; and none for every other type and for a class with no
-    /// `__toString`.
+    /// `__toString`. php throws the `Error` only where nothing is pending
+    /// (`if (!EG(exception))`): a call refused while a throwable stands,
+    /// as a native's conversion past a throw meets it, answers that one,
+    /// which ext/intl's `umsg_format_helper` is the witness of.
     pub(crate) fn cast_object(
         &mut self,
         object: PhpObject,
@@ -1160,6 +1163,7 @@ impl Request {
                     return Ok(Some(Owner::adopt(value)));
                 }
                 self.release(value);
+                crate::api::raising::pending(self)?;
                 let class = self.class_name(object.class());
                 Err(crate::api::raising::throw_error(
                     self,

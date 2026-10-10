@@ -220,7 +220,7 @@ impl IntlBreakIterator {
     const SENTENCE_SEP: i64 = 100;
     const SENTENCE_SEP_LIMIT: i64 = 200;
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createCharacterInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
@@ -228,17 +228,16 @@ impl IntlBreakIterator {
         factory(req, 0, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createCodePointInstance(
         req: &mut Request,
     ) -> Answer<Owner<Instance<IntlCodePointBreakIterator>>> {
-        error::reset(req);
         let made = Breaker::open(5, c"")
             .map_err(|_| fatal(req, "InternalError: IntlCodePointBreakIterator"))?;
         made_object(req, made).map(Owner::into_instance)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createLineInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
@@ -246,7 +245,7 @@ impl IntlBreakIterator {
         factory(req, 2, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createSentenceInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
@@ -254,7 +253,7 @@ impl IntlBreakIterator {
         factory(req, 3, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createTitleInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
@@ -262,7 +261,7 @@ impl IntlBreakIterator {
         factory(req, 4, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createWordInstance(
         req: &mut Request,
         #[php(default = null)] locale: Option<PhpString>,
@@ -280,40 +279,39 @@ impl IntlBreakIterator {
         ))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn current(req: &mut Request, this: This<Self>) -> Answer<i64> {
         step(req, this.object(), Step::Current, None)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn first(req: &mut Request, this: This<Self>) -> Answer<i64> {
         step(req, this.object(), Step::First, None)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn following(req: &mut Request, this: This<Self>, offset: i64) -> Answer<i64> {
         step(req, this.object(), Step::Following, Some(offset))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
         i64::from(error::object_code::<BreakObject>(req, this.object()).0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         let message = error::object_message::<BreakObject>(req, this.object());
         PhpString::new(req, &message)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getLocale(
         req: &mut Request,
         this: This<Self>,
         r#type: i64,
     ) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
-        error::reset(req);
         if r#type != 0 && r#type != 1 {
             error::set(req, Code::ILLEGAL_ARGUMENT, "invalid locale type")?;
             return Ok(OrFalse::False);
@@ -327,14 +325,13 @@ impl IntlBreakIterator {
         PhpString::new(req, &name).map(OrFalse::Value)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getPartsIterator(
         req: &mut Request,
         this: This<Self>,
         #[php(default = IntlPartsIterator::KEY_SEQUENTIAL)] r#type: Raw<PhpString>,
     ) -> Answer<Owner<Instance<IntlPartsIterator>>> {
         let object = this.object();
-        error::reset(req);
         let key = coerce_param(req, &r#type.value(), &Type::Int, 1)?
             .as_int()
             .unwrap_or(-1);
@@ -351,27 +348,26 @@ impl IntlBreakIterator {
         iterator::made(req, b"IntlPartsIterator", Box::new(walk)).map(Owner::into_instance)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getText(req: &mut Request, this: This<Self>) -> Answer<Option<PhpString>> {
         let object = this.object();
-        error::reset(req);
         with(req, object, |_| ())?;
         Ok(object
             .native::<BreakObject>(req)
             .and_then(|o| o.text.as_deref().copied()))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn isBoundary(req: &mut Request, this: This<Self>, offset: i64) -> Answer<bool> {
         step(req, this.object(), Step::IsBoundary, Some(offset)).map(|n| n != 0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn last(req: &mut Request, this: This<Self>) -> Answer<i64> {
         step(req, this.object(), Step::Last, None)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn next(
         req: &mut Request,
         this: This<Self>,
@@ -383,20 +379,19 @@ impl IntlBreakIterator {
         }
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn preceding(req: &mut Request, this: This<Self>, offset: i64) -> Answer<i64> {
         step(req, this.object(), Step::Preceding, Some(offset))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn previous(req: &mut Request, this: This<Self>) -> Answer<i64> {
         step(req, this.object(), Step::Previous, None)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setText(req: &mut Request, this: This<Self>, text: PhpString) -> Answer<bool> {
         let object = this.object();
-        error::reset(req);
         let set = with(req, object, |b| b.set_text(text.as_bytes()))?;
         if let Err((at, status)) = set {
             let message = if at == 1 {
@@ -429,6 +424,7 @@ impl IntlBreakIterator {
 
 #[php_class]
 impl IntlRuleBasedBreakIterator {
+    #[php(before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -436,7 +432,6 @@ impl IntlRuleBasedBreakIterator {
         #[php(default = false)] compiled: bool,
     ) -> Answer<()> {
         let object = this.object();
-        error::reset(req);
         if object
             .native::<BreakObject>(req)
             .is_some_and(|o| o.biter.is_some())
@@ -480,7 +475,7 @@ impl IntlRuleBasedBreakIterator {
         }
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getBinaryRules(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         let rules = with(req, object, Breaker::binary_rules)?;
@@ -492,7 +487,7 @@ impl IntlRuleBasedBreakIterator {
         PhpString::new(req, &rules).map(OrFalse::Value)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getRules(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         let (rules, _) = with(req, object, Breaker::rules)?;
@@ -510,12 +505,12 @@ impl IntlRuleBasedBreakIterator {
         }
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getRuleStatus(req: &mut Request, this: This<Self>) -> Answer<i64> {
         step(req, this.object(), Step::RuleStatus, None)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getRuleStatusVec(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpArray>>> {
         let object = this.object();
         match with(req, object, Breaker::rule_status_vec)? {
@@ -541,7 +536,7 @@ impl IntlRuleBasedBreakIterator {
 
 #[php_class]
 impl IntlCodePointBreakIterator {
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getLastCodePoint(req: &mut Request, this: This<Self>) -> Answer<i64> {
         step(req, this.object(), Step::LastCodePoint, None)
     }
@@ -553,7 +548,7 @@ impl IntlPartsIterator {
     const KEY_LEFT: i64 = 1;
     const KEY_RIGHT: i64 = 2;
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getBreakIterator(
         req: &mut Request,
         this: This<Self>,
@@ -568,7 +563,7 @@ impl IntlPartsIterator {
         }
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getRuleStatus(req: &mut Request, this: This<Self>) -> Answer<i64> {
         let data = iterator::data(req, this.object())?;
         let Some(object) = data.and_then(|v| v.as_object().copied()) else {
@@ -591,7 +586,6 @@ fn factory(
     kind: i32,
     locale: Option<PhpString>,
 ) -> Answer<Option<Owner<Instance<IntlBreakIterator>>>> {
-    error::reset(req);
     let locale = match locale {
         Some(l) => c_string(l.as_bytes()),
         None => c_string(&crate::default_locale(req)),
@@ -655,7 +649,6 @@ fn status_ok(req: &mut Request, object: PhpObject, status: Code, message: &str) 
 /// `_breakiter_no_args_ret_int32` and `_breakiter_int32_ret_int32`: an
 /// offset held to `int32_t` first.
 fn step(req: &mut Request, object: PhpObject, which: Step, offset: Option<i64>) -> Answer<i64> {
-    error::reset(req);
     if which != Step::IsBoundary {
         with(req, object, |_| ())?;
     }

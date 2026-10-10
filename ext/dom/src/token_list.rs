@@ -16,7 +16,7 @@ use php_ext::values::{Emalloc, Key, Owner, PhpObject, PhpString, Value, ValueRef
 use php_ext_libxml::ffi::Node;
 
 use crate::object::{Code, Dom, Extra};
-use crate::{class_name, dom_error_message, dom_mut, string};
+use crate::{dom_error_message, dom_mut, string};
 
 /// `ascii_whitespace`, infra's.
 pub(crate) const ASCII_WHITESPACE: &[u8] = b"\x09\x0A\x0C\x0D\x20";
@@ -609,16 +609,15 @@ fn offset(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
     })
 }
 
-/// `zend_illegal_container_offset`.
-fn illegal_offset(req: &mut Request, object: PhpObject, value: &Value, isset: bool) -> Thrown {
-    let given = php_ext::coerce::type_name(req, value);
-    let message = if isset {
-        format!("Cannot access offset of type {given} in isset or empty")
-    } else {
-        let class = class_name(req, object.class());
-        format!("Cannot access offset of type {given} on {class}")
-    };
-    throw_error(req, "TypeError", &message)
+/// `zend_illegal_container_offset(object->ce->name, offset, read)`.
+fn illegal_offset(
+    req: &mut Request,
+    object: PhpObject,
+    value: &Value,
+    read: DimensionRead,
+) -> Thrown {
+    let class = req.class_name(object.class());
+    php_ext::raising::illegal_container_offset(req, &class, value, read)
 }
 
 /// `dom_token_list_object_handlers`.
@@ -720,12 +719,7 @@ impl ObjectHandlers for TokenListHandlers {
         };
         match offset(req, offset_value)? {
             Some(index) => item_value(req, object, index),
-            None => Err(illegal_offset(
-                req,
-                object,
-                offset_value,
-                read == DimensionRead::Silent,
-            )),
+            None => Err(illegal_offset(req, object, offset_value, read)),
         }
     }
 
@@ -737,7 +731,12 @@ impl ObjectHandlers for TokenListHandlers {
         not_empty: bool,
     ) -> Result<bool, Thrown> {
         let Some(index) = offset(req, offset_value)? else {
-            return Err(illegal_offset(req, object, offset_value, true));
+            return Err(illegal_offset(
+                req,
+                object,
+                offset_value,
+                DimensionRead::Silent,
+            ));
         };
         if not_empty {
             let value = item_value(req, object, index)?;

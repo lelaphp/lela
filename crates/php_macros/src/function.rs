@@ -202,8 +202,9 @@ pub(crate) fn checks(signature: &Signature, class: Option<&Ident>) -> Vec<Tokens
     out
 }
 
-/// The entry's reads: the native recorded as entered, then the arity,
-/// then each argument held at its position, its default evaluated where
+/// The entry's reads: the native recorded as entered, then what
+/// `before_args` names, then the arity, then each argument held at its
+/// position, its default evaluated where
 /// the call gave none. `scope` names the declaring class for a default
 /// that reads `self::`; `site` is the native as the source names it, its
 /// `#[php_class]` type or none and its identifier, which `xtask witness`
@@ -211,7 +212,7 @@ pub(crate) fn checks(signature: &Signature, class: Option<&Ident>) -> Vec<Tokens
 pub(crate) fn prologue(
     params: &[Param],
     scope: &Tokens,
-    manual: bool,
+    reads: &Reads,
     site: (Option<&Ident>, &Ident),
 ) -> Tokens {
     let root = root();
@@ -227,7 +228,8 @@ pub(crate) fn prologue(
     let entered = quote! {
         #root::__private::entered(__request, ::core::env!("CARGO_CRATE_NAME"), #owner, #name);
     };
-    let arity = if manual {
+    let before = reads.before.as_ref().map(|path| quote!(#path(__request);));
+    let arity = if reads.manual {
         quote!()
     } else {
         let steps = params.iter().map(|param| {
@@ -262,7 +264,7 @@ pub(crate) fn prologue(
             #root::__private::arity(__request, required, if #unbounded { None } else { Some(#total) })?;
         }
     };
-    let reads = params.iter().enumerate().map(|(at, param)| {
+    let holds = params.iter().enumerate().map(|(at, param)| {
         let ident = &param.ident;
         let ty = &param.ty;
         let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
@@ -279,8 +281,9 @@ pub(crate) fn prologue(
     });
     quote! {
         #entered
+        #before
         #arity
-        #(#reads)*
+        #(#holds)*
     }
 }
 
@@ -289,17 +292,36 @@ const FUNCTION_KEYS: &[(&str, Form)] = &[
     ("aliases", Form::List),
     ("frameless", Form::List),
     ("arity", Form::Eq),
+    ("before_args", Form::Eq),
     ("deprecated", Form::FlagOrList),
     ("no_discard", Form::FlagOrList),
     ("attribute", Form::List),
 ];
 
-/// `arity = manual`: the body counts its own arguments.
-pub(crate) fn manual(keys: &Keys) -> syn::Result<bool> {
-    match keys.eq("arity") {
-        None => Ok(false),
-        Some(tokens) if tokens.to_string() == "manual" => Ok(true),
-        Some(_) => Err(error(keys.span("arity"), "`arity` is `arity = manual`")),
+/// What the attribute says of the entry's reads.
+pub(crate) struct Reads {
+    /// `arity = manual`: the body counts its own arguments.
+    manual: bool,
+    /// `before_args = path`: a `fn(&mut Request)` the entry calls before
+    /// the arity and the arguments are read, where php's native does its
+    /// own work ahead of `zend_parse_parameters`, as ext/intl's
+    /// `INTL_METHOD_INIT_VARS` resets the request's error first, so an
+    /// argument's `TypeError` leaves no earlier failure standing.
+    before: Option<syn::Path>,
+}
+
+impl Reads {
+    pub(crate) fn of(keys: &Keys) -> syn::Result<Reads> {
+        let manual = match keys.eq("arity") {
+            None => false,
+            Some(tokens) if tokens.to_string() == "manual" => true,
+            Some(_) => return Err(error(keys.span("arity"), "`arity` is `arity = manual`")),
+        };
+        let before = keys
+            .eq("before_args")
+            .map(|tokens| syn::parse2::<syn::Path>(tokens.clone()))
+            .transpose()?;
+        Ok(Reads { manual, before })
     }
 }
 
@@ -319,9 +341,9 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
     }
     let root = root();
     let ident = function.sig.ident.clone();
-    let manual = manual(&keys)?;
+    let reads = Reads::of(&keys)?;
     let parameters = declared_parameters(&signature.params)?;
-    let prologue = prologue(&signature.params, &quote!(None), manual, (None, &ident));
+    let prologue = prologue(&signature.params, &quote!(None), &reads, (None, &ident));
     let output = &signature.output;
     let arguments: Vec<&Ident> = signature.params.iter().map(|param| &param.ident).collect();
     let request = signature.request.then(|| quote!(__request,));
