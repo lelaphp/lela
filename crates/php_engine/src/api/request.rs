@@ -17,9 +17,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use php_heap::{
-    Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, Zval, ZvalRef,
-};
+use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Obj, Ref, Res, ResourceType, Zval, ZvalRef};
 use php_link::LinkedClass;
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
@@ -252,9 +250,11 @@ pub struct Request {
     annexes: crate::exec::Annexes,
     /// The map table of design §5.14, php's `CG(map_ptr_base)`: what a
     /// published unit's map pointers index, laid down with the request,
-    /// every entry `NULL` until touched. Every op array's runtime cache
-    /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
-    map: MapTable<crate::exec::RuntimeCache>,
+    /// every entry `NULL` until touched, and beside it the caches of the
+    /// units compiled for the request alone, php's heap caches. Every op
+    /// array's runtime cache stands in one of them
+    /// ([`exec::RuntimeCaches`]) and nowhere else.
+    map: crate::exec::RuntimeCaches,
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
@@ -590,7 +590,7 @@ pub(crate) struct FrameShape {
     /// The first opline past the `RECV*` prologue, `safepoints[0]`.
     pub(crate) entry: u32,
     /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
-    pub(crate) cache: u32,
+    pub(crate) cache: exec::CacheAt,
     /// `op_array.cache_size`.
     pub(crate) cache_size: u32,
 }
@@ -606,7 +606,9 @@ impl FrameShape {
             entry: code
                 .and_then(|code| code.safepoints.first())
                 .map_or(0, |at| at.0),
-            cache: code.map_or(0, |code| code.runtime_cache),
+            cache: code.map_or_else(exec::CacheAt::default, |code| {
+                exec::CacheAt::of(code.runtime_cache)
+            }),
             cache_size: code.map_or(0, |code| code.cache_size),
         }
     }
@@ -776,7 +778,7 @@ impl Request {
             heap,
             vm,
             annexes: crate::exec::Annexes::default(),
-            map: MapTable::new(),
+            map: crate::exec::RuntimeCaches::default(),
             state: state::RequestState::default(),
             ini: ini::Ini::new(typed_ini),
             diagnostics: diagnostics::Diagnostics::default(),

@@ -4823,7 +4823,7 @@ impl Emit<'_> {
             line_start,
             line_end,
             cache_size: self.cache_slots,
-            runtime_cache: 0,
+            runtime_cache: php_unit::MapPtrOffset::default(),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into_boxed_slice(),
             bound_vars: std::mem::take(&mut self.static_vars).into_boxed_slice(),
             no_receiver: self.fn_flags.is_static,

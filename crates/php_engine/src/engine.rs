@@ -897,13 +897,9 @@ pub(crate) struct Shared {
 /// and no offset, so its count does not move for it, where this one
 /// does.
 pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
-    let bodies = std::iter::once(&mut unit.main)
-        .chain(unit.functions.iter_mut().map(|(_, code)| code))
-        .chain(unit.dynamic.iter_mut().map(|(_, code)| code))
-        .chain(unit.methods.iter_mut().map(|method| &mut method.body))
-        .chain(unit.hooks.iter_mut().map(|hook| &mut hook.body));
-    for code in bodies {
-        code.runtime_cache = map_ptr_last.fetch_add(1, Ordering::Relaxed);
+    for code in exec::op_arrays_mut(unit) {
+        code.runtime_cache =
+            php_unit::MapPtrOffset::Engine(map_ptr_last.fetch_add(1, Ordering::Relaxed));
     }
 }
 

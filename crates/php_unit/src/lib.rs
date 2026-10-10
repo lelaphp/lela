@@ -32,8 +32,8 @@ mod opcode {
 pub use enum_methods::enum_methods;
 pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{
-    BoundVar, CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, OpArray, OperandKind, Opline,
-    OplineIdx, TryCatch,
+    BoundVar, CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, MapPtrOffset, OpArray,
+    OperandKind, Opline, OplineIdx, TryCatch,
 };
 pub use opcode::Opcode;
 pub use types::{type_to_string, type_to_string_called};

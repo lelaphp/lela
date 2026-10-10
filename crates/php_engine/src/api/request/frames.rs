@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use php_heap::{Fatal, FrameRef, MapPtr, Slot, Zval, ZvalRef};
+use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef};
 use php_unit::{CacheSlot, Unit};
 
 use crate::api::call::Function;
@@ -729,7 +729,7 @@ impl Request {
                 }
             }
         }
-        exec::lay_runtime_cache(&mut self.map, MapPtr::new(shape.cache), shape.cache_size);
+        exec::lay_runtime_cache(&mut self.map, shape.cache, shape.cache_size);
         crate::observer::call(self, call);
         Ok(exec::Activated {
             frame: call,
