@@ -799,6 +799,19 @@ fn longish(value: &Value) -> bool {
 ///   string(2) "x]"
 /// }
 /// ```
+///
+/// The key is read through the argument, which keeps its owner: a
+/// string the program built is still its own after the call, and an
+/// integer is read as its string.
+///
+/// ```php
+/// $s = str_repeat("[g]", 2) . "n"; $r = dba_key_split($s); echo $s, ' ', $r[0], ' ', $r[1], "\n";
+/// $r = dba_key_split(12); echo $r[0], '|', $r[1], "\n";
+/// ```
+/// ```expect
+/// [g][g]n g [g]n
+/// |12
+/// ```
 #[php_function]
 pub(crate) fn dba_key_split(
     req: &mut Request,
@@ -821,7 +834,6 @@ pub(crate) fn dba_key_split(
         return Ok(OrFalse::False);
     };
     let bytes = text.as_bytes().to_vec();
-    req.release(held);
     let (group, name) = match bytes.iter().position(|&b| b == b']') {
         Some(close) if bytes.first() == Some(&b'[') => (&bytes[1..close], &bytes[close + 1..]),
         _ => (&[][..], &bytes[..]),

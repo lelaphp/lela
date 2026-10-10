@@ -667,7 +667,6 @@ fn rounding(
         Some(b"PositiveInfinity") => Some(Rounding::Ceiling),
         _ => None,
     };
-    req.release(name);
     rounding.ok_or_else(|| value_error(req, position, "is an unsupported rounding mode"))
 }
 
