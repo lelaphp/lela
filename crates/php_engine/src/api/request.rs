@@ -60,7 +60,7 @@ pub(crate) use constants::halt_offset_key;
 mod diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
 pub use diagnostics::{FormatDate, Syslog};
-pub(crate) use diagnostics::{append_escaped, escape_html, escaped_html_sizes};
+pub(crate) use diagnostics::{append_escaped, escape_html};
 mod ending;
 pub(crate) use ending::{Ending, Phase};
 mod environment;

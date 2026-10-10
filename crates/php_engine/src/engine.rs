@@ -5319,7 +5319,12 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
             req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
         }
         (php_compile::Stage::Compiling, true) => {
-            req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
+            req.end_in_uncaught(
+                refused.level,
+                refused.message.as_bytes(),
+                file,
+                refused.line,
+            );
         }
         (php_compile::Stage::Compiling, false) => {
             req.end_in_compile_time(refused.level, &refused.message, file, refused.line);

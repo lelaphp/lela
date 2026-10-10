@@ -274,10 +274,12 @@ impl Request {
                     return Err(Fatal::Error(String::new()));
                 }
             }
-            format!(
-                "Uncaught {}\n  thrown",
-                string_prop(self, throwable, b"string")
-            )
+            [
+                b"Uncaught ".as_slice(),
+                &string_prop(self, throwable, b"string"),
+                b"\n  thrown",
+            ]
+            .concat()
         };
         let (file, line) = self.throw_site(throwable);
         // `zend_error_va` with no file for a throwable that recorded an
@@ -289,12 +291,12 @@ impl Request {
             file
         };
         if compile_time.is_none() && severity != Level::Error {
-            crate::api::raising::raise_at(self, severity, &message, &file, line);
+            self.note_error_bytes_in(severity, &message, &file, line);
             self.release(throwable.as_value());
             return Ok(());
         }
         self.end_in_uncaught(compile_time.unwrap_or(Level::Error), &message, &file, line);
-        let fatal = Fatal::Error(message);
+        let fatal = Fatal::Error(String::from_utf8_lossy(&message).into_owned());
         // `zend_exception_error` ends with `OBJ_RELEASE(ex)`: the pending
         // slot's owner, given up once the rendering has read it.
         self.release(throwable.as_value());
@@ -752,14 +754,11 @@ pub enum Raised {
     GracefulExit,
 }
 
-/// One string property of a throwable, empty where there is none.
-fn string_prop(req: &Request, object: PhpObject, name: &[u8]) -> String {
+/// One string property of a throwable, its bytes as they stand, empty
+/// where there is none.
+fn string_prop(req: &Request, object: PhpObject, name: &[u8]) -> Vec<u8> {
     object
         .prop(req, name)
-        .and_then(|value| {
-            value
-                .as_str_bytes()
-                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-        })
+        .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
         .unwrap_or_default()
 }

@@ -54,12 +54,14 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
+mod charset;
 mod emalloc;
 mod fresh;
 mod identity;
 mod owner;
 mod smart_str;
 pub mod walk;
+pub use charset::Charset;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
 pub use identity::Identity;
