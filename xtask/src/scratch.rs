@@ -1,5 +1,6 @@
 //! A scratch tree that owns itself (#194): one directory under the
-//! system's temporary directory, made by the constructor and taken away
+//! system's temporary directory, or under `/tmp` for a program the oracle
+//! runs ([`Tree::short`]), made by the constructor and taken away
 //! again when the value goes out of scope, however it goes out of scope.
 //!
 //! The harness makes scratch trees in two places that cannot see each
@@ -73,9 +74,9 @@ const TAKING: &str = ".lock-taking";
 ///
 /// [`Tree::new`] takes a name for the caller — the test, or the lane — and
 /// the path it makes is that name between `xtask-` and two numbers that
-/// make it this one's alone: the process, and a counter of the trees this
-/// process has made. Two tests naming themselves the same thing at the
-/// same time get two trees.
+/// make it this one's alone, each at a fixed width ([`unique`]): the
+/// process, and a counter of the trees this process has made. Two tests
+/// naming themselves the same thing at the same time get two trees.
 ///
 /// Deref, `AsRef<Path>` and `AsRef<OsStr>` are all here, so a call site
 /// reads the way it read when the value was a `PathBuf`:
@@ -105,21 +106,24 @@ impl Tree {
     /// by php through the link it was resolved through, so a caller that
     /// compares paths would compare two spellings of one directory.
     pub fn new(name: &str) -> Result<Tree> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let unique = format!(
-            "{name}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        );
-        Tree::under(&std::env::temp_dir(), &unique)
+        Tree::under(&std::env::temp_dir(), &unique(name))
     }
 
-    /// The tree `xtask-<name>` under `base` and not the temporary
-    /// directory, `name` the caller's to make unique: where a path a
-    /// program is handed must stay short and of one length, as a unix
-    /// socket's must and as a witness's memory count reads it (`run_dir`,
-    /// #1730). `base` is swept as the temporary directory is.
-    pub(crate) fn under(base: &Path, name: &str) -> Result<Tree> {
+    /// The tree for `name` under `/tmp` and not the temporary directory,
+    /// at a path of one length whatever process makes it, however many
+    /// trees that process made before it and whatever `TMPDIR` the
+    /// session has: where a program the oracle runs stands. php reads the
+    /// path back, a unix socket's into its 104 bytes and a program file's into
+    /// `$_SERVER`, whose strings a witness's memory count reads (#1730,
+    /// #2523): under the temporary directory, the count moved with the
+    /// session's `TMPDIR`.
+    pub(crate) fn short(name: &str) -> Result<Tree> {
+        Tree::under(Path::new("/tmp"), &unique(name))
+    }
+
+    /// The tree `xtask-<name>` under `base`, swept as the temporary
+    /// directory is.
+    fn under(base: &Path, name: &str) -> Result<Tree> {
         static SWEPT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
         // Before this process's first tree under `base`, and so before
@@ -167,6 +171,18 @@ impl Tree {
         std::fs::write(&path, contents).map_err(|err| made(err, &path, "writing"))?;
         Ok(path)
     }
+}
+
+/// `name` made this tree's alone, at one length: the process id at the
+/// widest any platform numbers one (Linux's `pid_max` reaches 4194304),
+/// and a counter of the trees this process has made at a width no run
+/// reaches. A number written at its own width moved the path by a byte
+/// whenever the pid or the counter crossed a digit, and with it every
+/// number php reads off the path (#2523).
+fn unique(name: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!("{name}-{:07}-{next:06}", std::process::id())
 }
 
 /// A scratch tree, its lock, or a file a lane writes into one, that could
@@ -574,6 +590,25 @@ mod tests {
             failed
         });
         assert_eq!(failed, None);
+    }
+
+    /// A program's tree is one length however many trees came before it,
+    /// under `/tmp` whatever the session's `TMPDIR` (#2523): a dozen made
+    /// in a row, so the counter crosses a digit wherever it stood, each
+    /// named `xtask-<name>-<7 digits>-<6 digits>` under one directory.
+    #[test]
+    fn a_programs_tree_is_one_length_whatever_the_process_and_the_session() {
+        let trees: Vec<Tree> = (0..12).map(|_| Tree::short("length").unwrap()).collect();
+        let tmp = std::fs::canonicalize("/tmp").unwrap();
+        for tree in &trees {
+            assert_eq!(tree.parent(), Some(tmp.as_path()), "{tree:?}");
+            let name = tree.file_name().unwrap().to_str().unwrap();
+            let numbers = name.strip_prefix("xtask-length-").unwrap();
+            let (pid, next) = numbers.split_once('-').unwrap();
+            assert_eq!((pid.len(), next.len()), (7, 6), "{name}");
+            assert!(numbers.bytes().all(|b| b == b'-' || b.is_ascii_digit()));
+            assert_eq!(pid.parse::<u32>().unwrap(), std::process::id());
+        }
     }
 
     /// A scratch tree the volume has no room for is [`Full`], naming the
