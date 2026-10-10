@@ -295,7 +295,7 @@ fn flag(req: &Request, name: &[u8]) -> bool {
 /// pk(function () { try { assert(false); } catch (Error $e) {} });
 /// ```
 /// ```expect
-/// 4528 32
+/// 4480 32
 /// ```
 ///
 /// A callback that runs is handed the op array's file name and the
@@ -308,7 +308,7 @@ fn flag(req: &Request, name: &[u8]) -> bool {
 /// pk(function () { try { assert(false); } catch (Error $e) {} });
 /// ```
 /// ```expect
-/// 5088 32
+/// 5040 32
 /// ```
 ///
 /// Under `assert.bail` without `assert.exception` the request ends there,
