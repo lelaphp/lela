@@ -787,7 +787,7 @@ impl ParameterMap {
         name: &[u8],
     ) -> Result<(), Thrown> {
         let name = PhpString::filled(req, name.len(), |to| to.copy_from_slice(name))?;
-        let key = Owner::take(req, Key::Int(bindno));
+        let key = Owner::index(bindno);
         self.table.set(req, key, name.into_value())
     }
 

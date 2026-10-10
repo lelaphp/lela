@@ -6,16 +6,16 @@ use std::cmp::Ordering;
 use php_unit::decl::Type;
 
 use crate::api::abi::{Callable, Class, FromArgument, Instance, IntoReturn, Raw, Static};
-use crate::api::call::Target;
+use crate::api::call::{Iter, Target};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value};
 
 /// A view an [`Owner`] can own: [`Value`], the five refcounted kinds, a
 /// [`Key`], the two object returns, [`Instance`] and [`Static`], a
-/// [`Raw`] return, a [`Callable`], and a typed view of one resource
-/// ([`ResourceView`]). Sealed but for that last door: the face lists
-/// them.
+/// [`Raw`] return, a [`Callable`], an [`Iter`], and a typed view of one
+/// resource ([`ResourceView`]). Sealed but for that last door: the face
+/// lists them.
 pub trait View: sealed::Counted + Clone {}
 
 /// A typed view of one [`Resource`]: the streams facet's `Stream` and
@@ -28,12 +28,6 @@ pub trait View: sealed::Counted + Clone {}
 pub trait ResourceView: Copy {
     /// The resource the view is.
     fn resource(&self) -> Resource;
-}
-
-impl ResourceView for Resource {
-    fn resource(&self) -> Resource {
-        *self
-    }
 }
 
 impl<T: ResourceView> sealed::Counted for T {
@@ -75,6 +69,16 @@ mod sealed {
         fn receiver(&self) -> Option<PhpObject> {
             None
         }
+
+        /// The view moved out of an owner that is forgotten next: a copy,
+        /// for a view with no drop glue, which is every view but
+        /// [`super::Callable`].
+        fn moved_out(&mut self) -> Self
+        where
+            Self: Clone,
+        {
+            self.clone()
+        }
     }
 
     /// A view whose owner is the one count on [`Counted::counted`], so
@@ -101,12 +105,14 @@ view!(PhpString, Value::string);
 view!(PhpArray, Value::array);
 view!(PhpObject, Value::object);
 view!(PhpRef, Value::reference);
+view!(Resource, Value::resource);
 
 view!(Key, |k: Key| match k {
     Key::Int(n) => Value::int(n),
     Key::Str(s) => Value::string(s),
 });
 view!(Static, |s: Static| Value::object(s.0));
+view!(Iter, |i: Iter| i.as_value());
 
 impl<C: Class> sealed::Counted for Instance<C> {
     type Kept = ();
@@ -145,6 +151,10 @@ impl sealed::Counted for Callable {
         self.value()
     }
 
+    fn moved_out(&mut self) -> Callable {
+        Callable::moved_out(self)
+    }
+
     fn receiver(&self) -> Option<PhpObject> {
         match self.target() {
             Target::Method {
@@ -175,9 +185,14 @@ impl View for Callable {}
 /// unconsumed releases nothing, as no `Drop` here ever does, and is
 /// recorded on its request's heap, naming the line that made it, and
 /// raised as the `InternalError` that ends the request at the engine's
-/// next sensing point. A release build gives it no `Drop`, so no drop
-/// glue runs (design §5.1), and what such an owner kept is freed with
-/// the request's memory at its end.
+/// next sensing point. The line is kept beside the block the owner
+/// stands on, in its heap's table ([`php_heap::owners`]), not in the
+/// owner, so an owner is its view in every build and a payload held to
+/// php's size holds one as php holds the `zval` (#2246); an owner of
+/// what no count owns, which leaks nothing, is recorded nowhere. A
+/// release build gives it no `Drop`, so no drop glue runs (design §5.1),
+/// and what such an owner kept is freed with the request's memory at
+/// its end.
 ///
 /// A copied owner is a moved one, used once:
 ///
@@ -223,7 +238,7 @@ impl View for Callable {}
 /// # use php_engine::api::request::Request;
 /// # use php_engine::api::values::{Owner, Value};
 /// fn fabricated(req: &mut Request, value: Value) -> Owner<Value> {
-///     Owner::adopt(req, value)
+///     Owner::adopt(value)
 /// }
 /// # fn main() {}
 /// ```
@@ -241,21 +256,8 @@ pub struct Owner<T: View> {
     view: T,
     /// What names the value the count stands on beside the view, read
     /// where the owner was made: nothing for a sealed view, so an owner of
-    /// one is the view alone in a release build.
+    /// one is the view alone.
     kept: T::Kept,
-    /// A debug build's record of where the owner was made, until it is
-    /// consumed.
-    #[cfg(debug_assertions)]
-    made: Option<Made>,
-}
-
-/// Where a debug build's owner was made, and its way to the heap's
-/// sensed record ([`php_heap::Sensor`]).
-#[cfg(debug_assertions)]
-#[derive(Debug)]
-struct Made {
-    site: &'static std::panic::Location<'static>,
-    sensor: php_heap::Sensor,
 }
 
 impl<T: View> Owner<T> {
@@ -272,48 +274,39 @@ impl<T: View> Owner<T> {
         if let Some(receiver) = view.receiver() {
             req.addref(&receiver.as_value());
         }
-        Owner::of(req, view, kept)
+        Owner::of(view, kept)
     }
 
     /// The owner `view` already is: the count a value is made with,
     /// which only the engine hands out.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn adopt(req: &Request, view: T) -> Owner<T> {
+    pub(crate) fn adopt(view: T) -> Owner<T> {
         let kept = view.kept();
-        Owner::of(req, view, kept)
+        Owner::of(view, kept)
     }
 
-    /// The owner of what `view` and `kept` name.
+    /// The owner of what `view` and `kept` name, its line kept in a
+    /// debug build's table.
     #[cfg_attr(debug_assertions, track_caller)]
-    fn of(req: &Request, view: T, kept: T::Kept) -> Owner<T> {
-        #[cfg(not(debug_assertions))]
-        let _ = req;
-        Owner {
-            view,
-            kept,
-            #[cfg(debug_assertions)]
-            made: Some(Made {
-                site: std::panic::Location::caller(),
-                sensor: req.sensor(),
-            }),
-        }
+    fn of(view: T, kept: T::Kept) -> Owner<T> {
+        let owner = Owner { view, kept };
+        #[cfg(debug_assertions)]
+        php_heap::owners::made(owner.sensed_on(), std::panic::Location::caller());
+        owner
     }
 
     /// The owner given up, `zval_ptr_dtor`: the value is freed with its
     /// last owner, an object's destructor served first, and is a possible
     /// root of the cycle collector where owners are left (design §5.12).
-    // Taking the owner is the point: one given up cannot be given up
-    // again.
     // The caller's line is what a debug build's freed-use guard names
     // where the release is refused.
-    #[allow(clippy::needless_pass_by_value)]
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn give_up(mut self, req: &mut Request) {
-        self.consume();
-        if let Some(receiver) = self.view.receiver() {
+    pub fn give_up(self, req: &mut Request) {
+        let (view, kept) = self.consume();
+        if let Some(receiver) = view.receiver() {
             req.release(receiver.as_value());
         }
-        req.release(self.stands_on());
+        req.release(view.counted_on(kept));
     }
 
     /// The owner given up as `zval_ptr_dtor_nogc` gives one up: the value
@@ -322,15 +315,13 @@ impl<T: View> Owner<T> {
     /// what it held where php's held nothing, `zend_array_release`, and
     /// what a native gives up where php's gives up its `ZVAL_COPY` with
     /// `zval_ptr_dtor_nogc` (`json_encode`).
-    // Taking the owner is the point, as `give_up`'s.
-    #[allow(clippy::needless_pass_by_value)]
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn give_up_nogc(mut self, req: &mut Request) {
-        self.consume();
-        if let Some(receiver) = self.view.receiver() {
+    pub fn give_up_nogc(self, req: &mut Request) {
+        let (view, kept) = self.consume();
+        if let Some(receiver) = view.receiver() {
             req.release_nogc(receiver.as_value());
         }
-        req.release_nogc(self.stands_on());
+        req.release_nogc(view.counted_on(kept));
     }
 
     /// The owner left to the request's end, as php's fatal leaves every
@@ -338,17 +329,14 @@ impl<T: View> Owner<T> {
     /// it, and the heap is freed whole with the request (design §5.1).
     /// The fatal it is left to is its argument, so only a path that hands
     /// one on can take it.
-    pub(crate) fn abandon(mut self, _ending: &php_heap::Fatal) {
+    pub(crate) fn abandon(self, _ending: &php_heap::Fatal) {
         self.consume();
     }
 
     /// The view, the owner handed on with it: what a sink keeps, and what
     /// the engine is handed as a native's return.
-    // Taking the owner is the point: the sink holds it from here.
-    #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn hand_on(mut self) -> T {
-        self.consume();
-        self.view.clone()
+    pub(crate) fn hand_on(self) -> T {
+        self.consume().0
     }
 
     /// The value the count stands on.
@@ -356,14 +344,43 @@ impl<T: View> Owner<T> {
         self.view.counted_on(self.kept)
     }
 
-    /// The owner consumed, so a debug build's `Drop` records nothing.
-    // A release build's owner has nothing to mark.
-    #[allow(clippy::unused_self)]
-    fn consume(&mut self) {
-        #[cfg(debug_assertions)]
-        {
-            self.made = None;
+    /// The value a debug build keeps the owner's line beside: the one
+    /// its count stands on, or where that is counted by nothing, the
+    /// receiver a callable's owner counts beside it.
+    #[cfg(debug_assertions)]
+    fn sensed_on(&self) -> php_heap::Zval {
+        let value = self.stands_on();
+        match self.view.receiver() {
+            Some(receiver) if !value.is_refcounted() => receiver.as_value(),
+            _ => value,
         }
+        .to_zval()
+    }
+
+    /// The owner consumed, its line taken off a debug build's table
+    /// before its count moves, and what it was made of moved out without
+    /// its `Drop`, which records only an owner never consumed.
+    fn consume(self) -> (T, T::Kept) {
+        #[cfg(debug_assertions)]
+        php_heap::owners::consumed(self.sensed_on());
+        self.disarmed()
+    }
+
+    /// What the owner was made of, moved out, and the owner forgotten:
+    /// the view's own drop glue, a callable's name, moved out with it, so
+    /// the forgotten owner holds none.
+    #[cfg_attr(
+        debug_assertions,
+        expect(
+            clippy::mem_forget,
+            reason = "a consumed owner skips the debug sensor's Drop, the one thing it would run"
+        )
+    )]
+    fn disarmed(mut self) -> (T, T::Kept) {
+        let view = sealed::Counted::moved_out(&mut self.view);
+        let kept = self.kept;
+        std::mem::forget(self);
+        (view, kept)
     }
 }
 
@@ -380,9 +397,9 @@ impl<T: View + sealed::One> Owner<T> {
     /// diagnostic, and the test they make after it: whether the call the
     /// owner was held across freed the value or took an owner of its own.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn let_go(mut self, req: &mut Request) -> Left {
-        self.consume();
-        let value = self.stands_on();
+    pub(crate) fn let_go(self, req: &mut Request) -> Left {
+        let (view, kept) = self.consume();
+        let value = view.counted_on(kept);
         if !value.is_refcounted() {
             return Left::Uncounted;
         }
@@ -400,20 +417,11 @@ impl<T: View + sealed::One> Owner<T> {
     }
 
     /// The same owner over another view of its value, `kept` naming the
-    /// same value; a debug build's record of where it was made moves to
-    /// it, and this one is consumed.
+    /// same value, so a debug build's line beside the block is its, and
+    /// this one is consumed.
     fn recast<U: View + sealed::One>(self, view: U, kept: U::Kept) -> Owner<U> {
-        #[cfg(debug_assertions)]
-        let made = {
-            let mut recast = self;
-            recast.made.take()
-        };
-        Owner {
-            view,
-            kept,
-            #[cfg(debug_assertions)]
-            made,
-        }
+        self.disarmed();
+        Owner { view, kept }
     }
 }
 
@@ -422,9 +430,8 @@ impl<T: ResourceView> Owner<T> {
     /// count: what a native returns a stream it made as.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_resource(self) -> Owner<Resource> {
-        let resource = self.view.resource();
-        let kept = self.kept;
-        self.recast(resource, kept)
+        let resource = self.kept;
+        self.recast(resource, ())
     }
 }
 
@@ -453,7 +460,7 @@ impl Owner<Resource> {
             view.resource() == self.view,
             "a typed view of another resource"
         );
-        let kept = self.kept;
+        let kept = self.view;
         self.recast(view, kept)
     }
 }
@@ -503,12 +510,7 @@ impl Owner<Value> {
 
     /// The owner of a value its constructor vouches carries no count.
     const fn scalar(view: Value) -> Owner<Value> {
-        Owner {
-            view,
-            kept: (),
-            #[cfg(debug_assertions)]
-            made: None,
-        }
+        Owner { view, kept: () }
     }
 
     /// The owner of the object the value is, the same count: what a
@@ -573,6 +575,29 @@ impl Owner<Value> {
     }
 }
 
+/// The owner of an integer key, made without the request, as
+/// [`Owner::<Value>::int`](Owner::int) is of an integer: `zend_hash_index_update`'s `h`,
+/// which no count owns, so a debug build's owner records no line. The
+/// constructor takes the integer alone, so it cannot name a string key,
+/// whose owner [`Owner::take`] or [`Owner::into_key`] makes.
+///
+/// ```compile_fail,E0308
+/// # use php_engine::api::values::{Key, Owner, PhpString};
+/// fn counted(s: PhpString) -> Owner<Key> {
+///     Owner::index(s)
+/// }
+/// # fn main() {}
+/// ```
+impl Owner<Key> {
+    /// The owner of the integer key `n`.
+    pub const fn index(n: i64) -> Owner<Key> {
+        Owner {
+            view: Key::Int(n),
+            kept: (),
+        }
+    }
+}
+
 impl Owner<Callable> {
     /// `zend_get_gc_buffer_add_fcc`: each value the owner counts, the
     /// callable's value and the receiver it resolved to, handed to a
@@ -611,8 +636,17 @@ impl Owner<PhpArray> {
     /// A write through the owner's array. The count stands on the array
     /// the owner names, so where the write separated it the count moved
     /// with the name.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(super) fn written<R>(&mut self, write: impl FnOnce(&mut PhpArray) -> R) -> R {
-        write(&mut self.view)
+        #[cfg(debug_assertions)]
+        let made = php_heap::owners::consumed(self.sensed_on());
+        let written = write(&mut self.view);
+        #[cfg(debug_assertions)]
+        php_heap::owners::made(
+            self.sensed_on(),
+            made.unwrap_or_else(std::panic::Location::caller),
+        );
+        written
     }
 
     /// Remove `key` from this very table, whatever its other owners,
@@ -734,9 +768,9 @@ impl Owner<PhpArray> {
 /// over the engine's own, whose view is the one owner the value was made
 /// with ([`Owner::adopt`]).
 #[cfg_attr(debug_assertions, track_caller)]
-pub(crate) fn adopted<T: View>(req: &Request, made: Result<T, Thrown>) -> Result<Owner<T>, Thrown> {
+pub(crate) fn adopted<T: View>(made: Result<T, Thrown>) -> Result<Owner<T>, Thrown> {
     match made {
-        Ok(view) => Ok(Owner::adopt(req, view)),
+        Ok(view) => Ok(Owner::adopt(view)),
         Err(thrown) => Err(thrown),
     }
 }
@@ -744,11 +778,10 @@ pub(crate) fn adopted<T: View>(req: &Request, made: Result<T, Thrown>) -> Result
 /// [`adopted`] over what may be nothing.
 #[cfg_attr(debug_assertions, track_caller)]
 pub(crate) fn adopted_some<T: View>(
-    req: &Request,
     made: Result<Option<T>, Thrown>,
 ) -> Result<Option<Owner<T>>, Thrown> {
     match made {
-        Ok(Some(view)) => Ok(Some(Owner::adopt(req, view))),
+        Ok(Some(view)) => Ok(Some(Owner::adopt(view))),
         Ok(None) => Ok(None),
         Err(thrown) => Err(thrown),
     }
@@ -782,14 +815,16 @@ impl Left {
     }
 }
 
-// An owner of a value is the value (#2209): what it keeps beside a sealed
-// view is nothing, and only a debug build's record of where it was made
-// adds to it. Held at every build, so no lane can skip it.
+// An owner of a value is the value (#2209), in every build (#2246): what
+// it keeps beside a sealed view is nothing, and a debug build's line is
+// kept beside the block it stands on. Held at every build, so no lane can
+// skip it.
 const _: () = {
-    #[cfg(not(debug_assertions))]
     assert!(size_of::<Owner<Value>>() == size_of::<Value>());
-    #[cfg(debug_assertions)]
-    assert!(size_of::<Owner<Value>>() == size_of::<Value>() + size_of::<Option<Made>>());
+    assert!(size_of::<Owner<PhpString>>() == size_of::<usize>());
+    assert!(size_of::<Owner<PhpArray>>() == size_of::<usize>());
+    assert!(size_of::<Owner<PhpObject>>() == size_of::<usize>());
+    assert!(size_of::<Owner<Resource>>() == size_of::<usize>());
 };
 
 impl<T: View> std::ops::Deref for Owner<T> {
@@ -801,13 +836,12 @@ impl<T: View> std::ops::Deref for Owner<T> {
 }
 
 /// A debug build's sensor: an owner dropped unconsumed releases nothing
-/// and is recorded on its heap with the line that made it.
+/// and is recorded on its heap with the line that made it. A consumed
+/// owner is forgotten, so this runs only for one never consumed.
 #[cfg(debug_assertions)]
 impl<T: View> Drop for Owner<T> {
     fn drop(&mut self) {
-        if let Some(made) = self.made.take() {
-            made.sensor.unconsumed(made.site);
-        }
+        php_heap::owners::dropped(self.sensed_on());
     }
 }
 

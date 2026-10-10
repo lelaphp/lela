@@ -428,7 +428,7 @@ fn dir_stream(req: &mut Request, given: Option<Stream>) -> Result<Stream, Thrown
             Level::Deprecated,
             "Passing null is deprecated, instead the last opened directory stream should be provided",
         );
-        let default = req.state::<State>().default_dir;
+        let default = req.state::<State>().default_dir.as_deref().copied();
         let Some(stream) = default.and_then(|res| Stream::from_value(req, &res.as_value())) else {
             return Err(throw_error(req, "TypeError", "No resource supplied"));
         };
@@ -443,12 +443,9 @@ fn dir_stream(req: &mut Request, given: Option<Stream>) -> Result<Stream, Thrown
 /// `php_set_default_dir` (`Z/ext/standard/dir.c:62`): the owner the last
 /// directory held given up, and one taken on the new one, or none.
 pub(super) fn set_default_dir(req: &mut Request, stream: Option<Stream>) {
-    let res = stream.map(Stream::resource);
-    if let Some(res) = res {
-        req.addref(&res.as_value());
-    }
+    let res = stream.map(|stream| Owner::take(req, stream.resource()));
     if let Some(old) = std::mem::replace(&mut req.state::<State>().default_dir, res) {
-        req.release(old.as_value());
+        old.give_up(req);
     }
 }
 
@@ -547,6 +544,7 @@ fn closedir(
     let is_default = req
         .state::<State>()
         .default_dir
+        .as_deref()
         .is_some_and(|default| default.id() == res.id());
     if is_default {
         set_default_dir(req, None);

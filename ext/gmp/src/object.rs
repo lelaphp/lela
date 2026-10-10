@@ -109,7 +109,7 @@ impl GMP {
             for (key, value) in rows {
                 let key = match key {
                     Key::Str(name) => Owner::take(req, Key::lookup(name)),
-                    Key::Int(n) => Owner::take(req, Key::Int(n)),
+                    Key::Int(n) => Owner::index(n),
                 };
                 props.set(req, key, Owner::take(req, value))?;
             }

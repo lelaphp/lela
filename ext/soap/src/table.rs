@@ -77,20 +77,21 @@ impl<V> Table<V> {
         true
     }
 
-    /// `zend_hash_update`: the row replaced where it stands, or appended.
-    pub(crate) fn update(&mut self, key: Key, value: V) {
+    /// `zend_hash_update`: the row replaced where it stands, or appended;
+    /// the value it replaced, for the caller to destroy as the table's
+    /// destructor would.
+    pub(crate) fn update(&mut self, key: Key, value: V) -> Option<V> {
         if let Some(&at) = self.index.get(&key) {
-            if let Some(row) = self.rows.get_mut(at) {
-                *row = Some((key, value));
-            }
-            return;
+            let row = self.rows.get_mut(at)?;
+            return row.replace((key, value)).map(|(_, old)| old);
         }
         self.add(key, value);
+        None
     }
 
     /// `zend_hash_str_update`.
-    pub(crate) fn update_str(&mut self, key: &[u8], value: V) {
-        self.update(Key::str(key), value);
+    pub(crate) fn update_str(&mut self, key: &[u8], value: V) -> Option<V> {
+        self.update(Key::str(key), value)
     }
 
     /// `zend_hash_next_index_insert`: the key it took.
@@ -140,6 +141,26 @@ impl<V> Table<V> {
 
     pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.rows.iter_mut().flatten().map(|(_, v)| v)
+    }
+
+    /// The values in order, the table consumed.
+    pub(crate) fn into_values(self) -> impl Iterator<Item = V> {
+        self.rows.into_iter().flatten().map(|(_, v)| v)
+    }
+
+    /// The same table over `f` of each value: the rows, their keys and
+    /// their order kept.
+    pub(crate) fn map<U>(&self, f: impl Fn(&V) -> U) -> Table<U> {
+        Table {
+            rows: self
+                .rows
+                .iter()
+                .map(|row| row.as_ref().map(|(k, v)| (k.clone(), f(v))))
+                .collect(),
+            index: self.index.clone(),
+            next_free: self.next_free,
+            live: self.live,
+        }
     }
 
     /// The first row, `zend_hash_internal_pointer_reset` and the current

@@ -460,7 +460,7 @@ impl Request {
         write_prop(self, &case, b"name", spelled)?;
         if backing != php_unit::decl::EnumBacking::Pure {
             let value = crate::api::call::eval_declared_made(self, &value, Some(class))?;
-            let value = Owner::adopt(self, value);
+            let value = Owner::adopt(value);
             write_prop(self, &case, b"value", value)?;
         }
         self.class_constants

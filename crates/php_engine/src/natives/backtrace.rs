@@ -117,7 +117,7 @@ fn debug_backtrace(
     #[php(default = 0)] limit: i64,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let made = req.fetch_debug_backtrace(true, options, limit);
-    crate::api::values::adopted(req, made)
+    crate::api::values::adopted(made)
 }
 
 /// `debug_print_backtrace(int $options = 0, int $limit = 0): void`,

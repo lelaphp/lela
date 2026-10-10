@@ -217,7 +217,7 @@ impl BoundTable {
         let held = Emalloc::new(req, BOUND_PARAM_DATA)?;
         let key = match &bound.name {
             Some(name) => Owner::take(req, **name).into_key(),
-            None => Owner::take(req, Key::Int(bound.position)),
+            None => Owner::index(bound.position),
         };
         match self.table.set(req, key, Owner::null()) {
             Ok(()) => Ok(held),

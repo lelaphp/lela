@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{HostPath, Request, Standard, Unresolved};
-use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Resource, Value};
 
 pub use crate::api::request::paths::scheme_length;
 pub use crate::api::request::temporary::TemporaryGuard;
@@ -166,6 +166,13 @@ pub trait Face: sealed::Sealed {
     /// type.
     #[must_use]
     fn layer_state<T: Send + Sync + 'static>(&self) -> Option<Arc<T>>;
+    /// The resource's owner handed to `EG(regular_list)`, which keeps it
+    /// to the request's end: the list's close serves its destructor
+    /// (`zend_close_rsrc_list`) and its destruction frees it, what php
+    /// does with a resource it names by pointer alone,
+    /// `FG(default_context)` (#2246). The id answered names the resource
+    /// with no owner, read back with [`Request::resource`].
+    fn keep_in_list(&self, resource: Owner<Resource>) -> i64;
 }
 
 impl Face for Request {
@@ -226,5 +233,8 @@ impl Face for Request {
     }
     fn layer_state<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
         Arc::clone(self.shared.layer.as_ref()?).downcast().ok()
+    }
+    fn keep_in_list(&self, resource: Owner<Resource>) -> i64 {
+        resource.hand_on().id()
     }
 }

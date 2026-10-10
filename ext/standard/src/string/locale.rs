@@ -24,7 +24,7 @@ use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
     self, LC_ALL, LC_COLLATE, LC_CTYPE, LC_MESSAGES, LC_MONETARY, LC_NUMERIC, LC_TIME,
@@ -452,7 +452,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut list = PhpArray::new(req)?;
         for (at, byte) in (0i64..).zip(grouping) {
             let value = i64::from(c_char::from_ne_bytes([*byte]));
-            list.set(req, Owner::take(req, Key::Int(at)), Owner::int(value))?;
+            list.set(req, Owner::index(at), Owner::int(value))?;
         }
         let key = PhpString::new(req, name)?.into_key();
         array.set(req, key, list.into_value())?;

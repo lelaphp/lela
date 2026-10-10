@@ -90,8 +90,8 @@ impl FreshString {
 
     /// The string handed out, `RETURN_STR(s)`: one owner, the caller's.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn finish(self, req: &Request) -> Owner<PhpString> {
-        Owner::adopt(req, PhpString::of(self.0.finish()))
+    pub fn finish(self) -> Owner<PhpString> {
+        Owner::adopt(PhpString::of(self.0.finish()))
     }
 
     /// `zend_string_efree(s)`: the allocation back to the heap.

@@ -259,10 +259,9 @@ pub(crate) struct Mm {
     /// under a pin that still stands.
     retired: Vec<NonNull<u8>>,
     /// A debug build's record of what its sensors found
-    /// ([`crate::sensed`]), shared so the address every chunk's header
-    /// holds stands while the heap moves and while any owner the engine
-    /// made holds a [`crate::sensed::Sensor`] on it, and dropped after
-    /// the chunks are given back and the last of those.
+    /// ([`crate::sensed`]), held apart so the address every chunk's
+    /// header holds stands while the heap moves, and dropped after the
+    /// chunks are given back.
     #[cfg(debug_assertions)]
     sensed: crate::sensed::Sensor,
     /// A debug build's quarantine of each bin's last freed slots
@@ -1402,12 +1401,6 @@ impl Mm {
         self.sensed.take()
     }
 
-    /// A way to this heap's sensed record ([`crate::sensed::Sensor`]).
-    #[cfg(debug_assertions)]
-    pub(crate) fn sensor(&self) -> crate::sensed::Sensor {
-        self.sensed.clone()
-    }
-
     /// Whether a fatal is leaving the request ([`crate::sensed::Record`]).
     #[cfg(debug_assertions)]
     pub(crate) fn fatal_leaving(&self, leaving: bool) {
@@ -2020,14 +2013,26 @@ pub(crate) mod freed {
     /// `chunk->heap`. Only a block [`is_freed`] found marked is passed,
     /// and only a slot of a chunk carries the mark.
     pub(crate) fn record(at: NonNull<u8>, sensed: crate::sensed::Sensed) {
+        with_record(at, |record| record.record(sensed));
+    }
+
+    /// `f` handed the record of the heap the block at `at` belongs to,
+    /// reached through the header of its chunk, php's `chunk->heap`. `at`
+    /// is a block of a chunk, never a huge block, which heads a mapping of
+    /// its own, and the chunk is mapped: a block the caller holds an owner
+    /// of, or one [`is_freed`] found marked, whose chunk its heap still
+    /// holds, since a slot is marked only while its chunk is the heap's.
+    pub(crate) fn with_record<R>(
+        at: NonNull<u8>,
+        f: impl FnOnce(&crate::sensed::Record) -> R,
+    ) -> R {
         let chunk = super::chunk_of(at);
-        // SAFETY: the block carries the mark, so it is a slot or a `run`
-        // of a chunk its heap still holds mapped, and that chunk's page
-        // zero is the header `chunk_init` wrote.
+        // SAFETY: the caller's contract: the chunk is one its heap holds
+        // mapped, whose page zero is the header `chunk_init` wrote.
         let record = unsafe { (*chunk.as_ptr()).sensed };
         // SAFETY: the header names the record its heap shares, which the
         // heap lets go of only after it has given every chunk back, so the
         // record stands while the chunk is mapped.
-        unsafe { &*record }.record(sensed);
+        f(unsafe { &*record })
     }
 }

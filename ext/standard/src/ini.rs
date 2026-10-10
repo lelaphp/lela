@@ -113,7 +113,7 @@ fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<
                 _ => None,
             };
             let key = match (index, label.as_php_string()) {
-                (Some(n), _) => Owner::take(req, Key::Int(n)),
+                (Some(n), _) => Owner::index(n),
                 (None, Some(s)) => Owner::take(req, Key::Str(*s)),
                 (None, None) => PhpString::new(req, b"")?.into_key(),
             };

@@ -114,7 +114,7 @@ fn namespace_node(
     if let Some(object) = value.as_object().copied() {
         let parent = Owner::take(req, this.as_value());
         match dom_mut(req, object) {
-            Some(d) => d.extra = Extra::NamespaceParent(Box::new(parent)),
+            Some(d) => d.extra = Extra::NamespaceParent(parent),
             None => parent.give_up(req),
         }
     }

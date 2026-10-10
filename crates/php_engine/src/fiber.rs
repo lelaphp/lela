@@ -1791,7 +1791,7 @@ fn switch_refused(req: &mut Request) -> Result<(), Thrown> {
 /// already recorded.
 fn delegate(req: &mut Request, transfer: Transfer) -> Result<Owner<Value>, Thrown> {
     match transfer {
-        Transfer::Value(value) => Ok(Owner::adopt(req, value)),
+        Transfer::Value(value) => Ok(Owner::adopt(value)),
         // `zend_throw_exception_internal`, which tells the hooks again of
         // a throwable a switch carried.
         Transfer::Throw(thrown) => Err(match thrown.exception().copied() {

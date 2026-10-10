@@ -3,8 +3,9 @@
 //! `Z/main/streams/streams.c`), owned by the stream layer beside
 //! [`Stream`] as #1777 ruled: a `stream-context` resource holding the
 //! options array and, where `notification` was set, the callable it
-//! calls. `FG(default_context)` is kept in the layer's request state,
-//! since where php keeps it is not observable. ext/standard's
+//! calls. `FG(default_context)` is a resource the request's list owns,
+//! as php's is, named by an id in the layer's request state, since where
+//! php keeps it is not observable. ext/standard's
 //! `stream_context_*` natives and every other extension reach it here
 //! through `php_ext`; a `transport` reads its `socket` options off it, and
 //! a stream that keeps one tells its notifier what its reads and writes
@@ -13,6 +14,7 @@
 use super::{Request, SocketOptions};
 use crate::api::call::call;
 use crate::api::coerce::{callable_checked, to_long, truthy};
+use crate::api::layer::Face as _;
 use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::request::BindTo;
 use crate::api::values::{
@@ -44,9 +46,7 @@ pub struct StreamCtx(Resource);
 /// its notifier, which php `ecalloc`s apart from it when `notification`
 /// is set.
 pub(crate) struct Context {
-    /// Boxed, so the payload fits php's `php_stream_context` in a debug
-    /// build too, where an owner carries the line that made it.
-    options: Option<Box<Owner<PhpArray>>>,
+    options: Option<Owner<PhpArray>>,
     notifier: Option<Box<Notifier>>,
 }
 
@@ -58,7 +58,7 @@ pub(crate) struct Context {
 /// `PHP_STREAM_NOTIFIER_PROGRESS` in its `mask`; the notifier's own
 /// `ecalloc` on the request's heap.
 struct Notifier {
-    callback: Value,
+    callback: Owner<Value>,
     progress: usize,
     progress_max: usize,
     counting: bool,
@@ -71,7 +71,7 @@ impl Notifier {
     /// `user_space_stream_notifier_dtor`, letting the callable go and
     /// `efree`ing its cache, then the notifier `efree`d.
     fn free(self, req: &mut Request) {
-        req.release(self.callback);
+        self.callback.give_up(req);
         self.fcc.free(req);
         self.allocation.free(req);
     }
@@ -193,7 +193,7 @@ impl StreamCtx {
         let kind = req.types().context;
         let options = PhpArray::new(req)?;
         let context = Context {
-            options: Some(Box::new(options)),
+            options: Some(options),
             notifier: None,
         };
         Ok(Resource::sized(req, kind, context, CONTEXT_SIZE)?.into_typed(StreamCtx))
@@ -204,6 +204,12 @@ impl StreamCtx {
     /// native handed no `$context` opens under, as `gzopen` and
     /// `hash_update_file` do.
     ///
+    /// The request's list owns it, as php's `EG(regular_list)` owns the
+    /// resource `FG(default_context)` names by pointer, and closes it with
+    /// the other resources; the layer keeps its id alone. Read after the
+    /// list's close, it is the closed resource, where php's pointer names
+    /// the `php_stream_context` the close freed.
+    ///
     /// ```php
     /// var_dump(fopen('php://memory', 'r'), stream_context_get_default(), fopen('php://memory', 'r'));
     /// ```
@@ -213,23 +219,15 @@ impl StreamCtx {
     /// resource(6) of type (stream)
     /// ```
     pub fn default_ctx(req: &mut Request) -> Result<StreamCtx, Thrown> {
-        if let Some(context) = req.streams().default_context.as_deref() {
-            return Ok(*context);
+        if let Some(id) = req.streams().default_context
+            && let Some(resource) = req.resource(id)
+        {
+            return Ok(StreamCtx(resource));
         }
         let context = StreamCtx::alloc(req)?;
         let view = *context;
-        req.streams().default_context = Some(context);
+        req.streams().default_context = Some(req.keep_in_list(context.into_resource()));
         Ok(view)
-    }
-
-    /// `FG(default_context)` given up as the request ends: php keeps no
-    /// value of it and frees it with the regular list after
-    /// `shutdown_executor`; ext/standard, whose `FG` it is in php, gives
-    /// it up at its `post_deactivate`, past the list's close.
-    pub fn release_default(req: &mut Request) {
-        if let Some(context) = req.streams().default_context.take() {
-            context.give_up(req);
-        }
     }
 
     /// `zend_fetch_resource_ex(zcontext, "Stream-Context", le)` over
@@ -288,11 +286,7 @@ impl StreamCtx {
     /// which `stream_context_get_options` hands back with one more.
     #[must_use]
     pub fn options(self, req: &Request) -> Option<PhpArray> {
-        self.0
-            .native::<Context>(req)?
-            .options
-            .as_deref()
-            .map(|options| **options)
+        self.0.native::<Context>(req)?.options.as_deref().copied()
     }
 
     /// `php_stream_context_set_option` (`Z/main/streams/streams.c:2457`):
@@ -336,7 +330,7 @@ impl StreamCtx {
     /// `None` where the `context` has no notifier.
     #[must_use]
     pub fn notifier(self, req: &Request) -> Option<Value> {
-        Some(self.0.native::<Context>(req)?.notifier.as_ref()?.callback)
+        Some(*self.0.native::<Context>(req)?.notifier.as_ref()?.callback)
     }
 
     /// `context->notifier` replaced: the one there freed first,
@@ -348,7 +342,7 @@ impl StreamCtx {
     pub fn set_notifier(
         self,
         req: &mut Request,
-        notifier: Option<(Value, Emalloc)>,
+        notifier: Option<(Owner<Value>, Emalloc)>,
     ) -> Result<(), Thrown> {
         let old = self
             .0
@@ -363,7 +357,7 @@ impl StreamCtx {
         let allocation = match Emalloc::new(req, NOTIFIER_SIZE) {
             Ok(allocation) => allocation,
             Err(thrown) => {
-                req.release(callback);
+                callback.give_up(req);
                 fcc.free(req);
                 return Err(thrown);
             }
@@ -535,17 +529,13 @@ impl StreamCtx {
     /// The options array taken out of the `context` for a call that
     /// changes it.
     fn take_options(self, req: &mut Request) -> Option<Owner<PhpArray>> {
-        self.0
-            .native_mut::<Context>(req)?
-            .options
-            .take()
-            .map(|options| *options)
+        self.0.native_mut::<Context>(req)?.options.take()
     }
 
     /// The options array put back after [`StreamCtx::take_options`].
     fn put_options(self, req: &mut Request, options: Owner<PhpArray>) {
         match self.0.native_mut::<Context>(req) {
-            Some(context) => context.options = Some(Box::new(options)),
+            Some(context) => context.options = Some(options),
             None => options.give_up(req),
         }
     }
@@ -563,9 +553,9 @@ impl StreamCtx {
         let Some(callback) = self.notifier(req) else {
             return Ok(());
         };
-        req.addref(&callback);
-        let called = call_user_notifier(req, &callback, notice);
-        req.release(callback);
+        let held = Owner::take(req, callback);
+        let called = call_user_notifier(req, &held, notice);
+        held.give_up(req);
         called
     }
 }

@@ -18,7 +18,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, raise};
 use php_ext::request::Opcode;
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::bp::At;
 use crate::out::{self, Element};
@@ -753,12 +753,12 @@ fn to_array(req: &mut Request, rows: &Rows) -> Result<Owner<PhpArray>, Thrown> {
         for sub in subs {
             match sub {
                 Sub::Count(index, n) => {
-                    inner.set(req, Owner::take(req, Key::Int(*index)), Owner::int(*n))?;
+                    inner.set(req, Owner::index(*index), Owner::int(*n))?;
                 }
                 Sub::Named(name, counts) => {
                     let mut named = PhpArray::new(req)?;
                     for (index, n) in counts {
-                        named.set(req, Owner::take(req, Key::Int(*index)), Owner::int(*n))?;
+                        named.set(req, Owner::index(*index), Owner::int(*n))?;
                     }
                     let key = PhpString::new(req, name)?.into_key();
                     inner.set(req, key, named.into_value())?;

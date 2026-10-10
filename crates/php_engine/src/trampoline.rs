@@ -300,12 +300,12 @@ pub(crate) fn hand_to_magic(req: &mut Request, function: Function) -> Result<Fun
     };
     // The arguments are the frame's owners, moved here.
     for argument in arguments {
-        packed.append(req, Owner::adopt(req, argument))?;
+        packed.append(req, Owner::adopt(argument))?;
     }
     for (key, value) in named {
-        let key = Owner::adopt(req, key);
+        let key = Owner::adopt(key);
         let key = Key::from_string(req, key);
-        packed.set(req, key, Owner::adopt(req, value))?;
+        packed.set(req, key, Owner::adopt(value))?;
     }
     req.serve_instead(magic, vec![Value::string(name), Value::array(packed)]);
     Ok(magic)
@@ -379,7 +379,7 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thro
         .collect();
     let named = req.named_arguments();
     let name = req.string(&name.0)?;
-    let name = Owner::adopt(req, Value::string(name));
+    let name = Owner::adopt(Value::string(name));
     let packed = match packed_arguments(req, passed, named) {
         Ok(packed) => packed,
         Err(thrown) => {
@@ -395,7 +395,7 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thro
     };
     name.give_up(req);
     packed.give_up(req);
-    adopted(req, served)
+    adopted(served)
 }
 
 /// The array `zend_closure_call_magic` hands the magic method as its

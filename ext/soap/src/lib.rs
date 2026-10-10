@@ -47,7 +47,7 @@ use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
 
 pub(crate) use globals::{Error, Res, TypemapEntry, raised, soap_error};
-pub(crate) use globals::{State, Typemap};
+pub(crate) use globals::{State, Typemap, TypemapView};
 
 /// Core's `Exception`, which `SoapFault` extends.
 #[php_class(extern)]

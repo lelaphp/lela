@@ -1053,7 +1053,7 @@ impl ReflectionProperty {
             let value = Owner::take(req, value);
             return set_raw_value(req, asked, prop.as_ref(), object, &name, value);
         }
-        req.addref(&value);
+        let value = Owner::take(req, value);
         skip_lazy_initialization(req, &object, &name, Some(value))?;
         Ok(())
     }

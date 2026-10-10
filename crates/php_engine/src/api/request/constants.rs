@@ -165,7 +165,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn constants(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.constants_made();
-        adopted(self, made)
+        adopted(made)
     }
 
     /// What [`constants`](Self::constants) makes, its one owner not yet named.

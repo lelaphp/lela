@@ -299,8 +299,8 @@ pub(crate) struct Parser {
     pub(crate) separator: Option<Vec<u8>>,
     pub(crate) registered: Registered,
     pub(crate) handlers: Box<Callbacks>,
-    /// `xml_set_object`'s object, one owner.
-    object: Option<PhpObject>,
+    /// `xml_set_object`'s object, an owner of it.
+    object: Option<Owner<PhpObject>>,
     /// `parser->data` and `parser->info`, once `xml_parse_into_struct` set them.
     pub(crate) into: Option<Collected>,
     pub(crate) level: i32,
@@ -348,17 +348,14 @@ impl ObjectHandlers for Handlers {
         let Some(p) = object.native::<Parser>(req) else {
             return;
         };
-        if let Some(o) = p.object {
+        if let Some(o) = &p.object {
             visit(o.as_value());
         }
         for h in p.handlers.0.iter().flatten() {
             h.callable.visit(visit);
         }
-        if let Some(into) = p.into {
-            visit(into.data.as_value());
-            if let Some(info) = into.info {
-                visit(info.as_value());
-            }
+        if let Some(into) = &p.into {
+            into.visit(visit);
         }
     }
 
@@ -373,7 +370,7 @@ impl ObjectHandlers for Handlers {
                 h.callable.give_up(req);
             }
             if let Some(o) = p.object {
-                req.release(o.as_value());
+                o.give_up(req);
             }
         }
         Std.free_obj(req, object);
@@ -484,18 +481,29 @@ impl Given {
 
 /// `php_xml_check_string_method_arg`: the handler a method name names on
 /// `xml_set_object`'s object; `None` for the empty name, which unsets it.
-/// With `position` zero, `xml_set_object`'s own check, a failure raises
-/// nothing.
 fn by_name(
     req: &mut Request,
     parser: PhpObject,
     name: &[u8],
     position: u32,
 ) -> Result<Option<Handler>, Option<Thrown>> {
+    let object = parser_mut(req, parser).and_then(|p| p.object.as_deref().copied());
+    method_on(req, object, name, position)
+}
+
+/// [`by_name`] against `object`, which `xml_set_object` asks of the
+/// object it is about to set. With `position` zero, `xml_set_object`'s
+/// own check, a failure raises nothing.
+fn method_on(
+    req: &mut Request,
+    object: Option<PhpObject>,
+    name: &[u8],
+    position: u32,
+) -> Result<Option<Handler>, Option<Thrown>> {
     if name.is_empty() {
         return Ok(None);
     }
-    let Some(object) = parser_mut(req, parser).and_then(|p| p.object) else {
+    let Some(object) = object else {
         let tail = "an object must be set via xml_set_object() to be able to lookup method";
         return Err(Some(php_ext::raising::argument_error(
             req,
@@ -660,15 +668,7 @@ fn set_object(req: &mut Request, parser: PhpObject, new: PhpObject) -> Result<()
             if let Some(old) = old {
                 old.callable.give_up(req);
             }
-            let swapped = {
-                let held = parser_mut(req, parser).and_then(|p| p.object.replace(new));
-                let answer = by_name(req, parser, &name, 0);
-                if let Some(p) = parser_mut(req, parser) {
-                    p.object = held;
-                }
-                answer
-            };
-            let Ok(handler) = swapped else {
+            let Ok(handler) = method_on(req, Some(new), &name, 0) else {
                 let class_name = req
                     .class_decl(new.class())
                     .map(|d| String::from_utf8_lossy(&d.name.0).into_owned())
@@ -690,10 +690,13 @@ fn set_object(req: &mut Request, parser: PhpObject, new: PhpObject) -> Result<()
             }
         }
     }
-    req.addref(&new.as_value());
-    let old = parser_mut(req, parser).and_then(|p| p.object.replace(new));
+    let new = Owner::take(req, new);
+    let old = match parser_mut(req, parser) {
+        Some(p) => p.object.replace(new),
+        None => Some(new),
+    };
     if let Some(old) = old {
-        req.release(old.as_value());
+        old.give_up(req);
     }
     Ok(())
 }

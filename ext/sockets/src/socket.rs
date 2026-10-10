@@ -29,12 +29,8 @@ pub(crate) enum Handle {
     /// An fd a stream owns, the socket imported from it or
     /// exported to it: the number, and the stream, of which the socket
     /// holds one owner. The number stays the socket's after the stream
-    /// is closed, as php's `bsd_socket` does. The owner is boxed, so the
-    /// payload fits the `php_socket` php allocates.
-    Stream {
-        fd: RawFd,
-        stream: Box<Owner<Resource>>,
-    },
+    /// is closed, as php's `bsd_socket` does.
+    Stream { fd: RawFd, stream: Owner<Resource> },
 }
 
 /// `php_socket` less its `zend_object`.
@@ -84,7 +80,7 @@ impl Sock {
     /// `zstream`, where it is defined.
     pub(crate) fn stream(&self) -> Option<Resource> {
         match &self.handle {
-            Handle::Stream { stream, .. } => Some(***stream),
+            Handle::Stream { stream, .. } => Some(**stream),
             _ => None,
         }
     }
@@ -160,7 +156,7 @@ impl ObjectHandlers for Handlers {
             .native_mut::<Sock>(req)
             .map(|sock| std::mem::take(&mut sock.handle));
         if let Some(Handle::Stream { stream, .. }) = handle {
-            (*stream).give_up(req);
+            stream.give_up(req);
         }
     }
 

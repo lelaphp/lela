@@ -353,14 +353,14 @@ impl Request {
                 // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
                 // name, one more owner of its string.
                 let file = Value::string(self.op_array_string(&file)?);
-                self.set_string_key(&mut row, b"file", Owner::adopt(self, file))?;
-                self.set_string_key(&mut row, b"line", Owner::adopt(self, Value::int(line)))?;
+                self.set_string_key(&mut row, b"file", Owner::adopt(file))?;
+                self.set_string_key(&mut row, b"line", Owner::adopt(Value::int(line)))?;
             }
             match traced {
                 Traced::Function(function) => {
                     let name = self.declared_name(function);
                     let name = Value::string(self.op_array_string(name.as_bytes())?);
-                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
                     // `ce->name` whole: an anonymous class's with its NUL
                     // and site; a receiver's class name for a function of
                     // no scope it is passed to, `zend_ffi_get_func`'s.
@@ -371,22 +371,18 @@ impl Request {
                     };
                     if let Some(class) = class {
                         let class = Value::string(self.op_array_string(&class)?);
-                        self.set_string_key(&mut row, b"class", Owner::adopt(self, class))?;
+                        self.set_string_key(&mut row, b"class", Owner::adopt(class))?;
                         if provide_object && let Some(this) = this {
                             let this = Owner::take(self, this.as_value());
                             self.set_string_key(&mut row, b"object", this)?;
                         }
                         let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
                         let join = Value::string(self.interned(join)?);
-                        self.set_string_key(&mut row, b"type", Owner::adopt(self, join))?;
+                        self.set_string_key(&mut row, b"type", Owner::adopt(join))?;
                     }
                     if !ignore_arguments {
                         let args = self.trace_row_arguments(function, arguments, named)?;
-                        self.set_string_key(
-                            &mut row,
-                            b"args",
-                            Owner::adopt(self, Value::array(args)),
-                        )?;
+                        self.set_string_key(&mut row, b"args", Owner::adopt(Value::array(args)))?;
                     }
                 }
                 Traced::Include { kind, file } => {
@@ -398,18 +394,14 @@ impl Request {
                         let file = PhpString::new(self, &file)?;
                         let mut args = self.array()?;
                         args.append(self, file.into_value())?;
-                        self.set_string_key(
-                            &mut row,
-                            b"args",
-                            Owner::adopt(self, Value::array(args)),
-                        )?;
+                        self.set_string_key(&mut row, b"args", Owner::adopt(Value::array(args)))?;
                     }
                     let name = Value::string(self.interned(kind.name().as_bytes())?);
-                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
                 }
                 Traced::Unknown => {
                     let name = Value::string(self.string(b"unknown")?);
-                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
                 }
                 Traced::Dropped => {
                     // `zend_array_destroy(stack_frame)`.
@@ -417,7 +409,7 @@ impl Request {
                     continue;
                 }
             }
-            trace.append(self, Owner::adopt(self, Value::array(row)))?;
+            trace.append(self, Owner::adopt(Value::array(row)))?;
         }
         Ok(trace)
     }
@@ -446,7 +438,7 @@ impl Request {
             let argument = argument.deref();
             let argument = if sensitive.at(at) {
                 let redacted = self.sensitive_value(argument)?;
-                Owner::adopt(self, redacted)
+                Owner::adopt(redacted)
             } else {
                 Owner::take(self, argument)
             };
@@ -456,7 +448,7 @@ impl Request {
             let argument = argument.deref();
             let argument = if sensitive.variadic {
                 let redacted = self.sensitive_value(argument)?;
-                Owner::adopt(self, redacted)
+                Owner::adopt(redacted)
             } else {
                 Owner::take(self, argument)
             };
@@ -490,15 +482,11 @@ impl Request {
         }
         let mut row = self.array()?;
         let file = Value::string(self.string(&executing)?);
-        self.set_string_key(&mut row, b"file", Owner::adopt(self, file))?;
-        self.set_string_key(
-            &mut row,
-            b"line",
-            Owner::adopt(self, Value::int(i64::from(at))),
-        )?;
+        self.set_string_key(&mut row, b"file", Owner::adopt(file))?;
+        self.set_string_key(&mut row, b"line", Owner::adopt(Value::int(i64::from(at))))?;
         let name = Value::string(self.string(b"[constant expression]")?);
-        self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
-        trace.append(self, Owner::adopt(self, Value::array(row)))
+        self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
+        trace.append(self, Owner::adopt(Value::array(row)))
     }
 
     /// Which arguments of a call to `function` a trace shows redacted,
@@ -1208,7 +1196,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.fetch_debug_backtrace(true, options, limit);
-        adopted(self, made)
+        adopted(made)
     }
 
     /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
@@ -1219,7 +1207,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn backtrace_here(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.fetch_debug_backtrace(false, options, limit);
-        adopted(self, made)
+        adopted(made)
     }
 
     /// `zend_hash_str_update` on a row: `value` at the string key `name`,

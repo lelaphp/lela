@@ -587,11 +587,16 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
         );
         return Err(throw_error(req, "ValueError", &text));
     }
-    if what.is_some() {
-        req.addref(&value);
-    }
-    let kept = what.map(|_| value);
-    let curl = payload(req, object)?;
+    let kept = what.map(|_| Owner::take(req, value));
+    let curl = match payload(req, object) {
+        Ok(curl) => curl,
+        Err(thrown) => {
+            if let Some(kept) = kept {
+                kept.give_up(req);
+            }
+            return Err(thrown);
+        }
+    };
     let old = match which {
         StreamOpt::File => {
             curl.write.to = if kept.is_some() {
@@ -619,7 +624,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
         code = easy.set_stderr(req, file);
     }
     if let Some(old) = old {
-        req.release(old);
+        old.give_up(req);
     }
     saved(req, object, code)
 }
@@ -680,10 +685,16 @@ fn set_share(req: &mut Request, object: PhpObject, value: &Value) -> Set {
         return saved(req, object, 0);
     };
     easy_of(req, object)?.set_share(req, handle);
-    req.addref(&share.as_value());
-    let old = payload(req, object)?.share.replace(share);
+    let held = Owner::take(req, share);
+    let old = match payload(req, object) {
+        Ok(curl) => curl.share.replace(held),
+        Err(thrown) => {
+            held.give_up(req);
+            return Err(thrown);
+        }
+    };
     if let Some(old) = old {
-        req.release(old.as_value());
+        old.give_up(req);
     }
     saved(req, object, 0)
 }
@@ -772,10 +783,16 @@ pub(crate) fn setopt(
             option_str(req, object, option, &text)
         }
         Opt::Private => {
-            let value = value.deref();
-            req.addref(&value);
-            if let Some(old) = payload(req, object)?.private.replace(value) {
-                req.release(old);
+            let held = Owner::take(req, value.deref());
+            let old = match payload(req, object) {
+                Ok(curl) => curl.private.replace(held),
+                Err(thrown) => {
+                    held.give_up(req);
+                    return Err(thrown);
+                }
+            };
+            if let Some(old) = old {
+                old.give_up(req);
             }
             Ok(true)
         }

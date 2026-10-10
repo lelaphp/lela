@@ -175,7 +175,7 @@ impl Request {
         options: i64,
     ) -> Result<Option<Owner<PhpArray>>, Thrown> {
         let made = self.execution_trace_made(object, options);
-        adopted_some(self, made)
+        adopted_some(made)
     }
 
     /// What [`execution_trace`](Self::execution_trace) makes, its one owner not yet named.

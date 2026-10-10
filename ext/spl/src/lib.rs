@@ -371,7 +371,8 @@ fn apply(
     object: PhpObject,
     mut each: impl FnMut(&mut Request, Iter) -> Result<bool, Thrown>,
 ) -> Result<(), Thrown> {
-    let iter = iterate(req, &object)?;
+    let held = iterate(req, &object)?;
+    let iter = *held;
     let walked = (|| {
         iter.rewind(req)?;
         while iter.valid(req)? {
@@ -382,7 +383,7 @@ fn apply(
         }
         Ok(())
     })();
-    req.release(iter.as_value());
+    held.give_up(req);
     walked
 }
 
@@ -445,14 +446,14 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Owner<Key>, Thrown> {
         return key_of(req, &Value::string(*s));
     }
     if let Some(n) = key.as_int() {
-        return Ok(Owner::take(req, Key::Int(n)));
+        return Ok(Owner::index(n));
     }
     if let Some(b) = key.as_bool() {
-        return Ok(Owner::take(req, Key::Int(i64::from(b))));
+        return Ok(Owner::index(i64::from(b)));
     }
     if let Some(f) = key.as_float() {
         let n = float_key(req, f)?;
-        return Ok(Owner::take(req, Key::Int(n)));
+        return Ok(Owner::index(n));
     }
     if let Some(resource) = key.as_resource() {
         let id = resource.id();
@@ -461,7 +462,7 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Owner<Key>, Thrown> {
             &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
         );
         php_ext::raising::pending(req)?;
-        return Ok(Owner::take(req, Key::Int(id)));
+        return Ok(Owner::index(id));
     }
     if key.as_array().is_none() && key.as_object().is_none() {
         php_ext::raising::deprecated(

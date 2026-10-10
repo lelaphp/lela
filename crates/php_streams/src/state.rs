@@ -16,7 +16,7 @@ use php_engine::api::values::ResourceType;
 use crate::api::request::{
     EngineWrapper, FilterFactory, Request, Standard, StreamCtx, StreamWrapper, context_dtor,
 };
-use crate::api::values::{Owner, Resource};
+use crate::api::values::Resource;
 use crate::streams::persistent::{Entry, Held};
 use crate::streams::{FilterCall, Registered};
 use crate::wrapper::StatCache;
@@ -46,9 +46,11 @@ pub(crate) struct State {
     /// instance is given as its `$context`; `None` is php's `NULL`.
     pub(crate) stream_ctx: Option<StreamCtx>,
     /// `FG(default_context)`, made on its first use
-    /// ([`StreamCtx::default_ctx`]); where php keeps it is not
-    /// observable, so the layer keeps it beside the `context` (#1777).
-    pub(crate) default_context: Option<Owner<StreamCtx>>,
+    /// ([`StreamCtx::default_ctx`]): the id of a resource the request's
+    /// list owns and closes with itself, as php's does (#2246), and no
+    /// owner of it. Where php keeps it is not observable, so the layer
+    /// keeps it beside the `context` (#1777).
+    pub(crate) default_context: Option<i64>,
     /// `PG(in_user_include)`: a user-space wrapper that is no URL wrapper
     /// is opening for an include under `allow_url_include=0`, so the
     /// opens it makes are held to `allow_url_include` as an include's are.

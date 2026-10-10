@@ -84,10 +84,7 @@ fn socket_import_stream(
     match object.native_mut::<Sock>(req) {
         Some(payload) => {
             *payload = Sock {
-                handle: Handle::Stream {
-                    fd,
-                    stream: Box::new(held),
-                },
+                handle: Handle::Stream { fd, stream: held },
                 family,
                 error: 0,
                 blocking: !ffi::is_nonblocking(flags),
@@ -186,7 +183,7 @@ fn socket_export_stream(
         Ok(payload) => {
             payload.handle = Handle::Stream {
                 fd: raw,
-                stream: Box::new(stream.into_resource()),
+                stream: stream.into_resource(),
             }
         }
         Err(thrown) => {
