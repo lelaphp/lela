@@ -169,18 +169,28 @@ impl Request {
             return;
         }
         self.clear_fatal_error_backtrace();
+        self.serve_uncaught(level, message, file, line);
+        self.leave();
+    }
+
+    /// `zend_exception_error`'s `zend_error_va(severity | E_DONT_BAIL, ...)`
+    /// (`Z/Zend/zend_exceptions.c:921-930`, `:999`): the observers told
+    /// of an uncaught throwable with `E_DONT_BAIL`
+    /// ([`crate::observer::uncaught`]) and the diagnostic served by
+    /// `zend_error_cb` alone, never asking the user's handler, at
+    /// `level`: `E_ERROR` as the request ends, or `E_WARNING` where a
+    /// fatal reports the throwable that stood pending as it was raised
+    /// (`Z/Zend/zend.c:1514`).
+    pub(crate) fn serve_uncaught(&mut self, level: Level, message: &[u8], file: &[u8], line: u32) {
         // `zend_strpprintf`'s message, handed to `zend_error_cb` and
         // released after: the throwable's bytes as they stand, which
         // every display form writes.
         if let Ok(string) = self.string(message) {
-            // `zend_exception_error`'s `zend_observer_error_notify`
-            // before `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`).
             crate::observer::uncaught(self, level, file, line, string.as_bytes());
             let text = String::from_utf8_lossy(message);
             self.zend_error_cb(level, Bail::DontBail, string, &text, file, line);
             self.release(Value::string(string));
         }
-        self.leave();
     }
 
     /// `zend_bailout` (`Z/Zend/zend.c:1256-1270`) out of a level

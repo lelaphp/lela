@@ -895,9 +895,10 @@ impl<'a> ErrorNotice<'a> {
     /// ends, `zend_exception_error`'s `E_ERROR`, or a `ParseError`'s or a
     /// `CompileError`'s own level, which php tells with `E_DONT_BAIL` set
     /// in `type` (`Z/Zend/zend_exceptions.c:926`, `:951-953`), so a tool
-    /// tells it from a fatal `zend_error` raised. A pending throwable
-    /// reported as a warning before a fatal is told as the warning
-    /// alone.
+    /// tells it from a fatal `zend_error` raised; and a throwable that
+    /// stood pending as a fatal was raised, which php reports at
+    /// `E_WARNING` with `E_DONT_BAIL` before the fatal
+    /// (`Z/Zend/zend.c:1514`).
     #[must_use]
     pub fn uncaught(&self) -> bool {
         self.uncaught

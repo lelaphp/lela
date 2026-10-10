@@ -299,7 +299,7 @@ impl Request {
             file
         };
         if compile_time.is_none() && severity != Level::Error {
-            self.note_error_bytes_in(severity, &message, &file, line);
+            self.serve_uncaught(severity, &message, &file, line);
             self.release(throwable.as_value());
             return Ok(());
         }

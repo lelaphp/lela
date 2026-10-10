@@ -12,11 +12,14 @@
 
 use std::path::{Path, PathBuf};
 
+use php_macros::php_function;
+
 use super::test_ext::{Event, Events, Phase, Recording, TestExt, observed_name, record};
 use crate::api::abi::{
     Admission, ExtensionBuilder, Lookup, Observed, ObserverHandlers, Removed, Validation,
 };
-use crate::api::raising::Level;
+use crate::api::raising::{Level, Thrown, fatal_while_pending, throw};
+use crate::api::request::Request;
 use crate::engine::Engine;
 use crate::test::{Capture, Served};
 
@@ -322,6 +325,67 @@ fn declarations_on_one_line_are_told_in_the_order_written() {
     assert_eq!(
         only(&events.between("function first", "end"), &kinds),
         [declared("f"), linked("a")]
+    );
+}
+
+/// `fatal_while_thrown()`: an `Exception` left pending, then a fatal
+/// raised over it, as a native that meets php's `E_ERROR` while
+/// `EG(exception)` holds one raises it.
+#[php_function]
+fn fatal_while_thrown(req: &mut Request) -> Result<(), Thrown> {
+    let thrown = throw(req, "Exception", "pending");
+    Err(fatal_while_pending(req, thrown, "after"))
+}
+
+/// The throwable pending as a fatal is raised is reported first, as
+/// `zend_exception_error(EG(exception), E_WARNING)` reports it
+/// (`Z/Zend/zend.c:1514`) through `zend_error_va`
+/// (`Z/Zend/zend_exceptions.c:921-930`): told to the observers with
+/// `E_DONT_BAIL`, uncaught, and served by `zend_error_cb` alone, the
+/// user's handler never asked (#2012).
+#[test]
+fn a_throwable_pending_at_a_fatal_is_told_uncaught_and_served_without_the_handler() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            TestExt::<0>::observing(),
+            ExtensionBuilder::default()
+                .functions(vec![fatal_while_thrown::declared()])
+                .build("pending_fatal"),
+        ])
+        .build();
+    let dir = scratch("pending_fatal");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nset_error_handler(function ($n, $s) { echo \"handler\\n\"; return true; });\n\
+         fatal_while_thrown();\n",
+    );
+    rec.mark("served");
+    assert!(
+        !String::from_utf8_lossy(&served.stdout).contains("handler"),
+        "{}",
+        String::from_utf8_lossy(&served.stdout)
+    );
+    let events = only(
+        &rec.events().between("built", "served"),
+        &[
+            ErrorObserved(Level::Error, String::new(), false),
+            Error(String::new()),
+        ],
+    );
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                Ext(0, ErrorObserved(Level::Warning, told, true)),
+                Ext(0, Error(served)),
+                Ext(0, ErrorObserved(Level::Error, fatal, false)),
+                Ext(0, Error(_)),
+            ] if told.starts_with("Uncaught Exception: pending") && told == served && fatal == "after"
+        ),
+        "{events:?}"
     );
 }
 

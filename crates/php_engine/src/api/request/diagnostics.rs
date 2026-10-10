@@ -521,19 +521,6 @@ impl Request {
         self.note_message_in(level, Message::Text(message.as_bytes()), file, line)
     }
 
-    /// [`Request::note_error_in`] over bytes the engine formatted that
-    /// need not be UTF-8, which every form writes as they stand, as
-    /// `zend_exception_error` hands `zend_error_va` a throwable's string.
-    pub(crate) fn note_error_bytes_in(
-        &mut self,
-        level: Level,
-        message: &[u8],
-        file: &[u8],
-        line: u32,
-    ) -> bool {
-        self.note_message_in(level, Message::Text(message), file, line)
-    }
-
     /// [`Request::note_error`] over a string of the request's raised as
     /// it stands, `zend_error_zstr_at`'s message: the user handler is
     /// handed it and the last error keeps it, one more owner each, as
