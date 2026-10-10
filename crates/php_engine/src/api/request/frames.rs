@@ -663,9 +663,9 @@ impl Request {
         let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
         let cvs = self
             .vm
-            .serving(frame)
-            .and_then(|serving| serving.code().map(|code| code.num_cvs as usize))
-            .unwrap_or(slots);
+            .at(frame)
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map_or(slots, |code| code.num_cvs as usize);
         for at in 0..slots {
             let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
             if at < cvs {

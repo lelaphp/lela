@@ -3469,9 +3469,7 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let callee = req.push_user_frame(function, call, returns_to, exec::Caller::Opline(frame))?;
-    let serving = exec::standing(req, callee)?;
-    let body = exec::serving_code(&serving, callee)?;
-    if let Some(at) = exec::parameter_prologue(req, callee, body)? {
+    if let Some(at) = exec::parameter_prologue(req, callee)? {
         return Ok(Stepped::Threw(at).into());
     }
     Ok(Stepped::Pushed(callee).into())

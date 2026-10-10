@@ -2057,9 +2057,22 @@ pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32
 pub(crate) fn parameter_prologue(
     req: &mut Request,
     callee: FrameRef,
-    body: &OpArray,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
-    let entry = body.safepoints.first().map_or(0, |at| at.0);
+    // A frame whose push skipped every `RECV*` stands at its entry
+    // already, and its op array is not held for a run of none.
+    let entry = {
+        let state = req.vm().at(callee);
+        let body = state.and_then(|state| body_of(&state.unit, state.body));
+        let entry = body
+            .and_then(|body| body.safepoints.first())
+            .map_or(0, |at| at.0);
+        if state.is_none_or(|state| state.opline >= entry) {
+            return Ok(None);
+        }
+        entry
+    };
+    let serving = standing(req, callee)?;
+    let body = serving_code(&serving, callee)?;
     loop {
         let at = req.vm().opline(callee);
         if at >= entry {
