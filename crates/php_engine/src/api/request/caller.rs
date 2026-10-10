@@ -288,7 +288,7 @@ impl Request {
     pub fn named_arguments(&self) -> Vec<(PhpString, Value)> {
         self.vm
             .serving_call()
-            .map(|call| call.extra_named.clone())
+            .map(|call| call.extra_named.to_vec())
             .unwrap_or_default()
     }
 
@@ -308,7 +308,7 @@ impl Request {
                 call.count = 0;
                 (
                     std::mem::take(&mut call.arguments),
-                    std::mem::take(&mut call.extra_named),
+                    call.extra_named.take_rows(),
                 )
             }
             None => (Vec::new(), Vec::new()),

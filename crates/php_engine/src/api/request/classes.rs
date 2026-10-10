@@ -21,7 +21,7 @@ use crate::exec;
 use crate::observer::LinkedAtLoad;
 
 use super::{
-    Bound, Declared, Deprecations, Keyed, Member, MemberAt, Named, Request, UserFunction,
+    Arity, Bound, Declared, Deprecations, Keyed, Member, MemberAt, Named, Request, UserFunction,
     lowered_key, preload, user_function_decl,
 };
 
@@ -635,6 +635,7 @@ impl Request {
                     body,
                     member,
                     flags,
+                    arity: Arity::of(&decl.function),
                 },
             ));
         }
@@ -660,6 +661,7 @@ impl Request {
                         body,
                         member,
                         flags,
+                        arity: Arity::of(&hook.function),
                     },
                 ));
             }
@@ -760,14 +762,8 @@ impl Request {
                 Some((from, at))
             })?,
         };
-        Some((
-            Arc::clone(&from.unit),
-            exec::Body::Hook {
-                class: from.at,
-                property: u32::try_from(at).ok()?,
-                kind,
-            },
-        ))
+        let body = exec::Body::hook(&from.unit, from.at, u32::try_from(at).ok()?, kind)?;
+        Some((Arc::clone(&from.unit), body))
     }
 
     /// Where the op array of the method at `method` of a class the
@@ -823,13 +819,8 @@ impl Request {
         method: u32,
     ) -> Option<(Arc<Unit>, exec::Body)> {
         let Some(composed) = &declared.composed else {
-            return Some((
-                Arc::clone(&declared.unit),
-                exec::Body::Method {
-                    class: declared.at,
-                    method,
-                },
-            ));
+            let body = exec::Body::method(&declared.unit, declared.at, method)?;
+            return Some((Arc::clone(&declared.unit), body));
         };
         let body = composed.bodies.get(usize::try_from(method).ok()?)?;
         let own = composed.decl.name.0.eq_ignore_ascii_case(&body.class.0);
@@ -839,13 +830,8 @@ impl Request {
             let holder = self.class_named(&body.class.0)?;
             self.declared_row(holder)?
         };
-        Some((
-            Arc::clone(&from.unit),
-            exec::Body::Method {
-                class: from.at,
-                method: body.method,
-            },
-        ))
+        let body = exec::Body::method(&from.unit, from.at, body.method)?;
+        Some((Arc::clone(&from.unit), body))
     }
 
     /// `do_bind_class` at a `ZEND_DECLARE_CLASS`: the declaration the
@@ -1487,11 +1473,13 @@ impl Request {
             return Err(crate::api::raising::fatal(self, &message));
         }
         let declared = Function::local(self.user_functions.len());
+        let (flags, arity) = dynamic_traits(unit, at);
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body: exec::Body::Dynamic(at),
             member: None,
-            flags: dynamic_flags(unit, at),
+            flags,
+            arity,
         });
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
@@ -1521,11 +1509,13 @@ impl Request {
             return Function::local(position);
         }
         let function = Function::local(self.user_functions.len())?;
+        let (flags, arity) = dynamic_traits(unit, at);
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body,
             member: None,
-            flags: dynamic_flags(unit, at),
+            flags,
+            arity,
         });
         Some(function)
     }
@@ -1609,6 +1599,7 @@ impl Request {
                 body,
                 member: None,
                 flags: crate::attributes::Flags::of(&decl.attributes),
+                arity: Arity::of(decl),
             });
         }
         true
@@ -1912,13 +1903,19 @@ fn class_in(
     })
 }
 
-/// The flags of the function at `at` of a unit's `dynamic` table, one
-/// a `DECLARE_FUNCTION` binds or a closure is made of.
-fn dynamic_flags(unit: &Unit, at: u32) -> crate::attributes::Flags {
+/// The flags and the arity of the function at `at` of a unit's
+/// `dynamic` table, one a `DECLARE_FUNCTION` binds or a closure is made
+/// of.
+fn dynamic_traits(unit: &Unit, at: u32) -> (crate::attributes::Flags, Arity) {
     usize::try_from(at)
         .ok()
         .and_then(|at| unit.dynamic.get(at))
-        .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
+        .map(|(decl, _)| {
+            (
+                crate::attributes::Flags::of(&decl.attributes),
+                Arity::of(decl),
+            )
+        })
         .unwrap_or_default()
 }
 

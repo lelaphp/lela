@@ -282,13 +282,13 @@ impl Request {
         let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        self.vm.push(unit);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
         // stands in the table, in the compiler's order, from the start.
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.symbol_table = Some(TableId::GLOBAL);
-        }
+        self.vm.push(exec::Activation {
+            symbol_table: Some(TableId::GLOBAL),
+            ..exec::Activation::of(unit, exec::Body::Main)
+        });
         self.attach_symbol_table(frame);
         Ok(frame)
     }
@@ -326,20 +326,15 @@ impl Request {
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        self.vm.push_body(
-            unit,
-            exec::Body::Main,
-            None,
+        self.vm.push(exec::Activation {
             receiver,
             called_scope,
-            0,
+            scope,
+            symbol_table: Some(table),
             returns_to,
-            exec::Caller::Opline(caller),
-        );
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.scope = scope;
-            state.symbol_table = Some(table);
-        }
+            caller: exec::Caller::Opline(caller),
+            ..exec::Activation::of(unit, exec::Body::Main)
+        });
         self.attach_symbol_table(frame);
         crate::observer::call(self, frame);
         Ok(frame)
@@ -512,62 +507,55 @@ impl Request {
                 "InternalError: a user function whose body the unit has not",
             ))
         };
-        let (unit, body) = {
-            let user = self.user_function(function).ok_or_else(no_body)?;
-            (Arc::clone(&user.unit), user.body)
-        };
-        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
-        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it on the stack for
         // `RECV_VARIADIC` to collect.
-        let (parameters, typed) = self.function_decl(function).map_or((0, false), |decl| {
-            (
-                decl.parameters.iter().filter(|p| !p.variadic).count(),
-                decl.parameters.iter().any(|p| p.ty.is_some()),
-            )
-        });
+        let (unit, body, arity) = {
+            let user = self.user_function(function).ok_or_else(no_body)?;
+            (Arc::clone(&user.unit), user.body, user.arity)
+        };
+        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
+        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let parameters = usize::try_from(arity.parameters).unwrap_or(usize::MAX);
         let entry = code.safepoints.first().map_or(0, |at| at.0);
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let extra_args = call.arguments.len().saturating_sub(parameters);
         let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
-        let closure = call.closure;
         exec::init_runtime_cache(&mut self.map, code, body);
-        self.vm.push_body(
-            unit,
-            body,
-            Some(function),
-            call.receiver,
-            call.called_scope,
-            num_args,
-            returns_to,
-            caller,
-        );
-        let mut extra = Vec::new();
-        for (at, argument) in call.arguments.into_iter().enumerate() {
-            if at < parameters {
-                let previous =
-                    self.set_slot(frame, u32::try_from(at).unwrap_or(u32::MAX), argument);
-                self.release(previous);
-            } else {
-                extra.push(argument);
+        // The parameters' CVs of the frame just pushed hold `UNDEF`, so
+        // each argument is written over nothing, as `SEND_*` writes into
+        // the callee's slot; the rest are the extra arguments.
+        let mut arguments = call.arguments;
+        let mut placing = arguments.drain(..);
+        if let Some(slots) = self.stack.frame_mut(frame) {
+            let cells = slots.slots_mut().iter_mut().take(parameters);
+            for (cell, argument) in cells.zip(placing.by_ref()) {
+                *cell = argument.to_zval();
             }
         }
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.extra_args = extra;
-            state.extra_named = call.extra_named;
-            state.closure = closure;
-        }
+        let extra_args: Vec<Value> = placing.collect();
+        self.vm.keep_arguments(arguments);
+        let opline =
+            exec::skipped_recv(num_args, arity.parameters, arity.typed, entry).unwrap_or(0);
+        self.vm.push(exec::Activation {
+            function: Some(function),
+            opline,
+            receiver: call.receiver,
+            called_scope: call.called_scope,
+            closure: call.closure,
+            num_args,
+            extra_args,
+            extra_named: call.extra_named,
+            returns_to,
+            caller,
+            ..exec::Activation::of(unit, body)
+        });
         if let Some(name) = call.name {
             self.release(Value::string(name));
         }
         for coerced in call.coerced {
             self.release(coerced);
-        }
-        let declared = u32::try_from(parameters).unwrap_or(u32::MAX);
-        if let Some(at) = exec::skipped_recv(num_args, declared, typed, entry) {
-            self.vm.jump(frame, at);
         }
         crate::observer::call(self, frame);
         Ok(frame)
@@ -665,16 +653,17 @@ impl Request {
         let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
         let cvs = self
             .vm
-            .serving(frame)
-            .and_then(|serving| serving.code().map(|code| code.num_cvs as usize))
-            .unwrap_or(slots);
-        for at in 0..slots {
-            let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
+            .at(frame)
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map_or(slots, |code| code.num_cvs as usize);
+        let mut from = 0;
+        while let Some((at, value)) = self.take_next_owner(frame, from) {
             if at < cvs {
                 self.release(value);
             } else {
                 self.release_nogc(value);
             }
+            from = at.saturating_add(1);
         }
         self.free_rebuilt_table(frame);
         // A generator's frame leaves its closure to the generator
@@ -703,6 +692,23 @@ impl Request {
                 self.release(closure.as_value());
             }
         }
+    }
+
+    /// The first slot of `frame` from `from` on that holds an owner, and
+    /// what it held, the slot left `UNDEF`: the walk of a frame being
+    /// popped, which gives up each owner in slot order, the frame looked
+    /// up again after each release since the release may serve PHP
+    /// code. A slot that owns nothing is passed over in the same lookup
+    /// and left as it stands, as `i_free_compiled_variables` passes over
+    /// what `Z_REFCOUNTED_P` refuses.
+    fn take_next_owner(&mut self, frame: FrameRef, from: usize) -> Option<(usize, Value)> {
+        let slots = self.stack.frame_mut(frame)?.slots_mut();
+        let (at, cell) = slots
+            .iter_mut()
+            .enumerate()
+            .skip(from)
+            .find(|(_, cell)| cell.is_refcounted())?;
+        Some((at, Value::of_zval(std::mem::replace(cell, Zval::UNDEF))))
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -838,9 +844,11 @@ impl Request {
             for value in call.coerced {
                 self.release_nogc(value);
             }
-            for value in call.arguments {
+            let mut arguments = call.arguments;
+            for value in arguments.drain(..) {
                 self.release_nogc(value);
             }
+            self.vm.keep_arguments(arguments);
             if let Some(name) = call.name {
                 self.release(Value::string(name));
             }
@@ -856,7 +864,18 @@ impl Request {
 
     /// `zend_free_extra_named_params`: each name and value of a call's
     /// or a frame's extra named arguments given up.
+    /// A call or a frame that carries none, nearly every one, is told
+    /// apart where the caller stands and gives up nothing.
+    #[inline]
     pub(crate) fn release_named(&mut self, named: exec::ExtraNamed) {
+        if named.carries_any() {
+            self.release_named_rows(named);
+        }
+    }
+
+    /// [`Request::release_named`] over what carries a row or a table.
+    #[inline(never)]
+    fn release_named_rows(&mut self, named: exec::ExtraNamed) {
         for (name, value) in named.free(self) {
             self.release(Value::string(name));
             self.release(value);

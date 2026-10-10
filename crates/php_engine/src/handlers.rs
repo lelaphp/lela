@@ -78,12 +78,12 @@ use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand};
 use crate::ops::inline::{self, Arith};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
-use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
+use crate::tier::{Next, SafepointIdx, Site, Stepped, Tier, continued};
 use php_unit::Opcode;
 
 /// What one handler did to the frame chain, and the fatal that ends the
 /// request instead.
-pub(crate) type Edge = Result<Stepped, Fatal>;
+pub(crate) type Edge = Result<Next, Fatal>;
 
 /// `ZEND_BIND_REF` (`Z/Zend/zend_compile.h:1194`): the bit a
 /// `BIND_LEXICAL`'s and a `BIND_STATIC`'s `extended_value` carries for
@@ -669,11 +669,7 @@ pub(crate) fn declare_attributed_const<T: Tier>(
     }
     let value = crate::api::values::Owner::adopt(req, value);
     req.define_attributed_constant(&key, value, attributes);
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    Ok(Stepped::Same(frame))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8343`):
@@ -1168,7 +1164,7 @@ pub(crate) fn bind_init_static_or_jmp<T: Tier>(
     let bound = cell.as_value();
     req.addref(&bound);
     req.replace_slot(frame, op.op1, bound);
-    jump_to(req, frame, op.op2)
+    jump_to(op.op2)
 }
 
 /// `ZEND_BIND_GLOBAL` (`Z/Zend/zend_vm_def.h:8679`), one variable of a
@@ -1697,12 +1693,20 @@ fn init_call(
     lookups: &[ConstIdx],
     named: ConstIdx,
 ) -> Edge {
+    // The name is a string constant of the op array, held by one more
+    // owner for the call, as `zval_get_string` would hold it.
     let named = exec::constant(code, named);
-    let name = match crate::ops::to_string(req, &named) {
-        Ok(name) => name,
-        Err(thrown) => {
-            return threw(req, frame, &thrown);
+    let name = match named.as_php_string() {
+        Some(&name) => {
+            req.addref(&named);
+            name
         }
+        None => match crate::ops::to_string(req, &named) {
+            Ok(name) => name,
+            Err(thrown) => {
+                return threw(req, frame, &thrown);
+            }
+        },
     };
     let slot = CacheSlot(op.out);
     let function = if let Cached::Function(function) = req.cached(frame, slot) {
@@ -2422,7 +2426,7 @@ pub(crate) fn init_user_call<T: Tier>(
         // A deprecation's handler may have thrown with the callable found.
         Ok(_) if req.is_pending() => {
             exec::free_operand(req, frame, code, op.op2_type, op.op2);
-            return Ok(Stepped::Threw(frame));
+            return Ok(Stepped::Threw(frame).into());
         }
         Ok(callable) => user_call_target(req, callable.target()),
         // `zend_type_error`, chained onto what a deprecation's handler
@@ -2680,7 +2684,7 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
                 match crate::api::call::handle_named_arg(
                     offset,
                     &mut call.arguments,
-                    &mut call.extra_named,
+                    call.extra_named.rows_mut(),
                     name,
                 ) {
                     Ok(named) => {
@@ -2880,7 +2884,7 @@ pub(crate) fn assert_check<T: Tier>(
         return Ok(advance(req, frame));
     }
     write_out(req, frame, code, op, &Value::bool(true));
-    jump_to(req, frame, op.op2)
+    jump_to(op.op2)
 }
 
 /// Where a `SEND_*` or a `CHECK_FUNC_ARG` places its argument, php's
@@ -2997,7 +3001,7 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
     let placed = crate::api::call::handle_named_arg(
         offset,
         &mut call.arguments,
-        &mut call.extra_named,
+        call.extra_named.rows_mut(),
         name,
     );
     Ok(match placed {
@@ -3356,7 +3360,7 @@ fn included(
         _ => php_compile::SourceKind::File,
     };
     if !crate::engine::note_compiled(req, &unit, source) {
-        return Ok(Stepped::Threw(frame));
+        return Ok(Stepped::Threw(frame).into());
     }
     // The op array `zend_accel_load_script` copies out of the cache, or
     // `zend_compile` makes, the request's while the file runs.
@@ -3381,7 +3385,7 @@ fn included(
     if let Err(thrown) = req.hold_op_array(callee, copy) {
         return threw(req, callee, &thrown);
     }
-    Ok(Stepped::Pushed(callee))
+    Ok(Stepped::Pushed(callee).into())
 }
 
 /// The value an `INCLUDE_OR_EVAL` answers without a frame, into the
@@ -3473,12 +3477,10 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let callee = req.push_user_frame(function, call, returns_to, exec::Caller::Opline(frame))?;
-    let serving = exec::standing(req, callee)?;
-    let body = exec::serving_code(&serving, callee)?;
-    if let Some(at) = exec::parameter_prologue(req, callee, body)? {
-        return Ok(Stepped::Threw(at));
+    if let Some(at) = exec::parameter_prologue(req, callee)? {
+        return Ok(Stepped::Threw(at).into());
     }
-    Ok(Stepped::Pushed(callee))
+    Ok(Stepped::Pushed(callee).into())
 }
 
 /// `ZEND_RECV` (`Z/Zend/zend_vm_def.h:5692`): the parameter numbered
@@ -3831,7 +3833,7 @@ pub(crate) fn recv_variadic<T: Tier>(
     let named = req
         .vm()
         .at(frame)
-        .map(|state| state.extra_named.clone())
+        .map(|state| state.extra_named.to_vec())
         .unwrap_or_default();
     // An untyped variadic with no positional extras is php's
     // `ZVAL_ARR(params, EX(extra_named_params))`, the frame's table
@@ -4705,7 +4707,7 @@ pub(crate) fn new<T: Tier>(
         let next_is_do_fcall = exec::opline_at(code, at.saturating_add(1))
             .is_some_and(|next| next.opcode == php_unit::Opcode::DoFcall);
         if count == 0 && next_is_do_fcall {
-            return jump_to(req, frame, at.saturating_add(2));
+            return jump_to(at.saturating_add(2));
         }
     }
     let function = constructor.unwrap_or(Function::PASS);
@@ -6082,7 +6084,7 @@ pub(crate) fn unset_var<T: Tier>(
     req.symbol_unset(table, &name);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
+        return Ok(Stepped::Threw(frame).into());
     }
     Ok(advance(req, frame))
 }
@@ -6209,7 +6211,7 @@ fn fetch_by_name(
     }
     req.replace_slot(frame, out, value.unwrap_or_else(Value::null));
     if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
+        return Ok(Stepped::Threw(frame).into());
     }
     Ok(advance(req, frame))
 }
@@ -10354,7 +10356,7 @@ fn data_after(
 /// The `Threw` edge: the throwable left pending where the loop reads it.
 fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     req.leave_pending(thrown);
-    Ok(Stepped::Threw(frame))
+    Ok(Stepped::Threw(frame).into())
 }
 
 /// The body the `DO_*CALL` handlers share, `opcode` naming the one that
@@ -10414,7 +10416,7 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             let into = (op.out_type != OperandKind::Unused)
                 .then(|| (frame, exec::temporary_slot(code, op.out)));
             if handed_back(req, into, value) || threw {
-                return Ok(Stepped::Threw(frame));
+                return Ok(Stepped::Threw(frame).into());
             }
             Ok(advance(req, frame))
         }
@@ -10535,7 +10537,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
         }
     };
     if answer == Cached::Hit {
-        return jump_to(req, frame, op.op2);
+        return jump_to(op.op2);
     }
     Ok(advance(req, frame))
 }
@@ -10766,7 +10768,7 @@ fn frameless_call(
     match served {
         Ok(value) => {
             set_out(req, frame, code, op, value);
-            jump_to(req, frame, at.saturating_add(width))
+            jump_to(at.saturating_add(width))
         }
         Err(thrown) => threw(req, frame, &thrown),
     }
@@ -10855,10 +10857,12 @@ pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_assign(req, frame, code, op, (A::default(), B::default())) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     assigned(req, frame, code, op)
 }
 
@@ -11167,7 +11171,7 @@ pub(crate) fn assign_ref<T: Tier>(
     if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
         crate::api::raising::notice(req, "Only variables should be assigned by reference");
         if req.is_pending() {
-            return Ok(Stepped::Threw(frame));
+            return Ok(Stepped::Threw(frame).into());
         }
         let value = held.undef_as_null();
         req.addref(&value);
@@ -11354,7 +11358,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         crate::api::raising::notice(req, "Only variables should be assigned by reference");
         if req.is_pending() {
             exec::free_operand(req, frame, code, data_type, data_at);
-            return Ok(Stepped::Threw(frame));
+            return Ok(Stepped::Threw(frame).into());
         }
         let value = held.undef_as_null();
         req.addref(&value);
@@ -11365,7 +11369,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         write_out(req, frame, code, op, &landed);
         req.release(garbage);
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(req, frame, at.saturating_add(2));
+        return jump_to(at.saturating_add(2));
     }
     // The owner the source had of `held` is the cell's now.
     let cell = match req.make_ref(source) {
@@ -11412,7 +11416,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     write_out(req, frame, code, op, &bound);
     req.release(garbage);
     exec::free_operand(req, frame, code, data_type, data_at);
-    jump_to(req, frame, at.saturating_add(2))
+    jump_to(at.saturating_add(2))
 }
 
 /// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two
@@ -11711,7 +11715,7 @@ pub(crate) fn assign_obj<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    jump_to(req, frame, at.saturating_add(2))
+    jump_to(at.saturating_add(2))
 }
 
 /// `ASSIGN_OBJ`'s body over an object: the name placed
@@ -12039,7 +12043,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     };
     let Some(info) = placed else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(req, frame, at.saturating_add(2));
+        return jump_to(at.saturating_add(2));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     // `zend_assign_to_typed_prop`'s set-visibility arm, after the value
@@ -12059,7 +12063,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
         Ok(pair) => landed_out(req, frame, code, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
-    jump_to(req, frame, at.saturating_add(2))
+    jump_to(at.saturating_add(2))
 }
 
 /// The slot one of the five read-modify-write opcodes over a
@@ -12304,7 +12308,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(req, frame, at.saturating_add(2));
+        return jump_to(at.saturating_add(2));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
@@ -12352,7 +12356,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
         write_out(req, frame, code, op, &cell.get());
-        return jump_to(req, frame, at.saturating_add(2));
+        return jump_to(at.saturating_add(2));
     }
     let stepped = match ty {
         None => stepped,
@@ -12372,7 +12376,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // time: a weak conversion raises a deprecation and php raises it
     // once.
     req.store_static_property(declaring, &name, stepped);
-    jump_to(req, frame, at.saturating_add(2))
+    jump_to(at.saturating_add(2))
 }
 
 /// `zend_binary_assign_op_typed_prop` (`Z/Zend/zend_execute.c:1693`):
@@ -12730,7 +12734,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(req, frame, at.saturating_add(2));
+        return jump_to(at.saturating_add(2));
     };
     let Some(source) = write_place(req, frame, code, data_type, data_at) else {
         return Err(Fatal::Error(String::from(
@@ -12742,7 +12746,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     if returns_function {
         crate::api::raising::notice(req, "Only variables should be assigned by reference");
         if req.is_pending() {
-            return Ok(Stepped::Threw(frame));
+            return Ok(Stepped::Threw(frame).into());
         }
     }
     let cell = if let Some(cell) = held.as_php_ref() {
@@ -12802,7 +12806,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             },
         );
     }
-    jump_to(req, frame, at.saturating_add(2))
+    jump_to(at.saturating_add(2))
 }
 
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
@@ -14003,7 +14007,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    jump_to(req, frame, at.saturating_add(2))
+    jump_to(at.saturating_add(2))
 }
 
 /// The operation of a compound assignment over a declared property
@@ -16603,7 +16607,7 @@ pub(crate) fn fe_reset_r<T: Tier>(
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
         }
         if started.is_none() {
-            return jump_to(req, frame, op.op2);
+            return jump_to(op.op2);
         }
         return Ok(advance(req, frame));
     }
@@ -16663,7 +16667,7 @@ fn fe_reset_iterator(
         Ok((_, empty)) => {
             free(req);
             if empty {
-                jump_to(req, frame, op.op2)
+                jump_to(op.op2)
             } else {
                 Ok(advance(req, frame))
             }
@@ -16712,7 +16716,7 @@ fn fe_reset_refused(
     req.replace_slot(frame, slot, Value::undef());
     set_fe_iter(req, frame, slot, None);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    jump_to(req, frame, op.op2)
+    jump_to(op.op2)
 }
 
 /// `Z_FE_ITER` (`Z/Zend/zend_types.h:424`): the index a walk over a
@@ -16953,7 +16957,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
     let (key, value) = match foreach_var(req, at.read()) {
         ForeachVar::Array { array, pos } => {
             let Some((found, key, value)) = array.live_from(pos) else {
-                return jump_to(req, frame, op.extended_value);
+                return jump_to(op.extended_value);
             };
             // `Z_FE_POS_P(array) = pos + 1`: the word alone, since a
             // value write is `ZVAL_COPY_VALUE` and leaves `u2` standing
@@ -16974,7 +16978,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
                 (key, value)
             }
             Ok(None) => {
-                return jump_to(req, frame, op.extended_value);
+                return jump_to(op.extended_value);
             }
             Err(thrown) => return threw(req, frame, &thrown),
         },
@@ -17026,7 +17030,7 @@ fn fe_fetch_iterator(
     let (current, key) = match crate::interfaces::fetch(req, iterator, keyed, false) {
         Ok(Some(found)) => found,
         Ok(None) => {
-            return jump_to(req, frame, op.extended_value);
+            return jump_to(op.extended_value);
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -17284,7 +17288,7 @@ pub(crate) fn fe_reset_rw<T: Tier>(
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
     }
     if started.is_none() {
-        return jump_to(req, frame, op.op2);
+        return jump_to(op.op2);
     }
     Ok(advance(req, frame))
 }
@@ -17340,7 +17344,7 @@ fn fe_reset_rw_value(
         };
         set_fe_iter(req, frame, slot, started);
         if started.is_none() {
-            return jump_to(req, frame, op.op2);
+            return jump_to(op.op2);
         }
         return Ok(advance(req, frame));
     }
@@ -17442,7 +17446,7 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
                     ),
                 );
                 if req.is_pending() {
-                    return Ok(Stepped::Threw(frame));
+                    return Ok(Stepped::Threw(frame).into());
                 }
                 Ok(Ok(None))
             }
@@ -17458,7 +17462,7 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
     let BoundRw { key, cell, owned } = match found? {
         Ok(Some(found)) => found,
         Ok(None) => {
-            return jump_to(req, frame, op.extended_value);
+            return jump_to(op.extended_value);
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -17718,6 +17722,7 @@ pub(crate) fn add<T: Tier, A: Operand + Default, B: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_arith(
         req,
@@ -17729,6 +17734,7 @@ pub(crate) fn add<T: Tier, A: Operand + Default, B: Operand + Default>(
     ) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     binary(req, frame, code, op, crate::ops::add)
 }
 
@@ -17738,6 +17744,7 @@ pub(crate) fn sub<T: Tier, A: Operand + Default, B: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_arith(
         req,
@@ -17749,6 +17756,7 @@ pub(crate) fn sub<T: Tier, A: Operand + Default, B: Operand + Default>(
     ) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     binary(req, frame, code, op, crate::ops::sub)
 }
 
@@ -17758,6 +17766,7 @@ pub(crate) fn mul<T: Tier, A: Operand + Default, B: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_arith(
         req,
@@ -17769,6 +17778,7 @@ pub(crate) fn mul<T: Tier, A: Operand + Default, B: Operand + Default>(
     ) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     binary(req, frame, code, op, crate::ops::mul)
 }
 
@@ -18190,17 +18200,20 @@ pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_compare::<T>(
         req,
         frame,
         code,
         op,
+        at,
         Ordering::is_lt,
         (A::default(), B::default()),
     ) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     compared_branch::<T>(req, frame, code, op, crate::ops::is_smaller)
 }
 
@@ -18213,7 +18226,15 @@ pub(crate) fn is_smaller_or_equal<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_compare::<T>(req, frame, code, op, Ordering::is_le, kinds) {
+    if let Some(edge) = inline_compare::<T>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        Ordering::is_le,
+        kinds,
+    ) {
         return edge;
     }
     compared_branch::<T>(req, frame, code, op, crate::ops::is_smaller_or_equal)
@@ -18227,17 +18248,20 @@ pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_compare::<T>(
         req,
         frame,
         code,
         op,
+        at,
         Ordering::is_eq,
         (A::default(), B::default()),
     ) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     compared_branch::<T>(req, frame, code, op, crate::ops::is_equal)
 }
 
@@ -18249,7 +18273,15 @@ pub(crate) fn is_not_equal<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_compare::<T>(req, frame, code, op, Ordering::is_ne, kinds) {
+    if let Some(edge) = inline_compare::<T>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        Ordering::is_ne,
+        kinds,
+    ) {
         return edge;
     }
     compared_branch::<T>(req, frame, code, op, crate::ops::is_not_equal)
@@ -18327,10 +18359,12 @@ pub(crate) fn pre_inc<T: Tier, A: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if let Some(edge) = inline_incdec(req, frame, code, op, (Arith::Add, false), A::default()) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     incdec(req, frame, code, op, false, crate::ops::increment)
 }
 
@@ -19429,14 +19463,14 @@ pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: 
 /// interrupt is tested and then the loop safepoint raised with
 /// `number`, the one the compiler wrote into the jump's `result`.
 fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, number: u32) -> Edge {
-    req.vm_mut().jump(frame, target);
     if target <= at {
+        req.vm_mut().stand(frame, target);
         if crate::interrupt::check(req)? {
-            return Ok(Stepped::Threw(frame));
+            return Ok(Stepped::Threw(frame).into());
         }
         continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(number))))?;
     }
-    Ok(Stepped::Same(frame))
+    Ok(Next::Jump(target))
 }
 
 /// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a
@@ -19451,10 +19485,12 @@ pub(crate) fn jmpnz<T: Tier, A: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_branch::<T, true, false>(req, frame, code, op, A::default()) {
+    if let Some(edge) = inline_branch::<T, true, false>(req, frame, code, op, at, A::default()) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     branched::<T, true, false>(req, frame, code, op)
 }
 
@@ -19476,10 +19512,12 @@ pub(crate) fn jmpz<T: Tier, A: Operand + Default>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_branch::<T, false, false>(req, frame, code, op, A::default()) {
+    if let Some(edge) = inline_branch::<T, false, false>(req, frame, code, op, at, A::default()) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     branched::<T, false, false>(req, frame, code, op)
 }
 
@@ -19515,7 +19553,14 @@ pub(crate) fn jmpz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if let Some(edge) = inline_branch::<T, false, true>(req, frame, code, op, ByKind(op.op1_type)) {
+    if let Some(edge) = inline_branch::<T, false, true>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        ByKind(op.op1_type),
+    ) {
         return edge;
     }
     branched::<T, false, true>(req, frame, code, op)
@@ -19542,7 +19587,14 @@ pub(crate) fn jmpnz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if let Some(edge) = inline_branch::<T, true, true>(req, frame, code, op, ByKind(op.op1_type)) {
+    if let Some(edge) = inline_branch::<T, true, true>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        ByKind(op.op1_type),
+    ) {
         return edge;
     }
     branched::<T, true, true>(req, frame, code, op)
@@ -19574,10 +19626,10 @@ fn branched<T: Tier, const ON: bool, const EX: bool>(
         return Ok(advance(req, frame));
     }
     if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
+        return Ok(Stepped::Threw(frame).into());
     }
     if EX {
-        return jump_to(req, frame, op.op2);
+        return jump_to(op.op2);
     }
     let at = req.vm().opline(frame);
     jumped::<T>(req, frame, at, op.op2, op.out)
@@ -19614,7 +19666,7 @@ pub(crate) fn jmp_set<T: Tier>(
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     set_out(req, frame, code, op, taken);
-    jump_to(req, frame, op.op2)
+    jump_to(op.op2)
 }
 
 /// `ZEND_JMP_NULL` (`Z/Zend/zend_vm_def.h:7841`), the short circuit of a
@@ -19683,7 +19735,7 @@ pub(crate) fn jmp_null<T: Tier>(
                 // `ZVAL_UNDEFINED_OP1`.
                 let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
                 if req.is_pending() {
-                    return Ok(Stepped::Threw(frame));
+                    return Ok(Stepped::Threw(frame).into());
                 }
             }
             Value::null()
@@ -19692,7 +19744,7 @@ pub(crate) fn jmp_null<T: Tier>(
         _ => Value::bool(true),
     };
     set_out(req, frame, code, op, result);
-    jump_to(req, frame, op.op2)
+    jump_to(op.op2)
 }
 
 /// `ZEND_SHORT_CIRCUITING_CHAIN_MASK` and the three values under it
@@ -19745,7 +19797,7 @@ pub(crate) fn coalesce<T: Tier>(
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     set_out(req, frame, code, op, taken);
-    jump_to(req, frame, op.op2)
+    jump_to(op.op2)
 }
 
 /// `ZEND_SWITCH_LONG`: [`crate::ops::switch_long`] over the subject,
@@ -19986,19 +20038,19 @@ fn returned_to_caller<T: Tier>(
     crate::observer::returned(req, frame, Some(&returned));
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
-        return Ok(Stepped::Done);
+        return Ok(Stepped::Done.into());
     }
     continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
     let returns_to = req.vm().returns_to(frame);
     req.leave_frame(frame);
     let caller = req.stack_mut().current();
     if handed_back(req, returns_to, returned) {
-        return Ok(Stepped::Threw(caller));
+        return Ok(Stepped::Threw(caller).into());
     }
     // The caller stands at the call opline that pushed this frame, and
     // goes on from the one after it.
     req.vm_mut().advance(caller);
-    Ok(Stepped::Popped(caller))
+    Ok(Stepped::Popped(caller).into())
 }
 
 /// What a call returned, handed to the frame that made the call: into
@@ -20132,7 +20184,7 @@ fn smart_branch<T: Tier>(
         return computed_into(req, frame, code, op, computed);
     };
     if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
+        return Ok(Stepped::Threw(frame).into());
     }
     branch_fused::<T>(
         req,
@@ -20184,7 +20236,7 @@ fn branch_fused<T: Tier>(
     answer: bool,
 ) -> Edge {
     if answer != (jump.opcode == Opcode::Jmpnz) {
-        return jump_to(req, frame, at.saturating_add(1));
+        return jump_to(at.saturating_add(1));
     }
     jumped::<T>(req, frame, at, jump.op2, jump.out)
 }
@@ -20215,7 +20267,7 @@ fn inline_arith(
         b.read(slots, code, op.op2),
     )?;
     write_owning_nothing(slots, code, op, computed)?;
-    Some(Ok(advanced(req, frame)))
+    Some(Ok(advanced()))
 }
 
 /// The inline path of the comparisons that branch (`ZEND_IS_SMALLER`,
@@ -20233,6 +20285,7 @@ fn inline_compare<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
     holds: impl FnOnce(Ordering) -> bool,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
@@ -20241,7 +20294,6 @@ fn inline_compare<T: Tier>(
         a.read(slots, code, op.op1),
         b.read(slots, code, op.op2),
     )?);
-    let at = req.vm().opline(frame);
     if let Some(jump) = fused_jump(code, op, at) {
         return Some(branch_fused::<T>(
             req,
@@ -20252,7 +20304,7 @@ fn inline_compare<T: Tier>(
         ));
     }
     write_owning_nothing(req.slots_mut(frame), code, op, Zval::bool(answer))?;
-    Some(Ok(advanced(req, frame)))
+    Some(Ok(advanced()))
 }
 
 /// The inline path of the four conditional jumps
@@ -20272,6 +20324,7 @@ fn inline_branch<T: Tier, const ON: bool, const EX: bool>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
     a: impl Operand,
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
@@ -20280,12 +20333,11 @@ fn inline_branch<T: Tier, const ON: bool, const EX: bool>(
         write_owning_nothing(slots, code, op, Zval::bool(truth))?;
     }
     if truth != ON {
-        return Some(Ok(advanced(req, frame)));
+        return Some(Ok(advanced()));
     }
     if EX {
-        return Some(jump_to(req, frame, op.op2));
+        return Some(jump_to(op.op2));
     }
-    let at = req.vm().opline(frame);
     Some(jumped::<T>(req, frame, at, op.op2, op.out))
 }
 
@@ -20306,7 +20358,7 @@ fn inline_truth<const NOT: bool>(
     let slots = req.slots_mut(frame);
     let truth = inline::truth(a.read(slots, code, op.op1))?;
     write_owning_nothing(slots, code, op, Zval::bool(truth != NOT))?;
-    Some(Ok(advanced(req, frame)))
+    Some(Ok(advanced()))
 }
 
 /// The inline path of `ZEND_PRE_INC`, `ZEND_PRE_DEC` and their `POST_`
@@ -20338,7 +20390,7 @@ fn inline_incdec(
         write_owning_nothing(slots, code, op, if post { held } else { stepped })?;
     }
     *slots.get_mut(at)? = stepped;
-    Some(Ok(advanced(req, frame)))
+    Some(Ok(advanced()))
 }
 
 /// The inline path of `ZEND_ASSIGN` to a CV (`ZEND_ASSIGN_SPEC_CV_*`,
@@ -20371,7 +20423,7 @@ fn inline_assign(
         write_owning_nothing(slots, code, op, value)?;
     }
     *slots.get_mut(at)? = value;
-    Some(Ok(advanced(req, frame)))
+    Some(Ok(advanced()))
 }
 
 /// `ZVAL_COPY_VALUE(EX_VAR(opline->result.var), z)` for a zval that owns
@@ -20392,9 +20444,8 @@ fn write_owning_nothing(slots: &mut [Zval], code: &OpArray, op: &Opline, z: Zval
 
 /// `ZEND_VM_NEXT_OPCODE` after an inline path, which serves no user
 /// code and so leaves nothing pending for [`advance`] to test.
-fn advanced(req: &mut Request, frame: FrameRef) -> Stepped {
-    req.vm_mut().advance(frame);
-    Stepped::Same(frame)
+fn advanced() -> Next {
+    Next::Advance
 }
 
 /// The body the one-operand kernels' handlers share: the operand
@@ -20650,16 +20701,10 @@ fn compared(
 /// Where a jump-table opcode sends the frame: `ZEND_VM_SET_RELATIVE_OPCODE`
 /// to the target or to `extended_value`, or `ZEND_VM_NEXT_OPCODE` on to
 /// the chain. Every target is forward, so none is a safepoint site.
-fn switched(req: &mut Request, frame: FrameRef, switched: Switched, op: &Opline) -> Stepped {
+fn switched(req: &Request, frame: FrameRef, switched: Switched, op: &Opline) -> Next {
     match switched {
-        Switched::Target(target) => {
-            req.vm_mut().jump(frame, target);
-            Stepped::Same(frame)
-        }
-        Switched::Default => {
-            req.vm_mut().jump(frame, op.extended_value);
-            Stepped::Same(frame)
-        }
+        Switched::Target(target) => Next::Jump(target),
+        Switched::Default => Next::Jump(op.extended_value),
         Switched::Chain => advance(req, frame),
     }
 }
@@ -20683,24 +20728,22 @@ fn no_table(opcode: &str) -> Fatal {
 /// between this opline and the next. The frame stays at the opline that
 /// raised, php's `EG(opline_before_exception)`, for the unwinder to
 /// read which `try` element and live ranges it stands in.
-fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
+fn advance(req: &Request, frame: FrameRef) -> Next {
     if req.is_pending() {
-        return Stepped::Threw(frame);
+        return Stepped::Threw(frame).into();
     }
-    req.vm_mut().advance(frame);
-    Stepped::Same(frame)
+    Next::Advance
 }
 
 /// `ZEND_VM_NEXT_OPCODE_EX(1, 2)`, [`advance`] for a handler that is two
 /// oplines, the `OP_DATA` after it carrying the value: the opline after
 /// the pair, and the `Threw` edge at this one where a throwable is
 /// pending, which a handler php carries on past a diagnostic leaves.
-fn advance_over_data(req: &mut Request, frame: FrameRef, at: u32) -> Stepped {
+fn advance_over_data(req: &Request, frame: FrameRef, at: u32) -> Next {
     if req.is_pending() {
-        return Stepped::Threw(frame);
+        return Stepped::Threw(frame).into();
     }
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    Stepped::Same(frame)
+    Next::Jump(at.saturating_add(2))
 }
 
 /// The body the by-value `SEND_*` handlers share: the operand placed in
@@ -20884,7 +20927,7 @@ pub(crate) fn catch<T: Tier>(
     let pending = match req.pending() {
         Some(pending) => Some(pending),
         None if req.is_pending() => None,
-        None => return jump_to(req, frame, op.op2),
+        None => return jump_to(op.op2),
     };
     let slot = Some(CacheSlot(op.extended_value & !LAST_CATCH));
     let matched = pending.is_some_and(|pending| {
@@ -20893,9 +20936,9 @@ pub(crate) fn catch<T: Tier>(
     });
     if !matched {
         if op.extended_value & LAST_CATCH != 0 {
-            return Ok(Stepped::Threw(frame));
+            return Ok(Stepped::Threw(frame).into());
         }
-        return jump_to(req, frame, op.op2);
+        return jump_to(op.op2);
     }
     let Some(caught) = req.take_pending_view() else {
         return Ok(advance(req, frame));
@@ -20953,7 +20996,7 @@ pub(crate) fn fast_call<T: Tier>(
     if let Some(left) = left {
         req.release_raised(left);
     }
-    jump_to(req, frame, op.op1)
+    jump_to(op.op1)
 }
 
 /// `ZEND_FAST_RET` (`Z/Zend/zend_vm_def.h:8658`): where the cell records
@@ -20984,7 +21027,7 @@ pub(crate) fn fast_ret<T: Tier>(
     });
     let (from, delayed) = cell.unwrap_or((None, None));
     if let Some(from) = from {
-        return jump_to(req, frame, from.saturating_add(1));
+        return jump_to(from.saturating_add(1));
     }
     if let Some(delayed) = delayed {
         req.raise_under(delayed);
@@ -21164,7 +21207,7 @@ fn unwind_from<T: Tier>(
         if op_num < element.catch_op.0 && req.is_pending() {
             cleanup_live_vars(req, frame, code, op_num, element.catch_op.0);
             req.vm_mut().stand_at_exception_op(frame, false);
-            return jump_to(req, frame, element.catch_op.0);
+            return jump_to(element.catch_op.0);
         }
         if op_num < element.finally_op.0 {
             if req.unwinding() {
@@ -21183,7 +21226,7 @@ fn unwind_from<T: Tier>(
                 cell.from = None;
             }
             req.vm_mut().stand_at_exception_op(frame, false);
-            return jump_to(req, frame, element.finally_op.0);
+            return jump_to(element.finally_op.0);
         }
         if op_num < element.finally_end.0 {
             let Some(var) = fast_call_var(code, element) else {
@@ -21229,9 +21272,9 @@ fn unwind_from<T: Tier>(
             // The return of nothing below, from the serving's entry
             // frame, which the loop's caller pops: the serving is over.
             req.set_returned(Value::undef());
-            return Ok(Stepped::Done);
+            return Ok(Stepped::Done.into());
         }
-        return Ok(Stepped::Threw(frame));
+        return Ok(Stepped::Threw(frame).into());
     }
     let returns_to = req.vm().returns_to(frame);
     req.leave_frame(frame);
@@ -21251,9 +21294,9 @@ fn unwind_from<T: Tier>(
         // nothing pending, `zend_leave_helper` leaves the frame as a
         // return of nothing; the caller goes on past its call.
         req.vm_mut().advance(caller);
-        return Ok(Stepped::Popped(caller));
+        return Ok(Stepped::Popped(caller).into());
     }
-    Ok(Stepped::Threw(caller))
+    Ok(Stepped::Threw(caller).into())
 }
 
 /// `EX(func)->op_array.opcodes[try_catch->finally_end].op1.var`: the
@@ -21290,9 +21333,8 @@ fn free_throwing_result(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
 
 /// `ZEND_VM_JMP_EX(target, 0)`: the frame at `at`, with neither the
 /// interrupt test nor the pending test the loop's own jumps make.
-fn jump_to(req: &mut Request, frame: FrameRef, at: u32) -> Edge {
-    req.vm_mut().jump(frame, at);
-    Ok(Stepped::Same(frame))
+fn jump_to(at: u32) -> Edge {
+    Ok(Next::Jump(at))
 }
 
 /// `ZEND_RETURN_BY_REF` (`Z/Zend/zend_vm_def.h:4586`), what a function
@@ -21417,7 +21459,7 @@ pub(crate) fn generator_create<T: Tier>(
     _: &OpArray,
     _: &Opline,
 ) -> Edge {
-    crate::generator::create(req, frame)
+    crate::generator::create(req, frame).map(Next::from)
 }
 
 /// `ZEND_YIELD` (`Z/Zend/zend_vm_def.h:8397`): the previous value and
@@ -21497,7 +21539,7 @@ pub(crate) fn r#yield<T: Tier>(
     crate::generator::yielded(req, generator, value, key, send_target);
     crate::observer::generator_yielded(req, frame, generator);
     crate::generator::suspend(req, generator)?;
-    Ok(Stepped::Done)
+    Ok(Stepped::Done.into())
 }
 
 /// The value a by-reference `YIELD` hands out: `GET_OP1_ZVAL_PTR_PTR(BP_VAR_W)`
@@ -21635,7 +21677,7 @@ pub(crate) fn yield_from<T: Tier>(
             }
             crate::observer::generator_yielded(req, frame, generator);
             crate::generator::suspend(req, generator)?;
-            Ok(Stepped::Done)
+            Ok(Stepped::Done.into())
         }
         Err(thrown) => threw(req, frame, &thrown),
     }
@@ -21670,7 +21712,7 @@ pub(crate) fn generator_return<T: Tier>(
     // before the generator is closed (`Z/Zend/zend_vm_def.h:4766`).
     crate::observer::returned(req, frame, Some(&value));
     crate::generator::returned(req, generator, value);
-    Ok(Stepped::Done)
+    Ok(Stepped::Done.into())
 }
 
 /// `ZEND_MAKE_REF` (`Z/Zend/zend_vm_def.h:9262`), what a by-reference
@@ -21749,6 +21791,18 @@ pub(crate) fn make_ref<T: Tier>(
 
 #[cfg(test)]
 mod tests {
+
+    /// The edge a handler called outside the loop served, as
+    /// [`crate::tier::step`] hands it out: the position the loop would
+    /// have held written back to the frame, which the handler was
+    /// entered at as the dispatch enters it.
+    macro_rules! served {
+        ($req:ident, $frame:expr, $at:ident => $call:expr) => {{
+            let $at = $req.vm().opline($frame);
+            let edge = $call;
+            edge.map(|next| crate::tier::settled(&mut $req, $frame, $at, next))
+        }};
+    }
     use std::sync::Arc;
 
     use php_heap::Intern as _;
@@ -21793,10 +21847,10 @@ mod tests {
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
-        req.vm_mut().jump(frame, 1);
+        req.vm_mut().stand(frame, 1);
 
         assert_eq!(
-            jmp::<Probe>(&mut req, frame, code, &back),
+            served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().opline(frame), 0);
@@ -21811,7 +21865,7 @@ mod tests {
             ..Opline::default()
         };
         assert_eq!(
-            jmp::<Probe>(&mut req, frame, code, &forward),
+            served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &forward)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().opline(frame), 1);
@@ -21829,11 +21883,11 @@ mod tests {
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
-        req.vm_mut().jump(frame, 1);
+        req.vm_mut().stand(frame, 1);
         req.interrupt().elapsed(1);
 
         assert_eq!(
-            jmp::<Probe>(&mut req, frame, code, &back),
+            served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back)),
             Err(Fatal::Error(String::from(
                 "Maximum execution time of 1 second exceeded"
             )))
@@ -21877,10 +21931,10 @@ mod tests {
         let frame = req.pushed(Arc::clone(&taken));
         let code = crate::exec::code_of(&taken);
         let op = code.oplines.get(1).copied().unwrap_or_default();
-        req.vm_mut().jump(frame, 1);
+        req.vm_mut().stand(frame, 1);
 
         assert_eq!(
-            jmpnz::<Probe, crate::operand::Const>(&mut req, frame, code, &op),
+            served!(req, frame, at => jmpnz::<Probe, crate::operand::Const>(&mut req, frame, code, &op, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().opline(frame), 0);
@@ -21892,9 +21946,9 @@ mod tests {
         let not_taken = conditional(php_heap::Zval::long(0));
         let frame = req.pushed(Arc::clone(&not_taken));
         let code = crate::exec::code_of(&not_taken);
-        req.vm_mut().jump(frame, 1);
+        req.vm_mut().stand(frame, 1);
         assert_eq!(
-            jmpnz::<Probe, crate::operand::Const>(&mut req, frame, code, &op),
+            served!(req, frame, at => jmpnz::<Probe, crate::operand::Const>(&mut req, frame, code, &op, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().opline(frame), 2, "on to the opline after it");
@@ -21956,12 +22010,12 @@ mod tests {
         let frame = req.pushed(Arc::clone(&taken));
         let code = crate::exec::code_of(&taken);
         let op = code.oplines.get(1).copied().unwrap_or_default();
-        req.vm_mut().jump(frame, 1);
+        req.vm_mut().stand(frame, 1);
 
         assert_eq!(
-            is_smaller::<Probe, crate::operand::Const, crate::operand::Const>(
-                &mut req, frame, code, &op
-            ),
+            served!(req, frame, at => is_smaller::<Probe, crate::operand::Const, crate::operand::Const>(
+                &mut req, frame, code, &op, at
+            )),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().opline(frame), 0);
@@ -21972,7 +22026,7 @@ mod tests {
 
         let not_taken = compared_loop(1);
         let frame = req.pushed(Arc::clone(&not_taken));
-        req.vm_mut().jump(frame, 1);
+        req.vm_mut().stand(frame, 1);
         assert_eq!(crate::tier::step(&mut req, frame), Ok(Stepped::Same(frame)));
         assert_eq!(req.vm().opline(frame), 3, "past the jump in one step");
         assert_eq!(req.state::<Asked>().sites.len(), 1);
@@ -22013,7 +22067,7 @@ mod tests {
         let op = code.oplines.first().copied().unwrap_or_default();
 
         assert_eq!(
-            r#return::<Probe>(&mut req, inner, code, &op),
+            served!(req, inner, at => r#return::<Probe>(&mut req, inner, code, &op)),
             Ok(Stepped::Popped(outer))
         );
         assert_eq!(
@@ -22023,7 +22077,7 @@ mod tests {
 
         // The entry frame's own return raises nothing and ends the loop.
         assert_eq!(
-            r#return::<Probe>(&mut req, outer, code, &op),
+            served!(req, outer, at => r#return::<Probe>(&mut req, outer, code, &op)),
             Ok(Stepped::Done)
         );
         assert_eq!(req.state::<Asked>().sites.len(), 1);
@@ -22107,16 +22161,16 @@ mod tests {
         let call = code.oplines.get(2).copied().unwrap_or_default();
 
         assert_eq!(
-            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
             Ok(Stepped::Same(frame))
         );
         assert!(!req.is_pending(), "the lowered constant is the table's key");
         assert_eq!(
-            send_val_ex::<Nop>(&mut req, frame, code, &send),
+            served!(req, frame, at => send_val_ex::<Nop>(&mut req, frame, code, &send)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(
-            do_fcall_by_name::<Nop>(&mut req, frame, code, &call),
+            served!(req, frame, at => do_fcall_by_name::<Nop>(&mut req, frame, code, &call)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.slot(frame, 0).as_int(), Some(3));
@@ -22140,7 +22194,7 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
 
         assert_eq!(
-            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 1, "the first pass looks the table up");
@@ -22153,7 +22207,7 @@ mod tests {
         );
 
         assert_eq!(
-            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 1, "the second pass reads the slot");
@@ -22226,7 +22280,7 @@ mod tests {
                 .push_user_frame(f, state, None, crate::exec::Caller::Opline(main))
                 .unwrap_or(main);
             assert_eq!(
-                init_fcall_by_name::<Nop>(&mut req, frame, &code, &init),
+                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, &code, &init)),
                 Ok(Stepped::Same(frame)),
                 "call {call}"
             );
@@ -22297,7 +22351,7 @@ mod tests {
         let strlen = req.function_named(b"strlen");
 
         assert_eq!(
-            init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 2, "foo\\strlen misses, strlen hits");
@@ -22308,7 +22362,7 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         assert_eq!(
-            init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 2, "the second pass looks nothing up");
@@ -22349,7 +22403,7 @@ mod tests {
         let init = code.oplines.first().copied().unwrap_or_default();
         for pass in 1..=2 {
             assert_eq!(
-                init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+                served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
                 Ok(Stepped::Threw(frame))
             );
             assert_eq!(req.vm().lookups, pass);
@@ -22413,9 +22467,9 @@ mod tests {
         for pass in 1..=2 {
             let thrown = crate::api::raising::throw_error(&mut req, "Error", "e");
             req.leave_pending(&thrown);
-            req.vm_mut().jump(frame, 0);
+            req.vm_mut().stand(frame, 0);
             assert_eq!(
-                catch::<Nop>(&mut req, frame, code, &clause),
+                served!(req, frame, at => catch::<Nop>(&mut req, frame, code, &clause)),
                 Ok(Stepped::Same(frame))
             );
             assert!(
@@ -22496,9 +22550,9 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
-            req.vm_mut().jump(frame, 0);
+            req.vm_mut().stand(frame, 0);
             assert_eq!(
-                init_static_method_call::<Nop>(&mut req, frame, code, &op),
+                served!(req, frame, at => init_static_method_call::<Nop>(&mut req, frame, code, &op)),
                 Ok(Stepped::Same(frame)),
                 "the call frame is pushed on pass {pass}"
             );
@@ -22533,9 +22587,9 @@ mod tests {
         assert!(exception.is_some(), "the engine declares Exception");
 
         for pass in 1..=2 {
-            req.vm_mut().jump(frame, 0);
+            req.vm_mut().stand(frame, 0);
             assert_eq!(
-                init_static_method_call::<Nop>(&mut req, frame, code, &op),
+                served!(req, frame, at => init_static_method_call::<Nop>(&mut req, frame, code, &op)),
                 Ok(Stepped::Threw(frame)),
                 "a constructor is an instance method on pass {pass}"
             );
@@ -22625,9 +22679,9 @@ mod tests {
             );
             let Some(Ok(object)) = made else { continue };
             req.replace_slot(frame, 0, object.as_value());
-            req.vm_mut().jump(frame, 0);
+            req.vm_mut().stand(frame, 0);
             assert_eq!(
-                init_method_call::<Nop>(&mut req, frame, code, &op),
+                served!(req, frame, at => init_method_call::<Nop>(&mut req, frame, code, &op)),
                 Ok(Stepped::Same(frame)),
                 "the call frame is pushed on pass {pass}"
             );
@@ -22662,9 +22716,9 @@ mod tests {
         req.leave_pending(&thrown);
 
         for pass in 1..=2 {
-            req.vm_mut().jump(frame, 0);
+            req.vm_mut().stand(frame, 0);
             assert_eq!(
-                catch::<Nop>(&mut req, frame, code, &clause),
+                served!(req, frame, at => catch::<Nop>(&mut req, frame, code, &clause)),
                 Ok(Stepped::Threw(frame))
             );
             assert_eq!(req.vm().lookups, pass, "looked up again on pass {pass}");
@@ -22749,7 +22803,7 @@ mod tests {
 
         let new_op = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(
-            new::<Nop>(&mut req, frame, code, &new_op),
+            served!(req, frame, at => new::<Nop>(&mut req, frame, code, &new_op)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(
@@ -22760,7 +22814,7 @@ mod tests {
 
         let instanceof_op = code.oplines.get(2).copied().unwrap_or_default();
         assert_eq!(
-            instanceof::<Nop>(&mut req, frame, code, &instanceof_op),
+            served!(req, frame, at => instanceof::<Nop>(&mut req, frame, code, &instanceof_op)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(
@@ -22771,7 +22825,7 @@ mod tests {
 
         let constant_op = code.oplines.get(3).copied().unwrap_or_default();
         assert_eq!(
-            fetch_class_constant::<Nop>(&mut req, frame, code, &constant_op),
+            served!(req, frame, at => fetch_class_constant::<Nop>(&mut req, frame, code, &constant_op)),
             Ok(Stepped::Threw(frame))
         );
         assert!(
@@ -22824,9 +22878,9 @@ mod tests {
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
-            req.vm_mut().jump(frame, 0);
+            req.vm_mut().stand(frame, 0);
             assert_eq!(
-                jmp_frameless::<Nop>(&mut req, frame, code, &jmp),
+                served!(req, frame, at => jmp_frameless::<Nop>(&mut req, frame, code, &jmp)),
                 Ok(Stepped::Same(frame))
             );
             assert_eq!(
@@ -22852,9 +22906,9 @@ mod tests {
         let jmp = code.oplines.first().copied().unwrap_or_default();
 
         for pass in 1..=2 {
-            req.vm_mut().jump(frame, 0);
+            req.vm_mut().stand(frame, 0);
             assert_eq!(
-                jmp_frameless::<Nop>(&mut req, frame, code, &jmp),
+                served!(req, frame, at => jmp_frameless::<Nop>(&mut req, frame, code, &jmp)),
                 Ok(Stepped::Same(frame))
             );
             assert_eq!(
@@ -22935,7 +22989,7 @@ mod tests {
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(
-            frameless_icall_0::<Nop>(&mut req, frame, code, &call),
+            served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.slot(frame, 0).as_int(), Some(7));
@@ -22971,7 +23025,7 @@ mod tests {
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert!(matches!(
-            frameless_icall_0::<Nop>(&mut req, frame, code, &call),
+            served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call)),
             Err(Fatal::Error(message)) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000")
         ));
     }
@@ -23016,7 +23070,7 @@ mod tests {
         let init = code.oplines.first().copied().unwrap_or_default();
 
         assert_eq!(
-            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
             Ok(Stepped::Threw(frame))
         );
         assert!(req.is_pending());
@@ -23085,7 +23139,7 @@ mod tests {
         req.replace_slot(frame, 0, cell.as_value());
 
         assert_eq!(
-            assign::<Nop, crate::operand::Cv, crate::operand::Const>(&mut req, frame, code, &op),
+            served!(req, frame, at => assign::<Nop, crate::operand::Cv, crate::operand::Const>(&mut req, frame, code, &op, at)),
             Ok(Stepped::Same(frame))
         );
         assert_eq!(

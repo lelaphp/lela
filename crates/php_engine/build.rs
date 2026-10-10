@@ -16,7 +16,10 @@
 //! each naming the handler at those kinds (`crate::operand`), as
 //! `zend_vm_gen.php` emits one handler per `SPEC` pair (design §5.8). A
 //! handler generic over kinds the spec does not specialise is a build
-//! error.
+//! error. Such a handler is handed the opline's position after the four
+//! every handler takes, since its arm writes nothing to the frame before
+//! it; every other arm writes the position first, php's `SAVE_OPLINE()`
+//! (`crate::tier::Next`).
 //!
 //! Written to `OUT_DIR/dispatch.rs` and included, never committed (design
 //! §10).
@@ -166,9 +169,14 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
          /// `ops.toml` and the handlers beside it: the handler at the frame's\n\
-         /// opline, or the fatal for an opcode this engine does not serve yet.\n\
-         /// A handler that leaves a throwable pending says so with\n\
-         /// [`Stepped::Threw`], which is the pending test the loop performs.\n\
+         /// opline `at`, or the fatal for an opcode this engine does not serve\n\
+         /// yet. A handler that leaves a throwable pending says so with\n\
+         /// [`crate::tier::Stepped::Threw`], which is the pending test the\n\
+         /// loop performs. The loop holds `at` in its own hand ([`Next`]): a\n\
+         /// handler generic over its operands' kinds is handed it and writes\n\
+         /// it to the frame before anything it calls out to, and every other\n\
+         /// handler is entered with it written, as php's handler is entered\n\
+         /// past its `SAVE_OPLINE()`.\n\
          // One arm per opcode served: the length of this function is the\n\
          // number of handlers and says nothing about the code, so the line\n\
          // count is no bound on it. Every crate lints under `-D warnings`\n\
@@ -182,7 +190,8 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20   frame: FrameRef,\n\
          \x20   code: &OpArray,\n\
          \x20   op: &Opline,\n\
-         ) -> Result<Stepped, Fatal> {{\n\
+         \x20   at: u32,\n\
+         ) -> Result<Next, Fatal> {{\n\
          \x20   match op.opcode {{\n\
          {arms}\
          \x20       other => Err(Fatal::Error(format!(\n\
@@ -210,13 +219,19 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
             .ok();
         }
         format!(
-            "crate::handlers::{}::<T{params}>(req, frame, code, op)",
+            "crate::handlers::{}::<T{params}>(req, frame, code, op, at)",
             handler.ident
         )
     };
     let variant = &spec.variant;
     if handler.operands == 0 {
-        return Ok(format!("        Opcode::{variant} => {},\n", call(&[])));
+        return Ok(format!(
+            "        Opcode::{variant} => {{\n\
+             \x20           req.vm_mut().stand(frame, at);\n\
+             \x20           crate::handlers::{}::<T>(req, frame, code, op)\n\
+             \x20       }}\n",
+            handler.ident
+        ));
     }
     if !spec.specialise {
         return Err(format!(

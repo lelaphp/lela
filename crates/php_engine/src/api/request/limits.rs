@@ -382,7 +382,10 @@ impl Request {
     /// `ITIMER_REAL` (`Z/Zend/zend_execute_API.c:1611-1614`), so wall time
     /// is the clock it counts. The child is left to end on its own, so the
     /// parent waits on nothing a loaded machine stretches before its loop.
-    /// The fatal's line is masked, as php's tests mask it.
+    /// The fatal's line is masked, as php's tests mask it. The time before
+    /// the fork is spent in a loop that asks the clock once per hundred
+    /// thousand passes, so the natives a witness records stay a few
+    /// thousand however fast the loop runs.
     ///
     /// ```php
     /// $start = microtime(true);
@@ -391,7 +394,7 @@ impl Request {
     ///     if ($child === 0) { return; }
     ///     echo microtime(true) - $forked < 3 ? "counted from before the fork\n" : "counted again from the fork\n";
     /// });
-    /// while (microtime(true) - $start < 2.5) {}
+    /// while (microtime(true) - $start < 2.5) { for ($i = 0; $i < 100000; $i++); }
     /// $forked = microtime(true);
     /// if (($child = pcntl_fork()) === 0) { exit(0); }
     /// for (;;) {}
