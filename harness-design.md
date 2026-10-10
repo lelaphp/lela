@@ -259,6 +259,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **117. Revision 117 (2026-10-10).** §4.1, §6 and §3 say what the generated clippy configuration and the re-entry rule are since #1950 and #2464, settled by Mitchell on #2465 (2026-10-09, a session), the sentences word for word. Since branch `t1917` (644fe4ab, c71f8c03), a `clippy.toml` is rendered at each directory that a `deny_types` or `deny_methods` rule's scope names. Each file carries every such rule whose scope reaches it: `crates/clippy.toml` and `sapi/clippy.toml` hold `fork.threads`, and `ext/clippy.toml` holds `ext.no-locks` and `fork.threads`. Yet §4.1's derived bullet still said that `ext/clippy.toml` was generated from `ext.no-locks` alone and covered nothing under `crates/`. It now says each such rule renders into the file at each directory its scope names, and it names no file list, so a fourth directory does not stale it. §4.1's readers name the generator of each `clippy.toml`, and its deletion test names the generated clippy.toml files. §6 gains a row for `fork.threads`, the fork home and the engine's counted threads, and its generated-config row names each generated clippy.toml. #2464's third diff, approved by Mitchell and landed at e27db22f, deleted `engine.reentry-signature`. Measured on #2464 at a1299fa1, over php_engine and php_streams, 298 of the 300 functions that call `execute`, `reenter` or a `release` take `&mut Request`, and the other two hold one or make the request they serve. So §6's re-entry row cites the type and design principle 9, not a lint, with compile as its cadence. §3's row is now **Re-entry in signatures**, and its last column says this revision retires the lint. §4.1's excerpt shows `lints.no-panic` at its scope since e27db22f, and the `engine.reentry-signature` row is struck. Rejected, by the ruling: listing the three files in the prose, §6 keeping "the parameter" (it claims more than the types enforce, e.g. `api::syntax::InRequest`), and reversing the deletion. Design revision 125 carries principle 9 and strikes §10's lint bullet, and #2475 asks what stops a crate-level clippy.toml from hiding the generated rules. Nothing is reversed, so there is no ADR. Check: `grep -n 'reentry-signature\|Re-entry lint' harness-design.md` matches ledger rows alone, and `cargo xtask budget` reads each of `crates/clippy.toml`, `ext/clippy.toml` and `sapi/clippy.toml` as matching its rendering.
 
+**118. Revision 118 (2026-10-10).** §4.1's excerpt of `seams.toml` takes its `[[rule]]` rows from the file. Mitchell ruled on #2465 (2026-10-09, a session) that those rows become a computed region rendered from the manifest by id, and #2472 builds it. The excerpt had been typed by hand and had drifted: after #2464 it still showed `lints.no-panic`'s old scope and the deleted `engine.reentry-signature`, which revision 117 struck by hand. The region `manifest-rules` runs `scripts/manifest-rules.sh` over the ids the excerpt showed, less the deleted one: `ext.no-locks`, `unsafe.homes`, `lints.no-panic`, `witness.exit-authored`, `git.no-verify` and `harness.self`. It prints each row verbatim, from its `[[rule]]` line to the blank line that ends it, comments included, so the excerpt now shows what the file carries: `ext.no-locks`' once types, `Rc` and `deny_macros`, and `harness.self`'s function-hook modules. An id the manifest carries no row for fails the render, naming the id, so a deleted rule cannot drop out unseen. The renderer is a script beside `scripts/adr-index.sh`, the other region that prints a file's own text, and adds no line to `xtask`. The non-rule tables (`[oracle]`, `[budget]`, `[[crate]]`, `[[seam]]`, `[[edge]]`) stay hand-typed above it, since their comments explain keys the file states bare and a rendering would lose that. That was the builder's call, which the ticket left open. Nothing is reversed, so there is no ADR. Check: `cargo test -p xtask --test map` runs `the_rule_excerpt_fails_naming_an_id_the_manifest_has_no_row_for`, whose manifest lacks `c.deleted` and has `a.first`, and `the_rule_excerpt_prints_each_named_row_verbatim_in_the_order_named`. `computed check harness-design.md` holds the region to `seams.toml`.
+
 ---
 
 ## 2. Vocabulary
@@ -353,43 +355,61 @@ from = "php_engine::{executor,kernels}"
 to = "php_engine::{serve,headers,gpc,output}"
 deny = true
 
+```
+
+The rules of the excerpt are the file's own rows, rendered by id, so a row the manifest changes changes here and a row it drops fails the render, naming the id (#2472):
+
+<!-- computed exec cmd="scripts/manifest-rules.sh ext.no-locks unsafe.homes lints.no-panic witness.exit-authored git.no-verify harness.self" inputs=seams.toml,scripts/manifest-rules.sh name=manifest-rules as=fence lang=toml | do not edit; run computed -->
+```toml
 [[rule]]
 id = "ext.no-locks"
 scope = "ext/*"
-deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*"]
+deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*",
+              "std::sync::Once", "std::sync::OnceLock", "std::sync::LazyLock", "std::cell::OnceCell", "std::cell::LazyCell", "once_cell::*",
+              "std::rc::Rc"]
+deny_macros = ["std::thread_local"]
 adr = "0005"
-text = "Extension state is request-scoped or immutable; no lock or cell in ext/*."
+text = "Extension state is request-scoped, immutable engine-scoped or process-scoped (ADR-0005, ADR-0010); no lock, cell, once, Rc or thread-local in ext/*. Cross-request caching is api::Cache; a library's object a call into PHP code must outlive is the request's, held by Request::holding (ADR-0013)."
+# Renders to the generated, committed `ext/clippy.toml` (`disallowed-types`);
+# a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
+
 [[rule]]
 id = "unsafe.homes"
-allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]
+allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
 adr = "0006"
-text = "unsafe is permitted only in the homes this rule names; see design §4.1."
+text = "unsafe is permitted only in the homes this rule names; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
+
 [[rule]]
 id = "lints.no-panic"
-scope = ["crates/*", "ext/*", "sapi/*"]
+scope = ["crates/*", "ext/*", "sapi/*"]  # every crate a request runs through; php_syntax because the parser runs inside every request (#236), the rest measured clean (#1917)
 exempt = ["tests", "xtask", "crates/php_macros"]
 deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
 text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
+
 [[rule]]
 id = "witness.exit-authored"
 scope = "**/*.rs"
 deny_pattern = '```expect[^\n]*\bexit=\d+'
 unless = "xtask witness --accept"
+exempt = ["xtask/src/witness/**", "xtask/tests/witness.rs"] # the parser of the fence grammar and its tests carry the shape they parse (#23)
 text = "exit= in a witness is captured by `xtask witness --accept`, never authored."
+
 [[rule]]
 id = "git.no-verify"
 tool = "Bash"
 deny_argv = ["--no-verify", "-n", "-c core.hooksPath", "--config-env core.hooksPath"]
 with = "git commit"
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
+
 [[rule]]
 id = "harness.self"
 tool = ["Edit", "Write"]
-scope = [".claude/**", "harness-plugins/hooks/hooks.json", "harness-plugins/.claude-plugin/plugin.json", "seams.toml", "oracle.toml", "docs/divergence.toml"]
+scope = [".claude/**", "harness-plugins/hooks/hooks.json", "harness-plugins/hooks/*.ts", "harness-plugins/.claude-plugin/plugin.json", "seams.toml", "oracle.toml", "docs/divergence.toml"]
 exempt = [".claude/skills/**"] # a skill is an ordinary file, held by review and the [budget] harness ceiling (#626)
 deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
 ```
+<!-- /computed in=daea52631378899dc418a21bade36f22c72110fe6a4fb6ffa6d0d82eedbfb0a3 out=d033659c4a79d8fe35f044f08be78e1618404c243d536a1a413f813351fbf98a -->
 
 Each `[[rule]]` has an `id`, a scope or a tool, one predicate, an optional `adr`, an optional `exempt` (paths the rule does not judge, in the scope's grammar; `permit` reads it for every predicate it judges, #23), an optional `exempt_label` (the tracker's labels under which the rule does not judge a call that names an issue, which only a rule `permit` judges at the call may carry, #341, ledger 53), and the `text` a failure prints. A tool is `Edit`, `Write` or `Bash`, the calls `permit` judges, or `Stop`, the hook event, for a rule `done --hook` reads over the reply and `permit` never judges (#32). The predicates are the ones `manifest::Predicates::NAMES` lists, and a rule carries exactly one; the qualifiers, keys that qualify a predicate and are none of their own, are the ones `Predicates::orphaned_qualifier` refuses without the predicate they qualify. This section cites both lists and restates neither (#1909, #2250). `check` names an `xtask` lint, `avoid_from` a glossary file, or `{ file, section }` for one section of it alone (#63), and `generated` the files the manifest renders, each from every rule whose scope reaches its directory (`generated::reaches`). Of the qualifiers, `unless` on `deny_pattern` names the instrument whose work the pattern describes, so that a hit that instrument left behind is that instrument's own and not the call's, judged by the instrument's reading and never by the shape of the call (§4.4). A rule `permit` judges at the call may carry `where = "ticketed"`, which limits it to a checkout whose branch records a ticket, the call's own or the one a leading `cd` names; a `deny_pattern` may carry `unless_pattern`, which lets a hit through when the command around it, the text between the shell separators on either side, also matches. Each `[[seam]]` names its lock, and a lock with `sections` is diffed per section; each `[[crate]]` names its ceiling and nothing about `unsafe`; the `unsafe` homes are one rule and appear nowhere else in the file. That is the whole grammar, and `xtask` refuses a manifest with an unknown key.
 

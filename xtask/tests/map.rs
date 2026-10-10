@@ -840,3 +840,78 @@ fn the_session_start_hook_wires_the_clone_and_renders_the_local_file_on_the_four
         "permit's hook stands"
     );
 }
+
+/// A scratch workspace holding `scripts/manifest-rules.sh` and the
+/// `seams.toml` given, and what it printed for the ids named.
+fn manifest_rules(manifest: &str, ids: &[&str]) -> std::process::Output {
+    let root = Tree::new("manifest-rules").unwrap();
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::copy(
+        workspace().join("scripts/manifest-rules.sh"),
+        root.join("scripts/manifest-rules.sh"),
+    )
+    .unwrap();
+    std::fs::write(root.join("seams.toml"), manifest).unwrap();
+    Command::new(root.join("scripts/manifest-rules.sh"))
+        .args(ids)
+        .current_dir(std::env::temp_dir())
+        .output()
+        .unwrap()
+}
+
+const MANIFEST: &str = "\
+[budget]
+total = 1
+
+[[rule]]
+id = \"a.first\"
+scope = \"ext/*\"   # a comment on the row
+text = \"The first.\"
+# a comment after the row's keys, still the row's
+
+# a comment that heads the next row
+[[rule]]
+id = \"b.second\"
+deny = true
+text = \"The second.\"
+";
+
+#[test]
+fn the_rule_excerpt_prints_each_named_row_verbatim_in_the_order_named() {
+    let out = manifest_rules(MANIFEST, &["b.second", "a.first"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "[[rule]]\nid = \"b.second\"\ndeny = true\ntext = \"The second.\"\n\n\
+         [[rule]]\nid = \"a.first\"\nscope = \"ext/*\"   # a comment on the row\n\
+         text = \"The first.\"\n# a comment after the row's keys, still the row's\n"
+    );
+}
+
+#[test]
+fn the_rule_excerpt_fails_naming_an_id_the_manifest_has_no_row_for() {
+    let out = manifest_rules(MANIFEST, &["a.first", "c.deleted", "a.firs"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty(), "a failed render prints no excerpt");
+    let said = String::from_utf8(out.stderr).unwrap();
+    assert!(said.contains("\"c.deleted\""), "{said}");
+    assert!(
+        said.contains("\"a.firs\""),
+        "a prefix of an id is not the id: {said}"
+    );
+}
+
+#[test]
+fn harness_design_s_rule_excerpt_is_rendered_from_the_manifest() {
+    let design = staged(workspace(), "harness-design.md");
+    let opener = opener(&design, "manifest-rules").unwrap();
+    assert!(opener.contains("scripts/manifest-rules.sh "), "{opener}");
+    assert!(
+        opener.contains("inputs=seams.toml,scripts/manifest-rules.sh"),
+        "{opener}"
+    );
+}
