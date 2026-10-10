@@ -6421,7 +6421,7 @@ mod tests {
     #[test]
     fn a_diagnostic_is_displayed_or_logged_as_the_ini_entries_say() {
         let mut displayed = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .build()
             .serve(description("<?php echo NAN;"), &mut displayed);
         assert_eq!(
@@ -6434,7 +6434,7 @@ mod tests {
         );
 
         let mut logged = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -6444,6 +6444,25 @@ mod tests {
             logged.logged(),
             "PHP Warning:  unexpected NAN value was coerced to string in witness.php on line 1\n"
         );
+    }
+
+    /// `builder` with `INF` and `NAN` among its persistent constants, as
+    /// ext/standard declares them, which the bundle of these tests has
+    /// not: what the diagnostics tests below echo to raise php's warning.
+    fn declaring_nan(builder: EngineBuilder) -> EngineBuilder {
+        let constant = |name: &str, value: f64| php_unit::decl::ConstDecl {
+            name: Name::from(name),
+            value: php_unit::decl::ConstExpr::Double(value),
+            attributes: Vec::new(),
+        };
+        builder.additional_extension(
+            crate::api::abi::ExtensionBuilder::default()
+                .constants(vec![
+                    constant("INF", f64::INFINITY),
+                    constant("NAN", f64::NAN),
+                ])
+                .build("standard"),
+        )
     }
 
     /// The warning php writes for `echo NAN;` on line 2 of the witness
@@ -6459,7 +6478,7 @@ mod tests {
     #[test]
     fn the_two_error_strings_stand_around_the_display_form() {
         let mut around = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
             .ini("log_errors", "1")
@@ -6484,7 +6503,7 @@ mod tests {
     #[test]
     fn html_errors_is_phps_other_display_form() {
         let mut html = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("html_errors", "1")
             .build()
             .serve(description("<?php\necho NAN;"), &mut html);
@@ -6496,7 +6515,7 @@ mod tests {
         );
 
         let mut around = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("html_errors", "1")
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
@@ -6524,7 +6543,7 @@ mod tests {
             |line: u32| format!("\nWarning: {NAN_WARNING} in witness.php on line {line}\n");
 
         let mut every = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .build()
             .serve(description(source), &mut every);
         assert_eq!(
@@ -6533,7 +6552,7 @@ mod tests {
         );
 
         let mut once_a_site = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .build()
             .serve(description(source), &mut once_a_site);
@@ -6544,7 +6563,7 @@ mod tests {
         );
 
         let mut once = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .build()
@@ -6566,7 +6585,7 @@ mod tests {
     #[test]
     fn xmlrpc_errors_is_phps_first_display_form() {
         let mut fault = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("xmlrpc_errors", "1")
             .ini("xmlrpc_error_number", "42")
             .ini("error_prepend_string", "<PRE>")
@@ -6595,7 +6614,7 @@ mod tests {
     /// `sapi_module.name` fails and the `else` is the plain form.
     #[test]
     fn stderr_is_the_error_stream_only_under_the_hosts_php_names() {
-        let engine = Engine::cli_builder()
+        let engine = declaring_nan(Engine::cli_builder())
             .ini("display_errors", "stderr")
             .build();
         let under = |host: &str| {
@@ -6645,7 +6664,9 @@ mod tests {
     #[test]
     fn a_numeric_display_errors_is_read_as_phps_uint8_mode() {
         let under = |value: &str| {
-            let engine = Engine::cli_builder().ini("display_errors", value).build();
+            let engine = declaring_nan(Engine::cli_builder())
+                .ini("display_errors", value)
+                .build();
             let mut kept = Kept::default();
             engine.serve(description("<?php\necho NAN;"), &mut kept);
             (
@@ -6687,7 +6708,7 @@ mod tests {
     #[test]
     fn the_stderr_form_and_the_log_entry_are_two_calls_in_phps_order() {
         let mut kept = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "stderr")
             .ini("log_errors", "1")
             .build()
@@ -6713,7 +6734,7 @@ mod tests {
     #[test]
     fn a_dropped_repeat_is_neither_logged_nor_stored() {
         let mut logged = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .ini("display_errors", "0")
@@ -7102,7 +7123,7 @@ mod tests {
     /// is one.
     #[test]
     fn a_cached_unit_raises_what_compiling_it_raised_on_every_request() {
-        let engine = Engine::cli_builder().build();
+        let engine = declaring_nan(Engine::cli_builder()).build();
         let path = std::env::temp_dir().join(format!("dax-{}-nan.php", std::process::id()));
         assert!(std::fs::write(&path, b"<?php\necho 'a';\necho NAN . 'z';").is_ok());
         let name = path.to_string_lossy().as_bytes().to_vec();
@@ -7126,7 +7147,7 @@ mod tests {
             );
         }
         let mut masked = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("error_reporting", "0")
             .build()
             .serve(described(), &mut masked);
@@ -7385,7 +7406,7 @@ mod tests {
     #[test]
     fn the_sink_is_given_one_call_per_diagnostic_whatever_its_lines() {
         let mut fatal = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -7401,7 +7422,7 @@ mod tests {
         );
 
         let mut warned = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
