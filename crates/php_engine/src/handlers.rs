@@ -18968,6 +18968,12 @@ pub(crate) fn fast_concat<T: Tier, A: Operand + Default, B: Operand + Default>(
 /// conversion threw leaves the throwable pending
 /// (`ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`).
 ///
+/// The three rope opcodes dispatch unspecialised, unlike the rest of
+/// design §5.8's hot list: what a rope costs is the array, laid down,
+/// appended to, walked and destroyed for every interpolated string,
+/// and not the reading of its pieces, which an inline path would save
+/// (#2580).
+///
 /// ```php
 /// $a = 1; $b = 2; echo "$a-$b-$a";
 /// ```
