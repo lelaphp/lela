@@ -384,6 +384,52 @@ struct FileShape {
     divergence: Vec<Divergence>,
 }
 
+/// The ids a registry's text names, each row's own and those it covers,
+/// read without holding the rows to today's shape: `done`'s base is any
+/// older commit, and a kind or field since removed (`php-ub`, #2510) must
+/// still answer which rows the diff added.
+pub(crate) fn named_ids(text: &str) -> Result<BTreeSet<String>> {
+    #[derive(Deserialize)]
+    struct Named {
+        id: String,
+        #[serde(default)]
+        covers: Vec<String>,
+    }
+    #[derive(Deserialize)]
+    struct Names {
+        #[serde(default)]
+        divergence: Vec<Named>,
+    }
+    let names: Names = toml::from_str(text)?;
+    Ok(names
+        .divergence
+        .into_iter()
+        .flat_map(|row| std::iter::once(row.id).chain(row.covers))
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::named_ids;
+
+    #[test]
+    fn an_older_registrys_ids_are_read_whatever_its_kinds() {
+        let old = r#"
+[[divergence]]
+id = "php-ub:heap-openbsd-stack-base"
+kind = "php-ub"
+reason = "r"
+status = "accepted"
+since = "2026-09-01"
+covers = ["php-ub:other-site"]
+"#;
+        let ids = named_ids(old).unwrap_or_default();
+        assert!(ids.contains("php-ub:heap-openbsd-stack-base"), "{ids:?}");
+        assert!(ids.contains("php-ub:other-site"), "{ids:?}");
+        assert!(super::Registry::parse(old).is_err());
+    }
+}
+
 impl Registry {
     /// Load `docs/divergence.toml` from the workspace root.
     pub fn load(root: &Path) -> Result<Registry> {

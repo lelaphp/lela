@@ -944,14 +944,14 @@ fn open_rows(
 ) -> Result<()> {
     let proposed_here: Vec<divergence::Id> = if changed.iter().any(|c| c.path == divergence::FILE) {
         let before = git::show(root, base, divergence::FILE)?
-            .map(|text| Registry::parse(&text))
+            .map(|text| divergence::named_ids(&text))
             .transpose()
             .with_context(|| format!("{}:{}", base, divergence::FILE))?
             .unwrap_or_default();
         registry
             .rows()
             .iter()
-            .filter(|r| before.row(r.id.as_str()).is_none())
+            .filter(|r| !before.contains(r.id.as_str()))
             .map(|r| r.id.clone())
             .collect()
     } else {
