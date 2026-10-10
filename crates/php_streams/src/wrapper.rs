@@ -321,7 +321,7 @@ impl PlainFiles for Request {
                 )?)
             }
             Located::Ext(at) => match self.streams().wrappers[at].stat {
-                Some(stat) => match stat(self, local)? {
+                Some(stat) => match crate::supplied::wrapper(self, at, |req| stat(req, local))? {
                     Some(array) => {
                         // `statbuf_from_array`
                         // (`Z/main/streams/userspace.c:799`): each of the
@@ -371,7 +371,9 @@ impl PlainFiles for Request {
                 match self.locate_wrapper(path).0 {
                     Located::Plain => Ok(self.plain_mkdir(path, mode, recursive)),
                     Located::Ext(at) => match self.streams().wrappers[at].mkdir {
-                        Some(mkdir) => mkdir(self, path, mode, recursive),
+                        Some(mkdir) => crate::supplied::wrapper(self, at, |req| {
+                            mkdir(req, path, mode, recursive)
+                        }),
                         None => Ok(false),
                     },
                     Located::Space(user) => {
@@ -386,7 +388,7 @@ impl PlainFiles for Request {
                 match self.locate_wrapper(path).0 {
                     Located::Plain => Ok(self.plain_rmdir(path)),
                     Located::Ext(at) => match self.streams().wrappers[at].rmdir {
-                        Some(rmdir) => rmdir(self, path),
+                        Some(rmdir) => crate::supplied::wrapper(self, at, |req| rmdir(req, path)),
                         None => Ok(false),
                     },
                     Located::Space(user) => {
@@ -419,11 +421,13 @@ impl PlainFiles for Request {
             Located::Space(user) => {
                 return crate::streams::userspace::path_op(self, user, path, WrapperOp::Unlink);
             }
-            Located::Ext(at) => self.streams().wrappers[*at].unlink,
+            Located::Ext(at) => self.streams().wrappers[*at]
+                .unlink
+                .map(|unlink| (*at, unlink)),
             Located::Data => None,
         };
-        if let Some(unlink) = unlink {
-            return unlink(self, path);
+        if let Some((at, unlink)) = unlink {
+            return crate::supplied::wrapper(self, at, |req| unlink(req, path));
         }
         let text = format!("{} does not allow unlinking", self.wrapper_label(&wrapper));
         docref(self, Level::Warning, &text);
@@ -479,7 +483,9 @@ impl PlainFiles for Request {
             }
             Located::Plain | Located::Space(_) => None,
             Located::Ext(at) if self.streams().wrappers[*at].rename.is_some() => {
-                self.streams().wrappers[*at].rename
+                self.streams().wrappers[*at]
+                    .rename
+                    .map(|rename| (*at, rename))
             }
             Located::Ext(_) | Located::Data => {
                 let text = format!(
@@ -502,7 +508,7 @@ impl PlainFiles for Request {
             return crate::streams::userspace::path_op(self, user, from, WrapperOp::Rename { to });
         }
         match rename {
-            Some(rename) => rename(self, from, to),
+            Some((at, rename)) => crate::supplied::wrapper(self, at, |req| rename(req, from, to)),
             None => Ok(self.plain_rename(from, to)),
         }
     }
@@ -743,7 +749,7 @@ impl PlainFiles for Request {
             Located::Plain => return Ok(self.plain_metadata(path, op)),
             Located::Ext(at) => {
                 if let Some(set_stat) = self.streams().wrappers[at].set_stat {
-                    return set_stat(self, path, op);
+                    return crate::supplied::wrapper(self, at, |req| set_stat(req, path, op));
                 }
             }
             Located::Space(user) => {

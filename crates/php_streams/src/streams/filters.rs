@@ -24,7 +24,7 @@ use super::PhpStream;
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::{
     Brigade, FilterChain as Chain, FilterFactory, FilterFlags, FilterStatus, Request, Stream,
-    StreamFilter, Whence,
+    StreamFilter, Supplier, Whence,
 };
 use crate::api::values::{Owner, Resource, Value};
 use crate::state::Layer;
@@ -540,18 +540,20 @@ impl FilterLayer for Request {
         name: &[u8],
         params: Option<&Value>,
     ) -> Option<Box<dyn StreamFilter>> {
-        let lookup = |req: &Request, wanted: &[u8]| -> Option<FilterFactory> {
+        let lookup = |req: &Request, wanted: &[u8]| -> Option<(FilterFactory, Supplier)> {
             req.streams_ref()?
                 .filters
                 .iter()
                 .find(|(n, _)| n.as_slice() == wanted)
-                .map(|(_, f)| *f)
+                .map(|(_, f)| (f.row, f.by))
         };
         // A factory that threw is php's `create_filter` answering `NULL`
         // with `EG(exception)` set: refused, and the throwable kept for
         // the native.
-        let create = |req: &mut Request, found: FilterFactory| match found(req, name, params) {
-            Ok(filter) => filter,
+        let create = |req: &mut Request, (found, by): (FilterFactory, Supplier)| match req
+            .serve_supplied(by, |req| found(req, name, params))
+        {
+            Ok(filter) => filter.map(|filter| crate::supplied::filter(by, filter)),
             Err(thrown) => {
                 defer(req, thrown);
                 None

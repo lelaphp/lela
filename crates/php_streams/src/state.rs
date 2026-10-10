@@ -19,6 +19,7 @@ use crate::api::request::{
 use crate::api::values::Resource;
 use crate::streams::persistent::{Entry, Held};
 use crate::streams::{FilterCall, Registered};
+use crate::supplied::Supplied;
 use crate::wrapper::StatCache;
 
 /// One request's streams.
@@ -27,7 +28,7 @@ pub(crate) struct State {
     pub(crate) types: Option<Types>,
     /// The operations of each wrapper an extension registered, which a
     /// [`crate::streams::Located::Ext`] row names by its place.
-    pub(crate) wrappers: Vec<StreamWrapper>,
+    pub(crate) wrappers: Vec<Supplied<StreamWrapper>>,
     /// `url_stream_wrappers_hash`: the table every request starts with,
     /// the layer's own wrappers and then the extensions' in the order
     /// they registered them, which is php's startup order since the
@@ -61,7 +62,7 @@ pub(crate) struct State {
     /// `FG(stream_filters)`: each filter name and its factory in the
     /// order they were registered, the extensions' in php's startup
     /// order and a program's after.
-    pub(crate) filters: Vec<(Vec<u8>, FilterFactory)>,
+    pub(crate) filters: Vec<(Vec<u8>, Supplied<FilterFactory>)>,
     /// The streams an operation holds while it serves PHP code on them,
     /// php's `PHP_STREAM_FLAG_NO_FCLOSE`, which `fclose` refuses.
     pub(crate) held_streams: Vec<Resource>,

@@ -4058,7 +4058,7 @@ impl StreamLayer for Request {
         };
         let opening = options.opening(use_path);
         let outer = std::mem::take(&mut self.streams().wrapper_errors);
-        let opened = open(self, path, mode, opening);
+        let opened = crate::supplied::wrapper(self, at, |req| open(req, path, mode, opening));
         let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
         // The opener's owner, which the open hands its caller.
         let opened = opened?;
@@ -4223,7 +4223,9 @@ impl StreamLayer for Request {
                 let wrapper = &self.streams().wrappers[at];
                 let (label, open_dir) = (wrapper.label, wrapper.open_dir);
                 let outer = std::mem::take(&mut self.streams().wrapper_errors);
-                let opened = open_dir.map(|open_dir| open_dir(self, &path_to_open));
+                let opened = open_dir.map(|open_dir| {
+                    crate::supplied::wrapper(self, at, |req| open_dir(req, &path_to_open))
+                });
                 let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
                 match opened {
                     Some(opened) => match opened? {
