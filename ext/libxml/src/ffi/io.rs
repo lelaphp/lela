@@ -46,6 +46,53 @@ pub(super) fn sanitize(ctxt: &mut sys::xmlParserCtxt) {
     ctxt.options = 0;
 }
 
+/// `PHP_LIBXML_SANITIZE_GLOBALS` and `PHP_LIBXML_RESTORE_GLOBALS`
+/// (`Z/ext/libxml/php_libxml.h:237-257`) around `f`: the calling thread's
+/// deprecated parse defaults, which libxml2 copies into each parser it
+/// makes, set to php's for the call (no external subset, no validation,
+/// nothing pedantic, entities kept, no line numbers, blanks kept) and put
+/// back after, so a library that left them otherwise, or
+/// `zend_test_override_libxml_global_state`, reaches no parse of php's
+/// that makes its parser inside libxml (GHSA-3qrf-m4j2-pcrr). A parser
+/// php makes itself is [`sanitize`]d instead.
+pub(super) fn sanitized_globals<R>(f: impl FnOnce() -> R) -> R {
+    // SAFETY: the address of the thread's own default.
+    let load = unsafe { sys::__xmlLoadExtDtdDefaultValue() };
+    // SAFETY: as above.
+    let validity = unsafe { sys::__xmlDoValidityCheckingDefaultValue() };
+    // SAFETY: the thread's own global, read by copy.
+    let old_load = unsafe { *load };
+    // SAFETY: as above, written.
+    unsafe { *load = 0 };
+    // SAFETY: as above, read by copy.
+    let old_validity = unsafe { *validity };
+    // SAFETY: as above, written.
+    unsafe { *validity = 0 };
+    // SAFETY: no pointer argument; each the thread's own default, the old
+    // value answered.
+    let pedantic = unsafe { sys::xmlPedanticParserDefault(0) };
+    // SAFETY: as above.
+    let substitute = unsafe { sys::xmlSubstituteEntitiesDefault(0) };
+    // SAFETY: as above.
+    let line_numbers = unsafe { sys::xmlLineNumbersDefault(0) };
+    // SAFETY: as above.
+    let blanks = unsafe { sys::xmlKeepBlanksDefault(1) };
+    let answer = f();
+    // SAFETY: the thread's own globals, put back as they were.
+    unsafe { *load = old_load };
+    // SAFETY: as above.
+    unsafe { *validity = old_validity };
+    // SAFETY: as above, through the setters.
+    let _ = unsafe { sys::xmlPedanticParserDefault(pedantic) };
+    // SAFETY: as above.
+    let _ = unsafe { sys::xmlSubstituteEntitiesDefault(substitute) };
+    // SAFETY: as above.
+    let _ = unsafe { sys::xmlLineNumbersDefault(line_numbers) };
+    // SAFETY: as above.
+    let _ = unsafe { sys::xmlKeepBlanksDefault(blanks) };
+    answer
+}
+
 /// libxml2's parsers, and the `XInclude` pass over a parsed document.
 pub struct Parser;
 
@@ -156,7 +203,7 @@ impl Parser {
             sax: ptr::null_mut(),
         };
         Raised::capture_io(req, Some(unconfigured), || {
-            let doc = match source {
+            let doc = sanitized_globals(|| match source {
                 Source::Memory(bytes) => {
                     let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
                     // SAFETY: `len` readable bytes, no base URL and no encoding.
@@ -175,7 +222,7 @@ impl Parser {
                     // SAFETY: a NUL-terminated path and no encoding.
                     unsafe { sys::xmlReadFile(p.as_ptr().cast(), ptr::null(), options) }
                 }
-            };
+            });
             Node::from_raw(doc.cast())
         })
     }
@@ -326,18 +373,20 @@ impl Parser {
         let d = cstr(data);
         let mut list: *mut sys::xmlNode = ptr::null_mut();
         let (status, raised) = Raised::capture(|| {
-            // SAFETY: a live document or none, a NUL-terminated chunk and a
-            // local out-pointer.
-            unsafe {
-                sys::xmlParseBalancedChunkMemory(
-                    doc.map_or(ptr::null_mut(), |n| n.raw().cast()),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                    d.as_ptr(),
-                    &raw mut list,
-                )
-            }
+            sanitized_globals(|| {
+                // SAFETY: a live document or none, a NUL-terminated chunk
+                // and a local out-pointer.
+                unsafe {
+                    sys::xmlParseBalancedChunkMemory(
+                        doc.map_or(ptr::null_mut(), |n| n.raw().cast()),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        0,
+                        d.as_ptr(),
+                        &raw mut list,
+                    )
+                }
+            })
         });
         let answer = if status == 0 {
             Ok(Node::from_raw(list))
@@ -361,8 +410,10 @@ impl Parser {
             sax: ptr::null_mut(),
         };
         Raised::capture_io(req, Some(unconfigured), || {
-            // SAFETY: a live document.
-            unsafe { sys::xmlXIncludeProcessFlags(doc.raw().cast(), flags | NOXINCNODE) }
+            sanitized_globals(|| {
+                // SAFETY: a live document.
+                unsafe { sys::xmlXIncludeProcessFlags(doc.raw().cast(), flags | NOXINCNODE) }
+            })
         })
     }
 }
@@ -725,16 +776,18 @@ impl Validate {
     /// it loads read through `req`'s streams.
     pub fn dtd(req: &mut Request, doc: Node) -> (bool, Vec<Raised>, Option<Thrown>) {
         Raised::capture_io(req, Some(Routing::Validator), || {
-            // SAFETY: no argument.
-            let cvp = unsafe { sys::xmlNewValidCtxt() };
-            if cvp.is_null() {
-                return false;
-            }
-            // SAFETY: a live context and document.
-            let valid = unsafe { sys::xmlValidateDocument(cvp, doc.raw().cast()) } != 0;
-            // SAFETY: the context, freed once.
-            unsafe { sys::xmlFreeValidCtxt(cvp) };
-            valid
+            sanitized_globals(|| {
+                // SAFETY: no argument.
+                let cvp = unsafe { sys::xmlNewValidCtxt() };
+                if cvp.is_null() {
+                    return false;
+                }
+                // SAFETY: a live context and document.
+                let valid = unsafe { sys::xmlValidateDocument(cvp, doc.raw().cast()) } != 0;
+                // SAFETY: the context, freed once.
+                unsafe { sys::xmlFreeValidCtxt(cvp) };
+                valid
+            })
         })
     }
 
@@ -749,87 +802,89 @@ impl Validate {
         flags: c_int,
     ) -> (Validated, Vec<Raised>, Option<Thrown>) {
         Raised::capture_io(req, Some(Routing::Validator), || {
-            let parser = match (schema, source) {
-                (Schema::Xsd, Source::File(path)) => {
-                    let p = cstr(path);
-                    // SAFETY: a NUL-terminated path.
-                    unsafe { sys::xmlSchemaNewParserCtxt(p.as_ptr().cast()) }
+            sanitized_globals(|| {
+                let parser = match (schema, source) {
+                    (Schema::Xsd, Source::File(path)) => {
+                        let p = cstr(path);
+                        // SAFETY: a NUL-terminated path.
+                        unsafe { sys::xmlSchemaNewParserCtxt(p.as_ptr().cast()) }
+                    }
+                    (Schema::Xsd, Source::Memory(bytes)) => {
+                        let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
+                        // SAFETY: `len` readable bytes.
+                        unsafe { sys::xmlSchemaNewMemParserCtxt(bytes.as_ptr().cast(), len) }
+                    }
+                    (Schema::RelaxNg, Source::File(path)) => {
+                        let p = cstr(path);
+                        // SAFETY: a NUL-terminated path.
+                        unsafe { sys::xmlRelaxNGNewParserCtxt(p.as_ptr().cast()) }
+                    }
+                    (Schema::RelaxNg, Source::Memory(bytes)) => {
+                        let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
+                        // SAFETY: `len` readable bytes.
+                        unsafe { sys::xmlRelaxNGNewMemParserCtxt(bytes.as_ptr().cast(), len) }
+                    }
+                };
+                if parser.is_null() {
+                    return Validated::InvalidSchema;
                 }
-                (Schema::Xsd, Source::Memory(bytes)) => {
-                    let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
-                    // SAFETY: `len` readable bytes.
-                    unsafe { sys::xmlSchemaNewMemParserCtxt(bytes.as_ptr().cast(), len) }
+                let parsed = match schema {
+                    Schema::Xsd => {
+                        // SAFETY: a live parser context, freed once after.
+                        let s = unsafe { sys::xmlSchemaParse(parser) };
+                        // SAFETY: as above.
+                        unsafe { sys::xmlSchemaFreeParserCtxt(parser) };
+                        s
+                    }
+                    Schema::RelaxNg => {
+                        // SAFETY: as above.
+                        let s = unsafe { sys::xmlRelaxNGParse(parser) };
+                        // SAFETY: as above.
+                        unsafe { sys::xmlRelaxNGFreeParserCtxt(parser) };
+                        s
+                    }
+                };
+                if parsed.is_null() {
+                    return Validated::InvalidSchema;
                 }
-                (Schema::RelaxNg, Source::File(path)) => {
-                    let p = cstr(path);
-                    // SAFETY: a NUL-terminated path.
-                    unsafe { sys::xmlRelaxNGNewParserCtxt(p.as_ptr().cast()) }
-                }
-                (Schema::RelaxNg, Source::Memory(bytes)) => {
-                    let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
-                    // SAFETY: `len` readable bytes.
-                    unsafe { sys::xmlRelaxNGNewMemParserCtxt(bytes.as_ptr().cast(), len) }
-                }
-            };
-            if parser.is_null() {
-                return Validated::InvalidSchema;
-            }
-            let parsed = match schema {
-                Schema::Xsd => {
-                    // SAFETY: a live parser context, freed once after.
-                    let s = unsafe { sys::xmlSchemaParse(parser) };
-                    // SAFETY: as above.
-                    unsafe { sys::xmlSchemaFreeParserCtxt(parser) };
-                    s
-                }
-                Schema::RelaxNg => {
-                    // SAFETY: as above.
-                    let s = unsafe { sys::xmlRelaxNGParse(parser) };
-                    // SAFETY: as above.
-                    unsafe { sys::xmlRelaxNGFreeParserCtxt(parser) };
-                    s
-                }
-            };
-            if parsed.is_null() {
-                return Validated::InvalidSchema;
-            }
-            let valid = match schema {
-                Schema::Xsd => {
-                    // SAFETY: a live schema.
-                    let v = unsafe { sys::xmlSchemaNewValidCtxt(parsed) };
-                    if v.is_null() {
-                        // SAFETY: the schema, freed once.
+                let valid = match schema {
+                    Schema::Xsd => {
+                        // SAFETY: a live schema.
+                        let v = unsafe { sys::xmlSchemaNewValidCtxt(parsed) };
+                        if v.is_null() {
+                            // SAFETY: the schema, freed once.
+                            unsafe { sys::xmlSchemaFree(parsed) };
+                            return Validated::Unusable;
+                        }
+                        // SAFETY: a live validation context.
+                        unsafe { sys::xmlSchemaSetValidOptions(v, flags & 1) };
+                        // SAFETY: a live context and document.
+                        let r = unsafe { sys::xmlSchemaValidateDoc(v, doc.raw().cast()) };
+                        // SAFETY: both freed once.
                         unsafe { sys::xmlSchemaFree(parsed) };
-                        return Validated::Unusable;
+                        // SAFETY: as above.
+                        unsafe { sys::xmlSchemaFreeValidCtxt(v) };
+                        r == 0
                     }
-                    // SAFETY: a live validation context.
-                    unsafe { sys::xmlSchemaSetValidOptions(v, flags & 1) };
-                    // SAFETY: a live context and document.
-                    let r = unsafe { sys::xmlSchemaValidateDoc(v, doc.raw().cast()) };
-                    // SAFETY: both freed once.
-                    unsafe { sys::xmlSchemaFree(parsed) };
-                    // SAFETY: as above.
-                    unsafe { sys::xmlSchemaFreeValidCtxt(v) };
-                    r == 0
-                }
-                Schema::RelaxNg => {
-                    // SAFETY: a live schema.
-                    let v = unsafe { sys::xmlRelaxNGNewValidCtxt(parsed) };
-                    if v.is_null() {
-                        // SAFETY: the schema, freed once.
+                    Schema::RelaxNg => {
+                        // SAFETY: a live schema.
+                        let v = unsafe { sys::xmlRelaxNGNewValidCtxt(parsed) };
+                        if v.is_null() {
+                            // SAFETY: the schema, freed once.
+                            unsafe { sys::xmlRelaxNGFree(parsed) };
+                            return Validated::Unusable;
+                        }
+                        // SAFETY: a live context and document.
+                        let r = unsafe { sys::xmlRelaxNGValidateDoc(v, doc.raw().cast()) };
+                        // SAFETY: both freed once.
                         unsafe { sys::xmlRelaxNGFree(parsed) };
-                        return Validated::Unusable;
+                        // SAFETY: as above.
+                        unsafe { sys::xmlRelaxNGFreeValidCtxt(v) };
+                        r == 0
                     }
-                    // SAFETY: a live context and document.
-                    let r = unsafe { sys::xmlRelaxNGValidateDoc(v, doc.raw().cast()) };
-                    // SAFETY: both freed once.
-                    unsafe { sys::xmlRelaxNGFree(parsed) };
-                    // SAFETY: as above.
-                    unsafe { sys::xmlRelaxNGFreeValidCtxt(v) };
-                    r == 0
-                }
-            };
-            Validated::Done(valid)
+                };
+                Validated::Done(valid)
+            })
         })
     }
 }
@@ -1080,17 +1135,21 @@ impl Reader {
         Library::init();
         let len = c_int::try_from(bytes.len()).ok()?;
         let (element, _silenced) = Raised::capture(|| {
-            // SAFETY: `len` readable bytes the reader reads for its life,
-            // which ends below; no URL, no encoding.
-            let reader = unsafe {
-                sys::xmlReaderForMemory(
-                    bytes.as_ptr().cast(),
-                    len,
-                    ptr::null(),
-                    ptr::null(),
-                    OPTIONS,
-                )
-            };
+            // `PHP_LIBXML_SANITIZE_GLOBALS(reader_for_stream)` around the
+            // reader's making, whose parser copies the defaults.
+            let reader = sanitized_globals(|| {
+                // SAFETY: `len` readable bytes the reader reads for its
+                // life, which ends below; no URL, no encoding.
+                unsafe {
+                    sys::xmlReaderForMemory(
+                        bytes.as_ptr().cast(),
+                        len,
+                        ptr::null(),
+                        ptr::null(),
+                        OPTIONS,
+                    )
+                }
+            });
             if reader.is_null() {
                 return None;
             }

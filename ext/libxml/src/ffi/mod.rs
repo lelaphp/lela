@@ -171,20 +171,17 @@ impl Library {
     /// and `PHP_LIBXML_RESTORE_GLOBALS` after. libxml2 keeps both per
     /// thread.
     pub fn stylesheet_defaults<R>(f: impl FnOnce() -> R) -> R {
-        // SAFETY: no pointer argument; the thread's own default.
-        let substitute = unsafe { sys::xmlSubstituteEntitiesDefault(1) };
-        // SAFETY: the address of the thread's own default.
-        let load = unsafe { sys::__xmlLoadExtDtdDefaultValue() };
-        // SAFETY: the thread's own global, read by copy.
-        let saved = unsafe { *load };
-        // SAFETY: as above; `XML_DETECT_IDS | XML_COMPLETE_ATTRS`.
-        unsafe { *load = 2 | 4 };
-        let answer = f();
-        // SAFETY: as above.
-        unsafe { *load = saved };
-        // SAFETY: as above.
-        unsafe { sys::xmlSubstituteEntitiesDefault(substitute) };
-        answer
+        io::sanitized_globals(|| {
+            // SAFETY: no pointer argument; the thread's own default, put
+            // back with the rest as the sanitising ends.
+            let _ = unsafe { sys::xmlSubstituteEntitiesDefault(1) };
+            // SAFETY: the address of the thread's own default.
+            let load = unsafe { sys::__xmlLoadExtDtdDefaultValue() };
+            // SAFETY: the thread's own global, written by copy;
+            // `XML_DETECT_IDS | XML_COMPLETE_ATTRS`.
+            unsafe { *load = 2 | 4 };
+            f()
+        })
     }
 
     /// `xmlParserVersion`, the library's own version string: `"20913"`.

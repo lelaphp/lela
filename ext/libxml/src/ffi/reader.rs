@@ -10,6 +10,7 @@ use std::ptr::{self, NonNull};
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Stream};
 
+use super::io::sanitized_globals;
 use super::{Alloc, Node, Raised, Routing, cstr, loader, sys};
 
 /// `xmlreader_object`'s three libxml members: the reader, the memory
@@ -92,9 +93,10 @@ impl TextReader {
     ) -> (Option<TextReader>, Vec<Raised>, Option<Thrown>) {
         let (p, e) = (cstr(path), held(encoding));
         Raised::capture_io(req, Some(ROUTING), || {
-            // SAFETY: a NUL-terminated path and an encoding or null.
-            let raw =
-                unsafe { sys::xmlReaderForFile(p.as_ptr().cast(), at(e.as_ref()).cast(), options) };
+            let raw = sanitized_globals(|| {
+                // SAFETY: a NUL-terminated path and an encoding or null.
+                unsafe { sys::xmlReaderForFile(p.as_ptr().cast(), at(e.as_ref()).cast(), options) }
+            });
             TextReader::of(raw)
         })
     }
@@ -114,34 +116,36 @@ impl TextReader {
             return (None, Vec::new(), None);
         };
         Raised::capture_io(req, Some(ROUTING), || {
-            // SAFETY: `len` readable bytes, copied into the buffer.
-            let input = unsafe {
-                sys::xmlParserInputBufferCreateMem(
-                    source.as_ptr().cast(),
-                    len,
-                    sys::XML_CHAR_ENCODING_NONE,
-                )
-            };
-            let input = NonNull::new(input)?;
-            // SAFETY: a live buffer the reader reads, and a URI or null.
-            let raw = unsafe { sys::xmlNewTextReader(input.as_ptr(), at(u.as_ref()).cast()) };
-            let Some(mut reader) = TextReader::of(raw) else {
-                // SAFETY: the buffer no reader took, freed once.
-                unsafe { sys::xmlFreeParserInputBuffer(input.as_ptr()) };
-                return None;
-            };
-            reader.input = Some(input);
-            // SAFETY: the live reader, no new input, and strings or null.
-            let set = unsafe {
-                sys::xmlTextReaderSetup(
-                    raw,
-                    ptr::null_mut(),
-                    at(u.as_ref()).cast(),
-                    at(e.as_ref()).cast(),
-                    options,
-                )
-            };
-            (set == 0).then_some(reader)
+            sanitized_globals(|| {
+                // SAFETY: `len` readable bytes, copied into the buffer.
+                let input = unsafe {
+                    sys::xmlParserInputBufferCreateMem(
+                        source.as_ptr().cast(),
+                        len,
+                        sys::XML_CHAR_ENCODING_NONE,
+                    )
+                };
+                let input = NonNull::new(input)?;
+                // SAFETY: a live buffer the reader reads, and a URI or null.
+                let raw = unsafe { sys::xmlNewTextReader(input.as_ptr(), at(u.as_ref()).cast()) };
+                let Some(mut reader) = TextReader::of(raw) else {
+                    // SAFETY: the buffer no reader took, freed once.
+                    unsafe { sys::xmlFreeParserInputBuffer(input.as_ptr()) };
+                    return None;
+                };
+                reader.input = Some(input);
+                // SAFETY: the live reader, no new input, and strings or null.
+                let set = unsafe {
+                    sys::xmlTextReaderSetup(
+                        raw,
+                        ptr::null_mut(),
+                        at(u.as_ref()).cast(),
+                        at(e.as_ref()).cast(),
+                        options,
+                    )
+                };
+                (set == 0).then_some(reader)
+            })
         })
     }
 
@@ -157,18 +161,20 @@ impl TextReader {
         let (u, e) = (held(uri), held(encoding));
         let context = loader::lend(req, stream);
         Raised::capture_io(req, Some(ROUTING), || {
-            // SAFETY: the callbacks read the box this hands over, which the
-            // reader owns from here and closes even where it fails.
-            let raw = unsafe {
-                sys::xmlReaderForIO(
-                    loader::stream_read,
-                    Some(loader::stream_release),
-                    context,
-                    at(u.as_ref()).cast(),
-                    at(e.as_ref()).cast(),
-                    options,
-                )
-            };
+            let raw = sanitized_globals(|| {
+                // SAFETY: the callbacks read the box this hands over, which
+                // the reader owns from here and closes even where it fails.
+                unsafe {
+                    sys::xmlReaderForIO(
+                        loader::stream_read,
+                        Some(loader::stream_release),
+                        context,
+                        at(u.as_ref()).cast(),
+                        at(e.as_ref()).cast(),
+                        options,
+                    )
+                }
+            });
             TextReader::of(raw)
         })
     }
@@ -269,9 +275,11 @@ impl TextReader {
         xsd: Option<&[u8]>,
     ) -> (i32, Vec<Raised>, Option<Thrown>) {
         let x = held(xsd);
-        // SAFETY: the live reader and a NUL-terminated path or null.
-        self.call(req, |r| unsafe {
-            sys::xmlTextReaderSchemaValidate(r, at(x.as_ref()).cast())
+        self.call(req, |r| {
+            sanitized_globals(|| {
+                // SAFETY: the live reader and a NUL-terminated path or null.
+                unsafe { sys::xmlTextReaderSchemaValidate(r, at(x.as_ref()).cast()) }
+            })
         })
     }
 
@@ -302,10 +310,13 @@ impl TextReader {
                     if parser.is_null() {
                         return (-1, None);
                     }
-                    // SAFETY: a live schema parser.
-                    let schema = unsafe { sys::xmlRelaxNGParse(parser) };
-                    // SAFETY: the parser, freed once.
-                    unsafe { sys::xmlRelaxNGFreeParserCtxt(parser) };
+                    let schema = sanitized_globals(|| {
+                        // SAFETY: a live schema parser.
+                        let schema = unsafe { sys::xmlRelaxNGParse(parser) };
+                        // SAFETY: the parser, freed once.
+                        unsafe { sys::xmlRelaxNGFreeParserCtxt(parser) };
+                        schema
+                    });
                     if schema.is_null() {
                         return (-1, None);
                     }
