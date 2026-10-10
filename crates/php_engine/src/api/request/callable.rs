@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use php_unit::decl::Visibility;
+use php_unit::decl::{Visibility, shown};
 
 use super::{Request, visibility_string};
 use crate::api::abi::Callable;
@@ -246,8 +246,9 @@ impl Request {
                 };
                 let Some(function) = made else {
                     return Err(Refusal::Said(format!(
-                        "class {} does not have a method \"{name}\"",
+                        "class {} does not have a method \"{}\"",
                         self.class_name(scope),
+                        shown(name.as_bytes()),
                     )));
                 };
                 let target = Target::Method {
@@ -662,7 +663,7 @@ impl Request {
         let Some(class) = class else {
             return Err(Refusal::Said(format!(
                 "class \"{}\" not found",
-                String::from_utf8_lossy(name)
+                shown(name)
             )));
         };
         fcc.calling = Some(class);
@@ -698,7 +699,24 @@ impl Request {
     /// class, a parent's private method where the frame's scope is that
     /// parent (`ZEND_ACC_CHANGED`), and the handler's answer where the
     /// class has none the scope may call ([`Request::callable_via_handler`]);
-    /// and php's refusals, each in its words.
+    /// and php's refusals, each in its words, a name in them up to its
+    /// first NUL as php's `%s` prints it:
+    ///
+    /// ```php
+    /// try { call_user_func("a\0b"); } catch (Throwable $e) { echo $e->getMessage(), "\n"; }
+    /// try { array_map("a\0b", [1]); } catch (Throwable $e) { echo $e->getMessage(), "\n"; }
+    /// class C {}
+    /// foreach (["C::m\0n", ["C", "m\0n"], "N\0o::m"] as $f) {
+    ///     try { call_user_func($f); } catch (Throwable $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// call_user_func(): Argument #1 ($callback) must be a valid callback, function "a" not found or invalid function name
+    /// array_map(): Argument #1 ($callback) must be a valid callback or null, function "a" not found or invalid function name
+    /// call_user_func(): Argument #1 ($callback) must be a valid callback, class C does not have a method "m"
+    /// call_user_func(): Argument #1 ($callback) must be a valid callback, class C does not have a method "m"
+    /// call_user_func(): Argument #1 ($callback) must be a valid callback, class "N" not found
+    /// ```
     fn callable_func(
         &mut self,
         callable: &[u8],
@@ -740,7 +758,7 @@ impl Request {
                         let form = format!(
                             "Callables of the form [\"{}\", \"{}\"] are deprecated",
                             self.class_name(org),
-                            String::from_utf8_lossy(callable)
+                            shown(callable)
                         );
                         crate::api::raising::deprecated(self, &form);
                     }
@@ -754,7 +772,7 @@ impl Request {
             None => {
                 return Err(Refusal::Said(format!(
                     "function \"{}\" not found or invalid function name",
-                    String::from_utf8_lossy(callable)
+                    shown(callable)
                 )));
             }
         };
@@ -762,7 +780,7 @@ impl Request {
         let Some(calling) = fcc.calling else {
             return Err(Refusal::Said(format!(
                 "function {}() does not exist",
-                String::from_utf8_lossy(&method)
+                shown(&method)
             )));
         };
         let found = if strict && lowered == b"__construct" {
@@ -779,7 +797,7 @@ impl Request {
             return Err(Refusal::Said(format!(
                 "class {} does not have a method \"{}\"",
                 self.class_name(calling),
-                String::from_utf8_lossy(&method)
+                shown(&method)
             )));
         };
         self.callable_settle(callee, frame, fcc, via_handler)
@@ -963,25 +981,25 @@ impl Request {
             && !via_handler
         {
             let decl = self.method_decl(function);
-            let shown = || {
+            let method_shown = || {
                 format!(
                     "{}::{}",
                     self.class_name(calling),
                     decl.map_or_else(String::new, |decl| {
-                        String::from_utf8_lossy(&decl.function.name.0).into_owned()
+                        shown(&decl.function.name.0).into_owned()
                     })
                 )
             };
             if decl.is_some_and(|decl| decl.is_abstract) {
                 return Err(Refusal::Said(format!(
                     "cannot call abstract method {}()",
-                    shown()
+                    method_shown()
                 )));
             }
             if fcc.object.is_none() && !is_static {
                 return Err(Refusal::Said(format!(
                     "non-static method {}() cannot be called statically",
-                    shown()
+                    method_shown()
                 )));
             }
             let visibility = self.method_visibility(function);
@@ -991,7 +1009,7 @@ impl Request {
                 return Err(Refusal::Said(format!(
                     "cannot access {} method {}()",
                     visibility_string(visibility),
-                    shown()
+                    method_shown()
                 )));
             }
         }
