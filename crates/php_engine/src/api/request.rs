@@ -17,13 +17,12 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use php_heap::{
-    Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, Zval, ZvalRef,
-};
+use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Obj, Ref, Res, ResourceType, Zval, ZvalRef};
 use php_link::LinkedClass;
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
 
+use crate::api::abi::GcTable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
@@ -253,9 +252,11 @@ pub struct Request {
     annexes: crate::exec::Annexes,
     /// The map table of design §5.14, php's `CG(map_ptr_base)`: what a
     /// published unit's map pointers index, laid down with the request,
-    /// every entry `NULL` until touched. Every op array's runtime cache
-    /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
-    map: MapTable<crate::exec::RuntimeCache>,
+    /// every entry `NULL` until touched, and beside it the caches of the
+    /// units compiled for the request alone, php's heap caches. Every op
+    /// array's runtime cache stands in one of them
+    /// ([`exec::RuntimeCaches`]) and nowhere else.
+    map: crate::exec::RuntimeCaches,
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
@@ -591,7 +592,7 @@ pub(crate) struct FrameShape {
     /// The first opline past the `RECV*` prologue, `safepoints[0]`.
     pub(crate) entry: u32,
     /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
-    pub(crate) cache: u32,
+    pub(crate) cache: exec::CacheAt,
     /// `op_array.cache_size`.
     pub(crate) cache_size: u32,
 }
@@ -616,7 +617,9 @@ impl FrameShape {
             entry: code
                 .and_then(|code| code.safepoints.first())
                 .map_or(0, |at| at.0),
-            cache: code.map_or(0, |code| code.runtime_cache),
+            cache: code.map_or_else(exec::CacheAt::default, |code| {
+                exec::CacheAt::of(code.runtime_cache)
+            }),
             cache_size: code.map_or(0, |code| code.cache_size),
         }
     }
@@ -786,7 +789,7 @@ impl Request {
             heap,
             vm,
             annexes: crate::exec::Annexes::default(),
-            map: MapTable::new(),
+            map: crate::exec::RuntimeCaches::default(),
             state: state::RequestState::default(),
             ini: ini::Ini::new(typed_ini),
             diagnostics: diagnostics::Diagnostics::default(),
@@ -1076,15 +1079,28 @@ impl HeapHooks for Hooks<'_> {
     }
 
     /// `get_gc`, through the table: what the payload owns, handed to the
-    /// collector's walk as zvals.
-    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) {
-        let table = self.0.object_handlers(obj);
-        table.get_gc(self.0, PhpObject::of(obj), &mut |value| {
+    /// collector's walk as zvals, and the table the handler returns.
+    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) -> php_heap::GcTable {
+        let handlers = self.0.object_handlers(obj);
+        let table = handlers.get_gc(self.0, PhpObject::of(obj), &mut |value| {
             visit(value.to_zval());
         });
         // `zend_lazy_object_get_gc`: the initializer a lazy object waits
         // for, or the instance a proxy forwards to.
         self.0.lazy_gc(obj, &mut |value| visit(value.to_zval()));
+        match table {
+            GcTable::Properties => php_heap::GcTable::Properties,
+            GcTable::Owned(table) => php_heap::GcTable::Arr(table.heap()),
+            GcTable::Rows(rows) => {
+                php_heap::GcTable::Rows(rows.into_iter().map(Value::to_zval).collect())
+            }
+        }
+    }
+
+    /// `GC buffer overflow (GC disabled)`, php's warning with its own
+    /// newline, raised where the request stands.
+    fn gc_overflow(&mut self) {
+        crate::api::raising::warning(self.0, "GC buffer overflow (GC disabled)\n");
     }
 
     /// `list_dtor_ex`: the type's destructor as registered, handed the

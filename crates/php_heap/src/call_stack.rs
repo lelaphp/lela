@@ -99,9 +99,11 @@ fn stack_rlimit() -> Option<usize> {
 }
 
 /// `sysconf(_SC_PAGESIZE)`, the page the BSD and Haiku arms deduct a
-/// guard of; php spells it `getpagesize()` on FreeBSD, which answers the
-/// same number.
+/// guard of, and the macOS arm the Rust runtime's; php spells it
+/// `getpagesize()` on FreeBSD, which answers the same number, and Rust's
+/// runtime reads it as this does.
 #[cfg(any(
+    target_os = "macos",
     target_os = "freebsd",
     target_os = "dragonfly",
     target_os = "openbsd",
@@ -116,11 +118,23 @@ fn page_size() -> Option<usize> {
 
 /// `zend_call_stack_get_macos`: the base is `pthread_get_stackaddr_np`
 /// and the size `pthread_get_stacksize_np`, both of the calling thread,
-/// save the main thread of an Intel Mac, whose size the platform
-/// under-reports and php states as the 8 MiB default instead.
+/// save the main thread's size, which ends above the page Rust's runtime
+/// takes for its guard.
+///
+/// php's size is right for php's main thread and not for this one: a
+/// Rust program's runtime, before `main`, remaps the lowest page of the
+/// main thread's stack `PROT_NONE` (`std::sys::pal::unix::stack_overflow`,
+/// `install_main_guard_default`, at the page-aligned address
+/// `pthread_get_stacksize_np` below the base), so the last page php's
+/// arithmetic counts faults here, and `zend.reserved_stack_size`'s 32
+/// KiB above the end php reckons is one page less above the stack's real
+/// end: 16 KiB on Apple silicon. php's Intel arm, which states 8 MiB for
+/// a main thread because macOS 10.9 and 10.10 under-reported it, has no
+/// place here either: the runtime places its guard by the platform's
+/// size, and no macOS Rust supports under-reports it.
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::CallStack;
+    use super::{CallStack, page_size};
 
     /// `pthread_main_np`, non-zero on the process's first thread.
     pub(super) fn is_main_thread() -> bool {
@@ -129,10 +143,6 @@ mod platform {
         unsafe { libc::pthread_main_np() != 0 }
     }
 
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "php's macOS arm always answers, and the arm's shape is every arm's"
-    )]
     pub(super) fn call_stack_bounds() -> Option<CallStack> {
         // SAFETY: `pthread_self` takes no argument and answers the
         // calling thread's own handle, which stays valid while the
@@ -140,18 +150,18 @@ mod platform {
         let this = unsafe { libc::pthread_self() };
         // SAFETY: `this` is the calling thread's handle, so it names a
         // live thread; the call reads its attributes and writes nothing.
-        let base = unsafe { libc::pthread_get_stackaddr_np(this) };
-        let max_size = if cfg!(not(target_arch = "aarch64")) && is_main_thread() {
-            8 * 1024 * 1024
+        let base = unsafe { libc::pthread_get_stackaddr_np(this) }.addr();
+        // SAFETY: as above, `this` names a live thread and the call reads
+        // its attributes and writes nothing.
+        let size = unsafe { libc::pthread_get_stacksize_np(this) };
+        let max_size = if is_main_thread() {
+            let page = page_size()?;
+            let guard = base.checked_sub(size)?.checked_next_multiple_of(page)?;
+            base.checked_sub(guard.checked_add(page)?)?
         } else {
-            // SAFETY: as above, `this` names a live thread and the call
-            // reads its attributes and writes nothing.
-            unsafe { libc::pthread_get_stacksize_np(this) }
+            size
         };
-        Some(CallStack {
-            base: base.addr(),
-            max_size,
-        })
+        Some(CallStack { base, max_size })
     }
 }
 

@@ -4,7 +4,7 @@
 //! entities or notations, or the node set an `XPath` query answered.
 
 use php_ext::abi::{
-    ClassIterator, DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead,
+    ClassIterator, DimensionRead, GcTable, Instance, ObjectHandlers, PropertyPlace, PropertyRead,
     PropertyTest, Raw, Refusals, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
@@ -753,7 +753,12 @@ impl ObjectHandlers for MapHandlers {
         crate::release_libxml(req, object);
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(Dom {
             extra: Extra::Map(map),
             ..
@@ -766,6 +771,7 @@ impl ObjectHandlers for MapHandlers {
                 visit(Value::array(**array));
             }
         }
+        GcTable::Properties
     }
 }
 

@@ -42,8 +42,8 @@ use php_heap::{Exponent, double_to_string};
 use php_syntax::tree::{self, NodeId, Stmt, TokenId};
 use php_syntax::{Holder, Parsed, SyntaxKind, TextRange, TokenValue};
 
-use super::Emit;
 use super::args::Arg;
+use super::{Emit, Source};
 use crate::CompileError;
 
 /// php's `ZEND_ACC_*` visibility and the modifiers `zend_ast_export`
@@ -402,9 +402,11 @@ impl<'a> Emit<'a> {
             }
             Arg::Unpack(value) => {
                 out.extend(b"...");
-                *value
+                Source::Expr(*value)
             }
-            Arg::Made(..) => return Err(self.fatal("an assertion the compiler wrote")),
+        };
+        let Some(value) = value.tree() else {
+            return Err(self.fatal("an assertion the compiler holds"));
         };
         self.export(&mut out, value, 0, 0)?;
         out.push(b')');

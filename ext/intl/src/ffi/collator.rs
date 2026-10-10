@@ -49,11 +49,12 @@ impl Drop for Collator {
 }
 
 impl Collator {
-    /// `ucol_open`: the collator, or `None` where ICU answered none; the
-    /// code is written either way.
+    /// `ucol_open`: the collator, or `None` where ICU answered none or a
+    /// failure ([`Code::built`]); the code is written either way.
     pub(crate) fn open(locale: &CStr, status: &mut Code) -> Option<Collator> {
         // SAFETY: the locale is NUL-terminated.
-        NonNull::new(unsafe { sys::ucol_open(locale.as_ptr(), status) }).map(Collator)
+        let made = NonNull::new(unsafe { sys::ucol_open(locale.as_ptr(), status) }).map(Collator);
+        status.built(made)
     }
 
     /// `ucol_strcoll`: -1, 0 or 1.

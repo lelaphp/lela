@@ -7,8 +7,8 @@
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    ClassIterator, Instance, ObjectHandlers, OrFalse, Passed, Raw, Ref, Refusals, Std, This, True,
-    Union, Variadic,
+    ClassIterator, GcTable, Instance, ObjectHandlers, OrFalse, Passed, Raw, Ref, Refusals, Std,
+    This, True, Union, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
@@ -338,13 +338,19 @@ impl ObjectHandlers for Handlers {
 
     /// `dbstmt_get_gc`: the connection, and what the default fetch style
     /// holds.
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(stmt) = object.native::<Stmt>(req) {
             if let DbLink::Owned(dbh) = &stmt.dbh {
                 visit(dbh.as_value());
             }
             stmt.target.visit(visit);
         }
+        GcTable::Properties
     }
 
     /// `dbstmt_prop_write` answers for the declared `queryString`, so

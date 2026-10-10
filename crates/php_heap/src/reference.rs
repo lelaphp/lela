@@ -250,7 +250,9 @@ mod tests {
             self.served.push(obj.id().0);
         }
         fn free_native(&mut self, _: Obj) {}
-        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) -> crate::GcTable {
+            crate::GcTable::Properties
+        }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)

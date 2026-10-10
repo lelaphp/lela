@@ -3,10 +3,11 @@
 //! writes them, and the validator `zend_compile_attributes` runs over it
 //! once its target holds (`validate_attribute`,
 //! `validate_allow_dynamic_properties`, `validate_deprecated`). The
-//! compiler reads them where php's `zend_internal_attribute_get` answers,
-//! by the attribute's lowered name.
+//! compiler reads them, and an extension's attribute class beside them
+//! ([`Config`]), where php's `zend_internal_attribute_get` answers, by
+//! the attribute's lowered name.
 
-use php_unit::decl::{Attribute, ClassFlags, ClassKind};
+use php_unit::decl::{Attribute, ClassDecl, ClassFlags, ClassKind, ConstExpr};
 
 use super::walk::ClassModifiers;
 
@@ -19,6 +20,21 @@ pub(super) const TARGET_CLASS_CONST: u32 = 1 << 4;
 pub(super) const TARGET_PARAMETER: u32 = 1 << 5;
 pub(super) const TARGET_CONST: u32 = 1 << 6;
 const TARGET_ALL: u32 = (1 << 7) - 1;
+/// `ZEND_ATTRIBUTE_IS_REPEATABLE`.
+const IS_REPEATABLE: u32 = 1 << 7;
+
+/// `Attribute`'s constants by the names its stub declares them under.
+const FLAG_NAMES: [(&str, u32); 9] = [
+    ("TARGET_CLASS", TARGET_CLASS),
+    ("TARGET_FUNCTION", TARGET_FUNCTION),
+    ("TARGET_METHOD", TARGET_METHOD),
+    ("TARGET_PROPERTY", TARGET_PROPERTY),
+    ("TARGET_CLASS_CONSTANT", TARGET_CLASS_CONST),
+    ("TARGET_PARAMETER", TARGET_PARAMETER),
+    ("TARGET_CONSTANT", TARGET_CONST),
+    ("TARGET_ALL", TARGET_ALL),
+    ("IS_REPEATABLE", IS_REPEATABLE),
+];
 
 /// `target_names`, in the order of the bits.
 const TARGET_NAMES: [&str; 7] = [
@@ -132,6 +148,89 @@ impl InternalAttribute {
         };
         php_unit::decl::class_attribute_refusal(self.declared().as_bytes(), kind, &flags, class)
     }
+}
+
+/// `zend_internal_attribute`, what `zend_internal_attribute_get` answers
+/// for an attribute class of the engine: one of Core's, whose validator
+/// the compiler runs, or one an extension declares with `#[Attribute]`
+/// (`zend_mark_internal_attribute`), with the flags its `#[Attribute]`
+/// was given, the targets it may stand on and whether it may repeat.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Config {
+    /// Core's attribute, none for an extension's.
+    pub(super) core: Option<InternalAttribute>,
+    flags: u32,
+}
+
+impl Config {
+    /// The one of Core's that a resolved name is, or the class of
+    /// `classes` (the bundle's, php's `CG(class_table)` of internal
+    /// classes) declared with `#[Attribute]`; none for a user's.
+    pub(super) fn named<'a>(
+        name: &[u8],
+        classes: impl FnOnce(&[u8]) -> Option<&'a ClassDecl>,
+    ) -> Option<Config> {
+        if let Some(core) = InternalAttribute::named(name) {
+            return Some(Config {
+                core: Some(core),
+                flags: core.targets(),
+            });
+        }
+        let attribute = classes(name)?
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.0.eq_ignore_ascii_case(b"Attribute"))?;
+        // `Z_LVAL(attr->args[0].value)`; `Attribute`'s own default where
+        // the class gives none.
+        let flags = match attribute.arguments.first() {
+            Some(argument) => flags_of(&argument.value)?,
+            None => TARGET_ALL,
+        };
+        Some(Config { core: None, flags })
+    }
+
+    /// The targets it may stand on, `flags & ZEND_ATTRIBUTE_TARGET_ALL`.
+    pub(super) fn targets(self) -> u32 {
+        self.flags & TARGET_ALL
+    }
+
+    /// `ZEND_ATTRIBUTE_IS_REPEATABLE`.
+    pub(super) fn repeatable(self) -> bool {
+        self.flags & IS_REPEATABLE != 0
+    }
+}
+
+/// The integer a native's `#[Attribute(...)]` argument stands for, as
+/// `gen_stub` folds it into the `zval` it hands `zend_add_class_attribute`:
+/// an integer, `Attribute`'s `TARGET_*` and `IS_REPEATABLE` by name, and
+/// `|` over them.
+fn flags_of(value: &ConstExpr) -> Option<u32> {
+    match value {
+        ConstExpr::Long { value, .. } => u32::try_from(*value).ok(),
+        ConstExpr::ClassConstant { class, name, .. }
+            if class.0.eq_ignore_ascii_case(b"Attribute") =>
+        {
+            FLAG_NAMES
+                .iter()
+                .find(|(known, _)| known.as_bytes() == &*name.0)
+                .map(|(_, bits)| *bits)
+        }
+        ConstExpr::Binary { op, lhs, rhs, .. } if &*op.0 == b"|" => {
+            Some(flags_of(lhs)? | flags_of(rhs)?)
+        }
+        _ => None,
+    }
+}
+
+/// `zend_get_attribute_str(*attributes, "delayedtargetvalidation")`:
+/// whether a declaration's attributes carry
+/// `#[\DelayedTargetValidation]`, which defers every target check over
+/// them to `ReflectionAttribute::newInstance`.
+pub(super) fn delays_validation(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        InternalAttribute::named(&attribute.name.0)
+            == Some(InternalAttribute::DelayedTargetValidation)
+    })
 }
 
 /// Whether a declaration's attributes carry `#[\Deprecated]`, which

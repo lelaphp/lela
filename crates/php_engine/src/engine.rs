@@ -891,19 +891,12 @@ pub(crate) struct Shared {
 /// `ZEND_MAP_PTR_NEW` over every op array of `unit`, at its publication:
 /// each takes the next offset the engine has, so a request serving the
 /// unit finds each op array's runtime cache at its own entry
-/// ([`exec::init_runtime_cache`]). A unit compiled for one request,
-/// from source the host handed over, takes its offsets here too: php
-/// gives such an op array a cache on the heap (`ZEND_ACC_HEAP_RT_CACHE`)
-/// and no offset, so its count does not move for it, where this one
-/// does.
+/// ([`exec::init_runtime_cache`]). A unit compiled for one request
+/// alone takes none ([`exec::RuntimeCaches::take`]).
 pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
-    let bodies = std::iter::once(&mut unit.main)
-        .chain(unit.functions.iter_mut().map(|(_, code)| code))
-        .chain(unit.dynamic.iter_mut().map(|(_, code)| code))
-        .chain(unit.methods.iter_mut().map(|method| &mut method.body))
-        .chain(unit.hooks.iter_mut().map(|hook| &mut hook.body));
-    for code in bodies {
-        code.runtime_cache = map_ptr_last.fetch_add(1, Ordering::Relaxed);
+    for code in exec::op_arrays_mut(unit) {
+        code.runtime_cache =
+            php_unit::MapPtrOffset::Engine(map_ptr_last.fetch_add(1, Ordering::Relaxed));
     }
 }
 
@@ -1420,15 +1413,17 @@ impl Shared {
             // ended holding the lock left is consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        compile(
+        let mut unit = compile(
             source,
             origin,
             self.compile_ini(),
             self.declared(),
             stack,
             &mut *strings,
-            &self.map_ptr_last,
-        )
+        )?;
+        drop(strings);
+        assign_map_ptrs(&mut unit, &self.map_ptr_last);
+        Ok(unit.published())
     }
 
     /// One source compiled for one request alone, under the request's
@@ -1485,19 +1480,11 @@ impl Shared {
                 request_classes,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
-            compile(
-                source,
-                origin,
-                ini,
-                declared,
-                stack,
-                heap,
-                &self.map_ptr_last,
-            )
+            compile(source, origin, ini, declared, stack, heap)
         })?;
         let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
         req.keys_made = req.keys_made.saturating_add(made);
-        Ok(unit)
+        Ok(req.take_unit(unit))
     }
 
     /// `zend_call_stack_init` on the calling thread, from the startup
@@ -5133,9 +5120,11 @@ struct CompileIni {
 /// reads as `CG(function_table)` before it serves a call of
 /// `zend_try_compile_special_func`'s table itself, and the classes, which
 /// it reads as `CG(class_table)` to know a method's callee; and `stack`
-/// the calling thread's limit, which the compiler's recursion is held to;
-/// and `map_ptr_last` the engine's count of map pointers, which every op
-/// array of the unit takes one from ([`assign_map_ptrs`]).
+/// the calling thread's limit, which the compiler's recursion is held to.
+/// The unit's op arrays take their runtime caches where it is shared:
+/// offsets of the engine's as it is published ([`assign_map_ptrs`]), or
+/// numbers of the request's it was compiled for
+/// ([`exec::RuntimeCaches::take`]).
 fn compile(
     source: &[u8],
     origin: Origin<'_>,
@@ -5143,8 +5132,7 @@ fn compile(
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
-    map_ptr_last: &AtomicU32,
-) -> Result<Arc<Unit>, CompileError> {
+) -> Result<Unit, CompileError> {
     let options = php_compile::Options {
         filename: Name(origin.filename.into()),
         kind: origin.kind,
@@ -5165,9 +5153,7 @@ fn compile(
         hooked: declared.hooked,
         extended_info: declared.extended_info,
     };
-    let mut unit = php_compile::compile_source(source, &options, strings)?;
-    assign_map_ptrs(&mut unit, map_ptr_last);
-    Ok(unit.published())
+    php_compile::compile_source(source, &options, strings)
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -5646,6 +5632,26 @@ mod tests {
             String::from_utf8_lossy(&sink.body).into_owned(),
             observables,
         )
+    }
+
+    /// A unit compiled from source the host handed over is the request's
+    /// alone, and so is every `eval`'s: their op arrays take runtime
+    /// caches of the request's own and no map-pointer offset of the
+    /// engine's, so `CG(map_ptr_last)` moves only for what the engine
+    /// publishes, as php's moves only for what opcache persists, and a
+    /// request that evaluates in a loop grows it by nothing (#528).
+    #[test]
+    fn a_unit_compiled_for_one_request_moves_the_engine_s_map_pointer_count_by_nothing() {
+        let engine = Engine::cli_builder().build();
+        let count = || engine.shared.map_ptr_last.load(Ordering::Relaxed);
+        let before = count();
+        let (body, _) = served(
+            &engine,
+            "<?php function f($s) { return strlen($s); } echo f('ab'), f('abc');\n\
+             for ($i = 0; $i < 3; $i++) { echo eval('return $i;'); }",
+        );
+        assert_eq!(body, "23012");
+        assert_eq!(count(), before, "the engine's count is where it was");
     }
 
     /// What the pinned oracle answers for
@@ -6422,7 +6428,7 @@ mod tests {
     #[test]
     fn a_diagnostic_is_displayed_or_logged_as_the_ini_entries_say() {
         let mut displayed = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .build()
             .serve(description("<?php echo NAN;"), &mut displayed);
         assert_eq!(
@@ -6435,7 +6441,7 @@ mod tests {
         );
 
         let mut logged = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -6445,6 +6451,25 @@ mod tests {
             logged.logged(),
             "PHP Warning:  unexpected NAN value was coerced to string in witness.php on line 1\n"
         );
+    }
+
+    /// `builder` with `INF` and `NAN` among its persistent constants, as
+    /// ext/standard declares them, which the bundle of these tests has
+    /// not: what the diagnostics tests below echo to raise php's warning.
+    fn declaring_nan(builder: EngineBuilder) -> EngineBuilder {
+        let constant = |name: &str, value: f64| php_unit::decl::ConstDecl {
+            name: Name::from(name),
+            value: php_unit::decl::ConstExpr::Double(value),
+            attributes: Vec::new(),
+        };
+        builder.additional_extension(
+            crate::api::abi::ExtensionBuilder::default()
+                .constants(vec![
+                    constant("INF", f64::INFINITY),
+                    constant("NAN", f64::NAN),
+                ])
+                .build("standard"),
+        )
     }
 
     /// The warning php writes for `echo NAN;` on line 2 of the witness
@@ -6460,7 +6485,7 @@ mod tests {
     #[test]
     fn the_two_error_strings_stand_around_the_display_form() {
         let mut around = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
             .ini("log_errors", "1")
@@ -6485,7 +6510,7 @@ mod tests {
     #[test]
     fn html_errors_is_phps_other_display_form() {
         let mut html = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("html_errors", "1")
             .build()
             .serve(description("<?php\necho NAN;"), &mut html);
@@ -6497,7 +6522,7 @@ mod tests {
         );
 
         let mut around = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("html_errors", "1")
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
@@ -6525,7 +6550,7 @@ mod tests {
             |line: u32| format!("\nWarning: {NAN_WARNING} in witness.php on line {line}\n");
 
         let mut every = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .build()
             .serve(description(source), &mut every);
         assert_eq!(
@@ -6534,7 +6559,7 @@ mod tests {
         );
 
         let mut once_a_site = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .build()
             .serve(description(source), &mut once_a_site);
@@ -6545,7 +6570,7 @@ mod tests {
         );
 
         let mut once = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .build()
@@ -6567,7 +6592,7 @@ mod tests {
     #[test]
     fn xmlrpc_errors_is_phps_first_display_form() {
         let mut fault = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("xmlrpc_errors", "1")
             .ini("xmlrpc_error_number", "42")
             .ini("error_prepend_string", "<PRE>")
@@ -6596,7 +6621,7 @@ mod tests {
     /// `sapi_module.name` fails and the `else` is the plain form.
     #[test]
     fn stderr_is_the_error_stream_only_under_the_hosts_php_names() {
-        let engine = Engine::cli_builder()
+        let engine = declaring_nan(Engine::cli_builder())
             .ini("display_errors", "stderr")
             .build();
         let under = |host: &str| {
@@ -6646,7 +6671,9 @@ mod tests {
     #[test]
     fn a_numeric_display_errors_is_read_as_phps_uint8_mode() {
         let under = |value: &str| {
-            let engine = Engine::cli_builder().ini("display_errors", value).build();
+            let engine = declaring_nan(Engine::cli_builder())
+                .ini("display_errors", value)
+                .build();
             let mut kept = Kept::default();
             engine.serve(description("<?php\necho NAN;"), &mut kept);
             (
@@ -6688,7 +6715,7 @@ mod tests {
     #[test]
     fn the_stderr_form_and_the_log_entry_are_two_calls_in_phps_order() {
         let mut kept = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "stderr")
             .ini("log_errors", "1")
             .build()
@@ -6714,7 +6741,7 @@ mod tests {
     #[test]
     fn a_dropped_repeat_is_neither_logged_nor_stored() {
         let mut logged = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .ini("display_errors", "0")
@@ -7103,7 +7130,7 @@ mod tests {
     /// is one.
     #[test]
     fn a_cached_unit_raises_what_compiling_it_raised_on_every_request() {
-        let engine = Engine::cli_builder().build();
+        let engine = declaring_nan(Engine::cli_builder()).build();
         let path = std::env::temp_dir().join(format!("dax-{}-nan.php", std::process::id()));
         assert!(std::fs::write(&path, b"<?php\necho 'a';\necho NAN . 'z';").is_ok());
         let name = path.to_string_lossy().as_bytes().to_vec();
@@ -7127,7 +7154,7 @@ mod tests {
             );
         }
         let mut masked = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("error_reporting", "0")
             .build()
             .serve(described(), &mut masked);
@@ -7169,7 +7196,6 @@ mod tests {
                 Declared::default(),
                 StackLimit::UNCHECKED,
                 req.heap_mut(),
-                &engine.shared.map_ptr_last,
             );
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
@@ -7386,7 +7412,7 @@ mod tests {
     #[test]
     fn the_sink_is_given_one_call_per_diagnostic_whatever_its_lines() {
         let mut fatal = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -7402,7 +7428,7 @@ mod tests {
         );
 
         let mut warned = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()

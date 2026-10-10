@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use php_heap::{Fatal, FrameRef, MapPtr, Slot, Zval, ZvalRef, ZvalType};
+use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef, ZvalType};
 use php_unit::{CacheSlot, Unit};
 
 use crate::api::call::Function;
@@ -325,6 +325,15 @@ impl Request {
     /// ([`crate::tier::resume`]).
     pub(crate) fn resume_loop(&self) -> fn(&mut Request, FrameRef) -> Result<(), Fatal> {
         self.shared.loops.resume
+    }
+
+    /// A unit compiled for this request alone, a source the host handed
+    /// over, an `eval`'s string or a file no cache keeps, shared from
+    /// here on: its op arrays take runtime caches of the request's own,
+    /// as php gives them caches on the heap, and none of the engine's
+    /// offsets ([`exec::RuntimeCaches::take`]).
+    pub(crate) fn take_unit(&mut self, unit: Unit) -> Arc<Unit> {
+        self.map.take(unit)
     }
 
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
@@ -867,7 +876,7 @@ impl Request {
                 }
             }
         }
-        exec::lay_runtime_cache(&mut self.map, MapPtr::new(shape.cache), shape.cache_size);
+        exec::lay_runtime_cache(&mut self.map, shape.cache, shape.cache_size);
         crate::observer::call(self, call);
         Ok(exec::Activated {
             frame: call,

@@ -36,7 +36,7 @@ pub(crate) struct ListFormat(NonNull<UListFormatter>);
 unsafe impl Send for ListFormat {}
 
 impl ListFormat {
-    /// `ulistfmt_openForType`.
+    /// `ulistfmt_openForType`, none beside a failure ([`Code::built`]).
     pub(crate) fn open(
         locale: &CStr,
         kind: i32,
@@ -45,7 +45,7 @@ impl ListFormat {
     ) -> Option<ListFormat> {
         // SAFETY: the locale is NUL-terminated.
         let raw = unsafe { sys::ulistfmt_openForType(locale.as_ptr(), kind, width, status) };
-        NonNull::new(raw).map(ListFormat)
+        status.built(NonNull::new(raw).map(ListFormat))
     }
 
     /// `ulistfmt_format` of `items` into `out`, the full length answered.

@@ -23,8 +23,8 @@ use php_heap::Obj;
 use php_macros::php_class;
 
 use crate::api::abi::{
-    ClassIterator, CloneObj, DebugInfo, DimensionRead, Instance, IteratorElement, ObjectHandlers,
-    This, Untyped,
+    ClassIterator, CloneObj, DebugInfo, DimensionRead, GcTable, Instance, IteratorElement,
+    ObjectHandlers, This, Untyped,
 };
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
@@ -592,13 +592,19 @@ impl ObjectHandlers for WeakMapHandlers {
     /// int(2)
     /// int(0)
     /// ```
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(entries) = entries_of(req, object) else {
-            return;
+            return GcTable::Properties;
         };
         for (_, value) in walk::rows(req, entries) {
             visit(value);
         }
+        GcTable::Properties
     }
 }
 

@@ -10,7 +10,7 @@
 
 use std::ops::ControlFlow;
 
-use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, Std, This, True};
+use php_ext::abi::{CloneObj, ExtensionBuilder, GcTable, ObjectHandlers, Std, This, True};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, to_long};
@@ -917,7 +917,12 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(h) = object.native::<Heap>(req) {
             for (a, b) in &h.elements {
                 visit(**a);
@@ -926,6 +931,7 @@ impl ObjectHandlers for Handlers {
                 }
             }
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

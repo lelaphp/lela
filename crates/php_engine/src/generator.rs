@@ -30,13 +30,13 @@ use php_heap::{Fatal, FrameRef};
 use php_macros::php_class;
 use php_unit::Opcode;
 
-use crate::api::abi::{CloneObj, DtorObj, Instance, ObjectHandlers, This};
+use crate::api::abi::{CloneObj, DtorObj, GcTable, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::classes::{Exception, Throwable};
-use crate::exec::{self, FrameAt, HeapFrame};
+use crate::exec::{self, FrameAt, HeapFrame, TableId};
 use crate::interfaces::Iterator;
 
 /// Where a generator's frame is: php's `execute_data`, and
@@ -234,9 +234,36 @@ impl ObjectHandlers for GeneratorHandlers {
     /// bool(true)
     /// done
     /// ```
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    ///
+    /// A frame that made a variable by name has a symbol table, which is
+    /// returned as the generator's table and walked after its values, the
+    /// CVs among its rows, so what the variables reach is found before
+    /// what the generator yielded:
+    ///
+    /// ```php
+    /// class D { public $self; function __construct(public $n) { $this->self = $this; } function __destruct() { echo $this->n, "\n"; } }
+    /// function g() { $c = new D('cv'); $y = 'x'; $$y = new D('by name'); $h = yield; yield new D('yielded'); }
+    /// $g = g();
+    /// $g->send($g);
+    /// gc_collect_cycles();
+    /// unset($g);
+    /// gc_collect_cycles();
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// cv
+    /// by name
+    /// yielded
+    /// done
+    /// ```
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(generator) = object.native::<ZendGenerator>(req) else {
-            return;
+            return GcTable::Properties;
         };
         match &generator.execution {
             Execution::Closed => {
@@ -246,15 +273,31 @@ impl ObjectHandlers for GeneratorHandlers {
                 if let Some(closure) = generator.closure {
                     visit(closure.as_value());
                 }
+                GcTable::Properties
             }
-            Execution::Running => {}
+            Execution::Running => GcTable::Properties,
             Execution::Suspended(frame) => {
                 let calls: Vec<FrameAt<'_>> = frame
                     .calls
                     .iter()
                     .map(|call| req.kept_frame(call))
                     .collect();
-                frame_gc(generator, req.kept_frame(&frame.frame), &calls, visit);
+                let state = req.kept_frame(&frame.frame);
+                match frame_gc(generator, state, &calls, visit) {
+                    Some(table) => {
+                        let mut rows = Vec::new();
+                        // The frame is the table's only one: a generator
+                        // suspends at its own `yield`, never inside a
+                        // file it included.
+                        req.gc_symbol_rows(
+                            table,
+                            &|_, at| state.frame.slot(php_heap::Slot(at)),
+                            &mut |value| rows.push(value),
+                        );
+                        GcTable::Rows(rows)
+                    }
+                    None => GcTable::Properties,
+                }
             }
         }
     }
@@ -290,15 +333,16 @@ pub(crate) fn value(req: &Request, generator: PhpObject) -> Value {
 /// `zend_generator_frame_gc` (`Z/Zend/zend_generators.c:399`): what a
 /// generator with a frame holds, its value, key, return value and
 /// delegated values, its frame by [`exec::unfinished_execution_gc`]
-/// with the calls it was building, and the generator it delegates to.
-/// The frame is the one the generator keeps while it is suspended, or
-/// the one on the stack of a suspended fiber it runs on.
+/// with the calls it was building, and the generator it delegates to;
+/// and the frame's symbol table, which php returns. The frame is the one
+/// the generator keeps while it is suspended, or the one on the stack of
+/// a suspended fiber it runs on.
 pub(crate) fn frame_gc(
     generator: &ZendGenerator,
     state: FrameAt<'_>,
     calls: &[FrameAt<'_>],
     visit: &mut dyn FnMut(Value),
-) {
+) -> Option<TableId> {
     visit(generator.value);
     visit(generator.key);
     visit(generator.retval);
@@ -307,10 +351,11 @@ pub(crate) fn frame_gc(
         Delegated::Array { array, .. } => visit(*array),
         Delegated::Iterator(iterator) => visit(iterator.as_value()),
     }
-    exec::unfinished_execution_gc(state, calls, visit);
+    let table = exec::unfinished_execution_gc(state, calls, visit);
     if let Some(parent) = generator.parent {
         visit(parent.as_value());
     }
+    table
 }
 
 /// [`frame_gc`] over a running generator's frame on a suspended
@@ -321,12 +366,11 @@ pub(crate) fn running_frame_gc(
     object: PhpObject,
     state: FrameAt<'_>,
     visit: &mut dyn FnMut(Value),
-) {
-    if let Some(generator) = object.native::<ZendGenerator>(req)
-        && matches!(generator.execution, Execution::Running)
-    {
-        frame_gc(generator, state, &[], visit);
-    }
+) -> Option<TableId> {
+    let generator = object.native::<ZendGenerator>(req)?;
+    matches!(generator.execution, Execution::Running)
+        .then(|| frame_gc(generator, state, &[], visit))
+        .flatten()
 }
 
 /// `ZEND_GENERATOR_CURRENTLY_RUNNING`: a resumption holds the frame on

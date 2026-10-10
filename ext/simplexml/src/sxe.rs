@@ -5,7 +5,7 @@
 //! the Rust of its C function.
 
 use php_ext::abi::{
-    ClassIterator, CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead,
+    ClassIterator, CloneObj, DimensionRead, GcTable, ObjectHandlers, PropertyPlace, PropertyRead,
     PropertyTest, Std,
 };
 use php_ext::call::{call_method, lookup_class, new_object};
@@ -1574,10 +1574,16 @@ impl ObjectHandlers for Handlers {
         true
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(p) = sxe(req, object).and_then(|s| s.properties.as_deref()) {
             visit(Value::array(*p));
         }
+        GcTable::Properties
     }
 
     fn cast_object(

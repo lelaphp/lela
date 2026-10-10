@@ -16,19 +16,25 @@ use crate::exec::{self, TableId};
 use super::{Request, Symbol, SymbolTable};
 
 impl Request {
-    /// What a symbol table holds that is no CV of its frame, for the
-    /// collector: the frame's walk names the CVs themselves, which is
-    /// where php's `IS_INDIRECT` buckets point.
-    pub(crate) fn gc_symbol_table(&self, table: TableId, visit: &mut dyn FnMut(Value)) {
+    /// What each row of a frame's symbol table holds, in order, for the
+    /// collector, as php's walk reads the table `get_gc` returns: an
+    /// `IS_INDIRECT` row followed to the CV it stands for, which `cv`
+    /// reads off the frames of the execution that holds the table.
+    pub(crate) fn gc_symbol_rows(
+        &self,
+        table: TableId,
+        cv: &dyn Fn(FrameRef, u32) -> Zval,
+        visit: &mut dyn FnMut(Value),
+    ) {
         let Some(table) = self.tables.get(table.0 as usize) else {
             return;
         };
         for (_, symbol) in &table.entries {
-            match symbol {
-                Symbol::Value(value) => visit(*value),
-                Symbol::Held(cell) => visit(cell.as_value()),
-                Symbol::Indirect(..) => {}
-            }
+            visit(match *symbol {
+                Symbol::Value(value) => value,
+                Symbol::Held(cell) => cell.as_value(),
+                Symbol::Indirect(frame, at) => Value::of_zval(cv(frame, at)),
+            });
         }
     }
 
