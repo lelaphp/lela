@@ -1561,6 +1561,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "php_bundle",
+ "php_ext",
  "php_proto",
  "php_sapi",
  "tokio",

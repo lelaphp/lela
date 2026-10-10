@@ -29,6 +29,7 @@
 mod connection;
 mod framing;
 mod log;
+mod natives;
 pub mod options;
 mod request;
 mod socket;
@@ -145,7 +146,7 @@ fn engine(options: &Options) -> Engine {
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
-    php_sapi::start(builder, &options.ini, log::error)
+    php_sapi::start(natives::declare(builder), &options.ini, log::error)
 }
 
 /// A line of the server's own on stderr.

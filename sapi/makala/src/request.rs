@@ -7,9 +7,14 @@
 //! channel its connection feeds, pulled as the request reads it (#2338);
 //! and its sink writes onto the channel its connection's response reads.
 //!
-//! The environment is provisional: the mapping the oracle holds, nginx's
-//! stock `fastcgi_params` against the pinned php-fpm, is #2334's and
-//! arrives with #2347.
+//! The environment is the mapping the oracle holds (#2334, #2347): the
+//! stock `fastcgi_params` of the nginx release `oracle.toml`'s
+//! `[fastcgi]` names, as it records it, with `SCRIPT_FILENAME` first and
+//! the header fields after, and `SERVER_SOFTWARE` the host's own (#2335),
+//! registered in php-fpm's order. The witnesses of `request makala` fences hold it to the pinned
+//! php-fpm handed the same request under that recipe.
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::convert::Infallible;
 use std::io::Read;
@@ -200,17 +205,22 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
                 .map(std::path::Path::to_path_buf)
         })
         .unwrap_or_else(|| php_sapi::cgi::path_of(root));
+    // php-fpm registers the parameters newest first, as `fcgi_hash_apply`
+    // walks them (`Z/main/fastcgi.c:399-407`): the header fields first and
+    // `SCRIPT_FILENAME` last, in `$_SERVER` and `getallheaders()` alike.
+    let newest = Environment(php_proto::fcgi::newest_first(&env).cloned().collect());
     let web = WebRequest {
         body: Body::Stream(Box::new(Arriving {
             pieces: body,
             held: Bytes::new(),
         })),
         head_ini: &[],
+        headers: php_proto::cgi::request_headers(&newest),
         ..php_sapi::cgi::web(&env, &info)
     };
     let description = RequestDescription {
         server: php_sapi::cgi::server_variables(&env, &info, settings),
-        params: env.0,
+        params: newest.0,
         cwd,
         sapi_name: crate::NAME.to_owned(),
         web: Some(web),
@@ -259,6 +269,59 @@ fn look(info: &RequestInfo) -> HostServes {
 /// `$fastcgi_script_name`: the path `php -S`'s rules translated to, with
 /// the index file where it named a directory and the path's info after
 /// it, which php-fpm's `cgi.fix_pathinfo` takes apart again.
+///
+/// `$_SERVER` in php-fpm's order, held to the pinned php-fpm handed the
+/// same request under the recipe with its default `clear_env`: every row
+/// but php-fpm's own, `FCGI_ROLE`, the `FastCGI` role, which a host that speaks
+/// HTTP has none of, and `USER` and `HOME`, which `fpm_env_init_child`
+/// puts in a child's emptied environment; the ports, which are the run's
+/// own, and `SERVER_SOFTWARE`, nginx's in the recipe and
+/// `makala/<version>` here (#2335), masked.
+///
+/// ```php
+/// foreach ($_SERVER as $name => $value) {
+///     if (in_array($name, ['FCGI_ROLE', 'USER', 'HOME', 'REQUEST_TIME', 'REQUEST_TIME_FLOAT'])) continue;
+///     echo $name, '=', in_array($name, ['REMOTE_PORT', 'SERVER_PORT', 'SERVER_SOFTWARE']) ? '(the run)' : $value, "\n";
+/// }
+/// ```
+/// ```request makala
+/// --GET--
+/// a=1
+/// --COOKIE--
+/// c=v
+/// --POST--
+/// p=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// HTTP_CONTENT_LENGTH=3
+/// HTTP_CONTENT_TYPE=application/x-www-form-urlencoded
+/// HTTP_COOKIE=c=v
+/// HTTP_HOST=localhost
+/// REDIRECT_STATUS=200
+/// SERVER_NAME=localhost
+/// SERVER_PORT=(the run)
+/// SERVER_ADDR=127.0.0.1
+/// REMOTE_PORT=(the run)
+/// REMOTE_ADDR=127.0.0.1
+/// SERVER_SOFTWARE=(the run)
+/// GATEWAY_INTERFACE=CGI/1.1
+/// REQUEST_SCHEME=http
+/// SERVER_PROTOCOL=HTTP/1.0
+/// DOCUMENT_ROOT=%SCRATCH%
+/// DOCUMENT_URI=/witness.php
+/// REQUEST_URI=/witness.php?a=1
+/// SCRIPT_NAME=/witness.php
+/// CONTENT_LENGTH=3
+/// CONTENT_TYPE=application/x-www-form-urlencoded
+/// REQUEST_METHOD=POST
+/// QUERY_STRING=a=1
+/// SCRIPT_FILENAME=%SCRATCH%/witness.php
+/// PHP_SELF=/witness.php
+/// ```
 fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environment {
     let field = |name: &[u8]| {
         head.fields
@@ -320,7 +383,12 @@ fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environ
         (b"SERVER_NAME".to_vec(), host),
         (b"REDIRECT_STATUS".to_vec(), b"200".to_vec()),
     ];
-    for (name, value) in &head.fields {
+    // nginx's `fastcgi_pass_request_headers`: each field after the
+    // parameters, a name sent twice joined as nginx joins it since 1.23,
+    // and a name with `_` in it left out, as nginx ignores one by its
+    // `underscores_in_headers off`, so no field can pose as another
+    // whose `-` reads as the same `_`.
+    for (name, value) in head.fields.iter().filter(|(name, _)| !name.contains(&b'_')) {
         let mut var = b"HTTP_".to_vec();
         var.extend(name.iter().map(|b| match b {
             b'-' => b'_',
@@ -482,6 +550,41 @@ impl OutputSink for Sink {
 
     /// Every write is handed over as it is made.
     fn flush(&mut self) {}
+
+    /// php-fpm's `sapi_cgibin_flush` sends the head first, so `flush()`
+    /// before any output sends it here too.
+    ///
+    /// ```php
+    /// var_dump(headers_sent());
+    /// flush();
+    /// var_dump(headers_sent());
+    /// ```
+    /// ```request makala
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect capture
+    /// 200
+    /// x-powered-by: PHP/8.5.9
+    /// content-type: text/html; charset=UTF-8
+    ///
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn flush_sends_head(&self) -> bool {
+        true
+    }
+
+    /// `fastcgi_finish_request()`: the body's channel closed and the body
+    /// said whole, so the connection ends the response while the program
+    /// runs on; the response is closed after, whatever came before.
+    fn finish(&mut self) -> bool {
+        self.body = None;
+        if let Some(whole) = self.whole.take() {
+            whole.send(()).ok();
+        }
+        true
+    }
 
     fn send_headers(&mut self, head: &ResponseHead) {
         if let Some(waiting) = self.head.take() {

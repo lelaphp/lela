@@ -5,6 +5,8 @@
 //! <name>=<value>`, and each applied by the connection side, the
 //! connection cap by its accept loop (#2342) and the shutdown timeout by
 //! the drain SIGTERM begins (#2344).
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -38,6 +40,34 @@ pub fn usage() -> String {
 /// The stack of each request thread, php-fpm's main thread's on the
 /// reference machine (#2335): the engine reads the serving thread's
 /// bounds for php's "Maximum call stack size", so a program sees this.
+/// Held to the pinned php-fpm, serving on its main thread under the same
+/// 8 MiB limit, where recursion that runs through a native, and so takes
+/// the thread's stack, fails: the size php reports is 8 MiB to the
+/// nearest MiB under both. The bytes differ by less than a page table's
+/// worth, 8,368,128 here against php-fpm's 8,339,456 on the reference
+/// machine, since a thread's stack is whole 16 KiB pages there and the
+/// main thread's ends below its guard, a size no thread's stack can take;
+/// whether the bytes must match is a person's (#2589).
+///
+/// ```php
+/// function down($n) { return array_map('down', [$n + 1]); }
+/// try { down(0); } catch (Error $e) {
+///     echo preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()), "\n";
+///     echo round((int) preg_replace('/\D+/', '', strstr($e->getMessage(), ' bytes', true)) / (1 << 20)), " MiB\n";
+/// }
+/// ```
+/// ```request makala
+/// --GET--
+/// q=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// 8 MiB
+/// ```
 pub const REQUEST_STACK: usize = 8 << 20;
 
 /// The server as the operator's line set it.
