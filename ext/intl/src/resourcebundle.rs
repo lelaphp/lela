@@ -13,8 +13,9 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{internal_iterator, lookup_class, new_object};
-use php_ext::coerce::type_name;
-use php_ext::raising::{Thrown, arg_value_error, argument_error, fatal, throw_error};
+use php_ext::raising::{
+    Thrown, arg_value_error, argument_error, fatal, illegal_container_offset, throw_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -476,28 +477,8 @@ fn illegal_offset(
     offset: &Value,
     read: DimensionRead,
 ) -> Thrown {
-    let given = type_name(req, offset);
-    let message = match read {
-        DimensionRead::Silent => format!("Cannot access offset of type {given} in isset or empty"),
-        DimensionRead::Unset => {
-            format!(
-                "Cannot unset offset of type {given} on {}",
-                class_name(req, object)
-            )
-        }
-        _ => format!(
-            "Cannot access offset of type {given} on {}",
-            class_name(req, object)
-        ),
-    };
-    throw_error(req, "TypeError", &message)
-}
-
-/// `ce->name` of the object's class.
-fn class_name(req: &Request, object: PhpObject) -> String {
-    req.class_decl(object.class())
-        .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
-        .unwrap_or_default()
+    let class = req.class_name(object.class());
+    illegal_container_offset(req, &class, offset, read)
 }
 
 /// The `foreach` over a bundle's elements, `ResourceBundle_iterator`:

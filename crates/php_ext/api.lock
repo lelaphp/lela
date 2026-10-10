@@ -494,6 +494,7 @@ raising::docref_parameter
 raising::exit
 raising::fatal
 raising::fatal_while_pending
+raising::illegal_container_offset
 raising::leave_pending
 raising::new_throwable
 raising::notice

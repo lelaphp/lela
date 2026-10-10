@@ -832,6 +832,49 @@ fn throwable_at(
     Ok(object)
 }
 
+/// `zend_illegal_container_offset` (`Z/Zend/zend.c:1846`): the one
+/// sentence every container throws for an offset it refuses, named as
+/// `zend_zval_type_name` names the offset and `container` as php prints
+/// `ce->name` (or `array`, `string`): "Cannot access offset of type T in
+/// isset or empty" for the read an `isset`, an `empty` or a `??` makes,
+/// "Cannot unset offset of type T on C" for an unset (and php's `Error`
+/// "Cannot unset string offsets" for a string), and "Cannot access
+/// offset of type T on C" for every other fetch.
+///
+/// ```php
+/// $a = [1]; $o = new ArrayObject([1]);
+/// foreach ([fn() => $a[[]], fn() => isset($a[new stdClass]), function () use ($a) { unset($a[[]]); },
+///           fn() => $o[[]], fn() => isset($o[[]]), function () use ($o) { unset($o[new stdClass]); }] as $f) {
+///     try { $f(); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// TypeError: Cannot access offset of type array on array
+/// TypeError: Cannot access offset of type stdClass in isset or empty
+/// TypeError: Cannot unset offset of type array on array
+/// TypeError: Cannot access offset of type array on ArrayObject
+/// TypeError: Cannot access offset of type array in isset or empty
+/// TypeError: Cannot unset offset of type stdClass on ArrayObject
+/// ```
+pub fn illegal_container_offset(
+    req: &mut Request,
+    container: &str,
+    offset: &Value,
+    read: crate::api::abi::DimensionRead,
+) -> Thrown {
+    use crate::api::abi::DimensionRead;
+    let given = crate::ops::zval_type_name(req, &offset.deref());
+    let message = match read {
+        DimensionRead::Silent => format!("Cannot access offset of type {given} in isset or empty"),
+        DimensionRead::Unset if container == "string" => {
+            return throw_error(req, "Error", "Cannot unset string offsets");
+        }
+        DimensionRead::Unset => format!("Cannot unset offset of type {given} on {container}"),
+        _ => format!("Cannot access offset of type {given} on {container}"),
+    };
+    throw_error(req, "TypeError", &message)
+}
+
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of
 /// `class` with `message`, the one `previous` holds chained as its
 /// `previous` (`zend_throw_exception_internal`), as
