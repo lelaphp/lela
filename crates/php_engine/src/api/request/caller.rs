@@ -807,6 +807,19 @@ impl Request {
         parameter.ty.clone()
     }
 
+    /// The class the parameter at `position` of the native being served
+    /// holds its argument to, where its type names one class, resolved
+    /// as the engine started ([`crate::engine::Shared::parameter_classes`]);
+    /// none for every other parameter and past the declared ones.
+    pub(crate) fn active_parameter_class(&self, position: u32) -> Option<ClassId> {
+        let function = self.active_native_function()?;
+        let classes = self
+            .shared
+            .parameter_classes
+            .get(usize::try_from(function.0).ok()?)?;
+        *classes.get(usize::try_from(position.checked_sub(1)?).ok()?)?
+    }
+
     /// `func->common.scope` and `Z_CE(EX(This))` of the native being
     /// served: the class its method is declared on and the class it was
     /// called on, what a parameter typed `self`, `parent` or `static`

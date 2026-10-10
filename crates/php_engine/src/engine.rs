@@ -27,6 +27,7 @@ use php_heap::{Intern, Strings, Zval};
 use php_link::{Exact, Folded, Indexed, LinkedClass, Names};
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
+    Type,
 };
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
@@ -708,6 +709,9 @@ pub(crate) struct Shared {
     /// synthesises, which `ce->function_table` has no row for, so no
     /// lookup by name and no rendering finds it.
     pub(crate) trampolines: Vec<MethodDecl>,
+    /// The class each parameter of each native holds its argument to, by
+    /// the native's number ([`parameter_classes`]).
+    pub(crate) parameter_classes: Vec<Box<[Option<ClassId>]>>,
     /// `CG(class_table)`'s keys as startup leaves them
     /// ([`class_keys`]): what a lookup by name finds among the engine's
     /// classes in one hash lookup, as `zend_hash_find` does, before the
@@ -1246,6 +1250,58 @@ fn tables_of<'a>(
 }
 
 /// `zend_string_tolower`: the key a name is found under.
+/// `zend_parse_arg_object`'s class for each parameter of each native, by
+/// the native's number among the functions and then the methods: the
+/// class a parameter's type names where it names one, `?Class` among
+/// them, resolved once as the engine starts, as ZPP's `O` names a
+/// `zend_class_entry *`, so holding an argument to it compares
+/// identities ([`crate::api::coerce::argument`]); none for every other
+/// parameter.
+fn parameter_classes(
+    functions: &[FunctionDecl],
+    methods: &[NativeMethod],
+    classes: &[ClassDecl],
+    trampolines: &[MethodDecl],
+    class_keys: &HashMap<Box<[u8]>, ClassId>,
+) -> Vec<Box<[Option<ClassId>]>> {
+    let of = |decl: Option<&FunctionDecl>| -> Box<[Option<ClassId>]> {
+        decl.map_or_else(Box::default, |decl| {
+            decl.parameters
+                .iter()
+                .map(|parameter| {
+                    let named = match parameter.ty.as_ref()? {
+                        Type::Named(name) => name,
+                        Type::Nullable(inner) => match &**inner {
+                            Type::Named(name) => name,
+                            _ => return None,
+                        },
+                        _ => return None,
+                    };
+                    class_keys.get(&*lowered(&named.0)).copied()
+                })
+                .collect()
+        })
+    };
+    let method_decl = |method: &NativeMethod| match method.at {
+        MethodAt::Declared { class, at } => classes
+            .get(class.0 as usize)?
+            .methods
+            .get(usize::try_from(at).ok()?),
+        MethodAt::Trampoline { at, .. }
+        | MethodAt::ParentHook { at, .. }
+        | MethodAt::Unlisted { at } => trampolines.get(usize::try_from(at).ok()?),
+    };
+    functions
+        .iter()
+        .map(|decl| of(Some(decl)))
+        .chain(
+            methods
+                .iter()
+                .map(|method| of(method_decl(method).map(|decl| &decl.function))),
+        )
+        .collect()
+}
+
 fn lowered(name: &[u8]) -> Box<[u8]> {
     name.to_ascii_lowercase().into_boxed_slice()
 }
@@ -3186,6 +3242,8 @@ impl EngineBuilder {
             })
             .collect();
         let placed = native_placed(&classes, &records, &parents);
+        let parameter_classes =
+            parameter_classes(&functions, &methods, &classes, &trampolines, &class_keys);
         // `module_registry`: `Core` first, as `zend_startup` registers it,
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
@@ -3226,6 +3284,7 @@ impl EngineBuilder {
                 natives,
                 methods,
                 trampolines,
+                parameter_classes,
                 class_keys,
                 records,
                 method_functions,
