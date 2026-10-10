@@ -263,7 +263,7 @@ impl Request {
                 return None;
             }
             if let Link::Frame(_, state) = link {
-                let closure = state.closure?;
+                let closure = state.closure()?;
                 return closure
                     .closure(self)
                     .filter(|info| !info.fake)
@@ -671,7 +671,7 @@ impl Request {
         function: Function,
         call: CallState,
     ) -> Result<Value, Thrown> {
-        let standing = self.vm.frames().len();
+        let standing = self.vm.depth();
         let caller = self
             .current_user_frame()
             .map_or(exec::Caller::Outside, exec::Caller::Loop);
@@ -686,7 +686,7 @@ impl Request {
         let raised = match self.fatal_of(raised) {
             Ok(raised) => raised,
             Err(thrown) => {
-                while self.vm.frames().len() > standing {
+                while self.vm.depth() > standing {
                     self.pop_frame();
                 }
                 return Err(thrown);
@@ -698,7 +698,7 @@ impl Request {
             // here it is left at once.
             self.vm.stand_at_exception_op(frame, true);
             crate::observer::returned(self, frame, None);
-            while self.vm.frames().len() > standing {
+            while self.vm.depth() > standing {
                 self.pop_frame();
             }
             return match self.take_pending_view() {
@@ -713,7 +713,7 @@ impl Request {
         // it is: the site a timeout names inside a callback, or inside a
         // fiber's body, is the callback's and not its caller's.
         let served = self.fatal_of(served);
-        while self.vm.frames().len() > standing {
+        while self.vm.depth() > standing {
             self.pop_frame();
         }
         served?;

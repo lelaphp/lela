@@ -478,8 +478,9 @@ impl Request {
         let executing = match self.vm.innermost_site() {
             Some(site) => Some((site.file.clone(), site.line)),
             None => self.innermost_frame().and_then(|state| {
-                exec::body_of(&state.unit, state.body)
-                    .map(|code| (code.filename.0.clone(), exec::line_of(state)))
+                state
+                    .code()
+                    .map(|code| (code.filename.0.clone(), state.line()))
             }),
         };
         let Some((executing, at)) = executing else {
@@ -594,11 +595,11 @@ impl Request {
     /// ([`crate::generator::placeholder_frames`]).
     pub(super) fn chain(&self) -> impl Iterator<Item = Link<'_>> {
         let mut chain: Vec<Link> = Vec::new();
-        for (stack, vm) in self.executions() {
+        for vm in self.executions() {
             chain.extend(links_of(
-                stack,
+                self,
                 vm,
-                0..vm.frames().len(),
+                0..vm.depth(),
                 0..vm.calls().len(),
                 &|root| self.placeholder_links(root),
             ));
@@ -610,7 +611,7 @@ impl Request {
     pub(super) fn placeholder_links(&self, root: PhpObject) -> Vec<Link<'_>> {
         crate::generator::placeholder_frames(self, root)
             .into_iter()
-            .map(|(slots, state)| Link::Frame(Slots::Kept(slots), state))
+            .map(|state| Link::Frame(Slots::Kept, state))
             .collect()
     }
 
@@ -727,10 +728,7 @@ impl Request {
                     Link::Frame(_, below) => Some(below),
                     Link::Call(_) | Link::Site(_) | Link::Fake(_) => None,
                 })
-                .and_then(|below| {
-                    let code = exec::body_of(&below.unit, below.body)?;
-                    exec::opline_at(code, below.opline)
-                })
+                .and_then(|below| exec::opline_at(below.code()?, below.opline()))
                 .filter(|op| op.opcode == Opcode::IncludeOrEval)
                 .and_then(|op| IncludeKind::of(op.extended_value))
         };
@@ -738,8 +736,8 @@ impl Request {
         for (at, link) in chain.iter().enumerate() {
             let site = self.row_site(chain, at.saturating_add(1));
             match link {
-                Link::Frame(slots, state) => {
-                    let Some(function) = state.function else {
+                Link::Frame(_, state) => {
+                    let Some(function) = state.function() else {
                         // A code frame: named by the includer's opline
                         // where that is an `INCLUDE_OR_EVAL`, and the
                         // main op array's frame, which no opline pushed,
@@ -760,7 +758,7 @@ impl Request {
                         };
                         // `build_filename_arg`: an `eval` names no file.
                         let file = (at > 0 && kind != IncludeKind::Eval)
-                            .then(|| exec::body_of(&state.unit, state.body))
+                            .then(|| state.code())
                             .flatten()
                             .map(|code| code.filename.0.to_vec());
                         rows.push((
@@ -773,13 +771,13 @@ impl Request {
                         ));
                         continue;
                     };
-                    let arguments = self.traced_arguments(slots, state, function);
+                    let arguments = self.traced_arguments(*state, function);
                     rows.push((
                         Traced::Function(function),
                         state.this(),
-                        self.closure_scope(state.closure),
+                        self.closure_scope(state.closure()),
                         arguments,
-                        state.extra_named.to_vec(),
+                        state.extra_named().to_vec(),
                         site.clone(),
                     ));
                     // `fake_frame`: a function served from outside the
@@ -788,7 +786,7 @@ impl Request {
                     // include's own row, whose argument is php's
                     // `include_filename`, the site of the row before the
                     // function's, and none where it is the first.
-                    if !matches!(state.caller, exec::Caller::Opline(_))
+                    if !matches!(state.caller(), exec::Caller::Opline(_))
                         && let Some(kind) = including(at)
                     {
                         let file = (kind != IncludeKind::Eval)
@@ -837,8 +835,9 @@ impl Request {
     fn row_site(&self, chain: &[Link<'_>], mut below: usize) -> Option<(Vec<u8>, i64)> {
         loop {
             break match chain.get(below) {
-                Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
-                    .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
+                Some(Link::Frame(_, below)) => below
+                    .file()
+                    .map(|file| (file.to_vec(), i64::from(below.line()))),
                 Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
                 Some(Link::Call(call)) if self.via_trampoline(call.function) => {
                     below = below.saturating_add(1);
@@ -1168,23 +1167,18 @@ impl Request {
     /// passed, read through its symbol table where it has one, whose
     /// values the stack may hold stale (`ZEND_CALL_HAS_SYMBOL_TABLE`,
     /// bug #73156), then its extra ones. Views, no owner taken.
-    fn traced_arguments(
-        &self,
-        slots: &Slots<'_>,
-        state: &exec::FrameState,
-        function: Function,
-    ) -> Vec<Value> {
-        let passed = usize::try_from(state.num_args).unwrap_or(0);
-        let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+    fn traced_arguments(&self, state: exec::FrameAt<'_>, function: Function) -> Vec<Value> {
+        let passed = usize::try_from(state.num_args()).unwrap_or(0);
+        let extra = state.extra_args();
+        let mut arguments: Vec<Value> = (0..passed.saturating_sub(extra.len()))
             .map(|slot| {
                 let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
-                slots
-                    .frame()
-                    .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
+                Value::of_zval(state.frame.slot(slot))
             })
             .collect();
-        if let Some(table) = state.symbol_table {
-            let names = exec::body_of(&state.unit, state.body)
+        if let Some(table) = state.symbol_table() {
+            let names = state
+                .code()
                 .map(|code| code.vars.clone())
                 .unwrap_or_default();
             let declared = self
@@ -1198,7 +1192,7 @@ impl Request {
                 }
             }
         }
-        arguments.extend(state.extra_args.iter().copied());
+        arguments.extend(extra.iter().copied());
         arguments
     }
 

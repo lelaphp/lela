@@ -3747,7 +3747,7 @@ fn verified_arg(
 /// `ZEND_RECV_VARIADIC` (`Z/Zend/zend_vm_def.h:5773`): the arguments
 /// from the one numbered `op1` on, collected into a packed array in the
 /// variadic parameter's CV. The arguments past the declared parameters
-/// are the frame's extra ones ([`exec::FrameState::extra_args`]), where
+/// are the frame's extra ones ([`exec::Annex::extra_args`]), where
 /// php leaves them on its stack past the temporaries, and they stay
 /// there: each is one more owner in the array (`Z_ADDREF_P`) and the
 /// frame gives its own up when it is popped
@@ -3760,7 +3760,7 @@ fn verified_arg(
 /// names the argument's own number and no parameter name, since php has
 /// a name for the declared ones alone. A call that passed nothing from
 /// here on leaves the empty array. The extra named arguments a call
-/// placed ([`exec::FrameState::extra_named`]) follow under their names,
+/// placed ([`exec::Annex::extra_named`]) follow under their names,
 /// each held to the declared type under the number after the last
 /// positional one; the witness for that stands beside
 /// `call_user_func_array` in `ext/standard`, the one caller that places
@@ -3829,11 +3829,12 @@ pub(crate) fn recv_variadic<T: Tier>(
 ) -> Edge {
     let first = op.op1;
     let at = usize::try_from(first.saturating_sub(1)).unwrap_or(usize::MAX);
-    let count = req.vm().at(frame).map_or(0, |state| state.extra_args.len());
+    let count = req
+        .annex_of(frame)
+        .map_or(0, |extra| extra.extra_args.len());
     let named = req
-        .vm()
-        .at(frame)
-        .map(|state| state.extra_named.to_vec())
+        .annex_of(frame)
+        .map(|extra| extra.extra_named.to_vec())
         .unwrap_or_default();
     // An untyped variadic with no positional extras is php's
     // `ZVAL_ARR(params, EX(extra_named_params))`, the frame's table
@@ -3847,9 +3848,8 @@ pub(crate) fn recv_variadic<T: Tier>(
         .is_none_or(|parameter| parameter.ty.is_none());
     if count == 0 && untyped {
         let table = req
-            .vm_mut()
-            .at_mut(frame)
-            .map(|state| state.extra_named.take_table());
+            .annex_mut(frame)
+            .map(|extra| extra.extra_named.take_table());
         if let Some(table) = table {
             table.free(req);
         }
@@ -3868,9 +3868,8 @@ pub(crate) fn recv_variadic<T: Tier>(
     req.replace_slot(frame, op.out, collected.to_value());
     for step in 0..count {
         let Some(argument) = req
-            .vm()
-            .at(frame)
-            .and_then(|state| state.extra_args.get(step).copied())
+            .annex_of(frame)
+            .and_then(|extra| extra.extra_args.get(step).copied())
         else {
             break;
         };
@@ -3878,8 +3877,8 @@ pub(crate) fn recv_variadic<T: Tier>(
         let argument = match verified_arg(req, frame, number, at, &argument) {
             Ok(None) => argument,
             Ok(Some(coerced)) => {
-                if let Some(state) = req.vm_mut().at_mut(frame)
-                    && let Some(place) = state.extra_args.get_mut(step)
+                if let Some(extra) = req.annex_mut(frame)
+                    && let Some(place) = extra.extra_args.get_mut(step)
                 {
                     let previous = std::mem::replace(place, coerced);
                     req.release(previous);
@@ -3902,8 +3901,8 @@ pub(crate) fn recv_variadic<T: Tier>(
         let argument = match verified_arg(req, frame, number, at, &argument) {
             Ok(None) => argument,
             Ok(Some(coerced)) => {
-                if let Some(state) = req.vm_mut().at_mut(frame)
-                    && let Some((_, place)) = state
+                if let Some(extra) = req.annex_mut(frame)
+                    && let Some((_, place)) = extra
                         .extra_named
                         .iter_mut()
                         .find(|(held, _)| held.as_bytes() == name.as_bytes())
@@ -4426,12 +4425,13 @@ fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
             .site_below(frame)
             .map(|site| (String::from_utf8_lossy(&site.file).into_owned(), site.line));
     };
-    let caller = req.vm().at(caller)?;
+    let caller = req.frame_at(caller)?;
     Some((
-        exec::body_of(&caller.unit, caller.body)
-            .map(|code| String::from_utf8_lossy(&code.filename.0).into_owned())
+        caller
+            .file()
+            .map(|file| String::from_utf8_lossy(file).into_owned())
             .unwrap_or_default(),
-        exec::line_of(caller),
+        caller.line(),
     ))
 }
 
@@ -20986,7 +20986,7 @@ pub(crate) fn fast_call<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    let left = req.vm_mut().fast_call(frame, op.out).and_then(|cell| {
+    let left = req.fast_call(frame, op.out).and_then(|cell| {
         cell.from = Some(at);
         cell.delayed.take()
     });
@@ -21020,7 +21020,7 @@ pub(crate) fn fast_ret<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let cell = req.vm_mut().fast_call(frame, op.op1).map(|cell| {
+    let cell = req.fast_call(frame, op.op1).map(|cell| {
         let from = cell.from.take();
         let delayed = cell.delayed.take();
         (from, delayed)
@@ -21056,7 +21056,7 @@ pub(crate) fn discard_exception<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let cell = req.vm_mut().fast_call(frame, op.op1).map(|cell| {
+    let cell = req.fast_call(frame, op.op1).map(|cell| {
         let from = cell.from;
         (from, cell.delayed.take())
     });
@@ -21221,7 +21221,7 @@ fn unwind_from<T: Tier>(
             };
             cleanup_live_vars(req, frame, code, op_num, element.finally_op.0);
             let delayed = req.take_raised();
-            if let Some(cell) = req.vm_mut().fast_call(frame, var) {
+            if let Some(cell) = req.fast_call(frame, var) {
                 cell.delayed = delayed;
                 cell.from = None;
             }
@@ -21234,15 +21234,11 @@ fn unwind_from<T: Tier>(
                     "InternalError: a try element whose finally_end names no FAST_RET",
                 )));
             };
-            let carried = req
-                .vm_mut()
-                .fast_call(frame, var)
-                .and_then(|cell| cell.from);
+            let carried = req.fast_call(frame, var).and_then(|cell| cell.from);
             if let Some(from) = carried {
                 free_carried_value(req, frame, code, from);
             }
             let delayed = req
-                .vm_mut()
                 .fast_call(frame, var)
                 .and_then(|cell| cell.delayed.take());
             if let Some(delayed) = delayed {

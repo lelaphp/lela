@@ -254,7 +254,7 @@ impl Request {
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, closure, carried) = match link {
-                Link::Frame(_, state) => (state.function, state.closure, state.scope),
+                Link::Frame(_, state) => (state.function(), state.closure(), state.scope()),
                 Link::Call(call) => (
                     Some(call.function),
                     call.closure,

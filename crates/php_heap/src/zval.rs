@@ -640,8 +640,8 @@ mod tests {
     fn an_indirect_zval_names_a_slot_in_place() {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
-        let mut stack = crate::VmStack::new();
-        let pushed = stack.push_frame(&mut heap, 2, 0);
+        let mut stack = crate::VmStack::<()>::new();
+        let pushed = stack.push_frame(&mut heap, 2, 0, ());
         assert!(pushed.is_ok(), "a frame of two slots fits the first page");
         let Some(frame) = pushed.ok().and_then(|f| stack.frame_mut(f)) else {
             return;

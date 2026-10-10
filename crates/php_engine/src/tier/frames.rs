@@ -60,7 +60,7 @@ pub fn catches(req: &mut Request, frame: FrameRef) -> bool {
         Some(Raised::GracefulExit) => None,
         _ => return false,
     };
-    let Some(serving) = req.vm().serving(frame) else {
+    let Some(serving) = req.serving(frame) else {
         return false;
     };
     let Some(code) = serving.code() else {

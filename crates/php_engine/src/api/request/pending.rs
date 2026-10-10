@@ -12,7 +12,6 @@ use php_heap::Fatal;
 use crate::api::call::write_prop;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpObject, PhpString, Value};
-use crate::exec;
 
 use super::Request;
 
@@ -469,7 +468,7 @@ impl Request {
             Some((file, _)) => file.to_vec(),
             None => self
                 .innermost_frame()
-                .and_then(|state| exec::body_of(&state.unit, state.body))
+                .and_then(crate::exec::FrameAt::code)
                 .map_or_else(
                     || b"[no active file]".to_vec(),
                     |code| code.filename.0.to_vec(),

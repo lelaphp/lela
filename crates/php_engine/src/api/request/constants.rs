@@ -11,7 +11,6 @@ use php_unit::decl::Attribute;
 
 use crate::api::raising::Thrown;
 use crate::api::values::{Owner, PhpArray, PhpString, Value, adopted};
-use crate::exec;
 
 use super::{ExtensionId, Request, Standard};
 
@@ -247,7 +246,7 @@ impl Request {
         // none where nothing is executing.
         let file = self
             .innermost_frame()
-            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .and_then(crate::exec::FrameAt::code)
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         self.constants.constants.push(ConstantRow {

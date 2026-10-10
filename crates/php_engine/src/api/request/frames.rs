@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use php_heap::{Fatal, FrameRef, Slot, VmStack, Zval, ZvalRef};
+use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef};
 use php_unit::{CacheSlot, Unit};
 
 use crate::api::call::Function;
@@ -24,7 +24,7 @@ use super::Request;
 /// `EG(current_execute_data)` to, so the frames and calls between are on
 /// no chain while it stands, as php's `prev_execute_data` passes them.
 pub(super) fn links_of<'a>(
-    stack: &'a VmStack,
+    req: &'a Request,
     vm: &'a Vm,
     frames: std::ops::Range<usize>,
     calls: std::ops::Range<usize>,
@@ -85,7 +85,6 @@ pub(super) fn links_of<'a>(
             }
         }
     }
-    let states = vm.frames();
     let mut walk = Walk {
         vm,
         served: vm.calls(),
@@ -97,15 +96,19 @@ pub(super) fn links_of<'a>(
     };
     for at in frames.clone() {
         walk.placed(at);
-        let Some(state) = states.get(at) else {
+        let Some(frame) = u32::try_from(at)
+            .ok()
+            .and_then(|at| vm.stack.frame(FrameRef(at)))
+        else {
             break;
         };
-        walk.take_below(usize::try_from(state.calls_below).unwrap_or(usize::MAX));
-        if let Some(generator) = state.generator {
+        let state = exec::FrameAt { req, frame };
+        walk.take_below(usize::try_from(state.header().calls_below).unwrap_or(usize::MAX));
+        if let Some(generator) = state.generator() {
             walk.links.extend(expand(generator).into_iter().rev());
         }
-        if !state.leaving {
-            walk.links.push(Link::Frame(Slots::Stack(stack, at), state));
+        if !state.leaving() {
+            walk.links.push(Link::Frame(Slots::Stack(vm, at), state));
         }
         walk.ends.push((at, walk.links.len()));
     }
@@ -120,7 +123,7 @@ pub(super) fn links_of<'a>(
 /// a user frame, with its place among the frames, or a call a native
 /// is serving.
 pub(super) enum Link<'a> {
-    Frame(Slots<'a>, &'a exec::FrameState),
+    Frame(Slots<'a>, exec::FrameAt<'a>),
     Call(&'a exec::CallState),
     /// `zend_get_attribute_object`'s dummy frame ([`exec::Site`]): user
     /// code that serves no function, has no `$this` and no scope, and
@@ -135,40 +138,118 @@ pub(super) enum Link<'a> {
     Fake(usize),
 }
 
-/// Where the slots of a frame on the chain are: on a VM stack at its
-/// place, or kept by a suspended generator a running one was resumed
-/// through, which php's `execute_fake` placeholder stands for until a
-/// backtrace expands it.
+/// Where a frame on the chain is: on its VM stack at its place, or kept
+/// by a suspended generator a running one was resumed through, which
+/// php's `execute_fake` placeholder stands for until a backtrace expands
+/// it.
 #[derive(Clone, Copy)]
 pub(super) enum Slots<'a> {
-    Stack(&'a VmStack, usize),
-    Kept(&'a php_heap::Frame),
-}
-
-impl<'a> Slots<'a> {
-    pub(super) fn frame(self) -> Option<&'a php_heap::Frame> {
-        match self {
-            Slots::Stack(stack, at) => stack.frame(FrameRef(u32::try_from(at).unwrap_or(u32::MAX))),
-            Slots::Kept(frame) => Some(frame),
-        }
-    }
+    Stack(&'a Vm, usize),
+    Kept,
 }
 
 impl Request {
-    pub(crate) fn stack_mut(&mut self) -> &mut VmStack {
-        &mut self.stack
+    pub(crate) fn stack_mut(&mut self) -> &mut crate::exec::Stack {
+        &mut self.vm.stack
     }
 
-    /// [`VmStack::move_to_heap`] over the request's stack and heap.
-    pub(crate) fn move_frame_to_heap(&mut self) -> Result<Option<php_heap::Frame>, Fatal> {
-        self.stack.move_to_heap(&mut self.heap)
+    /// What the frames own beyond their headers ([`exec::Annex`]).
+    pub(crate) fn annexes(&self) -> &exec::Annexes {
+        &self.annexes
+    }
+
+    pub(crate) fn annexes_mut(&mut self) -> &mut exec::Annexes {
+        &mut self.annexes
+    }
+
+    /// `frame` of the running stack read where it stands; none where no
+    /// frame stands there.
+    pub(crate) fn frame_at(&self, frame: FrameRef) -> Option<exec::FrameAt<'_>> {
+        let frame = self.vm.stack.frame(frame)?;
+        Some(exec::FrameAt { req: self, frame })
+    }
+
+    /// The frame at `at` of `vm`, a running or a resumer's stack, read
+    /// where it stands.
+    pub(super) fn frame_on<'a>(&'a self, vm: &'a Vm, at: usize) -> Option<exec::FrameAt<'a>> {
+        let frame = vm.stack.frame(FrameRef(u32::try_from(at).ok()?))?;
+        Some(exec::FrameAt { req: self, frame })
+    }
+
+    /// A frame no stack holds, a suspended generator's, read where it is
+    /// kept.
+    pub(crate) fn kept_frame<'a>(&'a self, frame: &'a exec::HeapFrame) -> exec::FrameAt<'a> {
+        exec::FrameAt { req: self, frame }
+    }
+
+    /// The unit `header`'s frame serves and which of its op arrays: a
+    /// function's through the function table, which holds the unit, a
+    /// file's through the frame's [`exec::Annex`].
+    pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&Arc<Unit>, exec::Body)> {
+        if let Some(function) = header.function {
+            let user = self.user_function(function)?;
+            Some((&user.unit, user.body))
+        } else {
+            let unit = self.annexes.get(header.annex?)?.unit.as_ref()?;
+            Some((unit, exec::Body::Main))
+        }
+    }
+
+    /// The unit and the op array being served in `frame`, the unit
+    /// shared rather than copied, so the loop can read its oplines while
+    /// the request is borrowed.
+    pub(crate) fn serving(&self, frame: FrameRef) -> Option<exec::Serving> {
+        let (unit, body) = self.unit_of(self.vm.at(frame)?)?;
+        Some(exec::Serving {
+            unit: Arc::clone(unit),
+            body,
+        })
+    }
+
+    /// The [`exec::Annex`] of `frame`, made where it has none.
+    pub(crate) fn annex_mut(&mut self, frame: FrameRef) -> Option<&mut exec::Annex> {
+        let id = if let Some(id) = self.vm.at(frame)?.annex {
+            id
+        } else {
+            let id = self.annexes.insert(exec::Annex::default());
+            if let Some(header) = self.vm.at_mut(frame) {
+                header.annex = Some(id);
+            }
+            id
+        };
+        self.annexes.get_mut(id)
+    }
+
+    /// The [`exec::Annex`] of `frame`, where it has one.
+    pub(crate) fn annex_of(&self, frame: FrameRef) -> Option<&exec::Annex> {
+        self.annexes.get(self.vm.at(frame)?.annex?)
+    }
+
+    /// The fast-call cell of `frame`'s temporary `var`
+    /// ([`exec::Annex::fast_call`]).
+    pub(crate) fn fast_call(&mut self, frame: FrameRef, var: u32) -> Option<&mut exec::FastCall> {
+        self.annex_mut(frame)?.fast_call(var)
+    }
+
+    /// A frame's [`exec::Annex`] given up with the frame: its place
+    /// given back, and what it owns handed to the caller.
+    pub(crate) fn take_annex(&mut self, header: &exec::Header) -> Option<exec::Annex> {
+        self.annexes.take(header.annex?)
+    }
+
+    /// The innermost frame off the stack, moved to an allocation of its
+    /// own, with the calls it was building ([`Vm::suspend`]).
+    pub(crate) fn suspend_frame(
+        &mut self,
+    ) -> Result<Option<(crate::exec::HeapFrame, Vec<exec::CallState>)>, Fatal> {
+        self.vm.suspend(&mut self.heap)
     }
 
     /// The first page of the VM stack the request runs on, out of its
     /// heap, where none stands: what `zend_fiber_execute` takes for a
     /// fiber's stack before the fiber's function is called.
     pub(crate) fn open_stack(&mut self) -> Result<(), Fatal> {
-        self.stack.open(&mut self.heap)
+        self.vm.stack.open(&mut self.heap)
     }
 
     /// The engine's half of the frames: what the loop and the handlers
@@ -211,7 +292,6 @@ impl Request {
     /// lent ([`exec::Receiver`]).
     fn switch_stack(&mut self, other: &mut crate::fiber::Execution) {
         self.own_lent_receivers();
-        std::mem::swap(&mut self.stack, &mut other.stack);
         std::mem::swap(&mut self.vm, &mut other.vm);
         self.swap_observing(&mut other.observing);
     }
@@ -249,19 +329,16 @@ impl Request {
     /// The stacks php's one `prev_execute_data` chain runs through: the
     /// one the request is running on, then each resumer's below it, the
     /// request's own last.
-    pub(super) fn executions(&self) -> impl Iterator<Item = (&VmStack, &Vm)> {
-        std::iter::once((&self.stack, &self.vm)).chain(
-            self.fibers
-                .below()
-                .map(|execution| (&execution.stack, &execution.vm)),
-        )
+    pub(super) fn executions(&self) -> impl Iterator<Item = &Vm> {
+        std::iter::once(&self.vm).chain(self.fibers.below().map(|execution| &execution.vm))
     }
 
     /// The innermost user frame on the chain, which is where
     /// `zend_get_executed_filename` and `zend_get_executed_lineno` stop:
     /// on a fiber whose callable is a native, the resumer's.
-    pub(super) fn innermost_frame(&self) -> Option<&exec::FrameState> {
-        self.executions().find_map(|(_, vm)| vm.innermost())
+    pub(super) fn innermost_frame(&self) -> Option<exec::FrameAt<'_>> {
+        self.executions()
+            .find_map(|vm| self.frame_on(vm, vm.innermost_at()?))
     }
 
     /// The loop over a generator's frame, bound to the engine's tier
@@ -279,18 +356,40 @@ impl Request {
     pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
+        let header = exec::Header::of(None, code);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
         // stands in the table, in the compiler's order, from the start.
-        self.vm.push(exec::Activation {
-            symbol_table: Some(TableId::GLOBAL),
-            ..exec::Activation::of(unit, exec::Body::Main)
-        });
+        let frame = self.push_code_record(
+            slots,
+            header,
+            exec::Annex {
+                unit: Some(unit),
+                symbol_table: Some(TableId::GLOBAL),
+                ..exec::Annex::default()
+            },
+        )?;
         self.attach_symbol_table(frame);
         Ok(frame)
+    }
+
+    /// A file's frame pushed with its header and its [`exec::Annex`],
+    /// the extra given back where the push is refused.
+    fn push_code_record(
+        &mut self,
+        slots: usize,
+        mut header: exec::Header,
+        extra: exec::Annex,
+    ) -> Result<FrameRef, Fatal> {
+        let id = self.annexes.insert(extra);
+        header.annex = Some(id);
+        let pushed = self.vm.push(&mut self.heap, slots, 0, header);
+        if pushed.is_err() {
+            self.annexes.take(id);
+        }
+        pushed
     }
 
     /// The frame for the main op array of a file an `INCLUDE_OR_EVAL`
@@ -316,25 +415,30 @@ impl Request {
     ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
+        let mut header = exec::Header::of(None, code);
+        let reserved = self.vm.push(&mut self.heap, slots, 0, header.clone())?;
         let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
             (state.this(), state.called_scope, self.frame_scope(caller))
         });
         // `ZEND_CALL_HAS_THIS` carried from the including frame, whose
         // `$this` that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
-        let receiver = this.map(exec::Receiver::lent);
+        header.set_receiver(this.map(exec::Receiver::lent));
+        header.called_scope = called_scope;
+        header.returns_to = returns_to.map(|(_, slot)| slot);
+        header.caller = exec::Caller::Opline(caller);
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        self.vm.push(exec::Activation {
-            receiver,
-            called_scope,
+        header.annex = Some(self.annexes.insert(exec::Annex {
+            unit: Some(unit),
             scope,
             symbol_table: Some(table),
-            returns_to,
-            caller: exec::Caller::Opline(caller),
-            ..exec::Activation::of(unit, exec::Body::Main)
-        });
+            ..exec::Annex::default()
+        }));
+        if let Some(laid) = self.vm.at_mut(reserved) {
+            *laid = header;
+        }
+        let frame = reserved;
         self.attach_symbol_table(frame);
         crate::observer::call(self, frame);
         Ok(frame)
@@ -370,12 +474,11 @@ impl Request {
         copy: crate::api::values::Emalloc,
     ) -> Result<(), Thrown> {
         let size = self
-            .vm
-            .serving(frame)
-            .and_then(|serving| serving.code().map(|code| code.cache_size))
+            .frame_at(frame)
+            .and_then(|state| state.code().map(|code| code.cache_size))
             .unwrap_or(0);
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.op_array = Some(exec::HeapOpArray {
+        if let Some(extra) = self.annex_mut(frame) {
+            extra.op_array = Some(exec::HeapOpArray {
                 copy,
                 run_time_cache: None,
             });
@@ -383,9 +486,8 @@ impl Request {
         let cache =
             crate::api::values::Emalloc::new(self, usize::try_from(size).unwrap_or(usize::MAX))?;
         if let Some(held) = self
-            .vm
-            .at_mut(frame)
-            .and_then(|state| state.op_array.as_mut())
+            .annex_mut(frame)
+            .and_then(|extra| extra.op_array.as_mut())
         {
             held.run_time_cache = Some(cache);
         }
@@ -414,7 +516,7 @@ impl Request {
         }
         self.pop_frame();
         if let Some(includer) = code_frame {
-            let includer = includer.unwrap_or_else(|| self.stack.current());
+            let includer = includer.unwrap_or_else(|| self.vm.stack.current());
             self.attach_symbol_table(includer);
         }
     }
@@ -511,24 +613,36 @@ impl Request {
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it on the stack for
         // `RECV_VARIADIC` to collect.
-        let (unit, body, arity) = {
-            let user = self.user_function(function).ok_or_else(no_body)?;
-            (Arc::clone(&user.unit), user.body, user.arity)
-        };
-        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
+        let user = self.user_function(function).ok_or_else(no_body)?;
+        let (body, arity) = (user.body, user.arity);
+        let code = exec::body_of(&user.unit, body).ok_or_else(no_body)?;
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let parameters = usize::try_from(arity.parameters).unwrap_or(usize::MAX);
         let entry = code.safepoints.first().map_or(0, |at| at.0);
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let extra_args = call.arguments.len().saturating_sub(parameters);
-        let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
-        exec::init_runtime_cache(&mut self.map, code, body);
+        let opline =
+            exec::skipped_recv(num_args, arity.parameters, arity.typed, entry).unwrap_or(0);
+        let mut header = exec::Header::of(Some(function), code);
+        header.opline = opline;
+        header.set_receiver(call.receiver);
+        header.called_scope = call.called_scope;
+        header.closure = call.closure;
+        header.num_args = num_args;
+        header.returns_to = returns_to.map(|(_, slot)| slot);
+        header.caller = caller;
+        // `zend_init_func_run_time_cache`, read off the op array the
+        // function table holds before the request is borrowed again.
+        let cache = exec::runtime_cache_of(code);
+        let lay = code.cache_size;
+        let frame = self.vm.push(&mut self.heap, slots, extra_args, header)?;
+        exec::init_runtime_cache_at(&mut self.map, cache, lay, body);
         // The parameters' CVs of the frame just pushed hold `UNDEF`, so
         // each argument is written over nothing, as `SEND_*` writes into
         // the callee's slot; the rest are the extra arguments.
         let mut arguments = call.arguments;
         let mut placing = arguments.drain(..);
-        if let Some(slots) = self.stack.frame_mut(frame) {
+        if let Some(slots) = self.vm.stack.frame_mut(frame) {
             let cells = slots.slots_mut().iter_mut().take(parameters);
             for (cell, argument) in cells.zip(placing.by_ref()) {
                 *cell = argument.to_zval();
@@ -536,21 +650,12 @@ impl Request {
         }
         let extra_args: Vec<Value> = placing.collect();
         self.vm.keep_arguments(arguments);
-        let opline =
-            exec::skipped_recv(num_args, arity.parameters, arity.typed, entry).unwrap_or(0);
-        self.vm.push(exec::Activation {
-            function: Some(function),
-            opline,
-            receiver: call.receiver,
-            called_scope: call.called_scope,
-            closure: call.closure,
-            num_args,
-            extra_args,
-            extra_named: call.extra_named,
-            returns_to,
-            caller,
-            ..exec::Activation::of(unit, body)
-        });
+        if (!extra_args.is_empty() || call.extra_named.carries_any())
+            && let Some(annex) = self.annex_mut(frame)
+        {
+            annex.extra_args = extra_args;
+            annex.extra_named = call.extra_named;
+        }
         if let Some(name) = call.name {
             self.release(Value::string(name));
         }
@@ -621,40 +726,44 @@ impl Request {
     /// bool(true)
     /// ```
     pub(crate) fn pop_frame(&mut self) {
-        let frame = self.stack.current();
+        let frame = self.vm.stack.current();
         if let Some(state) = self.vm.at_mut(frame) {
-            state.leaving = true;
+            state.info.set_leaving(true);
         }
         if !self.bailout {
             self.release_frame(frame);
         }
         // `destroy_op_array`, which frees the heap runtime cache, then
         // `efree_size(EX(func))`.
-        let Some(mut popped) = self.vm.pop() else {
-            self.stack.pop_frame(&mut self.heap);
+        let popped = self.vm.at(frame).cloned();
+        let extra = popped.as_ref().and_then(|header| self.take_annex(header));
+        self.vm.stack.pop_frame(&mut self.heap);
+        let Some(mut extra) = extra else {
             return;
         };
-        if let Some(held) = popped.op_array.take() {
+        if let Some(held) = extra.op_array.take() {
             if let Some(cache) = held.run_time_cache {
                 cache.free(self);
             }
             held.copy.free(self);
         }
-        self.stack.pop_frame(&mut self.heap);
         // An `eval`'s main op array is destroyed when its execution ends,
         // and the names its compile made with it.
-        if popped.function.is_none() && popped.body == exec::Body::Main && !self.bailout {
-            self.release_unit_names(Some(&popped.unit));
+        if popped.is_some_and(|header| header.function.is_none()) && !self.bailout {
+            self.release_unit_names(extra.unit.as_ref());
         }
     }
 
     /// What [`Request::pop_frame`] gives up of `frame`, in its order.
     fn release_frame(&mut self, frame: FrameRef) {
-        let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
-        let cvs = self
+        let slots = self
             .vm
-            .at(frame)
-            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .stack
+            .frame(frame)
+            .map_or(0, crate::exec::HeapFrame::len);
+        let cvs = self
+            .frame_at(frame)
+            .and_then(exec::FrameAt::code)
             .map_or(slots, |code| code.num_cvs as usize);
         let mut from = 0;
         while let Some((at, value)) = self.take_next_owner(frame, from) {
@@ -668,12 +777,27 @@ impl Request {
         self.free_rebuilt_table(frame);
         // A generator's frame leaves its closure to the generator
         // (`ZendGenerator::closure`), which keeps it until it is freed.
+        let generator = self.annex_of(frame).and_then(|extra| extra.generator);
+        let (named, extra_args) = self
+            .vm
+            .at(frame)
+            .and_then(|header| header.annex)
+            .and_then(|id| self.annexes.get_mut(id))
+            .map(|extra| {
+                (
+                    std::mem::take(&mut extra.extra_named),
+                    std::mem::take(&mut extra.extra_args),
+                )
+            })
+            .unwrap_or_default();
         let held = self.vm.at_mut(frame).map(|state| {
+            let receiver = state.receiver();
+            state.set_receiver(None);
             (
-                std::mem::take(&mut state.extra_named),
-                std::mem::take(&mut state.extra_args),
-                state.receiver.take(),
-                state.closure.take().filter(|_| state.generator.is_none()),
+                named,
+                extra_args,
+                receiver,
+                state.closure.take().filter(|_| generator.is_none()),
             )
         });
         if let Some((named, extra_args, receiver, closure)) = held {
@@ -702,7 +826,7 @@ impl Request {
     /// and left as it stands, as `i_free_compiled_variables` passes over
     /// what `Z_REFCOUNTED_P` refuses.
     fn take_next_owner(&mut self, frame: FrameRef, from: usize) -> Option<(usize, Value)> {
-        let slots = self.stack.frame_mut(frame)?.slots_mut();
+        let slots = self.vm.stack.frame_mut(frame)?.slots_mut();
         let (at, cell) = slots
             .iter_mut()
             .enumerate()
@@ -715,27 +839,29 @@ impl Request {
     /// no owner taken, off the heap's frame (design §5.6). A slot past
     /// the end reads as `UNDEF`, as an uninitialised zval reads.
     pub(crate) fn slot(&self, frame: FrameRef, at: u32) -> Value {
-        self.stack
+        self.vm
+            .stack
             .frame(frame)
             .map_or(Value::undef(), |f| Value::of_zval(f.slot(Slot(at))))
     }
 
-    /// Every slot of `frame` in place ([`php_heap::Frame::slots_mut`]),
+    /// Every slot of `frame` in place ([`crate::exec::HeapFrame::slots_mut`]),
     /// the CVs and then the temporaries: what a handler's inline path
     /// addresses its operands and its temporary through, one lookup of
     /// the frame for all of them (design §5.8). Empty for a frame that
     /// is not live, where every operand reads as `UNDEF` and the inline
     /// path stands aside for the kernel.
     pub(crate) fn slots_mut(&mut self, frame: FrameRef) -> &mut [Zval] {
-        self.stack
+        self.vm
+            .stack
             .frame_mut(frame)
-            .map_or(&mut [], php_heap::Frame::slots_mut)
+            .map_or(&mut [], crate::exec::HeapFrame::slots_mut)
     }
 
     /// The value out of a slot, the slot left `UNDEF`: what the slot
     /// owned is the caller's now, which is how a temporary is consumed.
     pub(crate) fn take_slot(&mut self, frame: FrameRef, at: u32) -> Value {
-        let Some(f) = self.stack.frame_mut(frame) else {
+        let Some(f) = self.vm.stack.frame_mut(frame) else {
             return Value::undef();
         };
         let z = f.slot(Slot(at));
@@ -760,6 +886,7 @@ impl Request {
     /// the `BOOL` after them writes again.
     pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
         let Some(f) = self
+            .vm
             .stack
             .frame_mut(frame)
             .filter(|f| (at as usize) < f.len())
@@ -788,7 +915,7 @@ impl Request {
     /// stands there (`_get_zval_ptr_ptr_var`). None for a slot the
     /// frame does not have.
     pub(crate) fn slot_ptr(&mut self, frame: FrameRef, at: u32) -> Option<ZvalRef> {
-        self.stack.frame_mut(frame)?.slot_ptr(Slot(at))
+        self.vm.stack.frame_mut(frame)?.slot_ptr(Slot(at))
     }
 
     /// A call's or a frame's receiver given up: the owner an owned one
@@ -913,7 +1040,10 @@ impl Request {
     /// ```
     pub fn executing(&self) -> bool {
         self.fibers.on_context_stack()
-            || self.vm.frames().iter().any(|frame| !frame.leaving)
+            || (0..self.vm.depth()).any(|at| {
+                self.frame_on(&self.vm, at)
+                    .is_some_and(|frame| !frame.leaving())
+            })
             || self.vm.serving_call().is_some()
     }
 }

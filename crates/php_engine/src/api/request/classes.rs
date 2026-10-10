@@ -1529,18 +1529,17 @@ impl Request {
     /// copy of its function, whose scope is the one the closure was
     /// made or bound in, which `Closure::bind` and `Closure::call` move.
     pub(crate) fn frame_scope(&self, frame: FrameRef) -> Option<ClassId> {
-        self.scope_of(self.vm.at(frame)?)
+        self.scope_of(self.frame_at(frame)?)
     }
 
-    /// [`Request::frame_scope`] of a frame's state, on whichever stack
-    /// it stands.
-    pub(crate) fn scope_of(&self, state: &exec::FrameState) -> Option<ClassId> {
-        if state.closure.is_some() {
-            return self.closure_scope(state.closure);
+    /// [`Request::frame_scope`] of a frame, on whichever stack it stands.
+    pub(crate) fn scope_of(&self, state: exec::FrameAt<'_>) -> Option<ClassId> {
+        if state.closure().is_some() {
+            return self.closure_scope(state.closure());
         }
-        match state.function {
+        match state.function() {
             Some(function) => self.method_class(function),
-            None => state.scope,
+            None => state.scope(),
         }
     }
 

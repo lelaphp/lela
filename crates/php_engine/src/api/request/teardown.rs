@@ -61,9 +61,9 @@ impl Request {
         if self.unclean_shutdown() || !report_memleaks {
             return;
         }
-        let mut stack = std::mem::take(&mut self.stack);
+        let mut stack = std::mem::take(&mut self.vm.stack);
         stack.close(&mut self.heap);
-        self.stack = stack;
+        self.vm.stack = stack;
         self.free_hash_tables();
         self.drop_request_states();
         let shared = &self.shared;

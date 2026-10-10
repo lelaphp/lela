@@ -598,7 +598,7 @@ impl Request {
         if !crate::engine::note_compiled(self, &unit, kind) || self.bailing_out() {
             return Err(Thrown::of(self.take_pending_view()));
         }
-        let standing = self.vm.frames().len();
+        let standing = self.vm.depth();
         let callee = match self.caller_frame() {
             Some(frame) => self.push_code_frame(unit, frame, None),
             None => match self.push_frame(unit) {
@@ -612,8 +612,8 @@ impl Request {
         let callee = self.fatal_of(callee)?;
         let reenter = self.shared.loops.reenter;
         let served = reenter(self, callee);
-        while self.vm.frames().len() > standing {
-            let top = self.stack.current();
+        while self.vm.depth() > standing {
+            let top = self.vm.stack.current();
             self.leave_frame(top);
         }
         self.fatal_of(served)?;

@@ -180,7 +180,6 @@ pub enum Transfer {
 /// ([`crate::observer`]).
 #[derive(Default)]
 pub(crate) struct Execution {
-    pub(crate) stack: php_heap::VmStack,
     pub(crate) vm: Vm,
     pub(crate) observing: ObservedChain,
     pub(crate) error_reporting: i64,
@@ -335,15 +334,15 @@ impl Fibers {
     /// The request's own VM stack, below every fiber running, which is
     /// the one `EG(symbol_table)`'s attached CVs stand on; none while no
     /// fiber runs and the request runs on it.
-    pub(crate) fn request_stack(&self) -> Option<&php_heap::VmStack> {
-        self.running.first().map(|running| &running.below.stack)
+    pub(crate) fn request_stack(&self) -> Option<&crate::exec::Stack> {
+        self.running.first().map(|running| &running.below.vm.stack)
     }
 
     /// [`Fibers::request_stack`], to write.
-    pub(crate) fn request_stack_mut(&mut self) -> Option<&mut php_heap::VmStack> {
+    pub(crate) fn request_stack_mut(&mut self) -> Option<&mut crate::exec::Stack> {
         self.running
             .first_mut()
-            .map(|running| &mut running.below.stack)
+            .map(|running| &mut running.below.vm.stack)
     }
 
     /// The execution states below the running stack, the innermost
@@ -474,16 +473,17 @@ impl ObjectHandlers for FiberHandlers {
         let Some(execution) = &fiber.coroutine.execution else {
             return;
         };
-        for (at, state) in execution.vm.frames().iter().enumerate().rev() {
+        for at in (0..execution.vm.depth()).rev() {
             let frame = php_heap::FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
-            let Some(slots) = execution.stack.frame(frame) else {
+            let Some(slots) = execution.vm.stack.frame(frame) else {
                 continue;
             };
-            match state.generator {
+            let state = req.kept_frame(slots);
+            match state.generator() {
                 Some(generator) => {
-                    crate::generator::running_frame_gc(req, generator, slots, state, visit);
+                    crate::generator::running_frame_gc(req, generator, state, visit);
                 }
-                None => exec::unfinished_execution_gc(req, slots, state, &[], visit),
+                None => exec::unfinished_execution_gc(state, &[], visit),
             }
         }
         exec::unfinished_calls_gc(execution.vm.calls(), visit);
@@ -1374,7 +1374,7 @@ fn switch_into<P: HoldsCoroutine>(
             if let Some(record) = record {
                 req.heap_mut().free_block(record);
             }
-            execution.stack.close(req.heap_mut());
+            execution.vm.stack.close(req.heap_mut());
             if matches!(back, Transfer::Fatal) {
                 // `zend_fiber_switch_to` raises the fiber's bailout again
                 // on the resumer, which leaves its own open frames to
@@ -1386,7 +1386,7 @@ fn switch_into<P: HoldsCoroutine>(
         }
         Err(fatal) => {
             coroutine.status = CoroutineStatus::Dead;
-            execution.stack.close(req.heap_mut());
+            execution.vm.stack.close(req.heap_mut());
             req.fatal_of::<()>(Err(fatal))?;
             Ok(Transfer::Fatal)
         }
@@ -1753,8 +1753,7 @@ fn lay_down<P: HoldsCoroutine>(
         }
     };
     let execution = Execution {
-        stack: php_heap::VmStack::fiber(),
-        vm: Vm::default(),
+        vm: Vm::fiber(),
         observing: ObservedChain::default(),
         error_reporting,
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),

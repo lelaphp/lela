@@ -551,10 +551,13 @@ impl Request {
                 current_this = state.this();
             }
             let scope = self
-                .closure_scope(state.closure)
-                .or_else(|| state.function.and_then(|f| self.method_class(f)))
-                .or(state.scope);
-            let called = state.this().map(|this| this.class()).or(state.called_scope);
+                .closure_scope(state.closure())
+                .or_else(|| state.function().and_then(|f| self.method_class(f)))
+                .or(state.scope());
+            let called = state
+                .this()
+                .map(|this| this.class())
+                .or(state.called_scope());
             return CallFrame {
                 scope,
                 called,

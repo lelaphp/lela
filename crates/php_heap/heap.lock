@@ -56,11 +56,14 @@ FiberStack::new
 FiberStack::resume
 Frame
 Frame::free
+Frame::header
+Frame::header_mut
 Frame::is_empty
 Frame::len
 Frame::set
 Frame::slot
 Frame::slot_ptr
+Frame::slots
 Frame::slots_mut
 FrameRef
 FramesAside
@@ -320,6 +323,11 @@ VmStack::entry
 VmStack::fiber
 VmStack::frame
 VmStack::frame_mut
+VmStack::grow_top
+VmStack::header
+VmStack::header_mut
+VmStack::is_empty
+VmStack::len
 VmStack::move_to_heap
 VmStack::new
 VmStack::open

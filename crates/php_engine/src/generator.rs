@@ -10,7 +10,7 @@
 //! resumer stands on, a fiber's included, and runs the engine's one
 //! loop over it again ([`crate::tier::resume`]) until `YIELD` moves it
 //! off once more, `GENERATOR_RETURN` closes it, or a throwable leaves
-//! it. The frame is the heap's `Frame` and the engine's `FrameState`
+//! it. The frame is the heap's `Frame`, its header with it,
 //! together, with the calls its body was building when it yielded, so
 //! no slot is copied on the way in or out.
 //!
@@ -36,7 +36,7 @@ use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::classes::{Exception, Throwable};
-use crate::exec::{self, CallState, FrameState};
+use crate::exec::{self, CallState, FrameAt};
 use crate::interfaces::Iterator;
 
 /// Where a generator's frame is: php's `execute_data`, and
@@ -57,8 +57,7 @@ enum Execution {
 /// A frame off the stack: its slots, its engine half, and the calls its
 /// body was building (`frozen_call_stack`).
 pub(crate) struct Suspended {
-    slots: php_heap::Frame,
-    state: FrameState,
+    frame: crate::exec::HeapFrame,
     calls: Vec<CallState>,
 }
 
@@ -250,14 +249,7 @@ impl ObjectHandlers for GeneratorHandlers {
             }
             Execution::Running => {}
             Execution::Suspended(frame) => {
-                frame_gc(
-                    req,
-                    generator,
-                    &frame.slots,
-                    &frame.state,
-                    &frame.calls,
-                    visit,
-                );
+                frame_gc(generator, req.kept_frame(&frame.frame), &frame.calls, visit);
             }
         }
     }
@@ -297,10 +289,8 @@ pub(crate) fn value(req: &Request, generator: PhpObject) -> Value {
 /// The frame is the one the generator keeps while it is suspended, or
 /// the one on the stack of a suspended fiber it runs on.
 pub(crate) fn frame_gc(
-    req: &Request,
     generator: &ZendGenerator,
-    slots: &php_heap::Frame,
-    state: &FrameState,
+    state: FrameAt<'_>,
     calls: &[CallState],
     visit: &mut dyn FnMut(Value),
 ) {
@@ -312,7 +302,7 @@ pub(crate) fn frame_gc(
         Delegated::Array { array, .. } => visit(*array),
         Delegated::Iterator(iterator) => visit(iterator.as_value()),
     }
-    exec::unfinished_execution_gc(req, slots, state, calls, visit);
+    exec::unfinished_execution_gc(state, calls, visit);
     if let Some(parent) = generator.parent {
         visit(parent.as_value());
     }
@@ -324,14 +314,13 @@ pub(crate) fn frame_gc(
 pub(crate) fn running_frame_gc(
     req: &Request,
     object: PhpObject,
-    slots: &php_heap::Frame,
-    state: &FrameState,
+    state: FrameAt<'_>,
     visit: &mut dyn FnMut(Value),
 ) {
     if let Some(generator) = object.native::<ZendGenerator>(req)
         && matches!(generator.execution, Execution::Running)
     {
-        frame_gc(req, generator, slots, state, &[], visit);
+        frame_gc(generator, state, &[], visit);
     }
 }
 
@@ -367,11 +356,11 @@ pub(crate) fn in_fiber(req: &Request, object: PhpObject) -> Option<PhpObject> {
 }
 
 /// The engine half of a frame off the stack, where the generator's is.
-pub(crate) fn suspended_state(req: &Request, object: PhpObject) -> Option<&FrameState> {
+pub(crate) fn suspended_state(req: &Request, object: PhpObject) -> Option<FrameAt<'_>> {
     object
         .native::<ZendGenerator>(req)
         .and_then(|generator| match &generator.execution {
-            Execution::Suspended(suspended) => Some(&suspended.state),
+            Execution::Suspended(suspended) => Some(req.kept_frame(&suspended.frame)),
             Execution::Running | Execution::Closed => None,
         })
 }
@@ -392,13 +381,28 @@ fn same(a: PhpObject, b: PhpObject) -> bool {
     a.index() == b.index()
 }
 
+/// The temporary the opline a suspended frame stands at writes, the
+/// one its `result` operand names.
+fn suspended_out(req: &Request, object: PhpObject) -> Option<u32> {
+    read(req, object, |generator| match &generator.execution {
+        Execution::Suspended(suspended) => {
+            let state = req.kept_frame(&suspended.frame);
+            let code = state.code()?;
+            let op = exec::opline_at(code, state.opline())?;
+            Some(exec::temporary_slot(code, op.out))
+        }
+        _ => None,
+    })
+    .flatten()
+}
+
 /// The opline a suspended frame stands at, and its op array's opcode
 /// there.
 fn suspended_at(req: &Request, object: PhpObject) -> Option<Opcode> {
     read(req, object, |generator| match &generator.execution {
         Execution::Suspended(suspended) => {
-            let code = exec::body_of(&suspended.state.unit, suspended.state.body)?;
-            exec::opline_at(code, suspended.state.opline).map(|op| op.opcode)
+            let state = req.kept_frame(&suspended.frame);
+            exec::opline_at(state.code()?, state.opline()).map(|op| op.opcode)
         }
         _ => None,
     })
@@ -542,15 +546,14 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
                 req.release(old);
             }
             req.addref(&retval);
+            let out = suspended_out(req, root);
             let written = with(req, root, |g| {
                 let Execution::Suspended(suspended) = &mut g.execution else {
                     return Some(retval);
                 };
-                let code = exec::body_of(&suspended.state.unit, suspended.state.body)?;
-                let op = exec::opline_at(code, suspended.state.opline)?;
-                let slot = exec::temporary_slot(code, op.out);
-                let old = suspended.slots.slot(php_heap::Slot(slot));
-                suspended.slots.set(php_heap::Slot(slot), retval.to_zval());
+                let slot = out?;
+                let old = suspended.frame.slot(php_heap::Slot(slot));
+                suspended.frame.set(php_heap::Slot(slot), retval.to_zval());
                 Some(Value::of_zval(old))
             })
             .flatten();
@@ -617,15 +620,10 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
         }
     })
     .flatten()?;
-    let Suspended {
-        slots,
-        mut state,
-        calls,
-    } = *suspended;
-    state.caller = crate::exec::Caller::Outside;
-    let table = state.symbol_table;
-    let frame = req.stack_mut().resume_frame(slots);
-    req.vm_mut().resume(state, calls);
+    let Suspended { mut frame, calls } = *suspended;
+    frame.header_mut().caller = crate::exec::Caller::Outside;
+    let table = req.kept_frame(&frame).symbol_table();
+    let frame = req.vm_mut().resume(frame, calls);
     if let Some(table) = table {
         req.resume_generator_table(table, frame);
     }
@@ -635,22 +633,13 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
 /// The frame on top of the stack, which is `generator`'s, off it again
 /// and suspended: what `YIELD` and `YIELD_FROM` leave.
 pub(crate) fn suspend(req: &mut Request, generator: PhpObject) -> Result<(), Fatal> {
-    let Some(slots) = req.move_frame_to_heap()? else {
+    let Some((frame, calls)) = req.suspend_frame()? else {
         return Err(Fatal::Error(String::from(
             "InternalError: a generator suspended with no frame on the stack",
         )));
     };
-    let Some((state, calls)) = req.vm_mut().suspend() else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a generator suspended with no frame state on the stack",
-        )));
-    };
     with(req, generator, |g| {
-        g.execution = Execution::Suspended(Box::new(Suspended {
-            slots,
-            state,
-            calls,
-        }));
+        g.execution = Execution::Suspended(Box::new(Suspended { frame, calls }));
     });
     Ok(())
 }
@@ -686,7 +675,7 @@ pub(crate) fn with_kept_frame<R>(
     f: impl FnOnce(&mut Request, FrameRef) -> R,
 ) -> Option<R> {
     let kept = read(req, generator, |g| match &g.execution {
-        Execution::Suspended(kept) => kept.state.identity.get() == Some(identity),
+        Execution::Suspended(kept) => kept.frame.header().identity.get() == Some(identity),
         Execution::Running | Execution::Closed => false,
     })?;
     if !kept {
@@ -711,7 +700,7 @@ pub(crate) fn with_frames<R>(
     f: impl FnOnce(&mut Request, usize) -> R,
 ) -> R {
     let root = current(req, generator);
-    let floor = req.vm().frames().len();
+    let floor = req.vm().depth();
     let chain = delegation_chain(req, generator, root);
     for link in &chain {
         let _ = push(req, *link);
@@ -808,14 +797,16 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
         .vm()
         .at(frame)
         .map_or((None, None), |state| (state.function, state.closure));
+    if let Some(extra) = req.annex_mut(frame) {
+        extra.generator = Some(object);
+    }
     // `ZEND_CALL_RELEASE_THIS` and `Z_ADDREF` on a receiver the frame
     // was lent: the generator's frame outlives the call that lent it.
     let lent = req.vm_mut().at_mut(frame).and_then(|state| {
-        state.generator = Some(object);
         state.returns_to = None;
-        match state.receiver {
+        match state.receiver() {
             Some(crate::exec::Receiver::Lent(this)) => {
-                state.receiver = Some(crate::exec::Receiver::Owned(this));
+                state.set_receiver(Some(crate::exec::Receiver::Owned(this)));
                 Some(this)
             }
             _ => None,
@@ -843,9 +834,8 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
 
 /// The generator whose frame `frame` is, `zend_get_running_generator`.
 pub(crate) fn running(req: &Request, frame: FrameRef) -> Result<PhpObject, Fatal> {
-    req.vm()
-        .at(frame)
-        .and_then(|state| state.generator)
+    req.frame_at(frame)
+        .and_then(FrameAt::generator)
         .ok_or_else(|| {
             Fatal::Error(String::from(
                 "InternalError: a generator opcode on a frame that is no generator's",
@@ -1102,7 +1092,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         // php links the running frame to (`execute_fake`), which
         // `zend_generator_check_placeholder_frame` expands.
         let through = (!same(generator, orig)).then_some(orig);
-        let standing = req.vm().frames().len();
+        let standing = req.vm().depth();
         let Some(frame) = push(req, generator) else {
             return Ok(());
         };
@@ -1131,12 +1121,12 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         crate::observer::generator_resumed(req, frame);
         let run = req.resume_loop();
         let served = run(req, frame);
-        if req.vm().frames().len() > standing {
+        if req.vm().depth() > standing {
             // The body left the frame standing: a throwable it did not
             // catch, which the unwinder has already cleaned the frame
             // for (`zend_generator_close(generator, 1)` in
             // `zend_dispatch_try_catch_finally_helper`), or a fatal.
-            while req.vm().frames().len() > standing.saturating_add(1) {
+            while req.vm().depth() > standing.saturating_add(1) {
                 req.pop_frame();
             }
             finish_on_stack(req, generator, true);
@@ -1228,10 +1218,7 @@ fn running_in_fiber(req: &Request, generator: PhpObject) -> bool {
 /// #2 [internal function]: outer()
 /// #3 %s(7): Generator->next()
 /// ```
-pub(crate) fn placeholder_frames(
-    req: &Request,
-    root: PhpObject,
-) -> Vec<(&php_heap::Frame, &FrameState)> {
+pub(crate) fn placeholder_frames(req: &Request, root: PhpObject) -> Vec<FrameAt<'_>> {
     let Some(orig) = read(req, root, |g| g.resumed_through).flatten() else {
         return Vec::new();
     };
@@ -1241,16 +1228,12 @@ pub(crate) fn placeholder_frames(
 /// The kept frames of the generators from `orig` towards `root`, the one
 /// `root` runs for first and `orig`'s last: what php links under
 /// `root`'s frame through `orig`'s `execute_fake`.
-pub(crate) fn kept_frames(
-    req: &Request,
-    orig: PhpObject,
-    root: PhpObject,
-) -> Vec<(&php_heap::Frame, &FrameState)> {
+pub(crate) fn kept_frames(req: &Request, orig: PhpObject, root: PhpObject) -> Vec<FrameAt<'_>> {
     delegation_chain(req, orig, root)
         .into_iter()
         .rev()
         .filter_map(|link| match &link.native::<ZendGenerator>(req)?.execution {
-            Execution::Suspended(kept) => Some((&kept.slots, &kept.state)),
+            Execution::Suspended(kept) => Some(req.kept_frame(&kept.frame)),
             Execution::Running | Execution::Closed => None,
         })
         .collect()
@@ -1356,19 +1339,15 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
     // A generator running inside a suspended fiber has its frame on the
     // fiber's stack and not on the one the request runs on; the fiber's
     // teardown gives that frame up ([`crate::fiber`]).
-    let on_top = req
-        .vm()
-        .frames()
-        .last()
-        .and_then(|state| state.generator)
+    let top = req.vm().depth().checked_sub(1);
+    let on_top = top
+        .and_then(|top| req.frame_at(FrameRef(u32::try_from(top).ok()?)))
+        .and_then(FrameAt::generator)
         .is_some_and(|running| same(running, generator));
     if !on_top {
         return;
     }
-    let Ok(Some(slots)) = req.move_frame_to_heap() else {
-        return;
-    };
-    let Some((state, calls)) = req.vm_mut().suspend() else {
+    let Ok(Some((frame, calls))) = req.suspend_frame() else {
         return;
     };
     // `EG(current_execute_data)` goes back to the placeholder the frame
@@ -1377,15 +1356,7 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
     if through {
         req.vm_mut().push_placeholder(generator);
     }
-    release_frame(
-        req,
-        Suspended {
-            slots,
-            state,
-            calls,
-        },
-        finished,
-    );
+    release_frame(req, Suspended { frame, calls }, finished);
     if through {
         req.vm_mut().pop_placeholder();
     }
@@ -1421,17 +1392,23 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
 /// ```
 fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
     let Suspended {
-        mut slots,
-        state,
+        frame: mut slots,
         calls,
     } = suspended;
-    if let Some(table) = state.symbol_table {
+    let header = slots.header().clone();
+    let extra = req.take_annex(&header).unwrap_or_default();
+    if let Some(table) = extra.symbol_table {
         req.free_generator_table(table);
     }
-    let unit = std::sync::Arc::clone(&state.unit);
-    let code = exec::body_of(&unit, state.body);
+    let unit = header
+        .function
+        .and_then(|function| req.user_function(function))
+        .map(|user| (std::sync::Arc::clone(&user.unit), user.body));
+    let code = unit
+        .as_ref()
+        .and_then(|(unit, body)| exec::body_of(unit, *body));
     let num_cvs = code.map_or(0, |code| code.num_cvs);
-    let take = |slots: &mut php_heap::Frame, at: u32| {
+    let take = |slots: &mut crate::exec::HeapFrame, at: u32| {
         let z = slots.slot(php_heap::Slot(at));
         slots.set(php_heap::Slot(at), php_heap::Zval::UNDEF);
         Value::of_zval(z)
@@ -1440,24 +1417,25 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         let value = take(&mut slots, at);
         req.release(value);
     }
-    req.release_named(state.extra_named);
-    if let Some(this) = state.receiver.and_then(crate::exec::Receiver::owned) {
+    req.release_named(extra.extra_named);
+    if let Some(this) = header.receiver().and_then(crate::exec::Receiver::owned) {
         req.release(this.as_value());
     }
-    for extra in state.extra_args {
+    for extra in extra.extra_args {
         req.release(extra);
     }
-    if !finished && state.opline != 0 {
+    let opline = header.opline;
+    if !finished && opline != 0 {
         for call in calls.into_iter().rev() {
             req.vm_mut().push_call(call);
             req.pop_call();
         }
         if let Some(code) = code {
             for range in &code.live_ranges {
-                if range.start.0 > state.opline {
+                if range.start.0 > opline {
                     break;
                 }
-                if state.opline >= range.end.0 {
+                if opline >= range.end.0 {
                     continue;
                 }
                 let slot = exec::temporary_slot(code, range.var);
@@ -1541,7 +1519,7 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
         close(req, object, false);
         return;
     };
-    let Some(serving) = req.vm().serving(frame) else {
+    let Some(serving) = req.serving(frame) else {
         finish_on_stack(req, object, false);
         return;
     };
@@ -1563,15 +1541,11 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
         if op_num < element.finally_end.0 {
             let var = exec::opline_at(code, element.finally_end.0).map(|op| op.op1);
             if let Some(var) = var {
-                let carried = req
-                    .vm_mut()
-                    .fast_call(frame, var)
-                    .and_then(|cell| cell.from);
+                let carried = req.fast_call(frame, var).and_then(|cell| cell.from);
                 if let Some(from) = carried {
                     exec::free_carried_value(req, frame, code, from);
                 }
                 let delayed = req
-                    .vm_mut()
                     .fast_call(frame, var)
                     .and_then(|cell| cell.delayed.take());
                 if let Some(delayed) = delayed {
@@ -1589,7 +1563,7 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
     exec::cleanup_live_vars(req, frame, code, op_num, element.finally_op.0);
     let var = exec::opline_at(code, element.finally_end.0).map(|op| op.op1);
     if let Some(var) = var
-        && let Some(cell) = req.vm_mut().fast_call(frame, var)
+        && let Some(cell) = req.fast_call(frame, var)
     {
         cell.delayed = None;
         cell.from = None;
@@ -1886,8 +1860,8 @@ impl Generator {
             req.addref(&sent);
             let old = with(req, root, |g| match &mut g.execution {
                 Execution::Suspended(suspended) => {
-                    let old = suspended.slots.slot(php_heap::Slot(slot));
-                    suspended.slots.set(php_heap::Slot(slot), sent.to_zval());
+                    let old = suspended.frame.slot(php_heap::Slot(slot));
+                    suspended.frame.set(php_heap::Slot(slot), sent.to_zval());
                     Some(Value::of_zval(old))
                 }
                 _ => None,
