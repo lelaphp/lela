@@ -2669,9 +2669,9 @@ pub(crate) fn send_array<T: Tier>(
 
 /// `SEND_ARRAY`'s walk of the whole array, keys read.
 fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown> {
-    let Some(function) = req.building_call_function() else {
+    if req.building_call().is_none() {
         return Err(no_call_under(req));
-    };
+    }
     let mut have_named = false;
     // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, name, arg)`
     // (`Z/Zend/zend_vm_def.h:5583`), no owner of the table taken: the
@@ -2681,7 +2681,6 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
         let (slot, number) = match row.key().clone() {
             crate::api::values::Key::Str(name) => {
                 have_named = true;
-                let _ = function;
                 match reserve_named(req, name) {
                     Ok(Ok(reserved)) => (reserved.slot, reserved.number),
                     Ok(Err(thrown)) => return Err(thrown),
@@ -4940,11 +4939,10 @@ pub(crate) fn init_static_method_call<T: Tier>(
         _ => None,
     };
     if let Some(function) = cached_callee {
-        let written = exec::constant(code, ConstIdx(op.op2));
-        return static_call_frame(req, frame, op, class, function, Some(written));
+        return static_call_frame(req, frame, op, class, function);
     }
     let mut uncached = false;
-    let (function, name) = match op.op2_type {
+    let function = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.method_named(class, b"__construct") else {
                 let thrown =
@@ -4969,7 +4967,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 );
                 return threw(req, frame, &thrown);
             }
-            (constructor, None)
+            constructor
         }
         OperandKind::Const => {
             let written = exec::constant(code, ConstIdx(op.op2));
@@ -4979,7 +4977,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
             match static_method(req, class, &lowered, &written, this) {
                 Ok((function, never_cached)) => {
                     uncached = never_cached;
-                    (function, Some(written))
+                    function
                 }
                 Err(thrown) => return threw(req, frame, &thrown),
             }
@@ -4996,7 +4994,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
         req.prime_callee(frame, slot, class, function);
     }
-    static_call_frame(req, frame, op, class, function, name)
+    static_call_frame(req, frame, op, class, function)
 }
 
 /// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
@@ -5063,9 +5061,7 @@ fn static_call_named(
     let this = req.vm().this(frame);
     let found = static_method(req, class, &method.lowered, &method.written, this);
     let edge = match found {
-        Ok((function, _)) => {
-            static_call_frame(req, frame, op, class, function, Some(method.written))
-        }
+        Ok((function, _)) => static_call_frame(req, frame, op, class, function),
         Err(thrown) => threw(req, frame, &thrown),
     };
     method.release(req);
@@ -5083,7 +5079,6 @@ fn static_call_frame(
     op: &Opline,
     class: crate::api::values::ClassId,
     function: Function,
-    written: Option<Value>,
 ) -> Edge {
     // `if (!(fbc->common.fn_flags & ZEND_ACC_STATIC))`: an instance
     // method takes the calling frame's `$this` where it is an instance
@@ -5115,7 +5110,6 @@ fn static_call_frame(
     } else {
         (None, class)
     };
-    let _ = written;
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this);
     header.called_scope = Some(called);
