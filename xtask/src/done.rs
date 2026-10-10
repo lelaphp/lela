@@ -335,9 +335,12 @@ pub(crate) enum Condition {
     /// an extension the binary carries; `witness` is not asked of the
     /// harness, and fresh means the reading's `key` is the crate's key now
     /// and, under the oracle's recipe, its `recipe` the pin's digest now.
-    /// For a change whose dependency closure includes `php_heap`, `done`
-    /// reads a fresh `miri` reading of `php_heap` and holds `undefined` to
-    /// zero (`unsupported` is reported, not held, under the permissive
+    /// A crate whose library or binary sources name `debug_assertions` is
+    /// asked for `clippy` twice, at its name and at `<crate>/release`, the
+    /// release profile's lint on its library and binaries (#2392).
+    /// For a change that moves `php_heap`'s key (ADR-0011), `done` reads a
+    /// fresh `miri` reading of `php_heap` and holds `undefined` to zero
+    /// (`unsupported` is reported, not held, under the permissive
     /// provenance #2415 ruled).
     ///
     /// Which instruments one crate is asked for is [`instruments_of`],
