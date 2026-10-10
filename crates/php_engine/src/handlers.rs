@@ -4059,6 +4059,28 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// int(1)
 /// string(1) "1"
 /// ```
+///
+/// A `CONST` operand is copied into the temporary the opline writes
+/// before it is checked, so the `RETURN` after reads the coerced value,
+/// or the constant itself where it passes, wherever the constant stands
+/// in the op array's table, a jump table's arms included (#2276):
+///
+/// ```php
+/// function f($m): int { switch ($m) { case "a": return 1.5; case "b": return 2; } }
+/// var_dump(f("a"));
+/// function g($m): string { switch ($m) { case "a": return 15; case "b": return 2; } }
+/// var_dump(g("a"), g("b"));
+/// function h(): callable { return "strlen"; }
+/// var_dump(h());
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 2
+/// int(1)
+/// string(2) "15"
+/// string(1) "2"
+/// string(6) "strlen"
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -4091,6 +4113,13 @@ pub(crate) fn verify_return_type<T: Tier>(
         Some(place) => exec::value_of(place.read()).deref(),
         None => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
     };
+    // A `CONST` operand is checked in the temporary the `RETURN` reads
+    // (`ZVAL_COPY(EX_VAR(opline->result.var), retval_ptr)`), never in
+    // place in the table.
+    let constant = op.op1_type == OperandKind::Const;
+    if constant {
+        write_out(req, frame, code, op, &returned);
+    }
     if crate::api::coerce::holds(req, &returned, &ty, req.frame_scopes(frame)) {
         return Ok(advance(req, frame));
     }
@@ -4113,10 +4142,10 @@ pub(crate) fn verify_return_type<T: Tier>(
         req.release(previous);
         return Ok(advance(req, frame));
     }
-    let slot = if op.op1_type == OperandKind::Cv {
-        op.op1
-    } else {
-        exec::temporary_slot(code, op.op1)
+    let slot = match op.op1_type {
+        OperandKind::Cv => op.op1,
+        _ if constant => exec::temporary_slot(code, op.out),
+        _ => exec::temporary_slot(code, op.op1),
     };
     // `ZEND_ACC_RETURN_REFERENCE` over a reference: the check is handed
     // the reference and coerces the value it holds, which every name
