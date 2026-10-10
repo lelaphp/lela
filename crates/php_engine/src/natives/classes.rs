@@ -908,7 +908,11 @@ fn method_exists(
 /// #1 {main}
 ///   thrown in %s on line 6
 /// ```
-#[php_function]
+///
+/// Declared frameless for its two arguments
+/// (`frameless_function_infos_property_exists`), so each call above is a
+/// `FRAMELESS_ICALL_2` over this body, the refusal's among them.
+#[php_function(frameless(2))]
 fn property_exists(
     req: &mut Request,
     object_or_class: Untyped<Value>,

@@ -715,7 +715,10 @@ fn exit(
 /// to lack: the class under the lowered name, a leading `\` dropped,
 /// which is a class or an enum and not an interface or a trait. The
 /// autoloaders are served for a miss under `$autoload`, and none is
-/// registered yet.
+/// registered yet. Declared frameless for one argument and for two
+/// (`frameless_function_infos_class_exists`), so a call of either is a
+/// `FRAMELESS_ICALL_1` or `_2` over this body, and a refusal's trace
+/// has php's frameless row.
 ///
 /// ```php
 /// class M {}
@@ -730,7 +733,29 @@ fn exit(
 /// bool(false)
 /// bool(false)
 /// ```
-#[php_function]
+///
+/// ```php
+/// $a = []; try { class_exists($a); } catch (TypeError $e) { echo $e->getMessage(), "\n", implode(',', array_keys($e->getTrace()[0])), "\n"; }
+/// var_dump(class_exists('stdClass', false));
+/// ```
+/// ```expect
+/// class_exists(): Argument #1 ($class) must be of type string, array given
+/// function,file,line,args
+/// bool(true)
+/// ```
+///
+/// An autoloader's throw under it peaks where php's does, the call's
+/// row in the throwable's trace php's frameless one:
+///
+/// ```php
+/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { class_exists('Boom'); } catch (Exception $e) {} });
+/// ```
+/// ```expect
+/// 3096 32
+/// ```
+#[php_function(frameless(1, 2))]
 fn class_exists(
     req: &mut Request,
     class: PhpString,
