@@ -3229,6 +3229,10 @@ mod tests {
     /// table is left empty where it stands, its data and size kept, every
     /// key and value given back, and it takes rows again from the start.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a bound of five seconds over 100,000 rows, which Miri interprets in half an hour"
+    )]
     fn a_clean_empties_a_hash_in_one_pass_and_keeps_its_data() {
         let _alone = alone();
         let mut nothing = Nothing::new();

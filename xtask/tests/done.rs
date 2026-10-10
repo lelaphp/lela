@@ -19,10 +19,11 @@ use xtask::scratch::Tree;
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
 /// change: [`FRESH`] less `port-map`, which is asked of the crate
-/// `api.lock` lives with and of no other (§4.5 condition 1, #148), and
+/// `api.lock` lives with and of no other (§4.5 condition 1, #148), less
+/// `miri`, asked of `php_heap` alone (#2416), and
 /// with `crosscheck`, asked of a default extension (#269) at both its
 /// scopes, the crate's name and `ext/<name>/ri` (#361). That this is
-/// [`FRESH`] less that one row is asserted in
+/// [`FRESH`] less those two rows is asserted in
 /// `the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is`.
 const ASKED: [&str; 8] = [
     "clippy",
@@ -349,8 +350,10 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
 /// edit of `api.lock` alone stales the reading and the condition says so.
 #[test]
 fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is() {
-    let asked_of_every_other_crate: Vec<&str> =
-        FRESH.into_iter().filter(|i| *i != "port-map").collect();
+    let asked_of_every_other_crate: Vec<&str> = FRESH
+        .into_iter()
+        .filter(|i| !matches!(*i, "port-map" | "miri"))
+        .collect();
     assert_eq!(asked_of_every_other_crate, ASKED);
 
     let root = scratch("port-map");

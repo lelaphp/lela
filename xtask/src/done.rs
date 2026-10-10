@@ -59,6 +59,7 @@ use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::key::{self, Snapshot};
 use crate::manifest::{Crate, Manifest};
+use crate::miri;
 use crate::permit;
 use crate::port_map;
 use crate::reading::{Number, Outcome, Reading, Status, Store, plural};
@@ -77,10 +78,11 @@ pub(crate) const WORKSPACE: &str = "workspace";
 /// name, `witness` is no crate's without a kernel or a native, and
 /// `port-map` is the one crate `api.lock` lives with alone, and
 /// `crosscheck` is an extension's the binary carries, the ones the
-/// per-commit lane renders (#269). `test` is narrowed for nobody: the
-/// harness has tests as every crate has, and it is asked the way `clippy`
-/// is (#191).
-pub const FRESH: [&str; 9] = [
+/// per-commit lane renders (#269), and `miri` is the memory model's,
+/// the crates [`miri::CRATES`] names (#2416). `test` is narrowed for
+/// nobody: the harness has tests as every crate has, and it is asked the
+/// way `clippy` is (#191).
+pub const FRESH: [&str; 10] = [
     "clippy",
     "test",
     "witness",
@@ -90,6 +92,7 @@ pub const FRESH: [&str; 9] = [
     "phpt",
     "port-map",
     "crosscheck",
+    "miri",
 ];
 
 /// The harness crate; it has no kernel and no native.
@@ -118,7 +121,11 @@ pub(crate) const HARNESS: &str = "xtask";
 /// renders those per commit and every other feature nightly (harness §7),
 /// the same line `phpt` stands on, and the reading is the port's progress
 /// meter, so an extension whose rendering is not the oracle's is not done
-/// (design §7.1, #269).
+/// (design §7.1, #269). `miri` is asked of the crates the Miri lane runs,
+/// [`miri::CRATES`], `php_heap`, the engine's main `unsafe` home, when the
+/// change moves its key (#2416). `php_heap` depends on no workspace crate,
+/// so its dependency closure is itself and a change that moves its key is
+/// a change to it, one that touches it.
 pub(crate) fn instruments_of(
     krate: &Crate,
     lock_home: Option<&str>,
@@ -134,6 +141,7 @@ pub(crate) fn instruments_of(
         "phpt" => measured_by_the_lane,
         "port-map" => home_of_the_lock,
         "crosscheck" => carried_extension,
+        "miri" => miri::CRATES.contains(&krate.name.as_str()),
         _ => true,
     })
 }
@@ -308,6 +316,10 @@ pub(crate) enum Condition {
     /// an extension the binary carries; `witness` is not asked of the
     /// harness, and fresh means the reading's `key` is the crate's key now
     /// and, under the oracle's recipe, its `recipe` the pin's digest now.
+    /// For a change whose dependency closure includes `php_heap`, `done`
+    /// reads a fresh `miri` reading of `php_heap` and holds `undefined` to
+    /// zero (`unsupported` is reported, not held, under the permissive
+    /// provenance #2415 ruled).
     ///
     /// Which instruments one crate is asked for is [`instruments_of`],
     /// over [`FRESH`], `test` among them and asked of every crate, since
@@ -328,7 +340,10 @@ pub(crate) enum Condition {
     /// `[[crate]]` row carries `porting = true` has its `crosscheck` and
     /// its `phpt` readings read as the port's meter, [`porting_meter`],
     /// fresh and printed but met whatever they say, while the port is
-    /// partial (#383).
+    /// partial (#383). `miri` is asked of the crates [`miri::CRATES`]
+    /// names, `php_heap`, when a change touches it, `php_heap` depending
+    /// on no workspace crate; a fail made only of unsupported operations is
+    /// met, [`miri_unsupported`], and every other is held (#2416).
     Fresh,
     /// Every kernel or native added in the diff has a witness: the
     /// `witness` reading's `missing` is zero for the crate.
@@ -638,12 +653,39 @@ fn porting_meter(krate: &Crate, instrument: &str) -> bool {
     krate.porting && matches!(instrument, "crosscheck" | "phpt")
 }
 
-/// Condition 1's three rungs for a reading that is not a pass: the causes a
+/// Whether a `miri` fail is met all the same because every test that
+/// failed ended in an unsupported operation (#2416).
+///
+/// A person ruled what `done` holds of the Miri lane: `undefined` at
+/// zero, and `unsupported` reported, not held, since under permissive
+/// provenance (#2415) an unsupported operation is a call Miri cannot
+/// run, a foreign function it has no shim for, and says nothing of the
+/// heap's soundness. So a fail whose `failed` is all `unsupported` is met,
+/// its message printed with the reading. Everything else a fail can carry
+/// is held: undefined behaviour, a test libtest failed, a run Miri ended
+/// some other way, and a fail with nothing failed, which is what the
+/// instrument writes where the tests did not build or Miri spoke after
+/// the last of them (`miri::Suite::after`). A skip, the nightly not
+/// installed, is held too: it measured nothing.
+fn miri_unsupported(instrument: &str, reading: &Reading) -> bool {
+    if instrument != "miri" || reading.status != Status::Fail {
+        return false;
+    }
+    let count = |key: &str| match reading.numbers.get(key) {
+        Some(Number::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let failed = count("failed");
+    failed.is_some_and(|n| n > 0) && failed == count("unsupported") && count("undefined") == Some(0)
+}
+
+/// Condition 1's four rungs for a reading that is not a pass: the causes a
 /// person excused, and no other.
 fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bool {
     no_binary_yet(instrument, reading)
         || compiler_unread(instrument, reading)
         || porting_meter(krate, instrument)
+        || miri_unsupported(instrument, reading)
 }
 
 /// A touched crate's key now ([`Snapshot::key`], its tree and its dependency
@@ -1009,7 +1051,8 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        FRESH, compiler_unread, instruments_of, met_without_passing, no_binary_yet, porting_meter,
+        FRESH, compiler_unread, instruments_of, met_without_passing, miri_unsupported,
+        no_binary_yet, porting_meter,
     };
     use crate::carried::Carried;
     use crate::manifest::Crate;
@@ -1026,10 +1069,10 @@ mod tests {
         instruments_of(krate, lock_home, &Carried::turning_on(&["openssl"])).collect()
     }
 
-    /// [`FRESH`] less `port-map` and `crosscheck`: what an engine crate
-    /// that is not the lock's home is asked, before the two narrowings of
-    /// its own. That it is [`FRESH`] less the two rows is asserted below
-    /// and not trusted here.
+    /// [`FRESH`] less `port-map`, `crosscheck` and `miri`: what an engine
+    /// crate that is not the lock's home nor the Miri lane's is asked,
+    /// before the two narrowings of its own. That it is [`FRESH`] less the
+    /// three rows is asserted below and not trusted here.
     const ASKED_OF_EVERY_OTHER_CRATE: [&str; 7] = [
         "clippy",
         "test",
@@ -1089,7 +1132,7 @@ mod tests {
     /// one is asked.
     #[test]
     fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
-        let asked = asked_of(&Crate::named("php_heap"), HOME);
+        let asked = asked_of(&Crate::named("php_engine"), HOME);
         assert_eq!(
             asked,
             [
@@ -1101,9 +1144,61 @@ mod tests {
                 "unsafe-audit"
             ]
         );
-        let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
+        let row = Crate::named("php_engine").with_phpt(&["Zend/tests"]);
         let asked = asked_of(&row, HOME);
         assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
+    }
+
+    /// `miri` is asked of the crates the Miri lane runs, `php_heap`, and
+    /// of no other crate (#2416).
+    #[test]
+    fn the_memory_model_is_the_one_crate_asked_for_a_miri_reading() {
+        let asked = asked_of(&Crate::named("php_heap"), HOME);
+        assert_eq!(
+            asked,
+            [
+                "clippy",
+                "test",
+                "witness",
+                "api-check",
+                "budget",
+                "unsafe-audit",
+                "miri"
+            ]
+        );
+        for other in ["php_engine", "php_ext", "ext/pcre", "xtask"] {
+            let asked = asked_of(&Crate::named(other), HOME);
+            assert!(!asked.contains(&"miri"), "{other}: {asked:?}");
+        }
+    }
+
+    /// A `miri` fail is met where every test that failed ended in an
+    /// unsupported operation, and held where one is undefined behaviour,
+    /// a test libtest failed, or nothing failed at all, which is a build
+    /// that did not finish or Miri speaking after the last test (#2416).
+    /// A skip is held: it measured nothing.
+    #[test]
+    fn a_miri_reading_is_held_to_its_undefined_behaviour_and_not_to_what_miri_cannot_run() {
+        let reading = |status: Status, failed: u64, undefined: u64, unsupported: u64| {
+            let mut reading = Reading::new("miri", "php_heap");
+            reading.status = status;
+            reading.count("failed", failed).unwrap();
+            reading.count("undefined", undefined).unwrap();
+            reading.count("unsupported", unsupported).unwrap();
+            reading
+        };
+        let heap = Crate::named("php_heap");
+        let met = |r: &Reading| met_without_passing(&heap, "miri", r);
+        assert!(met(&reading(Status::Fail, 2, 0, 2)));
+        assert!(!met(&reading(Status::Fail, 2, 1, 1)), "undefined behaviour");
+        assert!(!met(&reading(Status::Fail, 3, 0, 2)), "a test that failed");
+        assert!(
+            !met(&reading(Status::Fail, 0, 0, 0)),
+            "nothing ran to its end"
+        );
+        assert!(!met(&reading(Status::Skip, 0, 0, 0)), "nothing measured");
+        // The rung reads the miri reading's numbers and no other's.
+        assert!(!miri_unsupported("test", &reading(Status::Fail, 2, 0, 2)));
     }
 
     /// A crate behind a feature the binary under test does not turn on is
@@ -1159,7 +1254,7 @@ mod tests {
     fn the_crate_the_lock_lives_with_is_the_one_asked_for_a_port_map_reading() {
         let rest: Vec<&str> = FRESH
             .into_iter()
-            .filter(|i| *i != "port-map" && *i != "crosscheck")
+            .filter(|i| !matches!(*i, "port-map" | "crosscheck" | "miri"))
             .collect();
         assert_eq!(rest, ASKED_OF_EVERY_OTHER_CRATE);
         let asked = asked_of(&Crate::named("php_ext"), HOME);
