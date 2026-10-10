@@ -118,10 +118,6 @@ mod tests {
     /// for, the one set where it was made and not the one standing where
     /// the request ends; a small slot, a `run` and a huge block alike.
     #[test]
-    #[cfg_attr(
-        all(miri, target_os = "macos"),
-        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
-    )]
     fn a_leak_names_the_origin_its_block_was_allocated_for() {
         let _alone = alone();
         for size in [7, 5000, 3 * 1024 * 1024] {
