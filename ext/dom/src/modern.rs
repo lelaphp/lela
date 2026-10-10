@@ -71,7 +71,7 @@ pub(crate) fn document_object(
         obj.take_node(req, doc);
         obj.set_class_type(ClassType::Modern);
         obj.set_document_handlers(&crate::xml_serializer::MODERN);
-        obj.set_private_data(Box::new(private));
+        obj.set_private_data(req, Box::new(private));
     } else {
         private.free(req);
     }
