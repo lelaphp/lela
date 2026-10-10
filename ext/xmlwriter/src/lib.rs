@@ -132,6 +132,22 @@ impl ObjectHandlers for Handlers {
         Refusals::NONE.cloning()
     }
 
+    /// `xmlwriter_object_dtor`: the emitter freed, which flushes what it
+    /// holds, then the class's `__destruct`. A table's own, so an `XMLWriter`
+    /// the cycle collector finds is destructor garbage and is flushed
+    /// before the collection frees it, as php's `gc_call_destructors`
+    /// serves it.
+    ///
+    /// ```php
+    /// class X extends XMLWriter { public $self; }
+    /// function x() { $w = new X; $w->openUri('php://output'); $w->startDocument(); $w->writeElement('a', 'b'); $w->self = $w; unset($w); echo "collect\n"; var_dump(gc_collect_cycles()); }
+    /// x();
+    /// ```
+    /// ```expect
+    /// collect
+    /// <?xml version="1.0"?>
+    /// <a>b</a>int(1)
+    /// ```
     fn dtor_obj(&self) -> DtorObj {
         DtorObj::Own(|req, object| {
             destroy(req, object);
