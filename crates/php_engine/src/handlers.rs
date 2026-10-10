@@ -17701,12 +17701,99 @@ fn set_fe_iter(req: &mut Request, frame: FrameRef, slot: u32, walk: Option<HashI
 /// ```expect
 /// n=1 s=x n=1 p=2 s=x q=3
 /// ```
-pub(crate) fn fe_fetch_r<T: Tier>(
+pub(crate) fn fe_fetch_r<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fe_fetch_r(req, frame, code, op, A::default()) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_element(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_FE_FETCH_R` over an array into a CV
+/// (`ZEND_FE_FETCH_R_SPEC_VAR_HANDLER`, `Z/Zend/zend_vm_def.h:7090-7140`):
+/// the next live position from `Z_FE_POS`, the jump to
+/// `extended_value` past the end, and otherwise the position moved past
+/// it, the key into the temporary under `RETURN_VALUE_USED` and the
+/// value, a reference followed, into the CV with one more owner. `None`,
+/// with nothing touched, for an object or an iterator, a target that is
+/// no CV, an element that is a symbol table's `IS_INDIRECT`, a CV that
+/// holds an owner other than a string, a reference among them, whose
+/// write is `zend_assign_to_variable`'s, and a temporary holding an
+/// owner. A string the CV held is given up after the write, which
+/// serves no code.
+///
+/// ```php
+/// $a = [1, "s" => str_repeat("b", 2), 3 => [4]]; unset($a[0]); $a[] = 5;
+/// foreach ($a as $k => $v) { echo $k, "=", is_array($v) ? "A" : $v, " "; }
+/// $r = 7; $x = [&$r, 8]; foreach ($x as $v) echo $v; foreach ([] as $v) echo "never";
+/// echo "\n";
+/// ```
+/// ```expect
+/// s=bb 3=A 4=5 78
+/// ```
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_fe_fetch_r(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    if op.op2_type != OperandKind::Cv {
+        return None;
+    }
+    let var = a.slot(code, op.op1)?;
+    let target = op.op2 as usize;
+    let out = exec::temporary_slot(code, op.out) as usize;
+    let slots = req.slots_mut(frame);
+    let held = *slots.get(var)?;
+    let array = held.as_arr()?;
+    let Some((found, key, value)) = array.live_from(held.fe_pos()) else {
+        return Some(jump_to(op.extended_value));
+    };
+    let value = crate::operand::deref(value);
+    let keyed = op.out_type != OperandKind::Unused;
+    let old = *slots.get(target)?;
+    if value.is_undef()
+        || value.kind() == php_heap::ZvalType::Indirect
+        || (old.is_refcounted() && old.kind() != php_heap::ZvalType::String)
+        || (keyed && slots.get(out)?.is_refcounted())
+    {
+        return None;
+    }
+    let key = match key {
+        php_heap::Key::Long(n) => Zval::long(n),
+        php_heap::Key::Str(name) => Zval::string(name),
+    };
+    slots.get_mut(var)?.set_fe_pos(found.saturating_add(1));
+    if keyed {
+        *slots.get_mut(out)? = key;
+    }
+    *slots.get_mut(target)? = value;
+    let heap = req.heap_mut();
+    if keyed {
+        heap.addref(key);
+    }
+    heap.addref(value);
+    // What the CV held, a string at most, which serves no code as it goes.
+    if old.is_refcounted() {
+        req.release_nogc(Value::of_zval(old));
+    }
+    Some(Ok(advanced()))
+}
+
+/// `FE_FETCH_R` past its inline path: the next element of an array, an
+/// object's properties or an iterator, by [`foreach_var`]'s decoding.
+/// A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let slot = exec::temporary_slot(code, op.op1);
     let Some(at) = req.slot_ptr(frame, slot) else {
         return Err(Fatal::Error(String::from(
