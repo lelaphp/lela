@@ -10,7 +10,8 @@
 //! php's test extension is the native half of its Zend-level tests: each
 //! function, class and constant reaches one API of the engine. Here
 //! `test.c`'s are [`functions`] and [`classes`], with its weak table
-//! [`weakmap`]; `iterators.c`'s is [`iterators`] and `object_handlers.c`'s
+//! [`weakmap`] and the functions that reach past the program [`internals`],
+//! which names the three left out and why; `iterators.c`'s is [`iterators`] and `object_handlers.c`'s
 //! are [`object_handlers`]. The observer of `observer.c` is [`observer`], the one
 //! bundled user of design §4.3 seam 9, and the allocator hooks of
 //! `zend_mm_custom_handlers.c` are ported by observation
@@ -31,6 +32,7 @@
 mod classes;
 mod fiber;
 mod functions;
+mod internals;
 mod iterators;
 mod mm_custom_handlers;
 mod object_handlers;
@@ -43,7 +45,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpObject, ResourceType, Value};
+use php_ext::values::{Emalloc, Owner, PhpObject, ResourceType, Value};
 
 /// `zend_test.str_test`, `OnUpdateStr`.
 pub(crate) const STR_TEST: &[u8] = b"zend_test.str_test";
@@ -156,8 +158,9 @@ fn on_update_not_empty(_: &mut Request, value: Option<&[u8]>) -> Result<bool, Th
 /// The extension's request state (ADR-0005), the part of php's
 /// `zend_test` request state this crate carries: the observer's, where
 /// the allocation observer stands, the weak table, the resource type
-/// whose destructor throws, the owners `zend_leak_variable` took, and
-/// `ZT_G(active_fiber)`, the `_ZendTestFiber` a resume runs.
+/// whose destructor throws, the owners `zend_leak_variable` took, the
+/// blocks `zend_leak_bytes` allocated, and `ZT_G(active_fiber)`, the
+/// `_ZendTestFiber` a resume runs.
 #[derive(Debug, Default)]
 struct State {
     observer: observer::Observing,
@@ -165,6 +168,7 @@ struct State {
     weakmap: weakmap::Map,
     throwing_resource: Option<ResourceType>,
     leaked: Vec<Owner<Value>>,
+    leaked_bytes: Vec<Emalloc>,
     active_fiber: Option<PhpObject>,
 }
 
@@ -175,12 +179,16 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `PHP_RSHUTDOWN_FUNCTION(zend_test)`: the weak table given up, then
-/// the allocator hooks' end; and the owners `zend_leak_variable` took,
-/// which php frees with its heap.
+/// the allocator hooks' end; and the owners `zend_leak_variable` took
+/// and the blocks `zend_leak_bytes` allocated, which php frees with its
+/// heap.
 fn rshutdown(req: &mut Request) {
     weakmap::release(req);
     for leaked in std::mem::take(&mut req.state::<State>().leaked) {
         leaked.give_up(req);
+    }
+    for leaked in std::mem::take(&mut req.state::<State>().leaked_bytes) {
+        leaked.free(req);
     }
     mm_custom_handlers::rshutdown(req);
 }

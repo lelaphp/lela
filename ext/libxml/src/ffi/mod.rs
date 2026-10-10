@@ -171,20 +171,46 @@ impl Library {
     /// and `PHP_LIBXML_RESTORE_GLOBALS` after. libxml2 keeps both per
     /// thread.
     pub fn stylesheet_defaults<R>(f: impl FnOnce() -> R) -> R {
-        // SAFETY: no pointer argument; the thread's own default.
-        let substitute = unsafe { sys::xmlSubstituteEntitiesDefault(1) };
+        io::sanitized_globals(|| {
+            // SAFETY: no pointer argument; the thread's own default, put
+            // back with the rest as the sanitising ends.
+            let _ = unsafe { sys::xmlSubstituteEntitiesDefault(1) };
+            // SAFETY: the address of the thread's own default.
+            let load = unsafe { sys::__xmlLoadExtDtdDefaultValue() };
+            // SAFETY: the thread's own global, written by copy;
+            // `XML_DETECT_IDS | XML_COMPLETE_ATTRS`.
+            unsafe { *load = 2 | 4 };
+            f()
+        })
+    }
+
+    /// The calling thread's deprecated parse defaults set as a careless
+    /// library would leave them, what `zend_test_override_libxml_global_state`
+    /// sets through `<libxml/globals.h>` and `<libxml/parser.h>`: external
+    /// DTDs loaded, validation, the pedantic parser, entities substituted,
+    /// line numbers kept and blanks dropped. php's parsers each set their
+    /// own options, so none of it reaches a parse they make
+    /// (GHSA-3qrf-m4j2-pcrr). libxml2 keeps them per thread, and they
+    /// stand for the thread's later requests, as php's stand for its
+    /// process.
+    pub fn override_global_state() {
         // SAFETY: the address of the thread's own default.
         let load = unsafe { sys::__xmlLoadExtDtdDefaultValue() };
-        // SAFETY: the thread's own global, read by copy.
-        let saved = unsafe { *load };
-        // SAFETY: as above; `XML_DETECT_IDS | XML_COMPLETE_ATTRS`.
-        unsafe { *load = 2 | 4 };
-        let answer = f();
+        // SAFETY: the thread's own global, written by copy.
+        unsafe { *load = 1 };
         // SAFETY: as above.
-        unsafe { *load = saved };
+        let validity = unsafe { sys::__xmlDoValidityCheckingDefaultValue() };
         // SAFETY: as above.
-        unsafe { sys::xmlSubstituteEntitiesDefault(substitute) };
-        answer
+        unsafe { *validity = 1 };
+        // SAFETY: no pointer argument; the thread's own default, whose
+        // old value php discards.
+        let _ = unsafe { sys::xmlPedanticParserDefault(1) };
+        // SAFETY: as above.
+        let _ = unsafe { sys::xmlSubstituteEntitiesDefault(1) };
+        // SAFETY: as above.
+        let _ = unsafe { sys::xmlLineNumbersDefault(1) };
+        // SAFETY: as above.
+        let _ = unsafe { sys::xmlKeepBlanksDefault(0) };
     }
 
     /// `xmlParserVersion`, the library's own version string: `"20913"`.

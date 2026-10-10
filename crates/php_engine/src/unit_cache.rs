@@ -372,6 +372,48 @@ pub(crate) struct Asked<'a> {
     pub(crate) levels: Levels<'a>,
 }
 
+/// The unit [`UnitCache::file`] answers with: one held, published for
+/// every request with its map-pointer offsets, or one held nowhere, the
+/// asking request's own (`Request::take_unit`), as php keeps a file it
+/// does not persist in process memory with heap caches
+/// (`zend_file_cache_unserialize_op_array`'s `script->corrupted` arm), so
+/// `CG(map_ptr_last)` moves only for what is held (GH-8646).
+pub(crate) enum Compiled {
+    Published(Arc<Unit>),
+    Alone(Box<Unit>),
+}
+
+/// What [`UnitCache::file`] answers: the unit, what it did with the
+/// file, and the classes a held unit's compiler bound early.
+pub(crate) type Answered = (
+    Option<Result<Compiled, CompileError>>,
+    Filed,
+    Option<EarlyBound>,
+);
+
+/// A unit held nowhere, answered as `filed`.
+fn alone(unit: Result<Unit, CompileError>, filed: Filed) -> Answered {
+    (
+        Some(unit.map(|unit| Compiled::Alone(Box::new(unit)))),
+        filed,
+        None,
+    )
+}
+
+/// What [`UnitCache::file`] answered, as its caller serves it: a unit
+/// held nowhere made `own`'s.
+pub(crate) fn served(
+    answered: Option<Result<Compiled, CompileError>>,
+    own: impl FnOnce(Unit) -> Arc<Unit>,
+) -> Cached {
+    answered.map(|compiled| {
+        compiled.map(|compiled| match compiled {
+            Compiled::Published(unit) => unit,
+            Compiled::Alone(unit) => own(*unit),
+        })
+    })
+}
+
 /// What [`UnitCache::file`] did with the file it was asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Filed {
@@ -576,15 +618,18 @@ impl UnitCache {
     /// without the cache; any miss while a restart is pending is kept in
     /// the file cache alone. [`Levels::Disk`] asks and keeps in the file
     /// cache alone and counts nothing. Nothing where the file cannot be
-    /// read.
+    /// read. What is `compile`d or `decode`d takes no map-pointer offset
+    /// until it is held, `share`d as it is; one held nowhere is answered
+    /// [`Compiled::Alone`], its caller's own (GH-8646).
     pub(crate) fn file(
         &self,
         files: &Files,
         asked: Asked<'_>,
-        compile: impl FnOnce(&[u8]) -> Result<Arc<Unit>, CompileError>,
-        decode: impl FnOnce(&[u8]) -> Option<Arc<Unit>>,
+        compile: impl FnOnce(&[u8]) -> Result<Unit, CompileError>,
+        decode: impl FnOnce(&[u8]) -> Option<Unit>,
+        share: impl FnOnce(Unit) -> Arc<Unit>,
         publish: impl FnOnce(&Arc<Unit>) -> EarlyBound,
-    ) -> (Cached, Filed, Option<EarlyBound>) {
+    ) -> Answered {
         let Asked {
             path,
             written,
@@ -600,7 +645,7 @@ impl UnitCache {
         };
         if memory && let Some(hit) = self.held_hit(files, path, written.as_ref(), validation, now) {
             return (
-                Some(hit.unit.clone()),
+                Some(hit.unit.clone().map(Compiled::Published)),
                 Filed::Hit,
                 Some(Arc::clone(&hit.early)),
             );
@@ -619,14 +664,15 @@ impl UnitCache {
             // Held as `zend_file_cache_script_load` puts it in the shared
             // hash, a hit, except while a restart is pending.
             if !memory {
-                return (Some(Ok(unit)), Filed::Unheld, None);
+                return alone(Ok(unit), Filed::Unheld);
             }
             if files.restart_pending() || !self.room_for(files, kept.size) {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                return (Some(Ok(unit)), Filed::Unheld, None);
+                return alone(Ok(unit), Filed::Unheld);
             }
             // Under its full path alone: `zend_file_cache_script_load`
             // files no key, which the next include adds after opening it.
+            let unit = share(unit);
             let early = publish(&unit);
             let read = Read {
                 unit: Ok(unit),
@@ -637,7 +683,7 @@ impl UnitCache {
             let held = self.hold(files, path, validation, now, read);
             self.hit(&held, validation, now);
             return (
-                Some(held.unit.clone()),
+                Some(held.unit.clone().map(Compiled::Published)),
                 Filed::Hit,
                 Some(Arc::clone(&held.early)),
             );
@@ -655,7 +701,7 @@ impl UnitCache {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
         if unheld {
-            return (Some(unit), Filed::Compiled, None);
+            return alone(unit, Filed::Compiled);
         }
         if let (Some(disk), Ok(compiled)) = (&disk, &unit)
             && let Some(body) = wire::encode(compiled)
@@ -664,12 +710,9 @@ impl UnitCache {
             disk.store(path, stamp, size, &body);
         }
         if !memory || files.restart_pending() || !self.room_for(files, size) {
-            return (
-                Some(unit),
-                disk.map_or(Filed::Compiled, |_| Filed::Unheld),
-                None,
-            );
+            return alone(unit, disk.map_or(Filed::Compiled, |_| Filed::Unheld));
         }
+        let unit = unit.map(share);
         let early = match &unit {
             Ok(compiled) => publish(compiled),
             Err(_) => Arc::new([]),
@@ -685,7 +728,7 @@ impl UnitCache {
             self.add_key(files, written, &held);
         }
         (
-            Some(held.unit.clone()),
+            Some(held.unit.clone().map(Compiled::Published)),
             Filed::Held,
             Some(Arc::clone(&held.early)),
         )

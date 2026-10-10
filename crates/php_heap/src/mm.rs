@@ -558,6 +558,24 @@ impl Mm {
         self.chunks.contains(&chunk_of(at))
     }
 
+    /// Whether `address` lies anywhere inside one of this heap's chunks
+    /// or huge blocks, what php's `is_zend_ptr` answers: its chunks in
+    /// their walk order, then its huge blocks, each a range of addresses
+    /// compared and nothing at `address` read, so any number is a
+    /// question it can answer. Unlike [`Mm::owns`] it asks of an
+    /// address, not of a block the heap handed out.
+    pub(crate) fn holds(&self, address: usize) -> bool {
+        let within =
+            |start: usize, size: usize| (start..start.saturating_add(size)).contains(&address);
+        self.chunks
+            .iter()
+            .any(|chunk| within(chunk.as_ptr().addr(), CHUNK_SIZE))
+            || self
+                .huge
+                .iter()
+                .any(|block| within(block.at.as_ptr().addr(), block.size))
+    }
+
     /// The bytes the block at `at` can hold, what `zend_mm_size` answers:
     /// its bin's size, its pages, or a huge block's rounded size.
     ///
@@ -1291,9 +1309,16 @@ impl Mm {
     /// 24-byte bin of the same heap, so the bin accounting moves by 24
     /// and then by the rounded block, and the peak is the sum. A node
     /// the bin cannot give ends php's request there; here the mapping
-    /// goes back and the fatal is the bin's.
+    /// goes back and the fatal is the bin's. A size the rounding would
+    /// carry past the top of memory is php's `E_ERROR` before any of
+    /// that, the limit not consulted.
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
-        let new_size = size.next_multiple_of(real_page_size());
+        let page = real_page_size();
+        let Some(new_size) = size.checked_next_multiple_of(page) else {
+            return Err(Fatal::Error(format!(
+                "Possible integer overflow in memory allocation ({size} + {page})"
+            )));
+        };
         if new_size > self.limit - self.real_size.min(self.limit)
             && (self.gc_heap() == 0 || new_size > self.limit - self.real_size.min(self.limit))
             && !self.overflow

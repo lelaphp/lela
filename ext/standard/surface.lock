@@ -15,8 +15,10 @@ Unserializer::offset
 Unserializer::set_offset
 Unserializer::value
 UriParser
+UriParser::named
 UriParser::of_ctx
 UriParser::parse
+UriParser::parse_to_struct
 base64::decode
 base64::encode
 crc32::update

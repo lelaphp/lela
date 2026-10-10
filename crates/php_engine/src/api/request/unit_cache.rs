@@ -455,16 +455,16 @@ impl Request {
         let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
         let holds = |name: &[u8]| self.class_named(name).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
-        let arena = Arc::clone(&self.arena);
-        let (cached, filed, early) = shared.units.file(
+        let (arena, cwd) = (Arc::clone(&self.arena), &self.cwd);
+        let (compiled, filed, early) = shared.units.file(
             &arena.files,
             asked,
-            |source| {
-                shared.publish_file(source, path, &self.cwd, stack, request_classes, multibyte)
-            },
-            |body| shared.publish_kept(body),
+            |source| shared.compile_file(source, path, cwd, stack, request_classes, multibyte),
+            |body| shared.decode_kept(body),
+            |unit| shared.publish_compiled(unit),
             |unit| self.publish_unit(unit),
         );
+        let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
         }
@@ -785,6 +785,17 @@ impl UnitCache<'_> {
     /// reaches `max_wasted` percent of its memory.
     pub fn bound(&self, budget: CacheBudget) {
         self.req.shared.units.set_budget(budget);
+    }
+
+    /// `CG(map_ptr_last)`: how many map pointers the engine has handed
+    /// the op arrays of the units it published, one each as php's
+    /// `zend_persist_op_array` takes one (design §5.14). A unit compiled
+    /// for one request alone takes none, so a count that moves between
+    /// two requests of one engine serving the same file is a leak of
+    /// slots (GH-8646).
+    #[must_use]
+    pub fn map_ptr_last(&self) -> u32 {
+        (self.req.shared.map_ptr_last).load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

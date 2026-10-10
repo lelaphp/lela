@@ -632,6 +632,12 @@ unsafe extern "C" {
     // saves and sets around a foreign library's parse.
     pub(crate) fn xmlSubstituteEntitiesDefault(val: c_int) -> c_int;
     pub(crate) fn __xmlLoadExtDtdDefaultValue() -> *mut c_int;
+    // The rest of the deprecated defaults `zend_test_override_libxml_global_state`
+    // sets, each the thread's own.
+    pub(crate) fn __xmlDoValidityCheckingDefaultValue() -> *mut c_int;
+    pub(crate) fn xmlPedanticParserDefault(val: c_int) -> c_int;
+    pub(crate) fn xmlLineNumbersDefault(val: c_int) -> c_int;
+    pub(crate) fn xmlKeepBlanksDefault(val: c_int) -> c_int;
     pub(crate) fn xmlResetLastError();
 
     // tree.h

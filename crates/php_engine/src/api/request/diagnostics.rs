@@ -1176,7 +1176,17 @@ impl Request {
     /// `error_log()` to the host's log: `php_log_err` with the message
     /// as given, one entry.
     pub fn error_log(&mut self, message: &[u8]) {
-        let _ = self.log_err(message, 5);
+        self.log_err_with_severity(message, 5);
+    }
+
+    /// `php_log_err_with_severity`: `message` logged as one entry, as
+    /// [`Request::error_log`] logs it, at `priority`, the `syslog(3)`
+    /// level `LOG_EMERG` (0) to `LOG_DEBUG` (7) a [`Syslog`] is handed
+    /// where `error_log` is `syslog`; `php_log_err` is this at
+    /// `LOG_NOTICE` (5). An entry asked for while one is being logged
+    /// is dropped, `PG(in_error_log)`'s guard.
+    pub fn log_err_with_severity(&mut self, message: &[u8], priority: i32) {
+        let _ = self.log_err(message, priority);
     }
 
     /// `EG(error_reporting)` as it stands: what `error_reporting()`

@@ -220,6 +220,13 @@ impl StackLimit {
         position() <= self.limit
     }
 
+    /// `EG(stack_limit)` itself: the address a frame at or below has
+    /// [`overflowed`](Self::overflowed), zero where nothing is checked.
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
     /// The size `zend_call_stack_size_error` names, the stack's base less
     /// its limit: `zend.max_allowed_stack_size` less
     /// `zend.reserved_stack_size`.

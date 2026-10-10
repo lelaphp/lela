@@ -194,6 +194,17 @@ impl Heap {
         }
     }
 
+    /// `is_zend_ptr`: whether `address` lies inside one of this heap's
+    /// chunks or huge blocks, what php asks before it frees a pointer
+    /// it cannot tell the allocator of (`ext/ffi`'s owned data) and what
+    /// `zend_test_is_zend_ptr` answers. Only the heap's own lists are
+    /// read, so any address is a question it answers, including one no
+    /// mapping holds.
+    #[must_use]
+    pub fn holds(&self, address: usize) -> bool {
+        self.mm.holds(address)
+    }
+
     /// The high-water mark of the bin accounting since the request began
     /// or the peak was last reset, `memory_get_peak_usage(false)`.
     #[must_use]
@@ -1255,6 +1266,61 @@ mod tests {
         if let Ok(s) = swept {
             heap.release_string(s);
         }
+    }
+
+    /// A size the page rounding carries past the top of memory is php's
+    /// `E_ERROR`, with the size and the page in its words, before the
+    /// limit is asked (`zend_mm_alloc_huge`, `Z/Zend/zend_alloc.c:1929`),
+    /// and the heap is left as it was.
+    #[test]
+    fn a_size_the_rounding_overflows_is_php_s_integer_overflow() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let before = heap.memory_usage(false);
+        let page = mm::real_page_size();
+        let refused = heap.block(usize::MAX).err();
+        let said = format!(
+            "Possible integer overflow in memory allocation ({} + {page})",
+            usize::MAX
+        );
+        assert!(matches!(refused, Some(Fatal::Error(ref text)) if *text == said));
+        assert_eq!(heap.memory_usage(false), before);
+        let small = heap.block(16);
+        assert!(small.is_ok(), "the heap still allocates");
+        if let Ok(small) = small {
+            heap.free_block(small);
+        }
+    }
+
+    /// `is_zend_ptr` answers for any address inside a chunk or a huge
+    /// block, block or not, and no for addresses no list holds, the null
+    /// one and the top of memory among them, without reading them
+    /// (`Z/Zend/tests/gh14626.phpt`). A heap collected twice before it
+    /// has given anything out keeps its main chunk, which GH-18756's
+    /// `zend_mm_gc` deleted (`Z/Zend/tests/gh18756.phpt`).
+    #[test]
+    fn the_heap_holds_its_chunks_and_huge_blocks_and_nothing_else() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.gc_mem_caches();
+        heap.gc_mem_caches();
+        let (small, huge) = (heap.block(100), heap.block(3_000_000));
+        assert!(small.is_ok() && huge.is_ok(), "the heap would not allocate");
+        let (Ok(small), Ok(huge)) = (small, huge) else {
+            return;
+        };
+        let small_at = small.bytes().as_ptr().addr();
+        let huge_at = huge.bytes().as_ptr().addr();
+        let huge_end = huge_at + 3_000_000usize.next_multiple_of(mm::real_page_size());
+        assert!(heap.holds(small_at) && heap.holds(small_at + 1));
+        assert!(heap.holds(small_at & !(mm::CHUNK_SIZE - 1)));
+        assert!(heap.holds(huge_at) && heap.holds(huge_end - 1));
+        assert!(!heap.holds(huge_end));
+        assert!(!heap.holds(0) && !heap.holds(usize::MAX));
+        heap.free_block(huge);
+        assert!(!heap.holds(huge_at));
+        heap.free_block(small);
+        assert!(heap.holds(small_at), "the main chunk stays the heap's");
     }
 
     /// A request that outgrows one chunk takes more of them, gives the

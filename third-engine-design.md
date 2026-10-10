@@ -636,18 +636,18 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 399 |  |
+| heap | heap.lock | 400 |  |
 | process | process.lock | 38 |  |
 | unit | unit.lock | 98 |  |
 | link | link.lock | 48 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1417 | 1500 |
+| api | api.lock | 1423 | 1500 |
 | sapi | sapi.lock | 47 |  |
 | tier | tier.lock | 32 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 400 |  |
 
-<!-- /computed in=3dc9350c723f2307f137ee4e44ec4b60ceb43e8eb833173052676269f0fcbee4 out=950130c2b8a604282bfcafa7aae33857d8c5d4c72e4c0a8dae4cf8e2ef861a46 -->
+<!-- /computed in=93fd82df5a1292697e970e32793e6cb2eadc28b2a6aececdd6494c28012464f6 out=31eb33be7736172e4ac864350259bce4884c5a9929d492e5715f1ff5f2dbce09 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
@@ -733,7 +733,9 @@ The FastCGI record codec (`M/crates/mahout_sapi_fcgi/src/fcgi.rs`, 335 lines, ve
 | `uri` → `soap` (#1562) | `Parser`, with `named`, handed to ext/standard's `UriParser`, whose `parse` is `parse_to_struct` in the raw read; `UriStruct` | `php_uri.h`: `php_uri_get_parser`, `php_uri_parse_to_struct` and `php_uri`, which `php_http.c` includes to parse a request's location and a redirect's `Location` with the class `__doRequest`'s `uriParserClass` names, and whose `php_uri` a `Soap\Url` keeps for the connection a client holds open |
 | `date` → `soap` (#1593) | `php_format_date_obj` | `php_date.h`'s `php_format_date_obj`, which `php_encoding.c`'s `to_xml_datetime_ex` writes a `DateTimeInterface` with, past a subclass's `format()`, and whose `NULL` for an object no constructor set is `Invalid DateTimeInterface` |
 | `standard` → `openssl` (#1246) | `http_wrapper`, `ftp_wrapper`; `UriParser`, with `of_ctx` and `parse` | `php_fopen_wrappers.h`'s `php_stream_http_wrapper` and `php_stream_ftp_wrapper`, which `PHP_MINIT(openssl)` registers again as `https` and `ftps`; and `main/streams/php_stream_context.h`'s `php_stream_context_get_uri_parser` with the `php_uri_parse` and `php_uri_get_host` of `php_uri.h` it hands on, which `xp_ssl.c` names the host a client verifies with (`php_openssl_get_url_name`), which php-src keeps in `main/` and this engine ports in `ext/standard` beside the wrappers |
-| `standard` → `zend_test` (#1816) | `php_var_export_ex` | `php_var.h`'s `php_var_export_ex`, which `observer.c`'s `get_retval_info` writes an observed frame's return value with under `zend_test.observer.show_return_value` |
+| `standard` → `zend_test` (#1816, #2388) | `php_var_export_ex`; `UriParser`, with `named` and `parse_to_struct` | `php_var.h`'s `php_var_export_ex`, which `observer.c`'s `get_retval_info` writes an observed frame's return value with under `zend_test.observer.show_return_value`; and `php_uri.h`'s `php_uri_get_parser` and `php_uri_parse_to_struct`, which `test.c`'s `zend_test_uri_parser` calls, whose `parse_url` arm (`uri_parser_php_parse_url.c` over `ext/standard/url.h`) stays with ext/standard as the `uri` → `standard` row says |
+| `uri` → `zend_test` (#2388) | `ReadAs`; `UriStruct` | `php_uri.h`'s `php_uri_component_read_mode` and `php_uri`, which `test.c` includes for `zend_test_uri_parser`'s normalized and raw reads and its struct |
+| `libxml` → `zend_test` (#2388) | `ffi::Library::override_global_state` | the libxml2 calls `test.c`'s `zend_test_override_libxml_global_state` makes over `<libxml/globals.h>` and `<libxml/parser.h>`, which it includes under `HAVE_LIBXML`: `xmlLoadExtDtdDefaultValue`, `xmlDoValidityCheckingDefaultValue`, `xmlPedanticParserDefault`, `xmlSubstituteEntitiesDefault`, `xmlLineNumbersDefault` and `xmlKeepBlanksDefault`, reached through the one crate that links the library |
 
 **No shared helper crate under `ext/`.** A function two extensions need is engine policy, and enters `api` (the `open_basedir` check, path absolutisation, the filesystem-access guard Mahout's `check_fs_access` performed at 27 sites), or belongs to the extension that owns it in php-src, which exports it. A `php_ext_common` is the grab-bag this rule exists to prevent.
 

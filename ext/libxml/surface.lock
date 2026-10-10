@@ -88,6 +88,7 @@ ffi::Library::init
 ffi::Library::install_loader
 ffi::Library::known_encoding
 ffi::Library::loaded_version
+ffi::Library::override_global_state
 ffi::Library::path_to_uri
 ffi::Library::stylesheet_defaults
 ffi::Library::to_utf8
