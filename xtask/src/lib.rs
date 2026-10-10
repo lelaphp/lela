@@ -190,7 +190,9 @@ fn command_line() -> Result<()> {
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
         }
-        ask @ Command::FpmCompare { .. } => record(&store, &[makala::run(&root, &manifest, ask)?]),
+        ask @ (Command::FpmCompare { .. } | Command::Soak { .. }) => {
+            record(&store, &[makala::run(&root, &manifest, ask)?])
+        }
         Command::UnsafeAudit { staged } => record(
             &store,
             &unsafe_audit::measure(&root, &manifest, &store, staged)?,

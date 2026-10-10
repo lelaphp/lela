@@ -348,6 +348,20 @@ pub(crate) enum Command {
         #[arg(long = "test", value_name = "PATH")]
         tests: Vec<String>,
     },
+    /// Many clients against one makala for a fixed time, each response held
+    /// to the request served alone; one reading, at makala's crate.
+    ///
+    /// The reading counts the requests served, mismatches, leak findings
+    /// and memory growth. The defaults are #2336's ruling for the nightly
+    /// lane; a shorter run is the two flags (#2350).
+    Soak {
+        /// How long the clients send, in seconds.
+        #[arg(long, default_value_t = crate::makala::soak::SECONDS)]
+        seconds: u64,
+        /// How many clients send at once.
+        #[arg(long, default_value_t = crate::makala::soak::CLIENTS)]
+        clients: usize,
+    },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit {
         /// For pre-commit: leave out each crate whose reading passes and

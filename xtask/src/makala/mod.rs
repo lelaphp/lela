@@ -1,4 +1,4 @@
-//! The production server's lanes beside its witnesses (#2337), each an
+//! The production server's two lanes beside its witnesses (#2337), each an
 //! instrument over `sapi/makala`'s `makala` as `profile::build` builds it,
 //! in the lanes' profile, whose debug assertions arm the request leak
 //! sensor:
@@ -8,21 +8,30 @@
 //!   `[fastcgi]` mapping, the two responses held to each other. It is the
 //!   oracle for what PHP code sees under makala, and runs on request where
 //!   the pinned php-fpm is.
+//! - `soak` ([`soak`], #2350): many clients sending the corpus to one
+//!   makala for a fixed time, each response held to the same request
+//!   served alone, with the leak sensor's findings and the growth of the
+//!   process's resident memory counted. Its length, its clients and its
+//!   lane are #2336's ruling: ten minutes, 64 clients, nightly on
+//!   `dax-build`, and a 30-second smoke in makala's own tests.
 //!
-//! It is served the HTTP-served subset: the CGI-shaped tests
+//! Both are served one corpus, the HTTP-served subset: the CGI-shaped tests
 //! of the pinned php-src that one file serves whole, each its `--FILE--`
 //! and the request its sections describe as run-tests.php's CGI
 //! translation of them ([`cgi::request`]) reads back as HTTP, under its
 //! `--INI--`. A test that runs only after its `--SKIPIF--`, reads a file
 //! beside it in place of `--FILE--`, cleans up after itself, redirects to
 //! another test, sends a compressed body or takes arguments is left out,
-//! since none of that crosses one request to one file.
+//! since none of that crosses one request to one file. The soak adds the
+//! bench workloads committed under `docs/perf/workloads/` (measurement
+//! protocol §11), each a `GET` of its own.
 
 pub(crate) mod compare;
+pub(crate) mod soak;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::cli::Command;
 use crate::manifest::Manifest;
@@ -34,7 +43,7 @@ use crate::phpt::{adapter, cgi};
 use crate::reading::Reading;
 use crate::witness::makala::Http;
 
-/// The crate the lanes' readings are scoped to.
+/// The crate both instruments' readings are scoped to.
 pub(crate) const SCOPE: &str = "sapi/makala";
 
 /// The sections whose test the corpus leaves out, the reasons above.
@@ -48,6 +57,9 @@ const LEFT_OUT: [&str; 7] = [
     "ARGS",
 ];
 
+/// Where the bench workloads stand, relative to the workspace root.
+const WORKLOADS: &str = "docs/perf/workloads";
+
 /// One request of the corpus: what names it, the whole file it runs, the
 /// request as a client sends it and the ini entries it is served under.
 #[derive(Debug, Clone)]
@@ -58,11 +70,12 @@ pub(crate) struct Entry {
     pub(crate) ini: Vec<String>,
 }
 
-/// The reading of the instrument `ask` names: `fpm-compare`.
+/// The reading of the instrument `ask` names: `fpm-compare` or `soak`.
 pub(crate) fn run(root: &Path, manifest: &Manifest, ask: Command) -> Result<Reading> {
     match ask {
         Command::FpmCompare { tests } => compare::run(root, manifest, &tests),
-        _ => anyhow::bail!("{ask:?} is not fpm-compare"),
+        Command::Soak { seconds, clients } => soak::run(root, manifest, seconds, clients),
+        _ => anyhow::bail!("{ask:?} is neither fpm-compare nor soak"),
     }
 }
 
@@ -105,6 +118,33 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
         http: Http::described(&request),
         ini: adapter::ini_of(phpt, path).ok()?,
     })
+}
+
+/// The bench workloads of the workspace at `root`, each a `GET` with no
+/// ini of its own, in the order of their names.
+pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
+    let dir = root.join(WORKLOADS);
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|found| found.ok().map(|found| found.path()))
+        .filter(|path| path.extension().is_some_and(|e| e == "php"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            Ok(Entry {
+                id: format!(
+                    "{WORKLOADS}/{}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                program: std::fs::read(&path)
+                    .with_context(|| format!("reading {}", path.display()))?,
+                http: Http::get(),
+                ini: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 /// `response` with each temporary copy of an uploaded file named alike:

@@ -90,6 +90,16 @@ impl Http {
         }
     }
 
+    /// A `GET` of the program with no query and no body.
+    pub(crate) fn get() -> Http {
+        Http {
+            method: "GET".to_owned(),
+            query: String::new(),
+            fields: vec![("Host", "localhost".to_owned())],
+            body: Vec::new(),
+        }
+    }
+
     /// A field's value as sent, empty where it is not.
     fn field(&self, name: &str) -> String {
         let found = self.fields.iter().find(|(had, _)| *had == name);
@@ -266,6 +276,11 @@ impl Server {
             .read_to_end(&mut answer)
             .context("reading makala's response")?;
         Ok((answer, stream.local_addr()?.port()))
+    }
+
+    /// The process, for what a soak samples of it.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
     }
 }
 
