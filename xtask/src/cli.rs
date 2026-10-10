@@ -352,12 +352,17 @@ pub(crate) enum Command {
     /// to the request served alone; one reading, at makala's crate.
     ///
     /// The reading counts the requests served, mismatches, leak findings
-    /// and memory growth. The defaults are #2336's ruling for the nightly
-    /// lane; a shorter run is the two flags (#2350).
+    /// and memory growth. A bare call is the 30-second smoke; `--nightly`
+    /// is the nightly lane's ten minutes, #2336's ruling, which runs in CI
+    /// only (#2632).
     Soak {
-        /// How long the clients send, in seconds.
-        #[arg(long, default_value_t = crate::makala::soak::SECONDS)]
-        seconds: u64,
+        /// The nightly lane's length, ten minutes, in place of the smoke's
+        /// 30 seconds.
+        #[arg(long)]
+        nightly: bool,
+        /// How long the clients send, in seconds, over either length.
+        #[arg(long)]
+        seconds: Option<u64>,
         /// How many clients send at once.
         #[arg(long, default_value_t = crate::makala::soak::CLIENTS)]
         clients: usize,

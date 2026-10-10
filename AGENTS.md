@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=ab9c196157e9bfd7df868a1c897bb4e62da078d68e0a0b1f9877b0b46161ee28 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=a58244dcdb8a3b50f1cab39e6285fd299868988ca8144c5913ea97c14935dad6 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 400 |  |
 
-<!-- /computed in=7cb5f290a3eb9eebc2fe7cddbb88a3c1e7a4137888af0f7266b92fb057092bbd out=f951da5c038526dfaa576cf21347dbd7be88f3a599489956de6a0fa2c78a3495 -->
+<!-- /computed in=4e4289b8969f8762191d132997d07093a198ce056fa37eac56a53bc70fb98363 out=f951da5c038526dfaa576cf21347dbd7be88f3a599489956de6a0fa2c78a3495 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -161,6 +161,7 @@ third-engine-design.md
 | ticket.reply-unfiled |  | deny_pattern |
 | lanes.nightly |  | deny_pattern |
 | lanes.nightly-flags |  | deny_argv |
+| lanes.nightly-soak |  | deny_argv |
 | lanes.builder-subset |  | require_argv |
 | computed.force |  | deny_pattern |
 | harness.self |  | deny |
@@ -168,7 +169,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern |
 | divergence.reason |  | check |
 
-<!-- /computed in=4e2ab21014004b71028e2acc47d29f450f252209a3c71fd1b3971fc3ba11be34 out=21a36875969905591a5f06f72d0ccc30825fb03343e1859cdb8f5a36f6b45bda -->
+<!-- /computed in=59d0ff0bcb381067a7362a1e967183212e80e6f67ae0b0666e2fb95b4d404ce4 out=3916f245ed29dcdb46bed5244958ed4fc90a0540f6bdc467177e77c9bdf08ea7 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -209,7 +210,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=2959c7e175fe329a07efdd6020dcbcd5f61da45ed3e92a05dc37110a14fd33da out=607732a408bc68e0472d3a3d5f9c666e4b79f8771e867ec56a0dbe7f3b5d86ed -->
+<!-- /computed in=90ebf66c69cc5fe472f68a41f74a69e4ca73146d1add3d3c4e4ecdccd2951525 out=607732a408bc68e0472d3a3d5f9c666e4b79f8771e867ec56a0dbe7f3b5d86ed -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

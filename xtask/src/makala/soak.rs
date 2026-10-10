@@ -28,9 +28,11 @@
 //! makala did not answer alone is a bork. An entry with an `--INI--` of its
 //! own is left out, since one process serves every request under one ini.
 //!
-//! **Its length and lane** are #2336's ruling: [`SECONDS`] and
-//! [`CLIENTS`], nightly on `dax-build` (`dashboard.yml`'s `soak` job);
-//! `--seconds` and `--clients` take a shorter run. The ruling's "debug
+//! **Its length and lane** are #2336's ruling: [`NIGHTLY`] and
+//! [`CLIENTS`], nightly on `dax-build` (`dashboard.yml`'s `soak` job, which
+//! asks for it with `--nightly`, a flag `lanes.nightly-soak` denies outside
+//! CI); a bare call is the smoke's [`SMOKE`], as makala's own test runs it
+//! (#2632). `--seconds` and `--clients` take another run over either. The ruling's "debug
 //! build" is read as a build with debug assertions, since those are what
 //! arm the leak sensor (`cfg(debug_assertions)`): the lanes' `release-da`,
 //! as every binary the harness serves through is built, not `dev`.
@@ -55,8 +57,12 @@ use crate::witness::makala::{Server, from_http};
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "soak";
 
-/// How long the clients send, as #2336 rules: ten minutes.
-pub(crate) const SECONDS: u64 = 600;
+/// How long the nightly lane's clients send, as #2336 rules: ten minutes.
+pub(crate) const NIGHTLY: u64 = 600;
+
+/// How long a bare call's clients send: the smoke's 30 seconds, as #2336
+/// rules for `sapi/makala/tests/soak.rs` and #2632 for the default.
+pub(crate) const SMOKE: u64 = 30;
 
 /// How many clients send at once, as #2336 rules.
 pub(crate) const CLIENTS: usize = 64;
@@ -69,6 +75,12 @@ const LEAK: &str = "InternalError: the request ended with";
 
 /// What makala logs for a request whose thread panicked.
 const PANIC: &str = "\" panicked: ";
+
+/// How long the clients send: `seconds` where named, else the nightly
+/// lane's length under `--nightly` and the smoke's otherwise.
+pub(crate) fn seconds(nightly: bool, seconds: Option<u64>) -> u64 {
+    seconds.unwrap_or(if nightly { NIGHTLY } else { SMOKE })
+}
 
 /// What the clients found while they sent.
 #[derive(Debug, Default)]
@@ -314,6 +326,29 @@ fn rss(pid: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare call is the smoke's 30 seconds and `--nightly` the nightly
+    /// lane's ten minutes, both with the nightly client count, and
+    /// `--seconds` stands over either (#2632).
+    #[test]
+    fn a_bare_call_is_the_smoke_and_nightly_the_nightly_length() {
+        use clap::Parser;
+        let asked = |args: &[&str]| match crate::cli::Cli::try_parse_from(args).unwrap().command {
+            crate::cli::Command::Soak {
+                nightly,
+                seconds,
+                clients,
+            } => (super::seconds(nightly, seconds), clients),
+            other => panic!("{other:?} is no soak"),
+        };
+        assert_eq!(asked(&["xtask", "soak"]), (30, 64));
+        assert_eq!(asked(&["xtask", "soak", "--nightly"]), (600, 64));
+        assert_eq!(
+            asked(&["xtask", "soak", "--nightly", "--seconds", "45"]).0,
+            45
+        );
+        assert_eq!(asked(&["xtask", "soak", "--clients", "8"]), (30, 8));
+    }
 
     /// A run that served and found nothing passes and states its memory;
     /// one mismatch, leak or bork fails it, and is named.

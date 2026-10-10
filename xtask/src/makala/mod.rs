@@ -75,7 +75,11 @@ pub(crate) struct Entry {
 pub(crate) fn run(root: &Path, manifest: &Manifest, ask: Command) -> Result<Reading> {
     match ask {
         Command::FpmCompare { tests } => compare::run(root, manifest, &tests),
-        Command::Soak { seconds, clients } => soak::run(root, manifest, seconds, clients),
+        Command::Soak {
+            nightly,
+            seconds,
+            clients,
+        } => soak::run(root, manifest, soak::seconds(nightly, seconds), clients),
         _ => anyhow::bail!("{ask:?} is neither fpm-compare nor soak"),
     }
 }
