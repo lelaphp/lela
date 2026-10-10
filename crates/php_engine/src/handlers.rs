@@ -19215,13 +19215,79 @@ pub(crate) fn is_not_equal<T: Tier>(
 /// `ZEND_IS_IDENTICAL`: [`crate::ops::is_identical`], the same way, both
 /// operands dereferenced (`GET_OP*_ZVAL_PTR_DEREF`), which the kernel
 /// does.
-pub(crate) fn is_identical<T: Tier>(
+pub(crate) fn is_identical<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) =
+        inline_identical::<T>(req, frame, code, op, at, (A::default(), B::default()))
+    {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     compared_branch::<T>(req, frame, code, op, crate::ops::is_identical)
+}
+
+/// The inline path of `ZEND_IS_IDENTICAL` (`ZEND_IS_IDENTICAL_SPEC_*`,
+/// `Z/Zend/zend_vm_def.h:477-497`): both operands, a reference followed
+/// (`GET_OP*_ZVAL_PTR_DEREF`), compared as [`inline::identical`]
+/// compares them, the answer branched on where a `JMPZ` or a `JMPNZ`
+/// is fused to it ([`fused_jump`]) and written into the temporary
+/// otherwise. `None`, with nothing touched, for a pair the kernel
+/// compares, a temporary operand that holds an owner, which the opcode
+/// would give up (`FREE_OP1`, `FREE_OP2`), and a temporary for the answer
+/// holding an owner.
+///
+/// ```php
+/// $a = 1; $b = "x"; $c = [1]; $o = new stdClass;
+/// for ($i = 0; $i < 3; $i++) { if ($i === 1) echo "one"; var_dump($a === $i, $b === "x", $c === [1], $o === $o); }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// onebool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+#[inline(always)] // as `inline_arith`
+#[allow(clippy::inline_always)]
+fn inline_identical<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let side = |kind: OperandKind, z: Zval| match kind {
+        OperandKind::Tmp | OperandKind::Var if z.is_refcounted() => None,
+        _ => Some(crate::operand::deref(z)),
+    };
+    let x = side(a.kind(), a.read(slots, code, op.op1))?;
+    let y = side(b.kind(), b.read(slots, code, op.op2))?;
+    let answer = inline::identical(x, y)?;
+    if let Some(jump) = fused_jump(code, op, at) {
+        return Some(branch_fused::<T>(
+            req,
+            frame,
+            at.saturating_add(1),
+            &jump,
+            answer,
+        ));
+    }
+    write_owning_nothing(slots, code, op, Zval::bool(answer))?;
+    Some(Ok(advanced()))
 }
 
 /// `ZEND_IS_NOT_IDENTICAL`: [`crate::ops::is_not_identical`], the same

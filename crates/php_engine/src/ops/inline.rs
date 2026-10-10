@@ -233,3 +233,52 @@ pub(crate) fn element(array: Arr, key: Key) -> Option<Zval> {
     let found = found.as_reference().map_or(found, |cell| cell.val());
     (!found.is_undef() && found.kind() != ZvalType::Indirect).then_some(found)
 }
+
+/// `zend_is_identical` (`Z/Zend/zend_operators.c:2445`) over two zvals
+/// a reference was followed for, where it reads no table: two of
+/// different types are not identical, two scalars or two strings are
+/// [`php_heap::identical`], two objects are one object, and an array
+/// is identical to itself. Two different arrays, which
+/// `zend_hash_compare` walks, and an operand nothing wrote are the
+/// kernel's.
+///
+/// ```php
+/// $o = new stdClass; $p = new stdClass; $a = [1]; $b = [1]; $n = NAN; $s = "1"; $r = &$s;
+/// var_dump(1 === 1.0, "1" === $s, $r === "1", $o === $o, $o === $p, $a === $a, $a === $b, $n === $n, null === false, 0.5 === 0.5);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// ```
+#[inline(always)] // as `number`
+#[allow(clippy::inline_always)]
+pub(crate) fn identical(a: Zval, b: Zval) -> Option<bool> {
+    let scalar = |z: Zval| match z.kind() {
+        ZvalType::Null => Some(php_heap::Scalar::Null),
+        ZvalType::False => Some(php_heap::Scalar::Bool(false)),
+        ZvalType::True => Some(php_heap::Scalar::Bool(true)),
+        ZvalType::Long => z.as_long().map(php_heap::Scalar::Long),
+        ZvalType::Double => z.as_double().map(php_heap::Scalar::Double),
+        _ => None,
+    };
+    if a.is_undef() || b.is_undef() {
+        return None;
+    }
+    if a.kind() != b.kind() {
+        return Some(false);
+    }
+    match a.kind() {
+        ZvalType::String => Some(a.as_str()?.bytes() == b.as_str()?.bytes()),
+        ZvalType::Object => Some(a.as_obj()?.is_same(b.as_obj()?)),
+        ZvalType::Array => a.as_arr()?.is_same(b.as_arr()?).then_some(true),
+        _ => Some(php_heap::identical(scalar(a)?, scalar(b)?)),
+    }
+}
