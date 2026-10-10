@@ -977,7 +977,6 @@ request::StreamCtx::notifier
 request::StreamCtx::notify
 request::StreamCtx::option
 request::StreamCtx::options
-request::StreamCtx::release_default
 request::StreamCtx::resource
 request::StreamCtx::set_notifier
 request::StreamCtx::set_option

@@ -3,8 +3,9 @@
 //! `Z/main/streams/streams.c`), owned by the stream layer beside
 //! [`Stream`] as #1777 ruled: a `stream-context` resource holding the
 //! options array and, where `notification` was set, the callable it
-//! calls. `FG(default_context)` is kept in the layer's request state,
-//! since where php keeps it is not observable. ext/standard's
+//! calls. `FG(default_context)` is a resource the request's list owns,
+//! as php's is, named by an id in the layer's request state, since where
+//! php keeps it is not observable. ext/standard's
 //! `stream_context_*` natives and every other extension reach it here
 //! through `php_ext`; a `transport` reads its `socket` options off it, and
 //! a stream that keeps one tells its notifier what its reads and writes
@@ -13,6 +14,7 @@
 use super::{Request, SocketOptions};
 use crate::api::call::call;
 use crate::api::coerce::{callable_checked, to_long, truthy};
+use crate::api::layer::Face as _;
 use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::request::BindTo;
 use crate::api::values::{
@@ -202,6 +204,12 @@ impl StreamCtx {
     /// native handed no `$context` opens under, as `gzopen` and
     /// `hash_update_file` do.
     ///
+    /// The request's list owns it, as php's `EG(regular_list)` owns the
+    /// resource `FG(default_context)` names by pointer, and closes it with
+    /// the other resources; the layer keeps its id alone. Read after the
+    /// list's close, it is the closed resource, where php's pointer names
+    /// the `php_stream_context` the close freed.
+    ///
     /// ```php
     /// var_dump(fopen('php://memory', 'r'), stream_context_get_default(), fopen('php://memory', 'r'));
     /// ```
@@ -211,23 +219,15 @@ impl StreamCtx {
     /// resource(6) of type (stream)
     /// ```
     pub fn default_ctx(req: &mut Request) -> Result<StreamCtx, Thrown> {
-        if let Some(context) = req.streams().default_context.as_deref() {
-            return Ok(*context);
+        if let Some(id) = req.streams().default_context
+            && let Some(resource) = req.resource(id)
+        {
+            return Ok(StreamCtx(resource));
         }
         let context = StreamCtx::alloc(req)?;
         let view = *context;
-        req.streams().default_context = Some(context);
+        req.streams().default_context = Some(req.keep_in_list(context.into_resource()));
         Ok(view)
-    }
-
-    /// `FG(default_context)` given up as the request ends: php keeps no
-    /// value of it and frees it with the regular list after
-    /// `shutdown_executor`; ext/standard, whose `FG` it is in php, gives
-    /// it up at its `post_deactivate`, past the list's close.
-    pub fn release_default(req: &mut Request) {
-        if let Some(context) = req.streams().default_context.take() {
-            context.give_up(req);
-        }
     }
 
     /// `zend_fetch_resource_ex(zcontext, "Stream-Context", le)` over

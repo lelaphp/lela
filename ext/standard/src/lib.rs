@@ -787,7 +787,6 @@ pub fn extension() -> Extension {
         .stream_hooks(STREAM_HOOKS)
         .info(basic_functions::minfo)
         .rshutdown(rshutdown)
-        .post_deactivate(post_deactivate)
         .rinit(rinit)
         .build("standard")
 }
@@ -847,14 +846,6 @@ fn rshutdown(req: &mut Request) {
     assert::rshutdown(req);
     url_scanner::rshutdown(req);
     http_fopen_wrapper::clear_last_headers(req);
-}
-
-/// `FG(default_context)` given up past the request's resources' close:
-/// php keeps no value of it and frees it with the regular list after
-/// `shutdown_executor`, and a stream opened in any extension's
-/// `RSHUTDOWN` or closed by the list's close may still make it.
-fn post_deactivate(req: &mut Request) {
-    php_ext::request::StreamCtx::release_default(req);
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`
