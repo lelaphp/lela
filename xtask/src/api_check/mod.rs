@@ -169,6 +169,18 @@ pub(crate) fn measure(
     Ok(readings)
 }
 
+/// The public items of the crate `name` under `root`, as an item lock's
+/// lines, its re-exports from the workspace included; the sources are
+/// read and nothing is built. The new-sapi fixture's stand-ins are held to
+/// the real crates through it (#2544).
+pub fn public_items(manifest: &Manifest, root: &Path, name: &str) -> Result<BTreeSet<String>> {
+    let crates = Crates::scan(manifest, root)?;
+    let krate = crates
+        .named(name)
+        .with_context(|| format!("no crate {name} under {}", root.display()))?;
+    Inventory::new(&crates).public_items(krate)
+}
+
 // ---------------------------------------------------------------- seams
 
 /// Which inventory a lock is: the items of the crate it lives with, the
