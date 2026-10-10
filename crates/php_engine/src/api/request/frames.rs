@@ -512,22 +512,18 @@ impl Request {
                 "InternalError: a user function whose body the unit has not",
             ))
         };
-        let (unit, body) = {
-            let user = self.user_function(function).ok_or_else(no_body)?;
-            (Arc::clone(&user.unit), user.body)
-        };
-        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
-        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it on the stack for
         // `RECV_VARIADIC` to collect.
-        let (parameters, typed) = self.function_decl(function).map_or((0, false), |decl| {
-            (
-                decl.parameters.iter().filter(|p| !p.variadic).count(),
-                decl.parameters.iter().any(|p| p.ty.is_some()),
-            )
-        });
+        let (unit, body, arity) = {
+            let user = self.user_function(function).ok_or_else(no_body)?;
+            (Arc::clone(&user.unit), user.body, user.arity)
+        };
+        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
+        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let parameters = usize::try_from(arity.parameters).unwrap_or(usize::MAX);
+        let typed = arity.typed;
         let entry = code.safepoints.first().map_or(0, |at| at.0);
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let extra_args = call.arguments.len().saturating_sub(parameters);
@@ -567,7 +563,7 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
-        let declared = u32::try_from(parameters).unwrap_or(u32::MAX);
+        let declared = arity.parameters;
         if let Some(at) = exec::skipped_recv(num_args, declared, typed, entry) {
             self.vm.stand(frame, at);
         }
