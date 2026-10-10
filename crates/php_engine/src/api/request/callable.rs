@@ -583,7 +583,52 @@ impl Request {
     /// called scope in `fcc` and answers php's `*strict_class`; a
     /// throwable a deprecation's handler or an autoloader left pending
     /// makes it a refusal, php's `if (EG(exception)) return false`.
+    ///
+    /// php lowers the name into `ZSTR_ALLOCA_ALLOC(lcname, ...)`, and
+    /// `do_alloca` is `emalloc` where php is built for macOS
+    /// (`!defined(__APPLE__)`, `Z/Zend/zend_portability.h:219`), so there
+    /// the lowered name is a block of the request's for as long as the
+    /// check runs, an autoloader's throw included; elsewhere it is the
+    /// stack's.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+    /// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+    /// pk(function () { try { is_callable('Foo::bar'); } catch (Throwable $e) {} });
+    /// pk(function () { try { call_user_func('Foo::bar'); } catch (Throwable $e) {} });
+    /// ```
+    /// ```expect
+    /// 2968
+    /// 4424
+    /// ```
     fn callable_class(
+        &mut self,
+        name: &[u8],
+        scope: Option<ClassId>,
+        frame: &CallFrame,
+        fcc: &mut Fcc,
+        deprecations: Deprecations,
+    ) -> Result<bool, Refusal> {
+        let lcname = if cfg!(target_vendor = "apple") {
+            // `_ZSTR_STRUCT_SIZE`: the header's 24 bytes, the name and
+            // its terminator.
+            let block = self.heap.block(24 + name.len() + 1);
+            match self.fatal_of(block) {
+                Ok(block) => Some(block),
+                Err(_) => return Err(Refusal::Unsaid),
+            }
+        } else {
+            None
+        };
+        let checked = self.callable_class_lowered(name, scope, frame, fcc, deprecations);
+        if let Some(block) = lcname {
+            self.heap.free_block(block);
+        }
+        checked
+    }
+
+    /// [`Request::callable_class`] once its lowered name is held.
+    fn callable_class_lowered(
         &mut self,
         name: &[u8],
         scope: Option<ClassId>,
@@ -742,6 +787,12 @@ impl Request {
             Some(at) => {
                 let scope = ce_org.or(frame.scope);
                 let class = callable[..at].to_vec();
+                // `zend_string_init_interned` of the class part, the
+                // string the lookup hands an autoloader, which a trace of
+                // what that loader throws then holds at no cost.
+                if self.interned(&class).is_err() {
+                    return Err(Refusal::Unsaid);
+                }
                 let quiet = if ce_org.is_some() {
                     Deprecations::Suppressed
                 } else {
