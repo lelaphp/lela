@@ -842,9 +842,15 @@ pub enum Section {
     /// The usage readings, the last per scope: the session, the turn it
     /// reached, its tokens and its usd.
     Usage,
-    /// Each rule permit judges: its last finding, denial or note, and the
-    /// denials the log holds per session and in total; then the log per
-    /// instrument, with the candidates for silent (the CI section of §7).
+    /// Each rule permit judges, the manifest's and then the three permit
+    /// owns, which no manifest row names: `computed.region-body`,
+    /// `permit.stale-build` and `permit.unjudged-call`. Each row has its
+    /// last finding, denial or note, the denials the log holds per session
+    /// and in total, and beside `denials` the `handed on` column: the calls
+    /// a stale build handed to the candidate that rebuilds, which judged
+    /// them, so a walk is never counted as a refusal (#118, #125). Then the
+    /// log per instrument, with the candidates for silent (the CI section
+    /// of §7).
     Permits,
     /// The weekly exit bar table: each `[[week]]` of the manifest with
     /// pass, fail or "no reading" from the readings it names.
