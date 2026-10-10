@@ -28,6 +28,7 @@
 
 mod connection;
 mod framing;
+mod log;
 pub mod options;
 mod request;
 mod socket;
@@ -64,6 +65,21 @@ pub fn main() -> ExitCode {
         }
     };
     let engine = engine(&options);
+    // The log thread once the engine has started, so what php logs while
+    // it starts, and a startup it refuses, reach stderr before the process
+    // ends. The thread is held, never joined, so a destination that
+    // blocks holds only it.
+    let _log = match log::start(
+        options.access_log.clone(),
+        options.error_log.clone(),
+        options.limits.log_lines,
+    ) {
+        Ok(thread) => thread,
+        Err(e) => {
+            say(&format!("makala: cannot start the log thread: {e}\n"));
+            return php_sapi::exit_code(1);
+        }
+    };
     let listener = match std::net::TcpListener::bind(options.listen) {
         Ok(listener) => listener,
         Err(e) => {
@@ -101,12 +117,19 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(1);
         }
     };
-    // The engine's end runs as `engine` is dropped, where it is the last
-    // clone: once every request thread is joined, and never while one is
-    // left in a request, which holds a clone of its own.
-    if !(drained.whole && pool.join_by(drained.deadline)) {
-        log(b"makala: the shutdown timeout passed with requests in flight; they were aborted");
+    if drained.whole && pool.join_by(drained.deadline) {
+        log::error(b"makala: drained");
+    } else {
+        log::error(
+            b"makala: the shutdown timeout passed with requests in flight; they were aborted",
+        );
     }
+    // The engine's end runs here, where `engine` is the last clone: once
+    // every request thread is joined, and never while one is left in a
+    // request, which holds a clone of its own. What it logs is written
+    // before the process ends, as is every line queued before it.
+    drop(engine);
+    log::settle(log::SETTLE);
     php_sapi::exit_code(0)
 }
 
@@ -122,15 +145,7 @@ fn engine(options: &Options) -> Engine {
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
-    php_sapi::start(builder, &options.ini, log)
-}
-
-/// The error log, until the server's own (#2345): one entry on the
-/// process's stderr, whole, with `\n` after it.
-pub(crate) fn log(entry: &[u8]) {
-    let mut stderr = std::io::stderr().lock();
-    stderr.write_all(entry).ok();
-    stderr.write_all(b"\n").ok();
+    php_sapi::start(builder, &options.ini, log::error)
 }
 
 /// A line of the server's own on stderr.

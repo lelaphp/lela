@@ -14,12 +14,15 @@ use std::time::Duration;
 
 use php_sapi::ini::Search;
 
+pub use crate::log::Destination;
+
 /// The line's grammar, printed with a refusal: the options, then each
 /// limit `--limit` names, from [`LIMITS`].
 #[must_use]
 pub fn usage() -> String {
     let mut usage = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --listen <addr>:<port> \
-                     --root <dir> [--threads <n>] [--queue <n>] [--limit <name>=<value>]...\n\
+                     --root <dir> [--threads <n>] [--queue <n>] [--access-log <path>] \
+                     [--error-log <path>] [--limit <name>=<value>]...\n\
                      limits, a time being <n>s or <n>ms and a rate <bytes a second>,<grace time> or off:\n"
         .to_owned();
     for (name, shape, _) in LIMITS {
@@ -57,6 +60,11 @@ pub struct Options {
     pub ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// `-n` and `-c`, which steer the ini file search.
     pub ini_search: Search,
+    /// Where the access log goes, a line for each response; none is kept
+    /// without `--access-log` (#2345).
+    pub access_log: Option<Destination>,
+    /// Where the error log goes: stderr without `--error-log`.
+    pub error_log: Destination,
     pub limits: Limits,
 }
 
@@ -99,6 +107,10 @@ pub struct Limits {
     /// Kestrel's host since .NET 6 (research/production-server.r2.md
     /// §1.4).
     pub shutdown_timeout: Duration,
+    /// How many log lines wait for the log thread, past which a line is
+    /// dropped and counted rather than waited for, so a slow destination
+    /// never stalls a request: 4096 (#2345).
+    pub log_lines: usize,
 }
 
 /// A minimum data rate, Kestrel's `MinDataRate`: so many bytes a second,
@@ -151,6 +163,7 @@ impl Default for Limits {
             requests_per_connection: 1000,
             connections: 10_000,
             shutdown_timeout: Duration::from_secs(30),
+            log_lines: 4096,
         }
     }
 }
@@ -195,6 +208,7 @@ const LIMITS: &[(&str, &str, SetLimit)] = &[
     ("shutdown-timeout", "<time>", |l, v| {
         set(&mut l.shutdown_timeout, time(v))
     }),
+    ("log-lines", "<n>", |l, v| set(&mut l.log_lines, count(v))),
 ];
 
 /// `read` into `field` where it was read.
@@ -279,6 +293,8 @@ impl Options {
         let mut ini = Vec::new();
         let mut ini_search = Search::default();
         let mut limits = Limits::default();
+        let mut access_log = None;
+        let mut error_log = Destination::Stderr;
         while let Some(word) = words.next() {
             let mut value = |name: &str| {
                 words
@@ -297,6 +313,10 @@ impl Options {
                 }
                 b"--queue" => queue = Some(option_count("--queue", &value("--queue")?)?),
                 b"--limit" => limits.set(&value("--limit")?)?,
+                b"--access-log" => {
+                    access_log = Some(Destination::File(path(&value("--access-log")?)));
+                }
+                b"--error-log" => error_log = Destination::File(path(&value("--error-log")?)),
                 other => {
                     return Err(format!("unknown option {}", String::from_utf8_lossy(other)));
                 }
@@ -317,9 +337,16 @@ impl Options {
             stack_size: REQUEST_STACK,
             ini,
             ini_search,
+            access_log,
+            error_log,
             limits,
         })
     }
+}
+
+/// A path the line names, as its bytes are.
+fn path(bytes: &[u8]) -> PathBuf {
+    php_sapi::cgi::path_of(bytes)
 }
 
 /// An option's value read as a `T`.
@@ -397,6 +424,8 @@ mod tests {
             "connections=1",
             "--limit",
             "shutdown-timeout=3s",
+            "--limit",
+            "log-lines=7",
         ])?;
         assert_eq!(
             options.limits,
@@ -418,6 +447,7 @@ mod tests {
                 requests_per_connection: 2,
                 connections: 1,
                 shutdown_timeout: Duration::from_secs(3),
+                log_lines: 7,
             }
         );
         let off = parse(&[

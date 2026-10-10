@@ -119,9 +119,25 @@ fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
         let Some(job) = next else {
             return;
         };
-        if std::panic::catch_unwind(AssertUnwindSafe(|| serve(job))).is_err() {
-            crate::log(
-                b"makala: a request panicked; its connection is answered 500, or cut where its response was under way",
+        let who = (
+            job.head.peer,
+            job.head.method.clone(),
+            job.head.target.clone(),
+        );
+        if let Err(panicked) = std::panic::catch_unwind(AssertUnwindSafe(|| serve(job))) {
+            let (peer, method, target) = who;
+            let why = panicked
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panicked.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("a panic with no message");
+            crate::log::error(
+                format!(
+                    "makala: {peer} \"{} {}\" panicked: {why}; its connection is answered 500, or cut where its response was under way",
+                    String::from_utf8_lossy(&method),
+                    String::from_utf8_lossy(&target)
+                )
+                .as_bytes(),
             );
         }
     }
@@ -396,7 +412,7 @@ impl OutputSink for Sink {
     }
 
     fn log(&mut self, entry: &[u8]) {
-        crate::log(entry);
+        crate::log::error(entry);
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
@@ -519,13 +535,38 @@ mod tests {
         stream
     }
 
+    /// The error log of this test binary, one file every test that
+    /// starts the server shares, as the process's one log thread does.
+    fn error_log() -> &'static std::path::Path {
+        static LOG: std::sync::OnceLock<(std::path::PathBuf, HostThread)> =
+            std::sync::OnceLock::new();
+        let (path, _) = LOG.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("makala-errors-{}", std::process::id()));
+            std::fs::remove_file(&path).ok();
+            let thread = crate::log::start(None, crate::log::Destination::File(path.clone()), 64)
+                .unwrap_or_else(|e| panic!("{e}"));
+            (path, thread)
+        });
+        path
+    }
+
+    /// A request that panics is answered 500, its thread serves the next,
+    /// and the error log names the request and the panic's message.
     #[test]
     fn a_request_that_panics_is_answered_500_and_its_thread_serves_the_next() {
+        let log = error_log();
         let addr = start();
         let panicked = exchange(addr, "/panic");
         assert!(
             panicked.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
             "{panicked}"
+        );
+        crate::log::settle(Duration::from_secs(5));
+        let logged = std::fs::read_to_string(log).unwrap_or_default();
+        assert!(
+            logged.lines().any(|line| line.contains("makala: 127.0.0.1:")
+                && line.contains(" \"GET /panic\" panicked: a request panicked before its head, on cue; its connection is answered 500")),
+            "{logged}"
         );
         let next = exchange(addr, "/next");
         assert!(next.starts_with("HTTP/1.1 200 OK\r\n"), "{next}");

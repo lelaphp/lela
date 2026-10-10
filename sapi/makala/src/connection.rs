@@ -34,7 +34,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -50,6 +50,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 
 use crate::framing;
+use crate::log::Access;
 use crate::options::Limits;
 use crate::request::{Head, Job, Sink, Written};
 use crate::socket::{Socket, Watch};
@@ -158,6 +159,13 @@ async fn serve_until_drained(
     }
     let deadline = tokio::time::Instant::now() + limits.shutdown_timeout;
     drop(listener);
+    crate::log::error(
+        format!(
+            "makala: SIGTERM: the listener is closed, and the connections drain for at most {:?}",
+            limits.shutdown_timeout
+        )
+        .as_bytes(),
+    );
     drain.send_replace(true);
     // A second SIGTERM ends the wait at once, as the deadline would.
     let ended = tokio::time::timeout_at(deadline, all_ended.recv());
@@ -269,8 +277,9 @@ async fn drive(
     let mut cut = pin!(connection.cut.notified());
     let mut drain = pin!(draining.wait_for(|draining| *draining));
     let mut shutting_down = false;
-    // A connection's end, the client's close among them, is nothing the
-    // server acts on until its logs (#2345).
+    // A connection that ends on a failure says so in the error log, but
+    // for a client gone between requests, the commonest end there is.
+    let peer = connection.peer;
     std::future::poll_fn(|cx| {
         if cut.as_mut().poll(cx).is_ready() {
             return Poll::Ready(());
@@ -279,9 +288,24 @@ async fn drive(
             served.as_mut().graceful_shutdown();
             shutting_down = true;
         }
-        served.as_mut().poll(cx).map(drop)
+        served.as_mut().poll(cx).map(|ended| {
+            if let Err(failed) = ended
+                && !failed.is_incomplete_message()
+            {
+                failure(peer, &failed);
+            }
+        })
     })
     .await;
+}
+
+/// A connection's failure in the error log: the peer, then hyper's error
+/// and the one under it, an I/O error or a limit's.
+fn failure(peer: SocketAddr, failed: &hyper::Error) {
+    let under = std::error::Error::source(failed)
+        .map(|under| format!(": {under}"))
+        .unwrap_or_default();
+    crate::log::error(format!("makala: {peer}: {failed}{under}").as_bytes());
 }
 
 /// The first of two futures to end: `a`'s output, or `None` where `b`
@@ -309,12 +333,18 @@ async fn respond(
 ) -> Result<Response<Reply>, Infallible> {
     connection.watch.request_began();
     let begun = connection.begun.fetch_add(1, Ordering::Relaxed) + 1;
-    let mut response = hand_over(&connection, request).await;
+    let mut access = Access::begun(connection.peer, &request);
+    let body_in = access.as_ref().map(|access| Arc::clone(&access.body_in));
+    let mut response = hand_over(&connection, request, body_in).await;
     if begun >= connection.limits.requests_per_connection {
         response
             .headers_mut()
             .insert(CONNECTION, HeaderValue::from_static("close"));
     }
+    if let Some(access) = &mut access {
+        access.status = response.status();
+    }
+    response.body_mut().access = access;
     Ok(response)
 }
 
@@ -326,7 +356,11 @@ async fn respond(
 /// of a body that faulted before the request sent its head; and with a
 /// 500 where the request ended without a head, which only a panic
 /// contained at its edge leaves.
-async fn hand_over(connection: &Arc<Connection>, request: Request<Incoming>) -> Response<Reply> {
+async fn hand_over(
+    connection: &Arc<Connection>,
+    request: Request<Incoming>,
+    body_in: Option<Arc<AtomicU64>>,
+) -> Response<Reply> {
     let (parts, incoming) = request.into_parts();
     if let Some(refused) =
         over_limit(&parts, &connection.limits).or_else(|| framing::refusal(&parts))
@@ -365,15 +399,15 @@ async fn hand_over(connection: &Arc<Connection>, request: Request<Incoming>) -> 
         return plain(connection, StatusCode::SERVICE_UNAVAILABLE);
     }
     let (broke, mut fault) = oneshot::channel();
-    tokio::spawn(pump(incoming, feed, broke, Arc::clone(connection)));
+    tokio::spawn(pump(incoming, feed, broke, Arc::clone(connection), body_in));
     match answer(head, &mut fault).await {
         Answer::Head(head) => {
             // A fault that came with the head is no longer the answer's:
             // closed, the channel takes no later one, which the pump then
             // cuts the connection for, and one already sent is cut here.
             fault.close();
-            if fault.try_recv().is_ok() {
-                connection.cut.notify_one();
+            if let Ok(fault) = fault.try_recv() {
+                cut(connection, fault);
             }
             response(connection, &head, Written { pieces, whole })
         }
@@ -467,6 +501,16 @@ enum BodyFault {
 }
 
 impl BodyFault {
+    /// What the body did, as the error log says it.
+    fn why(self) -> &'static str {
+        match self {
+            BodyFault::Broken => "broke",
+            BodyFault::TooLarge => "passed the body limit",
+            BodyFault::TooSlow => "came slower than the minimum data rate",
+            BodyFault::Trailers => "ended in a trailer section",
+        }
+    }
+
     /// The answer to a request whose body broke before it sent a head.
     fn status(self) -> StatusCode {
         match self {
@@ -495,6 +539,7 @@ async fn pump(
     feed: mpsc::Sender<Bytes>,
     broke: oneshot::Sender<BodyFault>,
     connection: Arc<Connection>,
+    body_in: Option<Arc<AtomicU64>>,
 ) {
     let limits = connection.limits;
     let mut arrived = 0u64;
@@ -519,6 +564,9 @@ async fn pump(
             Some(Ok(frame)) => match frame.into_data() {
                 Ok(piece) => {
                     arrived += u64::try_from(piece.len()).unwrap_or(u64::MAX);
+                    if let Some(body_in) = &body_in {
+                        body_in.store(arrived, Ordering::Relaxed);
+                    }
                     if arrived > limits.body_bytes {
                         break BodyFault::TooLarge;
                     }
@@ -530,9 +578,23 @@ async fn pump(
             },
         }
     };
-    if broke.send(fault).is_err() {
-        connection.cut.notify_one();
+    if let Err(fault) = broke.send(fault) {
+        cut(&connection, fault);
     }
+}
+
+/// The connection cut for its request's body, which faulted once the
+/// response was under way, and the cut in the error log.
+fn cut(connection: &Connection, fault: BodyFault) {
+    crate::log::error(
+        format!(
+            "makala: {}: the connection is cut, the request's body {}",
+            connection.peer,
+            fault.why()
+        )
+        .as_bytes(),
+    );
+    connection.cut.notify_one();
 }
 
 /// The response for the head a request sent: its code, 200 where it set
@@ -542,6 +604,7 @@ fn response(connection: &Connection, head: &ResponseHead, written: Written) -> R
     let mut response = Response::new(Reply {
         written: Some(written),
         watch: Arc::clone(&connection.watch),
+        access: None,
     });
     let code = u16::try_from(head.code).unwrap_or(500);
     *response.status_mut() = match code {
@@ -569,6 +632,7 @@ fn plain(connection: &Connection, status: StatusCode) -> Response<Reply> {
     let mut response = Response::new(Reply {
         written: None,
         watch: Arc::clone(&connection.watch),
+        access: None,
     });
     *response.status_mut() = status;
     response
@@ -594,6 +658,8 @@ fn closing(connection: &Connection, status: StatusCode) -> Response<Reply> {
 pub(crate) struct Reply {
     written: Option<Written>,
     watch: Arc<Watch>,
+    /// What the access log says of it, where one is kept.
+    access: Option<Access>,
 }
 
 /// A response body that a request's panic left unfinished.
@@ -616,10 +682,14 @@ impl hyper::body::Body for Reply {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Unfinished>>> {
-        let Some(written) = &mut self.get_mut().written else {
+        let reply = self.get_mut();
+        let Some(written) = &mut reply.written else {
             return Poll::Ready(None);
         };
         if let Some(piece) = std::task::ready!(written.pieces.poll_recv(cx)) {
+            if let Some(access) = &mut reply.access {
+                access.body_out += u64::try_from(piece.len()).unwrap_or(u64::MAX);
+            }
             return Poll::Ready(Some(Ok(Frame::data(piece))));
         }
         Pin::new(&mut written.whole)
@@ -640,7 +710,12 @@ impl hyper::body::Body for Reply {
 }
 
 impl Drop for Reply {
+    /// The response has ended, whole or cut: the connection waits for its
+    /// next request, and the access log has its line.
     fn drop(&mut self) {
         self.watch.response_ended();
+        if let Some(access) = &self.access {
+            access.ended();
+        }
     }
 }
