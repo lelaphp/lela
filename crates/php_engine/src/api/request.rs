@@ -534,8 +534,10 @@ struct DeclaredSlot {
     readonly: bool,
     /// `property_info->prototype->ce`: the class that first declared the
     /// property up the chain, through every redeclaration that was not
-    /// over a private one, which a protected property's access is
-    /// measured against (`is_protected_compatible_scope`).
+    /// over a private one, which a protected property's access and a
+    /// `protected(set)` one's write are measured against
+    /// (`is_protected_compatible_scope`); the declaring class for any
+    /// other.
     root: ClassId,
 }
 
