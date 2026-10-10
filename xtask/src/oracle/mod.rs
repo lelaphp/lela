@@ -23,11 +23,13 @@
 //! no source file (§10 rule 5).
 
 pub(crate) mod expect;
+mod fastcgi;
 pub(crate) mod hosts;
 pub(crate) mod linked;
 pub(crate) mod profile;
 mod variant;
 
+pub use fastcgi::{Mapping, Param, Piece, Variable};
 pub use variant::{Build, Oracles, Platform, Variant};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -179,6 +181,10 @@ pub struct Pin {
     /// lanes under (#1782); absent until a person writes one.
     #[serde(default)]
     pub variant: BTreeMap<String, Variant>,
+    /// `[fastcgi]`: the HTTP-to-FastCGI mapping `[sapi] fpm` is driven
+    /// under for a host php does not ship (#2334); [`Pin::fastcgi`].
+    #[serde(default)]
+    fastcgi: Option<Mapping>,
     /// How many times the digest was asserted through this pin; not a
     /// value of the file.
     #[serde(skip)]
@@ -715,6 +721,13 @@ impl Pin {
     pub(crate) fn wrapped(mut self, wrapper: Vec<String>) -> Pin {
         self.wrapper = wrapper;
         self
+    }
+
+    /// The HTTP-to-FastCGI mapping, refused where the pin carries none.
+    pub fn fastcgi(&self) -> Result<&Mapping> {
+        self.fastcgi
+            .as_ref()
+            .context("the pin carries no [fastcgi] mapping (#2334)")
     }
 
     /// The regime by name; an unknown name is refused beside the known ones.

@@ -153,6 +153,7 @@ oracle::Host
 oracle::Invocation
 oracle::Invocation::new
 oracle::Limits
+oracle::Mapping
 oracle::Normalise
 oracle::Observation
 oracle::Oracle
@@ -165,9 +166,12 @@ oracle::Oracles::main
 oracle::Oracles::new
 oracle::Oracles::of
 oracle::PROMISE_VARIABLE
+oracle::Param
+oracle::Piece
 oracle::Pin
 oracle::Pin::digest
 oracle::Pin::digests_asserted
+oracle::Pin::fastcgi
 oracle::Pin::load
 oracle::Pin::on_this_machine
 oracle::Pin::oracle
@@ -200,6 +204,9 @@ oracle::Source::tree
 oracle::Stdin
 oracle::Streams
 oracle::TREE_VARIABLE
+oracle::Variable
+oracle::Variable::ALL
+oracle::Variable::name
 oracle::Variant
 oracle::Variant::build
 oracle::Verdict
