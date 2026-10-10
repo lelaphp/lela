@@ -33,10 +33,17 @@ static GregorianCalendar *php_intl_cal_greg(Calendar *cal)
 
 extern "C" {
 
-// Calendar::createInstance(zone, locale): the zone adopted.
+// Calendar::createInstance(zone, locale): the zone adopted; null on
+// failure, as `php_intl_cal_greg_create` answers, so no calendar ICU
+// answered beside a failure is kept.
 Calendar *php_intl_cal_create(TimeZone *zone, const char *locale, UErrorCode *status)
 {
-	return Calendar::createInstance(zone, Locale::createFromName(locale), *status);
+	Calendar *cal = Calendar::createInstance(zone, Locale::createFromName(locale), *status);
+	if (U_FAILURE(*status)) {
+		delete cal;
+		return nullptr;
+	}
+	return cal;
 }
 
 // new GregorianCalendar(zone, locale), the zone adopted, or from 3, 5 or

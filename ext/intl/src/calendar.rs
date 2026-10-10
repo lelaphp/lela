@@ -1757,7 +1757,7 @@ fn gregorian_from_fields(req: &mut Request, n: i32, f: &[i32; 6]) -> Result<Opti
     let empty = c_string(b"");
     let made =
         cal::php_intl_cal_greg_create(None, CName::from(empty.as_c_str()), n, f, &mut status);
-    let Some(mut calendar) = made.filter(|_| !status.is_failure()) else {
+    let Some(mut calendar) = made else {
         error::set(
             req,
             status,

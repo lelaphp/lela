@@ -144,6 +144,16 @@ impl Code {
         self.0 > 0
     }
 
+    /// What an ICU constructor answered beside this code, kept only where
+    /// the code is no failure. ICU answers some objects half built beside
+    /// a failure (`umsg_open` on `U_PATTERN_SYNTAX_ERROR`), and php stores
+    /// that object before it checks the code and formats with it later,
+    /// which reads what ICU never set (#2566). Here the object is closed by
+    /// its owner's drop and never handed on, so a constructor finds none.
+    pub(crate) fn built<T>(self, made: Option<T>) -> Option<T> {
+        made.filter(|_| !self.is_failure())
+    }
+
     /// The code as a `Result`: a failure is the error, zero or a warning
     /// the value.
     pub(crate) fn check(self) -> Result<Code, Code> {
