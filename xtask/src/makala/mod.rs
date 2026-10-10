@@ -15,8 +15,9 @@
 //!   lane are #2336's ruling: ten minutes, 64 clients, nightly on
 //!   `dax-build`, and a 30-second smoke in makala's own tests.
 //!
-//! Both are served one corpus, the HTTP-served subset: the CGI-shaped tests
-//! of the pinned php-src that one file serves whole, each its `--FILE--`
+//! Both are served one corpus, the HTTP-served subset: the tests of the
+//! phpt lane's served subset (`phpt::http`, #2348) that one file serves
+//! whole, each its `--FILE--`
 //! and the request its sections describe as run-tests.php's CGI
 //! translation of them ([`cgi::request`]) reads back as HTTP, under its
 //! `--INI--`. A test that runs only after its `--SKIPIF--`, reads a file
@@ -36,10 +37,10 @@ use anyhow::{Context, Result};
 use crate::cli::Command;
 use crate::manifest::Manifest;
 use crate::oracle::hosts::MAKALA;
-use crate::oracle::{Source, profile};
+use crate::oracle::profile;
 use crate::phpt::environment::Environment;
 use crate::phpt::file::Phpt;
-use crate::phpt::{adapter, cgi};
+use crate::phpt::{adapter, cgi, http};
 use crate::reading::Reading;
 use crate::witness::makala::Http;
 
@@ -79,22 +80,20 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: Command) -> Result<Read
     }
 }
 
-/// The HTTP-served subset of the pinned tree at `tree`, in the order of
-/// its paths, and how many CGI-shaped tests it left out.
+/// The tests of the pinned tree at `tree` one file serves whole, in the
+/// order of their paths, and how many CGI-shaped tests it left out: the
+/// served subset's tests (`phpt::http`), which says which tests are
+/// CGI-shaped for every lane of the production server.
 pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, usize)> {
-    let mut files = Source::files(tree)?;
-    files.retain(|file| file.extension().is_some_and(|e| e == "phpt"));
+    let mut files = http::subset(tree).tests()?;
     files.sort();
     let (mut entries, mut left) = (Vec::new(), 0);
-    for file in files {
-        let path = tree.join(&file);
+    for path in files {
         let Ok(phpt) = Phpt::load(&path) else {
             continue;
         };
-        if !phpt.is_cgi() {
-            continue;
-        }
-        match entry(&phpt, &path, &file) {
+        let file = path.strip_prefix(tree).unwrap_or(&path);
+        match entry(&phpt, &path, file) {
             Some(entry) => entries.push(entry),
             None => left += 1,
         }
@@ -191,22 +190,22 @@ mod tests {
         let test = |sections: &str| {
             format!("--TEST--\nt\n{sections}--FILE--\n<?php echo 1;\n--EXPECT--\n1\n")
         };
+        std::fs::create_dir_all(tree.path().join("tests")).unwrap();
         tree.write(
-            "a.phpt",
+            "tests/a.phpt",
             test("--INI--\nprecision=4\n--COOKIE--\na=1;\nb=2\n"),
         )
         .unwrap();
-        tree.write("b.phpt", test("--SKIPIF--\n<?php\n--GET--\nx=1\n"))
+        tree.write("tests/b.phpt", test("--SKIPIF--\n<?php\n--GET--\nx=1\n"))
             .unwrap();
-        tree.write("c.phpt", test("")).unwrap();
+        tree.write("tests/c.phpt", test("")).unwrap();
         let (entries, left) = subset(tree.path()).unwrap();
         assert_eq!(left, 1);
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, ["a.phpt"]);
+        assert_eq!(ids, ["tests/a.phpt"]);
         assert_eq!(entries[0].ini, ["precision=4"]);
         assert_eq!(entries[0].program, b"<?php echo 1;\n");
-        let shown = format!("{:?}", entries[0].http);
-        assert!(shown.contains("\"a=1; b=2\""), "{shown}");
+        assert_eq!(entries[0].http.field("Cookie"), b"a=1; b=2");
     }
 
     /// An uploaded file's temporary name reads as one token, and a path

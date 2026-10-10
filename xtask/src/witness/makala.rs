@@ -37,13 +37,19 @@ use crate::oracle::{Ended, Mapping, Observation, Oracle, Piece, Recipe, Variable
 use crate::phpt::cgi;
 use crate::scratch::Tree;
 
-/// The request a fence describes, as a client sends it.
+/// The request a fence describes, as a client sends it. The query string,
+/// the target and each field's value are the bytes the test wrote, which
+/// need not be text: a cookie's or a query's bytes in a legacy encoding
+/// reach the server as written.
 #[derive(Debug, Clone)]
 pub(crate) struct Http {
     method: String,
-    query: String,
+    query: Vec<u8>,
+    /// The request target the test names as its `REQUEST_URI`, a path
+    /// past the program's name among it, empty where it names none.
+    uri: Vec<u8>,
     /// The header fields in the order they are sent.
-    fields: Vec<(&'static str, String)>,
+    fields: Vec<(&'static str, Vec<u8>)>,
     body: Vec<u8>,
 }
 
@@ -61,30 +67,32 @@ impl Http {
 
     /// The request a CGI-shaped test's translation describes
     /// ([`cgi::request`]), read back as HTTP: its method, query string,
-    /// cookie, content type and length, and body. A value is one line, as
-    /// a header field carries it, so a section's line breaks, which an
-    /// environment variable holds and a field may not, are each a space.
+    /// cookie, the encodings it accepts, content type and length, target
+    /// and body. A value is one line, as a header field carries it, so a
+    /// section's line breaks, which an environment variable holds and a
+    /// field may not, are each a space.
     pub(crate) fn described(described: &cgi::Request) -> Http {
         let var = |name: &str| {
             let entries = described.env.entries().iter().rev();
             let mut found = entries.filter(|(had, _)| had == name);
-            found.next().map_or_else(String::new, |(_, value)| {
-                value
-                    .to_string_lossy()
-                    .replace("\r\n", " ")
-                    .replace(['\r', '\n'], " ")
-            })
+            found
+                .next()
+                .map_or_else(Vec::new, |(_, value)| one_line(value.as_encoded_bytes()))
         };
         let fields = [
-            ("Host", "localhost".to_owned()),
+            ("Host", b"localhost".to_vec()),
             ("Cookie", var("HTTP_COOKIE")),
+            ("Accept-Encoding", var("HTTP_ACCEPT_ENCODING")),
             ("Content-Type", var("CONTENT_TYPE")),
             ("Content-Length", var("CONTENT_LENGTH")),
         ];
-        let method = Some(var("REQUEST_METHOD")).filter(|m| !m.is_empty());
+        let method = String::from_utf8_lossy(&var("REQUEST_METHOD")).into_owned();
         Http {
-            method: method.unwrap_or_else(|| "GET".to_owned()),
+            method: Some(method)
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "GET".to_owned()),
             query: var("QUERY_STRING"),
+            uri: var("REQUEST_URI"),
             fields: fields.into_iter().filter(|(_, v)| !v.is_empty()).collect(),
             body: described.stdin.clone().unwrap_or_default(),
         }
@@ -94,25 +102,50 @@ impl Http {
     pub(crate) fn get() -> Http {
         Http {
             method: "GET".to_owned(),
-            query: String::new(),
-            fields: vec![("Host", "localhost".to_owned())],
+            query: Vec::new(),
+            uri: Vec::new(),
+            fields: vec![("Host", b"localhost".to_vec())],
             body: Vec::new(),
         }
     }
 
     /// A field's value as sent, empty where it is not.
-    fn field(&self, name: &str) -> String {
+    pub(crate) fn field(&self, name: &str) -> Vec<u8> {
         let found = self.fields.iter().find(|(had, _)| *had == name);
-        found.map_or_else(String::new, |(_, value)| value.clone())
+        found.map_or_else(Vec::new, |(_, value)| value.clone())
     }
 
-    /// The request target: the program's file, and the query after a `?`.
-    fn target(&self, script: &str) -> String {
-        match self.query.as_str() {
-            "" => format!("/{script}"),
-            query => format!("/{script}?{query}"),
+    /// The request target: the `REQUEST_URI` the test names or else the
+    /// program's file, and the query after a `?` where the target has none.
+    fn target(&self, script: &str) -> Vec<u8> {
+        let mut target = match self.uri.as_slice() {
+            [] => format!("/{script}").into_bytes(),
+            uri => uri.to_vec(),
+        };
+        if !self.query.is_empty() && !target.contains(&b'?') {
+            target.push(b'?');
+            target.extend_from_slice(&self.query);
         }
+        target
     }
+}
+
+/// A value as one line, as a header field carries it: each line break of
+/// it, `\r\n`, `\r` or `\n`, a space.
+fn one_line(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut bytes = value.iter().peekable();
+    while let Some(&byte) = bytes.next() {
+        if byte == b'\r' && bytes.peek() == Some(&&b'\n') {
+            bytes.next();
+        }
+        out.push(if matches!(byte, b'\r' | b'\n') {
+            b' '
+        } else {
+            byte
+        });
+    }
+    out
 }
 
 /// `snippet` served as the request `request` describes by the makala at
@@ -236,15 +269,21 @@ impl Server {
             port: 0,
             software: String::new(),
         };
-        let mut line = String::new();
-        BufReader::new(stderr?).read_line(&mut line)?;
+        // What php logs at startup, a deprecated ini entry's warning among
+        // it, stands before the line that says where it listens.
+        let (mut line, mut before) = (String::new(), String::new());
+        let mut stderr = BufReader::new(stderr?);
+        while stderr.read_line(&mut line)? > 0 && !line.contains(" listening on http://") {
+            before.push_str(&line);
+            line.clear();
+        }
         let said = line
             .split_once(" listening on http://")
             .and_then(|(software, rest)| Some((software, rest.split_once(',')?.0)));
         let (software, addr) =
-            said.ok_or_else(|| anyhow!("makala did not say where it listens: {line:?}"))?;
+            said.ok_or_else(|| anyhow!("makala did not say where it listens: {before:?}"))?;
         server.port = (addr.rsplit(':').next().and_then(|p| p.parse().ok()))
-            .ok_or_else(|| anyhow!("makala names no port it listens on: {line:?}"))?;
+            .ok_or_else(|| anyhow!("makala names no port it listens on: {before}{line:?}"))?;
         software.clone_into(&mut server.software);
         addr.clone_into(&mut server.addr);
         Ok(server)
@@ -265,12 +304,17 @@ impl Server {
             .with_context(|| format!("connecting to {addr}"))?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
-        let fields: String = (http.fields.iter())
-            .flat_map(|(name, value)| [*name, ": ", value, "\r\n"])
-            .collect();
-        let target = http.target(script);
-        write!(stream, "{} {target} HTTP/1.0\r\n{fields}\r\n", http.method)?;
-        stream.write_all(&http.body)?;
+        let mut sent = format!("{} ", http.method).into_bytes();
+        sent.extend_from_slice(&http.target(script));
+        sent.extend_from_slice(b" HTTP/1.0\r\n");
+        for (name, value) in &http.fields {
+            sent.extend_from_slice(format!("{name}: ").as_bytes());
+            sent.extend_from_slice(value);
+            sent.extend_from_slice(b"\r\n");
+        }
+        sent.extend_from_slice(b"\r\n");
+        sent.extend_from_slice(&http.body);
+        stream.write_all(&sent)?;
         let mut answer = Vec::new();
         stream
             .read_to_end(&mut answer)
@@ -339,7 +383,7 @@ pub(crate) fn by_fpm(
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let stream = pool.connect()?;
     stream.set_read_timeout(Some(timeout))?;
-    let pairs = params.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes()));
+    let pairs = params.iter().map(|(n, v)| (n.as_bytes(), v.as_slice()));
     let answered = round(stream, pairs, Some(&http.body))?;
     pool.settle(timeout)?;
     Ok(answered)
@@ -356,31 +400,31 @@ fn mapped(
     root: &str,
     script: &str,
     ports: Ports,
-) -> Vec<(String, String)> {
-    let fill = |variable: Variable| -> String {
+) -> Vec<(String, Vec<u8>)> {
+    let fill = |variable: Variable| -> Vec<u8> {
         match variable {
-            Variable::DocumentRoot => root.to_owned(),
-            Variable::FastcgiUri | Variable::DocumentUri => format!("/{script}"),
             Variable::QueryString => http.query.clone(),
-            Variable::RequestMethod => http.method.clone(),
             Variable::ContentType => http.field("Content-Type"),
             Variable::ContentLength => http.field("Content-Length"),
             Variable::RequestUri => http.target(script),
-            Variable::ServerProtocol => "HTTP/1.0".to_owned(),
-            Variable::Scheme => "http".to_owned(),
-            Variable::Https => String::new(),
-            Variable::NginxVersion => mapping.nginx.clone(),
-            Variable::RemoteAddr | Variable::ServerAddr => "127.0.0.1".to_owned(),
-            Variable::RemotePort => ports.remote.to_string(),
-            Variable::ServerPort => ports.server.to_string(),
-            Variable::ServerName => "localhost".to_owned(),
+            Variable::DocumentRoot => root.as_bytes().to_vec(),
+            Variable::FastcgiUri | Variable::DocumentUri => format!("/{script}").into_bytes(),
+            Variable::RequestMethod => http.method.clone().into_bytes(),
+            Variable::ServerProtocol => b"HTTP/1.0".to_vec(),
+            Variable::Scheme => b"http".to_vec(),
+            Variable::Https => Vec::new(),
+            Variable::NginxVersion => mapping.nginx.clone().into_bytes(),
+            Variable::RemoteAddr | Variable::ServerAddr => b"127.0.0.1".to_vec(),
+            Variable::RemotePort => ports.remote.to_string().into_bytes(),
+            Variable::ServerPort => ports.server.to_string().into_bytes(),
+            Variable::ServerName => b"localhost".to_vec(),
         }
     };
     let mut params = Vec::new();
     for param in &mapping.params {
-        let value: String = (param.value.iter())
-            .map(|piece| match piece {
-                Piece::Text(text) => text.clone(),
+        let value: Vec<u8> = (param.value.iter())
+            .flat_map(|piece| match piece {
+                Piece::Text(text) => text.clone().into_bytes(),
                 Piece::Variable(variable) => fill(*variable),
             })
             .collect();
@@ -430,7 +474,7 @@ pub(crate) fn php_logged(logged: &str) -> Vec<u8> {
 }
 
 /// A head and its body, split at the first blank line.
-fn split_head(bytes: &[u8]) -> (String, &[u8]) {
+pub(crate) fn split_head(bytes: &[u8]) -> (String, &[u8]) {
     let end = bytes.windows(4).position(|w| w == b"\r\n\r\n");
     let (head, body) = end.map_or((bytes, &[][..]), |end| (&bytes[..end], &bytes[end + 4..]));
     (String::from_utf8_lossy(head).into_owned(), body)
@@ -470,10 +514,11 @@ mod tests {
         let pin = Pin::parse(&text).unwrap();
         let http = Http {
             method: "POST".to_owned(),
-            query: "a=1".to_owned(),
+            query: b"a=1".to_vec(),
+            uri: Vec::new(),
             fields: vec![
-                ("Host", "localhost".to_owned()),
-                ("Content-Length", "2".to_owned()),
+                ("Host", b"localhost".to_vec()),
+                ("Content-Length", b"2".to_vec()),
             ],
             body: b"hi".to_vec(),
         };
@@ -495,13 +540,42 @@ mod tests {
             params
                 .iter()
                 .find(|(had, _)| had == name)
-                .map(|(_, v)| v.as_str())
+                .and_then(|(_, v)| std::str::from_utf8(v).ok())
         };
         assert_eq!(value("SCRIPT_FILENAME"), Some("/root/t.php"));
         assert_eq!(value("REQUEST_URI"), Some("/t.php?a=1"));
         assert_eq!(value("SERVER_SOFTWARE"), Some("nginx/1.30.5"));
         assert_eq!(value("CONTENT_LENGTH"), Some("2"));
         assert_eq!(value("CONTENT_TYPE"), Some(""));
+    }
+
+    /// A test's `REQUEST_URI` is the target, its query after it where the
+    /// target carries none, its `HTTP_ACCEPT_ENCODING` a field, and a
+    /// cookie's bytes are sent as written.
+    #[test]
+    fn a_test_s_request_uri_is_the_target_and_the_encodings_it_accepts_a_field() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut env = crate::phpt::environment::Environment::default();
+        env.set("REQUEST_URI", "/f.php/a.jpg");
+        env.set("QUERY_STRING", "x=1");
+        env.set("HTTP_ACCEPT_ENCODING", "gzip");
+        env.set(
+            "HTTP_COOKIE",
+            OsString::from_vec(b"a=\xc6\xfc\r\nb=1".to_vec()),
+        );
+        let http = Http::described(&cgi::Request {
+            env,
+            stdin: None,
+            args: Vec::new(),
+        });
+        assert_eq!(http.target("f.php"), b"/f.php/a.jpg?x=1");
+        assert_eq!(http.field("Accept-Encoding"), b"gzip");
+        assert_eq!(
+            http.field("Cookie"),
+            b"a=\xc6\xfc b=1",
+            "bytes as written, on one line"
+        );
+        assert_eq!(Http::get().target("t.php"), b"/t.php");
     }
 
     /// php-fpm's CGI response and makala's HTTP one read alike: the code,

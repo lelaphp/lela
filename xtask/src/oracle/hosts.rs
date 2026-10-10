@@ -71,8 +71,10 @@ pub(crate) const PHPDBG: EngineHost = EngineHost {
 };
 
 /// The production server, which a `request makala` fence is served by
-/// (#2347), and no phpt test yet (#2348); its oracle is php-fpm under the
-/// pin's `[fastcgi]` mapping, so `[sapi]` pins none of its own.
+/// (#2347) and the phpt lane's served subset is served to over HTTP
+/// (`phpt::http`, #2348); its oracle is php-fpm under the pin's
+/// `[fastcgi]` mapping, and the served subset's php-cgi, so `[sapi]` pins
+/// none of its own.
 pub(crate) const MAKALA: EngineHost = EngineHost {
     krate: "sapi/makala",
     binary: "makala",

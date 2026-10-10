@@ -284,12 +284,13 @@ fn first_blank(out: &[u8]) -> Option<(usize, usize)> {
 /// `--EXPECTHEADERS--` held to the headers a run wrote
 /// (run-tests.php:2549-2576): each wanted line with a colon, by its name,
 /// is met by a header of that name whose value php's `==` finds equal.
+/// A name is held as [`Names`] says.
 /// `None` where every one is met; the wanted lines and the ones the run
 /// wrote of those names otherwise, each joined by `\n`, which upstream
 /// shows above the body with `--HEADERS--` between.
 pub(super) fn headers_missed(
     wanted: &str,
-    headers: &[(String, String)],
+    (headers, names): (&[(String, String)], Names),
 ) -> Option<(String, String)> {
     let mut want: Vec<(String, String)> = Vec::new();
     for line in wanted.split(['\n', '\r']) {
@@ -302,7 +303,7 @@ pub(super) fn headers_missed(
     let mut failed = false;
     let mut got = Vec::new();
     for (name, value) in &want {
-        let found = headers.iter().find(|(had, _)| had == name);
+        let found = (headers.iter()).find(|(had, _)| names.same(had, name));
         if let Some((_, had)) = found {
             got.push(format!("{name}: {had}"));
         }
@@ -323,7 +324,7 @@ pub(super) fn headers_missed(
 /// texts a difference is shown between.
 pub(super) fn with_headers(
     wanted: Option<&str>,
-    headers: &[(String, String)],
+    headers: (&[(String, String)], Names),
     (met, expected): (bool, &[u8]),
     actual: Vec<u8>,
 ) -> (bool, Vec<u8>, Vec<u8>) {
@@ -336,6 +337,26 @@ pub(super) fn with_headers(
                 shown
             };
             (false, above(wanted, expected), above(written, &actual))
+        }
+    }
+}
+
+/// How a header's name written is held to the name wanted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Names {
+    /// As written, as run-tests.php holds php-cgi's.
+    AsWritten,
+    /// Without regard to case, as the served subset holds makala's, which
+    /// writes every name lowercase by design (#2570).
+    Folded,
+}
+
+impl Names {
+    /// Whether the name written, `had`, is the name wanted.
+    fn same(self, had: &str, wanted: &str) -> bool {
+        match self {
+            Names::AsWritten => had == wanted,
+            Names::Folded => had.eq_ignore_ascii_case(wanted),
         }
     }
 }
@@ -442,17 +463,31 @@ mod tests {
         assert_eq!(empty, b"");
         assert_eq!(parted(b"no headers", &rules).1, b"no headers");
         assert_eq!(
-            headers_missed("Status: 404 Not Found\nX-Powered-By: PHP/X.Y.Z", &headers),
+            headers_missed(
+                "Status: 404 Not Found\nX-Powered-By: PHP/X.Y.Z",
+                (&headers, Names::AsWritten)
+            ),
             None
         );
         assert_eq!(
-            headers_missed("Location: /\nStatus: 302", &headers),
+            headers_missed("Location: /\nStatus: 302", (&headers, Names::AsWritten)),
             Some((
                 "Location: /\nStatus: 302".to_owned(),
                 "Status: 404 Not Found".to_owned()
             ))
         );
         let length = [("Content-length".to_owned(), "03".to_owned())];
-        assert_eq!(headers_missed("Content-length: 3", &length), None);
+        assert_eq!(
+            headers_missed("Content-length: 3", (&length, Names::AsWritten)),
+            None
+        );
+        // A name of another case is met only where names are folded, as
+        // makala's lowercase ones are (#2570).
+        let lower = [("content-length".to_owned(), "3".to_owned())];
+        assert!(headers_missed("Content-length: 3", (&lower, Names::AsWritten)).is_some());
+        assert_eq!(
+            headers_missed("Content-length: 3", (&lower, Names::Folded)),
+            None
+        );
     }
 }

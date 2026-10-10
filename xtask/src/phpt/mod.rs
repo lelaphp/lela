@@ -127,7 +127,9 @@
 //! #814); a CGI-shaped one runs through the CGI host beside the binary,
 //! the php-cgi `[sapi]` pins for the control and the engine's own
 //! `php-cgi`, `sapi/cgi`'s binary, for the engine, as the `cgi` module
-//! has it (#1198, ADR-0008); and a test of `sapi/fpm/tests` finds the
+//! has it (#1198, ADR-0008), or in `sapi/makala`'s served subset is
+//! served to the production server over HTTP, as the `http` module has it
+//! (#2348); and a test of `sapi/fpm/tests` finds the
 //! engine's own `php-fpm` where upstream's `FPM\Tester` looks, as the
 //! `fpm` module places it (#1291). Beyond those, the process adapter
 //! gives a test run-tests.php's environment and pipes for its streams, the
@@ -147,6 +149,7 @@ pub(crate) mod against;
 pub(crate) mod base;
 pub(crate) mod cgi;
 mod fpm;
+pub(crate) mod http;
 pub(crate) mod phpdbg;
 mod scope;
 pub(crate) use scope::{Comparison, Scope};
@@ -351,17 +354,45 @@ pub(crate) struct Subset {
     /// in, as run-tests.php runs them from `TEST_PHP_SRCDIR`
     /// (run-tests.php:1173, #952).
     pub root: PathBuf,
+    /// Which tests of its directories it holds, and how they run.
+    pub holds: Holds,
+}
+
+/// Which tests of its directories a subset holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Holds {
+    /// Every `.phpt`, each run as its shape says.
+    Every,
+    /// The CGI-shaped ones alone, served to the production server over
+    /// HTTP under the engine: `sapi/makala`'s served subset (the `http`
+    /// module, #2348).
+    Served,
+}
+
+impl Holds {
+    /// Whether the file at `path` is a test of a subset that holds these.
+    fn admits(self, path: &Path) -> bool {
+        match self {
+            Holds::Every => is_phpt(path),
+            Holds::Served => http::is_served(path),
+        }
+    }
 }
 
 impl Subset {
     /// The subset a name asks for: a crate of the manifest by name
     /// (`php_engine`, `pcre`, `ext/pcre`), whose subsets its row owns, or
     /// a directory of the pinned tree at `source` (`Zend/tests`), whose
-    /// scope is that path. A crate that owns none is refused by saying so:
-    /// which subsets are a crate's is the manifest's sentence, and an
-    /// absent one is an answer, not a lookup that failed.
+    /// scope is that path, or `sapi/makala`, the served subset its row
+    /// names no directory of (the `http` module, #2348). A crate that owns
+    /// none is refused by saying so: which subsets are a crate's is the
+    /// manifest's sentence, and an absent one is an answer, not a lookup
+    /// that failed.
     pub(crate) fn resolve(manifest: &Manifest, source: &Path, name: &str) -> Result<Subset> {
         let named = name.trim_matches('/');
+        if named == http::SCOPE {
+            return Ok(http::subset(source));
+        }
         let as_crate = format!("ext/{named}");
         if let Some(krate) = manifest
             .crate_named(named)
@@ -381,6 +412,7 @@ impl Subset {
                 scope: named.to_owned(),
                 dirs: vec![Dir::at(source, under)],
                 root: source.to_path_buf(),
+                holds: Holds::Every,
             });
         }
         bail!(
@@ -406,6 +438,7 @@ impl Subset {
             scope: krate.name.clone(),
             dirs,
             root: source.to_path_buf(),
+            holds: Holds::Every,
         })
     }
 
@@ -421,6 +454,7 @@ impl Subset {
                 .map(|place| Dir::at(root, place.under.clone()))
                 .collect(),
             root: root.to_path_buf(),
+            holds: self.holds,
         }
     }
 
@@ -463,6 +497,7 @@ impl Subset {
                 scope: under.to_string_lossy().into_owned(),
                 dirs: vec![Dir::at(source, under)],
                 root: source.to_path_buf(),
+                holds: Holds::Every,
             })
             .filter(|subset| {
                 subset
@@ -473,14 +508,15 @@ impl Subset {
             .collect()
     }
 
-    /// Every `.phpt` under the subset's directories, sorted within each.
+    /// Every test the subset holds under its directories, sorted within
+    /// each: every `.phpt`, or the served subset's CGI-shaped ones.
     pub(crate) fn tests(&self) -> Result<Vec<PathBuf>> {
         let mut all = Vec::new();
         for place in &self.dirs {
             let mut found = Vec::new();
             tally::files_under(&place.dir, &mut found)
                 .with_context(|| format!("listing the subset at {}", place.dir.display()))?;
-            found.retain(|path| is_phpt(path));
+            found.retain(|path| self.holds.admits(path));
             found.sort();
             all.append(&mut found);
         }
@@ -1302,6 +1338,12 @@ impl<'v> Runners<'v> {
             Engine::Built if !ask.unkept => featured(root, manifest, variants, subsets)?,
             Engine::Built | Engine::Named(_) | Engine::Control => BTreeMap::new(),
         };
+        // The served subset's host, built now in the lanes' profile, where
+        // the engine's own build stands, as `fpm-compare` builds it (#2348).
+        if ask.engine == Engine::Built && subsets.iter().any(|subset| subset.holds == Holds::Served)
+        {
+            crate::makala::makala(root)?;
+        }
         Ok(Runners {
             main: resolve(&manifest.pin)?,
             variants: resolved,
@@ -1668,9 +1710,15 @@ fn run_tests(
     let control = matches!(runner, Runner::Control(_));
     let host = |kind: EngineHost| kind.for_run(oracle.pin(), binary, control);
     fpm::place(subset, host(FPM).as_deref())?;
+    // The served subset under the engine: each test served to the makala
+    // beside the binary, and none through php-cgi in its place.
+    let http = (subset.holds == Holds::Served && !control)
+        .then(|| http::host(binary))
+        .transpose()?;
     let hosts = adapter::Hosts {
         cgi: host(CGI),
         phpdbg: host(PHPDBG),
+        http,
     };
     let adapter = Adapter::new(oracle, registry, binary, hosts, lane);
     let items = adapter.listed(subset, tests)?;

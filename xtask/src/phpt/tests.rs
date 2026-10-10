@@ -99,6 +99,7 @@ fn subset(name: &str, tests: &[(&str, &str)]) -> (Tree, Subset) {
             dir: dir.path().to_path_buf(),
         }],
         root: dir.path().to_path_buf(),
+        holds: Holds::Every,
     };
     (dir, subset)
 }
@@ -183,6 +184,7 @@ fn rooted(name: &str, text: &str) -> (Tree, Subset) {
             dir,
         }],
         root: root.path().to_path_buf(),
+        holds: Holds::Every,
     };
     (root, subset)
 }
@@ -633,6 +635,7 @@ fn a_test_of_sapi_fpm_finds_the_process_manager() {
             dir: tests.clone(),
         }],
         root: tree.path().to_path_buf(),
+        holds: Holds::Every,
     };
     let tally = run(&subset, &registry(""));
     let found: Vec<(&str, Judgement)> = tally
@@ -1451,6 +1454,7 @@ fn redirect_subset(tree: &Tree, under: &str) -> Subset {
         scope: "ext/driver".to_owned(),
         dirs: vec![Dir::at(tree.path(), PathBuf::from(under))],
         root: tree.path().to_path_buf(),
+        holds: Holds::Every,
     }
 }
 
@@ -1915,6 +1919,7 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
             dir: tests,
         }],
         root: tree.path().to_path_buf(),
+        holds: Holds::Every,
     };
     assert!(server::needs(&subset));
     let mut down = manifest();

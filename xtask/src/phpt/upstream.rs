@@ -220,6 +220,7 @@ mod tests {
                 dir: tree.join("ext/a"),
             }],
             root: tree.to_path_buf(),
+            holds: crate::phpt::Holds::Every,
         };
         let named = |files: &[&str]| {
             let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
