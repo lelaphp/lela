@@ -842,6 +842,12 @@ pub(crate) struct Vm {
     /// The switches standing, `EG(current_execute_data)` moved below the
     /// innermost frame.
     switches: Vec<Switch>,
+    /// The argument lists of calls already served, emptied, each kept
+    /// for the next call to place its arguments in: php places a call's
+    /// arguments in its frame on the VM stack and allocates nothing for
+    /// them, and this keeps a call from asking the system allocator for
+    /// its list ([`Vm::building_call`], [`Vm::keep_arguments`]).
+    spare_arguments: Vec<Vec<Value>>,
     /// How many times a kernel has looked a name up among the linked
     /// functions, the linked classes or a receiver's methods, which is
     /// what a primed cache slot spares: the tests count it across two
@@ -1266,9 +1272,31 @@ impl Vm {
         self.calls.push(call);
     }
 
-    /// The call the `SEND_*` oplines are placing arguments into.
+    /// The argument list of a call whose arguments have been given up
+    /// or handed on, kept empty for the next call to place its arguments
+    /// in ([`Vm::building_call`]). A list that never held one is nothing
+    /// to keep, and one longer than a call ordinarily passes is let go,
+    /// so a call that spread a large array keeps nothing of it.
+    pub(crate) fn keep_arguments(&mut self, mut arguments: Vec<Value>) {
+        const KEPT: usize = 16;
+        arguments.clear();
+        if (1..=KEPT).contains(&arguments.capacity()) {
+            self.spare_arguments.push(arguments);
+        }
+    }
+
+    /// The call the `SEND_*` oplines are placing arguments into, its
+    /// argument list one an earlier call left ([`Vm::keep_arguments`])
+    /// where it has none yet, so placing a call's first argument asks
+    /// the system allocator for nothing.
     pub(crate) fn building_call(&mut self) -> Option<&mut CallState> {
-        self.calls.last_mut()
+        let call = self.calls.last_mut()?;
+        if call.arguments.capacity() == 0
+            && let Some(spare) = self.spare_arguments.pop()
+        {
+            call.arguments = spare;
+        }
+        Some(call)
     }
 
     /// The callee of the call being built, which a `SEND_*_EX` reads the

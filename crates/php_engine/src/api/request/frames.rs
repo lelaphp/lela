@@ -545,7 +545,8 @@ impl Request {
             caller,
         );
         let mut extra = Vec::new();
-        for (at, argument) in call.arguments.into_iter().enumerate() {
+        let mut arguments = call.arguments;
+        for (at, argument) in arguments.drain(..).enumerate() {
             if at < parameters {
                 let previous =
                     self.set_slot(frame, u32::try_from(at).unwrap_or(u32::MAX), argument);
@@ -559,6 +560,7 @@ impl Request {
             state.extra_named = call.extra_named;
             state.closure = closure;
         }
+        self.vm.keep_arguments(arguments);
         if let Some(name) = call.name {
             self.release(Value::string(name));
         }
@@ -838,9 +840,11 @@ impl Request {
             for value in call.coerced {
                 self.release_nogc(value);
             }
-            for value in call.arguments {
+            let mut arguments = call.arguments;
+            for value in arguments.drain(..) {
                 self.release_nogc(value);
             }
+            self.vm.keep_arguments(arguments);
             if let Some(name) = call.name {
                 self.release(Value::string(name));
             }
