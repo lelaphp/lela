@@ -371,20 +371,29 @@ impl Request {
     /// inherits no interval timer and no POSIX timer, so it runs untimed
     /// until it sets a limit of its own, in its copy of this request.
     ///
-    /// Two seconds of a three-second limit spent before the fork leave one
-    /// after it; a limit counted again from the fork would end the program
-    /// two seconds later. The fatal's line is masked, as php's tests mask it:
-    /// a loaded machine spends that second in `pcntl_waitpid`, not the loop.
+    /// Two and a half seconds of a three-second limit spent before the fork
+    /// leave a half after it. A limit counted again from the fork could end
+    /// the program no sooner than three seconds after the fork, so the
+    /// verdict asks only that, with the instant read before `pcntl_fork`:
+    /// no delay can make a limit counted again pass as one counted from
+    /// before, and one counted from before passes unless its timeout is
+    /// taken two and a half seconds late. The limit counts wall-clock time
+    /// here and in the oracle, whose build on this platform arms
+    /// `ITIMER_REAL` (`Z/Zend/zend_execute_API.c:1611-1614`), so wall time
+    /// is the clock it counts. The child is left to end on its own, so the
+    /// parent waits on nothing a loaded machine stretches before its loop.
+    /// The fatal's line is masked, as php's tests mask it.
     ///
     /// ```php
     /// $start = microtime(true);
     /// set_time_limit(3);
-    /// while (microtime(true) - $start < 2) {}
-    /// if (($child = pcntl_fork()) === 0) { exit(0); }
-    /// register_shutdown_function(function () use ($start) {
-    ///     echo microtime(true) - $start < 4.5 ? "counted from before the fork\n" : "counted again from the fork\n";
+    /// register_shutdown_function(function () use (&$forked, &$child) {
+    ///     if ($child === 0) { return; }
+    ///     echo microtime(true) - $forked < 3 ? "counted from before the fork\n" : "counted again from the fork\n";
     /// });
-    /// pcntl_waitpid($child, $status);
+    /// while (microtime(true) - $start < 2.5) {}
+    /// $forked = microtime(true);
+    /// if (($child = pcntl_fork()) === 0) { exit(0); }
     /// for (;;) {}
     /// ```
     /// ```expect exit=255 process wall=3s
