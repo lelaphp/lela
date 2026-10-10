@@ -75,6 +75,7 @@ FreshStr::is_empty
 FreshStr::len
 FreshStr::set_len
 GcStatus
+GcTable
 Heap
 Heap::addref
 Heap::array

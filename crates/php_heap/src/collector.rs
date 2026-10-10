@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use crate::array::Arr;
 use crate::gc::{self, Colour, Counted};
-use crate::hooks::HeapHooks;
+use crate::hooks::{GcTable, HeapHooks};
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::zval::WeakMarks;
@@ -561,15 +561,37 @@ fn as_count(count: i64) -> u32 {
     count as u32
 }
 
+/// The table php's walk reaches through an object after the values its
+/// handler named, `get_gc`'s returned `ht`: one of the heap's, which
+/// each phase colours, or the rows of one that is no heap value, which
+/// each phase reaches once, through the one object holding it.
+#[derive(Clone, Copy)]
+enum Table {
+    Arr(Arr),
+    Rows,
+}
+
+impl Table {
+    /// Whether the phase whose step on a child is `step` walks the
+    /// table's rows: php's colour test on `ht`, and always for rows.
+    fn newly(self, step: impl FnOnce(Node) -> bool) -> bool {
+        match self {
+            Table::Arr(a) => step(Node::Arr(a)),
+            Table::Rows => true,
+        }
+    }
+}
+
 /// The children php's walk reads off one value, `get_gc` for an object:
 /// the zvals in `kids`, and the table php's handler hands back beside
 /// them, whose own entries follow in `kids` from the index returned.
-/// For an object with a dynamic table that is the table, walked after
-/// what the handler names, its declared slots first, as php's
-/// `rebuild_object_properties` puts the slots' `IS_INDIRECT` rows first;
-/// for one without, the handler's zvals and then the slots, php's
-/// `properties_table`.
-fn children(hooks: &mut dyn HeapHooks, node: Node, kids: &mut Vec<Zval>) -> (Option<Arr>, usize) {
+/// For an object of the properties' handlers with a dynamic table that
+/// is the table, walked after what the handler names, its declared slots
+/// first, as php's `rebuild_object_properties` puts the slots'
+/// `IS_INDIRECT` rows first; for one without, the handler's zvals and
+/// then the slots, php's `properties_table`. A table the handler hands
+/// back takes the properties' place, as php's does.
+fn children(hooks: &mut dyn HeapHooks, node: Node, kids: &mut Vec<Zval>) -> (Option<Table>, usize) {
     kids.clear();
     match node {
         Node::Arr(a) => {
@@ -580,19 +602,37 @@ fn children(hooks: &mut dyn HeapHooks, node: Node, kids: &mut Vec<Zval>) -> (Opt
             kids.push(r.val());
             (None, 0)
         }
-        Node::Obj(o) => {
-            hooks.gc_children(o, &mut |z| kids.push(z));
-            let table = o.properties();
-            let split = if table.is_some() { kids.len() } else { 0 };
-            for i in 0..o.slots() {
-                kids.push(o.slot(i));
+        Node::Obj(o) => match hooks.gc_children(o, &mut |z| kids.push(z)) {
+            GcTable::Properties => {
+                let table = o.properties();
+                let split = if table.is_some() { kids.len() } else { 0 };
+                for i in 0..o.slots() {
+                    kids.push(o.slot(i));
+                }
+                if let Some(table) = table {
+                    table.gc_values(kids);
+                }
+                (owned(table), split)
             }
-            if let Some(table) = table {
+            GcTable::Arr(table) => {
+                let split = kids.len();
                 table.gc_values(kids);
+                (owned(Some(table)), split)
             }
-            (table.filter(|t| !t.is_immutable()), split)
-        }
+            GcTable::Rows(rows) => {
+                let split = kids.len();
+                kids.extend(rows);
+                (Some(Table::Rows), split)
+            }
+        },
     }
+}
+
+/// A table of the heap's as the walk colours it: an immutable one has no
+/// header to colour and holds nothing a cycle passes through, so its
+/// rows are walked as the handler's values are.
+fn owned(table: Option<Arr>) -> Option<Table> {
+    table.filter(|t| !t.is_immutable()).map(Table::Arr)
 }
 
 /// php's `handle_zvals` loop over `list` for one phase: `step` is what
@@ -919,17 +959,11 @@ impl Heap {
             let next = match node {
                 Node::Obj(o) if walkable(o) && Heap::gc_grey_weak(hooks, o, &mut stack) => None,
                 Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
-                    (Some(table), split) => {
-                        let g = table.gc();
-                        g.delref();
-                        if g.colour() == Colour::Grey {
-                            walk(&kids[..split], &mut stack, grey)
-                        } else {
-                            g.set_colour(Colour::Grey);
-                            push_all(&kids[..split], &mut stack, grey);
-                            walk(&kids[split..], &mut stack, grey)
-                        }
+                    (Some(table), split) if table.newly(grey) => {
+                        push_all(&kids[..split], &mut stack, grey);
+                        walk(&kids[split..], &mut stack, grey)
                     }
+                    (Some(_), split) => walk(&kids[..split], &mut stack, grey),
                     (None, _) => walk(kids, &mut stack, grey),
                 },
                 Node::Obj(_) => None,
@@ -955,17 +989,11 @@ impl Heap {
             let next = match node {
                 Node::Obj(o) if walkable(o) && Heap::gc_black_weak(hooks, o, &mut stack) => None,
                 Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
-                    (Some(table), split) => {
-                        let g = table.gc();
-                        g.addref();
-                        if g.colour() == Colour::Black {
-                            walk(&kids[..split], &mut stack, blacken)
-                        } else {
-                            g.set_colour(Colour::Black);
-                            push_all(&kids[..split], &mut stack, blacken);
-                            walk(&kids[split..], &mut stack, blacken)
-                        }
+                    (Some(table), split) if table.newly(blacken) => {
+                        push_all(&kids[..split], &mut stack, blacken);
+                        walk(&kids[split..], &mut stack, blacken)
                     }
+                    (Some(_), split) => walk(&kids[..split], &mut stack, blacken),
                     (None, _) => walk(kids, &mut stack, blacken),
                 },
                 Node::Obj(_) => None,
@@ -1003,17 +1031,14 @@ impl Heap {
                     Node::Obj(o) if walkable(o) => {
                         Heap::gc_whiten_weakly_keyed(hooks, o, &mut stack);
                         match children(hooks, node, kids) {
-                            (Some(table), split) => {
-                                let g = table.gc();
-                                if g.colour() == Colour::Grey {
-                                    g.set_colour(Colour::White);
-                                    stack.push(Node::Arr(table));
-                                    push_all(&kids[..split], &mut stack, whiten);
-                                    walk(&kids[split..], &mut stack, whiten)
-                                } else {
-                                    walk(&kids[..split], &mut stack, whiten)
+                            (Some(table), split) if table.newly(whiten) => {
+                                if let Table::Arr(a) = table {
+                                    stack.push(Node::Arr(a));
                                 }
+                                push_all(&kids[..split], &mut stack, whiten);
+                                walk(&kids[split..], &mut stack, whiten)
                             }
+                            (Some(_), split) => walk(&kids[..split], &mut stack, whiten),
                             (None, _) => walk(kids, &mut stack, whiten),
                         }
                     }
@@ -1061,17 +1086,11 @@ impl Heap {
                         None
                     } else {
                         match children(hooks, node, kids) {
-                            (Some(table), split) => {
-                                let g = table.gc();
-                                g.addref();
-                                if g.colour() == Colour::White {
-                                    g.set_colour(Colour::Black);
-                                    push_all(&kids[..split], &mut stack, collect);
-                                    walk(&kids[split..], &mut stack, collect)
-                                } else {
-                                    walk(&kids[..split], &mut stack, collect)
-                                }
+                            (Some(table), split) if table.newly(collect) => {
+                                push_all(&kids[..split], &mut stack, collect);
+                                walk(&kids[split..], &mut stack, collect)
                             }
+                            (Some(_), split) => walk(&kids[..split], &mut stack, collect),
                             (None, _) => walk(kids, &mut stack, collect),
                         }
                     }
@@ -1135,9 +1154,11 @@ impl Heap {
                         match children(hooks, node, kids) {
                             (Some(table), split) => {
                                 push_all(&kids[..split], &mut stack, |_| true);
-                                let g = table.gc();
-                                if g.address().is_some() && g.colour() == Colour::Black {
-                                    hooks.heap().gc.remove_from_buffer(Node::Arr(table));
+                                if let Table::Arr(table) = table {
+                                    let g = table.gc();
+                                    if g.address().is_some() && g.colour() == Colour::Black {
+                                        hooks.heap().gc.remove_from_buffer(Node::Arr(table));
+                                    }
                                 }
                                 walk(&kids[split..], &mut stack, |_| true)
                             }
@@ -1535,7 +1556,9 @@ mod tests {
             }
         }
         fn free_native(&mut self, _: Obj) {}
-        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) -> GcTable {
+            GcTable::Properties
+        }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)

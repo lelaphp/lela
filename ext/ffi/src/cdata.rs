@@ -12,8 +12,8 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    ClassIterator, CloneObj, DebugInfo, DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead,
-    PropertyTest,
+    ClassIterator, CloneObj, DebugInfo, DimensionRead, GcTable, ObjectHandlers, PropertyPlace,
+    PropertyRead, PropertyTest,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
@@ -1308,7 +1308,9 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `zend_fake_get_gc`: nothing.
-    fn get_gc(&self, _: &mut Request, _: PhpObject, _: &mut dyn FnMut(Value)) {}
+    fn get_gc(&self, _: &mut Request, _: PhpObject, _: &mut dyn FnMut(Value)) -> GcTable {
+        GcTable::Properties
+    }
 
     /// `zend_ffi_cdata_do_operation`: pointer arithmetic, `+` and `-` of
     /// an integer and `-` of two pointers to one type.

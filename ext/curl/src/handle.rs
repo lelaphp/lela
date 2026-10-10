@@ -4,7 +4,9 @@
 //! left and the values the `CurlHandle` holds; with `curl_object_handlers`
 //! and the natives of `interface.c` that act on one `CurlHandle`.
 
-use php_ext::abi::{Callable, CloneObj, Instance, ObjectHandlers, OrFalse, Refusals, Union};
+use php_ext::abi::{
+    Callable, CloneObj, GcTable, Instance, ObjectHandlers, OrFalse, Refusals, Union,
+};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, clear, docref, throw, throw_error};
@@ -233,9 +235,14 @@ impl ObjectHandlers for Handlers {
         Some(copied)
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(curl) = object.native::<Curl>(req) else {
-            return;
+            return GcTable::Properties;
         };
         let channels = [
             (&curl.read.handler, &curl.read.stream),
@@ -259,6 +266,7 @@ impl ObjectHandlers for Handlers {
         for value in [&curl.stderr, &curl.private].into_iter().flatten() {
             visit(**value);
         }
+        GcTable::Properties
     }
 
     /// `curl_cast_object`: `(int)` is the object's id, as the resource's

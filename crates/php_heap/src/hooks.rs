@@ -17,6 +17,7 @@
 //! it hands back is its own field.
 
 use crate::Heap;
+use crate::array::Arr;
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::resource::{Res, ResourceType};
@@ -33,6 +34,28 @@ pub enum Fatal {
     Error(String),
     /// The memory limit, with the bytes that were asked for.
     OutOfMemory(usize),
+}
+
+/// The table php's `get_gc` hands back beside the values it names, the
+/// `HashTable *` the collector's walks colour and walk after them
+/// (`Z/Zend/zend_gc.c:1112`), which takes the place of the object's own
+/// properties.
+#[derive(Debug)]
+pub enum GcTable {
+    /// `zend_std_get_properties(obj)`, or php's `NULL` for an object
+    /// with no table: the object's declared slots and dynamic table,
+    /// which the heap walks itself after the values the handler named.
+    Properties,
+    /// A table of the heap's the payload owns, as `zend_closure_get_gc`
+    /// hands back the closure's static variables: coloured as php
+    /// colours it, so it is walked once in each phase, and never counted
+    /// or freed among the garbage, since the object frees it.
+    Arr(Arr),
+    /// A table that is no value of the heap's, the symbol table a frame
+    /// rebuilt, which `zend_fiber_object_gc` and `zend_generator_get_gc`
+    /// hand back: its rows in order, walked as a table reached for the
+    /// first time, which the one object holding it is in each phase.
+    Rows(Vec<Zval>),
 }
 
 /// The five things the heap needs done above it (`zend_objects_store_del`,
@@ -63,8 +86,10 @@ pub trait HeapHooks {
     /// already invalid, as it is when php calls `free_obj`, so it is
     /// handed and not looked up.
     fn free_native(&mut self, obj: Obj);
-    /// The values the object owns, for the cycle collector's traversal.
-    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval));
+    /// php's `get_gc`, for the cycle collector's walk: the values the
+    /// object's payload owns, handed to `visit` as php's handler fills
+    /// `*table`, and the table it hands back beside them.
+    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) -> GcTable;
     /// A resource's per-type destructor, `list_dtor_ex`: served once,
     /// by `zend_list_close` or by the release that reaches zero, with
     /// the resource already closed and the type it had handed beside

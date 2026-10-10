@@ -2526,31 +2526,34 @@ fn stays_in_split_loop(code: &OpArray, range: &php_unit::LiveRange, catch_op: u3
         .is_some_and(|to_end| catch_op < range.end.0.saturating_add(to_end))
 }
 
-/// `zend_unfinished_execution_gc_ex` (`Z/Zend/zend_execute.c:4658`):
+/// `zend_unfinished_execution_gc_ex` (`Z/Zend/zend_execute.c:4968`):
 /// what one frame that is not running holds, named for the collector.
-/// The receiver and the closure its call released, the CVs, the extra
-/// arguments and the extra named ones, the calls it was building
-/// ([`unfinished_calls_gc`]), the temporaries and loop variables live
-/// where it stands, and what its symbol table holds beside the CVs
-/// attached to it. Every frame the collector reads is walked here, a
-/// suspended generator's and each frame of a suspended fiber alike.
+/// The receiver and the closure its call released, the CVs where it has
+/// no symbol table, the extra arguments and the extra named ones, the
+/// calls it was building ([`unfinished_calls_gc`]) and the temporaries
+/// and loop variables live where it stands; and its symbol table, which
+/// php returns for its caller to hand the collector as a table, the CVs
+/// reached through its `IS_INDIRECT` rows. Every frame the collector
+/// reads is walked here, a suspended generator's and each frame of a
+/// suspended fiber alike.
 pub(crate) fn unfinished_execution_gc(
     state: FrameAt<'_>,
     calls: &[FrameAt<'_>],
     visit: &mut dyn FnMut(Value),
-) {
+) -> Option<TableId> {
     if let Some(this) = state.receiver().and_then(Receiver::owned) {
         visit(this.as_value());
     }
     if let Some(closure) = state.closure() {
         visit(closure.as_value());
     }
-    let Some(code) = state.code() else {
-        return;
-    };
+    let code = state.code()?;
     let slot = |at: u32| Value::of_zval(state.frame.slot(php_heap::Slot(at)));
-    for cv in 0..code.num_cvs {
-        visit(slot(cv));
+    let table = state.symbol_table();
+    if table.is_none() {
+        for cv in 0..code.num_cvs {
+            visit(slot(cv));
+        }
     }
     for extra in state.extra_args() {
         visit(extra);
@@ -2575,9 +2578,7 @@ pub(crate) fn unfinished_execution_gc(
             }
         }
     }
-    if let Some(table) = state.symbol_table() {
-        state.req.gc_symbol_table(table, visit);
-    }
+    table
 }
 
 /// `zend_unfinished_calls_gc`: the calls a frame was building,

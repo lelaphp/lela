@@ -5,8 +5,8 @@
 //! trampoline its `get_method` makes under the function's name.
 
 use php_ext::abi::{
-    Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Raw, Ref, Refusals, Union,
-    Untyped,
+    GcTable, Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Raw, Ref,
+    Refusals, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
@@ -1439,7 +1439,9 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `zend_fake_get_gc`.
-    fn get_gc(&self, _: &mut Request, _: PhpObject, _: &mut dyn FnMut(Value)) {}
+    fn get_gc(&self, _: &mut Request, _: PhpObject, _: &mut dyn FnMut(Value)) -> GcTable {
+        GcTable::Properties
+    }
 
     /// `get_closure = NULL`.
     fn get_closure(&self, _: &mut Request, _: PhpObject) -> Option<php_ext::values::ClosureInfo> {

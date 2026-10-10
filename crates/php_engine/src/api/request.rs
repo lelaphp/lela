@@ -24,6 +24,7 @@ use php_link::LinkedClass;
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
 
+use crate::api::abi::GcTable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
@@ -1067,15 +1068,22 @@ impl HeapHooks for Hooks<'_> {
     }
 
     /// `get_gc`, through the table: what the payload owns, handed to the
-    /// collector's walk as zvals.
-    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) {
-        let table = self.0.object_handlers(obj);
-        table.get_gc(self.0, PhpObject::of(obj), &mut |value| {
+    /// collector's walk as zvals, and the table the handler returns.
+    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) -> php_heap::GcTable {
+        let handlers = self.0.object_handlers(obj);
+        let table = handlers.get_gc(self.0, PhpObject::of(obj), &mut |value| {
             visit(value.to_zval());
         });
         // `zend_lazy_object_get_gc`: the initializer a lazy object waits
         // for, or the instance a proxy forwards to.
         self.0.lazy_gc(obj, &mut |value| visit(value.to_zval()));
+        match table {
+            GcTable::Properties => php_heap::GcTable::Properties,
+            GcTable::Owned(table) => php_heap::GcTable::Arr(table.heap()),
+            GcTable::Rows(rows) => {
+                php_heap::GcTable::Rows(rows.into_iter().map(Value::to_zval).collect())
+            }
+        }
     }
 
     /// `GC buffer overflow (GC disabled)`, php's warning with its own

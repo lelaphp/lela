@@ -25,8 +25,8 @@ use php_macros::php_class;
 
 use crate::api::__private::native_function;
 use crate::api::abi::{
-    Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, Instance, NamedVariadic,
-    ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
+    Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, GcTable, Instance,
+    NamedVariadic, ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
@@ -139,7 +139,7 @@ impl ObjectHandlers for ClosureHandlers {
     /// `zend_closure_get_gc`: the bound `$this` where there is one, and
     /// the variables the closure bound, which php reaches through
     /// `ZEND_MAP_PTR_GET(closure->func.op_array.static_variables_ptr)`
-    /// and hands back as the object's table, so a cycle through a `use`
+    /// and returns as the object's table, so a cycle through a `use`
     /// variable collects the object and the closure and no more:
     ///
     /// ```php
@@ -151,22 +151,41 @@ impl ObjectHandlers for ClosureHandlers {
     /// ```expect
     /// int(2)
     /// ```
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    ///
+    /// The table is walked after `$this`, as php walks a returned table
+    /// after the values its handler names, so what the bound variables
+    /// reach is found before what `$this` reaches, and its destructors
+    /// are served first:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n, "\n"; } }
+    /// class H { public $d; public $f; }
+    /// function make() { $t = new H; $t->d = new D('this'); $a = new D('a'); $b = new D('b'); return $t->f = Closure::bind(function () use ($a, $b) {}, $t, H::class); }
+    /// $g = make();
+    /// gc_collect_cycles();
+    /// unset($g);
+    /// gc_collect_cycles();
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// a
+    /// b
+    /// this
+    /// done
+    /// ```
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(closure) = object.closure(req) else {
-            return;
+            return GcTable::Properties;
         };
-        let this = closure.this;
-        // The table's rows, as php hands the table itself back through
-        // `*table`, so the collector walks them as the closure's and
-        // counts no node of the table's.
-        if let Some(bound) = closure.bound {
-            for (_, value) in crate::api::values::walk::rows(req, bound) {
-                visit(value);
-            }
-        }
-        if let Some(this) = this {
+        if let Some(this) = closure.this {
             visit(this.as_value());
         }
+        closure.bound.map_or(GcTable::Properties, GcTable::Owned)
     }
 
     /// `zend_closure_get_closure`: the payload itself.
