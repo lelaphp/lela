@@ -66,7 +66,7 @@ pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use collector::GcStatus;
 pub use compare::{Scalar, compare, compare_constants, identical, identical_constants};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
-pub use hooks::{Fatal, HeapHooks};
+pub use hooks::{Fatal, GcTable, HeapHooks};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
@@ -1775,7 +1775,9 @@ mod tests {
         }
         fn destruct(&mut self, _obj: Obj) {}
         fn free_native(&mut self, _obj: Obj) {}
-        fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _obj: Obj, _: &mut dyn FnMut(Zval)) -> crate::GcTable {
+            crate::GcTable::Properties
+        }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)

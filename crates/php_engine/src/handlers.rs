@@ -4059,6 +4059,28 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// int(1)
 /// string(1) "1"
 /// ```
+///
+/// A `CONST` operand is copied into the temporary the opline writes
+/// before it is checked, so the `RETURN` after reads the coerced value,
+/// or the constant itself where it passes, wherever the constant stands
+/// in the op array's table, a jump table's arms included (#2276):
+///
+/// ```php
+/// function f($m): int { switch ($m) { case "a": return 1.5; case "b": return 2; } }
+/// var_dump(f("a"));
+/// function g($m): string { switch ($m) { case "a": return 15; case "b": return 2; } }
+/// var_dump(g("a"), g("b"));
+/// function h(): callable { return "strlen"; }
+/// var_dump(h());
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 2
+/// int(1)
+/// string(2) "15"
+/// string(1) "2"
+/// string(6) "strlen"
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -4091,6 +4113,13 @@ pub(crate) fn verify_return_type<T: Tier>(
         Some(place) => exec::value_of(place.read()).deref(),
         None => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
     };
+    // A `CONST` operand is checked in the temporary the `RETURN` reads
+    // (`ZVAL_COPY(EX_VAR(opline->result.var), retval_ptr)`), never in
+    // place in the table.
+    let constant = op.op1_type == OperandKind::Const;
+    if constant {
+        write_out(req, frame, code, op, &returned);
+    }
     if crate::api::coerce::holds(req, &returned, &ty, req.frame_scopes(frame)) {
         return Ok(advance(req, frame));
     }
@@ -4113,10 +4142,10 @@ pub(crate) fn verify_return_type<T: Tier>(
         req.release(previous);
         return Ok(advance(req, frame));
     }
-    let slot = if op.op1_type == OperandKind::Cv {
-        op.op1
-    } else {
-        exec::temporary_slot(code, op.op1)
+    let slot = match op.op1_type {
+        OperandKind::Cv => op.op1,
+        _ if constant => exec::temporary_slot(code, op.out),
+        _ => exec::temporary_slot(code, op.op1),
     };
     // `ZEND_ACC_RETURN_REFERENCE` over a reference: the check is handed
     // the reference and coerces the value it holds, which every name
@@ -22280,8 +22309,8 @@ mod tests {
 
     /// A unit declaring `f`, whose body is the `INIT_FCALL_BY_NAME` of
     /// [`by_name`] alone, and a main op array with a cache slot of its
-    /// own; each op array with the map pointer publication assigns it.
-    fn declaring_f(engine: &Engine, strings: &mut php_heap::Strings) -> Arc<Unit> {
+    /// own, not yet shared.
+    fn declaring_f(strings: &mut php_heap::Strings) -> Unit {
         use php_unit::decl::{FunctionDecl, Name};
         let by_name = by_name(strings);
         let mut body = by_name.main.clone();
@@ -22299,16 +22328,14 @@ mod tests {
             end_line: 0,
             frameless: Vec::new(),
         };
-        let mut unit = Unit {
+        Unit {
             main: OpArray {
                 cache_size: 8,
                 ..OpArray::default()
             },
             functions: vec![(decl, body)],
             ..Unit::default()
-        };
-        crate::engine::assign_map_ptrs(&mut unit, &engine.shared.map_ptr_last);
-        unit.published()
+        }
     }
 
     /// The runtime cache is the op array's for the request and not the
@@ -22321,13 +22348,43 @@ mod tests {
     #[test]
     fn a_function_called_twice_reads_on_its_second_call_what_its_first_primed() {
         let engine = Engine::cli_builder().build();
+        let req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let mut unit = declaring_f(&mut strings);
+        crate::engine::assign_map_ptrs(&mut unit, &engine.shared.map_ptr_last);
+        called_twice(req, &unit.published());
+    }
+
+    /// The same over a unit compiled for the request alone, whose op
+    /// arrays take caches of the request's own and none of the engine's
+    /// map-pointer offsets, php's heap caches (`ZEND_ACC_HEAP_RT_CACHE`):
+    /// the function's second call still reads what its first primed, and
+    /// the engine's count has not moved (#528).
+    #[test]
+    fn a_request_only_unit_s_function_called_twice_reads_what_its_first_call_primed() {
+        let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
-        let unit = declaring_f(&engine, &mut strings);
-        let main = req.pushed(Arc::clone(&unit));
-        req.declare_functions(&unit);
+        let count = || {
+            engine
+                .shared
+                .map_ptr_last
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let before = count();
+        let unit = req.take_unit(declaring_f(&mut strings));
+        called_twice(req, &unit);
+        assert_eq!(count(), before, "the engine's count is where it was");
+    }
+
+    /// `f` of `unit` called twice from its main op array: one lookup of
+    /// the table across both calls, each call's slot primed with the
+    /// callee, and the main op array's own slot not what they primed.
+    fn called_twice(mut req: Request, unit: &Arc<Unit>) {
+        let main = req.pushed(Arc::clone(unit));
+        req.declare_functions(unit);
         let f = req.function_named(b"f").unwrap_or(Function::PASS);
-        let code = crate::exec::body_of(&unit, exec::Body::Function(0))
+        let code = crate::exec::body_of(unit, exec::Body::Function(0))
             .cloned()
             .unwrap_or_default();
         let init = code.oplines.first().copied().unwrap_or_default();

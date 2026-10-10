@@ -59,7 +59,7 @@
 use php_syntax::tree;
 use php_unit::{Opcode, OperandKind, Opline};
 
-use super::{Emit, Where, used_stack};
+use super::{Emit, Source, Where, used_stack};
 use crate::CompileError;
 
 /// `ZEND_FCALL_MAY_HAVE_EXTRA_NAMED_PARAMS` on a call op: a name the
@@ -73,7 +73,7 @@ impl Emit<'_> {
     /// is the ordinary call, which the native refuses.
     pub(crate) fn call_user_func(
         &mut self,
-        arguments: &[tree::Expr],
+        arguments: &[Source],
     ) -> Result<Option<Where>, CompileError> {
         let Some((callback, rest)) = arguments.split_first() else {
             return Ok(None);
@@ -81,7 +81,7 @@ impl Emit<'_> {
         let count = u32::try_from(rest.len()).unwrap_or(u32::MAX);
         self.init_user_func(*callback, count, b"call_user_func")?;
         for (number, argument) in (1u32..).zip(rest) {
-            let value = self.expr(*argument)?;
+            let value = self.source(*argument)?;
             let (op1_type, op1) = self.operand(value);
             self.push(Opline {
                 opcode: Opcode::SendUser,
@@ -102,7 +102,7 @@ impl Emit<'_> {
     /// [`Self::sliced`] reads.
     pub(crate) fn call_user_func_array(
         &mut self,
-        arguments: &[tree::Expr],
+        arguments: &[Source],
     ) -> Result<Option<Where>, CompileError> {
         let [callback, array] = arguments else {
             return Ok(None);
@@ -125,7 +125,7 @@ impl Emit<'_> {
             let line = self.line;
             return Ok(Some(self.call_op(Opcode::DoFcall, line, false)));
         }
-        let value = self.expr(*array)?;
+        let value = self.source(*array)?;
         let (op1_type, op1) = self.operand(value);
         self.push(Opline {
             opcode: Opcode::SendArray,
@@ -154,11 +154,11 @@ impl Emit<'_> {
     /// and `count` in `extended_value`.
     fn init_user_func(
         &mut self,
-        callback: tree::Expr,
+        callback: Source,
         count: u32,
         native: &[u8],
     ) -> Result<(), CompileError> {
-        if let Some(name) = self.written(callback)?
+        if let Some(name) = self.written_of(callback)?
             && let Some(name) = name.as_str().map(|s| s.bytes().to_ascii_lowercase())
         {
             let stack = if self.native(&name) {
@@ -183,7 +183,7 @@ impl Emit<'_> {
                 return Ok(());
             }
         }
-        let value = self.expr(callback)?;
+        let value = self.source(callback)?;
         let (op2_type, op2) = self.operand(value);
         let native = self.string(native)?;
         let op1 = self.literal(native);
@@ -206,9 +206,9 @@ impl Emit<'_> {
     /// any other array.
     fn sliced(
         &mut self,
-        array: tree::Expr,
+        array: Source,
     ) -> Result<Option<(tree::Expr, u32, tree::Expr)>, CompileError> {
-        let Some((resolved, args)) = self.named_call(array) else {
+        let Some((resolved, args)) = array.tree().and_then(|array| self.named_call(array)) else {
             return Ok(None);
         };
         if resolved != b"array_slice" {

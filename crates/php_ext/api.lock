@@ -164,6 +164,7 @@ abi::FromArgument::declared
 abi::FromArgument::from_default
 abi::FromArgument::from_value
 abi::FromArgument::hold
+abi::GcTable
 abi::Header
 abi::Header::header
 abi::Header::register

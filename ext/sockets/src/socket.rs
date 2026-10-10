@@ -7,7 +7,7 @@
 
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
-use php_ext::abi::{Instance, ObjectHandlers, Refusals};
+use php_ext::abi::{GcTable, Instance, ObjectHandlers, Refusals};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
@@ -160,10 +160,16 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(stream) = object.native::<Sock>(req).and_then(Sock::stream) {
             visit(Value::resource(stream));
         }
+        GcTable::Properties
     }
 }
 

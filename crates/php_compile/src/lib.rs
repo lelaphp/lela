@@ -811,7 +811,10 @@ mod tests {
     /// `special::TABLE` and every name of [`CALLED`] as a native, which
     /// php's `-n` has, and then [`frameless_natives`]: what
     /// `zend_compile_call` reads as `CG(function_table)`, so the tests
-    /// below compile under the table php compiles under.
+    /// below compile under the table php compiles under; and `INF` and
+    /// `NAN` among its persistent constants, as `ext/standard` declares
+    /// them (`REGISTER_DOUBLE_CONSTANT("INF", ZEND_INFINITY,
+    /// CONST_PERSISTENT)`).
     fn bundled() -> Options<'static> {
         static NATIVES: std::sync::LazyLock<Vec<FunctionDecl>> = std::sync::LazyLock::new(|| {
             special::TABLE
@@ -838,9 +841,22 @@ mod tests {
             std::sync::LazyLock::new(|| Names::over(&NATIVES));
         static FRAMELESS: std::sync::LazyLock<Vec<php_unit::FramelessEntry>> =
             std::sync::LazyLock::new(|| frameless_table(NATIVES.iter()));
+        static PERSISTENT: std::sync::LazyLock<Vec<ConstDecl>> = std::sync::LazyLock::new(|| {
+            [(&b"INF"[..], f64::INFINITY), (b"NAN", f64::NAN)]
+                .into_iter()
+                .map(|(name, value)| ConstDecl {
+                    name: Name(name.into()),
+                    value: php_unit::decl::ConstExpr::Double(value),
+                    attributes: Vec::new(),
+                })
+                .collect()
+        });
+        static CONSTANT_NAMES: std::sync::LazyLock<Names<Exact>> =
+            std::sync::LazyLock::new(|| Names::over(&PERSISTENT));
         Options {
             functions: Indexed::new(&NATIVES, &NAMES),
             frameless: &FRAMELESS,
+            persistent: Indexed::new(&PERSISTENT, &CONSTANT_NAMES),
             ..Options::default()
         }
     }

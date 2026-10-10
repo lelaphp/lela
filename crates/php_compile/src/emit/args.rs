@@ -26,27 +26,24 @@
 //! for writing or for reading by it; `SEND_FUNC_ARG` then sends what
 //! was fetched the same way.
 
-use php_heap::Zval;
 use php_syntax::tree::{self, Node, NodeId};
 use php_unit::decl::Parameter;
 use php_unit::{AutoGlobal, Opcode, OperandKind, Opline};
 
-use super::{Emit, Fetch, Over, SimpleVar, walk};
+use super::{Emit, Fetch, Over, SimpleVar, Source, Where, walk};
 use crate::CompileError;
 
 /// One argument at a call site, php's child of a `ZEND_AST_ARG_LIST`:
-/// a plain expression, one written `name: value`
-/// (`ZEND_AST_NAMED_ARG`), or one written `...value`
-/// (`ZEND_AST_UNPACK`); or one the compiler adds to the list itself,
-/// a constant written nowhere, at its name where it has one, which is
-/// the description `zend_compile_assert` hands `assert()`
-/// (`zend_ast_create_zval_from_str`).
+/// a plain one, one written `name: value` (`ZEND_AST_NAMED_ARG`), or one
+/// written `...value` (`ZEND_AST_UNPACK`). A plain or a named one is a
+/// [`Source`]: the expression written, or a value the compiler holds,
+/// which is the value a pipe sends and the description
+/// `zend_compile_assert` adds to the list.
 #[derive(Clone)]
 pub(super) enum Arg {
-    Positional(tree::Expr),
-    Named(Box<[u8]>, tree::Expr),
+    Positional(Source),
+    Named(Box<[u8]>, Source),
     Unpack(tree::Expr),
-    Made(Option<Box<[u8]>>, Zval),
 }
 
 /// What a call site's argument list is, php's `args_ast->kind`, read
@@ -65,7 +62,10 @@ impl Args {
     /// A list the compiler makes itself, of plain expressions at `line`.
     pub(super) fn of(list: &[tree::Expr], line: u32) -> Args {
         Args::Written {
-            list: list.iter().copied().map(Arg::Positional).collect(),
+            list: list
+                .iter()
+                .map(|expr| Arg::Positional(Source::Expr(*expr)))
+                .collect(),
             line,
         }
     }
@@ -83,14 +83,14 @@ impl Args {
     /// special function, a frameless call and a constant fold read;
     /// none where one is, and none for a first-class callable, which
     /// php keeps out of all three by `is_callable_convert`.
-    pub(super) fn positional(&self) -> Option<Vec<tree::Expr>> {
+    pub(super) fn positional(&self) -> Option<Vec<Source>> {
         let Args::Written { list, .. } = self else {
             return None;
         };
         list.iter()
             .map(|arg| match arg {
                 Arg::Positional(value) => Some(*value),
-                Arg::Named(..) | Arg::Unpack(_) | Arg::Made(..) => None,
+                Arg::Named(..) | Arg::Unpack(_) => None,
             })
             .collect()
     }
@@ -186,7 +186,7 @@ enum ArgAt {
 /// reaches it.
 enum Placed {
     Send {
-        value: Sent,
+        value: Source,
         at: ArgAt,
         number: Option<u32>,
     },
@@ -195,14 +195,6 @@ enum Placed {
         count: u32,
     },
     Refused(&'static str),
-}
-
-/// What a placed argument sends: an expression the list holds, or the
-/// constant the compiler made ([`Arg::Made`]).
-#[derive(Clone, Copy)]
-enum Sent {
-    Written(tree::Expr),
-    Made(Zval),
 }
 
 /// `zend_compile_args`' placement of a whole list, which reads the
@@ -255,9 +247,8 @@ impl Plan {
                     plan.placed.push(placed);
                     continue;
                 }
-                Arg::Positional(value) => (None, Sent::Written(*value)),
-                Arg::Named(name, value) => (Some(name), Sent::Written(*value)),
-                Arg::Made(name, value) => (name.as_ref(), Sent::Made(*value)),
+                Arg::Positional(value) => (None, *value),
+                Arg::Named(name, value) => (Some(name), *value),
             };
             let placed = match name {
                 None if uses_unpack => {
@@ -328,13 +319,16 @@ impl Emit<'_> {
         let mut list = Vec::with_capacity(node.args.len());
         for arg in &node.args {
             match arg {
-                tree::Arg::Expr(expr) => list.push(Arg::Positional(*expr)),
+                tree::Arg::Expr(expr) => list.push(Arg::Positional(Source::Expr(*expr))),
                 tree::Arg::NamedArg(named) => {
                     let named = &self.parsed.tree[*named];
                     let Some(value) = named.value else {
                         return Err(walk::unread(line, "a named argument"));
                     };
-                    list.push(Arg::Named(self.text(named.name).into(), value));
+                    list.push(Arg::Named(
+                        self.text(named.name).into(),
+                        Source::Expr(value),
+                    ));
                 }
                 tree::Arg::SpreadArg(spread) => {
                     let Some(value) = self.parsed.tree[*spread].value else {
@@ -405,27 +399,8 @@ impl Emit<'_> {
         };
         for placed in &plan.placed {
             match placed {
-                Placed::Send {
-                    value: Sent::Written(value),
-                    at,
-                    number,
-                } => {
+                Placed::Send { value, at, number } => {
                     self.send_arg(*value, at, callee, *number, list_line)?;
-                }
-                Placed::Send {
-                    value: Sent::Made(value),
-                    at,
-                    number,
-                } => {
-                    // A constant, which `zend_compile_args` sends as any
-                    // expression that is no variable and no call.
-                    let known = callee.map(|callee| callee.mode(*number));
-                    let opcode = match known.filter(|_| number.is_some()) {
-                        Some(SendMode::Value | SendMode::PreferRef) => Opcode::SendVal,
-                        Some(SendMode::Ref) | None => Opcode::SendValEx,
-                    };
-                    let operand = self.operand(super::Where::Constant(*value));
-                    self.send(opcode, operand, at)?;
                 }
                 Placed::Unpack { value, count } => self.send_unpack(*value, *count)?,
                 Placed::Refused(message) => return Err(self.compile_error(*message)),
@@ -472,7 +447,7 @@ impl Emit<'_> {
     /// ```
     fn send_arg(
         &mut self,
-        value: tree::Expr,
+        value: Source,
         at: &ArgAt,
         callee: Option<&Callee>,
         number: Option<u32>,
@@ -480,14 +455,16 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         let mode = callee.map(|callee| callee.mode(number));
         let known = mode.filter(|_| number.is_some());
-        let value = self.peel(value);
         // A `ZEND_AST_ZNODE` is no call and no variable: the value it
         // holds is sent as any other expression's is.
-        let held = self.znode(value).is_some();
+        let value = match value {
+            Source::Expr(value) => self.peel(value),
+            Source::Node(held) => return self.send_value(held, at, known),
+        };
         // "Treat passing of $GLOBALS the same as passing a call": its
         // `FETCH_GLOBALS` temporary is `SEND_VAL_EX` where the parameter
         // may take a reference, which is the error the program meets.
-        if !held && (self.is_call(value) || self.is_globals(value)) {
+        if self.is_call(value) || self.is_globals(value) {
             // `zend_is_call`: the call's `VAR`, or the constant or the
             // temporary a call php served itself left.
             let returned = self.expr(value)?;
@@ -507,10 +484,22 @@ impl Emit<'_> {
             };
             return self.send(opcode, operand, at);
         }
-        if !held && let Some(variable) = self.variable_of(value)? {
+        if let Some(variable) = self.variable_of(value)? {
             return self.send_variable(value, variable, at, known, list_line);
         }
         let computed = self.expr(value)?;
+        self.send_value(computed, at, known)
+    }
+
+    /// `zend_compile_args`' last arm, an argument that is no call and no
+    /// variable, sent from where it left its value by the opcode its
+    /// operand kind and the parameter's way of being sent pick.
+    fn send_value(
+        &mut self,
+        computed: Where,
+        at: &ArgAt,
+        known: Option<SendMode>,
+    ) -> Result<(), CompileError> {
         let operand = self.operand(computed);
         let opcode = match (operand.0, known) {
             // "pass ++$a or something similar"

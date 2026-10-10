@@ -55,7 +55,7 @@ use php_heap::Zval;
 use php_unit::{Opcode, OperandKind, Opline};
 
 use super::args::{Arg, Args, Callee, Plan};
-use super::{Emit, Fbc, Where, used_stack};
+use super::{Emit, Fbc, Source, Where, used_stack};
 use crate::CompileError;
 
 /// What `zend_compile_assert` makes of a call of `assert()`, by
@@ -105,9 +105,11 @@ impl Emit<'_> {
             // "If the original argument was named, add the new argument
             // as named as well, as mixing named and positional is not
             // allowed."
-            let named =
-                matches!(only, Arg::Named(..)).then(|| Box::<[u8]>::from(&b"description"[..]));
-            list.push(Arg::Made(named, description));
+            let description = Source::Node(Where::Constant(description));
+            list.push(match only {
+                Arg::Named(..) => Arg::Named(b"description"[..].into(), description),
+                Arg::Positional(_) | Arg::Unpack(_) => Arg::Positional(description),
+            });
         }
         let arguments = match arguments {
             Args::Written { line, .. } => Args::Written { list, line: *line },

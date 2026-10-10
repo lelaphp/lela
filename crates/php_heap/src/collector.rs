@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use crate::array::Arr;
 use crate::gc::{self, Colour, Counted};
-use crate::hooks::HeapHooks;
+use crate::hooks::{GcTable, HeapHooks};
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::zval::WeakMarks;
@@ -390,10 +390,9 @@ impl Collector {
         (buf.first_unused() != buf.size).then(|| buf.fetch_next_unused())
     }
 
-    /// `gc_grow_root_buffer`. php warns `GC buffer overflow (GC
-    /// disabled)` when the buffer is at its largest; a buffer of 2^30
-    /// entries is sixteen gigabytes here, so the flags are set and the
-    /// warning, which no request reaches, is not raised.
+    /// `gc_grow_root_buffer`: at its largest the buffer grows no more and
+    /// the collector turns itself off, marked full, which
+    /// [`Heap::gc_growing`] tells as php's warning.
     fn grow_root_buffer(&mut self) {
         let Some(buf) = &mut self.buf else { return };
         if buf.size >= MAX_BUF_SIZE && !self.full {
@@ -562,15 +561,37 @@ fn as_count(count: i64) -> u32 {
     count as u32
 }
 
+/// The table php's walk reaches through an object after the values its
+/// handler named, `get_gc`'s returned `ht`: one of the heap's, which
+/// each phase colours, or the rows of one that is no heap value, which
+/// each phase reaches once, through the one object holding it.
+#[derive(Clone, Copy)]
+enum Table {
+    Arr(Arr),
+    Rows,
+}
+
+impl Table {
+    /// Whether the phase whose step on a child is `step` walks the
+    /// table's rows: php's colour test on `ht`, and always for rows.
+    fn newly(self, step: impl FnOnce(Node) -> bool) -> bool {
+        match self {
+            Table::Arr(a) => step(Node::Arr(a)),
+            Table::Rows => true,
+        }
+    }
+}
+
 /// The children php's walk reads off one value, `get_gc` for an object:
 /// the zvals in `kids`, and the table php's handler hands back beside
 /// them, whose own entries follow in `kids` from the index returned.
-/// For an object with a dynamic table that is the table, walked after
-/// what the handler names, its declared slots first, as php's
-/// `rebuild_object_properties` puts the slots' `IS_INDIRECT` rows first;
-/// for one without, the handler's zvals and then the slots, php's
-/// `properties_table`.
-fn children(hooks: &mut dyn HeapHooks, node: Node, kids: &mut Vec<Zval>) -> (Option<Arr>, usize) {
+/// For an object of the properties' handlers with a dynamic table that
+/// is the table, walked after what the handler names, its declared slots
+/// first, as php's `rebuild_object_properties` puts the slots'
+/// `IS_INDIRECT` rows first; for one without, the handler's zvals and
+/// then the slots, php's `properties_table`. A table the handler hands
+/// back takes the properties' place, as php's does.
+fn children(hooks: &mut dyn HeapHooks, node: Node, kids: &mut Vec<Zval>) -> (Option<Table>, usize) {
     kids.clear();
     match node {
         Node::Arr(a) => {
@@ -581,19 +602,37 @@ fn children(hooks: &mut dyn HeapHooks, node: Node, kids: &mut Vec<Zval>) -> (Opt
             kids.push(r.val());
             (None, 0)
         }
-        Node::Obj(o) => {
-            hooks.gc_children(o, &mut |z| kids.push(z));
-            let table = o.properties();
-            let split = if table.is_some() { kids.len() } else { 0 };
-            for i in 0..o.slots() {
-                kids.push(o.slot(i));
+        Node::Obj(o) => match hooks.gc_children(o, &mut |z| kids.push(z)) {
+            GcTable::Properties => {
+                let table = o.properties();
+                let split = if table.is_some() { kids.len() } else { 0 };
+                for i in 0..o.slots() {
+                    kids.push(o.slot(i));
+                }
+                if let Some(table) = table {
+                    table.gc_values(kids);
+                }
+                (owned(table), split)
             }
-            if let Some(table) = table {
+            GcTable::Arr(table) => {
+                let split = kids.len();
                 table.gc_values(kids);
+                (owned(Some(table)), split)
             }
-            (table.filter(|t| !t.is_immutable()), split)
-        }
+            GcTable::Rows(rows) => {
+                let split = kids.len();
+                kids.extend(rows);
+                (Some(Table::Rows), split)
+            }
+        },
     }
+}
+
+/// A table of the heap's as the walk colours it: an immutable one has no
+/// header to colour and holds nothing a cycle passes through, so its
+/// rows are walked as the handler's values are.
+fn owned(table: Option<Arr>) -> Option<Table> {
+    table.filter(|t| !t.is_immutable()).map(Table::Arr)
 }
 
 /// php's `handle_zvals` loop over `list` for one phase: `step` is what
@@ -699,6 +738,20 @@ fn walkable(o: Obj) -> bool {
 }
 
 impl Heap {
+    /// `f` over the collector, and php's `GC buffer overflow` warning
+    /// where it is what filled the root buffer: every path that can grow
+    /// the buffer runs through here, so the warning is raised once, as
+    /// `gc_grow_root_buffer` raises it the first time it finds the buffer
+    /// at `GC_MAX_BUF_SIZE` ([`HeapHooks::gc_overflow`]).
+    fn gc_growing<R>(hooks: &mut dyn HeapHooks, f: impl FnOnce(&mut Collector) -> R) -> R {
+        let full = hooks.heap().gc.full;
+        let out = f(&mut hooks.heap().gc);
+        if !full && hooks.heap().gc.full {
+            hooks.gc_overflow();
+        }
+        out
+    }
+
     /// `gc_check_possible_root` (`Z/Zend/zend_gc.h:114`): what a release
     /// that left owners does with the value. A reference is looked
     /// through to the value it holds; an array or an object not in the
@@ -744,7 +797,7 @@ impl Heap {
                 Some(count) => count,
                 None => Heap::gc_collect_cycles(hooks),
             };
-            hooks.heap().gc.adjust_threshold(count);
+            Heap::gc_growing(hooks, |gc| gc.adjust_threshold(count));
             if node.gc().delref() == 0 {
                 match node {
                     Node::Arr(a) => Heap::array_destroy(hooks, a),
@@ -757,10 +810,11 @@ impl Heap {
                 return;
             }
         }
-        let gc = &mut hooks.heap().gc;
-        if let Some(idx) = gc.fetch_any() {
-            gc.place(idx, node, Colour::Purple);
-        }
+        Heap::gc_growing(hooks, |gc| {
+            if let Some(idx) = gc.fetch_any() {
+                gc.place(idx, node, Colour::Purple);
+            }
+        });
     }
 
     /// `gc_mark_grey`'s two weak-map passes over an object: every entry
@@ -826,7 +880,7 @@ impl Heap {
             let map = Node::Obj(map);
             if map.gc().colour() == Colour::Grey {
                 if map.gc().address().is_none() {
-                    hooks.heap().gc.extra_root(map);
+                    Heap::gc_growing(hooks, |gc| gc.extra_root(map));
                 }
             } else if !marks.from_map && blacken(child) {
                 stack.push(child);
@@ -846,7 +900,7 @@ impl Heap {
             let key = Node::Obj(key);
             if key.gc().colour() == Colour::Grey {
                 if key.gc().address().is_none() {
-                    hooks.heap().gc.extra_root(key);
+                    Heap::gc_growing(hooks, |gc| gc.extra_root(key));
                 }
             } else if !marks.from_key && blacken(child) {
                 stack.push(child);
@@ -905,17 +959,11 @@ impl Heap {
             let next = match node {
                 Node::Obj(o) if walkable(o) && Heap::gc_grey_weak(hooks, o, &mut stack) => None,
                 Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
-                    (Some(table), split) => {
-                        let g = table.gc();
-                        g.delref();
-                        if g.colour() == Colour::Grey {
-                            walk(&kids[..split], &mut stack, grey)
-                        } else {
-                            g.set_colour(Colour::Grey);
-                            push_all(&kids[..split], &mut stack, grey);
-                            walk(&kids[split..], &mut stack, grey)
-                        }
+                    (Some(table), split) if table.newly(grey) => {
+                        push_all(&kids[..split], &mut stack, grey);
+                        walk(&kids[split..], &mut stack, grey)
                     }
+                    (Some(_), split) => walk(&kids[..split], &mut stack, grey),
                     (None, _) => walk(kids, &mut stack, grey),
                 },
                 Node::Obj(_) => None,
@@ -941,17 +989,11 @@ impl Heap {
             let next = match node {
                 Node::Obj(o) if walkable(o) && Heap::gc_black_weak(hooks, o, &mut stack) => None,
                 Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
-                    (Some(table), split) => {
-                        let g = table.gc();
-                        g.addref();
-                        if g.colour() == Colour::Black {
-                            walk(&kids[..split], &mut stack, blacken)
-                        } else {
-                            g.set_colour(Colour::Black);
-                            push_all(&kids[..split], &mut stack, blacken);
-                            walk(&kids[split..], &mut stack, blacken)
-                        }
+                    (Some(table), split) if table.newly(blacken) => {
+                        push_all(&kids[..split], &mut stack, blacken);
+                        walk(&kids[split..], &mut stack, blacken)
                     }
+                    (Some(_), split) => walk(&kids[..split], &mut stack, blacken),
                     (None, _) => walk(kids, &mut stack, blacken),
                 },
                 Node::Obj(_) => None,
@@ -989,17 +1031,14 @@ impl Heap {
                     Node::Obj(o) if walkable(o) => {
                         Heap::gc_whiten_weakly_keyed(hooks, o, &mut stack);
                         match children(hooks, node, kids) {
-                            (Some(table), split) => {
-                                let g = table.gc();
-                                if g.colour() == Colour::Grey {
-                                    g.set_colour(Colour::White);
-                                    stack.push(Node::Arr(table));
-                                    push_all(&kids[..split], &mut stack, whiten);
-                                    walk(&kids[split..], &mut stack, whiten)
-                                } else {
-                                    walk(&kids[..split], &mut stack, whiten)
+                            (Some(table), split) if table.newly(whiten) => {
+                                if let Table::Arr(a) = table {
+                                    stack.push(Node::Arr(a));
                                 }
+                                push_all(&kids[..split], &mut stack, whiten);
+                                walk(&kids[split..], &mut stack, whiten)
                             }
+                            (Some(_), split) => walk(&kids[..split], &mut stack, whiten),
                             (None, _) => walk(kids, &mut stack, whiten),
                         }
                     }
@@ -1038,7 +1077,7 @@ impl Heap {
             let next = match node {
                 Node::Obj(o) if walkable(o) => {
                     if o.gc().is_unplaced() {
-                        hooks.heap().gc.add_garbage(node);
+                        Heap::gc_growing(hooks, |gc| gc.add_garbage(node));
                     }
                     if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) && hooks.has_destructor(o) {
                         *has_destructors = true;
@@ -1047,17 +1086,11 @@ impl Heap {
                         None
                     } else {
                         match children(hooks, node, kids) {
-                            (Some(table), split) => {
-                                let g = table.gc();
-                                g.addref();
-                                if g.colour() == Colour::White {
-                                    g.set_colour(Colour::Black);
-                                    push_all(&kids[..split], &mut stack, collect);
-                                    walk(&kids[split..], &mut stack, collect)
-                                } else {
-                                    walk(&kids[..split], &mut stack, collect)
-                                }
+                            (Some(table), split) if table.newly(collect) => {
+                                push_all(&kids[..split], &mut stack, collect);
+                                walk(&kids[split..], &mut stack, collect)
                             }
+                            (Some(_), split) => walk(&kids[..split], &mut stack, collect),
                             (None, _) => walk(kids, &mut stack, collect),
                         }
                     }
@@ -1065,7 +1098,7 @@ impl Heap {
                 Node::Obj(_) => None,
                 Node::Arr(_) => {
                     if node.gc().is_unplaced() {
-                        hooks.heap().gc.add_garbage(node);
+                        Heap::gc_growing(hooks, |gc| gc.add_garbage(node));
                     }
                     children(hooks, node, kids);
                     walk(kids, &mut stack, collect)
@@ -1121,9 +1154,11 @@ impl Heap {
                         match children(hooks, node, kids) {
                             (Some(table), split) => {
                                 push_all(&kids[..split], &mut stack, |_| true);
-                                let g = table.gc();
-                                if g.address().is_some() && g.colour() == Colour::Black {
-                                    hooks.heap().gc.remove_from_buffer(Node::Arr(table));
+                                if let Table::Arr(table) = table {
+                                    let g = table.gc();
+                                    if g.address().is_some() && g.colour() == Colour::Black {
+                                        hooks.heap().gc.remove_from_buffer(Node::Arr(table));
+                                    }
                                 }
                                 walk(&kids[split..], &mut stack, |_| true)
                             }
@@ -1493,6 +1528,8 @@ mod tests {
         /// `$GLOBALS['x'] = $this` in `__destruct`.
         keep: Option<u32>,
         kept: Vec<Obj>,
+        /// How many times the overflow warning was raised.
+        overflows: u32,
     }
 
     impl Recorder {
@@ -1502,6 +1539,7 @@ mod tests {
                 served: Vec::new(),
                 keep: None,
                 kept: Vec::new(),
+                overflows: 0,
             }
         }
     }
@@ -1518,11 +1556,42 @@ mod tests {
             }
         }
         fn free_native(&mut self, _: Obj) {}
-        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) -> GcTable {
+            GcTable::Properties
+        }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
         }
+        fn gc_overflow(&mut self) {
+            self.overflows += 1;
+        }
+    }
+
+    /// `gc_grow_root_buffer` at `GC_MAX_BUF_SIZE`: the collector turns
+    /// itself off, running, protected and full, and php's `GC buffer
+    /// overflow (GC disabled)` warning is raised the first time and not
+    /// again; a buffer under the largest grows without one. 2^30 entries
+    /// are made by no test, so the size is set to the largest directly.
+    #[test]
+    fn a_root_buffer_at_its_largest_warns_once_and_turns_the_collector_off() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        r.heap.gc.enable(true);
+        Heap::gc_growing(&mut r, Collector::grow_root_buffer);
+        assert_eq!(r.heap.gc_status().buffer_size, DEFAULT_BUF_SIZE * 2);
+        assert_eq!(r.overflows, 0);
+        if let Some(buf) = &mut r.heap.gc.buf {
+            buf.size = MAX_BUF_SIZE;
+        }
+        Heap::gc_growing(&mut r, Collector::grow_root_buffer);
+        let status = r.heap.gc_status();
+        assert_eq!(r.overflows, 1);
+        assert!(status.running && status.protected && status.full);
+        assert_eq!(status.buffer_size, MAX_BUF_SIZE);
+        Heap::gc_growing(&mut r, Collector::grow_root_buffer);
+        assert_eq!(r.overflows, 1);
+        assert_eq!(r.heap.gc_status().buffer_size, MAX_BUF_SIZE);
     }
 
     /// Two objects, each in the other's slot: `$a->b = $b; $b->a = $a;`.

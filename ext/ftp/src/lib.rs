@@ -29,8 +29,8 @@
 mod ftp;
 
 use php_ext::abi::{
-    Extension, ExtensionBuilder, Instance, ObjectHandlers, OrFalse, Path, Ref, Refusals, True,
-    Union, Untyped,
+    Extension, ExtensionBuilder, GcTable, Instance, ObjectHandlers, OrFalse, Path, Ref, Refusals,
+    True, Union, Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
@@ -240,7 +240,12 @@ impl ObjectHandlers for Handlers {
         REFUSALS
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(conn) = object.native::<Box<Conn>>(req)
             && let Conn::Open(ftp) = &**conn
         {
@@ -248,6 +253,7 @@ impl ObjectHandlers for Handlers {
                 visit(stream);
             }
         }
+        GcTable::Properties
     }
 }
 

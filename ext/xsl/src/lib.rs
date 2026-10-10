@@ -22,8 +22,8 @@
 mod ffi;
 
 use php_ext::abi::{
-    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, OrFalse,
-    Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True, Union,
+    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, GcTable, ObjectHandlers,
+    OrFalse, Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True, Union,
 };
 use php_ext::attr::{php_class, php_const};
 use php_ext::call::{autoload, lookup_class, new_object};
@@ -312,10 +312,16 @@ impl ObjectHandlers for Handlers {
         Std.unset_property(req, object, name)
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(i) = object.native::<Intern>(req) {
             i.callbacks.visit(visit);
         }
+        GcTable::Properties
     }
 }
 

@@ -17,8 +17,8 @@
 use php_syntax::tree;
 use php_unit::{Opcode, OperandKind, Opline};
 
-use super::target::{Source, Target};
-use super::{Emit, Where};
+use super::target::Target;
+use super::{Emit, Source, Where};
 use crate::CompileError;
 
 /// `zend_memoize_mode`: whether an expression compiled now is compiled

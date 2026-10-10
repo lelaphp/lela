@@ -1,7 +1,7 @@
 //! `multi.c`: the `CurlMultiHandle` class over a `CURLM`, the easy
 //! `CurlHandle`s added to it, its push callable, and its natives.
 
-use php_ext::abi::{Instance, ObjectHandlers, Ref, Refusals, Untyped};
+use php_ext::abi::{GcTable, Instance, ObjectHandlers, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{callable_checked, to_long};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
@@ -92,9 +92,14 @@ impl ObjectHandlers for Handlers {
         REFUSALS
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(mh) = object.native::<Mh>(req) else {
-            return;
+            return GcTable::Properties;
         };
         if let Some(push) = &mh.push {
             push.visit(visit);
@@ -102,6 +107,7 @@ impl ObjectHandlers for Handlers {
         for easy in &mh.easy {
             visit(easy.as_value());
         }
+        GcTable::Properties
     }
 
     fn cast_object(

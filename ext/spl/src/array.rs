@@ -21,9 +21,9 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    Callable, CloneObj, CurrentPlace, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers,
-    PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std, This,
-    True, Union,
+    Callable, CloneObj, CurrentPlace, DimensionRead, ExtensionBuilder, GcTable, Instance,
+    ObjectHandlers, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw,
+    Std, This, True, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{autoload, call, call_method, clone_with, instantiate, lookup_class};
@@ -2036,13 +2036,19 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(held) = object
             .native::<SplArrayObject>(req)
             .and_then(|p| p.storage.seen().held())
         {
             visit(held);
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

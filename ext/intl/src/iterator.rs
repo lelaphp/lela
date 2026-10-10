@@ -6,7 +6,7 @@
 //! [`from_enumeration`]; `IntlPartsIterator` walks a break iterator's parts
 //! through the same object.
 
-use php_ext::abi::{ClassIterator, DtorObj, ObjectHandlers, Refusals, This};
+use php_ext::abi::{ClassIterator, DtorObj, GcTable, ObjectHandlers, Refusals, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
@@ -382,10 +382,16 @@ impl ObjectHandlers for Handlers {
     /// int(1)
     /// int(1)
     /// ```
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(cursor) = cursor(req, object) {
             visit(cursor.wrapping.as_value());
         }
+        GcTable::Properties
     }
 
     /// `IntlIterator_get_iterator`: the object's own iterator, which a
