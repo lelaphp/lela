@@ -1647,7 +1647,9 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// but the memory limit on a page the push takes, which is reported at
 /// this opline. `None`, with nothing touched, for a slot not primed yet
 /// and a callee that is a native, a trampoline or anything else
-/// [`Request::call_room`] sizes.
+/// [`Request::call_room`] sizes. `INIT_FCALL_BY_NAME` and
+/// `INIT_NS_FCALL_BY_NAME` read their callee off the same slot once a
+/// first pass primed it, and take it too.
 #[inline(always)] // as `inline_send`
 #[allow(clippy::inline_always)]
 fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -> Option<Edge> {
@@ -1709,6 +1711,9 @@ pub(crate) fn init_fcall_by_name<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+        return edge;
+    }
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     init_call(req, frame, code, op, &[lowered], written)
@@ -1874,7 +1879,10 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// by name, a number past what the `INIT` said, a slot an argument
 /// stands in already, a refcounted constant, a reference, whose value
 /// is what is sent (`ZVAL_COPY_DEREF`), and a CV nothing wrote, whose
-/// warning is [`send`]'s.
+/// warning is [`send`]'s. `SEND_VAL_EX` and `SEND_VAR_EX` take it too
+/// where the callee's parameter at the number takes its argument by
+/// value, as php's `_EX` handlers go to the same arm once
+/// `ARG_SHOULD_BE_SENT_BY_REF` is clear.
 ///
 /// ```php
 /// function f($a, $b, $c) { return "$a|$b|$c"; }
@@ -2148,6 +2156,12 @@ pub(crate) fn send_val_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if op.op2_type != OperandKind::Const
+        && !should_be_sent_by_ref(req, op.op2)
+        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
+    {
+        return edge;
+    }
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -2213,6 +2227,12 @@ pub(crate) fn send_var_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if op.op2_type != OperandKind::Const
+        && !should_be_sent_by_ref(req, op.op2)
+        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
+    {
+        return edge;
+    }
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -10638,6 +10658,9 @@ pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+        return edge;
+    }
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     let unqualified = ConstIdx(op.op2.saturating_add(2));
