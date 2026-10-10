@@ -7,7 +7,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString};
 
 use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
@@ -15,8 +15,8 @@ use crate::ffi::{self, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::format_timestamp;
 use crate::lent::{Lent, lent};
 use crate::obj::{
-    TIMEZONE, TzKind, TzObj, class_id, lent_time, new_timezone, rows_array, set_str, set_string,
-    set_tz, std_rows, tz_fields, tz_of,
+    TIMEZONE, TzKind, TzObj, class_id, lent_time, rows_array, set_str, set_string, set_tz,
+    std_rows, tz_fields, tz_of,
 };
 
 /// Why `timezone_initialize` refuses a zone: the sentence php prints for
@@ -38,17 +38,46 @@ impl Refusal {
         }
     }
 
-    /// The sentence naming `text`, made only once a zone is refused.
-    fn message(self, text: &[u8]) -> Vec<u8> {
-        [self.head(), text, b")"].concat()
+    /// `spprintf(warning_message, 0, "... (%s)", ZSTR_VAL(tz_zstr))`:
+    /// the sentence naming `text`, printed into `spprintf`'s buffer on
+    /// the request's heap. The `Err` is the memory limit's fatal.
+    fn print(self, req: &mut Request, text: &[u8]) -> Result<Printed, Thrown> {
+        let head = self.head();
+        let len = head.len() + text.len() + 1;
+        let mut buffer = Emalloc::printf_buffer(req, len)?;
+        let sentence = head.iter().chain(text).chain(b")");
+        for (slot, byte) in buffer.bytes_mut().iter_mut().zip(sentence) {
+            *slot = *byte;
+        }
+        Ok(Printed { buffer, len })
     }
 }
 
-/// `timezone_initialize(tzobj, tz, &warning)`: an identifier, an
-/// abbreviation or an offset, as `timelib_parse_zone` reads it, or why
-/// it refuses the text. Nothing is printed here, so a zone it accepts
-/// costs no sentence.
-fn initialize(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, Refusal> {
+/// The `warning_message` `timezone_initialize` hands back: the sentence
+/// in `spprintf`'s buffer, which stands until the caller has raised it
+/// and frees it, as php's `efree(warning_message)`.
+struct Printed {
+    buffer: Emalloc,
+    len: usize,
+}
+
+impl Printed {
+    /// The sentence.
+    fn text(&self) -> &[u8] {
+        self.buffer.bytes().get(..self.len).unwrap_or_default()
+    }
+
+    /// `efree(warning_message)`.
+    fn free(self, req: &mut Request) {
+        self.buffer.free(req);
+    }
+}
+
+/// What `timelib_parse_zone` reads of `text` as `timezone_initialize`
+/// judges it: an identifier, an abbreviation or an offset, or why it
+/// refuses the text. Nothing is printed here, so a zone it accepts costs
+/// no sentence.
+fn parse(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, Refusal> {
     let read = ffi::parse_zone(lent, text);
     #[allow(clippy::cast_possible_truncation)]
     let z = i64::from(read.offset as i32);
@@ -67,6 +96,21 @@ fn initialize(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, Refusal> {
             dst: read.dst,
         }),
         _ => Err(Refusal::Unknown),
+    }
+}
+
+/// `timezone_initialize(tzobj, tz, &warning_message)`: the zone `text`
+/// names set on `object`, or the sentence printed for one it refuses,
+/// which `timezone_open` and `DateTimeZone::__construct` raise each in
+/// its own way. The `Err` is the memory limit's fatal.
+fn initialize(
+    req: &mut Request,
+    object: PhpObject,
+    text: &[u8],
+) -> Result<Result<(), Printed>, Thrown> {
+    match lent(req, |l| parse(l, text))? {
+        Ok(kind) => set_zone(req, object, kind).map(Ok),
+        Err(refusal) => refusal.print(req, text).map(Err),
     }
 }
 
@@ -109,17 +153,45 @@ fn set_zone(req: &mut Request, object: PhpObject, kind: TzKind) -> Result<(), Th
 ///   string(6) "+99:00"
 /// }
 /// ```
+///
+/// The object is made before the zone is read, as `php_date_instantiate`
+/// makes it, so timelib's transient copy of the name peaks over it; a
+/// name it refuses has its warning printed into `spprintf`'s buffer,
+/// which stands while the warning is raised and the object is released
+/// after (#2481):
+///
+/// ```php
+/// function m($f) { memory_reset_peak_usage(); $u = memory_get_usage(); $f(); echo memory_get_peak_usage() - $u, ' ', memory_get_usage() - $u, "\n"; }
+/// $keep = [];
+/// m(function () use (&$keep) { $keep[] = timezone_open('Europe/Amsterdam'); });
+/// m(function () use (&$keep) { $keep[] = timezone_open('Europe/Amsterdam'); });
+/// m(function () { @timezone_open('Mars/Olympus'); });
+/// m(function () { @timezone_open('Mars/Olympus'); });
+/// ```
+/// ```expect
+/// 2360 2392
+/// 104 80
+/// 1624 456
+/// 1248 0
+/// ```
 #[php_function]
 fn timezone_open(
     req: &mut Request,
     timezone: Path,
 ) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
-    let text = timezone.0.as_bytes();
-    match lent(req, |l| initialize(l, text))? {
-        Ok(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
-        Err(refusal) => {
-            docref(req, Level::Warning, &refusal.message(text));
+    let class = class_id(req, "DateTimeZone")?;
+    let object = new_object(req, class)?;
+    match initialize(req, *object, timezone.0.as_bytes()) {
+        Ok(Ok(())) => Ok(OrFalse::Value(object.into_instance())),
+        Ok(Err(printed)) => {
+            docref(req, Level::Warning, printed.text());
+            printed.free(req);
+            object.give_up(req);
             Ok(OrFalse::False)
+        }
+        Err(thrown) => {
+            object.give_up(req);
+            Err(thrown)
         }
     }
 }
@@ -458,7 +530,7 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<TzKind>, Thrown
     let Some(text) = hash_zone(hash) else {
         return Ok(None);
     };
-    lent(req, |l| initialize(l, &text).ok())
+    lent(req, |l| parse(l, &text).ok())
 }
 
 /// The `timezone` a serialised zone's `timezone_type` admits, none for
@@ -596,18 +668,31 @@ impl DateTimeZone {
     /// ```expect
     /// 104 112
     /// ```
+    ///
+    /// A name it refuses has its sentence printed into `spprintf`'s
+    /// buffer, which stands while the `DateInvalidTimeZoneException` is
+    /// made:
+    ///
+    /// ```php
+    /// function m($f) { memory_reset_peak_usage(); $u = memory_get_usage(); $f(); echo memory_get_peak_usage() - $u, ' ', memory_get_usage() - $u, "\n"; }
+    /// m(function () { try { new DateTimeZone('Mars/Olympus'); } catch (DateInvalidTimeZoneException $e) {} });
+    /// m(function () { try { new DateTimeZone('Mars/Olympus'); } catch (DateInvalidTimeZoneException $e) {} });
+    /// ```
+    /// ```expect
+    /// 2800 88
+    /// 2744 0
+    /// ```
     fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
-        let text = timezone.0.as_bytes();
-        match lent(req, |l| initialize(l, text))? {
-            Ok(kind) => set_zone(req, this.object(), kind),
-            Err(refusal) => {
-                let message = format!(
-                    "DateTimeZone::__construct(): {}",
-                    String::from_utf8_lossy(&refusal.message(text))
-                );
-                Err(throw(req, "DateInvalidTimeZoneException", &message))
-            }
-        }
+        let Err(printed) = initialize(req, this.object(), timezone.0.as_bytes())? else {
+            return Ok(());
+        };
+        let message = format!(
+            "DateTimeZone::__construct(): {}",
+            String::from_utf8_lossy(printed.text())
+        );
+        let thrown = throw(req, "DateInvalidTimeZoneException", &message);
+        printed.free(req);
+        Err(thrown)
     }
 
     /// `DateTimeZone::getName(): string`, `timezone_name_get`'s body.
