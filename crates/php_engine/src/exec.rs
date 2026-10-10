@@ -1036,7 +1036,7 @@ pub(crate) fn runtime_cache_of(code: &OpArray) -> MapPtr<RuntimeCache> {
 /// table, none where the cache was never laid down, php's
 /// `RUN_TIME_CACHE` still `NULL`.
 pub(crate) fn observer_slot_of<'map>(
-    map: &'map mut MapTable,
+    map: &'map mut MapTable<RuntimeCache>,
     code: &OpArray,
 ) -> Option<&'map mut crate::observer::Slot> {
     let ptr = runtime_cache_of(code);
@@ -1083,14 +1083,14 @@ pub(crate) fn observer_slot_of<'map>(
 /// not, so [`Cached::ClassAndCallee`] carries the scope it was resolved
 /// from and answers no other. The day a slot here holds a property
 /// offset, a rebound closure takes its own cache there.
-pub(crate) fn init_runtime_cache(map: &mut MapTable, code: &OpArray, body: Body) {
+pub(crate) fn init_runtime_cache(map: &mut MapTable<RuntimeCache>, code: &OpArray, body: Body) {
     init_runtime_cache_at(map, runtime_cache_of(code), code.cache_size, body);
 }
 
 /// [`init_runtime_cache`] over the op array's cache pointer and size,
 /// read off it before the request is borrowed again.
 pub(crate) fn init_runtime_cache_at(
-    map: &mut MapTable,
+    map: &mut MapTable<RuntimeCache>,
     at: MapPtr<RuntimeCache>,
     cache_size: u32,
     body: Body,
@@ -1558,7 +1558,12 @@ impl Vm {
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, read off the request's map table
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
-    pub(crate) fn cached(&self, map: &MapTable, frame: FrameRef, slot: CacheSlot) -> Cached {
+    pub(crate) fn cached(
+        &self,
+        map: &MapTable<RuntimeCache>,
+        frame: FrameRef,
+        slot: CacheSlot,
+    ) -> Cached {
         self.at(frame)
             .and_then(|header| map.get(header.runtime_cache()))
             .map_or(Cached::Unprimed, |cache| cache.get(slot))
@@ -1569,7 +1574,7 @@ impl Vm {
     /// ([`RuntimeCache::set`]).
     pub(crate) fn prime(
         &self,
-        map: &mut MapTable,
+        map: &mut MapTable<RuntimeCache>,
         frame: FrameRef,
         slot: CacheSlot,
         value: Cached,
@@ -1582,7 +1587,11 @@ impl Vm {
     /// `ZEND_OBSERVER_DATA(EX(func))`: the observer slot of the op array
     /// `frame` serves, in the request's map table; unresolved for a frame
     /// that stands nowhere.
-    pub(crate) fn observer_slot(&self, map: &MapTable, frame: FrameRef) -> crate::observer::Slot {
+    pub(crate) fn observer_slot(
+        &self,
+        map: &MapTable<RuntimeCache>,
+        frame: FrameRef,
+    ) -> crate::observer::Slot {
         self.observer_slot_held(map, frame)
             .cloned()
             .unwrap_or_default()
@@ -1592,7 +1601,7 @@ impl Vm {
     /// read one handler of it at a time.
     pub(crate) fn observer_slot_held<'map>(
         &self,
-        map: &'map MapTable,
+        map: &'map MapTable<RuntimeCache>,
         frame: FrameRef,
     ) -> Option<&'map crate::observer::Slot> {
         self.at(frame)
@@ -1604,7 +1613,7 @@ impl Vm {
     /// `slot` (`zend_observer_fcall_install`).
     pub(crate) fn set_observer_slot(
         &self,
-        map: &mut MapTable,
+        map: &mut MapTable<RuntimeCache>,
         frame: FrameRef,
         slot: crate::observer::Slot,
     ) {

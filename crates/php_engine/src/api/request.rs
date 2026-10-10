@@ -254,7 +254,7 @@ pub struct Request {
     /// published unit's map pointers index, laid down with the request,
     /// every entry `NULL` until touched. Every op array's runtime cache
     /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
-    map: MapTable,
+    map: MapTable<crate::exec::RuntimeCache>,
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
