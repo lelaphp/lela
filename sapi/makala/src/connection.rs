@@ -8,33 +8,52 @@
 //! #2342 stands. The body follows on a bounded channel as hyper reads it,
 //! and the response comes back on two: the head once, then the body
 //! piece by piece, which hyper frames chunked on HTTP/1.1 and
-//! close-delimited on HTTP/1.0 where PHP set no length.
+//! close-delimited on HTTP/1.0 where PHP set no length. A `HEAD`
+//! response has none: PHP writes no body for one (php's `headers_only`),
+//! and hyper sends none.
+//!
+//! Every limit of [`Limits`] (#2341) is applied on this side: the head's
+//! request line, field bytes and declared body length where hyper has
+//! parsed it ([`over_limit`]), the field count by hyper's parser, the
+//! keep-alive and header clocks and the response's minimum rate by the
+//! connection's socket ([`Socket`]), a chunked body's length and the
+//! body's minimum rate as the body is read ([`pump`]), and the cap on
+//! requests per connection as each request begins ([`respond`]); the
+//! cap on connections is the accept loop's (#2342). hyper
+//! answers `100 Continue` when the body is first read, which is after
+//! the head has passed its limits.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use hyper::body::{Body as _, Bytes, Frame, Incoming, SizeHint};
-use hyper::header::{CONNECTION, HeaderName, HeaderValue};
+use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderName, HeaderValue};
+use hyper::http::request::Parts;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Version};
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::rt::TokioIo;
 use php_sapi::ResponseHead;
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::framing;
 use crate::options::{Limits, Options};
 use crate::request::{Head, Job, Sink};
-use crate::socket::Socket;
+use crate::socket::{Socket, Watch};
 
 /// How many pieces of a request's body wait for the request to read them.
 const BODY_PIECES: usize = 8;
 
 /// How many pieces of a response wait for the client to take them.
 const RESPONSE_PIECES: usize = 8;
+
+/// The least hyper's read buffer may hold, which its builder asserts.
+const LEAST_BUFFER: usize = 8192;
 
 /// The connection side, on this thread for as long as the process serves:
 /// every connection accepted on `listener` served on its own task, its
@@ -79,6 +98,8 @@ async fn accept(
             local,
             limits,
             queue: queue.clone(),
+            watch: Arc::new(Watch::new()),
+            begun: AtomicU32::new(0),
             cut: Notify::new(),
         });
         tokio::spawn(drive(connection, stream));
@@ -91,8 +112,13 @@ struct Connection {
     local: SocketAddr,
     limits: Limits,
     queue: mpsc::Sender<Job>,
+    /// What the connection waits on, which its socket's clocks read.
+    watch: Arc<Watch>,
+    /// How many of its requests have begun.
+    begun: AtomicU32,
     /// Rung where the connection must end while a response is under way,
-    /// its body broken after the response began: the connection is
+    /// its body broken, too large or too slow after the response began,
+    /// as `BodyFault` has it: the connection is
     /// dropped, its socket lingers, and the request's next write meets
     /// [`php_sapi::Aborted`].
     cut: Notify,
@@ -105,13 +131,20 @@ async fn drive(connection: Arc<Connection>, stream: tokio::net::TcpStream) {
         let connection = Arc::clone(&connection);
         service_fn(move |request| respond(Arc::clone(&connection), request))
     };
+    // The head's limits are held from what hyper parsed ([`over_limit`]);
+    // its buffer holds a head at both limits, and a head past it is
+    // answered 431 by hyper, a request line among it. The count is
+    // hyper's, the size of the array it parses into. The timeouts are the
+    // socket's, since hyper's one header timeout runs from the end of a
+    // response and answers nothing.
     let mut builder = http1::Builder::new();
-    builder
-        .timer(TokioTimer::new())
-        .header_read_timeout(limits.header_timeout)
-        .max_headers(limits.header_count)
-        .max_buf_size(limits.request_line + limits.header_bytes);
-    let served = builder.serve_connection(TokioIo::new(Socket::new(stream)), service);
+    builder.max_headers(limits.header_count).max_buf_size(
+        (limits.request_line + limits.header_bytes)
+            .saturating_add(4)
+            .max(LEAST_BUFFER),
+    );
+    let socket = Socket::new(stream, Arc::clone(&connection.watch), limits);
+    let served = builder.serve_connection(TokioIo::new(socket), service);
     // A connection's end, the client's close among them, is nothing the
     // server acts on until its logs (#2345).
     first_of(served, connection.cut.notified()).await;
@@ -130,20 +163,38 @@ async fn first_of<A: Future, B: Future>(a: A, b: B) {
     .await;
 }
 
-/// One request: refused where its framing does not hold ([`framing`]);
-/// else handed to the request side with its body following it, and
-/// answered with the head the request sends and the body it writes after
-/// it. The server answers on its own with a 503 where it is stopping and
-/// takes no request; with the refusal of a body that broke before the
-/// request sent its head; and with a 500 where the request ended without
-/// a head, which only a panic contained at its edge leaves.
+/// One request, the connection's last where it reaches the cap on
+/// requests per connection: its response then says `Connection: close`,
+/// which hyper closes after.
 async fn respond(
     connection: Arc<Connection>,
     request: Request<Incoming>,
 ) -> Result<Response<Reply>, Infallible> {
+    connection.watch.request_began();
+    let begun = connection.begun.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut response = hand_over(&connection, request).await;
+    if begun >= connection.limits.requests_per_connection {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    Ok(response)
+}
+
+/// One request: refused where it is past a limit ([`over_limit`]) or its
+/// framing does not hold ([`framing`]); else handed to the request side
+/// with its body following it, and answered with the head the request
+/// sends and the body it writes after it. The server answers on its own
+/// with a 503 where it is stopping and takes no request; with the refusal
+/// of a body that faulted before the request sent its head; and with a
+/// 500 where the request ended without a head, which only a panic
+/// contained at its edge leaves.
+async fn hand_over(connection: &Arc<Connection>, request: Request<Incoming>) -> Response<Reply> {
     let (parts, incoming) = request.into_parts();
-    if let Some(refused) = framing::refusal(&parts) {
-        return Ok(closing(refused));
+    if let Some(refused) =
+        over_limit(&parts, &connection.limits).or_else(|| framing::refusal(&parts))
+    {
+        return closing(connection, refused);
     }
     let (feed, body) = mpsc::channel(BODY_PIECES);
     let (head_sent, head) = oneshot::channel();
@@ -173,11 +224,11 @@ async fn respond(
         sink: Sink::new(head_sent, out),
     };
     if connection.queue.send(job).await.is_err() {
-        return Ok(plain(StatusCode::SERVICE_UNAVAILABLE));
+        return plain(connection, StatusCode::SERVICE_UNAVAILABLE);
     }
     let (broke, mut fault) = oneshot::channel();
-    tokio::spawn(pump(incoming, feed, broke, Arc::clone(&connection)));
-    Ok(match answer(head, &mut fault).await {
+    tokio::spawn(pump(incoming, feed, broke, Arc::clone(connection)));
+    match answer(head, &mut fault).await {
         Answer::Head(head) => {
             // A fault that came with the head is no longer the answer's:
             // closed, the channel takes no later one, which the pump then
@@ -186,11 +237,40 @@ async fn respond(
             if fault.try_recv().is_ok() {
                 connection.cut.notify_one();
             }
-            response(&head, written)
+            response(connection, &head, written)
         }
-        Answer::Broke(fault) => closing(fault.status()),
-        Answer::Headless => plain(StatusCode::INTERNAL_SERVER_ERROR),
-    })
+        Answer::Broke(fault) => closing(connection, fault.status()),
+        Answer::Headless => plain(connection, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// The limits a parsed head is held to (#2341): its request line, 414
+/// past [`Limits::request_line`]; its fields' bytes, each counted as its
+/// name, value, colon, space and CRLF, 431 past [`Limits::header_bytes`];
+/// and its body's length, 413 past [`Limits::body_bytes`] before a byte of
+/// the body is read or `100 Continue` sent. A chunked body is counted as
+/// it is read (`pump`).
+fn over_limit(parts: &Parts, limits: &Limits) -> Option<StatusCode> {
+    let line =
+        parts.method.as_str().len() + 1 + parts.uri.to_string().len() + 1 + b"HTTP/1.1".len();
+    let fields: usize = parts
+        .headers
+        .iter()
+        .map(|(name, value)| name.as_str().len() + value.len() + 4)
+        .sum();
+    let length = parts
+        .headers
+        .get(CONTENT_LENGTH)
+        .and_then(|length| length.to_str().ok()?.parse::<u64>().ok());
+    if line > limits.request_line {
+        Some(StatusCode::URI_TOO_LONG)
+    } else if fields > limits.header_bytes {
+        Some(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE)
+    } else if length.is_some_and(|length| length > limits.body_bytes) {
+        Some(StatusCode::PAYLOAD_TOO_LARGE)
+    } else {
+        None
+    }
 }
 
 /// How a request is answered.
@@ -204,16 +284,16 @@ enum Answer {
 }
 
 /// The request's head, or its body's fault where that comes first; a body
-/// that ends whole leaves the head to wait for.
+/// that ends whole leaves the head to wait for. A fault that has come is
+/// read before a head that has: the pump sends it before it lets the
+/// request read the body's end, so a request that answers once it has
+/// read its body never answers ahead of its body's fault.
 async fn answer(
     mut head: oneshot::Receiver<ResponseHead>,
     fault: &mut oneshot::Receiver<BodyFault>,
 ) -> Answer {
     let mut body_whole = false;
     std::future::poll_fn(|cx| {
-        if let Poll::Ready(sent) = Pin::new(&mut head).poll(cx) {
-            return Poll::Ready(sent.map_or(Answer::Headless, Answer::Head));
-        }
         if !body_whole {
             match Pin::new(&mut *fault).poll(cx) {
                 Poll::Ready(Ok(fault)) => return Poll::Ready(Answer::Broke(fault)),
@@ -221,7 +301,9 @@ async fn answer(
                 Poll::Pending => {}
             }
         }
-        Poll::Pending
+        Pin::new(&mut head)
+            .poll(cx)
+            .map(|sent| sent.map_or(Answer::Headless, Answer::Head))
     })
     .await
 }
@@ -232,6 +314,11 @@ enum BodyFault {
     /// It broke: a chunk hyper's decoder refused (§7.1), or the client
     /// failed or closed before the body's end.
     Broken,
+    /// A chunked body crossed [`Limits::body_bytes`].
+    TooLarge,
+    /// The client sent it slower than [`Limits::min_body_rate`], past the
+    /// grace.
+    TooSlow,
     /// It ended in a trailer section. hyper ends that section only at
     /// CRLF CRLF and parses it with a parser that takes a bare LF's blank
     /// line as its end and drops what follows, so a front end that ends
@@ -246,28 +333,57 @@ impl BodyFault {
     fn status(self) -> StatusCode {
         match self {
             BodyFault::Broken | BodyFault::Trailers => StatusCode::BAD_REQUEST,
+            BodyFault::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            BodyFault::TooSlow => StatusCode::REQUEST_TIMEOUT,
         }
     }
 }
 
 /// The request's body onto its channel as hyper reads it, until it ends,
-/// the request has gone and reads no more, or it breaks: a fault goes to
+/// the request has gone and reads no more, or it faults: a fault goes to
 /// the request's answer while that waits, and cuts the connection once
 /// the response is under way. The channel closed is the body's end, which
-/// the request reads as short where the body broke.
+/// the request reads as short where the body faulted, so a request thread
+/// blocked reading a stalled client's body is freed at the minimum rate.
+///
+/// The rate is Kestrel's: only the time spent waiting on the client
+/// counts, not the time the request leaves the channel full, and the body
+/// faults once that time passes the grace, or the time what has arrived
+/// takes at the rate where that is longer ([`MinDataRate::allowed`]).
+///
+/// [`MinDataRate::allowed`]: crate::options::MinDataRate::allowed
 async fn pump(
     mut incoming: Incoming,
     feed: mpsc::Sender<Bytes>,
     broke: oneshot::Sender<BodyFault>,
     connection: Arc<Connection>,
 ) {
+    let limits = connection.limits;
+    let mut arrived = 0u64;
+    let mut waited = Duration::ZERO;
     let fault = loop {
-        let frame = std::future::poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)).await;
+        let started = tokio::time::Instant::now();
+        let next = std::future::poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx));
+        let frame = match limits.min_body_rate {
+            Some(rate) => {
+                let left = rate.allowed(arrived).saturating_sub(waited);
+                match tokio::time::timeout(left, next).await {
+                    Ok(frame) => frame,
+                    Err(_) => break BodyFault::TooSlow,
+                }
+            }
+            None => next.await,
+        };
+        waited += started.elapsed();
         match frame {
             None => return,
             Some(Err(_)) => break BodyFault::Broken,
             Some(Ok(frame)) => match frame.into_data() {
                 Ok(piece) => {
+                    arrived += u64::try_from(piece.len()).unwrap_or(u64::MAX);
+                    if arrived > limits.body_bytes {
+                        break BodyFault::TooLarge;
+                    }
                     if feed.send(piece).await.is_err() {
                         return;
                     }
@@ -284,8 +400,15 @@ async fn pump(
 /// The response for the head a request sent: its code, 200 where it set
 /// none, and its header lines in order, each one hyper cannot carry left
 /// out; the body what the request writes after it.
-fn response(head: &ResponseHead, written: mpsc::Receiver<Bytes>) -> Response<Reply> {
-    let mut response = Response::new(Reply::Written(written));
+fn response(
+    connection: &Connection,
+    head: &ResponseHead,
+    written: mpsc::Receiver<Bytes>,
+) -> Response<Reply> {
+    let mut response = Response::new(Reply {
+        written: Some(written),
+        watch: Arc::clone(&connection.watch),
+    });
     let code = u16::try_from(head.code).unwrap_or(500);
     *response.status_mut() = match code {
         0 => StatusCode::OK,
@@ -308,16 +431,19 @@ fn response(head: &ResponseHead, written: mpsc::Receiver<Bytes>) -> Response<Rep
 }
 
 /// A response of the server's own, with no body.
-fn plain(status: StatusCode) -> Response<Reply> {
-    let mut response = Response::new(Reply::Empty);
+fn plain(connection: &Connection, status: StatusCode) -> Response<Reply> {
+    let mut response = Response::new(Reply {
+        written: None,
+        watch: Arc::clone(&connection.watch),
+    });
     *response.status_mut() = status;
     response
 }
 
 /// A response of the server's own after which the connection closes:
 /// hyper reads its `Connection: close` and keeps nothing alive.
-fn closing(status: StatusCode) -> Response<Reply> {
-    let mut response = plain(status);
+fn closing(connection: &Connection, status: StatusCode) -> Response<Reply> {
+    let mut response = plain(connection, status);
     response
         .headers_mut()
         .insert(CONNECTION, HeaderValue::from_static("close"));
@@ -326,10 +452,11 @@ fn closing(status: StatusCode) -> Response<Reply> {
 
 /// A response's body: what a request writes, piece by piece as it writes
 /// it, ending when its sink is dropped with the request; or none, the
-/// server's own answer.
-pub(crate) enum Reply {
-    Written(mpsc::Receiver<Bytes>),
-    Empty,
+/// server's own answer. hyper lets go of it when the response has ended,
+/// and the connection waits for its next request from then.
+pub(crate) struct Reply {
+    written: Option<mpsc::Receiver<Bytes>>,
+    watch: Arc<Watch>,
 }
 
 impl hyper::body::Body for Reply {
@@ -340,22 +467,28 @@ impl hyper::body::Body for Reply {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-        match self.get_mut() {
-            Reply::Written(written) => written
+        match &mut self.get_mut().written {
+            Some(written) => written
                 .poll_recv(cx)
                 .map(|piece| piece.map(|piece| Ok(Frame::data(piece)))),
-            Reply::Empty => Poll::Ready(None),
+            None => Poll::Ready(None),
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(self, Reply::Empty)
+        self.written.is_none()
     }
 
     fn size_hint(&self) -> SizeHint {
-        match self {
-            Reply::Written(_) => SizeHint::default(),
-            Reply::Empty => SizeHint::with_exact(0),
+        match self.written {
+            Some(_) => SizeHint::default(),
+            None => SizeHint::with_exact(0),
         }
+    }
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        self.watch.response_ended();
     }
 }

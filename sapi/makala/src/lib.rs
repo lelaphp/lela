@@ -55,7 +55,7 @@ pub fn main() -> ExitCode {
     let options = match Options::parse(&argv) {
         Ok(options) => options,
         Err(refusal) => {
-            say(&format!("makala: {refusal}\n{}", options::USAGE));
+            say(&format!("makala: {refusal}\n{}", options::usage()));
             return php_sapi::exit_code(1);
         }
     };
