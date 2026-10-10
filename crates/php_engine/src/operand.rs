@@ -168,3 +168,11 @@ pub(crate) fn owns_nothing(z: Zval) -> bool {
                 | ZvalType::Array
         )
 }
+
+/// `ZVAL_DEREF`: the value a reference holds, and any other zval as it
+/// stands.
+#[inline(always)] // a test of the type byte, on an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn deref(z: Zval) -> Zval {
+    z.as_reference().map_or(z, |cell| cell.val())
+}

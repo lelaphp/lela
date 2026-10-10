@@ -629,6 +629,73 @@ impl Request {
         );
     }
 
+    /// `zobj->ce == CACHED_PTR_EX(cache_slot)` and the offset beside it
+    /// (`ZEND_FETCH_OBJ_R`, `ZEND_ASSIGN_OBJ`): the declared slot of
+    /// objects of `class` the property fetch at `slot` placed on an
+    /// earlier pass, and whether it is typed, where `frame` is one the
+    /// placement holds for ([`exec::Cached::Property`]) and no write
+    /// names its own scope; none otherwise, and the fetch places the
+    /// name.
+    pub(crate) fn cached_property(
+        &self,
+        frame: FrameRef,
+        slot: CacheSlot,
+        class: crate::api::values::ClassId,
+    ) -> Option<(u32, bool)> {
+        let header = self.vm.at(frame)?;
+        let exec::Cached::Property {
+            class: held,
+            function,
+            scope,
+            slot,
+            typed,
+        } = self.map.get(header.runtime_cache())?.get(slot)
+        else {
+            return None;
+        };
+        let same = held == class
+            && header.closure.is_none()
+            && header.function == function
+            && !self.fakes_scope()
+            && (function.is_some() || self.frame_scope(frame) == scope);
+        same.then_some((slot, typed))
+    }
+
+    /// `zend_get_property_offset`'s `CACHE_POLYMORPHIC_PTR_EX` for the
+    /// fetch at `slot` in `frame`: the slot `name` is placed in on
+    /// objects of `object`'s class written into the runtime cache,
+    /// where [`Request::cacheable_slot`] answers one and the scope it
+    /// was placed from is the frame's own. A closure's frame is never
+    /// written for, since one op array serves closures bound to many
+    /// scopes.
+    pub(crate) fn prime_property(
+        &mut self,
+        frame: FrameRef,
+        slot: CacheSlot,
+        object: PhpObject,
+        name: &[u8],
+    ) {
+        let Some(header) = self.vm.at(frame).filter(|header| header.closure.is_none()) else {
+            return;
+        };
+        let function = header.function;
+        let scope = self.frame_scope(frame);
+        if self.property_scope() != scope {
+            return;
+        }
+        let Some((at, typed)) = self.cacheable_slot(object, name) else {
+            return;
+        };
+        let cached = exec::Cached::Property {
+            class: object.class(),
+            function,
+            scope,
+            slot: at,
+            typed,
+        };
+        self.prime(frame, slot, cached);
+    }
+
     /// The room on the VM stack a call to `function` takes when its
     /// `INIT_*` says `count` arguments are passed, past the header:
     /// `zend_vm_calc_used_stack`, the user function's CVs and
