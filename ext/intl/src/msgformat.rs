@@ -508,12 +508,12 @@ fn quoted(head: &str, bytes: &[u8], tail: &str) -> Vec<u8> {
 /// the walk goes on past as php's loop does: `zval_get_tmp_string`
 /// leaves the throwable pending and answers the empty string, and the
 /// later conversions are served as php serves them with one pending.
-struct Walk<'s, 'a> {
+struct Converting<'s, 'a> {
     site: &'s mut Site<'a>,
     pending: Option<Thrown>,
 }
 
-impl Walk<'_, '_> {
+impl Converting<'_, '_> {
     /// A conversion that can call PHP code: its value, or `None` where it
     /// threw, the throwable pending from there on. With one pending
     /// already it is served while that one stands, so a `__toString` is
@@ -735,7 +735,7 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
     let types = arg_types(req, site)?.unwrap_or_default();
     set_timezone(req, site)?;
     let mut args = Vec::with_capacity(values.len());
-    let mut walk = Walk {
+    let mut converting = Converting {
         site,
         pending: None,
     };
@@ -743,14 +743,14 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
     // the argument, which holds the array while a conversion serves
     // `__toString` or a date argument's methods.
     let walked = walk::foreach(req, values, Hold::None, |req, row| -> walk::Step {
-        if walk.code(req).is_failure() {
+        if converting.code(req).is_failure() {
             return Ok(ControlFlow::Break(()));
         }
         let value = row.value().deref();
         let (name, stored) = match row.key() {
             Key::Int(n) if !(0..=i64::from(i32::MAX)).contains(n) => {
                 let message = "Found negative or too large array key";
-                walk.set(req, Code::ILLEGAL_ARGUMENT, message)?;
+                converting.set(req, Code::ILLEGAL_ARGUMENT, message)?;
                 return Ok(ControlFlow::Continue(()));
             }
             Key::Int(n) => (
@@ -764,20 +764,20 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
                 }
                 Err(code) => {
                     let message = quoted("Invalid UTF-8 data in argument key: ", s.as_bytes(), "");
-                    walk.set(req, code, message)?;
+                    converting.set(req, code, message)?;
                     return Ok(ControlFlow::Continue(()));
                 }
             },
         };
         let arg = match stored.copied().unwrap_or(ArgType::Object) {
-            ArgType::String => walk.string(req, &value)?,
-            ArgType::Double => Some(walk.double(req, &value)),
-            ArgType::Long => walk.long(req, &value)?,
-            ArgType::Int64 => walk.int64(req, &value)?,
-            ArgType::Date => walk.date(req, value, &name)?,
-            ArgType::Object => walk.untyped(req, &value, &name)?,
+            ArgType::String => converting.string(req, &value)?,
+            ArgType::Double => Some(converting.double(req, &value)),
+            ArgType::Long => converting.long(req, &value)?,
+            ArgType::Int64 => converting.int64(req, &value)?,
+            ArgType::Date => converting.date(req, value, &name)?,
+            ArgType::Object => converting.untyped(req, &value, &name)?,
             ArgType::Array => {
-                walk.set(
+                converting.set(
                     req,
                     Code::ILLEGAL_ARGUMENT,
                     "Found unsupported argument type",
@@ -791,10 +791,10 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
         Ok(ControlFlow::Continue(()))
     });
     if let Err(thrown) = walked {
-        walk.keep(req, thrown);
+        converting.keep(req, thrown);
     }
-    let formatted = formatted(req, &mut walk, &args);
-    match walk.pending {
+    let formatted = formatted(req, &mut converting, &args);
+    match converting.pending {
         Some(pending) => Err(pending),
         None => formatted,
     }
@@ -805,25 +805,25 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
 /// throwable pending as php's does, its failure set over that one.
 fn formatted(
     req: &mut Request,
-    walk: &mut Walk,
+    converting: &mut Converting,
     args: &[(Vec<u16>, Formattable)],
 ) -> Answer<Vec<u16>> {
-    if walk.code(req).is_failure() {
+    if converting.code(req).is_failure() {
         return Ok(None);
     }
     // The formatter is read again once the arguments' PHP code has run:
     // an object that code left unconstructed is the `Error`.
-    let Some(formatter) = walk.site.formatter(req) else {
+    let Some(formatter) = converting.site.formatter(req) else {
         let message = "Found unconstructed MessageFormatter";
         let thrown = throw_error(req, "Error", message);
-        walk.keep(req, thrown);
+        converting.keep(req, thrown);
         return Ok(None);
     };
     let mut status = Code::ZERO;
     let text = formatter.umsgf.format(args, &mut status);
     if status.is_failure() {
         let message = "Call to ICU MessageFormat::format() has failed";
-        walk.set(req, status, message)?;
+        converting.set(req, status, message)?;
         return Ok(None);
     }
     Ok(Some(text.map(|t| t.units().to_vec()).unwrap_or_default()))
