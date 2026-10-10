@@ -967,6 +967,7 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
         ("fastcgi_param  X  \"a b\";\n", "fastcgi_param <name>"),
         ("fastcgi_param  X  ${https};\n", "syntax"),
         ("fastcgi_param  X  200\n", "`;`"),
+        ("fastcgi_param  X  a$;\n", "names no variable"),
     ] {
         let err = refused(line, None);
         assert!(
@@ -974,6 +975,9 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
             "{line}: {err}"
         );
     }
+
+    let err = refused("fastcgi_param  SCRIPT_FILENAME  $document_root;\n", None);
+    assert!(err.contains("SCRIPT_FILENAME twice"), "{err}");
 
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
     let mut bare: toml::Table = toml::from_str(&text).unwrap();

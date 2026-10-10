@@ -13,8 +13,12 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 
 /// The mapping: the nginx release the parameters were copied from, where
-/// from, and every parameter in the order nginx sends it, which is the
-/// order php-fpm registers `$_SERVER` in. `SCRIPT_FILENAME` stands first,
+/// from, and every parameter in the order nginx sends it. php-fpm
+/// registers `$_SERVER` in the reverse of that order: `fcgi_hash_set`
+/// puts each new parameter at the head of its list and `fcgi_hash_apply`
+/// walks from the head (`Z/main/fastcgi.c:353-354`, `:399-407`), so the
+/// request headers, sent last, come out first, and `SCRIPT_FILENAME` last
+/// of the parameters. `SCRIPT_FILENAME` stands first,
 /// where nginx's own `conf/fastcgi.conf` at the same tag puts it (that
 /// file is `fastcgi_params` with that one line added), and the file's
 /// parameters follow. After the parameters nginx passes every request
@@ -70,7 +74,8 @@ pub enum Piece {
 pub enum Variable {
     DocumentRoot,
     /// `$fastcgi_script_name`: the request URI, with `fastcgi_index`
-    /// appended where it ends in a slash.
+    /// appended where it ends in a slash; named for what it holds, since
+    /// the glossary keeps nginx's word out of item names.
     FastcgiUri,
     QueryString,
     RequestMethod,
@@ -161,6 +166,13 @@ impl TryFrom<File> for Mapping {
             // which prints one layer, so the line goes into the message.
             params.push(param(line).map_err(|e| anyhow!("[fastcgi] params line {}: {e}", n + 1))?);
         }
+        if let Some((_, twice)) = params
+            .iter()
+            .enumerate()
+            .find(|(n, p)| params[..*n].iter().any(|q| q.name == p.name))
+        {
+            bail!("[fastcgi] names the parameter {} twice", twice.name);
+        }
         Ok(Mapping {
             nginx: file.nginx,
             source: file.source,
@@ -206,6 +218,9 @@ fn pieces(value: &str) -> Result<Vec<Piece>> {
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .unwrap_or(segment.len());
         let (name, text) = segment.split_at(end);
+        if name.is_empty() {
+            bail!("{value:?} has a `$` that names no variable");
+        }
         let variable = Variable::ALL
             .into_iter()
             .find(|v| v.name() == name)
