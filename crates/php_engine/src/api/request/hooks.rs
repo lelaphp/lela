@@ -270,8 +270,8 @@ impl Request {
     /// `EG(current_execute_data)`'s function and `$this`.
     fn current_call(&self) -> Option<(Option<Function>, Option<PhpObject>)> {
         Some(match self.chain().next()? {
-            Link::Frame(_, state) => (state.function, state.this()),
-            Link::Call(call) => (Some(call.function), call.this()),
+            Link::Frame(_, state) => (state.function(), state.this()),
+            Link::Call(call) => (call.function(), call.this()),
             Link::Site(_) | Link::Fake(_) => (None, None),
         })
     }
@@ -296,12 +296,12 @@ impl Request {
     /// less its `$` and its hook, beside the property's class, the
     /// call's scope.
     fn trampoline_property(&self) -> Option<(Vec<u8>, Option<ClassId>)> {
-        let call = self.vm.serving_call()?;
-        let written = call.name?;
+        let call = self.serving_call()?;
+        let written = call.annex()?.name?;
         let bytes = written.as_bytes();
         let name = bytes.strip_prefix(b"$")?;
         let end = name.iter().rposition(|b| *b == b':')?.checked_sub(1)?;
-        Some((name.get(..end)?.to_vec(), call.called_scope))
+        Some((name.get(..end)?.to_vec(), call.called_scope()))
     }
 
     /// `zend_is_in_hook`: whether the function running is a hook of the

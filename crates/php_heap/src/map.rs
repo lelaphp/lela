@@ -4,9 +4,7 @@
 //! touch. This is `ZEND_MAP_PTR`, and it is what makes a published unit
 //! `Sync` by construction.
 
-use std::any::{Any, TypeId};
 use std::marker::PhantomData;
-use std::ptr;
 
 /// An offset into a request's map table, typed by what lives there.
 #[derive(Debug)]
@@ -41,26 +39,29 @@ impl<T> MapPtr<T> {
 }
 
 /// One request's per-request state for every published structure it has
-/// touched, indexed by [`MapPtr`]. Each touched entry is the `T` behind
-/// one box, beside the `TypeId` of the `T`, so that reading it is a
-/// compare with a constant and no call through the box's table, as php's
-/// `ZEND_MAP_PTR_GET` is one load.
-#[derive(Debug, Default)]
-pub struct MapTable {
-    entries: Vec<Option<Entry>>,
-}
-
-/// One touched entry: the `TypeId` of what the box holds, and the box.
+/// touched of one kind, `T`, indexed by [`MapPtr<T>`]: a `T` per offset
+/// the request has reached, `T::default()` standing for one it has not
+/// touched, so reading an entry is one bounds-checked index, as php's
+/// `ZEND_MAP_PTR_GET` is one load. The engine assigns one offset space
+/// per kind, so the table is dense: every op array of a published unit
+/// takes the next offset for its runtime cache.
 #[derive(Debug)]
-struct Entry {
-    of: TypeId,
-    value: Box<dyn Any + Send>,
+pub struct MapTable<T> {
+    entries: Vec<T>,
 }
 
-impl MapTable {
+impl<T> Default for MapTable<T> {
+    fn default() -> MapTable<T> {
+        MapTable {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<T: Default> MapTable<T> {
     /// An empty table.
     #[must_use]
-    pub fn new() -> MapTable {
+    pub fn new() -> MapTable<T> {
         MapTable::default()
     }
 
@@ -71,39 +72,21 @@ impl MapTable {
         self.entries.as_ptr() as usize
     }
 
-    /// `ZEND_MAP_PTR_GET`: the `T` at `ptr` where the request has touched
+    /// `ZEND_MAP_PTR_GET`: the `T` at `ptr` where the request has reached
     /// it, and none where it has not.
     #[must_use]
-    pub fn get<T: 'static>(&self, ptr: MapPtr<T>) -> Option<&T> {
-        let entry = self.entries.get(ptr.offset() as usize)?.as_ref()?;
-        if entry.of != TypeId::of::<T>() {
-            return None;
-        }
-        let raw = ptr::from_ref::<dyn Any + Send>(entry.value.as_ref()).cast::<T>();
-        // SAFETY: `of` is the `TypeId` of what the box was made over, in
-        // `map`, the one writer, and it is `T`'s, so the cast names the
-        // `T` the box owns; the borrow lives as long as the table's.
-        Some(unsafe { &*raw })
+    pub fn get(&self, ptr: MapPtr<T>) -> Option<&T> {
+        self.entries.get(ptr.offset() as usize)
     }
 
-    /// The `T` at `ptr`, built by `T::default()` on first touch.
-    pub fn map<T: Default + Send + 'static>(&mut self, ptr: MapPtr<T>) -> &mut T {
+    /// The `T` at `ptr`, `T::default()` laid down for it and every offset
+    /// below it the table had not reached.
+    pub fn map(&mut self, ptr: MapPtr<T>) -> &mut T {
         let at = ptr.offset() as usize;
         if self.entries.len() <= at {
-            self.entries.resize_with(at + 1, || None);
+            self.entries.resize_with(at + 1, T::default);
         }
-        let entry = match &mut self.entries[at] {
-            Some(entry) if entry.of == TypeId::of::<T>() => entry,
-            slot => slot.insert(Entry {
-                of: TypeId::of::<T>(),
-                value: Box::new(T::default()),
-            }),
-        };
-        let raw = ptr::from_mut::<dyn Any + Send>(entry.value.as_mut()).cast::<T>();
-        // SAFETY: the box holds a `T`: the first arm read its `TypeId`
-        // and the second wrote one, so the cast names the `T` the box
-        // owns and the borrow lives as long as the table's.
-        unsafe { &mut *raw }
+        &mut self.entries[at]
     }
 }
 
@@ -113,7 +96,7 @@ mod tests {
 
     #[test]
     fn a_map_pointer_allocates_on_first_touch_and_keeps_what_was_written() {
-        let mut table = MapTable::new();
+        let mut table = MapTable::<u32>::new();
         let ptr: MapPtr<u32> = MapPtr::new(3);
         assert_eq!(table.get(ptr), None, "untouched, there is nothing to read");
         assert_eq!(*table.map(ptr), 0);

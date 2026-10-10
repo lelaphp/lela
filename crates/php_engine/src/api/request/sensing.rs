@@ -67,7 +67,7 @@ impl Request {
             return;
         }
         let opline = self.vm.opline(frame);
-        let Some(serving) = self.vm.serving(frame) else {
+        let Some(serving) = self.serving(frame) else {
             return;
         };
         let Some((code, op)) = serving

@@ -10,16 +10,15 @@
 
 use std::sync::atomic::Ordering;
 
-use php_heap::Fatal;
-
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{
     ClassId, ClosureInfo, Owner, PhpObject, PhpString, Value, ValueRef, adopted,
 };
 use crate::engine::{MethodAt, NativeMethod};
-use crate::exec::{self, CallState};
+use crate::exec;
 use crate::observer::OnThrow;
+use php_heap::FrameRef;
 
 use super::{ExtensionId, Link, Request, UserFunction};
 
@@ -263,7 +262,7 @@ impl Request {
                 return None;
             }
             if let Link::Frame(_, state) = link {
-                let closure = state.closure?;
+                let closure = state.closure()?;
                 return closure
                     .closure(self)
                     .filter(|info| !info.fake)
@@ -339,6 +338,11 @@ impl Request {
         if self.pending().is_some() {
             return Ok(Value::null());
         }
+        // `EG(current_execute_data)` as the call finds it, which a user
+        // function it reaches names as its caller.
+        let caller = self
+            .current_user_frame()
+            .map_or(exec::Caller::Outside, exec::Caller::Loop);
         // `zend_call_function`: the deprecation before the arguments
         // are placed, and no call where a handler threw.
         if self.function_flags(function).deprecated {
@@ -389,15 +393,42 @@ impl Request {
         if let Some(closure) = closure {
             self.addref(&closure.as_value());
         }
-        let call = CallState {
-            receiver,
-            called_scope,
-            closure,
-            extra_named,
-            ..CallState::serving(function, sent)
+        // `zend_vm_stack_push_call_frame`, the arguments copied into its
+        // slots, the call served from here (`EG(current_execute_data)`
+        // is it while an undefined argument's default is found).
+        let mut header =
+            exec::Header::call(function, u32::try_from(sent.len()).unwrap_or(u32::MAX));
+        header.set_receiver(receiver);
+        header.called_scope = called_scope;
+        header.closure = closure;
+        header.info.set_serving();
+        let call = match self.push_call(header) {
+            Ok(call) => call,
+            Err(fatal) => {
+                for argument in sent {
+                    self.release(argument);
+                }
+                self.release_named(extra_named);
+                if let Some(receiver) = receiver {
+                    self.give_up_receiver(receiver);
+                }
+                if let Some(closure) = closure {
+                    self.release(closure.as_value());
+                }
+                return self.fatal_of(Err(fatal));
+            }
         };
-        self.vm.push_call(call);
-        if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self) {
+        if let Some(frame) = self.vm.stack.frame_mut(call) {
+            for (slot, argument) in frame.slots_mut().iter_mut().zip(sent) {
+                *slot = argument.to_zval();
+            }
+        }
+        if extra_named.carries_any()
+            && let Some(annex) = self.annex_mut(call)
+        {
+            annex.extra_named = extra_named;
+        }
+        if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self, call) {
             self.pop_call();
             return Err(thrown);
         }
@@ -409,12 +440,7 @@ impl Request {
             }
         };
         if self.user_function(function).is_some() {
-            let Some(call) = self.vm.pop_call() else {
-                return self.fatal_of(Err(Fatal::Error(String::from(
-                    "InternalError: the call just pushed is not on the call stack",
-                ))));
-            };
-            return self.serve_user(function, call);
+            return self.serve_user(call, caller);
         }
         // `zend_call_function` ends an observed native with `fci->retval`
         // whether it threw or not (`Z/Zend/zend_execute_API.c:1039`).
@@ -656,10 +682,10 @@ impl Request {
     /// returns, the `zend_bailout()` php's catch blocks end with. The
     /// session's decode is the witness, in `ext/session`: its handler's
     /// `destroy` is served after the fatal a class declaration raised.
-    fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
+    fn serve_user(&mut self, call: FrameRef, caller: exec::Caller) -> Result<Value, Thrown> {
         let caught = self.bailout;
         self.catch_bailout();
-        let served = self.serve_user_uncaught(function, call);
+        let served = self.serve_user_uncaught(call, caller);
         if caught {
             self.set_bailing_out(true);
         }
@@ -668,25 +694,32 @@ impl Request {
 
     fn serve_user_uncaught(
         &mut self,
-        function: Function,
-        call: CallState,
+        call: FrameRef,
+        caller: exec::Caller,
     ) -> Result<Value, Thrown> {
-        let standing = self.vm.frames().len();
-        let caller = self
-            .current_user_frame()
-            .map_or(exec::Caller::Outside, exec::Caller::Loop);
-        let pushed = self.push_user_frame(function, call, None, caller);
-        let frame = self.fatal_of(pushed)?;
+        let standing = call.0 as usize;
+        let shape = self.call_shape(call).unwrap_or_default();
+        let pushed = self.activate_user(call, shape, None, caller);
+        let activated = match pushed {
+            Ok(activated) => activated,
+            Err(fatal) => {
+                while self.vm.depth() > standing {
+                    self.pop_frame();
+                }
+                return self.fatal_of(Err(fatal));
+            }
+        };
         // `enter`'s own prologue, so a body reached from here stands
         // where a body reached from `DO_UCALL` stands: every `RECV*`
         // php runs is run, which is where a declared parameter type is
         // checked and a scalar argument coerced, and the entry
         // safepoint is raised after them by the loop below.
-        let raised = crate::exec::parameter_prologue(self, frame);
+        let frame = activated.frame;
+        let raised = crate::exec::parameter_prologue(self, activated);
         let raised = match self.fatal_of(raised) {
             Ok(raised) => raised,
             Err(thrown) => {
-                while self.vm.frames().len() > standing {
+                while self.vm.depth() > standing {
                     self.pop_frame();
                 }
                 return Err(thrown);
@@ -698,7 +731,7 @@ impl Request {
             // here it is left at once.
             self.vm.stand_at_exception_op(frame, true);
             crate::observer::returned(self, frame, None);
-            while self.vm.frames().len() > standing {
+            while self.vm.depth() > standing {
                 self.pop_frame();
             }
             return match self.take_pending_view() {
@@ -713,7 +746,7 @@ impl Request {
         // it is: the site a timeout names inside a callback, or inside a
         // fiber's body, is the callback's and not its caller's.
         let served = self.fatal_of(served);
-        while self.vm.frames().len() > standing {
+        while self.vm.depth() > standing {
             self.pop_frame();
         }
         served?;
@@ -733,29 +766,34 @@ impl Request {
     /// native's chain of interceptions, and how far down that one
     /// stands; none where the entry serving is the native's own.
     pub(crate) fn replaced_entry(&self) -> Option<(crate::api::abi::Entry, usize)> {
-        let call = self.vm.serving_call()?;
-        let at = usize::try_from(call.function.0).ok()?;
-        let entry = self.shared.replaced.get(at)?.get(call.beneath)?;
-        Some((*entry, call.beneath.saturating_add(1)))
+        let call = self.serving_call()?;
+        let at = usize::try_from(call.function()?.0).ok()?;
+        let beneath = call.annex().map_or(0, |annex| annex.beneath);
+        let entry = self.shared.replaced.get(at)?.get(beneath)?;
+        Some((*entry, beneath.saturating_add(1)))
     }
 
     /// The call being served, served from `beneath` down its native's
     /// chain of interceptions.
     pub(crate) fn serve_beneath(&mut self, beneath: usize) {
-        if let Some(call) = self.vm.serving_call_mut() {
-            call.beneath = beneath;
+        if let Some(call) = self.vm.serving_at()
+            && let Some(annex) = self.annex_mut(call)
+        {
+            annex.beneath = beneath;
         }
     }
 
     /// The first argument of the call being served replaced by `value`,
     /// the one it held given up.
     pub(crate) fn replace_first_argument(&mut self, value: Value) {
-        let old = match self
+        let slot = self
             .vm
-            .serving_call_mut()
-            .and_then(|call| call.arguments.first_mut())
-        {
-            Some(slot) => std::mem::replace(slot, value),
+            .serving_at()
+            .filter(|&call| self.vm.at(call).is_some_and(|header| header.num_args > 0))
+            .and_then(|call| self.vm.stack.frame_mut(call))
+            .and_then(|frame| frame.slots_mut().first_mut());
+        let old = match slot {
+            Some(slot) => Value::of_zval(std::mem::replace(slot, value.to_zval())),
             None => value,
         };
         self.release(old);
@@ -1012,12 +1050,7 @@ impl Request {
             return Ok(Value::null());
         }
         let Some(entry) = self.entry_of(function) else {
-            let name = self
-                .vm
-                .serving_call()
-                .and_then(|call| call.name)
-                .map(|name| String::from_utf8_lossy(name.as_bytes()).into_owned())
-                .unwrap_or_default();
+            let name = self.declared_name(function);
             return Err(crate::api::raising::throw_error(
                 self,
                 "Error",

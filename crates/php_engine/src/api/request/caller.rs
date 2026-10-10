@@ -6,7 +6,7 @@
 //! area holds no state of its own: it reads the frames and calls the
 //! request's VM holds.
 
-use php_heap::{FrameRef, Slot};
+use php_heap::{FrameRef, Slot, Zval};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -39,8 +39,7 @@ impl Request {
             return Some(&site.file);
         }
         self.innermost_frame()
-            .and_then(|state| exec::body_of(&state.unit, state.body))
-            .map(|code| code.filename.0.as_ref())
+            .and_then(exec::FrameAt::file)
             .or(self.description.script_name.as_deref())
     }
 
@@ -59,7 +58,7 @@ impl Request {
         if let Some(site) = self.vm.innermost_site() {
             return site.line;
         }
-        self.innermost_frame().map_or(0, exec::line_of)
+        self.innermost_frame().map_or(0, exec::FrameAt::line)
     }
 
     /// Whether the call being served is a frameless one, a
@@ -69,7 +68,8 @@ impl Request {
     /// the framed body, so the native reads which one it is.
     #[must_use]
     pub fn frameless(&self) -> bool {
-        self.vm.serving_call().is_some_and(|call| call.frameless)
+        self.serving_call()
+            .is_some_and(|call| call.info().frameless())
     }
 
     /// `USED_RET()` (`Z/Zend/zend_API.h`): whether the caller reads what
@@ -80,9 +80,8 @@ impl Request {
     /// decides when the removed elements' destructors are served.
     #[must_use]
     pub fn return_value_used(&self) -> bool {
-        self.vm
-            .serving_call()
-            .is_none_or(|call| call.return_value == exec::ReturnValue::Used)
+        self.serving_call()
+            .is_none_or(|call| call.info().return_used())
     }
 
     /// `zend_hash_find_ind(zend_rebuild_symbol_table(), name)`: the
@@ -174,9 +173,8 @@ impl Request {
         force: bool,
     ) -> bool {
         if self
-            .vm
-            .at(frame)
-            .is_some_and(|state| state.symbol_table.is_some())
+            .frame_at(frame)
+            .is_some_and(|state| state.symbol_table().is_some())
         {
             self.set_table_var(frame, name, value.hand_on(), Overwrite::InPlace);
             return true;
@@ -186,7 +184,7 @@ impl Request {
             .iter()
             .position(|var| var == name)
             .and_then(|at| u32::try_from(at).ok());
-        let slot = |req: &mut Request| req.stack.frame_mut(frame)?.slot_ptr(Slot(at?));
+        let slot = |req: &mut Request| req.vm.stack.frame_mut(frame)?.slot_ptr(Slot(at?));
         if slot(self).is_none() {
             if force {
                 self.set_table_var(frame, name, value.hand_on(), Overwrite::InPlace);
@@ -203,18 +201,15 @@ impl Request {
     /// The innermost user frame, the one a native's variable access
     /// reads: `EG(current_execute_data)`'s caller.
     pub(super) fn caller_frame(&self) -> Option<FrameRef> {
-        let count = self.vm.frames().len();
-        let at = count.checked_sub(1)?;
-        Some(FrameRef(u32::try_from(at).ok()?))
+        self.innermost_user_frame()
     }
 
     /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
     /// given, and zero outside a native's body.
     #[must_use]
     pub fn argument_count(&self) -> usize {
-        self.vm
-            .serving_call()
-            .map_or(0, |call| call.arguments.len())
+        self.serving_call()
+            .map_or(0, |call| call.num_args() as usize)
     }
 
     /// `ZEND_CALL_ARG(execute_data, position)`: the argument at
@@ -225,9 +220,9 @@ impl Request {
     /// its slot before coercing it.
     #[must_use]
     pub fn argument(&self, position: u32) -> Option<Value> {
-        let call = self.vm.serving_call()?;
-        let index = usize::try_from(position.checked_sub(1)?).ok()?;
-        call.arguments.get(index).copied()
+        let call = self.serving_call()?;
+        let index = position.checked_sub(1)?;
+        (index < call.num_args()).then(|| Value::of_zval(call.frame.slot(Slot(index))))
     }
 
     /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`
@@ -260,10 +255,10 @@ impl Request {
     /// 752 0
     /// ```
     pub fn variadic_arguments(&mut self, position: u32) -> Result<Vec<Value>, Thrown> {
-        let Some(call) = self.vm.serving_call() else {
+        let Some(call) = self.serving_call() else {
             return Ok(Vec::new());
         };
-        if !call.extra_named.is_empty() {
+        if !call.extra_named().is_empty() {
             let message = format!(
                 "{}() does not accept unknown named parameters",
                 self.active_native()
@@ -275,7 +270,7 @@ impl Request {
             ));
         }
         let from = usize::try_from(position.saturating_sub(1)).unwrap_or(usize::MAX);
-        Ok(call.arguments.get(from..).unwrap_or_default().to_vec())
+        Ok(call.arguments().get(from..).unwrap_or_default().to_vec())
     }
 
     /// `Z_PARAM_VARIADIC_WITH_NAMED`'s named half: the extra named
@@ -286,43 +281,74 @@ impl Request {
     /// arguments; empty for a call that carries none.
     #[must_use]
     pub fn named_arguments(&self) -> Vec<(PhpString, Value)> {
-        self.vm
-            .serving_call()
-            .map(|call| call.extra_named.to_vec())
+        self.serving_call()
+            .map(|call| call.extra_named().to_vec())
             .unwrap_or_default()
     }
 
     /// The callee of the call being served, its receiver and its called
     /// scope, php's `EX(func)` and `EX(This)` inside a native.
     pub(crate) fn serving_callee(&self) -> Option<(Function, Option<PhpObject>, Option<ClassId>)> {
-        self.vm
-            .serving_call()
-            .map(|call| (call.function, call.this(), call.called_scope))
+        self.serving_call()
+            .and_then(|call| Some((call.function()?, call.this(), call.called_scope())))
     }
 
     /// The arguments of the call being served and its extra named ones,
     /// each owner moved out to the caller and the call left with none.
     pub(crate) fn take_serving_arguments(&mut self) -> (Vec<Value>, Vec<(PhpString, Value)>) {
-        match self.vm.serving_call_mut() {
-            Some(call) => {
-                call.count = 0;
-                (
-                    std::mem::take(&mut call.arguments),
-                    call.extra_named.take_rows(),
-                )
-            }
-            None => (Vec::new(), Vec::new()),
-        }
+        let Some(call) = self.vm.serving_at() else {
+            return (Vec::new(), Vec::new());
+        };
+        let named = self
+            .annex_mut(call)
+            .map(|annex| annex.extra_named.take_rows())
+            .unwrap_or_default();
+        let Some(frame) = self.vm.stack.frame_mut(call) else {
+            return (Vec::new(), named);
+        };
+        let passed = std::mem::take(&mut frame.header_mut().num_args) as usize;
+        let arguments = frame
+            .slots_mut()
+            .iter_mut()
+            .take(passed)
+            .map(|slot| Value::of_zval(std::mem::replace(slot, Zval::UNDEF)))
+            .collect();
+        (arguments, named)
     }
 
     /// The call being served handed to `function` with `arguments`,
     /// each owner the call's from here: what `ZEND_CALL_TRAMPOLINE`
     /// writes into the frame it reuses.
     pub(crate) fn serve_instead(&mut self, function: Function, arguments: Vec<Value>) {
-        if let Some(call) = self.vm.serving_call_mut() {
-            call.function = function;
-            call.count = arguments.len();
-            call.arguments = arguments;
+        let Some(call) = self.vm.serving_at() else {
+            for argument in arguments {
+                self.release(argument);
+            }
+            return;
+        };
+        let len = self
+            .vm
+            .stack
+            .frame(call)
+            .map_or(0, crate::exec::HeapFrame::len);
+        if len < arguments.len() {
+            let grown = self
+                .vm
+                .stack
+                .grow_top(&mut self.heap, call, arguments.len() - len);
+            if grown.is_err() {
+                for argument in arguments {
+                    self.release(argument);
+                }
+                return;
+            }
+        }
+        if let Some(frame) = self.vm.stack.frame_mut(call) {
+            frame.header_mut().function = Some(function);
+            frame.header_mut().num_args = u32::try_from(arguments.len()).unwrap_or(u32::MAX);
+            for (slot, argument) in frame.slots_mut().iter_mut().zip(arguments) {
+                *slot = argument.to_zval();
+            }
         }
     }
 
@@ -342,21 +368,31 @@ impl Request {
         else {
             return;
         };
-        let Some(call) = self.vm.serving_call_mut() else {
+        let Some(call) = self.vm.serving_at() else {
             return;
         };
-        if call.frameless {
-            call.coerced.push(value);
+        let Some(header) = self.vm.at(call) else {
+            return;
+        };
+        if header.info.frameless() {
+            if let Some(annex) = self.annex_mut(call) {
+                annex.coerced.push(value);
+            }
             return;
         }
-        let Some(previous) = call
-            .arguments
-            .get_mut(index)
-            .map(|slot| std::mem::replace(slot, value))
+        if index >= header.num_args as usize {
+            return;
+        }
+        let Some(previous) = self
+            .vm
+            .stack
+            .frame_mut(call)
+            .and_then(|frame| frame.slots_mut().get_mut(index))
+            .map(|slot| std::mem::replace(slot, value.to_zval()))
         else {
             return;
         };
-        self.release(previous);
+        self.release(Value::of_zval(previous));
     }
 
     /// What called the native being served, `EX(prev_execute_data)` as
@@ -386,7 +422,7 @@ impl Request {
     pub(crate) fn native_caller(&self) -> NativeCaller {
         let mut chain = self.chain();
         if let Some(Link::Call(served)) = chain.next()
-            && served.dynamic
+            && served.info().dynamic()
         {
             return NativeCaller::Native;
         }
@@ -395,14 +431,14 @@ impl Request {
             // resumer: a native that is a fiber's own callable was called
             // from the fiber's bottom frame, which is `zend_fiber_function`,
             // a native's, so it answers as a native caller below.
-            Some(Link::Frame(Slots::Stack(stack, place), state))
-                if std::ptr::eq(stack, &raw const self.stack) && state.function.is_some() =>
+            Some(Link::Frame(Slots::Stack(vm, place), state))
+                if std::ptr::eq(vm, &raw const self.vm) && state.function().is_some() =>
             {
                 let frame = FrameRef(u32::try_from(place).unwrap_or(u32::MAX));
                 NativeCaller::Function(frame, self.arguments_of(frame, state))
             }
-            Some(Link::Frame(Slots::Stack(stack, place), _))
-                if std::ptr::eq(stack, &raw const self.stack) =>
+            Some(Link::Frame(Slots::Stack(vm, place), _))
+                if std::ptr::eq(vm, &raw const self.vm) =>
             {
                 NativeCaller::Code(FrameRef(u32::try_from(place).unwrap_or(u32::MAX)))
             }
@@ -417,18 +453,18 @@ impl Request {
     /// of them in all: what `ZEND_FUNC_GET_ARGS` copies, views with no
     /// owner taken.
     pub(crate) fn frame_arguments(&self, frame: FrameRef) -> Vec<Value> {
-        self.vm
-            .at(frame)
+        self.frame_at(frame)
             .map(|state| self.arguments_of(frame, state))
             .unwrap_or_default()
     }
 
-    fn arguments_of(&self, frame: FrameRef, state: &exec::FrameState) -> Vec<Value> {
-        let passed = usize::try_from(state.num_args).unwrap_or(0);
-        let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+    fn arguments_of(&self, frame: FrameRef, state: exec::FrameAt<'_>) -> Vec<Value> {
+        let passed = usize::try_from(state.num_args()).unwrap_or(0);
+        let extra = state.extra_args();
+        let mut arguments: Vec<Value> = (0..passed.saturating_sub(extra.len()))
             .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
             .collect();
-        arguments.extend(state.extra_args.iter().copied());
+        arguments.extend(extra.iter().copied());
         arguments
     }
 
@@ -501,8 +537,8 @@ impl Request {
     pub fn called_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, this, called) = match link {
-                Link::Frame(_, state) => (state.function, state.this(), state.called_scope),
-                Link::Call(call) => (Some(call.function), call.this(), call.called_scope),
+                Link::Frame(_, state) => (state.function(), state.this(), state.called_scope()),
+                Link::Call(call) => (call.function(), call.this(), call.called_scope()),
                 Link::Fake(_) => continue,
                 Link::Site(_) => return None,
             };
@@ -526,7 +562,7 @@ impl Request {
     /// native's body.
     #[must_use]
     pub fn this(&self) -> Option<PhpObject> {
-        if let Some(call) = self.vm.serving_call() {
+        if let Some(call) = self.serving_call() {
             return call.this();
         }
         self.vm.innermost()?.this()
@@ -553,8 +589,8 @@ impl Request {
     pub fn this_object(&self) -> Option<PhpObject> {
         for link in self.chain() {
             let (function, this) = match link {
-                Link::Frame(_, state) => (state.function, state.this()),
-                Link::Call(call) => (Some(call.function), call.this()),
+                Link::Frame(_, state) => (state.function(), state.this()),
+                Link::Call(call) => (call.function(), call.this()),
                 Link::Fake(_) => continue,
                 Link::Site(_) => return None,
             };
@@ -577,13 +613,7 @@ impl Request {
     /// raisers render its declared name and its parameters' names off
     /// the declaration, never off the caller's spelling.
     pub(super) fn active_native_function(&self) -> Option<Function> {
-        let floor = self.vm.innermost().map_or(0, |state| {
-            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
-        });
-        if self.vm.call_depth() <= floor {
-            return None;
-        }
-        self.vm.serving_call().map(|call| call.function)
+        self.serving_call()?.function()
     }
 
     /// `get_active_function_name`: the declared name of the native being
@@ -643,7 +673,7 @@ impl Request {
     /// object's handlers do from the code that reached them.
     pub(crate) fn active_user_function(&self) -> Option<String> {
         let frame = self.innermost_frame()?;
-        Some(frame.function.map_or_else(
+        Some(frame.function().map_or_else(
             || String::from("main"),
             |function| self.qualified_name(function, None),
         ))
@@ -660,8 +690,8 @@ impl Request {
         let mut chain = self.chain();
         let _served = chain.next();
         let function = match chain.next() {
-            Some(Link::Frame(_, state)) => state.function,
-            Some(Link::Call(call)) => Some(call.function),
+            Some(Link::Frame(_, state)) => state.function(),
+            Some(Link::Call(call)) => call.function(),
             Some(Link::Site(_) | Link::Fake(_)) | None => None,
         };
         function.map_or_else(
@@ -781,7 +811,7 @@ impl Request {
         let own = self
             .active_native_function()
             .and_then(|function| self.method_class(function));
-        let called = self.vm.serving_call().and_then(|call| call.called_scope);
+        let called = self.serving_call().and_then(exec::FrameAt::called_scope);
         crate::api::coerce::Scopes {
             own,
             called: called.or(own),
@@ -861,36 +891,22 @@ impl Request {
     /// int(0)
     /// ```
     pub(crate) fn strict_types(&self) -> bool {
-        let floor = self.vm.innermost().map_or(0, |state| {
-            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
-        });
-        let calls = self.vm.calls();
-        let serving = calls
-            .iter()
-            .rposition(|call| call.stage == exec::CallStage::Serving);
-        // A native called from a site standing above the innermost
-        // frame, with no native between, is called from the site.
-        if let (Some(site), Some(at)) = (self.vm.innermost_site(), serving)
-            && calls.get(site.calls..at).is_some_and(|between| {
-                !between
-                    .iter()
-                    .any(|call| call.stage == exec::CallStage::Serving)
-            })
-        {
+        let Some(serving) = self.vm.serving_at() else {
+            return self
+                .innermost_frame_on_running()
+                .is_some_and(exec::FrameAt::strict_types);
+        };
+        // A native called from a site standing between it and the record
+        // below it on the chain is called from the site.
+        if let Some(site) = self.site_below(serving) {
             return site.strict;
         }
-        if let Some(at) = serving
-            && calls.get(floor..at).is_some_and(|below| {
-                below
-                    .iter()
-                    .any(|call| call.stage == exec::CallStage::Serving)
-            })
-        {
-            return false;
-        }
+        // The record below: a user frame's file, and a native's own
+        // frame, which carries no `ZEND_ACC_STRICT_TYPES`.
         self.vm
-            .innermost()
-            .is_some_and(crate::exec::strict_types_of)
+            .below_record(serving.0 as usize)
+            .and_then(|at| self.frame_on(&self.vm, at))
+            .is_some_and(|below| below.info().user() && below.strict_types())
     }
 
     /// [`Request::strict_types`] over one frame rather than the
@@ -898,7 +914,8 @@ impl Request {
     /// which is what every opcode's handler asks, since a handler holds
     /// its own frame and the innermost is only the same frame by luck.
     pub(crate) fn frame_strict_types(&self, frame: FrameRef) -> bool {
-        self.vm.at(frame).is_some_and(crate::exec::strict_types_of)
+        self.frame_at(frame)
+            .is_some_and(exec::FrameAt::strict_types)
     }
 
     /// `property_uses_strict_types()`
@@ -911,23 +928,24 @@ impl Request {
     /// on an opcode's behalf stands.
     pub(crate) fn property_strict_types(&self) -> bool {
         self.current_user_frame()
-            .and_then(|frame| self.vm.at(frame))
-            .is_some_and(crate::exec::strict_types_of)
+            .and_then(|frame| self.frame_at(frame))
+            .is_some_and(exec::FrameAt::strict_types)
+    }
+
+    /// The innermost frame of the running stack read where it stands.
+    fn innermost_frame_on_running(&self) -> Option<exec::FrameAt<'_>> {
+        self.frame_on(&self.vm, self.vm.innermost_at()?)
     }
 
     /// `EG(current_execute_data)` where it is user code: the innermost
     /// frame, and nothing while a native is being served above it or
     /// no frame stands.
     pub(crate) fn current_user_frame(&self) -> Option<FrameRef> {
-        let at = self.vm.innermost_at()?;
-        let innermost = self.vm.frames().get(at)?;
-        let floor = usize::try_from(innermost.calls_below).unwrap_or(usize::MAX);
-        let serving = self.vm.calls().get(floor..).is_some_and(|above| {
-            above
-                .iter()
-                .any(|call| call.stage == exec::CallStage::Serving)
-        });
-        (!serving).then(|| FrameRef(u32::try_from(at).unwrap_or(u32::MAX)))
+        let at = self.vm.current_at()?;
+        self.vm
+            .at(at)
+            .is_some_and(|header| header.info.user())
+            .then_some(at)
     }
 
     /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`):
@@ -947,17 +965,17 @@ impl Request {
         }
     }
 
-    /// The site `frame` was called from: one standing where the frame
-    /// was pushed, with no native served between the two.
+    /// The site `frame`, a user frame or a native's call, was called
+    /// from: one standing where it was pushed, with no record of php's
+    /// chain, a user frame or a native's call served, between the two.
     pub(crate) fn site_below(&self, frame: FrameRef) -> Option<&exec::Site> {
         let at = usize::try_from(frame.0).ok()?;
-        let below = usize::try_from(self.vm.at(frame)?.calls_below).ok()?;
-        let site = self.vm.sites().iter().rev().find(|site| site.frame == at)?;
-        let between = self.vm.calls().get(site.calls..below)?;
-        (!between
+        let below = self.vm.below_record(at);
+        self.vm
+            .sites()
             .iter()
-            .any(|call| call.stage == exec::CallStage::Serving))
-        .then_some(site)
+            .rev()
+            .find(|site| site.frame <= at && below.is_none_or(|below| site.frame > below))
     }
 
     /// `fn_flags & ZEND_ACC_STRICT_TYPES` over a user function: whether the

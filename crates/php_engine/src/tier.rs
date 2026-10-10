@@ -372,7 +372,7 @@ pub(crate) fn resume<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) ->
     } else {
         Stepped::Same(frame)
     };
-    let outcome = serve_from::<T, D>(req, first);
+    let outcome = serve_frame::<T, D>(req, first);
     crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
     outcome
@@ -393,7 +393,7 @@ fn serving<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) -> Result<()
 /// own site (design §4.3 seam 8).
 fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     if interrupt::check(req)? {
-        return serve_from::<T, D>(req, Stepped::Threw(entry));
+        return serve_frame::<T, D>(req, Stepped::Threw(entry));
     }
     // A throwable raised before any opline of the entry frame ran, where
     // php clears `EG(opline_before_exception)` so that
@@ -410,7 +410,7 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
     }
     let flow = T::safepoint(req, entry, Site::Entry);
     let first = answered(req, flow, entry)?;
-    serve_from::<T, D>(req, first)
+    serve_frame::<T, D>(req, first)
 }
 
 /// `execute_ex`'s own check (`Z/Zend/zend_vm_execute.h:116244`), after
@@ -443,20 +443,33 @@ fn refused_at_entry(req: &mut Request) -> bool {
     }
 }
 
-/// The loop from the edge its first step took, telling the observers of
-/// declared opcodes as `D` says: [`Untold`] has nothing to tell and no
-/// test, so the loop of an engine where none is declared pays nothing
-/// for them (design §5.8, §7.1).
-fn serve_from<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
+/// The loop itself (design §5.8): from the edge its first step took,
+/// the oplines of one frame dispatched one after another for as long as
+/// each answers on in the frame, and every other edge taken here too, a
+/// callee pushed activated and entered, a caller returned to gone on in
+/// past its call, a throwable unwound, until the serving is over. The
+/// opline the loop stands at is held in hand across the handlers, as
+/// php's `execute_ex` keeps `opline` in a register, and read off a frame
+/// only where an edge enters it; it is written back only where
+/// something outside the loop can read it ([`Next`]). The units the
+/// frames serve are held across the frames, one share each for the last
+/// [`HELD`] the loop entered, so a call and a return between them take
+/// none and only a crossing into a unit past those takes one: php's
+/// `EX(func)` is a pointer the function table keeps, and the function
+/// table holds the unit here too.
+/// The observers of declared opcodes are told as `D` says: [`Untold`]
+/// has nothing to tell and no test, so the loop of an engine where none
+/// is declared pays nothing for them (design §5.8, §7.1).
+fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let declared = D::of(req);
-    let mut frame;
+    let mut held: [Option<std::sync::Arc<php_unit::Unit>>; HELD] = Default::default();
+    let mut oldest = 0;
     let mut stepped = first;
     loop {
-        match stepped {
-            Stepped::Same(at) | Stepped::Moved(at) | Stepped::Popped(at) => frame = at,
+        let frame = match stepped {
+            Stepped::Same(at) | Stepped::Moved(at) | Stepped::Popped(at) => at,
             Stepped::Pushed(at) => {
-                frame = at;
-                stepped = activated::<T>(req, frame)?;
+                stepped = activated::<T>(req, at)?;
                 continue;
             }
             Stepped::Threw(at) => {
@@ -471,42 +484,61 @@ fn serve_from<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<
                 continue;
             }
             Stepped::Done => return Ok(()),
-        }
-        let serving = exec::standing(req, frame)?;
-        let code = exec::serving_code(&serving, frame)?;
-        stepped = serve_frame::<T, D>(req, frame, code, declared)?;
+        };
+        let Some(header) = req.vm().at(frame) else {
+            return Err(no_frame(frame));
+        };
+        let mut at = header.opline;
+        let Some((unit, body)) = req.unit_of(header) else {
+            return Err(no_frame(frame));
+        };
+        let found = held.iter().position(|held| {
+            held.as_ref()
+                .is_some_and(|held| std::sync::Arc::ptr_eq(held, unit))
+        });
+        let place = found.unwrap_or_else(|| {
+            let place = oldest;
+            oldest = (oldest + 1) % HELD;
+            if let Some(slot) = held.get_mut(place) {
+                *slot = Some(std::sync::Arc::clone(unit));
+            }
+            place
+        });
+        let Some(code) = held
+            .get(place)
+            .and_then(Option::as_deref)
+            .and_then(|unit| exec::body_of(unit, body))
+        else {
+            return Err(no_frame(frame));
+        };
+        stepped = loop {
+            let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+            declared.before(req, frame, at, op.opcode);
+            let next = dispatch::dispatch::<T>(req, frame, code, op, at)?;
+            #[cfg(debug_assertions)]
+            req.sensed_after(code, op)?;
+            at = match next {
+                Next::Advance => at.saturating_add(1),
+                Next::Jump(to) => to,
+                Next::Left(stepped) => break stepped,
+            };
+        };
     }
 }
 
-/// The loop inside one frame: its oplines dispatched one after another
-/// for as long as each answers on in the frame, and the first other edge
-/// handed back to [`serve_from`]. The unit the frame serves and the
-/// opline the loop stands at are held here across them, so a step pays
-/// for the opline's fetch and the dispatch and nothing else, as php's
-/// `execute_ex` keeps `EX(func)` in hand and `opline` in a register
-/// between handlers (design §5.8). The position is read off the frame
-/// once, where the edge entered it, and written back only where
-/// something outside the loop can read it ([`Next`]); what the frame
-/// serves is looked up again only where the edge leaves it.
-fn serve_frame<T: Tier, D: Telling>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &php_unit::OpArray,
-    declared: D,
-) -> Result<Stepped, Fatal> {
-    let mut at = req.vm().opline(frame);
-    loop {
-        let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
-        declared.before(req, frame, at, op.opcode);
-        let next = dispatch::dispatch::<T>(req, frame, code, op, at)?;
-        #[cfg(debug_assertions)]
-        req.sensed_after(code, op)?;
-        at = match next {
-            Next::Advance => at.saturating_add(1),
-            Next::Jump(to) => to,
-            Next::Left(stepped) => return Ok(stepped),
-        };
-    }
+/// How many units the loop holds a share of at once ([`serve_frame`]):
+/// enough for a program's main file and the files of the functions it
+/// calls in turn to take no share per call.
+const HELD: usize = 4;
+
+/// The internal error for a frame the loop was sent into that serves no
+/// op array, which no unit the compiler wrote reaches.
+#[cold]
+fn no_frame(frame: FrameRef) -> Fatal {
+    Fatal::Error(format!(
+        "InternalError: frame {} is serving no op array",
+        frame.0
+    ))
 }
 
 /// The unwinder over one frame (design §5.9): php replaces the frame's

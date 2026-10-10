@@ -6,7 +6,7 @@
 //! face (#1911).
 
 use php_compile::SourceKind;
-use php_heap::{Fatal, FrameRef, VmStack};
+use php_heap::{Fatal, FrameRef};
 
 use super::{Request, Symbol};
 use crate::api::raising::{Level, Thrown};
@@ -34,8 +34,8 @@ pub(super) struct Inspected {
 
 impl Request {
     /// The VM stack the request runs on, read.
-    pub(crate) fn stack(&self) -> &VmStack {
-        &self.stack
+    pub(crate) fn stack(&self) -> &crate::exec::Stack {
+        &self.vm.stack
     }
 
     /// A property of a throwable as its bytes, `zval_get_string` over
@@ -138,13 +138,13 @@ impl Request {
         if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL) || self.bailing_out() {
             return Ok(Evaluated::NotCompiled);
         }
-        let standing = self.vm.frames().len();
+        let standing = self.vm.depth();
         let callee = self.push_frame(unit)?;
         crate::observer::call(self, callee);
         let reenter = self.shared.loops.reenter;
         let served = self.serve_host_string(|req| reenter(req, callee));
-        while self.vm.frames().len() > standing {
-            let top = self.stack.current();
+        while self.vm.depth() > standing {
+            let top = self.vm.stack.current();
             self.leave_frame(top);
         }
         served?;
@@ -226,7 +226,7 @@ impl Request {
         if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL) {
             return Ok(Evaluation::Refused);
         }
-        let standing = self.vm.frames().len();
+        let standing = self.vm.depth();
         let callee = if let Some(frame) = scope {
             self.push_code_frame(unit, frame, None)?
         } else {
@@ -239,8 +239,8 @@ impl Request {
         // `zend_leave_helper`'s arm for a nested code frame: its CVs
         // detached into the table it shares with the frame it was
         // evaluated in, which is attached to it again.
-        while self.vm.frames().len() > standing {
-            let top = self.stack.current();
+        while self.vm.depth() > standing {
+            let top = self.vm.stack.current();
             self.leave_frame(top);
         }
         served?;
@@ -264,14 +264,18 @@ impl Request {
     pub(crate) fn nothing_executing<R>(&mut self, f: impl FnOnce(&mut Request) -> R) -> R {
         let bound = self.unbind_globals();
         self.own_lent_receivers();
-        let frames = self.stack.set_aside();
-        let vm = std::mem::take(&mut self.vm);
+        let frames = self.vm.stack.set_aside();
+        // The stack's pages stay the running ones, the room of the frames
+        // set aside kept, and the rest of the execution is set aside.
+        let mut vm = std::mem::take(&mut self.vm);
+        std::mem::swap(&mut self.vm.stack, &mut vm.stack);
         let mut observing = super::ObservedChain::default();
         self.swap_observing(&mut observing);
         let served = f(self);
         self.swap_observing(&mut observing);
+        std::mem::swap(&mut self.vm.stack, &mut vm.stack);
         self.vm = vm;
-        self.stack.put_back(&mut self.heap, frames);
+        self.vm.stack.put_back(&mut self.heap, frames);
         for frame in bound {
             self.attach_symbol_table(frame);
         }

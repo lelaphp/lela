@@ -44,7 +44,7 @@ impl Request {
     /// again when the code frame leaves, so a variable the included
     /// file wrote is the includer's.
     pub(crate) fn attach_symbol_table(&mut self, frame: FrameRef) {
-        let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) else {
+        let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
             return;
         };
         for (at, name) in self.frame_var_names(frame).into_iter().enumerate() {
@@ -89,7 +89,7 @@ impl Request {
     /// [`Request::shutdown_destructors`], and the includer's for a code
     /// frame, whose re-attach takes them back.
     pub(crate) fn detach_symbol_table(&mut self, frame: FrameRef) {
-        let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) else {
+        let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
             return;
         };
         for (at, name) in self.frame_var_names(frame).into_iter().enumerate() {
@@ -112,7 +112,7 @@ impl Request {
     /// (`zend_clean_and_cache_symbol_table`). Its bytes are php's, on
     /// the request's heap ([`Request::rebuilt_table_bytes`]).
     pub(crate) fn rebuild_symbol_table(&mut self, frame: FrameRef) -> TableId {
-        if let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) {
+        if let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) {
             return table;
         }
         let entries = self
@@ -134,8 +134,8 @@ impl Request {
             entries,
             bytes,
         });
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.symbol_table = Some(table);
+        if let Some(extra) = self.annex_mut(frame) {
+            extra.symbol_table = Some(table);
         }
         table
     }
@@ -143,9 +143,8 @@ impl Request {
     /// The names of the CVs of the op array `frame` serves, in the
     /// order the compiler numbered them, `op_array->vars`.
     pub(super) fn frame_var_names(&self, frame: FrameRef) -> Vec<Vec<u8>> {
-        self.vm
-            .at(frame)
-            .and_then(|state| exec::body_of(&state.unit, state.body))
+        self.frame_at(frame)
+            .and_then(exec::FrameAt::code)
             .map(|code| code.vars.iter().map(|name| name.0.to_vec()).collect())
             .unwrap_or_default()
     }
@@ -190,7 +189,7 @@ impl Request {
     /// below the innermost is given one, as an evaluation in a paused
     /// frame gives it ([`Request::eval_in_frame`]).
     pub(super) fn free_rebuilt_table(&mut self, frame: FrameRef) {
-        let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) else {
+        let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
             return;
         };
         let at = table.0 as usize;
@@ -578,7 +577,7 @@ impl Request {
             Symbol::Indirect(frame, at) => {
                 let stack = match self.fibers.request_stack() {
                     Some(own) if table == TableId::GLOBAL => own,
-                    _ => &self.stack,
+                    _ => &self.vm.stack,
                 };
                 Value::of_zval(stack.frame(frame)?.slot(php_heap::Slot(at)))
             }
@@ -627,7 +626,7 @@ impl Request {
     fn attached_ptr(&mut self, table: TableId, frame: FrameRef, at: u32) -> Option<ZvalRef> {
         let stack = match self.fibers.request_stack_mut() {
             Some(own) if table == TableId::GLOBAL => own,
-            _ => &mut self.stack,
+            _ => &mut self.vm.stack,
         };
         stack.frame_mut(frame)?.slot_ptr(Slot(at))
     }

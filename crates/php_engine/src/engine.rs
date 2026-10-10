@@ -5369,7 +5369,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
-    let standing = req.vm().frames().len();
+    let standing = req.vm().depth();
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
@@ -5380,7 +5380,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
-    while req.vm().frames().len() > standing + 1 {
+    while req.vm().depth() > standing + 1 {
         req.pop_frame();
     }
     req.detach_symbol_table(frame);

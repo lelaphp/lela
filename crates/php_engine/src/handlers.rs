@@ -70,9 +70,8 @@ use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
-    self, Cached, CallState, E_FATAL_ERRORS, LAST_CATCH, ReturnValue, cached_class,
-    cleanup_live_vars, cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors,
-    restore_silenced,
+    self, Cached, E_FATAL_ERRORS, LAST_CATCH, cached_class, cleanup_live_vars,
+    cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand};
@@ -1700,28 +1699,18 @@ fn init_call(
     lookups: &[ConstIdx],
     named: ConstIdx,
 ) -> Edge {
-    // The name is a string constant of the op array, held by one more
-    // owner for the call, as `zval_get_string` would hold it.
-    let named = exec::constant(code, named);
-    let name = match named.as_php_string() {
-        Some(&name) => {
-            req.addref(&named);
-            name
-        }
-        None => match crate::ops::to_string(req, &named) {
-            Ok(name) => name,
-            Err(thrown) => {
-                return threw(req, frame, &thrown);
-            }
-        },
-    };
     let slot = CacheSlot(op.out);
     let function = if let Cached::Function(function) = req.cached(frame, slot) {
         Some(function)
     } else {
+        let named = exec::constant(code, named);
         let found = lookups.iter().find_map(|&at| {
             let key = exec::constant(code, at);
-            exec::find_function(req, key.as_str_bytes().unwrap_or(name.as_bytes()))
+            let key = key
+                .as_str_bytes()
+                .or(named.as_str_bytes())
+                .unwrap_or_default();
+            exec::find_function(req, key)
         });
         if let Some(function) = found {
             req.prime(frame, slot, Cached::Function(function));
@@ -1729,6 +1718,12 @@ fn init_call(
         found
     };
     let Some(function) = function else {
+        // The name as the constant spells it, `zval_get_string`.
+        let named = exec::constant(code, named);
+        let name = match crate::ops::to_string(req, &named) {
+            Ok(name) => name,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
         let thrown = crate::api::raising::throw_error(
             req,
             "Error",
@@ -1740,9 +1735,13 @@ fn init_call(
         req.release(Value::string(name));
         return threw(req, frame, &thrown);
     };
-    let count = usize::try_from(op.extended_value).unwrap_or(0);
-    req.vm_mut()
-        .push_call(CallState::building(function, Some(name), count));
+    pushed(req, frame, exec::Header::call(function, op.extended_value))
+}
+
+/// `zend_vm_stack_push_call_frame` for an `INIT_*`: the call `header`
+/// lays down pushed with its callee's room, and the opline advanced.
+fn pushed(req: &mut Request, frame: FrameRef, header: exec::Header) -> Edge {
+    req.push_call(header)?;
     Ok(advance(req, frame))
 }
 
@@ -1912,8 +1911,7 @@ fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
 /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past the
 /// declared ones.
 fn send_mode(req: &Request, number: u32) -> (bool, bool) {
-    req.vm()
-        .building_call_function()
+    req.building_call_function()
         .map_or((false, false), |function| {
             req.arg_send_mode(function, number)
         })
@@ -1938,7 +1936,7 @@ fn must_be_sent_by_ref(req: &Request, number: u32) -> bool {
 /// opline. The parameter is named where it is one of the declared ones
 /// (`get_function_arg_name`), and a variadic's is not.
 fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
-    let function = req.vm().building_call_function();
+    let function = req.building_call_function();
     let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
     let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
     let parameter = function
@@ -2250,7 +2248,7 @@ pub(crate) fn check_func_arg<T: Tier>(
         ArgAt::Number(number) => Some(number),
         ArgAt::Name(at) => {
             let name = exec::constant(code, at);
-            let function = req.vm().building_call_function();
+            let function = req.building_call_function();
             match (name.as_str_bytes(), function) {
                 (Some(name), Some(function)) => {
                     crate::api::call::arg_offset_by_name(req, function, name).number()
@@ -2260,12 +2258,15 @@ pub(crate) fn check_func_arg<T: Tier>(
         }
     };
     let by_ref = number.is_some_and(|number| should_be_sent_by_ref(req, number));
-    let Some(call) = req.vm_mut().building_call() else {
+    let Some(call) = req
+        .building_call()
+        .and_then(|call| req.vm_mut().at_mut(call))
+    else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_CHECK_FUNC_ARG with no call frame under it",
         )));
     };
-    call.send_arg_by_ref = by_ref;
+    call.info.set_send_by_ref(by_ref);
     Ok(advance(req, frame))
 }
 
@@ -2318,10 +2319,9 @@ pub(crate) fn send_func_arg<T: Tier>(
 /// `ZEND_CALL_INFO(EX(call)) & ZEND_CALL_SEND_ARG_BY_REF`: what the last
 /// `CHECK_FUNC_ARG` read for the call being built.
 fn sends_arg_by_ref(req: &Request) -> bool {
-    req.vm()
-        .calls()
-        .last()
-        .is_some_and(|call| call.send_arg_by_ref)
+    req.building_call()
+        .and_then(|call| req.vm().at(call))
+        .is_some_and(|call| call.info.send_by_ref())
 }
 
 /// `ZEND_CHECK_UNDEF_ARGS` (`Z/Zend/zend_vm_def.h:5656`), after the last
@@ -2352,12 +2352,15 @@ pub(crate) fn check_undef_args<T: Tier>(
     _: &OpArray,
     _: &Opline,
 ) -> Edge {
-    let undef = req.vm().calls().last().is_some_and(|call| {
-        call.arguments
+    let Some(call) = req.building_call() else {
+        return Ok(advance(req, frame));
+    };
+    let undef = req.frame_at(call).is_some_and(|call| {
+        call.arguments()
             .iter()
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef))
     });
-    if undef && let Err(thrown) = crate::api::call::handle_undef_args(req) {
+    if undef && let Err(thrown) = crate::api::call::handle_undef_args(req, call) {
         return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
@@ -2470,14 +2473,15 @@ fn push_dynamic(
             return threw(req, frame, &thrown);
         }
     };
-    let count = usize::try_from(op.extended_value).unwrap_or(0);
-    req.vm_mut().push_call(CallState {
-        receiver: target.this.map(exec::Receiver::Owned),
-        called_scope: target.called_scope,
-        closure: target.closure,
-        dynamic: true,
-        ..CallState::building(target.function, target.name, count)
-    });
+    let mut header = exec::Header::call(target.function, op.extended_value);
+    header.set_receiver(target.this.map(exec::Receiver::Owned));
+    header.called_scope = target.called_scope;
+    header.closure = target.closure;
+    header.info.set_dynamic(true);
+    if let Some(name) = target.name {
+        req.release(Value::string(name));
+    }
+    req.push_call(header)?;
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     Ok(advance(req, frame))
 }
@@ -2556,7 +2560,7 @@ pub(crate) fn send_user<T: Tier>(
     };
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     let value = if must_be_sent_by_ref(req, reserved.number) {
-        if let Some(function) = req.vm().building_call_function() {
+        if let Some(function) = req.building_call_function() {
             req.param_must_be_ref(function, reserved.number);
         }
         match req.reference(value) {
@@ -2672,9 +2676,9 @@ pub(crate) fn send_array<T: Tier>(
 
 /// `SEND_ARRAY`'s walk of the whole array, keys read.
 fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown> {
-    let Some(function) = req.vm().building_call_function() else {
+    if req.building_call().is_none() {
         return Err(no_call_under(req));
-    };
+    }
     let mut have_named = false;
     // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, name, arg)`
     // (`Z/Zend/zend_vm_def.h:5583`), no owner of the table taken: the
@@ -2684,24 +2688,10 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
         let (slot, number) = match row.key().clone() {
             crate::api::values::Key::Str(name) => {
                 have_named = true;
-                let offset = crate::api::call::arg_offset_by_name(req, function, name.as_bytes());
-                let Some(call) = req.vm_mut().building_call() else {
-                    return Err(no_call_under(req));
-                };
-                match crate::api::call::handle_named_arg(
-                    offset,
-                    &mut call.arguments,
-                    call.extra_named.rows_mut(),
-                    name,
-                ) {
-                    Ok(named) => {
-                        if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
-                            req.addref(&Value::string(name));
-                            lay_extra_named(req)?;
-                        }
-                        (ArgSlot::Named(named.at), named.number)
-                    }
-                    Err(refused) => return Err(refused.throw(req, name)),
+                match reserve_named(req, name) {
+                    Ok(Ok(reserved)) => (reserved.slot, reserved.number),
+                    Ok(Err(thrown)) => return Err(thrown),
+                    Err(fatal) => return Err(ended(req, fatal)),
                 }
             }
             crate::api::values::Key::Int(_) => {
@@ -2712,13 +2702,10 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
                         "Cannot use positional argument after named argument",
                     ));
                 }
-                let Some(call) = req.vm_mut().building_call() else {
-                    return Err(no_call_under(req));
-                };
-                let at = call.count;
-                call.count += 1;
-                let number = u32::try_from(call.count).unwrap_or(u32::MAX);
-                (ArgSlot::Positional(at), number)
+                match reserve_next(req) {
+                    Ok(reserved) => (reserved.slot, reserved.number),
+                    Err(fatal) => return Err(ended(req, fatal)),
+                }
             }
         };
         send_array_element(req, slot, number, value)?;
@@ -2779,13 +2766,11 @@ fn send_array_slice(
             return Ok(ControlFlow::Break(()));
         }
         sent += 1;
-        let Some(call) = req.vm_mut().building_call() else {
-            return Err(no_call_under(req));
+        let reserved = match reserve_next(req) {
+            Ok(reserved) => reserved,
+            Err(fatal) => return Err(ended(req, fatal)),
         };
-        let at = call.count;
-        call.count += 1;
-        let number = u32::try_from(call.count).unwrap_or(u32::MAX);
-        send_array_element(req, ArgSlot::Positional(at), number, *row.value())?;
+        send_array_element(req, reserved.slot, reserved.number, *row.value())?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(())
@@ -2807,7 +2792,7 @@ fn send_array_element(
     let is_ref = element.as_php_ref().is_some();
     let value = if should_be_sent_by_ref(req, number) {
         if !is_ref && must_be_sent_by_ref(req, number) {
-            if let Some(function) = req.vm().building_call_function() {
+            if let Some(function) = req.building_call_function() {
                 req.param_must_be_ref(function, number);
             }
             req.addref(&element);
@@ -2820,7 +2805,6 @@ fn send_array_element(
         // "don't separate references for __call": a trampoline takes
         // the reference as it is, every other callee its value.
         let value = if req
-            .vm()
             .building_call_function()
             .is_some_and(|function| req.via_trampoline(function))
         {
@@ -2831,29 +2815,21 @@ fn send_array_element(
         req.addref(&value);
         value
     };
-    let Some(call) = req.vm_mut().building_call() else {
-        req.release(value);
-        return Err(no_call_under(req));
-    };
-    let placed = match slot {
-        ArgSlot::Positional(at) => {
-            if call.arguments.len() <= at {
-                call.arguments.resize_with(at + 1, Value::undef);
-            }
-            call.arguments.get_mut(at)
-        }
-        ArgSlot::Named(at) => at.slot(&mut call.arguments, &mut call.extra_named),
-    };
-    let Some(placed) = placed else {
-        req.release(value);
-        return Err(no_call_under(req));
-    };
-    let previous = std::mem::replace(placed, value);
-    req.release(previous);
+    if let Err(fatal) = put_argument(req, slot, value) {
+        return Err(ended(req, fatal));
+    }
     Ok(())
 }
 
 /// The internal error a `SEND_ARRAY` with no call frame under it is.
+/// The fatal a walk over a call's arguments met, ending the request.
+fn ended(req: &mut Request, fatal: Fatal) -> Thrown {
+    match req.fatal_of::<()>(Err(fatal)) {
+        Err(thrown) => thrown,
+        Ok(()) => Thrown::of(None),
+    }
+}
+
 fn no_call_under(req: &mut Request) -> Thrown {
     crate::api::raising::fatal(
         req,
@@ -2913,11 +2889,19 @@ impl ArgAt {
     }
 }
 
-/// A slot of the call being built a send writes into: a positional
+/// A slot of the call being built a send writes into, the call's own
+/// record named once where the send reserved it: a positional
 /// argument's, or the one `zend_handle_named_arg` reserved for a named
 /// one.
 #[derive(Debug, Clone, Copy)]
-enum ArgSlot {
+struct ArgSlot {
+    call: FrameRef,
+    to: ArgTo,
+}
+
+/// Where in its call an [`ArgSlot`] stands.
+#[derive(Debug, Clone, Copy)]
+enum ArgTo {
     Positional(usize),
     Named(crate::api::call::NamedAt),
 }
@@ -2952,20 +2936,26 @@ fn reserve_arg(
     match ArgAt::of(op) {
         ArgAt::Number(number) => {
             let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-            let Some(call) = req.vm_mut().building_call() else {
+            let Some((call, passed)) = req
+                .vm()
+                .building_at()
+                .and_then(|call| Some((call, req.vm().at(call)?.num_args as usize)))
+            else {
                 return no_call();
             };
             // The `INIT_*` said how many arguments the call has in
             // order, so a number past that is a compiler bug and not an
             // allocation.
-            if at >= call.count {
+            if at >= passed {
                 return Err(Err(Fatal::Error(format!(
-                    "InternalError: a SEND_* opline places argument {number} of a call of {}",
-                    call.count
+                    "InternalError: a SEND_* opline places argument {number} of a call of {passed}"
                 ))));
             }
             Ok(Reserved {
-                slot: ArgSlot::Positional(at),
+                slot: ArgSlot {
+                    call,
+                    to: ArgTo::Positional(at),
+                },
                 number,
             })
         }
@@ -2998,48 +2988,83 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
             "InternalError: a SEND_* opline with no call frame under it",
         ))
     };
-    let Some(function) = req.vm().building_call_function() else {
+    let Some(function) = req.building_call_function() else {
         return Err(no_call());
     };
     let offset = crate::api::call::arg_offset_by_name(req, function, name.as_bytes());
-    let Some(call) = req.vm_mut().building_call() else {
+    let Some(call) = req.building_call() else {
         return Err(no_call());
     };
-    let placed = crate::api::call::handle_named_arg(
-        offset,
-        &mut call.arguments,
-        call.extra_named.rows_mut(),
-        name,
-    );
-    Ok(match placed {
-        Ok(named) => {
-            if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
-                req.addref(&Value::string(name));
-                if let Err(thrown) = lay_extra_named(req) {
-                    return Ok(Err(thrown));
+    let passed = req
+        .vm()
+        .at(call)
+        .map_or(0, |header| header.num_args as usize);
+    let placed = {
+        let frame = req.vm().stack.frame(call);
+        let set = |at: usize| {
+            frame.is_some_and(|frame| {
+                frame
+                    .slots()
+                    .get(at)
+                    .is_some_and(|z| z.kind() != php_heap::ZvalType::Undef)
+            })
+        };
+        let named = req
+            .annex_of(call)
+            .map_or(&[][..], |annex| &annex.extra_named[..]);
+        crate::api::call::named_arg_place(offset, passed, set, named, name)
+    };
+    let (place, number) = match placed {
+        Ok(placed) => placed,
+        Err(refused) => return Ok(Err(refused.throw(req, name))),
+    };
+    let at = match place {
+        crate::api::call::NamedTo::Argument(at) => {
+            // `zend_vm_stack_extend_call_frame` past what the call was
+            // given, `ZEND_CALL_NUM_ARGS` raised to take it, every slot
+            // between left `UNDEF` for `CHECK_UNDEF_ARGS`.
+            if at >= passed {
+                let len = req
+                    .vm()
+                    .stack
+                    .frame(call)
+                    .map_or(0, crate::exec::HeapFrame::len);
+                if at >= len {
+                    req.grow_call(call, at + 1 - len)?;
+                }
+                if let Some(header) = req.vm_mut().at_mut(call) {
+                    header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
                 }
             }
-            Ok(Reserved {
-                slot: ArgSlot::Named(named.at),
-                number: named.number,
-            })
+            crate::api::call::NamedAt::Argument(at)
         }
-        Err(refused) => Err(refused.throw(req, name)),
-    })
-}
-
-/// `zend_handle_named_arg`'s `zend_new_array(0)` and the add that
-/// grows it: the building call's table laid for its extra named rows.
-fn lay_extra_named(req: &mut Request) -> Result<(), Thrown> {
-    let Some(call) = req.vm_mut().building_call() else {
-        return Ok(());
+        crate::api::call::NamedTo::Extra => {
+            // `zend_new_array(0)` and the add that grows it, one owner of
+            // the name the table's.
+            req.addref(&Value::string(name));
+            let mut named = req
+                .annex_mut(call)
+                .map(|annex| std::mem::take(&mut annex.extra_named))
+                .unwrap_or_default();
+            named.rows_mut().push((name, Value::undef()));
+            let at = named.len() - 1;
+            let laid = named.lay(req);
+            if let Some(annex) = req.annex_mut(call) {
+                annex.extra_named = named;
+            }
+            if let Err(thrown) = laid {
+                return Ok(Err(thrown));
+            }
+            crate::api::call::NamedAt::Extra(at)
+        }
     };
-    let mut named: exec::ExtraNamed = std::mem::take(&mut call.extra_named);
-    let laid = named.lay(req);
-    if let Some(call) = req.vm_mut().building_call() {
-        call.extra_named = named;
-    }
-    laid
+    Ok(Ok(Reserved {
+        slot: ArgSlot {
+            call,
+            to: ArgTo::Named(at),
+        },
+        number,
+    }))
 }
 
 /// The next positional slot of the call being built, past every
@@ -3048,16 +3073,31 @@ fn lay_extra_named(req: &mut Request) -> Result<(), Thrown> {
 /// grows to take it, as `zend_vm_stack_extend_call_frame` grows the
 /// frame.
 fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
-    let Some(call) = req.vm_mut().building_call() else {
+    let Some(call) = req.building_call() else {
         return Err(Fatal::Error(String::from(
             "InternalError: SEND_UNPACK with no call frame under it",
         )));
     };
-    let at = call.arguments.len();
-    call.arguments.push(Value::undef());
-    call.count = call.count.max(at + 1);
+    let at = req
+        .vm()
+        .at(call)
+        .map_or(0, |header| header.num_args as usize);
+    let len = req
+        .vm()
+        .stack
+        .frame(call)
+        .map_or(0, crate::exec::HeapFrame::len);
+    if at >= len {
+        req.grow_call(call, at + 1 - len)?;
+    }
+    if let Some(header) = req.vm_mut().at_mut(call) {
+        header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
+    }
     Ok(Reserved {
-        slot: ArgSlot::Positional(at),
+        slot: ArgSlot {
+            call,
+            to: ArgTo::Positional(at),
+        },
         number: u32::try_from(at + 1).unwrap_or(u32::MAX),
     })
 }
@@ -3474,20 +3514,16 @@ fn enter(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    function: Function,
+    call: FrameRef,
+    shape: crate::api::request::FrameShape,
 ) -> Edge {
-    let Some(call) = req.vm_mut().pop_call() else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a user call with no call frame under it",
-        )));
-    };
     let returns_to =
-        (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
-    let callee = req.push_user_frame(function, call, returns_to, exec::Caller::Opline(frame))?;
-    if let Some(at) = exec::parameter_prologue(req, callee)? {
+        (op.out_type != OperandKind::Unused).then(|| exec::temporary_slot(code, op.out));
+    let activated = req.activate_user(call, shape, returns_to, exec::Caller::Opline(frame))?;
+    if let Some(at) = exec::parameter_prologue(req, activated)? {
         return Ok(Stepped::Threw(at).into());
     }
-    Ok(Stepped::Pushed(callee).into())
+    Ok(Stepped::Pushed(activated.frame).into())
 }
 
 /// `ZEND_RECV` (`Z/Zend/zend_vm_def.h:5692`): the parameter numbered
@@ -3754,7 +3790,7 @@ fn verified_arg(
 /// `ZEND_RECV_VARIADIC` (`Z/Zend/zend_vm_def.h:5773`): the arguments
 /// from the one numbered `op1` on, collected into a packed array in the
 /// variadic parameter's CV. The arguments past the declared parameters
-/// are the frame's extra ones ([`exec::FrameState::extra_args`]), where
+/// are the frame's extra ones ([`exec::Annex::extra_args`]), where
 /// php leaves them on its stack past the temporaries, and they stay
 /// there: each is one more owner in the array (`Z_ADDREF_P`) and the
 /// frame gives its own up when it is popped
@@ -3767,7 +3803,7 @@ fn verified_arg(
 /// names the argument's own number and no parameter name, since php has
 /// a name for the declared ones alone. A call that passed nothing from
 /// here on leaves the empty array. The extra named arguments a call
-/// placed ([`exec::FrameState::extra_named`]) follow under their names,
+/// placed ([`exec::Annex::extra_named`]) follow under their names,
 /// each held to the declared type under the number after the last
 /// positional one; the witness for that stands beside
 /// `call_user_func_array` in `ext/standard`, the one caller that places
@@ -3836,11 +3872,16 @@ pub(crate) fn recv_variadic<T: Tier>(
 ) -> Edge {
     let first = op.op1;
     let at = usize::try_from(first.saturating_sub(1)).unwrap_or(usize::MAX);
-    let count = req.vm().at(frame).map_or(0, |state| state.extra_args.len());
+    // The extra arguments stand past the CVs and the temporaries.
+    let (base, count) = req.frame_at(frame).map_or((0, 0), |state| {
+        let base = state
+            .code()
+            .map_or(0, |code| code.num_cvs.saturating_add(code.num_tmps));
+        (base, state.extra_args().len())
+    });
     let named = req
-        .vm()
-        .at(frame)
-        .map(|state| state.extra_named.to_vec())
+        .annex_of(frame)
+        .map(|extra| extra.extra_named.to_vec())
         .unwrap_or_default();
     // An untyped variadic with no positional extras is php's
     // `ZVAL_ARR(params, EX(extra_named_params))`, the frame's table
@@ -3854,9 +3895,8 @@ pub(crate) fn recv_variadic<T: Tier>(
         .is_none_or(|parameter| parameter.ty.is_none());
     if count == 0 && untyped {
         let table = req
-            .vm_mut()
-            .at_mut(frame)
-            .map(|state| state.extra_named.take_table());
+            .annex_mut(frame)
+            .map(|extra| extra.extra_named.take_table());
         if let Some(table) = table {
             table.free(req);
         }
@@ -3874,23 +3914,14 @@ pub(crate) fn recv_variadic<T: Tier>(
     };
     req.replace_slot(frame, op.out, collected.to_value());
     for step in 0..count {
-        let Some(argument) = req
-            .vm()
-            .at(frame)
-            .and_then(|state| state.extra_args.get(step).copied())
-        else {
-            break;
-        };
+        let place = base.saturating_add(u32::try_from(step).unwrap_or(u32::MAX));
+        let argument = req.slot(frame, place);
         let number = first.saturating_add(u32::try_from(step).unwrap_or(0));
         let argument = match verified_arg(req, frame, number, at, &argument) {
             Ok(None) => argument,
             Ok(Some(coerced)) => {
-                if let Some(state) = req.vm_mut().at_mut(frame)
-                    && let Some(place) = state.extra_args.get_mut(step)
-                {
-                    let previous = std::mem::replace(place, coerced);
-                    req.release(previous);
-                }
+                let previous = req.swap_slot(frame, place, coerced);
+                req.release(previous);
                 coerced
             }
             Err(thrown) => return threw(req, frame, &thrown),
@@ -3909,8 +3940,8 @@ pub(crate) fn recv_variadic<T: Tier>(
         let argument = match verified_arg(req, frame, number, at, &argument) {
             Ok(None) => argument,
             Ok(Some(coerced)) => {
-                if let Some(state) = req.vm_mut().at_mut(frame)
-                    && let Some((_, place)) = state
+                if let Some(extra) = req.annex_mut(frame)
+                    && let Some((_, place)) = extra
                         .extra_named
                         .iter_mut()
                         .find(|(held, _)| held.as_bytes() == name.as_bytes())
@@ -4263,17 +4294,17 @@ pub(crate) fn callable_convert<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(call) = req.vm_mut().building_call() else {
+    let Some(call) = req.building_call().and_then(|call| req.frame_at(call)) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
         )));
     };
-    let callee = match call.closure {
+    let callee = match call.closure() {
         Some(closure) => crate::classes::CallFrame::Closure(closure),
         None => crate::classes::CallFrame::Callee {
-            function: call.function,
+            function: call.callee(),
             this: call.this(),
-            called_scope: call.called_scope,
+            called_scope: call.called_scope(),
         },
     };
     let made = crate::classes::closure_from_frame(req, callee);
@@ -4433,12 +4464,13 @@ fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
             .site_below(frame)
             .map(|site| (String::from_utf8_lossy(&site.file).into_owned(), site.line));
     };
-    let caller = req.vm().at(caller)?;
+    let caller = req.frame_at(caller)?;
     Some((
-        exec::body_of(&caller.unit, caller.body)
-            .map(|code| String::from_utf8_lossy(&code.filename.0).into_owned())
+        caller
+            .file()
+            .map(|file| String::from_utf8_lossy(file).into_owned())
             .unwrap_or_default(),
-        exec::line_of(caller),
+        caller.line(),
     ))
 }
 
@@ -4718,20 +4750,14 @@ pub(crate) fn new<T: Tier>(
         }
     }
     let function = constructor.unwrap_or(Function::PASS);
-    let name = match req.method_name_string(function) {
-        Ok(name) => name,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
     let this = constructor.map(|_| {
         req.addref(&object.as_value());
         object
     });
-    req.vm_mut().push_call(CallState {
-        receiver: this.map(exec::Receiver::Owned),
-        called_scope: constructor.map(|_| class),
-        ..CallState::building(function, Some(name), count)
-    });
-    Ok(advance(req, frame))
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.set_receiver(this.map(exec::Receiver::Owned));
+    header.called_scope = constructor.map(|_| class);
+    pushed(req, frame, header)
 }
 
 /// `ZEND_INIT_STATIC_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3738`) over a
@@ -4920,11 +4946,10 @@ pub(crate) fn init_static_method_call<T: Tier>(
         _ => None,
     };
     if let Some(function) = cached_callee {
-        let written = exec::constant(code, ConstIdx(op.op2));
-        return static_call_frame(req, frame, op, class, function, Some(written));
+        return static_call_frame(req, frame, op, class, function);
     }
     let mut uncached = false;
-    let (function, name) = match op.op2_type {
+    let function = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.method_named(class, b"__construct") else {
                 let thrown =
@@ -4949,7 +4974,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 );
                 return threw(req, frame, &thrown);
             }
-            (constructor, None)
+            constructor
         }
         OperandKind::Const => {
             let written = exec::constant(code, ConstIdx(op.op2));
@@ -4959,7 +4984,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
             match static_method(req, class, &lowered, &written, this) {
                 Ok((function, never_cached)) => {
                     uncached = never_cached;
-                    (function, Some(written))
+                    function
                 }
                 Err(thrown) => return threw(req, frame, &thrown),
             }
@@ -4976,7 +5001,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
         req.prime_callee(frame, slot, class, function);
     }
-    static_call_frame(req, frame, op, class, function, name)
+    static_call_frame(req, frame, op, class, function)
 }
 
 /// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
@@ -5043,9 +5068,7 @@ fn static_call_named(
     let this = req.vm().this(frame);
     let found = static_method(req, class, &method.lowered, &method.written, this);
     let edge = match found {
-        Ok((function, _)) => {
-            static_call_frame(req, frame, op, class, function, Some(method.written))
-        }
+        Ok((function, _)) => static_call_frame(req, frame, op, class, function),
         Err(thrown) => threw(req, frame, &thrown),
     };
     method.release(req);
@@ -5063,7 +5086,6 @@ fn static_call_frame(
     op: &Opline,
     class: crate::api::values::ClassId,
     function: Function,
-    written: Option<Value>,
 ) -> Edge {
     // `if (!(fbc->common.fn_flags & ZEND_ACC_STATIC))`: an instance
     // method takes the calling frame's `$this` where it is an instance
@@ -5095,23 +5117,10 @@ fn static_call_frame(
     } else {
         (None, class)
     };
-    let name = match written {
-        Some(written) => match crate::ops::to_string(req, &written) {
-            Ok(name) => name,
-            Err(thrown) => return threw(req, frame, &thrown),
-        },
-        None => match req.method_name_string(function) {
-            Ok(name) => name,
-            Err(thrown) => return threw(req, frame, &thrown),
-        },
-    };
-    let count = usize::try_from(op.extended_value).unwrap_or(0);
-    req.vm_mut().push_call(CallState {
-        receiver: this,
-        called_scope: Some(called),
-        ..CallState::building(function, Some(name), count)
-    });
-    Ok(advance(req, frame))
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.set_receiver(this);
+    header.called_scope = Some(called);
+    pushed(req, frame, header)
 }
 
 /// `ZEND_INIT_PARENT_PROPERTY_HOOK_CALL` (`Z/Zend/zend_vm_def.h:9886`),
@@ -5200,20 +5209,34 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     // `ZEND_CALL_RELEASE_THIS`.
     let this = req.vm().this(frame);
     let receiver = this.map(exec::Receiver::lent);
-    let written = format!("${shown}::{}", kind.name());
-    let written = match req.string(written.as_bytes()) {
-        Ok(written) => written,
-        Err(thrown) => return threw(req, frame, &thrown),
+    // The trampoline's name, `$name::get`, which php makes with the
+    // trampoline (`zend_get_property_hook_trampoline`); a hook of its
+    // own needs none.
+    let written = if trampoline {
+        let written = format!("${shown}::{}", kind.name());
+        match req.string(written.as_bytes()) {
+            Ok(written) => Some(written),
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else {
+        None
     };
-    let count = usize::try_from(op.extended_value).unwrap_or(0);
-    req.vm_mut().push_call(CallState {
-        receiver,
-        called_scope: Some(match this {
-            Some(this) if !trampoline => this.class(),
-            _ => declaring,
-        }),
-        ..CallState::building(function, Some(written), count)
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.set_receiver(receiver);
+    header.called_scope = Some(match this {
+        Some(this) if !trampoline => this.class(),
+        _ => declaring,
     });
+    let call = req.push_call(header)?;
+    // The trampoline reads the property off the name it was built
+    // under, php's `internal_function.reserved[0]`; a hook's own body
+    // has no use for it.
+    if let Some(written) = written {
+        match req.annex_mut(call) {
+            Some(annex) => annex.name = Some(written),
+            None => req.release(Value::string(written)),
+        }
+    }
     Ok(advance(req, frame))
 }
 
@@ -5427,12 +5450,7 @@ pub(crate) fn init_method_call<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let name = crate::ops::to_string(req, &method.written);
     method.release(req);
-    let name = match name {
-        Ok(name) => name,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
     // `$this->m()`, `INIT_METHOD_CALL` over `UNUSED`: the calling frame
     // keeps its `$this`, and the call takes no owner of it (no
     // `ZEND_CALL_RELEASE_THIS`), the object lent, unless the class's
@@ -5476,18 +5494,14 @@ pub(crate) fn init_method_call<T: Tier>(
     } else {
         req.release(object.as_value());
         if req.is_pending() {
-            req.release(Value::string(name));
             return threw(req, frame, &Thrown::of(None));
         }
         None
     };
-    let count = usize::try_from(op.extended_value).unwrap_or(0);
-    req.vm_mut().push_call(CallState {
-        receiver: this,
-        called_scope: Some(called),
-        ..CallState::building(function, Some(name), count)
-    });
-    Ok(advance(req, frame))
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.set_receiver(this);
+    header.called_scope = Some(called);
+    pushed(req, frame, header)
 }
 
 /// The callee of an `INIT_METHOD_CALL` on `object`, and the receiver
@@ -10391,14 +10405,7 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
         req.pop_call();
         return threw(req, frame, &thrown);
     }
-    let Some(function) = req
-        .vm_mut()
-        .activate_call(if op.out_type == OperandKind::Unused {
-            ReturnValue::Unused
-        } else {
-            ReturnValue::Used
-        })
-    else {
+    let Some((call, function)) = req.activate_call(op.out_type != OperandKind::Unused) else {
         return Err(Fatal::Error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
@@ -10410,8 +10417,9 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             return threw(req, frame, &thrown);
         }
     };
-    if req.user_function(function).is_some() {
-        return enter(req, frame, code, op, function);
+    if let Some(user) = req.user_function(function) {
+        let shape = user.shape;
+        return enter(req, frame, code, op, call, shape);
     }
     let served = req.serve_native(function, OnThrow::Nothing);
     // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
@@ -10453,7 +10461,7 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
 /// `DO_UCALL` and `DO_ICALL`, the two that never test. What a handler
 /// threw is the `Err`, and the call is never made.
 fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
-    let Some(function) = req.vm().building_call_function() else {
+    let Some(function) = req.building_call_function() else {
         return Ok(());
     };
     let flags = req.function_flags(function);
@@ -10770,14 +10778,25 @@ fn frameless_call(
             req.frameless_count()
         )));
     };
-    let values: Vec<Value> = arguments
-        .iter()
-        .map(|&(kind, field)| exec::take_operand(req, frame, code, kind, field))
-        .collect();
-    req.vm_mut().push_call(CallState {
-        frameless: true,
-        ..CallState::serving(Function(entry.function), values)
-    });
+    let mut header = exec::Header::call(
+        Function(entry.function),
+        u32::try_from(arguments.len()).unwrap_or(u32::MAX),
+    );
+    header.info.set_serving();
+    header.info.set_frameless(true);
+    let call = req.push_call(header)?;
+    for (at, &(kind, field)) in arguments.iter().enumerate() {
+        let value = exec::take_operand(req, frame, code, kind, field);
+        let placed = req
+            .vm_mut()
+            .stack
+            .frame_mut(call)
+            .and_then(|record| record.slots_mut().get_mut(at));
+        match placed {
+            Some(slot) => *slot = value.to_zval(),
+            None => req.release(value),
+        }
+    }
     // php falls back to a full call where the callee is observed,
     // `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`), which
     // the call laid down here already is, and ends it with the result
@@ -16301,14 +16320,13 @@ fn send_unpacked_array(
 /// built that takes it by reference, which is when php separates the
 /// array before it binds one.
 fn unpack_binds(req: &Request, array: PhpArray) -> bool {
-    let Some(function) = req.vm().building_call_function() else {
+    let Some(function) = req.building_call_function() else {
         return false;
     };
     let mut next = req
-        .vm()
-        .calls()
-        .last()
-        .map_or(0, |call| call.arguments.len());
+        .building_call()
+        .and_then(|call| req.vm().at(call))
+        .map_or(0, |call| call.num_args as usize);
     crate::api::values::walk::rows(req, array).any(|(key, _)| {
         let number = match key {
             crate::api::values::Key::Str(name) => {
@@ -16380,7 +16398,7 @@ fn send_unpacked_iterator(
             }
         };
         let value = if must_be_sent_by_ref(req, reserved.number) {
-            let function = req.vm().building_call_function();
+            let function = req.building_call_function();
             let callee =
                 function.map_or_else(String::new, |function| req.qualified_name_of(function));
             crate::api::raising::warning(
@@ -20062,9 +20080,8 @@ fn returned_to_caller<T: Tier>(
         return Ok(Stepped::Done.into());
     }
     continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
-    let returns_to = req.vm().returns_to(frame);
+    let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
-    let caller = req.stack_mut().current();
     if handed_back(req, returns_to, returned) {
         return Ok(Stepped::Threw(caller).into());
     }
@@ -20787,27 +20804,26 @@ fn place_argument(req: &mut Request, frame: FrameRef, slot: ArgSlot, value: Valu
 /// `value` written into `slot` of the call being built, the call owning
 /// it from here.
 fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fatal> {
-    let Some(call) = req.vm_mut().building_call() else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a SEND_* opline with no call frame under it",
-        )));
+    let call = slot.call;
+    let previous = match slot.to {
+        ArgTo::Positional(at) | ArgTo::Named(crate::api::call::NamedAt::Argument(at)) => req
+            .vm_mut()
+            .stack
+            .frame_mut(call)
+            .and_then(|frame| frame.slots_mut().get_mut(at))
+            .map(|placed| Value::of_zval(std::mem::replace(placed, value.to_zval()))),
+        ArgTo::Named(crate::api::call::NamedAt::Extra(at)) => req
+            .annex_mut(call)
+            .and_then(|annex| annex.extra_named.get_mut(at))
+            .map(|(_, placed)| std::mem::replace(placed, value)),
     };
-    let placed = match slot {
-        ArgSlot::Positional(at) => {
-            if call.arguments.len() <= at {
-                call.arguments.resize_with(at + 1, Value::null);
-            }
-            call.arguments.get_mut(at)
-        }
-        ArgSlot::Named(at) => at.slot(&mut call.arguments, &mut call.extra_named),
-    };
-    let Some(placed) = placed else {
+    let Some(previous) = previous else {
         req.release(value);
         return Err(Fatal::Error(String::from(
             "InternalError: a SEND_* opline places an argument in a slot the call has not",
         )));
     };
-    *placed = value;
+    req.release(previous);
     Ok(())
 }
 
@@ -21007,7 +21023,7 @@ pub(crate) fn fast_call<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    let left = req.vm_mut().fast_call(frame, op.out).and_then(|cell| {
+    let left = req.fast_call(frame, op.out).and_then(|cell| {
         cell.from = Some(at);
         cell.delayed.take()
     });
@@ -21041,7 +21057,7 @@ pub(crate) fn fast_ret<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let cell = req.vm_mut().fast_call(frame, op.op1).map(|cell| {
+    let cell = req.fast_call(frame, op.op1).map(|cell| {
         let from = cell.from.take();
         let delayed = cell.delayed.take();
         (from, delayed)
@@ -21077,7 +21093,7 @@ pub(crate) fn discard_exception<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let cell = req.vm_mut().fast_call(frame, op.op1).map(|cell| {
+    let cell = req.fast_call(frame, op.op1).map(|cell| {
         let from = cell.from;
         (from, cell.delayed.take())
     });
@@ -21242,7 +21258,7 @@ fn unwind_from<T: Tier>(
             };
             cleanup_live_vars(req, frame, code, op_num, element.finally_op.0);
             let delayed = req.take_raised();
-            if let Some(cell) = req.vm_mut().fast_call(frame, var) {
+            if let Some(cell) = req.fast_call(frame, var) {
                 cell.delayed = delayed;
                 cell.from = None;
             }
@@ -21255,15 +21271,11 @@ fn unwind_from<T: Tier>(
                     "InternalError: a try element whose finally_end names no FAST_RET",
                 )));
             };
-            let carried = req
-                .vm_mut()
-                .fast_call(frame, var)
-                .and_then(|cell| cell.from);
+            let carried = req.fast_call(frame, var).and_then(|cell| cell.from);
             if let Some(from) = carried {
                 free_carried_value(req, frame, code, from);
             }
             let delayed = req
-                .vm_mut()
                 .fast_call(frame, var)
                 .and_then(|cell| cell.delayed.take());
             if let Some(delayed) = delayed {
@@ -21297,9 +21309,8 @@ fn unwind_from<T: Tier>(
         }
         return Ok(Stepped::Threw(frame).into());
     }
-    let returns_to = req.vm().returns_to(frame);
+    let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
-    let caller = req.stack_mut().current();
     // `zend_leave_helper`: the callee wrote no return value, so the
     // caller's temporary for the call is left undefined, and the caller
     // stands at the call opline, not past it, for the unwind to go on
@@ -22296,10 +22307,15 @@ mod tests {
         let strlen = req.function_named(b"strlen");
 
         for call in 1..=2 {
-            let state = CallState::serving(f, Vec::new());
+            let mut header = exec::Header::call(f, 0);
+            header.info.set_serving();
             let frame = req
-                .push_user_frame(f, state, None, crate::exec::Caller::Opline(main))
-                .unwrap_or(main);
+                .push_call(header)
+                .and_then(|call| {
+                    let shape = req.call_shape(call).unwrap_or_default();
+                    req.activate_user(call, shape, None, crate::exec::Caller::Opline(main))
+                })
+                .map_or(main, |activated| activated.frame);
             assert_eq!(
                 served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, &code, &init)),
                 Ok(Stepped::Same(frame)),
@@ -22328,11 +22344,10 @@ mod tests {
     /// The call last pushed off the stack, its callee, the name it held
     /// given up.
     fn popped_callee(req: &mut Request) -> Option<Function> {
-        let call = req.vm_mut().pop_call()?;
-        if let Some(name) = call.name {
-            req.release(Value::string(name));
-        }
-        Some(call.function)
+        let call = req.building_call()?;
+        let callee = req.vm().at(call)?.function;
+        req.pop_call();
+        callee
     }
 
     /// `ZEND_INIT_NS_FCALL_BY_NAME` over `Foo\StrLen`, `foo\strlen`,
@@ -23016,7 +23031,7 @@ mod tests {
         assert_eq!(req.slot(frame, 0).as_int(), Some(7));
         assert_eq!(req.vm().opline(frame), 1);
         assert!(
-            req.vm().serving_call().is_none(),
+            req.serving_call().is_none(),
             "the call is popped with the native"
         );
     }

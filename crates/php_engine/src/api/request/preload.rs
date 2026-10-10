@@ -319,12 +319,14 @@ impl Request {
         let Some(super::Link::Frame(_, state)) = chain.next() else {
             return false;
         };
-        state.body != Body::Main
-            && preloaded.scripts.iter().any(|held| {
-                held.unit
-                    .as_ref()
-                    .is_ok_and(|unit| Arc::ptr_eq(unit, &state.unit))
-            })
+        let Some((unit, body)) = state.unit() else {
+            return false;
+        };
+        body != Body::Main
+            && preloaded
+                .scripts
+                .iter()
+                .any(|held| held.unit.as_ref().is_ok_and(|held| Arc::ptr_eq(held, unit)))
     }
 
     /// The request, started, is the preload's from here: every file it

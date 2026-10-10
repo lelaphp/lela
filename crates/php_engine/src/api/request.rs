@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use php_heap::{
-    Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, VmStack, Zval, ZvalRef,
+    Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, Zval, ZvalRef,
 };
 use php_link::LinkedClass;
 use php_unit::Unit;
@@ -245,13 +245,16 @@ pub struct Request {
     _inside: crate::fork::Inside,
     /// The calls' state ([`calls::Calls`]).
     calls: calls::Calls,
-    stack: VmStack,
+    /// The VM stack the request runs on and its frames (design §5.6).
     vm: Vm,
+    /// What the frames own beyond their headers, every stack's
+    /// ([`crate::exec::Annex`]).
+    annexes: crate::exec::Annexes,
     /// The map table of design §5.14, php's `CG(map_ptr_base)`: what a
     /// published unit's map pointers index, laid down with the request,
     /// every entry `NULL` until touched. Every op array's runtime cache
     /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
-    map: MapTable,
+    map: MapTable<crate::exec::RuntimeCache>,
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
@@ -558,30 +561,51 @@ pub(crate) struct UserFunction {
     /// from the declaration's attributes, decoded where the function is
     /// declared.
     pub(crate) flags: crate::attributes::Flags,
-    /// What every call's frame push reads of the declaration, read off
-    /// it once where the function is declared ([`Arity`]).
-    pub(crate) arity: Arity,
+    /// What every call's frame push and activation read of the
+    /// function, read once where it is declared ([`FrameShape`]).
+    pub(crate) shape: FrameShape,
 }
 
-/// `op_array.num_args` and `ZEND_ACC_HAS_TYPE_HINTS`: how many
-/// parameters a declaration has before a variadic, and whether any of
-/// them declares a type, which `i_init_func_execute_data` reads off the
-/// function to place a call's arguments and to choose the `RECV*` it
-/// skips (design §5.6). php's compiler writes both onto the op array;
-/// the engine reads them off the declaration where the function is
-/// declared, so a call reads two fields and walks no parameter.
+/// What `zend_vm_stack_push_call_frame` and `i_init_func_execute_data`
+/// read off a user function (design §5.6): `op_array.num_args` and
+/// `ZEND_ACC_HAS_TYPE_HINTS`, how many parameters the declaration has
+/// before a variadic and whether any of them declares a type, which
+/// place a call's arguments and choose the `RECV*` it skips; and of its
+/// op array, `last_var + T`, the room its frame takes, the entry
+/// safepoint its prologue runs to, and its runtime cache's map pointer
+/// and size. php's compiler writes them all onto the op array; the
+/// engine reads them once where the function is declared, so a call
+/// reads them off the function table and walks neither the declaration
+/// nor the unit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Arity {
+pub(crate) struct FrameShape {
     pub(crate) parameters: u32,
     pub(crate) typed: bool,
+    /// The CVs, `last_var`.
+    pub(crate) cvs: u32,
+    /// The CVs and the temporaries.
+    pub(crate) slots: u32,
+    /// The first opline past the `RECV*` prologue, `safepoints[0]`.
+    pub(crate) entry: u32,
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
+    pub(crate) cache: u32,
+    /// `op_array.cache_size`.
+    pub(crate) cache_size: u32,
 }
 
-impl Arity {
-    pub(crate) fn of(decl: &FunctionDecl) -> Arity {
+impl FrameShape {
+    pub(crate) fn of(decl: &FunctionDecl, code: Option<&php_unit::OpArray>) -> FrameShape {
         let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
-        Arity {
+        FrameShape {
             parameters: u32::try_from(declared).unwrap_or(u32::MAX),
             typed: decl.parameters.iter().any(|p| p.ty.is_some()),
+            cvs: code.map_or(0, |code| code.num_cvs),
+            slots: code.map_or(0, |code| code.num_cvs.saturating_add(code.num_tmps)),
+            entry: code
+                .and_then(|code| code.safepoints.first())
+                .map_or(0, |at| at.0),
+            cache: code.map_or(0, |code| code.runtime_cache),
+            cache_size: code.map_or(0, |code| code.cache_size),
         }
     }
 }
@@ -728,8 +752,8 @@ impl Request {
         if shared.sense_leaks == crate::engine::LeakSensor::Traced {
             heap.trace_allocations();
         }
-        let mut stack = VmStack::new();
-        let _laid = stack.open(&mut heap);
+        let mut vm = Vm::default();
+        let _laid = vm.stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
         let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
         // `accel_activate`'s restart, where one is pending: a new epoch,
@@ -748,8 +772,8 @@ impl Request {
             inspect: inspect::Inspected::default(),
             _inside: crate::fork::Inside::enter(),
             heap,
-            stack,
-            vm: Vm::default(),
+            vm,
+            annexes: crate::exec::Annexes::default(),
             map: MapTable::new(),
             state: state::RequestState::default(),
             ini: ini::Ini::new(typed_ini),
@@ -1001,16 +1025,20 @@ impl HeapHooks for Hooks<'_> {
     /// ```
     fn gc_live_temporaries(&mut self, visit: &mut dyn FnMut(Zval)) {
         let req = &*self.0;
-        for (at, state) in req.vm.frames().iter().enumerate().rev() {
-            let Some(code) = crate::exec::body_of(&state.unit, state.body) else {
+        for at in (0..req.vm.depth()).rev() {
+            let Some(state) = req.frame_on(&req.vm, at) else {
                 continue;
             };
+            let Some(code) = state.code() else {
+                continue;
+            };
+            let opline = state.opline();
             let frame = FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
             for range in &code.live_ranges {
-                if range.start.0 > state.opline {
+                if range.start.0 > opline {
                     break;
                 }
-                if range.end.0 <= state.opline {
+                if range.end.0 <= opline {
                     continue;
                 }
                 if matches!(

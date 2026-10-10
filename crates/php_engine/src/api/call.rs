@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use php_heap::FrameRef;
+
 use php_unit::decl::{ConstExpr, HookKind, MethodDecl, Name, ParameterDefault};
 use php_unit::{ConstIdx, Opcode, Unit};
 
@@ -18,7 +20,7 @@ use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted, adopted_some,
     walk,
 };
-use crate::exec::{self, Body, CallStage};
+use crate::exec::{self, Body};
 
 /// A linked function: user or native, by identity, one word (design
 /// §5.14, *Identities*). With its top bit clear it is one every request
@@ -730,49 +732,49 @@ impl NamedRefused {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-pub(crate) fn handle_undef_args(req: &mut Request) -> Result<(), Thrown> {
-    let Some(call) = req.vm_mut().building_call() else {
+pub(crate) fn handle_undef_args(req: &mut Request, call: FrameRef) -> Result<(), Thrown> {
+    let Some(header) = req.vm().at(call) else {
         return Ok(());
     };
-    let function = call.function;
-    let stage = std::mem::replace(&mut call.stage, CallStage::Serving);
-    let filled = fill_undef_args(req, function);
-    if let Some(call) = req.vm_mut().building_call() {
-        call.stage = stage;
+    let (Some(function), building) = (header.function, header.info.building()) else {
+        return Ok(());
+    };
+    // `start_fake_frame`: the call current while its defaults are found.
+    if let Some(header) = req.vm_mut().at_mut(call) {
+        header.info.set_building(false);
+    }
+    let filled = fill_undef_args(req, call, function);
+    if let Some(header) = req.vm_mut().at_mut(call) {
+        header.info.set_building(building);
     }
     filled
 }
 
 /// The walk of [`handle_undef_args`] under the callee's frame.
-fn fill_undef_args(req: &mut Request, function: Function) -> Result<(), Thrown> {
+fn fill_undef_args(req: &mut Request, call: FrameRef, function: Function) -> Result<(), Thrown> {
     let user = req
         .user_function(function)
         .map(|user| (Arc::clone(&user.unit), user.body));
-    let count = req
-        .vm()
-        .calls()
-        .last()
-        .map_or(0, |call| call.arguments.len());
+    let count = req.vm().at(call).map_or(0, |header| header.num_args);
     for at in 0..count {
-        let undef = req
-            .vm()
-            .calls()
-            .last()
-            .and_then(|call| call.arguments.get(at))
-            .is_some_and(|held| matches!(held.as_ref(), ValueRef::Undef));
+        let undef = req.vm().stack.frame(call).is_some_and(|frame| {
+            frame.slot(php_heap::Slot(at)).kind() == php_heap::ZvalType::Undef
+        });
         if !undef {
             continue;
         }
+        let place = at as usize;
         let value = match &user {
-            Some((unit, body)) => user_default(req, unit, *body, at)?,
-            None => native_default(req, function, at)?,
+            Some((unit, body)) => user_default(req, unit, *body, place)?,
+            None => native_default(req, function, place)?,
         };
         let placed = req
             .vm_mut()
-            .building_call()
-            .and_then(|call| call.arguments.get_mut(at));
+            .stack
+            .frame_mut(call)
+            .and_then(|frame| frame.slots_mut().get_mut(place));
         match placed {
-            Some(slot) => *slot = value,
+            Some(slot) => *slot = value.to_zval(),
             None => req.release(value),
         }
     }
@@ -878,12 +880,30 @@ fn at_site(req: &mut Request, thrown: Thrown, file: &[u8], line: u32) -> Thrown 
 /// refused. The slot is left `UNDEF` for the caller to write, as php
 /// hands back the zval; the name is pushed as it is given, and whether
 /// it carries one more owner is the caller's to say.
-pub(crate) fn handle_named_arg(
+/// Where [`named_arg_place`] puts a named argument: the slot of the
+/// declared parameter, the call grown to it where it stands past what
+/// the call was given, or a new row of the extra named arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedTo {
+    Argument(usize),
+    Extra,
+}
+
+/// `zend_handle_named_arg`'s decision (`Z/Zend/zend_execute.c:5518`),
+/// the one rule both a call site's `SEND_*` and `zend_call_function`'s
+/// walk place by: an unknown name refused; a name a variadic collects
+/// placed as a new extra named row, refused where one of that name
+/// stands; a declared parameter placed at its slot, refused where an
+/// argument already fills it (`set`), the call's `passed` arguments
+/// telling a slot past them, which is not yet filled; and the
+/// parameter's number.
+pub(crate) fn named_arg_place(
     offset: ArgOffset,
-    arguments: &mut Vec<Value>,
-    extra_named: &mut Vec<(PhpString, Value)>,
+    passed: usize,
+    set: impl Fn(usize) -> bool,
+    extra_named: &[(PhpString, Value)],
     name: PhpString,
-) -> Result<Named, NamedRefused> {
+) -> Result<(NamedTo, u32), NamedRefused> {
     let number = offset.number().ok_or(NamedRefused::Unknown)?;
     match offset {
         ArgOffset::Unknown => Err(NamedRefused::Unknown),
@@ -894,28 +914,42 @@ pub(crate) fn handle_named_arg(
             {
                 return Err(NamedRefused::Overwrites);
             }
-            extra_named.push((name, Value::undef()));
-            Ok(Named {
-                at: NamedAt::Extra(extra_named.len() - 1),
-                number,
-            })
+            Ok((NamedTo::Extra, number))
         }
         ArgOffset::Declared(at) => {
-            if arguments
-                .get(at)
-                .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
-            {
+            if at < passed && set(at) {
                 return Err(NamedRefused::Overwrites);
             }
+            Ok((NamedTo::Argument(at), number))
+        }
+    }
+}
+
+pub(crate) fn handle_named_arg(
+    offset: ArgOffset,
+    arguments: &mut Vec<Value>,
+    extra_named: &mut Vec<(PhpString, Value)>,
+    name: PhpString,
+) -> Result<Named, NamedRefused> {
+    let set = |at: usize| {
+        arguments
+            .get(at)
+            .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
+    };
+    let (to, number) = named_arg_place(offset, arguments.len(), set, extra_named, name)?;
+    let at = match to {
+        NamedTo::Extra => {
+            extra_named.push((name, Value::undef()));
+            NamedAt::Extra(extra_named.len() - 1)
+        }
+        NamedTo::Argument(at) => {
             if arguments.len() <= at {
                 arguments.resize(at + 1, Value::undef());
             }
-            Ok(Named {
-                at: NamedAt::Argument(at),
-                number,
-            })
+            NamedAt::Argument(at)
         }
-    }
+    };
+    Ok(Named { at, number })
 }
 
 /// `zend_call_method` on `object`: the method looked up on the
