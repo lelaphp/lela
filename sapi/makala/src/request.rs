@@ -19,8 +19,9 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hyper::body::Bytes;
-use php_proto::cgi::{Environment, RequestInfo};
+use php_proto::cgi::{Environment, RequestInfo, Settings};
 use php_sapi::cgi::Disk;
+use php_sapi::vpath::{self, Translated};
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
@@ -151,15 +152,44 @@ pub(crate) fn serving(engine: &Engine, options: &Options) -> impl Fn(Job) + Clon
     move |job| serve(&engine, &root, job)
 }
 
-/// One request through its own `Engine::serve`.
+/// One request: a program's through its own `Engine::serve`, and a
+/// static file's served from the disk, as `php -S` tells them apart
+/// (`php_sapi::vpath`, #2346). The path is `normalize_vpath`'s, decoded
+/// and with every `..` taken, so no request names a file outside the
+/// root; a file whose path holds a NUL is refused, as `php -S` refuses
+/// one, though `stat(2)` finds none such.
 fn serve(engine: &Engine, root: &[u8], job: Job) {
     let Job {
         head,
         body,
         mut sink,
     } = job;
-    let mut env = environment(&head, root);
-    let settings = php_sapi::cgi::settings(engine);
+    let (path, query) = match head.target.iter().position(|b| *b == b'?') {
+        Some(at) => (&head.target[..at], &head.target[at + 1..]),
+        None => (&head.target[..], &[][..]),
+    };
+    let mut uri = php_proto::http::normalize_vpath(path);
+    if !uri.starts_with(b"/") {
+        uri.insert(0, b'/');
+    }
+    let found = vpath::translate(&uri, root);
+    if found
+        .as_ref()
+        .is_some_and(|found| found.path_translated.contains(&0))
+    {
+        return refuse(&mut sink, 400, Vec::new());
+    }
+    let program = match found {
+        Some(found) if found.is_program() => found,
+        found => return serve_static(&head, found.as_ref(), &mut sink),
+    };
+    let mut script = program.vpath;
+    script.extend_from_slice(&program.path_info.unwrap_or_default());
+    let mut env = environment(&head, root, &script, query);
+    // php-fpm's defaults of the entries `init_request_info` reads, which
+    // this host declares none of: `cgi.fix_pathinfo` on, so a path's info
+    // after the script is taken apart as php-fpm takes it.
+    let settings = Settings::default();
     let info = php_proto::cgi::request_info(&mut env, settings, None, &Disk);
     let cwd = info
         .path_translated
@@ -195,7 +225,7 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
 /// where the path names no script; `Access denied.` with a 403 for a
 /// script whose name does not end in `.php`, the default of its
 /// `security.limit_extensions`, so no file of another kind runs as a
-/// program (static files are #2346's); for one that does not open,
+/// program, `T.PHP` among them; for one that does not open,
 /// `Access denied.` with a 403 where it may not be read and `No input
 /// file specified.` with a 404 otherwise; and else the program.
 fn look(info: &RequestInfo) -> HostServes {
@@ -222,24 +252,14 @@ fn look(info: &RequestInfo) -> HostServes {
 }
 
 /// The CGI environment a web server hands php-fpm for `head`, after
-/// nginx's stock `fastcgi_params`: the script the path names under the
-/// root, the request's own variables, and each header field as an
-/// `HTTP_` variable. The path is `php -S`'s `normalize_vpath` of it
-/// (`Z/sapi/cli/php_cli_server.c:1538`), percent-decoded with `..` held at
-/// the root, so no request names a file outside it; a path that ends in
-/// `/` names its directory's `index.php`.
-fn environment(head: &Head, root: &[u8]) -> Environment {
-    let (path, query) = match head.target.iter().position(|b| *b == b'?') {
-        Some(at) => (&head.target[..at], &head.target[at + 1..]),
-        None => (&head.target[..], &[][..]),
-    };
-    let mut script = php_proto::http::normalize_vpath(path);
-    if !script.starts_with(b"/") {
-        script.insert(0, b'/');
-    }
-    if script.ends_with(b"/") {
-        script.extend_from_slice(b"index.php");
-    }
+/// nginx's stock `fastcgi_params`: the script the request found under
+/// the root, the request's own variables, and each header field as an
+/// `HTTP_` variable. `script` is both nginx's `$uri`, after the internal
+/// redirect its `index` makes of a directory, and its
+/// `$fastcgi_script_name`: the path `php -S`'s rules translated to, with
+/// the index file where it named a directory and the path's info after
+/// it, which php-fpm's `cgi.fix_pathinfo` takes apart again.
+fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environment {
     let field = |name: &[u8]| {
         head.fields
             .iter()
@@ -254,7 +274,7 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
         },
     );
     let mut filename = root.to_vec();
-    filename.extend_from_slice(&script);
+    filename.extend_from_slice(script);
     let mut env = vec![
         (b"SCRIPT_FILENAME".to_vec(), filename),
         (b"QUERY_STRING".to_vec(), query.to_vec()),
@@ -267,9 +287,9 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
             b"CONTENT_LENGTH".to_vec(),
             field(b"content-length").unwrap_or_default(),
         ),
-        (b"SCRIPT_NAME".to_vec(), script.clone()),
+        (b"SCRIPT_NAME".to_vec(), script.to_vec()),
         (b"REQUEST_URI".to_vec(), head.target.clone()),
-        (b"DOCUMENT_URI".to_vec(), script),
+        (b"DOCUMENT_URI".to_vec(), script.to_vec()),
         (b"DOCUMENT_ROOT".to_vec(), root.to_vec()),
         (
             b"SERVER_PROTOCOL".to_vec(),
@@ -315,6 +335,64 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
         }
     }
     Environment(env)
+}
+
+/// How many bytes of a static file go in one write to the connection.
+const STATIC_PIECE: usize = 64 << 10;
+
+/// A request that is not a program's, served as `php -S` serves a static
+/// file (`php_cli_server_begin_send_static`,
+/// `Z/sapi/cli/php_cli_server.c:2144`) on this request thread, which may
+/// wait on the disk where the connection side may not (M4): a method that
+/// writes refused with 405, a path that translated to nothing or a file
+/// that does not open with 404; else the type its extension has in php's
+/// table and the length of the file opened, and that many of its bytes
+/// after them but for `HEAD`, so a file that grows while it goes is sent
+/// as it was and one that shrinks cuts its connection. The
+/// refusals' bodies are empty, as the server's other refusals are. A
+/// static file holds its request thread while it goes, bounded by the
+/// minimum response data rate as a program's response is.
+fn serve_static(head: &Head, found: Option<&Translated>, sink: &mut Sink) {
+    if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&head.method.as_slice()) {
+        return refuse(sink, 405, vec![b"Allow: GET, HEAD, POST".to_vec()]);
+    }
+    let Some((found, file, length)) = found.and_then(|found| {
+        let file = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated)).ok()?;
+        let length = file.metadata().ok()?.len();
+        Some((found, file, length))
+    }) else {
+        return refuse(sink, 404, Vec::new());
+    };
+    let mut lines = Vec::new();
+    if let Some(content_type) = php_proto::mime::content_type(vpath::extension(&found.vpath)) {
+        lines.push(format!("Content-Type: {content_type}").into_bytes());
+    }
+    lines.push(format!("Content-Length: {length}").into_bytes());
+    sink.send_headers(&ResponseHead {
+        code: 200,
+        lines,
+        ..ResponseHead::default()
+    });
+    if head.method == b"HEAD" {
+        return;
+    }
+    let mut file = file.take(length);
+    let mut piece = vec![0; STATIC_PIECE];
+    while let Ok(read @ 1..) = file.read(&mut piece) {
+        if sink.write(&piece[..read]).is_err() {
+            return;
+        }
+    }
+}
+
+/// A response of the server's own, with `code`, header `lines` and no
+/// body.
+fn refuse(sink: &mut Sink, code: i64, lines: Vec<Vec<u8>>) {
+    sink.send_headers(&ResponseHead {
+        code,
+        lines,
+        ..ResponseHead::default()
+    });
 }
 
 /// The body as the connection reads it: each read hands out what is left

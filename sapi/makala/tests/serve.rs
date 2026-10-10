@@ -54,10 +54,9 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
     );
 }
 
-/// A path that names no script is php-fpm's 404; one that climbs out of
-/// the root to a PHP file beside it stays under the root and finds
-/// nothing there; and one that names a file other than PHP's is its 403
-/// `Access denied.`, never served as a program.
+/// A path that names nothing under the root is a 404, a `.php` one
+/// among them, and so is one that climbs out of the root to a file beside
+/// it; a file that is not PHP is served as itself, never run.
 #[test]
 fn a_path_with_no_php_file_is_not_served_as_a_program() {
     let root = root("missing", &[("notes.txt", "<?php echo 'ran';")]);
@@ -65,17 +64,9 @@ fn a_path_with_no_php_file_is_not_served_as_a_program() {
     std::fs::write(&outside, "<?php echo 'escaped';").unwrap_or_else(|e| panic!("{e}"));
     let server = Server::start(&root);
     for (path, status, body) in [
-        (
-            "/nothing.php",
-            "HTTP/1.1 404 Not Found",
-            "No input file specified.\n",
-        ),
-        ("/notes.txt", "HTTP/1.1 403 Forbidden", "Access denied.\n"),
-        (
-            "/../makala-outside.php",
-            "HTTP/1.1 404 Not Found",
-            "No input file specified.\n",
-        ),
+        ("/nothing.php", "HTTP/1.1 404 Not Found", ""),
+        ("/notes.txt", "HTTP/1.1 200 OK", "<?php echo 'ran';"),
+        ("/../makala-outside.php", "HTTP/1.1 404 Not Found", ""),
     ] {
         let mut stream = server.connect();
         write!(
