@@ -120,7 +120,7 @@ use attributes::InternalAttribute;
 use by_name::Symbols;
 use imports::{Imports, Namespacing, Symbol};
 use member::{Member, MethodName, PropName};
-use target::{Source, Target};
+use target::Target;
 use walk::{Class, Closure, Function, Method};
 
 mod args;
@@ -494,10 +494,6 @@ pub(crate) struct Emit<'a> {
     /// php's `CG(memoize_mode)` and `CG(memoized_exprs)`, which a `??=`
     /// opens over its place ([`memo`]).
     memo: memo::Memo,
-    /// The `ZEND_AST_ZNODE`s standing: a node of the tree and the value
-    /// the compiler already holds for it, which [`Self::expr`] answers
-    /// ([`pipe`]).
-    znodes: Vec<(tree::Expr, Where)>,
     /// How the constant expression [`Self::const_expr`] builds is
     /// evaluated, php's `allow_dynamic` ([`Evaluation`]).
     const_evaluation: Evaluation,
@@ -822,6 +818,30 @@ pub(crate) enum Where {
     Returned(u32),
     Temporary(u32),
     Cv(u32),
+}
+
+/// A node a compile is handed where the compiler may stand a value of
+/// its own in, php's `zend_ast` under `ZEND_AST_ZNODE`: an expression of
+/// the tree, compiled where it stands, or a value the compiler already
+/// holds (`zend_ast_create_znode`), which compiles to itself and which no
+/// reader of a node's shape takes for a call, a variable or a constant
+/// written. The values held are a write's (`zend_emit_assign_znode`), a
+/// pipe's argument and callee (`zend_compile_pipe`), and the description
+/// `zend_compile_assert` hands `assert()`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Source {
+    Expr(tree::Expr),
+    Node(Where),
+}
+
+impl Source {
+    /// The tree's node, none for a value held.
+    pub(crate) fn tree(self) -> Option<tree::Expr> {
+        match self {
+            Source::Expr(expr) => Some(expr),
+            Source::Node(_) => None,
+        }
+    }
 }
 
 /// `ZEND_FETCH_DIM_REF` (`Z/Zend/zend_compile.h:1095`), on the last
@@ -1213,7 +1233,6 @@ impl<'a> Emit<'a> {
             short_circuits: Vec::new(),
             chain_inner: None,
             memo: memo::Memo::default(),
-            znodes: Vec::new(),
             const_evaluation: Evaluation::Once,
             substitution: Substitution::Persistent,
             constants: Vec::new(),
@@ -2296,7 +2315,7 @@ impl Emit<'_> {
                     qualified.extend_from_slice(name);
                     return self.call(&qualified, &arguments, fetch);
                 }
-                self.call_var(callee, &arguments)
+                self.call_var(Source::Expr(callee), &arguments)
             }
         }
     }
@@ -7617,8 +7636,8 @@ impl Emit<'_> {
                         return Err(self
                             .compile_error("Cannot use positional argument after named argument"));
                     }
-                    args::Arg::Positional(value) => (None, self.const_expr(value)?),
-                    args::Arg::Named(name, value) => {
+                    args::Arg::Positional(Source::Expr(value)) => (None, self.const_expr(value)?),
+                    args::Arg::Named(name, Source::Expr(value)) => {
                         named = true;
                         (Some(Name(name)), self.const_expr(value)?)
                     }
@@ -7627,10 +7646,9 @@ impl Emit<'_> {
                             "Argument unpacking in constant expressions is not supported",
                         ));
                     }
-                    args::Arg::Made(..) => {
-                        return Err(
-                            self.fatal("a constant `new` over an argument the compiler made")
-                        );
+                    args::Arg::Positional(Source::Node(_))
+                    | args::Arg::Named(_, Source::Node(_)) => {
+                        return Err(self.fatal("a constant `new` over a value the compiler holds"));
                     }
                 });
             }
@@ -10589,6 +10607,15 @@ impl Emit<'_> {
         self.expr_under(expr, Fetch::Read)
     }
 
+    /// A [`Source`] compiled: the expression where it stands, or the
+    /// value already held.
+    pub(crate) fn source(&mut self, source: Source) -> Result<Where, CompileError> {
+        match source {
+            Source::Expr(expr) => self.expr(expr),
+            Source::Node(value) => Ok(value),
+        }
+    }
+
     /// [`Self::expr`] where the node stands under a fetch of its own,
     /// php's `zend_compile_var(result, ast, type, …)`: a call among what
     /// a write, an `unset`, a `??` or a by-name argument fetches is
@@ -10597,13 +10624,6 @@ impl Emit<'_> {
     /// calls ([`Self::call`]); every other node is compiled as a read's.
     fn expr_under(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let node = self.peel(expr);
-        // `ZEND_AST_ZNODE`: the value [`Self::pipe`] holds for the node.
-        if let Some(value) = self.znode(node) {
-            if self.chain_inner == Some(node) {
-                self.chain_inner = None;
-            }
-            return Ok(value);
-        }
         if self.memo.mode != memo::MemoMode::None {
             return self.memoized(node);
         }
@@ -14610,11 +14630,6 @@ impl Emit<'_> {
         // does emit was given.
         let line = expr.line(self.parsed);
         self.check_stack()?;
-        // `zend_eval_const_expr` has no `ZEND_AST_ZNODE` arm: a value the
-        // compiler holds folds nothing.
-        if self.znode(expr).is_some() {
-            return self.no_constant("a value the compiler holds is no constant expression");
-        }
         let eval_const_expr = self.fold == Fold::EvalConstExpr;
         match expr {
             tree::Expr::ParenExpr(id) => self.paren_constant(id),
@@ -15859,9 +15874,9 @@ impl Emit<'_> {
     /// Array callback must have exactly two elements
     /// Object of type stdClass is not callable
     /// ```
-    fn call_var(&mut self, callee: tree::Expr, arguments: &Args) -> Result<Where, CompileError> {
+    fn call_var(&mut self, callee: Source, arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
-        let value = self.expr(callee)?;
+        let value = self.source(callee)?;
         if let Where::Constant(name) = value
             && let Some(name) = name.as_str()
         {
@@ -17440,7 +17455,7 @@ impl Emit<'_> {
     fn frameless_icall(
         &mut self,
         index: usize,
-        arguments: &[tree::Expr],
+        arguments: &[Source],
         into: Option<u32>,
     ) -> Result<Option<Where>, CompileError> {
         let Some(arity) = self.frameless_arity(index, arguments.len()) else {
@@ -17452,7 +17467,7 @@ impl Emit<'_> {
         let mut values = Vec::new();
         for at in 0..arity as usize {
             if let Some(argument) = arguments.get(at) {
-                values.push(self.expr(*argument)?);
+                values.push(self.source(*argument)?);
                 continue;
             }
             let default = self
@@ -19023,7 +19038,6 @@ mod tests {
             short_circuits: Vec::new(),
             chain_inner: None,
             memo: memo::Memo::default(),
-            znodes: Vec::new(),
             const_evaluation: Evaluation::Once,
             substitution: Substitution::Persistent,
             constants: Vec::new(),

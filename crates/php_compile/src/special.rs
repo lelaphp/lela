@@ -38,7 +38,7 @@ use php_heap::{Key, Zval, ZvalType, numeric_prefix};
 use php_unit::Opcode;
 
 use crate::CompileError;
-use crate::emit::{CastTo, Emit, Fetch, Where, truth};
+use crate::emit::{CastTo, Emit, Fetch, Source, Where, truth};
 use php_syntax::tree;
 
 /// What php's compiler makes of one name in the table.
@@ -293,7 +293,7 @@ impl Emit<'_> {
     pub(crate) fn special(
         &mut self,
         lowered: &[u8],
-        arguments: &[tree::Expr],
+        arguments: &[Source],
         fetch: Fetch,
     ) -> Result<Option<Where>, CompileError> {
         if !self.native(lowered) {
@@ -342,7 +342,7 @@ impl Emit<'_> {
     pub(crate) fn special_constant(
         &mut self,
         lowered: &[u8],
-        arguments: &[tree::Expr],
+        arguments: &[Source],
     ) -> Result<Option<Zval>, CompileError> {
         if !self.native(lowered) {
             return Ok(None);
@@ -376,11 +376,11 @@ impl Emit<'_> {
     /// `zend_compile_func_strlen`: one argument, compiled, and a constant
     /// string is its length; `ZEND_STRLEN` over anything else, a
     /// constant that is not a string included (`strlen(1)`).
-    fn strlen(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+    fn strlen(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let value = self.expr(*argument)?;
+        let value = self.source(*argument)?;
         if let Where::Constant(constant) = value
             && let Some(s) = constant.as_str()
         {
@@ -415,11 +415,14 @@ impl Emit<'_> {
     /// Object of class stdClass could not be converted to string at 0
     /// 3 arguments are required, 2 given at 1
     /// ```
-    fn sprintf(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+    fn sprintf(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let Some((format, values)) = arguments.split_first() else {
             return Ok(None);
         };
-        let Some(format) = self.eval_const(*format)? else {
+        let Some(format) = format.tree() else {
+            return Ok(None);
+        };
+        let Some(format) = self.eval_const(format)? else {
             return Ok(None);
         };
         let Some(format) = format.as_str().map(|s| s.bytes().to_vec()) else {
@@ -443,7 +446,7 @@ impl Emit<'_> {
         }
         let mut compiled = Vec::with_capacity(values.len());
         for value in values {
-            compiled.push(self.expr(*value)?);
+            compiled.push(self.source(*value)?);
         }
         // The counts matched above, so every placeholder has its value.
         let mut compiled = compiled.into_iter();
@@ -476,11 +479,14 @@ impl Emit<'_> {
 
     /// [`Self::strlen`]'s constant arm alone: the length of a constant
     /// string, and nothing for anything else.
-    fn strlen_constant(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
+    fn strlen_constant(&mut self, arguments: &[Source]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let Some(value) = self.constant_of(*argument)? else {
+        let Some(argument) = argument.tree() else {
+            return Ok(None);
+        };
+        let Some(value) = self.constant_of(argument)? else {
             return Ok(None);
         };
         Ok(value.as_str().map(|s| length(s.len())))
@@ -565,7 +571,7 @@ impl Emit<'_> {
     /// 0000 CV0($a) = RECV 1
     /// 0001 RETURN null
     /// ```
-    fn func_get_args(&mut self, arguments: &[tree::Expr]) -> Option<Where> {
+    fn func_get_args(&mut self, arguments: &[Source]) -> Option<Where> {
         if !self.in_function() || !arguments.is_empty() {
             return None;
         }
@@ -599,13 +605,13 @@ impl Emit<'_> {
     /// ```
     fn cast_call(
         &mut self,
-        arguments: &[tree::Expr],
+        arguments: &[Source],
         to: CastTo,
     ) -> Result<Option<Where>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let value = self.expr(*argument)?;
+        let value = self.source(*argument)?;
         Ok(Some(self.emit_cast(value, to)))
     }
 
@@ -624,21 +630,22 @@ impl Emit<'_> {
     /// ```expect
     /// [[2,3],[],[3],[2,3]]
     /// ```
-    fn array_slice(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+    fn array_slice(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let [source, offset] = arguments else {
             return Ok(None);
         };
         if !self.in_function() {
             return Ok(None);
         }
-        if !self
-            .named_call(*source)
+        if !source
+            .tree()
+            .and_then(|source| self.named_call(source))
             .is_some_and(|(name, args)| name == b"func_get_args" && args.is_empty())
         {
             return Ok(None);
         }
         let Some(skip) = self
-            .written(*offset)?
+            .written_of(*offset)?
             .and_then(Zval::as_long)
             .filter(|n| *n >= 0)
         else {
@@ -655,15 +662,12 @@ impl Emit<'_> {
     /// (`Z/Zend/zend_compile.c:4586`): two arguments, the key compiled
     /// and then the array, and `ZEND_ARRAY_KEY_EXISTS` over them into a
     /// temporary; any other count is the call.
-    fn array_key_exists(
-        &mut self,
-        arguments: &[tree::Expr],
-    ) -> Result<Option<Where>, CompileError> {
+    fn array_key_exists(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let [key, array] = arguments else {
             return Ok(None);
         };
-        let key = self.expr(*key)?;
-        let array = self.expr(*array)?;
+        let key = self.source(*key)?;
+        let array = self.source(*array)?;
         Ok(Some(self.emit_binary(
             Opcode::ArrayKeyExists,
             key,
@@ -681,13 +685,13 @@ impl Emit<'_> {
     fn over_one(
         &mut self,
         opcode: Opcode,
-        arguments: &[tree::Expr],
+        arguments: &[Source],
         extended_value: u32,
     ) -> Result<Option<Where>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let value = self.expr(*argument)?;
+        let value = self.source(*argument)?;
         Ok(Some(self.emit_unary(opcode, value, extended_value)))
     }
 
@@ -747,7 +751,7 @@ impl Emit<'_> {
     /// bool(true)
     /// bool(true)
     /// ```
-    fn in_array(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+    fn in_array(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let (needle, haystack, strict) = match arguments {
             [needle, haystack] => (*needle, *haystack, false),
             [needle, haystack, flag] => match self.in_array_flag(*flag)? {
@@ -755,6 +759,9 @@ impl Emit<'_> {
                 None => return Ok(None),
             },
             _ => return Ok(None),
+        };
+        let Some(haystack) = haystack.tree() else {
+            return Ok(None);
         };
         let raised = self.raised();
         let Some(keys) = self
@@ -765,7 +772,7 @@ impl Emit<'_> {
             return Ok(None);
         };
         let table = self.lay_array(&keys)?;
-        let needle = self.expr(needle)?;
+        let needle = self.source(needle)?;
         Ok(Some(self.emit_binary(
             Opcode::InArray,
             needle,
@@ -779,7 +786,10 @@ impl Emit<'_> {
     /// (`ZEND_AST_ZVAL`) or over a constant `zend_try_ct_eval_const`
     /// substitutes (`ZEND_AST_CONST`), and nothing for any other
     /// argument, a constant left to the program among them.
-    fn in_array_flag(&mut self, flag: tree::Expr) -> Result<Option<bool>, CompileError> {
+    fn in_array_flag(&mut self, flag: Source) -> Result<Option<bool>, CompileError> {
+        let Some(flag) = flag.tree() else {
+            return Ok(None);
+        };
         if let tree::Expr::NameRef(token) = self.peel(flag) {
             return Ok(self.named_constant(token)?.map(truth));
         }
@@ -790,12 +800,12 @@ impl Emit<'_> {
     /// as such, 0 to 255 (`ZVAL_CHAR`). A long written any other way
     /// (`chr(1 + 64)`, `chr(-0)`), one outside the byte and anything
     /// else is the call, as php leaves it.
-    fn chr(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
+    fn chr(&mut self, arguments: &[Source]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
         let Some(byte) = self
-            .written(*argument)?
+            .written_of(*argument)?
             .and_then(Zval::as_long)
             .and_then(|n| u8::try_from(n).ok())
         else {
@@ -806,11 +816,11 @@ impl Emit<'_> {
 
     /// `zend_compile_func_ord`: the byte of a one-byte string written as
     /// such; a longer or an empty string, or anything else, is the call.
-    fn ord(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
+    fn ord(&mut self, arguments: &[Source]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let Some(value) = self.written(*argument)? else {
+        let Some(value) = self.written_of(*argument)? else {
             return Ok(None);
         };
         Ok(value.as_str().and_then(|s| match s.bytes() {
@@ -825,7 +835,7 @@ impl Emit<'_> {
     /// ([`Emit::ct_eval_const`]) is `true`; and the rest is
     /// `ZEND_DEFINED` over the name as a constant string, with a cache
     /// slot in `extended_value`.
-    fn defined(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+    fn defined(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let Some(name) = self.defined_name(arguments)? else {
             return Ok(None);
         };
@@ -846,7 +856,7 @@ impl Emit<'_> {
     /// [`Self::defined`]'s constant arm alone: `true` for a name the
     /// compiler substitutes, and nothing for a name it would leave to
     /// the opcode or the call.
-    fn defined_constant(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
+    fn defined_constant(&mut self, arguments: &[Source]) -> Result<Option<Zval>, CompileError> {
         let Some(name) = self.defined_name(arguments)? else {
             return Ok(None);
         };
@@ -860,11 +870,11 @@ impl Emit<'_> {
     /// written as a value, as a string, and nothing where the argument
     /// is anything else, there are two or none, or the name has a `\`
     /// or a `:` in it.
-    fn defined_name(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
+    fn defined_name(&mut self, arguments: &[Source]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let Some(value) = self.written(*argument)? else {
+        let Some(value) = self.written_of(*argument)? else {
             return Ok(None);
         };
         let Some(name) = self.stringified(value)? else {
@@ -913,6 +923,15 @@ impl Emit<'_> {
                 self.concat_fold(a, b)
             }
             _ => Ok(None),
+        }
+    }
+
+    /// [`Self::written`] over a [`Source`]: a value the compiler holds is
+    /// no `ZEND_AST_ZVAL`, so nothing.
+    pub(crate) fn written_of(&mut self, source: Source) -> Result<Option<Zval>, CompileError> {
+        match source {
+            Source::Expr(expr) => self.written(expr),
+            Source::Node(_) => Ok(None),
         }
     }
 }
