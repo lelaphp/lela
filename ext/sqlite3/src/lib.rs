@@ -108,6 +108,8 @@ pub fn extension() -> Extension {
         .class::<conn::SQLite3>()
         .class::<stmt::SQLite3Stmt>()
         .class::<result::SQLite3Result>()
+        .request_state::<conn::Forgotten>()
+        .rshutdown(conn::rshutdown)
         .info(sqlite3_info)
         .build("sqlite3")
 }

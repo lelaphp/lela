@@ -45,3 +45,27 @@ var_dump($db->querySingle('SELECT twice(a) FROM t'), $db->querySingle('SELECT ca
         "string(2) \"xx\"\nstring(4) \"xy/0\"\n",
     );
 }
+
+/// The authorizer a reopen forgets, which php leaks (#2514), is given up
+/// by the extension's `rshutdown`, after the store's walk has destructed
+/// what it holds, so the request ends holding none of it.
+#[test]
+fn an_authorizer_a_reopen_forgets_is_given_up_at_the_request_s_end() {
+    served(
+        r#"<?php
+class A { function __destruct() { echo "dtor\n"; } }
+$db = new SQLite3(':memory:');
+$a = new A;
+$db->setAuthorizer(function () use ($a) { return SQLite3::OK; });
+unset($a);
+$db->close();
+$db->open(':memory:');
+$db->setAuthorizer(fn () => SQLite3::OK);
+$db->close();
+$db->open(':memory:');
+unset($db);
+echo "end\n";
+"#,
+        "end\ndtor\n",
+    );
+}

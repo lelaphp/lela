@@ -38,11 +38,34 @@ pub(crate) struct Conn {
     pub(crate) exceptions: bool,
     /// The next statement's id.
     next: u64,
-    /// The callables the functions, aggregates, collations and authorizer
-    /// of a connection since closed held: php's `funcs`, `collations` and
-    /// `authorizer_fcc`, which `SQLite3::close` leaves on the object and
-    /// only `php_sqlite3_object_free_storage` gives up.
+    /// The callables the functions, aggregates and collations of a
+    /// connection since closed held: php's `funcs` and `collations`,
+    /// which `SQLite3::close` leaves on the object and only
+    /// `php_sqlite3_object_free_storage` gives up.
     closed_handlers: Vec<Handler>,
+    /// `authorizer_fcc` of a connection since closed, which
+    /// `SQLite3::close` leaves on the object for
+    /// `php_sqlite3_object_free_storage` to give up, and a successful
+    /// `SQLite3::open` forgets ([`Forgotten`]).
+    closed_authorizer: Option<Handler>,
+}
+
+/// Request-scoped (ADR-0005): the authorizers `SQLite3::open` forgot,
+/// `db_obj->authorizer_fcc = empty_fcall_info_cache` with no
+/// `zend_fcc_dtor` (`Z/ext/sqlite3/sqlite3.c:169`), which php leaks
+/// (#2514). The leak is copied where it is observable: no object owns
+/// them, so what they hold is destructed by the store's walk at the
+/// request's end, and `rshutdown`, which runs after that walk, gives
+/// them up, where php frees them with the request's memory.
+#[derive(Default)]
+pub(crate) struct Forgotten(Vec<Handler>);
+
+/// `RSHUTDOWN`'s part here: the authorizers [`Forgotten`] holds given up.
+pub(crate) fn rshutdown(req: &mut Request) {
+    let forgotten = std::mem::take(&mut req.state::<Forgotten>().0);
+    for handler in forgotten {
+        handler.give_up(req);
+    }
 }
 
 /// `initialised` and `db` as one state.
@@ -300,7 +323,8 @@ impl ObjectHandlers for Handlers {
         let Some(conn) = object.native_mut::<Conn>(req) else {
             return;
         };
-        let mut handlers = std::mem::take(&mut conn.closed_handlers);
+        let mut handlers: Vec<Handler> = conn.closed_authorizer.take().into_iter().collect();
+        handlers.append(&mut conn.closed_handlers);
         if let Link::Open(open) = std::mem::take(&mut conn.link) {
             let Open {
                 owner,
@@ -329,7 +353,7 @@ impl ObjectHandlers for Handlers {
         let Some(conn) = object.native::<Conn>(req) else {
             return GcTable::Properties;
         };
-        for handler in &conn.closed_handlers {
+        for handler in conn.closed_authorizer.iter().chain(&conn.closed_handlers) {
             handler.visit(visit);
         }
         if let Link::Open(open) = &conn.link {
@@ -390,7 +414,11 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
         registrations: Vec::new(),
         authorizer: None,
     }));
-    conn(req, object)?.link = open;
+    let conn = conn(req, object)?;
+    conn.link = open;
+    if let Some(forgotten) = conn.closed_authorizer.take() {
+        req.state::<Forgotten>().0.push(forgotten);
+    }
     Ok(())
 }
 
@@ -688,6 +716,56 @@ impl SQLite3 {
     /// ```expect
     /// int(42)
     /// ```
+    ///
+    /// The open forgets the authorizer a connection since closed held,
+    /// `authorizer_fcc = empty_fcall_info_cache` with no `zend_fcc_dtor`
+    /// (`Z/ext/sqlite3/sqlite3.c:169`), so php leaks it: its callable
+    /// outlives the object and what it holds is destructed at the
+    /// request's end (#2514):
+    ///
+    /// ```php
+    /// class A { function __destruct() { echo "dtor\n"; } }
+    /// $db = new SQLite3(':memory:');
+    /// $a = new A;
+    /// $db->setAuthorizer(function () use ($a) { return SQLite3::OK; });
+    /// unset($a);
+    /// $db->close();
+    /// $db->open(':memory:');
+    /// unset($db);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// dtor
+    /// ```
+    ///
+    /// The store's walk at the request's end destructs what the leaked
+    /// callable holds in the store's order, as it does any object an
+    /// owner still holds then: `$c` takes the store's slot the freed
+    /// `$db` left, so its destructor comes before `$a`'s.
+    ///
+    /// ```php
+    /// class A { public $self; function __construct(public $n) {} function __destruct() { echo "dtor{$this->n}\n"; } }
+    /// $b = new A(0);
+    /// $b->self = $b;
+    /// $db = new SQLite3(':memory:');
+    /// $a = new A(1);
+    /// $db->setAuthorizer(function () use ($a) { return SQLite3::OK; });
+    /// unset($a);
+    /// $db->close();
+    /// $db->open(':memory:');
+    /// $db->setAuthorizer(null);
+    /// unset($db);
+    /// $c = new A(2);
+    /// $c->self = $c;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// dtor0
+    /// dtor2
+    /// dtor1
+    /// ```
     #[php(tentative)]
     fn open(
         req: &mut Request,
@@ -784,7 +862,7 @@ impl SQLite3 {
         match Db::close(req, owner, registrations) {
             Ok(handlers) => {
                 let conn = self::conn(req, object)?;
-                conn.closed_handlers.extend(authorizer);
+                conn.closed_authorizer = authorizer;
                 conn.closed_handlers.extend(handlers);
                 Ok(true)
             }
