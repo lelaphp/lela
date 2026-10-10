@@ -611,8 +611,11 @@ pub struct Predicates {
 /// scope reaches its directory ([`crate::generated`]), so the row names
 /// files and no rule (#2473). A file that is not a `clippy.toml` would
 /// need its source named again; [`crate::generated::render`] says where.
+/// A row that spells anything else, the map of each file to one rule
+/// that #1950's generator wrote among them, is refused naming the row and
+/// what it takes ([`generated_refusal`], #2513).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "GeneratedShape", into = "Vec<String>")]
+#[serde(transparent)]
 pub struct Generated(Vec<String>);
 
 impl Generated {
@@ -622,33 +625,20 @@ impl Generated {
     }
 }
 
-impl From<Generated> for Vec<String> {
-    fn from(generated: Generated) -> Vec<String> {
-        generated.0
-    }
-}
-
-/// `generated` as the file spells it: the list of files, or the map of
-/// each file to the one rule #1950's generator outgrew, whose rule is read
-/// no more. The map shape goes once #2474 lands the list in seams.toml
-/// (#2513).
-#[derive(Deserialize)]
-#[serde(
-    untagged,
-    expecting = "a list of the files the manifest renders, such as [\"ext/clippy.toml\"]"
-)]
-enum GeneratedShape {
-    Files(Vec<String>),
-    Map(BTreeMap<String, String>),
-}
-
-impl From<GeneratedShape> for Generated {
-    fn from(shape: GeneratedShape) -> Generated {
-        match shape {
-            GeneratedShape::Files(files) => Generated(files),
-            GeneratedShape::Map(map) => Generated(map.into_keys().collect()),
-        }
-    }
+/// The refusal of a manifest `toml` would not decode, where a rule spells
+/// `generated` as anything but a list: the row by its id and what it
+/// takes, which `toml`'s own refusal names by the row's line alone.
+fn generated_refusal(text: &str) -> Option<anyhow::Error> {
+    let table: toml::Table = toml::from_str(text).ok()?;
+    table.get("rule")?.as_array()?.iter().find_map(|rule| {
+        let generated = rule.get("generated").filter(|g| !g.is_array())?;
+        let id = rule.get("id").and_then(toml::Value::as_str).unwrap_or("");
+        Some(anyhow::anyhow!(
+            "rule \"{id}\" spells `generated` as a {}; the row takes a list of the files the \
+             manifest renders, such as [\"ext/clippy.toml\"]",
+            generated.type_str()
+        ))
+    })
 }
 
 /// `avoid_from`: the glossary a `vocab` rule reads for its `_Avoid_` lists,
@@ -997,7 +987,8 @@ impl Manifest {
     /// Parse the manifest text alone and hold it to the grammar. The pin is
     /// left empty; `load` fills it.
     pub fn parse(text: &str) -> Result<Manifest> {
-        let manifest: Manifest = toml::from_str(text)?;
+        let manifest: Manifest = toml::from_str(text)
+            .map_err(|err| generated_refusal(text).unwrap_or_else(|| err.into()))?;
         let instruments = crate::cli::instruments();
         for week in &manifest.weeks {
             for read in &week.reads {

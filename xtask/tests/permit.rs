@@ -2905,7 +2905,7 @@ fn denied(manifest: &Manifest, root: &Path, line: &str) -> bool {
 /// `where = "ticketed"` (#1149): the rule judges a call in a checkout
 /// whose branch records a ticket, a builder's worktree, and not one in a
 /// checkout that records none, main's, where the merge check runs; a
-/// leading `cd` moves the call to the checkout it names.
+/// leading `cd` or `pushd` moves the call to the checkout it names.
 #[test]
 fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() {
     let manifest = probe(|rule| rule.within = Where::Ticketed);
@@ -2918,6 +2918,14 @@ fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() 
     assert!(denied(&manifest, main.path(), &moved));
     let moved = format!("cd {} && {line}", main.path().display());
     assert!(!denied(&manifest, ticketed.path(), &moved));
+    // #2607: a `cd` to a variable the line assigned, and a `pushd`, move
+    // it as a `cd` does, and a `popd` moves it back.
+    let assigned = format!("W={} && cd \"$W\" && {line}", ticketed.path().display());
+    assert!(denied(&manifest, main.path(), &assigned));
+    let pushed = format!("pushd {} && {line}", ticketed.path().display());
+    assert!(denied(&manifest, main.path(), &pushed));
+    let popped = format!("pushd {} && popd && {line}", ticketed.path().display());
+    assert!(!denied(&manifest, main.path(), &popped));
     // Without `where`, both.
     let manifest = probe(|_| {});
     assert!(denied(&manifest, main.path(), line));

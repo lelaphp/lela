@@ -16,13 +16,15 @@
 //! The rule is one: a file is put back only in the checkout the call ran
 //! in, only where its line can write it, and never where an operation in
 //! progress there has staged it; every other file that moved is kept as
-//! it stands and named. The checkout is the call's `cwd`, moved by a
-//! leading `cd`, at the top of its worktree ([`operation::ran_in`]), the
-//! resolution `where = "operating"` reads, and not the hook's own: a
-//! subagent's shell starts in the main checkout and `cd`s into its
-//! worktree, so the hook's checkout is often one the call never touched,
-//! and another session's merge may stand there (#2597). The line's words
-//! are read where its shell stands, the `cwd` moved by that `cd`.
+//! it stands and named. The checkout is where the call acts, its `cwd`
+//! moved by the line's leading `cd`, `pushd` and `popd`, or by git's `-C`
+//! where every command past them is git and names one directory, at the
+//! top of its worktree ([`operation::ran_in`]), the resolution `where =
+//! "operating"` reads (#2607), and not the hook's own: a subagent's shell
+//! starts in the main checkout and `cd`s into its worktree, so the hook's
+//! checkout is often one the call never touched, and another session's
+//! merge may stand there (#2597). The line's words are read where its
+//! shell stands, the `cwd` moved by those changes.
 //!
 //! What it leaves alone, on purpose:
 //!
@@ -541,17 +543,17 @@ fn runs_steer(command: &str) -> bool {
         .any(|argv| argv.invokes(&steer))
 }
 
-/// The one checkout a call is held in: the one it ran in, its workspace
-/// moved by a leading `cd` ([`operation::ran_in`]), and never the hook's
-/// own where the call ran elsewhere (#2597).
+/// The one checkout a call is held in: the one it ran in, where its
+/// workspace moved by its line acts ([`operation::ran_in`]), and never
+/// the hook's own where the call ran elsewhere (#2597, #2607).
 fn held(root: &Path, call: &Call) -> PathBuf {
     let line = call.command().map(argv::Line::read);
     operation::ran_in(&call.workspace(root), line.as_ref())
 }
 
 /// Where the line's shell stands, which its words are read against: the
-/// call's `cwd`, or `checkout` where it carries none, moved by a leading
-/// `cd` ([`runs_in`]).
+/// call's `cwd`, or `checkout` where it carries none, moved by the line's
+/// leading `cd`, `pushd` and `popd` ([`runs_in`]).
 fn shell_at(call: &Call, checkout: &Path, line: &argv::Line) -> PathBuf {
     runs_in(call.cwd.as_deref().map_or(checkout, Path::new), Some(line))
 }
