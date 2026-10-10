@@ -20,8 +20,8 @@ use crate::supplied::chain::StringArgs;
 
 use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
 
-/// Which include is being opened, and the primary file held open, whose
-/// fields no file but this one reads.
+/// Which include is being opened, and the files the request holds open,
+/// whose fields no file but this one reads.
 #[derive(Default)]
 pub(super) struct Include {
     /// The include opening a file through a stream wrapper, and how many
@@ -30,9 +30,36 @@ pub(super) struct Include {
     /// raises under it, and a native a user-space wrapper serves from
     /// inside it is one call deeper.
     including: Option<(IncludeKind, usize)>,
-    /// The primary file as the host's `zend_file_handle` holds it open
-    /// ([`ProgramFile`]), inherited by a process the request execs.
-    primary: Option<std::fs::File>,
+    /// The files the request's `zend_file_handle`s hold open, in the
+    /// order each was opened ([`Held`]).
+    held: Vec<Held>,
+}
+
+/// A file one of the request's `zend_file_handle`s holds open past the
+/// read that compiled it, with no `O_CLOEXEC`, as php's `fopen` and
+/// `zend_stream_open` open it, so a process the request execs inherits
+/// it (#2458, #2492): the program's file as its host hands it over
+/// ([`ProgramFile`]), and `auto_prepend_file`'s, `auto_append_file`'s and
+/// the built-in server's router's as `php_execute_script_ex` and
+/// `php_cli_server_dispatch_router` keep theirs ([`HandlePath::Kept`]).
+/// What holds it open is the [`std::fs::File`] alone, which nothing reads.
+struct Held {
+    _file: std::fs::File,
+    until: Until,
+}
+
+/// When the request closes a file it holds ([`Held`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    /// Once the program has been served: the host's
+    /// `zend_destroy_file_handle` after `php_execute_script`, and
+    /// `php_execute_script_ex`'s of `auto_prepend_file` and
+    /// `auto_append_file` after the append file ran
+    /// (`Z/main/main.c:2650-2656`), each before the shutdown functions.
+    Served,
+    /// As the request ends, after its shutdown functions
+    /// ([`ProgramFile::Listed`]).
+    Ended,
 }
 
 impl Request {
@@ -105,24 +132,38 @@ impl Request {
         let Some(script) = self.description.script_name.clone() else {
             return;
         };
+        let until = match self.description.program_file {
+            // Opened by its compile ([`HandlePath::Kept`]).
+            ProgramFile::Unopened => return,
+            ProgramFile::Listed => Until::Ended,
+            ProgramFile::Named | ProgramFile::Opened => Until::Served,
+        };
         if self.description.program_file != ProgramFile::Opened && self.accelerator_holds(&script) {
             return;
         }
-        let path = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&script);
+        self.hold_file(&script, until);
+    }
+
+    /// The file at the full path `path` opened and held, inherited by a
+    /// process the request execs, until `until` ([`Held`]); a file that
+    /// does not open is not held, as the read that compiled it has
+    /// answered for it.
+    fn hold_file(&mut self, path: &[u8], until: Until) {
+        let path = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path);
         if let Ok(file) = std::fs::File::open(path)
             && php_process::inherit_fd(std::os::fd::AsFd::as_fd(&file)).is_ok()
         {
-            self.include.primary = Some(file);
+            self.include.held.push(Held { _file: file, until });
         }
     }
 
-    /// The host's `zend_destroy_file_handle` once the program has been
-    /// served, before the request shuts down; a file php-fpm leaves
+    /// The `zend_destroy_file_handle`s once the program has been served,
+    /// before the request shuts down: the host's of the program's file,
+    /// and `php_execute_script_ex`'s of `auto_prepend_file`,
+    /// `auto_append_file` and the router; a program's file php-fpm leaves
     /// listed is closed with the request ([`ProgramFile::Listed`]).
-    pub(crate) fn close_primary_file(&mut self) {
-        if self.description.program_file != ProgramFile::Listed {
-            self.include.primary = None;
-        }
+    pub(crate) fn close_served_files(&mut self) {
+        self.include.held.retain(|held| held.until == Until::Ended);
     }
 
     /// `php_execute_script`'s `expand_filepath` of the primary file
@@ -193,6 +234,53 @@ impl Request {
         kind: IncludeKind,
         written: &[u8],
     ) -> Result<Opened, Thrown> {
+        let handle = if kind.once() {
+            HandlePath::Opened
+        } else {
+            HandlePath::Filename
+        };
+        self.include_through(kind, written, handle)
+    }
+
+    /// `zend_execute_script(ZEND_REQUIRE, NULL, file)` over
+    /// `auto_prepend_file` or `auto_append_file` (`Z/main/main.c:2638-2646`):
+    /// required as [`Request::include_file`] requires a file, through a
+    /// `zend_file_handle` that `php_execute_script_ex` destroys only once
+    /// the program and the append file are served, so the file it opened is
+    /// held open, and inherited by a process the request execs, until
+    /// then; where the unit cache answers the file by the path as written
+    /// it opens nothing, as opcache's lookup by its key opens nothing, and
+    /// nothing is held ([`HandlePath::Kept`]):
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/kept' . getmypid(); @mkdir($d);
+    /// $lib = '<?php function held($f) { $l = shell_exec("ls -iLd /dev/fd/* 2>/dev/null"); return preg_match_all("/^ *" . fileinode($f) . " /m", $l); }';
+    /// file_put_contents("$d/lib.php", $lib);
+    /// file_put_contents("$d/pre.php", '<?php require __DIR__ . "/lib.php"; register_shutdown_function(fn () => print("shutdown " . held(__FILE__) . "\n")); echo "prepend ", held(__FILE__), "\n";');
+    /// file_put_contents("$d/app.php", '<?php echo "append ", held(__DIR__ . "/pre.php"), held(__FILE__), "\n";');
+    /// file_put_contents("$d/t.php", '<?php echo "program ", held(__DIR__ . "/pre.php"), "\n";');
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', "auto_prepend_file=$d/pre.php", '-d', "auto_append_file=$d/app.php", "$d/t.php"], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect process
+    /// prepend 1
+    /// program 1
+    /// append 11
+    /// shutdown 0
+    /// ```
+    pub(crate) fn require_kept(&mut self, written: &[u8]) -> Result<Opened, Thrown> {
+        self.include_through(IncludeKind::Require, written, HandlePath::Kept)
+    }
+
+    /// [`Request::include_file`] through a `zend_file_handle` of the kind
+    /// `handle` names.
+    fn include_through(
+        &mut self,
+        kind: IncludeKind,
+        written: &[u8],
+        handle: HandlePath,
+    ) -> Result<Opened, Thrown> {
         if written.contains(&0) {
             return self.failed_opening(kind, written);
         }
@@ -258,11 +346,6 @@ impl Request {
             self.note_included(&path)?;
             return Ok(Opened::Unit(unit));
         }
-        let handle = if kind.once() {
-            HandlePath::Opened
-        } else {
-            HandlePath::Filename
-        };
         let cached = match held {
             Some(held) => Some(held.unit.clone()),
             None => self.cached_file(&path, Some(written), handle),
@@ -283,13 +366,14 @@ impl Request {
         }
     }
 
-    /// The stream `php_stream_open_for_zend_ex` opens over a plain file
-    /// an include or `spl_autoload` compiles, or looks up by its full
-    /// path in opcache's ([`Request::cached_file`]): a `stream` resource under
-    /// the next id, freed when `zend_destroy_file_handle` closes it
-    /// before the file runs, so the id is spent and `EG(regular_list)`
-    /// grows as php's does, here from its packed table of eight to a
-    /// hash at id 8, 160 bytes more that the list keeps:
+    /// The stream `php_stream_open_for_zend_ex` opens over the plain file
+    /// at the full path `path` that an include or `spl_autoload` compiles,
+    /// or looks up by its full path in opcache's ([`Request::cached_file`]):
+    /// a `stream` resource under the next id, freed when
+    /// `zend_destroy_file_handle` closes it before the file runs, so the
+    /// id is spent and `EG(regular_list)` grows as php's does, here from
+    /// its packed table of eight to a hash at id 8, 160 bytes more that
+    /// the list keeps:
     ///
     /// ```php
     /// $f = realpath(__DIR__) . '/spent.inc'; file_put_contents($f, '<?php $x = 1;');
@@ -326,11 +410,18 @@ impl Request {
     /// 7
     /// ```
     ///
+    /// A `zend_file_handle` php keeps past the compile, `handle`
+    /// [`HandlePath::Kept`], holds the file open until the program has
+    /// been served ([`Request::require_kept`]).
+    ///
     /// A refusal has recorded the memory limit's fatal, which ends the
     /// request.
-    pub(super) fn spend_include_stream(&mut self) {
+    pub(super) fn open_include_stream(&mut self, path: &[u8], handle: HandlePath) {
         if let Some(hooks) = self.stream_hooks() {
             (hooks.spend)(self);
+        }
+        if handle == HandlePath::Kept {
+            self.hold_file(path, Until::Served);
         }
     }
 

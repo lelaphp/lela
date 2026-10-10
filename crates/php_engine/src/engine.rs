@@ -37,7 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, Placed, PropertyInfo, Request, Sink, TypedIni, placed_of,
+    BuildDefs, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request, Sink, TypedIni,
+    placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -125,14 +126,23 @@ pub enum Primary {
 /// served, as `phpdbg_compile` closes it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProgramFile {
-    /// The file's name, which `zend_stream_open` opens unless opcache
-    /// holds the file, `persistent_stream_open_function` answering it
-    /// without opening it: the `zend_file_handle` of
-    /// `php_fopen_primary_script` (`Z/main/fopen_wrappers.c:468-473`), or
-    /// of `zend_stream_init_filename` and the scanner, which the host
+    /// The file's name, which `zend_stream_open` opens before the
+    /// program is served unless opcache holds the file,
+    /// `persistent_stream_open_function` answering it without opening
+    /// it: the `zend_file_handle` of `php_fopen_primary_script`
+    /// (`Z/main/fopen_wrappers.c:468-473`), php-cgi's, which the host
     /// destroys once the program has been served.
     #[default]
     Named,
+    /// The file's name alone, as `zend_stream_init_filename` leaves it
+    /// and the host hands it to `php_execute_script` unopened: the
+    /// built-in server's (`php_cli_server_dispatch_script`,
+    /// `Z/sapi/cli/php_cli_server.c:2132-2138`), opened as the program
+    /// compiles, once `auto_prepend_file` is served, where the unit cache
+    /// does not answer it by its name, as the server's router is
+    /// ([`Engine::dispatch`]), and destroyed once the program has been
+    /// served.
+    Unopened,
     /// php's CLI, `cli_seek_file_begin`'s `fopen` before the request
     /// starts (`Z/sapi/cli/php_cli.c:566`), open whatever opcache holds,
     /// and destroyed once the program has been served, before
@@ -4696,7 +4706,7 @@ impl Engine {
             req.open_primary_file();
         }
         let ran = self.execute_wrapped(req, source, script);
-        req.close_primary_file();
+        req.close_served_files();
         ran
     }
 
@@ -4746,31 +4756,33 @@ impl Engine {
             );
         }
         let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
-        self.compile_file(req, &script)
+        // A bare program is opened as phpdbg's `phpdbg_compile` opens it,
+        // a stream through `php_stream_open_for_zend_ex`, and spends a
+        // resource id where the CLI's `FILE *` spends none; the built-in
+        // server's is opened by its compile, as its router is.
+        let handle = match (req.primary(), req.program_file()) {
+            (Primary::Wrapped, ProgramFile::Unopened) => HandlePath::Kept,
+            (Primary::Wrapped, _) => HandlePath::Host,
+            (Primary::Bare, _) => HandlePath::Opened,
+        };
+        self.compile_file(req, &script, handle)
     }
 
-    /// The file at `path` compiled for the request: what an extension's
-    /// `zend_compile_file` answers, or the unit cache's. A bare program
-    /// is opened as phpdbg's `phpdbg_compile` opens it, a stream through
-    /// `php_stream_open_for_zend_ex`, and spends a resource id where the
-    /// CLI's `FILE *` spends none.
+    /// The file at `path` compiled for the request through a
+    /// `zend_file_handle` of the kind `handle` names: what an extension's
+    /// `zend_compile_file` answers, or the unit cache's.
     fn compile_file(
         &self,
         req: &mut Request,
         path: &[u8],
+        handle: HandlePath,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
         match req.compile_file_source(path) {
             Ok(Some(source)) => Some(
                 self.shared
                     .compile_for(req, &source, path, SourceKind::File),
             ),
-            Ok(None) => {
-                let handle = match req.primary() {
-                    Primary::Wrapped => crate::api::request::HandlePath::Host,
-                    Primary::Bare => crate::api::request::HandlePath::Opened,
-                };
-                req.cached_file(path, Some(path), handle)
-            }
+            Ok(None) => req.cached_file(path, Some(path), handle),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 None
@@ -4835,8 +4847,21 @@ impl Engine {
     }
 
     /// `php_cli_server_dispatch_router`: `router` served as
-    /// `php_execute_script_ex` serves a program, and whether it declined.
+    /// `php_execute_script_ex` serves a program, through the path alone
+    /// as `zend_stream_init_filename` leaves it, so its file is opened as
+    /// it compiles, where the unit cache does not answer it by its name,
+    /// and held open until the router and the append file are served, as
+    /// `zend_destroy_file_handle` closes it after `php_execute_script_ex`
+    /// ([`HandlePath::Kept`]); and whether it declined.
     fn execute_router(&self, req: &mut Request, router: &[u8]) -> Routed {
+        let answered = self.execute_router_files(req, router);
+        req.close_served_files();
+        answered
+    }
+
+    /// [`Engine::execute_router`] with the files it opens held:
+    /// `auto_prepend_file`, the router and `auto_append_file`.
+    fn execute_router_files(&self, req: &mut Request, router: &[u8]) -> Routed {
         let entry = self.shared.loops.entry;
         if !auto_file(req, b"auto_prepend_file", entry) {
             return Routed::Taken;
@@ -4844,7 +4869,7 @@ impl Engine {
         let path = req
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
-        let ran = match self.compile_file(req, &path) {
+        let ran = match self.compile_file(req, &path, HandlePath::Kept) {
             Some(Ok(unit)) => serve_unit(req, &unit, entry),
             Some(Err(refused)) => {
                 refused_program(req, &refused, &path);
@@ -5310,15 +5335,16 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
 
 /// `zend_execute_script(ZEND_REQUIRE, NULL, file)` over the file the
 /// ini entry `name` gives, `auto_prepend_file` or `auto_append_file`
-/// (`Z/main/main.c:2621-2645`): required as `require` resolves it and
-/// served where the program is, and whether it ran to its end; an entry
-/// left empty is nothing to serve.
+/// (`Z/main/main.c:2621-2645`): required as `require` resolves it, its
+/// file held open until the program has been served
+/// ([`Request::require_kept`]), and served where the program is, and
+/// whether it ran to its end; an entry left empty is nothing to serve.
 pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
     let Some(file) = req.ini_get(name).filter(|file| !file.is_empty()) else {
         return true;
     };
     let file = file.to_vec();
-    match req.include_file(crate::exec::IncludeKind::Require, &file) {
+    match req.require_kept(&file) {
         Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit, entry),
         Ok(_) => true,
         Err(thrown) => {

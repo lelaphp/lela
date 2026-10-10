@@ -315,3 +315,105 @@ args = ["-n", "-l", "{dir}/lint.php"]
 name = "ftruncate-on-stdout-cuts-the-file-it-is-redirected-to"
 args = ["-n", "-r", "var_dump(ftruncate(STDOUT, 0), fstat(STDOUT)['size']);"]
 streams = "files"
+
+# What a process a request execs holds of the files php opens for the
+# program (#2492), named by inode in the order of their fds: php opens
+# `auto_prepend_file` and `auto_append_file` with no `O_CLOEXEC` as each
+# compiles and `php_execute_script_ex` destroys their `zend_file_handle`s
+# only once the append file has run (`Z/main/main.c:2650-2656`), so the
+# prepend file is held from its compile through the program and the append
+# file, the append file while it runs, and neither, nor the program's file,
+# from a shutdown function. `-a`'s `readline_shell` destroys the prepend
+# file's once it has run, before the first line.
+[[line]]
+name = "the-auto-files-are-held-while-the-program-runs"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-d", "auto_append_file={dir}/app.php", "t.php"]
+files = { "listed.php" = '''
+<?php
+function listed($at) {
+    $names = [];
+    foreach (glob(__DIR__ . '/*.php') as $file) $names[fileinode($file)] = basename($file);
+    $fds = (string) shell_exec('for f in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done');
+    $held = [];
+    foreach (explode("\n", $fds) as $fd) if (preg_match('/^\s*(\d+)\s/', $fd, $m) && isset($names[$m[1]])) $held[] = $names[$m[1]];
+    echo $at, ': ', implode(' ', $held), "\n";
+}
+''', "pre.php" = '''
+<?php
+require_once __DIR__ . '/listed.php';
+listed('prepend');
+register_shutdown_function(fn () => listed('shutdown'));
+''', "t.php" = "<?php listed('program');", "app.php" = "<?php listed('append');" }
+
+[[line]]
+name = "the-shell-closes-the-prepend-file-before-its-first-line"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-a"]
+env = { PHP_HISTFILE = "{dir}/history" }
+stdin = "listed('shell');\n"
+files = { "listed.php" = '''
+<?php
+function listed($at) {
+    $names = [];
+    foreach (glob(__DIR__ . '/*.php') as $file) $names[fileinode($file)] = basename($file);
+    $fds = (string) shell_exec('for f in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done');
+    $held = [];
+    foreach (explode("\n", $fds) as $fd) if (preg_match('/^\s*(\d+)\s/', $fd, $m) && isset($names[$m[1]])) $held[] = $names[$m[1]];
+    echo $at, ': ', implode(' ', $held), "\n";
+}
+''', "pre.php" = "<?php require_once __DIR__ . '/listed.php'; listed('prepend');" }
+
+# The built-in server's router and its program are `zend_stream_init_filename`'s
+# `zend_file_handle`s (`php_cli_server_dispatch_router`,
+# `php_cli_server_dispatch_script`), each opened as it compiles, after the
+# prepend file has run, and destroyed once it and the append file have run,
+# so the router is held while it runs (#2492). The first request compiles
+# every file; opcache answers each by its name on the second, with
+# `opcache.file_update_protection=0` caching a file written this second,
+# and opens none; a prepend file the router's run compiled is answered the
+# same way for the program's run of the same request. With opcache off,
+# every request opens each.
+[[line]]
+name = "the-built-in-server-holds-its-router-while-it-runs"
+args = ["-n", "-d", "opcache.file_update_protection=0", "-d", "auto_prepend_file={dir}/pre.php", "-d", "auto_append_file={dir}/app.php", "-S", "127.0.0.1:{port}", "-t", "{dir}", "router.php"]
+files = { "listed.php" = '''
+<?php
+function listed($at) {
+    $names = [];
+    foreach (glob(__DIR__ . '/*.php') as $file) $names[fileinode($file)] = basename($file);
+    $fds = (string) shell_exec('for f in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done');
+    $held = [];
+    foreach (explode("\n", $fds) as $fd) if (preg_match('/^\s*(\d+)\s/', $fd, $m) && isset($names[$m[1]])) $held[] = $names[$m[1]];
+    echo $at, ': ', implode(' ', $held), "\n";
+}
+''', "pre.php" = "<?php require_once __DIR__ . '/listed.php'; listed('prepend');", "router.php" = "<?php listed('router'); return false;", "t.php" = "<?php listed('program');", "app.php" = "<?php listed('append');" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+[[line]]
+name = "the-built-in-server-opens-its-router-for-each-request-without-opcache"
+args = ["-n", "-d", "opcache.enable=0", "-S", "127.0.0.1:{port}", "-t", "{dir}", "router.php"]
+files = { "listed.php" = '''
+<?php
+function listed($at) {
+    $names = [];
+    foreach (glob(__DIR__ . '/*.php') as $file) $names[fileinode($file)] = basename($file);
+    $fds = (string) shell_exec('for f in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done');
+    $held = [];
+    foreach (explode("\n", $fds) as $fd) if (preg_match('/^\s*(\d+)\s/', $fd, $m) && isset($names[$m[1]])) $held[] = $names[$m[1]];
+    echo $at, ': ', implode(' ', $held), "\n";
+}
+''', "router.php" = "<?php require_once __DIR__ . '/listed.php'; listed('router'); return false;", "t.php" = "<?php listed('program');" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"

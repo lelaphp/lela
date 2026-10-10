@@ -236,3 +236,42 @@ listen = "{dir}/fpm.sock"
 stop = "SIGTERM"
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+
+# What a process a request execs holds of the files php opens for the
+# program (#2492), named by inode in the order of their fds: the request's
+# file, which `php_fopen_primary_script` opened before the program and the
+# scanner keeps listed through the shutdown functions (#2458), then
+# `auto_prepend_file` from its compile through the program and the append
+# file, and `auto_append_file` while it runs, each opened with no
+# `O_CLOEXEC` and destroyed by `php_execute_script_ex` once the append file
+# has run (`Z/main/main.c:2650-2656`), before the shutdown functions. The
+# first request compiles each file; opcache answers each by its name on the
+# second, with `opcache.file_update_protection=0` caching a file written
+# this second, and opens none.
+[[line]]
+name = "the-auto-files-are-held-while-the-program-runs"
+args = ["-R", "-n", "-F", "-d", "opcache.file_update_protection=0", "-d", "auto_prepend_file={dir}/pre.php", "-d", "auto_append_file={dir}/app.php", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "listed.php" = '''
+<?php
+function listed($at) {
+    $names = [];
+    foreach (glob(__DIR__ . '/*.php') as $file) $names[fileinode($file)] = basename($file);
+    $fds = (string) shell_exec('for f in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done');
+    $held = [];
+    foreach (explode("\n", $fds) as $fd) if (preg_match('/^\s*(\d+)\s/', $fd, $m) && isset($names[$m[1]])) $held[] = $names[$m[1]];
+    echo $at, ': ', implode(' ', $held), "\n";
+}
+''', "pre.php" = '''
+<?php
+require_once __DIR__ . '/listed.php';
+listed('prepend');
+register_shutdown_function(fn () => listed('shutdown'));
+''', "t.php" = "<?php listed('program');", "app.php" = "<?php listed('append');" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]

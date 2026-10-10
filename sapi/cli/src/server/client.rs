@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use php_proto::http::{self, Credentials, Events, Parser};
 use php_sapi::{
-    Aborted, Method, OutputSink, PHP_VERSION, RequestDescription, ResponseHead, Routed, WebRequest,
+    Aborted, Method, OutputSink, PHP_VERSION, ProgramFile, RequestDescription, ResponseHead,
+    Routed, WebRequest,
 };
 
 use super::Site;
@@ -466,6 +467,7 @@ fn describe(site: &Site, client: &Client, is_static: bool) -> RequestDescription
         } else {
             request.path_translated.clone()
         },
+        program_file: ProgramFile::Unopened,
         ..RequestDescription::default()
     }
 }
