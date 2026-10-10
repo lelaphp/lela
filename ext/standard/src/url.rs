@@ -8,7 +8,7 @@
 
 use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
-use php_ext::raising::{Thrown, arg_value_error};
+use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{OwnedStream as _, Request, StreamCtx, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
@@ -689,31 +689,71 @@ impl UriParser {
         let named = ctx.option(req, wrapper, b"uri_parser_class");
         Ok(match named.as_ref().map(Value::as_ref) {
             None | Some(ValueRef::Null) => Some(UriParser::ParseUrl),
-            Some(ValueRef::Str(name)) => match name.as_bytes() {
-                b"parse_url" => Some(UriParser::ParseUrl),
-                name => Parser::named(name).map(UriParser::Uri),
-            },
+            Some(ValueRef::Str(name)) => UriParser::named(name.as_bytes()),
             Some(_) => None,
         })
     }
 
-    /// `php_uri_parse_to_struct(parser, text, PHP_URI_COMPONENT_READ_MODE_RAW,
-    /// true)`: `None` where the parser refuses the text; `parse_url`'s
-    /// `port` of zero is no `port`, as `uri_parser_php_parse_url.c` reads it.
-    pub fn parse(self, req: &mut Request, text: &[u8]) -> Result<Option<UriStruct>, Thrown> {
-        match self {
-            UriParser::Uri(parser) => parser.parse_to_struct(req, text, ReadAs::Raw, true),
-            UriParser::ParseUrl => Ok(parse(text).map(|url| UriStruct {
-                scheme: url.scheme,
-                user: url.user,
-                password: url.pass,
-                host: url.host,
-                port: url.port.filter(|port| *port != 0).map(i64::from),
-                path: url.path,
-                query: url.query,
-                fragment: url.fragment,
-            })),
+    /// `php_uri_get_parser(name)` (`Z/ext/uri/php_uri.c:103`): the parser
+    /// registered under `name`, `parse_url` (`PHP_URI_PARSER_PHP_PARSE_URL`)
+    /// or a class of ext/uri's, and `None` for a name none is.
+    #[must_use]
+    pub fn named(name: &[u8]) -> Option<UriParser> {
+        match name {
+            b"parse_url" => Some(UriParser::ParseUrl),
+            name => Parser::named(name).map(UriParser::Uri),
         }
+    }
+
+    /// `php_uri_parse_to_struct(parser, text, PHP_URI_COMPONENT_READ_MODE_RAW,
+    /// true)`: `None` where the parser refuses the text.
+    pub fn parse(self, req: &mut Request, text: &[u8]) -> Result<Option<UriStruct>, Thrown> {
+        self.parse_to_struct(req, text, ReadAs::Raw, true)
+    }
+
+    /// `php_uri_parse_to_struct(parser, text, form, silent)`: `text`
+    /// parsed and each component read as `form` asks; `None` where the
+    /// parser refuses the text, which unless `silent` is the parser's
+    /// throw. `parse_url`'s refusal is `Uri\InvalidUriException`, its
+    /// normalized components raw-URL-decoded and its `port` of zero no
+    /// `port`, as `uri_parser_php_parse_url.c` reads them.
+    pub fn parse_to_struct(
+        self,
+        req: &mut Request,
+        text: &[u8],
+        form: ReadAs,
+        silent: bool,
+    ) -> Result<Option<UriStruct>, Thrown> {
+        let parsed = match self {
+            UriParser::Uri(parser) => return parser.parse_to_struct(req, text, form, silent),
+            UriParser::ParseUrl => parse(text),
+        };
+        let Some(url) = parsed else {
+            if silent {
+                return Ok(None);
+            }
+            return Err(throw(
+                req,
+                "Uri\\InvalidUriException",
+                "The specified URI is malformed",
+            ));
+        };
+        let read = |component: Option<Vec<u8>>| match form {
+            ReadAs::Raw => component,
+            ReadAs::NormalizedAscii | ReadAs::NormalizedUnicode => {
+                component.map(|raw| php_raw_url_decode(&raw))
+            }
+        };
+        Ok(Some(UriStruct {
+            scheme: read(url.scheme),
+            user: read(url.user),
+            password: read(url.pass),
+            host: read(url.host),
+            port: url.port.filter(|port| *port != 0).map(i64::from),
+            path: read(url.path),
+            query: read(url.query),
+            fragment: read(url.fragment),
+        }))
     }
 }
 
