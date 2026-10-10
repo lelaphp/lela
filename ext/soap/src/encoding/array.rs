@@ -339,7 +339,8 @@ fn add_xml_array_elements(
 fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Owner<PhpArray>> {
     let mut copy = PhpArray::new(req)?;
     let fill = |req: &mut Request, copy: &mut Owner<PhpArray>| -> Res<()> {
-        let it = iterate(req, &o)?;
+        let held = iterate(req, &o)?;
+        let it = *held;
         let walk = |req: &mut Request, copy: &mut Owner<PhpArray>| -> Res<()> {
             it.rewind(req)?;
             while it.valid(req)? {
@@ -365,7 +366,7 @@ fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Own
             Ok(())
         };
         let r = walk(req, copy);
-        req.release(it.as_value());
+        held.give_up(req);
         r
     };
     match fill(req, &mut copy) {

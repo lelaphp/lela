@@ -371,7 +371,8 @@ fn apply(
     object: PhpObject,
     mut each: impl FnMut(&mut Request, Iter) -> Result<bool, Thrown>,
 ) -> Result<(), Thrown> {
-    let iter = iterate(req, &object)?;
+    let held = iterate(req, &object)?;
+    let iter = *held;
     let walked = (|| {
         iter.rewind(req)?;
         while iter.valid(req)? {
@@ -382,7 +383,7 @@ fn apply(
         }
         Ok(())
     })();
-    req.release(iter.as_value());
+    held.give_up(req);
     walked
 }
 

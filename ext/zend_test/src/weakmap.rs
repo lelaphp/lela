@@ -61,8 +61,8 @@ pub(crate) fn dump(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let map = map(req)?;
     let mut copy = PhpArray::new(req)?;
     let walk = iterate(req, &map)?;
-    let copied = copy_into(req, walk, &mut copy);
-    req.release(walk.as_value());
+    let copied = copy_into(req, *walk, &mut copy);
+    walk.give_up(req);
     match copied {
         Ok(()) => Ok(copy),
         Err(thrown) => {

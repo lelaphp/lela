@@ -6,16 +6,16 @@ use std::cmp::Ordering;
 use php_unit::decl::Type;
 
 use crate::api::abi::{Callable, Class, FromArgument, Instance, IntoReturn, Raw, Static};
-use crate::api::call::Target;
+use crate::api::call::{Iter, Target};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value};
 
 /// A view an [`Owner`] can own: [`Value`], the five refcounted kinds, a
 /// [`Key`], the two object returns, [`Instance`] and [`Static`], a
-/// [`Raw`] return, a [`Callable`], and a typed view of one resource
-/// ([`ResourceView`]). Sealed but for that last door: the face lists
-/// them.
+/// [`Raw`] return, a [`Callable`], an [`Iter`], and a typed view of one
+/// resource ([`ResourceView`]). Sealed but for that last door: the face
+/// lists them.
 pub trait View: sealed::Counted + Clone {}
 
 /// A typed view of one [`Resource`]: the streams facet's `Stream` and
@@ -112,6 +112,7 @@ view!(Key, |k: Key| match k {
     Key::Str(s) => Value::string(s),
 });
 view!(Static, |s: Static| Value::object(s.0));
+view!(Iter, |i: Iter| i.as_value());
 
 impl<C: Class> sealed::Counted for Instance<C> {
     type Kept = ();

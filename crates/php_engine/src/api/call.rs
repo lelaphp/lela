@@ -183,9 +183,10 @@ impl PartialEq for Target {
 /// resumed, a user's `Iterator` served its methods, with what `current()`
 /// answered kept until the walk moves, as `zend_user_iterator` keeps it,
 /// and a class that walks its objects in C walked by its own functions,
-/// in no frame of their own. One owner of the iterator, the holder's,
-/// who names it to the collector and gives it up by its value
-/// ([`Iter::as_value`]).
+/// in no frame of their own. [`iterate`] hands out an [`Owner`] of it,
+/// the holder's, who names it to the collector by its value
+/// ([`Iter::as_value`]) and gives it up with [`Owner::give_up`],
+/// `zend_iterator_dtor`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Iter(PhpObject);
 
@@ -228,8 +229,7 @@ impl Iter {
         crate::interfaces::invalidate_current(req, self.0);
     }
 
-    /// The iterator as a value: what its holder names to the collector
-    /// and gives up with [`Request::release`], `zend_iterator_dtor`.
+    /// The iterator as a value: what its holder names to the collector.
     #[must_use]
     pub fn as_value(self) -> Value {
         self.0.as_value()
@@ -3108,7 +3108,8 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
 }
 
 /// `ce->get_iterator(ce, object, 0)` over a `Traversable` object: its
-/// iterator ([`Iter`]), one owner, the caller's. An `IteratorAggregate`
+/// iterator ([`Iter`]), one owner, the caller's, given up as
+/// `zend_iterator_dtor` gives it up. An `IteratorAggregate`
 /// is asked `getIterator()` until it answers an `Iterator`, php's
 /// `Exception` naming the class where it answers anything else; a
 /// finished `Generator` is php's refusal to traverse it.
@@ -3137,8 +3138,10 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
 /// Cannot traverse an already closed generator
 /// current 00
 /// ```
-pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Iter, Thrown> {
-    crate::interfaces::get_iterator(req, *object, false).map(Iter)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Owner<Iter>, Thrown> {
+    let made = crate::interfaces::get_iterator(req, *object, false).map(Iter);
+    adopted(made)
 }
 
 /// `zend_create_fake_closure` over a resolved callable, what
