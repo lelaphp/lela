@@ -6,74 +6,11 @@
 //! changes are every file the working tree differs in from it, committed
 //! since or not, plus the untracked files.
 //!
-//! The conditions, one sentence each, are §4.5's seven:
-//!
-//! 1. Every crate with a changed file has a fresh passing reading from each
-//!    instrument [`instruments_of`] asks it for: [`FRESH`], `test` among
-//!    them and asked of every crate, since every crate has tests and one
-//!    whose tests do not run is not done (#191), less `witness`
-//!    for the harness, less `phpt` for a crate the per-commit lane writes
-//!    no reading for, one that owns no subset or whose row's `feature =`
-//!    the binary under test does not turn on and names no oracle variant
-//!    (#133, revision 63, #2029), and less
-//!    `port-map` for every crate but the one `api.lock` lives with, which
-//!    is the only scope that instrument writes a reading at (#148), and
-//!    with `crosscheck` for an `ext/*` crate the binary carries, the
-//!    rendering diff the per-commit lane writes per extension (#269). Fresh
-//!    means the reading's `key` is the crate's key now, the hash over its
-//!    sources and its declared dependency closure's (§4.2, §13 D.18), the
-//!    one every instrument stamps; an
-//!    instrument that does not exist yet has written no reading, so its
-//!    condition is unmet and the list is honest from day one. Two `phpt`
-//!    skips are met without passing, each held to its cause and nothing
-//!    else: the one the missing engine binary causes, [`no_binary_yet`]
-//!    (#132), and the one the compiler causes when it refuses every test
-//!    of the subset with its own parse error, [`compiler_unread`] (#319);
-//!    a `witness` reading is held to its status, the linked engine having
-//!    served it (#119). A third rung is the manifest's, not a lane's:
-//!    a crate whose `[[crate]]` row carries `porting = true` has its
-//!    `crosscheck` and its `phpt` readings read as the port's meter,
-//!    [`porting_meter`], fresh and printed but met whatever they say,
-//!    while the port is partial (#383).
-//! 2. Every kernel or native added has a witness: the `witness` reading's
-//!    `missing` is zero for the crate.
-//! 3. A lock that differs from its regenerated form is in the diff, read
-//!    from the `api-check` seam readings and the diff's paths.
-//! 4. No `open` divergence row touches a changed scope: a touched crate's
-//!    name or a changed path in the row's id, or a row this diff proposes.
-//! 5. `permit` over the diff denies nothing: every changed file, judged as
-//!    the `Write` that would put its content in place.
-//! 6. The manifest, the pin and the registry (`seams.toml`, `oracle.toml`,
-//!    `docs/divergence.toml`, and the plugin's own files: what the
-//!    manifest's `deny = true` rule covers) are unchanged, or changed by a
-//!    person; the hook cannot tell, so such a change is a note, never an
-//!    unmet condition, and pre-push, run by the person, passes on it. The
-//!    one change it can tell is unattributed is the backstop (#1931): a
-//!    file `permit --after` kept, having moved under a call whose line
-//!    cannot write it, is unmet until a person commits it or restores it
-//!    to `HEAD`, read from the sensor's record ([`permit::kept_changes`]),
-//!    which a change the person approved in the session never has.
-//! 7. The ticket the branch records (`Track::of`'s `ticket`, #30) has no
-//!    unticked acceptance box: the `ticket` reading over its number, the
-//!    one `xtask ticket read` writes (#28), is fresh and passes, and its
-//!    message names the boxes when it does not; a ticket with no box at
-//!    all and not withdrawn is held the same way, since it cannot be
-//!    shown done, and a close the tracker refused with every box ticked
-//!    is met here, the boxes being the condition and not the close. A
-//!    withdrawal that went through is met whatever its boxes say, the
-//!    instrument having settled the ticket, and one refused is held
-//!    (#221). A branch that records
-//!    no ticket, and a detached `HEAD`, are not asked and nothing here
-//!    says the word, the way `xtask` is not asked for a witness (#31).
-//!    In practice this is the Stop hook's and pre-push's condition: the
-//!    record is the clone's own configuration, which a push does not
-//!    carry, and a pull request's checkout is detached, so CI's `done`
-//!    is not asked and has no store to answer from if it were. Beside
-//!    it, a ticket a merge since the base names and left open for want
-//!    of a ready record, `main`'s own merge at `HEAD` where the base is
-//!    `HEAD`, is unmet until a close replaces that reading (#2358); one
-//!    with a box unticked that an open ticket blocks is a partial landing
-//!    and is not (#2394).
+//! The conditions are [`Condition`]'s variants, in the order the list
+//! names what is unmet. Each variant's first paragraph is its sentence, and
+//! §4.5 renders those sentences as its list (`status --section
+//! conditions`, #2309), so the definition is read from this code and
+//! cannot fall behind it. [`judge`] has one arm for each variant.
 //!
 //! **What makes a `ticket` reading fresh** (#31). A ticket has no tree of
 //! its own, so the reading is stamped over the workspace, and it is fresh
@@ -354,6 +291,126 @@ fn names(id: &str, part: &str) -> bool {
     id.contains(&format!("/{}/", part.trim_matches('/')))
 }
 
+/// The conditions of done (harness-design.md §4.5), in the order the
+/// verdict lists what is unmet. A variant's first paragraph is its
+/// sentence, the line §4.5's region renders for it (`status --section
+/// conditions`); what follows it is this code's account and is not
+/// rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Condition {
+    /// For every crate with a changed file, a fresh passing reading exists
+    /// for `clippy`, `test`, `witness`, `api-check`, `budget` and
+    /// `unsafe-audit`, for `phpt` on that crate's subset where the crate is
+    /// one the binary under test carries, or one whose row names an oracle
+    /// variant, whose subsets the per-commit lane runs (revision 63,
+    /// #2029), for `port-map` where the crate is the one `api.lock` lives
+    /// with, and for `crosscheck` in both of its columns where the crate is
+    /// an extension the binary carries; `witness` is not asked of the
+    /// harness, and fresh means the reading's `key` is the crate's key now
+    /// and, under the oracle's recipe, its `recipe` the pin's digest now.
+    ///
+    /// Which instruments one crate is asked for is [`instruments_of`],
+    /// over [`FRESH`], `test` among them and asked of every crate, since
+    /// every crate has tests and one whose tests do not run is not done
+    /// (#191); `port-map` is the only scope that instrument writes a
+    /// reading at (#148), and `crosscheck` is the rendering diff the
+    /// per-commit lane writes per extension (#269). The key is the hash
+    /// over the crate's sources and its declared dependency closure's (§4.2,
+    /// §13 D.18), the one every instrument stamps; an instrument that does
+    /// not exist yet has written no reading, so its condition is unmet and
+    /// the list is honest from day one. Two `phpt` skips are met without
+    /// passing, each held to its cause and nothing else: the one the
+    /// missing engine binary causes, [`no_binary_yet`] (#132), and the one
+    /// the compiler causes when it refuses every test of the subset with
+    /// its own parse error, [`compiler_unread`] (#319); a `witness` reading
+    /// is held to its status, the linked engine having served it (#119). A
+    /// third rung is the manifest's, not a lane's: a crate whose
+    /// `[[crate]]` row carries `porting = true` has its `crosscheck` and
+    /// its `phpt` readings read as the port's meter, [`porting_meter`],
+    /// fresh and printed but met whatever they say, while the port is
+    /// partial (#383).
+    Fresh,
+    /// Every kernel or native added in the diff has a witness: the
+    /// `witness` reading's `missing` is zero for the crate.
+    ///
+    /// Judged with [`Condition::Fresh`], over the same `witness` reading.
+    Witnessed,
+    /// If a `.lock` differs from its regenerated form, the lock file is in
+    /// the diff, read from the `api-check` seam readings and the diff's
+    /// paths.
+    LockInDiff,
+    /// No `open` divergence touches a changed scope: a touched crate's name
+    /// or a changed path in an id the row names or covers, or a row the
+    /// diff proposes.
+    NoOpenRow,
+    /// `permit` over the diff denies nothing: every changed file is judged
+    /// as the `Write` that would put its content in place.
+    PermitOverTheDiff,
+    /// `seams.toml`, `oracle.toml`, `docs/divergence.toml` and the plugin's
+    /// own files, what the manifest's `deny = true` rule covers, are
+    /// unchanged in the diff, or the diff is by a person (the hook cannot
+    /// tell, so the Stop hook reports it as a note, and pre-push, run by
+    /// the person, passes).
+    ///
+    /// Judged with [`Condition::PermitOverTheDiff`]: a denial under a
+    /// `deny = true` rule is this note, never unmet.
+    APersonsFiles,
+    /// The ticket the branch records (`branch.<name>.ticket`, the record
+    /// `xtask worktree add --ticket` writes) has no unticked acceptance
+    /// box, or was withdrawn, read from the `ticket` reading over its
+    /// number and never from the tracker (#31, #221); a branch that
+    /// records no ticket, and a detached `HEAD`, are not asked.
+    ///
+    /// The reading is the one `xtask ticket read` writes (#28), fresh and
+    /// passing, and its message names the boxes when it does not; a ticket
+    /// with no box at all and not withdrawn is held the same way, since it
+    /// cannot be shown done, and a close the tracker refused with every
+    /// box ticked is met here, the boxes being the condition and not the
+    /// close. A withdrawal that went through is met whatever its boxes
+    /// say, the instrument having settled the ticket, and one refused is
+    /// held (#221). Nothing here says the word for a branch with no
+    /// record, the way `xtask` is not asked for a witness (#31). In
+    /// practice this is the Stop hook's and pre-push's condition: the
+    /// record is the clone's own configuration, which a push does not
+    /// carry, and a pull request's checkout is detached, so CI's `done` is
+    /// not asked and has no store to answer from if it were.
+    TicketBoxes,
+    /// A change `permit --after` kept, one no call's line could write, is
+    /// unmet until a person commits it or restores it to `HEAD`, read from
+    /// the sensor's record in the store and not from the diff (§4.4,
+    /// #1931).
+    ///
+    /// The record is [`permit::kept_changes`]'s, which a change the person
+    /// approved in the session never has.
+    KeptChange,
+    /// A ticket a merge since the base names, and that `xtask ticket
+    /// merged` left open for want of a ready record, is unmet until a
+    /// close replaces that reading, the merge at `HEAD` being read where
+    /// the base is `HEAD`, as on `main` (#2358); a merge that lands part of
+    /// a ticket, one with no ready record, a box unticked and an open
+    /// ticket blocking it, is a partial landing and is not named (#2394).
+    ///
+    /// [`ticket::stranded`] reads the `ticket` readings `merged` wrote:
+    /// a refusal for want of a ready record is `unready` and named here,
+    /// and a partial landing is a `skip` counting `partial`, which is not.
+    Stranded,
+}
+
+impl Condition {
+    /// Every condition, in the order of the list.
+    pub(crate) const ALL: [Condition; 9] = [
+        Condition::Fresh,
+        Condition::Witnessed,
+        Condition::LockInDiff,
+        Condition::NoOpenRow,
+        Condition::PermitOverTheDiff,
+        Condition::APersonsFiles,
+        Condition::TicketBoxes,
+        Condition::KeptChange,
+        Condition::Stranded,
+    ];
+}
+
 /// Judge the changes since the merge base with `base`, `main`
 /// ([`Base::of`]) when none is given, each key held to the one `snapshot`
 /// gives: the tree is read once, before anything is judged.
@@ -375,36 +432,47 @@ pub fn judge(
 
     let lock_home = lock_home(manifest);
     let carried = Carried::binary(root)?;
-    for krate in &crates {
-        fresh_readings(
-            store,
-            krate,
-            &KeyNow::of(snapshot, krate, &crates)?,
-            lock_home.as_deref(),
-            &carried,
-            manifest.pin.digest(),
-            &mut unmet,
-        )?;
+    for condition in Condition::ALL {
+        match condition {
+            Condition::Fresh => {
+                for krate in &crates {
+                    fresh_readings(
+                        store,
+                        krate,
+                        &KeyNow::of(snapshot, krate, &crates)?,
+                        lock_home.as_deref(),
+                        &carried,
+                        manifest.pin.digest(),
+                        &mut unmet,
+                    )?;
+                }
+            }
+            Condition::Witnessed | Condition::APersonsFiles => {}
+            Condition::LockInDiff => locks(snapshot, manifest, store, &changed, &mut unmet)?,
+            Condition::NoOpenRow => {
+                open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
+            }
+            Condition::PermitOverTheDiff => over_the_diff(
+                root,
+                manifest,
+                &base.commit,
+                &changed,
+                &mut unmet,
+                &mut notes,
+            )?,
+            Condition::KeptChange => unmet.extend(
+                permit::kept_changes(store, root)?
+                    .iter()
+                    .map(ToString::to_string),
+            ),
+            Condition::TicketBoxes => {
+                if let Some(ticket) = ticket {
+                    boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
+                }
+            }
+            Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
+        }
     }
-    locks(snapshot, manifest, store, &changed, &mut unmet)?;
-    open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
-    over_the_diff(
-        root,
-        manifest,
-        &base.commit,
-        &changed,
-        &mut unmet,
-        &mut notes,
-    )?;
-    unmet.extend(
-        permit::kept_changes(store, root)?
-            .iter()
-            .map(ToString::to_string),
-    );
-    if let Some(ticket) = ticket {
-        boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
-    }
-    unmet.extend(ticket::stranded(root, store, &base.commit)?);
 
     Ok(Verdict {
         base,

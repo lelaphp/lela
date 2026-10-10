@@ -886,6 +886,10 @@ pub enum Section {
     /// `.phpt` section adds it or none gives it, and the first sentence
     /// of its rustdoc; harness-design.md §4.3's region (#1319).
     Invocation,
+    /// The conditions of done, each the first rustdoc paragraph of a
+    /// variant of `done::Condition`, read from its source and numbered;
+    /// harness-design.md §4.5's region (#2309).
+    Conditions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

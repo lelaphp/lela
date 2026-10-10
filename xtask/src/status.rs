@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 
+mod conditions;
 pub(crate) mod every;
 mod graph;
 mod invocation;
@@ -227,6 +228,7 @@ pub fn render(
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
         Section::Invocation => return invocation::render(root, format),
+        Section::Conditions => return conditions::render(root, format),
         Section::Parity => {
             return parity::render(manifest, against.checkout()?, root, format);
         }
