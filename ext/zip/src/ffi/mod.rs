@@ -11,9 +11,15 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
-use std::ffi::{c_int, c_uint, c_void};
+use std::ffi::{c_char, c_int, c_uint, c_void};
 
 use libz_sys as z;
+
+unsafe extern "C" {
+    /// `ZLIB_VERSION` of the `zlib.h` this crate compiled against, the C
+    /// constant `build.rs` compiles, NUL-terminated.
+    static php_zip_zlib_version: c_char;
+}
 
 /// `BUFSIZE`, what `zip_source_compress` reads its source in and
 /// `copy_data` reads the compressed stream out in.
@@ -70,13 +76,13 @@ pub(crate) fn deflate(data: &[u8], level: c_int, mem_level: c_int) -> Option<Vec
         adler: 0,
         reserved: 0,
     }));
-    // SAFETY: `zlibVersion` answers the library's static version string.
-    let version = unsafe { z::zlibVersion() };
+    // The header's version, as libzip's `deflateInit2` macro hands it,
+    // which zlib's compatibility test holds to the library it loads.
+    let version = &raw const php_zip_zlib_version;
     let size = c_int::try_from(std::mem::size_of::<z::z_stream>()).ok()?;
-    // SAFETY: a fresh stream with its allocator set, the library's own
-    // version string, and the struct's size. libzip's macro hands the
-    // header it compiled against; this crate reads no header, and the
-    // library it links is the one it is handed.
+    // SAFETY: a fresh stream with its allocator set, the header's
+    // NUL-terminated version string, which lives as long as the
+    // program, and the struct's size.
     let code = unsafe {
         z::deflateInit2_(
             &raw mut *stream.0,
@@ -125,5 +131,34 @@ pub(crate) fn deflate(data: &[u8], level: c_int, mem_level: c_int) -> Option<Vec
             z::Z_BUF_ERROR if stream.0.avail_in == 0 => {}
             _ => return None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    use super::{php_zip_zlib_version, z};
+
+    /// What `deflateInit2_` is handed is the header's `ZLIB_VERSION`, a
+    /// dotted version of the major the loaded library answers, the one
+    /// byte zlib's compatibility test compares.
+    #[test]
+    fn deflate_init_is_handed_the_header_s_version() {
+        // SAFETY: the constant `build.rs` compiled, a NUL-terminated C
+        // string that lives as long as the program.
+        let header = unsafe { CStr::from_ptr(&raw const php_zip_zlib_version) };
+        // SAFETY: `zlibVersion` answers the library's static string.
+        let loaded = unsafe { z::zlibVersion() };
+        // SAFETY: that string is NUL-terminated and lives as long as the
+        // library.
+        let loaded = unsafe { CStr::from_ptr(loaded) };
+        let header = header.to_bytes();
+        let dotted = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-');
+        assert!(
+            !header.is_empty() && header.iter().all(dotted),
+            "{header:?}"
+        );
+        assert_eq!(header.first(), loaded.to_bytes().first());
     }
 }
