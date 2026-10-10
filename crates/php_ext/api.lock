@@ -1191,6 +1191,7 @@ values::Owner::cursor_reset
 values::Owner::float
 values::Owner::give_up
 values::Owner::give_up_nogc
+values::Owner::index
 values::Owner::int
 values::Owner::into_instance
 values::Owner::into_key

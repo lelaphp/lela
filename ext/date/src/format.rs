@@ -10,7 +10,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::lent::{Lent, kept, lent};
@@ -777,7 +777,7 @@ fn getdate_rows(req: &mut Request, t: &Time, ts: i64) -> Result<Owner<PhpArray>,
         full_day(t.y, t.m, t.d).as_bytes(),
     )?;
     set_string(req, &mut array, b"month", full_month(t.m).as_bytes())?;
-    array.set(req, Owner::take(req, Key::Int(0)), Owner::int(ts))?;
+    array.set(req, Owner::index(0), Owner::int(ts))?;
     Ok(array)
 }
 

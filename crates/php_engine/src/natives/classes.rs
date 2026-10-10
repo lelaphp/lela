@@ -582,7 +582,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
                 if !array.contains(&key) {
                     let value = req.dup_value(value, None);
                     let value = Owner::adopt(value);
-                    array.add_new(req, Owner::take(req, Key::Int(n)), value)?;
+                    array.add_new(req, Owner::index(n), value)?;
                 }
                 continue;
             }
@@ -643,7 +643,7 @@ fn answered_vars(
             Key::Int(n) => {
                 let value = req.dup_value(value, None);
                 let value = Owner::adopt(value);
-                array.set(req, Owner::take(req, Key::Int(n)), value)?;
+                array.set(req, Owner::index(n), value)?;
                 continue;
             }
             Key::Str(name) => name,

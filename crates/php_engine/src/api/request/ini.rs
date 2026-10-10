@@ -17,7 +17,7 @@ use super::{
 };
 use crate::api::abi::{IniStage, IniVerdict, OnModify};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Key, Owner, PhpString, Value, adopted_some};
+use crate::api::values::{Owner, PhpString, Value, adopted_some};
 use crate::engine::{Configured, ConfiguredKey};
 
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
@@ -884,7 +884,7 @@ impl Request {
                 let mut array = self.array()?;
                 for (key, entry) in rows {
                     let key = match key {
-                        ConfiguredKey::Index(n) => Owner::take(self, Key::Int(*n)),
+                        ConfiguredKey::Index(n) => Owner::index(*n),
                         ConfiguredKey::Name(name) => PhpString::new(self, name)?.into_key(),
                     };
                     let value = self.configured_value(entry)?;

@@ -499,7 +499,7 @@ fn add_section(
             match &entry.value {
                 Stored::Text(text) if section == Section::Comment => {
                     let text = PhpString::new(req, text)?.into_value();
-                    target.set(req, Owner::take(req, Key::Int(index)), text)?;
+                    target.set(req, Owner::index(index), text)?;
                     index += 1;
                     continue;
                 }
@@ -512,7 +512,7 @@ fn add_section(
                         let mut list = PhpArray::new(req)?;
                         for (at, one) in (0..).zip(many) {
                             let value = number(req, *one)?;
-                            list.set(req, Owner::take(req, Key::Int(at)), value)?;
+                            list.set(req, Owner::index(at), value)?;
                         }
                         list.into_value()
                     }

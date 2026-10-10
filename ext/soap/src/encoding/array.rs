@@ -866,11 +866,7 @@ fn fill_array(
                 }
             }
         }
-        ar.set(
-            req,
-            Owner::take(req, Key::Int(i64::from(pos[dimension - 1]))),
-            tmp,
-        )?;
+        ar.set(req, Owner::index(i64::from(pos[dimension - 1])), tmp)?;
         let mut i = dimension;
         while i > 0 {
             i -= 1;
@@ -991,7 +987,7 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
                 let s = PhpString::new(req, s.as_bytes())?;
                 Some(Key::from_string(req, s))
             }
-            ValueRef::Int(n) => Some(Owner::take(req, Key::Int(n))),
+            ValueRef::Int(n) => Some(Owner::index(n)),
             _ => None,
         };
         key.give_up(req);

@@ -753,7 +753,7 @@ fn unpack(
             };
             if let Some(value) = value {
                 let key = if name.is_empty() {
-                    Owner::take(req, Key::Int(i + 1))
+                    Owner::index(i + 1)
                 } else if repetitions == 1 {
                     let name = PhpString::new(req, &name)?;
                     Key::from_string(req, name)

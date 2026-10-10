@@ -13,7 +13,7 @@ use php_ext::raising::{
 };
 use php_ext::request::{Cast, OwnedStream as _, Request, Resolve, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::flatfile::{Flatfile, Stored};
 use crate::inifile::Key as IniKey;
@@ -1193,7 +1193,7 @@ pub(crate) fn dba_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let path = string(req, &path)?;
         array.set(
             req,
-            Owner::take(req, Key::Int(i64::from(object.index()))),
+            Owner::index(i64::from(object.index())),
             path.into_value(),
         )?;
     }

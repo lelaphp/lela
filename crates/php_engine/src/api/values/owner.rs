@@ -575,6 +575,29 @@ impl Owner<Value> {
     }
 }
 
+/// The owner of an integer key, made without the request, as
+/// [`Owner::<Value>::int`](Owner::int) is of an integer: `zend_hash_index_update`'s `h`,
+/// which no count owns, so a debug build's owner records no line. The
+/// constructor takes the integer alone, so it cannot name a string key,
+/// whose owner [`Owner::take`] or [`Owner::into_key`] makes.
+///
+/// ```compile_fail,E0308
+/// # use php_engine::api::values::{Key, Owner, PhpString};
+/// fn counted(s: PhpString) -> Owner<Key> {
+///     Owner::index(s)
+/// }
+/// # fn main() {}
+/// ```
+impl Owner<Key> {
+    /// The owner of the integer key `n`.
+    pub const fn index(n: i64) -> Owner<Key> {
+        Owner {
+            view: Key::Int(n),
+            kept: (),
+        }
+    }
+}
+
 impl Owner<Callable> {
     /// `zend_get_gc_buffer_add_fcc`: each value the owner counts, the
     /// callable's value and the receiver it resolved to, handed to a

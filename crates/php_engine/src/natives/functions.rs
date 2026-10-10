@@ -9,7 +9,7 @@ use php_macros::php_function;
 use crate::api::abi::{OrFalse, Passed};
 use crate::api::raising::{Thrown, arg_value_error, deprecated, throw_error};
 use crate::api::request::{NativeCaller, Request};
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Resource, TypeTag, Value};
+use crate::api::values::{Owner, PhpArray, PhpString, Resource, TypeTag, Value};
 
 /// `ZEND_VERSION` at the pin (`Z/Zend/zend.h:23`).
 pub(crate) const ZEND_VERSION: &str = "4.5.9";
@@ -568,11 +568,7 @@ fn get_resources(
             continue;
         }
         let value = resource.as_value();
-        array.set(
-            req,
-            Owner::take(req, Key::Int(resource.id())),
-            Owner::take(req, value),
-        )?;
+        array.set(req, Owner::index(resource.id()), Owner::take(req, value))?;
     }
     Ok(array)
 }

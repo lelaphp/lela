@@ -6,7 +6,7 @@ use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{
     ErrorContainer, Errors, Parsed, RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID,
@@ -52,11 +52,7 @@ fn add_errors(
         let mut element = PhpArray::new(req)?;
         for message in messages {
             let text = PhpString::new(req, &message.text)?.into_value();
-            element.set(
-                req,
-                Owner::take(req, Key::Int(i64::from(message.position))),
-                text,
-            )?;
+            element.set(req, Owner::index(i64::from(message.position)), text)?;
         }
         set_str(req, array, list, element.into_value())?;
     }

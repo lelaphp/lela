@@ -891,7 +891,7 @@ fn both(
     }
     match out {
         Out::Array(array) if !array.contains(&Key::Int(at)) => {
-            array.set(req, Owner::take(req, Key::Int(at)), fetched)
+            array.set(req, Owner::index(at), fetched)
         }
         _ => {
             fetched.give_up(req);
@@ -1132,7 +1132,7 @@ fn key_pair(
         }
     };
     let made = match key.as_int() {
-        Some(n) => Ok(Owner::take(req, Key::Int(n))),
+        Some(n) => Ok(Owner::index(n)),
         None => to_string(req, &key).map(|text| Key::from_string(req, text)),
     };
     key.give_up(req);

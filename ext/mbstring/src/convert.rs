@@ -98,7 +98,7 @@ fn convert_array(
                 Some(name) => new_string(req, &name)?.into_key(),
                 None => return Ok(ControlFlow::Continue(())),
             },
-            Key::Int(n) => Owner::take(req, Key::Int(n)),
+            Key::Int(n) => Owner::index(n),
         };
         let value = value.deref();
         let converted = match value.as_ref() {

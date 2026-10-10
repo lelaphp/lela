@@ -7,7 +7,7 @@
 use php_ext::call::{call_method, iterate, lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, Value, ValueRef};
 
 /// The request's map, its one owner, until [`release`] gives it up.
 #[derive(Debug, Default)]
@@ -86,7 +86,7 @@ fn copy_into(
         };
         key.give_up(req);
         let value = walk.value(req)?;
-        copy.set(req, Owner::take(req, Key::Int(index)), value)?;
+        copy.set(req, Owner::index(index), value)?;
         walk.next(req)?;
     }
     Ok(())

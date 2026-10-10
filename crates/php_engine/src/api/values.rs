@@ -365,7 +365,7 @@ impl Key {
         match php_heap::canonical_int(s.as_bytes()) {
             Some(n) => {
                 s.give_up(req);
-                Owner::take(req, Key::Int(n))
+                Owner::index(n)
             }
             None => s.into_key(),
         }
@@ -431,7 +431,7 @@ impl Key {
 /// # use php_engine::api::request::Request;
 /// # use php_engine::api::values::{Key, Owner, PhpArray, Value};
 /// fn kept(req: &mut Request, into: &mut PhpArray, value: Value) -> Result<(), Thrown> {
-///     let key = Owner::take(req, Key::Int(0));
+///     let key = Owner::index(0);
 ///     into.set(req, key, value)
 /// }
 /// # fn main() {}
@@ -2984,10 +2984,10 @@ mod tests {
         let Ok(mut a) = PhpArray::new(&mut req) else {
             return;
         };
-        let key = Owner::take(&req, Key::Int(5));
+        let key = Owner::index(5);
         assert!(a.set(&mut req, key, Owner::int(1)).is_ok());
         assert!(a.append(&mut req, Owner::int(2)).is_ok());
-        let key = Owner::take(&req, Key::Int(-4));
+        let key = Owner::index(-4);
         assert!(a.set(&mut req, key, Owner::null()).is_ok());
         assert_eq!(a.len(), 3);
         assert_eq!(a.get(&Key::Int(6)), Some(Value::int(2)));
