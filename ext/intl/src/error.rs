@@ -168,7 +168,19 @@ pub(crate) fn constructing<T>(req: &mut Request, f: impl FnOnce(&mut Request) ->
 
 /// `intl_error_set_custom_msg(NULL, msg)`: raised at `intl.error_level`,
 /// thrown as `IntlException` under `intl.use_exceptions`, and kept as
-/// the request's message.
+/// the request's message. The warning prints the message's bytes, as
+/// php's `php_error_docref(NULL, level, "%s", msg)` does, a key that is
+/// not UTF-8 included:
+///
+/// ```php
+/// ini_set('intl.error_level', E_WARNING);
+/// set_error_handler(function ($n, $m) { echo bin2hex($m), "\n"; return true; });
+/// (new MessageFormatter('en', '{0}'))->format(["\xffk" => 1]);
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): Using a value different than 0 for intl.error_level is deprecated, as the intl.error_level INI setting is deprecated. Instead the intl.use_exceptions INI setting should be enabled to throw exceptions on errors or intl_get_error_code()/intl_get_error_message() should be used to manually deal with errors in %s on line 2
+/// 4d657373616765466f726d61747465723a3a666f726d617428293a20496e76616c6964205554462d38206461746120696e20617267756d656e74206b65793a2027ff6b27
+/// ```
 pub(crate) fn set_custom_msg(req: &mut Request, message: impl AsRef<[u8]>) -> Result<(), Thrown> {
     custom_msg(req, None, message.as_ref())
 }
@@ -179,7 +191,7 @@ pub(crate) fn set_custom_msg(req: &mut Request, message: impl AsRef<[u8]>) -> Re
 fn custom_msg(req: &mut Request, pending: Option<Thrown>, message: &[u8]) -> Result<(), Thrown> {
     let text = prefixed(req, message);
     if let Some(level) = error_level(req) {
-        docref(req, level, &String::from_utf8_lossy(message));
+        docref(req, level, message);
     }
     let thrown = if use_exceptions(req) {
         Some(intl_exception(req, pending, &text))

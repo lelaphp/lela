@@ -189,7 +189,7 @@ pub(crate) fn raise(req: &mut Request, reported: Reported) -> Result<(), Thrown>
                 let function = req.active_function_name();
                 return Err(fatal(req, &format!("{function}(): {text}")));
             }
-            level => docref(req, level, &text),
+            level => docref(req, level, text.as_bytes()),
         }
     }
     Ok(())

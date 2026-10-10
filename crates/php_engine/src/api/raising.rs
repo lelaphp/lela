@@ -308,7 +308,9 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// which is how `ext/standard`'s natives raise most of what they raise
 /// (`chr(): Providing a value not in-between 0 and 255 is deprecated,
 /// ...`). The docref itself, php's link into the manual, is off in the
-/// CLI's ini and is not rendered here.
+/// CLI's ini and is not rendered here. The message is bytes, as php's
+/// `"%s"` prints a `char *`, so a text that is not UTF-8 is raised as it
+/// is; ext/intl's error raised at `intl.error_level` is the witness.
 ///
 /// Where no native is active, `php_verror` names the code being served,
 /// as `get_active_function_name` and `get_active_class_name` name it,
@@ -333,30 +335,19 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 ///
 /// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 5
 /// ```
-pub fn docref(req: &mut Request, level: Level, message: &str) {
+pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Sized)) {
+    let message = message.as_ref();
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
     // A fatal in flight is no native served: `_zend_bailout` empties
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
     if req.ini_stage() == crate::api::abi::IniStage::Startup {
-        return verror(
-            req,
-            level,
-            Origin::Phase("PHP Startup"),
-            b"",
-            message.as_bytes(),
-        );
+        return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
     }
     if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
         let function = req.active_native();
-        return verror(
-            req,
-            level,
-            Origin::Function(&function),
-            b"",
-            message.as_bytes(),
-        );
+        return verror(req, level, Origin::Function(&function), b"", message);
     }
     let phase = match req.phase() {
         crate::api::request::Phase::Startup => "PHP Request Startup",
@@ -364,7 +355,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         // `get_active_function_name` does when a handler raises it.
         crate::api::request::Phase::Running if !req.bailing_out() => {
             if let Some(name) = req.active_user_function() {
-                return verror(req, level, Origin::Function(&name), b"", message.as_bytes());
+                return verror(req, level, Origin::Function(&name), b"", message);
             }
             "Unknown"
         }
@@ -374,7 +365,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         }
         crate::api::request::Phase::EngineEnd => "PHP Shutdown",
     };
-    verror(req, level, Origin::Phase(phase), b"", message.as_bytes());
+    verror(req, level, Origin::Phase(phase), b"", message);
 }
 
 /// `php_error_docref1(NULL, param, level, ...)`: [`docref`] from a native
