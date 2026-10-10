@@ -375,11 +375,14 @@ impl Request {
     /// after it; a limit counted again from the fork would end the program
     /// two seconds later. The fatal's line is masked, as php's tests mask it:
     /// a loaded machine spends that second in `pcntl_waitpid`, not the loop.
+    /// The two seconds are spent in a loop that asks the clock once per
+    /// hundred thousand passes, so the natives a witness records stay a
+    /// few thousand however fast the loop runs.
     ///
     /// ```php
     /// $start = microtime(true);
     /// set_time_limit(3);
-    /// while (microtime(true) - $start < 2) {}
+    /// while (microtime(true) - $start < 2) { for ($i = 0; $i < 100000; $i++); }
     /// if (($child = pcntl_fork()) === 0) { exit(0); }
     /// register_shutdown_function(function () use ($start) {
     ///     echo microtime(true) - $start < 4.5 ? "counted from before the fork\n" : "counted again from the fork\n";
