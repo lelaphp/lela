@@ -480,7 +480,7 @@ fn get_defined_vars(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         }
     };
     let made = req.defined_vars(frame);
-    crate::api::values::adopted(req, made)
+    crate::api::values::adopted(made)
 }
 
 /// `get_resource_type($resource): string`, php's

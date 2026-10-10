@@ -463,7 +463,7 @@ fn item_object(
                 && let Some(d) = dom_mut(req, object)
             {
                 // The parent's owner is the namespace node's from here.
-                d.extra = Extra::NamespaceParent(Box::new(parent_value));
+                d.extra = Extra::NamespaceParent(parent_value);
             } else {
                 parent_value.give_up(req);
             }

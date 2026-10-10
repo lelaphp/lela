@@ -470,7 +470,7 @@ fn deflate_rounds(
                 return Err(thrown);
             }
             out.set_len(used);
-            Ok(Ok(out.finish(req)))
+            Ok(Ok(out.finish()))
         }
         failed => {
             out.free(req);
@@ -711,7 +711,7 @@ fn inflate_rounds(
         return Ok(Inflated::Refused(refused));
     }
     let out = out.truncate(req, used)?;
-    Ok(Inflated::Out(out.finish(req)))
+    Ok(Inflated::Out(out.finish()))
 }
 
 /// `inflate_get_status(InflateContext $context): int`: the last

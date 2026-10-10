@@ -1404,11 +1404,11 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
         && n.kind() == Kind::NamespaceDecl
     {
         let parent_obj = match dom(req, object).map(|d| &d.extra) {
-            Some(Extra::NamespaceParent(p)) => Some(***p),
+            Some(Extra::NamespaceParent(p)) => Some(**p),
             _ => None,
         };
         if let Some(p) = parent_obj {
-            payload.extra = Extra::NamespaceParent(Box::new(Owner::take(req, p)));
+            payload.extra = Extra::NamespaceParent(Owner::take(req, p));
         }
         let ns = n.ns();
         if let Some(parent) = n.parent()

@@ -44,9 +44,7 @@ pub struct StreamCtx(Resource);
 /// its notifier, which php `ecalloc`s apart from it when `notification`
 /// is set.
 pub(crate) struct Context {
-    /// Boxed, so the payload fits php's `php_stream_context` in a debug
-    /// build too, where an owner carries the line that made it.
-    options: Option<Box<Owner<PhpArray>>>,
+    options: Option<Owner<PhpArray>>,
     notifier: Option<Box<Notifier>>,
 }
 
@@ -193,7 +191,7 @@ impl StreamCtx {
         let kind = req.types().context;
         let options = PhpArray::new(req)?;
         let context = Context {
-            options: Some(Box::new(options)),
+            options: Some(options),
             notifier: None,
         };
         Ok(Resource::sized(req, kind, context, CONTEXT_SIZE)?.into_typed(StreamCtx))
@@ -288,11 +286,7 @@ impl StreamCtx {
     /// which `stream_context_get_options` hands back with one more.
     #[must_use]
     pub fn options(self, req: &Request) -> Option<PhpArray> {
-        self.0
-            .native::<Context>(req)?
-            .options
-            .as_deref()
-            .map(|options| **options)
+        self.0.native::<Context>(req)?.options.as_deref().copied()
     }
 
     /// `php_stream_context_set_option` (`Z/main/streams/streams.c:2457`):
@@ -535,17 +529,13 @@ impl StreamCtx {
     /// The options array taken out of the `context` for a call that
     /// changes it.
     fn take_options(self, req: &mut Request) -> Option<Owner<PhpArray>> {
-        self.0
-            .native_mut::<Context>(req)?
-            .options
-            .take()
-            .map(|options| *options)
+        self.0.native_mut::<Context>(req)?.options.take()
     }
 
     /// The options array put back after [`StreamCtx::take_options`].
     fn put_options(self, req: &mut Request, options: Owner<PhpArray>) {
         match self.0.native_mut::<Context>(req) {
-            Some(context) => context.options = Some(Box::new(options)),
+            Some(context) => context.options = Some(options),
             None => options.give_up(req),
         }
     }

@@ -928,7 +928,7 @@ impl Request {
                         return Err(thrown);
                     }
                     // The handler layer's two owners, named for the write.
-                    let (key, value) = (Owner::adopt(req, key), Owner::adopt(req, value));
+                    let (key, value) = (Owner::adopt(key), Owner::adopt(value));
                     req.write_std_property(object, key, value)
                 });
                 if written.is_err()
@@ -1047,7 +1047,7 @@ impl Request {
                 skip_on_serialize,
             },
         );
-        Ok(Owner::adopt(self, proxy))
+        Ok(Owner::adopt(proxy))
     }
 
     /// `zend_lazy_object_debug_info`: what `var_dump` shows of a lazy

@@ -1837,7 +1837,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn defined_functions(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.defined_functions_made();
-        adopted(self, made)
+        adopted(made)
     }
 
     /// What [`defined_functions`](Self::defined_functions) makes, its one owner not yet named.
@@ -1861,7 +1861,7 @@ impl Request {
                 rows.append(self, name.into_value())?;
             }
             let key = PhpString::new(self, list)?.into_key();
-            let rows = Owner::adopt(self, Value::array(rows));
+            let rows = Owner::adopt(Value::array(rows));
             array.set(self, key, rows)?;
         }
         Ok(array)

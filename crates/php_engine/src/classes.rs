@@ -533,7 +533,7 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
         req.addref(&this.as_value());
     }
     let made = req.clone_with_payload(object, closure);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `interface UnitEnum` as `zend_enum.stub.php` declares it and
@@ -749,7 +749,7 @@ impl Closure {
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
         let made = do_closure_bind(req, closure.object(), newThis, NewScope::of(newScope))?;
-        Ok(made.map(|bound| Owner::adopt(req, bound)))
+        Ok(made.map(|bound| Owner::adopt(bound)))
     }
 
     /// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -820,7 +820,7 @@ impl Closure {
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
         let made = do_closure_bind(req, this.object(), newThis, NewScope::of(newScope))?;
-        Ok(made.map(|bound| Owner::adopt(req, bound)))
+        Ok(made.map(|bound| Owner::adopt(bound)))
     }
 
     /// `Closure::call(object $newThis, mixed ...$args): mixed`,
@@ -893,7 +893,7 @@ impl Closure {
         // returning by reference handed back given up for the value it
         // holds, whose owner is the caller's.
         let value = req.unwrap_reference(returned);
-        Ok(Owner::adopt(req, value))
+        Ok(Owner::adopt(value))
     }
 
     /// `Closure::fromCallable(callable $callback): Closure`,
@@ -1023,7 +1023,7 @@ impl Closure {
             }
         };
         let made = fake_closure(req, &callable)?;
-        Ok(Owner::adopt(req, made).into_instance())
+        Ok(Owner::adopt(made).into_instance())
     }
 
     /// `Closure::getCurrent(): Closure` (8.5), `ZEND_METHOD(Closure,
@@ -1245,7 +1245,7 @@ pub(crate) fn closure_invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> 
         .collect();
     let named = req.named_arguments();
     let served = req.serve_closure(this, &arguments, &named);
-    adopted(req, served)
+    adopted(served)
 }
 
 /// `interface Stringable`, `zend_interfaces.stub.php`'s: what
@@ -1651,7 +1651,7 @@ impl Exception {
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let made = req.exception_string(this.object());
-        crate::api::values::adopted(req, made)
+        crate::api::values::adopted(made)
     }
 }
 

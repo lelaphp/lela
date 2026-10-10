@@ -14,11 +14,9 @@
 //! found through the block's chunk (`mm::freed::record`), as php reaches
 //! a block's heap through `chunk->heap` (`Z/Zend/zend_alloc.c:1454`).
 //!
-//! A value that names no block of a chunk, or none at all, reaches the
-//! record through a [`Sensor`], a way to it the engine takes from
-//! the heap where the value is made: an owner the engine hands a native
-//! carries one, so the owner dropped unconsumed is recorded whatever it
-//! owns, a huge string, an interned one or an integer among them.
+//! An owner the engine's owner type holds reaches it the same way, from
+//! the block it owns, and so does the table of the lines that made the
+//! owners standing ([`crate::owners`]), which the record keeps.
 //!
 //! The first defect is kept and a later one is not: the first ends the
 //! request where the engine next asks, and what follows it is read
@@ -55,9 +53,13 @@ pub(crate) enum Sensed {
     /// refused: the block and its bin's size.
     FreedTwice { at: usize, size: usize },
     /// An owner dropped without being handed to a sink or given up
-    /// (design §5.1): the line that made it.
+    /// (design §5.1): the block it owned, the line that made it, which
+    /// is the latest made of that block's owners standing, and the lines
+    /// of the others ([`crate::owners`]).
     Unconsumed {
-        site: &'static std::panic::Location<'static>,
+        at: usize,
+        site: Option<&'static std::panic::Location<'static>>,
+        others: Vec<&'static std::panic::Location<'static>>,
     },
     /// Blocks the heap still held where the request ended, once every
     /// block of the request's lifetime was freed by name: how many, the
@@ -133,9 +135,24 @@ impl Sensed {
             Sensed::FreedTwice { at, size } => Fatal::Error(format!(
                 "InternalError: a free of the {size}-byte block at {at:#x}, which the heap has freed"
             )),
-            Sensed::Unconsumed { site } => Fatal::Error(format!(
-                "InternalError: the owner made at {site} was dropped without being handed to a sink or given up"
-            )),
+            Sensed::Unconsumed { at, site, others } => {
+                let made = site.map_or_else(
+                    || format!("an owner of the block at {at:#x}"),
+                    |site| format!("the owner made at {site}"),
+                );
+                let others = if others.iter().all(|other| Some(*other) == site) {
+                    String::new()
+                } else {
+                    let lines: Vec<String> = others.iter().map(ToString::to_string).collect();
+                    format!(
+                        ", or one of the other owners of its block, made at {}",
+                        lines.join(", ")
+                    )
+                };
+                Fatal::Error(format!(
+                    "InternalError: {made} was dropped without being handed to a sink or given up{others}"
+                ))
+            }
             Sensed::Leak {
                 bytes,
                 blocks,
@@ -156,10 +173,11 @@ impl Sensed {
 }
 
 /// The first defect a debug build sensed in one heap and the engine has
-/// not yet taken. Written through a shared pointer, from a chunk's
-/// header, and from a [`Sensor`] wherever the owner carrying one is
-/// dropped, so the defect sits in a `Mutex`, and the `AtomicBool`
-/// beside it lets the engine's question after every handler be one load
+/// not yet taken, and the lines that made the owners standing
+/// ([`crate::owners`]). Written through a shared pointer, from a chunk's
+/// header, wherever a block of the chunk is used or an owner of one is
+/// dropped, so each sits in a `Mutex`, and the `AtomicBool` beside the
+/// defect lets the engine's question after every handler be one load
 /// while nothing is kept.
 ///
 /// While a fatal leaves the request (`zend_bailout`), an owner dropped
@@ -172,6 +190,7 @@ pub(crate) struct Record {
     kept: std::sync::atomic::AtomicBool,
     defect: std::sync::Mutex<Option<Sensed>>,
     fatal_leaving: std::sync::atomic::AtomicBool,
+    owners: std::sync::Mutex<crate::owners::Table>,
 }
 
 impl std::fmt::Debug for Record {
@@ -195,6 +214,20 @@ impl Record {
         }
     }
 
+    /// Whether a fatal is leaving the request, so an owner dropped
+    /// unconsumed is not a defect.
+    pub(crate) fn fatal_is_leaving(&self) -> bool {
+        self.fatal_leaving
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The table of the lines that made the owners standing.
+    pub(crate) fn owners(&self) -> std::sync::MutexGuard<'_, crate::owners::Table> {
+        self.owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The defect kept, as the `InternalError` fatal that ends the
     /// request, and taken, so it is raised once.
     pub(crate) fn take(&self) -> Option<Fatal> {
@@ -210,18 +243,10 @@ impl Record {
     }
 }
 
-/// A debug build's way to one heap's sensed record, for a value that
-/// cannot reach it through a chunk: what the engine's owner type carries
-/// so its `Drop` can record an owner dropped unconsumed. Cloning it
-/// shares the record; the record stands while any sensor does, so a
-/// sensor that outlives its heap records into a record nobody takes and
-/// never into freed memory.
-///
-/// The record is shared by count across threads, so a sensor moved off
-/// the request's thread with the owner carrying it, and dropped there,
-/// is sound: what it can do is record a defect for the engine to raise.
-#[derive(Clone)]
-pub struct Sensor(std::sync::Arc<Record>);
+/// A debug build's hold on one heap's sensed record, the heap's own:
+/// shared, so the address every chunk's header names stands while the
+/// heap moves.
+pub(crate) struct Sensor(std::sync::Arc<Record>);
 
 impl std::fmt::Debug for Sensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -230,19 +255,6 @@ impl std::fmt::Debug for Sensor {
 }
 
 impl Sensor {
-    /// An owner made at `site` dropped without being handed to a sink
-    /// or given up, kept for the engine's next question; nothing while a
-    /// fatal leaves the request ([`Record`]).
-    pub fn unconsumed(&self, site: &'static std::panic::Location<'static>) {
-        if !self
-            .0
-            .fatal_leaving
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            self.0.record(Sensed::Unconsumed { site });
-        }
-    }
-
     /// Whether a fatal is leaving the request, as the engine says where
     /// `zend_bailout` begins and where its `zend_try` catches it.
     pub(crate) fn fatal_leaving(&self, leaving: bool) {

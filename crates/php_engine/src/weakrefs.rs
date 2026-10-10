@@ -655,7 +655,7 @@ impl ClassIterator for MapIter {
         // The cell's one owner is the caller's, and the entry takes a
         // second.
         let cell = req.reference(value)?;
-        let cell = Owner::adopt(req, cell.as_value());
+        let cell = Owner::adopt(cell.as_value());
         let key = Owner::take(req, key);
         if let Err(thrown) = entries.set(req, key, Owner::take(req, *cell)) {
             cell.give_up(req);
@@ -732,7 +732,7 @@ fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
             register(req, owner, Holder::Map(made.index()));
         }
     }
-    Ok(Owner::adopt(req, made))
+    Ok(Owner::adopt(made))
 }
 
 /// `final class WeakReference`, `@strict-properties` and
@@ -868,7 +868,7 @@ impl WeakReference {
             },
         )?;
         register(req, referent, Holder::Reference(reference.index()));
-        Ok(Owner::adopt(req, reference).into_instance())
+        Ok(Owner::adopt(reference).into_instance())
     }
 
     /// `WeakReference::get(): ?object`: the referent with one more owner,

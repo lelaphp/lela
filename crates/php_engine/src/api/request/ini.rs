@@ -863,7 +863,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Owner<Value>>, Thrown> {
         let made = self.cfg_entry_made(name);
-        adopted_some(self, made)
+        adopted_some(made)
     }
 
     /// What [`cfg_entry`](Self::cfg_entry) makes, its one owner not yet named.
@@ -888,7 +888,7 @@ impl Request {
                         ConfiguredKey::Name(name) => PhpString::new(self, name)?.into_key(),
                     };
                     let value = self.configured_value(entry)?;
-                    let value = Owner::adopt(self, value);
+                    let value = Owner::adopt(value);
                     array.set(self, key, value)?;
                 }
                 Value::array(array)

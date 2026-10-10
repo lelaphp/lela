@@ -1321,7 +1321,7 @@ impl PhpStream {
             if len < max / 2 {
                 out = out.truncate(req, len)?;
             }
-            return Ok(Some(out.finish(req)));
+            return Ok(Some(out.finish()));
         }
         let size = self.stat(req).map_or(0, |sb| sb[7]);
         let mut buflen = if size > 0 {
@@ -1355,7 +1355,7 @@ impl PhpStream {
             out.free(req);
             return Ok(None);
         }
-        Ok(Some(out.truncate(req, len)?.finish(req)))
+        Ok(Some(out.truncate(req, len)?.finish()))
     }
 
     /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the
@@ -4561,7 +4561,7 @@ impl StreamLayer for Request {
         if read < len / 2 {
             out = out.truncate(self, read)?;
         }
-        Ok(Some(out.finish(self)))
+        Ok(Some(out.finish()))
     }
 
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown> {

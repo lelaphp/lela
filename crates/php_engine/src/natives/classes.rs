@@ -569,7 +569,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     // The fast copy (`Z/Zend/zend_builtin_functions.c:852`): a class
     // that declares nothing hands its own table on.
     if let Some(array) = crate::ops::object_symtable(req, object)? {
-        return Ok(Owner::adopt(req, array));
+        return Ok(Owner::adopt(array));
     }
     let rows = req.property_rows(&table)?;
     let mut array = PhpArray::new(req)?;
@@ -581,7 +581,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
             Key::Int(n) => {
                 if !array.contains(&key) {
                     let value = req.dup_value(value, None);
-                    let value = Owner::adopt(req, value);
+                    let value = Owner::adopt(value);
                     array.add_new(req, Owner::take(req, Key::Int(n)), value)?;
                 }
                 continue;
@@ -603,7 +603,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         };
         let key = Owner::take(req, key);
         let value = req.dup_value(value, None);
-        array.add_new(req, key, Owner::adopt(req, value))?;
+        array.add_new(req, key, Owner::adopt(value))?;
     }
     Ok(array)
 }
@@ -642,7 +642,7 @@ fn answered_vars(
         let name = match key {
             Key::Int(n) => {
                 let value = req.dup_value(value, None);
-                let value = Owner::adopt(req, value);
+                let value = Owner::adopt(value);
                 array.set(req, Owner::take(req, Key::Int(n)), value)?;
                 continue;
             }
@@ -658,7 +658,7 @@ fn answered_vars(
         };
         let key = Owner::take(req, key);
         let value = req.dup_value(value, None);
-        array.add_new(req, key, Owner::adopt(req, value))?;
+        array.add_new(req, key, Owner::adopt(value))?;
     }
     Ok(array)
 }
@@ -688,11 +688,11 @@ fn get_mangled_object_vars(
     // `zend_get_properties_no_lazy_init`: a lazy object's table as it
     // stands, nothing initialised for it.
     if let Some(array) = crate::ops::object_symtable(req, object)? {
-        return Ok(Owner::adopt(req, array));
+        return Ok(Owner::adopt(array));
     }
     let table = req.properties_no_lazy_init(object)?;
     let made = crate::ops::mangled_array(req, object, table);
-    crate::api::values::adopted(req, made)
+    crate::api::values::adopted(made)
 }
 
 /// `get_class_methods(object|string $object_or_class): array`, php's

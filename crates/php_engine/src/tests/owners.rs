@@ -1,7 +1,8 @@
 //! The owner type as a program meets it (#1995): an owner a native
 //! drops without handing it to a sink or giving it up is reported, in a
 //! debug build, as the `InternalError` naming the line that made it,
-//! whatever it owns; one given up or returned is reported nowhere, and
+//! whatever counted value it owns; one given up or returned is reported
+//! nowhere, and
 //! an owner returned from a native is the caller's.
 
 use php_macros::php_function;
@@ -131,17 +132,19 @@ fn owners() -> Extension {
         .build("owners")
 }
 
-/// An owner of each kind dropped unconsumed, a counted string, an
-/// interned one, an integer, an array and an object among them, ends the
-/// request at the next sensing point in the `InternalError` naming the
-/// line that took it, and nothing after it runs.
+/// An owner of each counted kind dropped unconsumed, a counted string,
+/// an array and an object, ends the request at the next sensing point in
+/// the `InternalError` naming the line that took it, and nothing after it
+/// runs. An owner of what no count owns, an interned string or an
+/// integer, leaks nothing and is reported nowhere: its line is kept
+/// beside a block, and it has none (#2246).
 #[test]
 fn an_owner_dropped_unconsumed_is_reported_with_the_line_that_made_it() {
     let engine = Engine::cli_builder().extensions(&[owners()]).build();
     let site = format!(
         "Fatal error: InternalError: the owner made at crates/php_engine/src/tests/owners.rs:{TAKEN_AT}:"
     );
-    for value in ["s('x')", "'interned'", "1", "[1, 2]", "new stdClass"] {
+    for value in ["s('x')", "[1, s('x')]", "new stdClass"] {
         let served = engine.serve_capture(
             &format!("<?php {COUNTED} echo 'a';\ndrop_owner({value});\necho 'went on';\n"),
             Capture::default(),
@@ -157,6 +160,18 @@ fn an_owner_dropped_unconsumed_is_reported_with_the_line_that_made_it() {
         );
         assert!(!stdout.contains("went on"), "{value}: {stdout}");
         assert_eq!(served.exit_code, 255, "{value}");
+    }
+    for value in ["'interned'", "1"] {
+        let served = engine.serve_capture(
+            &format!("<?php echo 'a';\ndrop_owner({value});\necho 'went on';\n"),
+            Capture::default(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "awent on",
+            "{value}"
+        );
+        assert_eq!(served.exit_code, 0, "{value}");
     }
 }
 

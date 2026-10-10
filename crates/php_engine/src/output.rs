@@ -510,7 +510,7 @@ impl StatusFields {
         ];
         for (key, value) in rows {
             let key = PhpString::new(req, key)?.into_key();
-            entry.set(req, key, Owner::adopt(req, value))?;
+            entry.set(req, key, Owner::adopt(value))?;
         }
         Ok(Value::array(entry))
     }
@@ -1903,7 +1903,7 @@ fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
                 for at in 0..level {
                     if let Some(fields) = req.output().status_fields(at) {
                         let row = fields.into_array(req)?;
-                        rows.append(req, Owner::adopt(req, row))?;
+                        rows.append(req, Owner::adopt(row))?;
                     }
                 }
                 Value::array(rows)

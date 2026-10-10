@@ -571,7 +571,7 @@ pub(crate) fn declare_const<T: Tier>(
     }
     // The value's one owner is the sink's, which warns and gives it up
     // where the name stands.
-    let value = crate::api::values::Owner::adopt(req, value);
+    let value = crate::api::values::Owner::adopt(value);
     req.define_constant(&key, value);
     Ok(advance(req, frame))
 }
@@ -667,7 +667,7 @@ pub(crate) fn declare_attributed_const<T: Tier>(
     if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
         key[..slash].make_ascii_lowercase();
     }
-    let value = crate::api::values::Owner::adopt(req, value);
+    let value = crate::api::values::Owner::adopt(value);
     req.define_attributed_constant(&key, value, attributes);
     req.vm_mut().jump(frame, at.saturating_add(2));
     if req.is_pending() {
@@ -11850,7 +11850,7 @@ fn assign_property(
             };
             write_out(req, frame, code, op, &value);
             let key = Owner::take(req, key);
-            let value = Owner::adopt(req, value);
+            let value = Owner::adopt(value);
             let table = req.object_handlers(object.heap());
             Ok(table.write_property(req, object, key, value))
         }
@@ -14516,7 +14516,7 @@ fn served_property_step(
     // gives up after the write, and one more of the name, which the
     // operand keeps its own of.
     let name = Owner::take(req, name);
-    let stepped = Owner::adopt(req, stepped);
+    let stepped = Owner::adopt(stepped);
     let table = req.object_handlers(object.heap());
     table.write_property(req, object, name, stepped)
 }
@@ -15125,7 +15125,7 @@ fn served_incdec(
     // `write_property` takes an owner of the value and of the name,
     // the stepped value's own and one more of the name.
     let name = Owner::take(req, name);
-    let stepped = Owner::adopt(req, stepped);
+    let stepped = Owner::adopt(stepped);
     let table = req.object_handlers(object.heap());
     let wrote = table.write_property(req, object, name, stepped);
     match (refused, wrote) {
@@ -18097,7 +18097,7 @@ pub(crate) fn rope_end<T: Tier>(
     let converted = crate::ops::to_string(req, &piece);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let appended = match converted {
-        Ok(text) => rope.append(req, Owner::adopt(req, Value::string(text))),
+        Ok(text) => rope.append(req, Owner::adopt(Value::string(text))),
         Err(thrown) => Err(thrown),
     };
     if let Err(thrown) = appended {
@@ -18126,7 +18126,7 @@ pub(crate) fn rope_end<T: Tier>(
             }
             at = end;
         }
-        fresh.finish(req).hand_on()
+        fresh.finish().hand_on()
     });
     let held = req.take_slot(frame, rope_slot);
     req.release(held);
@@ -18172,7 +18172,7 @@ fn rope_piece(
     let converted = crate::ops::to_string(req, &piece);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let appended = match converted {
-        Ok(text) => rope.append(req, Owner::adopt(req, Value::string(text))),
+        Ok(text) => rope.append(req, Owner::adopt(Value::string(text))),
         Err(thrown) => Err(thrown),
     };
     match appended {

@@ -237,7 +237,7 @@ fn rendered(
     }
     let raw = raw?;
     if binary {
-        return Ok(raw.finish(req));
+        return Ok(raw.finish());
     }
     let hexed = PhpString::new(req, &hex(digest));
     raw.free(req);

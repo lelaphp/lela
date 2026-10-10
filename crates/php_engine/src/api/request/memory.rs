@@ -131,14 +131,6 @@ impl Request {
         self.fatal_of(allocated).map(PhpString::of)
     }
 
-    /// A debug build's way to the heap's sensed record, which an
-    /// [`Owner`](crate::api::values::Owner) carries from where it is
-    /// made ([`php_heap::Sensor`]).
-    #[cfg(debug_assertions)]
-    pub(crate) fn sensor(&self) -> php_heap::Sensor {
-        self.heap.sensor()
-    }
-
     /// One more owner of what `value` holds: `Z_TRY_ADDREF_P`, a refcount
     /// for a string, an array, an object, a resource or a reference of
     /// the request's, nothing for a scalar, an interned string or an
@@ -632,7 +624,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn gc_status(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.gc_status_made();
-        adopted(self, made)
+        adopted(made)
     }
 
     /// What [`gc_status`](Self::gc_status) makes, its one owner not yet named.

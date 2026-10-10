@@ -180,7 +180,7 @@ pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn to_string(req: &mut Request, value: &Value) -> Result<Owner<PhpString>, Thrown> {
     let made = crate::ops::to_string(req, value);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `zval_get_tmp_string` and `zend_tmp_string_release` around one read:
@@ -247,7 +247,7 @@ pub fn to_number(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn to_array(req: &mut Request, value: &Value) -> Result<Owner<PhpArray>, Thrown> {
     let made = crate::ops::to_array(req, value);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `(object)`, the kernel [`crate::ops::to_object`] through the face:
@@ -259,7 +259,7 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<Owner<PhpArray>, Thr
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn to_object(req: &mut Request, value: &Value) -> Result<Owner<PhpObject>, Thrown> {
     let made = crate::ops::to_object(req, value);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `zend_is_callable` with the request's scope.
@@ -289,7 +289,7 @@ pub fn callable_checked(req: &mut Request, value: &Value) -> Result<Callable, St
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn callable_name(req: &mut Request, value: &Value) -> Result<Owner<PhpString>, Thrown> {
     let made = callable_name_made(req, value);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`callable_name`] makes, its one owner not yet named.
@@ -399,7 +399,7 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn key_of(req: &mut Request, value: &Value) -> Result<Owner<Key>, Thrown> {
     let made = key_of_made(req, value);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`key_of`] makes, its one owner not yet named.
@@ -522,7 +522,7 @@ pub fn binary_op(
     rhs: &Value,
 ) -> Result<Owner<Value>, Thrown> {
     let made = binary_op_made(req, op, lhs, rhs);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`binary_op`] makes, its one owner not yet named.

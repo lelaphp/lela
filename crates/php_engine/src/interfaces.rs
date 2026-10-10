@@ -1051,7 +1051,7 @@ impl InternalIterator {
         if let Some(walk) = internal_walk(req, this.object(), true) {
             let (funcs, walk) = walk?;
             let made = funcs.current(req, walk, false);
-            return crate::api::values::adopted(req, made);
+            return crate::api::values::adopted(made);
         }
         Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
@@ -1067,7 +1067,7 @@ impl InternalIterator {
         if let Some(walk) = internal_walk(req, this.object(), true) {
             let (funcs, walk) = walk?;
             let made = funcs.key(req, walk);
-            return crate::api::values::adopted(req, made);
+            return crate::api::values::adopted(made);
         }
         Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
