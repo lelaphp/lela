@@ -741,6 +741,9 @@ pub(crate) struct Shared {
     /// `constants`: the extension that declared it, `Core` for Zend's.
     pub(crate) constant_modules: Vec<ExtensionId>,
     pub(crate) engine_states: States<Box<dyn Any + Send + Sync>>,
+    /// Where each extension's request and engine state stands, by its
+    /// type ([`crate::api::request::StateSlots`]).
+    pub(crate) state_slots: crate::api::request::StateSlots,
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     /// The typed entries `ini`'s master values give, which each request
     /// starts with ([`TypedIni`]).
@@ -3233,6 +3236,7 @@ impl EngineBuilder {
                 constant_names,
                 constant_modules,
                 engine_states: States::new(),
+                state_slots: crate::api::request::StateSlots::default(),
                 typed_ini: TypedIni::of(|name| master_of(&ini, name)),
                 ini,
                 constant_values,
@@ -3986,6 +3990,8 @@ impl Engine {
             shared.supplied = suppliers.refused_at(ExtensionId::at(at));
             break;
         }
+        shared.state_slots =
+            crate::api::request::StateSlots::of(&shared.extensions, &shared.engine_states);
         if shared.refused.is_none() {
             shared.observe_opcodes(&start, bind_loops);
         }

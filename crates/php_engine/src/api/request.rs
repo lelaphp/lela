@@ -127,6 +127,7 @@ pub use response::{
 mod shutdown;
 mod site_override;
 mod state;
+pub(crate) use state::StateSlots;
 mod static_props;
 mod static_vars;
 mod symbol_tables;
