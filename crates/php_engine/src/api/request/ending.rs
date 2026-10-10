@@ -228,12 +228,12 @@ impl Request {
 
     /// The request leaving what it serves for the `zend_try` that
     /// catches it, the fatal or the uncaught throwable already rendered:
-    /// every frame still open to an observer ended with no value while the
-    /// frames still stand ([`crate::observer::end_all`]), since the
-    /// serving that catches it pops them on its way out.
+    /// every frame still open to an observer left open and kept as it
+    /// stands ([`crate::observer::bailed_out`]), since the serving that
+    /// catches it pops them on its way out.
     fn leave(&mut self) {
         self.set_bailing_out(true);
-        crate::observer::end_all(self);
+        crate::observer::bailed_out(self);
     }
 
     /// `php_error_cb`'s last arm, "Bail out if we can't recover"

@@ -12,11 +12,14 @@ use php_macros::php_function;
 use super::test_ext::{
     Event, Events, Phase, Recording, TestExt, fiber_name, observed_name, record, returned_name,
 };
-use crate::api::abi::{Extension, ExtensionBuilder, Observed, ObservedFiber, ObserverHandlers};
+use crate::api::abi::{
+    Beneath, Extension, ExtensionBuilder, Observed, ObservedFiber, ObserverHandlers, chain,
+};
 use crate::api::call::call;
 use crate::api::coerce::callable_checked;
+use crate::api::raising::{Level, Thrown, catch_fatal, leave_pending, throw};
 use crate::api::request::Request;
-use crate::api::values::{PhpString, Value};
+use crate::api::values::{Owner, PhpString, Value};
 use crate::engine::Engine;
 use crate::test::{Capture, Served};
 
@@ -471,6 +474,84 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
         ],
         "every open frame ended once after the fatal: {resumed:?}"
     );
+}
+
+/// A fatal in a shutdown function or in a destructor the shutdown calls
+/// ends none of the frames it leaves open, as php ends them only at
+/// `php_request_shutdown`'s first step, which has passed (#2015); a
+/// fatal in the program before them is ended there, before the
+/// shutdown function runs. php's sequence, read from the oracle's
+/// zend-test variant with `zend_test.observer.observe_all`: the file's
+/// frames ended after the program's fatal, then `sd`, `inner2` and
+/// `trigger_error` begun and the second fatal rendered, and nothing
+/// after it; and a destructor's `inner` and `trigger_error` begun, the
+/// fatal rendered, and nothing after it.
+#[test]
+fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("shutdown_fatal");
+    let file = "file 'main.php'";
+    rec.mark("shutdown function");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { trigger_error('in main', E_USER_ERROR); }\n\
+         function outer() { inner(); }\nfunction sd() { inner2(); }\n\
+         function inner2() { trigger_error('in shutdown', E_USER_ERROR); }\n\
+         function sd2() { echo 'not reached'; }\n\
+         register_shutdown_function('sd');\nregister_shutdown_function('sd2');\nouter();\n",
+    );
+    rec.mark("destructor");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { trigger_error('in destructor', E_USER_ERROR); }\n\
+         class D { function __destruct() { inner(); } }\n$d = new D;\n",
+    );
+    rec.mark("end");
+    let events = rec.events();
+
+    let shutdown = observed(&events.between("shutdown function", "destructor"));
+    let fatal = shutdown
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m == "in main"));
+    assert!(fatal.is_some(), "{shutdown:?}");
+    assert_eq!(
+        shutdown[fatal.unwrap_or_default() + 1..]
+            .iter()
+            .filter(|e| !matches!(e, Ext(_, Error(m)) if m.starts_with("Passing E_USER_ERROR")))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            end(0, "trigger_error", None),
+            end(0, "inner", None),
+            end(0, "outer", None),
+            end(0, file, None),
+            init(0, "sd"),
+            begin(0, "sd"),
+            init(0, "inner2"),
+            begin(0, "inner2"),
+            begin(0, "trigger_error"),
+            Ext(0, Error(String::from("in shutdown"))),
+        ],
+        "{shutdown:?}"
+    );
+
+    let destructor = observed(&events.between("destructor", "end"));
+    let fatal = destructor
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m == "in destructor"));
+    assert_eq!(
+        fatal.map(|at| at + 1),
+        Some(destructor.len()),
+        "nothing is ended after the destructor's fatal: {destructor:?}"
+    );
+    for name in ["D::__destruct", "inner", "trigger_error"] {
+        assert!(destructor.contains(&begin(0, name)), "{destructor:?}");
+    }
 }
 
 /// `frameless_probe(string $string): bool`, frameless for one argument:

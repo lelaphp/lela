@@ -4926,8 +4926,10 @@ impl Engine {
     /// runs in: its shutdown functions, its destructors, and every
     /// handler of the buffer stack popped.
     pub(crate) fn shutdown_program(req: &mut Request) {
-        // `php_request_shutdown`'s order (design §5.10): the shutdown
-        // functions first, which is `php_call_shutdown_functions`; then
+        // `php_request_shutdown`'s order (design §5.10): every frame a
+        // fatal left open to an observer ended first,
+        // `zend_observer_fcall_end_all`; the shutdown functions next,
+        // which is `php_call_shutdown_functions`; then
         // the destructors of what is still live, which is
         // `zend_call_destructors`, the symbol table walked in reverse
         // and the object store walked after it; then every output
@@ -4947,6 +4949,7 @@ impl Engine {
         // the step it was raised in and the next is served.
         req.enter_phase(crate::api::request::Phase::Shutdown);
         req.catch_bailout();
+        crate::observer::end_all(req);
         crate::natives::call_shutdown_functions(req);
         req.catch_bailout();
         req.shutdown_destructors();

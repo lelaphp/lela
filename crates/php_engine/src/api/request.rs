@@ -98,7 +98,7 @@ use methods::visibility_string;
 mod objects;
 mod observing;
 mod op_arrays;
-pub(crate) use observing::ObservedChain;
+pub(crate) use observing::{ObservedChain, OpenCall};
 pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
 pub(crate) mod paths;
 pub use paths::RealpathEntry;

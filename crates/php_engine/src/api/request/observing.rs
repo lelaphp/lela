@@ -26,7 +26,7 @@
 
 use crate::api::call::Function;
 use crate::exec;
-use crate::observer::{BeginHandler, EndHandler, Observable, Removed, Slot};
+use crate::observer::{BeginHandler, EndHandler, Left, Observable, Removed, Slot};
 
 use super::Request;
 
@@ -34,7 +34,15 @@ use super::Request;
 /// `EG(current_observed_frame)` and each frame's `prev_observed_frame`,
 /// and a suspended fiber's `top_observed_frame`.
 #[derive(Debug, Default)]
-pub(crate) struct ObservedChain(Vec<Observable>);
+pub(crate) struct ObservedChain(Vec<OpenCall>);
+
+/// One call on the open chain: one begun and standing, or a frame a
+/// fatal left, kept as it stood ([`crate::observer::bailed_out`]).
+#[derive(Debug)]
+pub(crate) enum OpenCall {
+    Call(Observable),
+    Left(Box<Left>),
+}
 
 /// The observer's request state.
 #[derive(Debug, Default)]
@@ -127,17 +135,38 @@ impl Request {
 
     /// `at` begun with an end handler: the innermost open call now.
     pub(crate) fn open_observed(&mut self, at: Observable) {
-        self.observing.open.0.push(at);
+        self.observing.open.0.push(OpenCall::Call(at));
     }
 
     /// `at` taken off the chain where it is the innermost open call, and
     /// whether it was: php's `execute_data == EG(current_observed_frame)`.
+    /// A frame a fatal left is `at` where `at` is that very frame,
+    /// still standing, and never one pushed since at the same place.
     pub(crate) fn close_observed(&mut self, at: Observable) -> bool {
-        if self.observing.open.0.last() != Some(&at) {
-            return false;
+        let innermost = match (self.observing.open.0.last(), at) {
+            (Some(OpenCall::Call(open)), _) => *open == at,
+            (Some(OpenCall::Left(left)), Observable::Code(frame)) => {
+                self.frame_view(frame).id() == left.frame
+            }
+            (Some(OpenCall::Left(_)), Observable::Native(_)) | (None, _) => false,
+        };
+        if innermost {
+            self.observing.open.0.pop();
         }
-        self.observing.open.0.pop();
-        true
+        innermost
+    }
+
+    /// Every frame on the chain kept as it stands, for a fatal that
+    /// pops them before they are ended; a native's call is kept by its
+    /// number already.
+    pub(crate) fn keep_observed(&mut self) {
+        let mut open = std::mem::take(&mut self.observing.open.0);
+        for opened in &mut open {
+            if let OpenCall::Call(Observable::Code(frame)) = *opened {
+                *opened = OpenCall::Left(Box::new(Left::of(self, frame)));
+            }
+        }
+        self.observing.open.0 = open;
     }
 
     /// The chain the request is served on and `other` change places, as
@@ -150,7 +179,7 @@ impl Request {
 
     /// Every open call, the innermost first, the chain left empty:
     /// `zend_observer_fcall_end_all`'s walk.
-    pub(crate) fn take_observed(&mut self) -> Vec<Observable> {
+    pub(crate) fn take_observed(&mut self) -> Vec<OpenCall> {
         let mut open = std::mem::take(&mut self.observing.open.0);
         open.reverse();
         open
