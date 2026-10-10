@@ -20,8 +20,8 @@ use php_unit::decl::{
     PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
-    AutoGlobal, BoundVar, ConstIdx, Diagnostic, HookBody, Level, LiveKind, LiveRange, MethodBody,
-    OpArray, Opcode, OperandKind, Opline, OplineIdx, TryCatch, Unit, UnitCell,
+    AutoGlobal, BoundVar, ConstIdx, Diagnostic, HookBody, Level, LiveKind, LiveRange, MapPtrOffset,
+    MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, TryCatch, Unit, UnitCell,
 };
 
 /// The unit's bytes; none where a constant of an op array is of a kind
@@ -494,6 +494,24 @@ impl Wire for ParameterDefault {
             1 => ParameterDefault::Unshown,
             2 => ParameterDefault::Expr(Wire::take(r)?),
             _ => return None,
+        })
+    }
+}
+
+impl Wire for MapPtrOffset {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        match self {
+            MapPtrOffset::Engine(at) => (false, at).put(out),
+            MapPtrOffset::Request(at) => (true, at).put(out),
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        let request = bool::take(r)?;
+        let at = u32::take(r)?;
+        Some(if request {
+            MapPtrOffset::Request(at)
+        } else {
+            MapPtrOffset::Engine(at)
         })
     }
 }

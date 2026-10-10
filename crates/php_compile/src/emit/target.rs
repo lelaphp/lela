@@ -12,18 +12,8 @@
 
 use php_syntax::tree::{self, NodeId};
 
-use super::{ClassSpec, Emit, Member, Scoped, ScopedName, SimpleVar, Where, walk};
+use super::{ClassSpec, Emit, Member, Scoped, ScopedName, SimpleVar, Source, Where, walk};
 use crate::CompileError;
-
-/// The value a write stores: an expression the write compiles where
-/// php's `zend_compile_assign` compiles its right side, or a value the
-/// compiler already holds, php's `ZEND_AST_ZNODE` (`zend_ast_create_znode`),
-/// which compiles to itself.
-#[derive(Clone, Copy)]
-pub(super) enum Source {
-    Expr(tree::Expr),
-    Node(Where),
-}
 
 /// A place a write lands, decoded once from the tree: php's
 /// `var_ast->kind` after `zend_ensure_writable_variable`.
@@ -62,15 +52,6 @@ pub(super) enum ListStyle {
 }
 
 impl Emit<'_> {
-    /// A [`Source`] compiled: the expression where it stands, or the
-    /// value already held.
-    pub(super) fn source(&mut self, source: Source) -> Result<Where, CompileError> {
-        match source {
-            Source::Expr(expr) => self.expr(expr),
-            Source::Node(value) => Ok(value),
-        }
-    }
-
     /// `expr` as a target, with the checks `zend_compile_assign` and
     /// `zend_compile_assign_ref` make before they compile anything:
     /// `$this` is `Cannot re-assign $this`, and then

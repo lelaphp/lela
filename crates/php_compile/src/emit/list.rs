@@ -8,8 +8,8 @@ use php_heap::Zval;
 use php_syntax::tree;
 use php_unit::{Opcode, OperandKind, Opline};
 
-use super::target::{List, ListStyle, Source};
-use super::{Emit, SimpleVar, Where};
+use super::target::{List, ListStyle};
+use super::{Emit, SimpleVar, Source, Where};
 use crate::CompileError;
 
 impl Emit<'_> {

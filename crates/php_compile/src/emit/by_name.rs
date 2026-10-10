@@ -23,8 +23,7 @@ use php_heap::Zval;
 use php_syntax::tree::{self, NodeId};
 use php_unit::{AutoGlobal, Opcode, OperandKind, Opline};
 
-use super::target::Source;
-use super::{Base, Emit, FETCH_GLOBAL, FETCH_LOCAL, Fetch, Over, SimpleVar, Where};
+use super::{Base, Emit, FETCH_GLOBAL, FETCH_LOCAL, Fetch, Over, SimpleVar, Source, Where};
 use crate::CompileError;
 
 /// `ZEND_FETCH_GLOBAL_LOCK` (`Z/Zend/zend_compile.h:1084`): the `FETCH_W`
