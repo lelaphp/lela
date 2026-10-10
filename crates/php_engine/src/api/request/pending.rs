@@ -234,7 +234,10 @@ impl Request {
     /// and nothing rendered for either exit. At `E_ERROR` it is the
     /// uncaught fatal and the request ends, [`Leaving`]; below it, php's
     /// `severity | E_DONT_BAIL` as `assert.bail` asks, it is a diagnostic
-    /// like any other, and the throwable is given up.
+    /// like any other, and the throwable is given up. At every severity
+    /// `EG(last_fatal_error_backtrace)` is cleared first
+    /// (`Z/Zend/zend_exceptions.c:944`), so the shell's warning after an
+    /// earlier fatal carries the throwable's trace alone (#2641).
     pub(crate) fn exception_error(&mut self, severity: Level) -> Result<(), Leaving> {
         let Some(throwable) = self.take_pending_view() else {
             // `zend_exception_error` on either exit: "We successfully
@@ -245,6 +248,7 @@ impl Request {
             self.catch_bailout();
             return Ok(());
         };
+        self.clear_fatal_error_backtrace();
         let class = self.class_name_of(throwable);
         let compile_time = match class.as_str() {
             "ParseError" => Some(Level::Parse),
