@@ -184,6 +184,50 @@ impl Request {
         self.properties.fake_scope.or_else(|| self.executed_scope())
     }
 
+    /// Whether a write that names its own scope stands
+    /// (`EG(fake_scope)`), which a property's placement reads ahead of
+    /// the executed scope: what an inline path that reads a placement a
+    /// frame's scope made tests first.
+    pub(crate) fn fakes_scope(&self) -> bool {
+        self.properties.fake_scope.is_some()
+    }
+
+    /// `zend_get_property_offset`'s answer a fetch may cache
+    /// (`Z/Zend/zend_object_handlers.c:450-461`): the declared slot of
+    /// `name` on objects of `object`'s class, and whether it is typed,
+    /// where the class is served by the standard handlers, the
+    /// property has no hooks and the scope a property is placed from
+    /// reaches it. None for every other name, which is placed on every
+    /// pass: a dynamic property, one the scope may not reach, one a
+    /// class's own handlers serve.
+    ///
+    /// ```php
+    /// class P { private $p = "P"; function viaP($o) { return $o->p; } }
+    /// class C extends P { public $p = "C"; protected $q = 1; function viaC($o) { return $o->p; } }
+    /// $c = new C; $d = new C; $d->p = "D";
+    /// foreach ([$c, $d, $c] as $o) echo $o->viaP($o), $o->viaC($o), $o->p, "|";
+    /// try { echo $c->q; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $c->dyn = 1; unset($d->p);
+    /// foreach ([$c, $d] as $o) { try { echo $o->viaC($o), "|"; } catch (Error $e) {} }
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// PCC|PDD|PCC|Cannot access protected property C::$q
+    ///
+    /// Deprecated: Creation of dynamic property C::$dyn is deprecated in %s on line 7
+    /// C|
+    /// Warning: Undefined property: C::$p in %s on line 3
+    /// |
+    /// ```
+    pub(crate) fn cacheable_slot(&self, object: PhpObject, name: &[u8]) -> Option<(u32, bool)> {
+        let class = object.class();
+        if self.own_handlers(class).is_some() || self.hooked(class, name).is_some() {
+            return None;
+        }
+        let placed = self.declared_slot(class, name)?;
+        self.reaches(&placed).then_some((placed.slot, placed.typed))
+    }
+
     /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
     /// native write names a property by: the write made in the scope of
     /// the class whose declaration the object's table holds for `name`,

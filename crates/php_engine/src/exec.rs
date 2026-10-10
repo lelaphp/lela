@@ -509,11 +509,13 @@ impl Header {
     }
 
     /// A call made a user frame over `code`, `i_init_func_execute_data`:
-    /// the opline it stands at and the runtime cache it reads.
-    pub(crate) fn activate(&mut self, run_time_cache: CacheAt, opline: u32) {
+    /// the opline it stands at, the runtime cache it reads, and whether
+    /// it was passed arguments past its parameters.
+    pub(crate) fn activate(&mut self, run_time_cache: CacheAt, opline: u32, extra_args: bool) {
         self.run_time_cache = run_time_cache;
         self.opline = opline;
         self.info.set(CallInfo::CALL | CallInfo::BUILDING, false);
+        self.info.set(CallInfo::EXTRA_ARGS, extra_args);
     }
 
     /// `EX(This)` as a receiver, with whether the frame owns it.
@@ -595,6 +597,10 @@ impl CallInfo {
     /// written over the argument, as `Z_FLF_PARAM_STR` converts in a
     /// temporary of the body's and a trace still reads the operand.
     const FRAMELESS: u32 = 1 << 8;
+    /// `ZEND_CALL_FREE_EXTRA_ARGS`: the activation moved arguments past
+    /// the declared parameters beyond the CVs and the temporaries
+    /// (`zend_copy_extra_args`), which the frame's leave gives up.
+    const EXTRA_ARGS: u32 = 1 << 9;
 
     fn has(self, bit: u32) -> bool {
         self.0 & bit != 0
@@ -630,6 +636,11 @@ impl CallInfo {
 
     pub(crate) fn set_at_exception_op(&mut self, on: bool) {
         self.set(Self::AT_EXCEPTION_OP, on);
+    }
+
+    /// The frame holds arguments past its declared parameters.
+    pub(crate) fn extra_args(self) -> bool {
+        self.has(Self::EXTRA_ARGS)
     }
 
     /// The record is a call, being built or a native's being served.
@@ -1006,7 +1017,7 @@ impl RuntimeCache {
     /// up every pass, which is the reading a program that was never
     /// given the slot would have had; php's would be a read past the
     /// allocation.
-    fn get(&self, slot: CacheSlot) -> Cached {
+    pub(crate) fn get(&self, slot: CacheSlot) -> Cached {
         self.slots
             .as_ref()
             .and_then(|slots| slots.get((slot.0 / SLOT_BYTES) as usize))
@@ -1169,6 +1180,29 @@ pub(crate) enum Cached {
         class: ClassId,
         scope: Option<ClassId>,
         function: Function,
+    },
+    /// The declared slot a property fetch or assignment over a constant
+    /// name placed on its first pass, `CACHE_POLYMORPHIC_PTR_EX(cache_slot,
+    /// ce, offset)` and the `prop_info` beside it
+    /// (`zend_get_property_offset`, `Z/Zend/zend_object_handlers.c:456`):
+    /// php writes the class into the slot the opline names, the offset
+    /// into the next and the property's info, there only where it is
+    /// typed, into the third, and its handler reads the slot in place
+    /// where the object's class is the one written. Written only for a
+    /// class served by the standard handlers, a property with no hooks
+    /// and a scope that reaches it ([`crate::api::request::Request::cacheable_slot`]).
+    ///
+    /// `function` and `scope` are the frame's that placed it: php's
+    /// cache is one per scope, and this engine's one per op array, so the
+    /// slot is read back only from a frame of the same function, which
+    /// fixes the scope, and for a frame of no function, an included or
+    /// evaluated file's, only where its scope is `scope` too.
+    Property {
+        class: ClassId,
+        function: Option<Function>,
+        scope: Option<ClassId>,
+        slot: u32,
+        typed: bool,
     },
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.

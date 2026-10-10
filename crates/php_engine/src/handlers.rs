@@ -1623,14 +1623,48 @@ pub(crate) fn echo<T: Tier>(
 /// written there (`CACHED_PTR`, `CACHE_PTR`), as the two `INIT_*_BY_NAME`
 /// read and write theirs. A name nothing is declared under is php's
 /// `Error`, over the same constant.
-pub(crate) fn init_fcall<T: Tier>(
+pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_init_fcall(req, frame, op, at) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     let name = ConstIdx(op.op2);
     init_call(req, frame, code, op, &[name], name)
+}
+
+/// The inline path of `ZEND_INIT_FCALL` (`ZEND_INIT_FCALL_SPEC_CONST`,
+/// `Z/Zend/zend_vm_def.h:4057`): the callee read off the cache slot
+/// `result.num` names, `CACHED_PTR`, and where it is a user function,
+/// the call pushed with the room its frame shape and the arguments past
+/// its parameters take (`_zend_vm_stack_push_call_frame_ex` over the
+/// `used_stack` php's compiler wrote into `op1`). Nothing here raises
+/// but the memory limit on a page the push takes, which is reported at
+/// this opline. `None`, with nothing touched, for a slot not primed yet
+/// and a callee that is a native, a trampoline or anything else
+/// [`Request::call_room`] sizes. `INIT_FCALL_BY_NAME` and
+/// `INIT_NS_FCALL_BY_NAME` read their callee off the same slot once a
+/// first pass primed it, and take it too.
+#[inline(always)] // as `inline_send`
+#[allow(clippy::inline_always)]
+fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -> Option<Edge> {
+    let Cached::Function(function) = req.cached(frame, CacheSlot(op.out)) else {
+        return None;
+    };
+    let room = req.user_function(function)?.shape.room(op.extended_value);
+    let header = exec::Header::call(function, op.extended_value);
+    Some(match req.push_room(room as usize, header) {
+        Ok(_) => Ok(advanced()),
+        Err(fatal) => {
+            req.vm_mut().stand(frame, at);
+            Err(fatal)
+        }
+    })
 }
 
 /// `ZEND_INIT_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:3871`): the call
@@ -1677,6 +1711,9 @@ pub(crate) fn init_fcall_by_name<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+        return edge;
+    }
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     init_call(req, frame, code, op, &[lowered], written)
@@ -1775,17 +1812,18 @@ fn pushed(req: &mut Request, frame: FrameRef, header: exec::Header) -> Edge {
 /// Unknown named parameter $nope
 /// Named parameter $string overwrites previous argument
 /// ```
-pub(crate) fn send_val<T: Tier>(
+pub(crate) fn send_val<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let reserved = match reserve_arg(req, frame, code, op) {
-        Ok(reserved) => reserved,
-        Err(edge) => return edge,
-    };
-    send(req, frame, code, op, reserved.slot)
+    if let Some(edge) = inline_send(req, frame, code, op, A::default()) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    sent(req, frame, code, op)
 }
 
 /// `ZEND_SEND_VAR`: an argument that is a variable or what a call
@@ -1802,17 +1840,109 @@ pub(crate) fn send_val<T: Tier>(
 /// ```expect
 /// string(6) " abc  "
 /// ```
-pub(crate) fn send_var<T: Tier>(
+pub(crate) fn send_var<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default()) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    sent(req, frame, code, op)
+}
+
+/// `SEND_VAL` and `SEND_VAR` past their inline path: the slot
+/// [`reserve_arg`] gives the argument, by number or by name, and the
+/// operand placed there ([`send`]). A call of its own, so that the
+/// inline path before it keeps to the registers it needs.
+#[inline(never)]
+fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
     };
     send(req, frame, code, op, reserved.slot)
+}
+
+/// The inline path of `ZEND_SEND_VAL` and `ZEND_SEND_VAR` by number
+/// (`ZEND_SEND_VAL_SPEC_CONST_CONST`, `_TMP_CONST`,
+/// `ZEND_SEND_VAR_SPEC_CV_CONST`, `Z/Zend/zend_vm_def.h:4886-4983`):
+/// `ZEND_CALL_VAR(EX(call), opline->result.var)` is the callee's slot
+/// for the argument's number, and the operand goes into it as php's
+/// handler puts it, a constant that counts no owner copied
+/// (`ZVAL_COPY_VALUE`), a temporary moved, its slot left `UNDEF` for
+/// the frame's release to pass over, and a CV copied with one more
+/// owner (`ZVAL_COPY`). `None`, with nothing touched, for an argument
+/// by name, a number past what the `INIT` said, a slot an argument
+/// stands in already, a refcounted constant, a reference, whose value
+/// is what is sent (`ZVAL_COPY_DEREF`), and a CV nothing wrote, whose
+/// warning is [`send`]'s. `SEND_VAL_EX` and `SEND_VAR_EX` take it too
+/// where the callee's parameter at the number takes its argument by
+/// value, as php's `_EX` handlers go to the same arm once
+/// `ARG_SHOULD_BE_SENT_BY_REF` is clear.
+///
+/// ```php
+/// function f($a, $b, $c) { return "$a|$b|$c"; }
+/// $s = str_repeat("s", 2);
+/// echo f($s, str_repeat("t", 2), 'c'), "\n";
+/// $r = &$s; $s .= "!";
+/// echo f($r, $s, [1][0]), "\n";
+/// echo f($undef, 1.5, null), "\n";
+/// debug_zval_dump($s);
+/// ```
+/// ```expect
+/// ss|tt|c
+/// ss!|ss!|1
+///
+/// Warning: Undefined variable $undef in %s on line 7
+/// |1.5|
+/// string(3) "ss!" refcount(2)
+/// ```
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_send(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    if op.op2_type == OperandKind::Const {
+        return None;
+    }
+    let to = (op.op2 as usize).checked_sub(1)?;
+    let call = req.vm().building_at()?;
+    let callee = req.vm().stack.frame(call)?;
+    if to >= callee.header().num_args as usize || !callee.slots().get(to)?.is_undef() {
+        return None;
+    }
+    let slots = req.slots_mut(frame);
+    let z = a.read(slots, code, op.op1);
+    match a.kind() {
+        OperandKind::Const if crate::operand::owns_nothing(z) => {}
+        OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => {
+            *slots.get_mut(a.slot(code, op.op1)?)? = Zval::UNDEF;
+        }
+        OperandKind::Cv if crate::operand::movable(z) => {
+            req.heap_mut().addref(z);
+        }
+        _ => return None,
+    }
+    let placed = req
+        .vm_mut()
+        .stack
+        .frame_mut(call)
+        .and_then(|callee| callee.slots_mut().get_mut(to));
+    match placed {
+        Some(placed) => *placed = z,
+        // The callee's slot was read above and the frame is the same
+        // one, so this arm is unreachable; what was taken is given back.
+        None => req.release(Value::of_zval(z)),
+    }
+    Some(Ok(advanced()))
 }
 
 /// `ZEND_SEND_REF` (`Z/Zend/zend_vm_def.h:5087`), the argument a call
@@ -2024,6 +2154,12 @@ pub(crate) fn send_val_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if op.op2_type != OperandKind::Const
+        && !should_be_sent_by_ref(req, op.op2)
+        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
+    {
+        return edge;
+    }
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -2089,6 +2225,12 @@ pub(crate) fn send_var_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if op.op2_type != OperandKind::Const
+        && !should_be_sent_by_ref(req, op.op2)
+        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
+    {
+        return edge;
+    }
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -4775,7 +4917,7 @@ pub(crate) fn new<T: Tier>(
         let next_is_do_fcall = exec::opline_at(code, at.saturating_add(1))
             .is_some_and(|next| next.opcode == php_unit::Opcode::DoFcall);
         if count == 0 && next_is_do_fcall {
-            return jump_to(at.saturating_add(2));
+            return Ok(advance_over_data(req, frame, at));
         }
     }
     let function = constructor.unwrap_or(Function::PASS);
@@ -7209,13 +7351,100 @@ fn fetch_static_prop(
 ///   int(2)
 /// }
 /// ```
-pub(crate) fn fetch_obj_r<T: Tier>(
+pub(crate) fn fetch_obj_r<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fetch_obj_r(req, frame, code, op, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_obj(req, frame, code, op)
+}
+
+/// `FETCH_OBJ_R` past its inline path: [`fetch_obj`] under `BP_VAR_R`.
+/// A call of its own, so that the inline path before it keeps to the
+/// registers it needs.
+#[inline(never)]
+fn fetched_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     fetch_obj(req, frame, code, op, PropertyRead::Warning)
+}
+
+/// The inline path of `ZEND_FETCH_OBJ_R` over a constant name
+/// (`ZEND_FETCH_OBJ_R_SPEC_CV_CONST`, `_UNUSED_CONST`,
+/// `Z/Zend/zend_vm_def.h:2102-2119`): the receiver a CV holds, or
+/// `$this`, whose class is the one the cache slot was primed with, and
+/// the declared slot the slot names read in place, `ZVAL_COPY_DEREF`
+/// into the temporary. `None`, with nothing touched, for a name that is
+/// no constant, a container that is a temporary, which the fetch would
+/// free, or no object, a lazy object, a slot the cache does not name
+/// for this class and frame ([`Request::cached_property`]), one nothing
+/// holds, whose read is `__get`'s or the warning's, and a temporary
+/// holding an owner.
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_fetch_obj_r(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (slot, _) = req.cached_property(
+        frame,
+        property_cache_slot(op),
+        crate::api::values::ClassId(object.class()),
+    )?;
+    let z = crate::operand::deref(object.slot(slot));
+    if z.is_undef() {
+        return None;
+    }
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if req.slots_mut(frame).get(out)?.is_refcounted() {
+        return None;
+    }
+    req.heap_mut().addref(z);
+    *req.slots_mut(frame).get_mut(out)? = z;
+    Some(Ok(advanced()))
+}
+
+/// `CACHE_ADDR(opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS)`: the
+/// first of the three cache slots a property opcode over a constant
+/// name carries in `extended_value`, below the fetch flags a `_W` and a
+/// `_FUNC_ARG` fetch carry beside it.
+fn property_cache_slot(op: &Opline) -> CacheSlot {
+    CacheSlot(op.extended_value & !(FETCH_REF | FETCH_DIM_WRITE))
+}
+
+/// The object a property opcode's inline path works on: `$this` for an
+/// `UNUSED` container, the object a CV holds, a reference followed,
+/// for a CV, and only where the name is a constant and the object is
+/// not lazy. None for every other container, which the kernel reads.
+#[inline(always)] // as `inline_fetch_obj_r`
+#[allow(clippy::inline_always)]
+fn inline_receiver(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+    b: impl Operand,
+) -> Option<php_heap::Obj> {
+    if b.kind() != OperandKind::Const {
+        return None;
+    }
+    let object = match a.kind() {
+        OperandKind::Unused => req.vm().this(frame)?.heap(),
+        OperandKind::Cv => {
+            crate::operand::deref(a.read(req.slots_mut(frame), code, op.op1)).as_obj()?
+        }
+        _ => return None,
+    };
+    (object.laziness() == php_heap::Laziness::Eager).then_some(object)
 }
 
 /// `ZEND_FETCH_OBJ_IS` (`Z/Zend/zend_vm_def.h:2276`), a link of a chain
@@ -7305,6 +7534,9 @@ fn fetch_obj(
     .deref();
     let read = if let Some(object) = container.as_object().copied() {
         name.bytes(req, frame, code, op).and_then(|name| {
+            if op.op2_type == OperandKind::Const {
+                req.prime_property(frame, property_cache_slot(op), object, &name);
+            }
             let table = req.object_handlers(object.heap());
             table
                 .read_property(req, object, &name, fetch)
@@ -7456,13 +7688,58 @@ fn fetch_obj(
 /// ```expect
 /// int(1)
 /// ```
-pub(crate) fn fetch_obj_w<T: Tier>(
+pub(crate) fn fetch_obj_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fetch_obj_w(req, frame, code, op, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_obj_place(req, frame, code, op)
+}
+
+/// `FETCH_OBJ_W` past its inline path: [`fetch_obj_place`] under
+/// `BP_VAR_W`. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn fetched_obj_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     fetch_obj_place(req, frame, code, op, PropertyRead::Silent)
+}
+
+/// The inline path of `ZEND_FETCH_OBJ_W` over a constant name
+/// (`zend_fetch_property_address`'s cached arm,
+/// `Z/Zend/zend_execute.c:3540-3560`): the declared slot the cache slot
+/// names on a receiver of the class it was primed with, where it holds
+/// a value, left in the `VAR` as an `IS_INDIRECT` for the write after
+/// it. `None` as [`inline_fetch_obj_r`]'s, and for a typed slot, whose
+/// fetch flags are [`fetch_flags`]', and a `VAR` holding an owner.
+#[inline(always)] // as `inline_fetch_obj_r`
+#[allow(clippy::inline_always)]
+fn inline_fetch_obj_w(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (slot, typed) = req.cached_property(
+        frame,
+        property_cache_slot(op),
+        crate::api::values::ClassId(object.class()),
+    )?;
+    let place = object
+        .slot_ref(slot)
+        .filter(|place| !typed && !place.read().is_undef())?;
+    let out = req
+        .slots_mut(frame)
+        .get_mut(exec::temporary_slot(code, op.out) as usize)
+        .filter(|out| !out.is_refcounted())?;
+    *out = Zval::indirect(place);
+    Some(Ok(advanced()))
 }
 
 /// `ZEND_FETCH_OBJ_RW` (`Z/Zend/zend_vm_def.h:2072`), the property
@@ -7561,12 +7838,12 @@ pub(crate) fn fetch_obj_func_arg<T: Tier>(
     op: &Opline,
 ) -> Edge {
     if !sends_arg_by_ref(req) {
-        return fetch_obj_r::<T>(req, frame, code, op);
+        return fetched_obj(req, frame, code, op);
     }
     if matches!(op.op1_type, OperandKind::Const | OperandKind::Tmp) {
         return use_tmp_in_write_context(req, frame, code, op);
     }
-    fetch_obj_w::<T>(req, frame, code, op)
+    fetched_obj_place(req, frame, code, op)
 }
 
 /// `ZEND_FETCH_DIM_FUNC_ARG` (`Z/Zend/zend_vm_def.h:2035`), an element
@@ -7607,7 +7884,7 @@ pub(crate) fn fetch_dim_func_arg<T: Tier>(
         if matches!(op.op1_type, OperandKind::Const | OperandKind::Tmp) {
             return use_tmp_in_write_context(req, frame, code, op);
         }
-        return fetch_dim_w::<T>(req, frame, code, op);
+        return fetched_dim_place(req, frame, code, op);
     }
     if op.op2_type == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
@@ -7615,7 +7892,7 @@ pub(crate) fn fetch_dim_func_arg<T: Tier>(
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
     }
-    fetch_dim_r::<T>(req, frame, code, op)
+    fetched_dim(req, frame, code, op)
 }
 
 /// `ZEND_FETCH_STATIC_PROP_FUNC_ARG` (`Z/Zend/zend_vm_def.h:1912`), a
@@ -8002,6 +8279,9 @@ fn property_place(
         let thrown = non_object_place(req, (frame, code, op), read, &container, &name);
         return Ok(PropertyFound::Threw(thrown));
     };
+    if op.op2_type == OperandKind::Const {
+        req.prime_property(frame, property_cache_slot(op), object, &name);
+    }
     let (object, lent) = match req.lazy_place(object, &name) {
         Ok(placed) => placed,
         Err(thrown) => {
@@ -8307,12 +8587,100 @@ fn freeing_container(
 /// #0 {main}
 ///   thrown in %s on line 11
 /// ```
-pub(crate) fn fetch_dim_r<T: Tier>(
+pub(crate) fn fetch_dim_r<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fetch_dim_r(req, frame, code, op, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_dim(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_FETCH_DIM_R` (`ZEND_FETCH_DIM_R_SPEC_*`,
+/// `Z/Zend/zend_vm_def.h:1970-1995`, `fetch_dim_r_array`): an array's
+/// element at a long or string key ([`inline::dim_key`],
+/// [`inline::element`]) copied into the temporary with one more owner.
+/// `None`, with nothing touched, for a container that is no array, a
+/// key the array has not got, a dimension php converts, an operand the
+/// fetch would have to give up, and a temporary holding an owner.
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_fetch_dim_r(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (array, (key, free_dim)) = inline_dim(slots, code, op, a, b)?;
+    let z = inline::element(array, key)?;
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    *slots.get_mut(out)? = z;
+    req.heap_mut().addref(z);
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    Some(Ok(advanced()))
+}
+
+/// The array and the key a dimension read's inline path works on: the
+/// array a CV holds, a reference followed, or one a constant or a
+/// temporary holds that counts no owner, so the opcode has nothing to
+/// give up (`FREE_OP1`); and the key [`inline_key`] reads, with whether
+/// the dimension is given up after. None for every other pair.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_dim(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+    b: impl Operand,
+) -> Option<(php_heap::Arr, (php_heap::Key, bool))> {
+    let container = a.read(slots, code, op.op1);
+    let container = match a.kind() {
+        OperandKind::Cv => crate::operand::deref(container),
+        OperandKind::Unused => return None,
+        _ if container.is_refcounted() => return None,
+        _ => container,
+    };
+    Some((container.as_arr()?, inline_key(slots, code, op, b)?))
+}
+
+/// The key [`inline::dim_key`] reads out of a dimension, and whether
+/// the opcode gives the dimension up after it (`FREE_OP2`): a
+/// temporary string, which serves no code as it goes. None for an
+/// append and for a temporary holding any other owner.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_key(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
+    b: impl Operand,
+) -> Option<(php_heap::Key, bool)> {
+    let dim = b.read(slots, code, op.op2);
+    let free = matches!(b.kind(), OperandKind::Tmp | OperandKind::Var) && dim.is_refcounted();
+    if b.kind() == OperandKind::Unused || (free && dim.kind() != php_heap::ZvalType::String) {
+        return None;
+    }
+    Some((inline::dim_key(dim, b.kind() == OperandKind::Const)?, free))
+}
+
+/// `FETCH_DIM_R` past its inline path: the container read as
+/// `zend_fetch_dimension_address_read_R` reads it and the read made by
+/// [`read_dimension`]. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn fetched_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
     let read = read_dimension(req, frame, code, op, &container, DimRead::Warning)?;
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
@@ -9612,13 +9980,167 @@ fn write_entry(req: &mut Request, array: PhpArray, at: WriteAt) -> Result<Landin
 /// #0 {main}
 ///   thrown in %s on line 9
 /// ```
-pub(crate) fn fetch_dim_w<T: Tier>(
+pub(crate) fn fetch_dim_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fetch_dim_w(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_dim_place(req, frame, code, op)
+}
+
+/// `FETCH_DIM_W` past its inline path: [`fetch_dim_place`] under
+/// `BP_VAR_W`. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn fetched_dim_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     fetch_dim_place(req, frame, code, op, DimRead::Silent, Keep::Nothing)
+}
+
+/// The inline path of `ZEND_FETCH_DIM_W` over a CV
+/// (`zend_fetch_dimension_address_W` into
+/// `zend_fetch_dimension_address_inner_W`): an array the CV alone owns,
+/// so `SEPARATE_ARRAY` copies nothing, whose element at the key holds a
+/// value, named in place by the `VAR` as an `IS_INDIRECT` for the write
+/// after it; and the same over a `VAR` a `FETCH_*_W` before it left
+/// naming such an array, `$a[1][0] = ...`'s inner link. `None`, with
+/// nothing touched, for every other container, a
+/// key the array has not got, which the write lays down, an element
+/// that is a reference or a symbol table's `IS_INDIRECT`, and a `VAR`
+/// holding an owner.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_fetch_dim_w(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if req.slots_mut(frame).get(out)?.is_refcounted() {
+        return None;
+    }
+    let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
+        Ok(placed) => placed,
+        Err(edge) => return Some(edge),
+    };
+    free_dim_operands(req, frame, code, op, (a, placed.free_dim));
+    *req.slots_mut(frame).get_mut(out)? = Zval::indirect(placed.entry);
+    // The table the entry stands in, for the write after this to hold
+    // across what it serves, as every `FETCH_DIM_W` notes it.
+    req.note_walk(Some((placed.entry, Value::of_zval(placed.table))));
+    Some(Ok(advanced()))
+}
+
+/// The element a dimension write's inline path writes in place, as
+/// `zend_fetch_dimension_address_inner_W` finds or lays it down: the
+/// array a CV holds, or the place a `FETCH_*_W` left in a `VAR` as an
+/// `IS_INDIRECT` holds (`GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`), where
+/// that array is refcounted with one owner and is no reference's, so
+/// `SEPARATE_ARRAY` copies nothing; the entry at the key [`inline_key`]
+/// reads, or the next one for an append, laid down holding `null` where
+/// the table has none (`zend_hash_lookup`, `zend_hash_next_index_insert`),
+/// which serves no code. None, with nothing touched, for every other
+/// container, an entry that is a reference or a symbol table's
+/// `IS_INDIRECT`, and an append past the last index, whose `Error` is
+/// the kernel's; the memory limit a laying-down meets is raised at the
+/// opline at `at`, the `Err`.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn owned_entry(
+    req: &mut Request,
+    frame: FrameRef,
+    (code, op, at): (&OpArray, &Opline, u32),
+    a: impl Operand,
+    b: impl Operand,
+) -> Option<Result<OwnedEntry, Edge>> {
+    let slots = req.slots_mut(frame);
+    let held = a.read(slots, code, op.op1);
+    let held = match a.kind() {
+        OperandKind::Cv => held,
+        OperandKind::Var => held.as_indirect()?.read(),
+        _ => return None,
+    };
+    let array = held.as_arr()?;
+    if !held.is_refcounted() || array.refcount() != 1 {
+        return None;
+    }
+    let key = match b.kind() {
+        OperandKind::Unused => None,
+        _ => Some(inline_key(slots, code, op, b)?),
+    };
+    let found = match key {
+        Some((key, _)) => array.value_ref(key),
+        None => None,
+    };
+    let entry = if let Some(entry) = found {
+        entry
+    } else {
+        let laid = match key {
+            Some((key, _)) => req.array_lookup(array, key),
+            None => req.array_next_entry(array),
+        };
+        match laid {
+            Ok(entry) => entry?,
+            Err(thrown) => {
+                req.vm_mut().stand(frame, at);
+                return Some(Err(threw(req, frame, &thrown)));
+            }
+        }
+    };
+    let z = entry.read();
+    let plain = !z.is_undef()
+        && !matches!(
+            z.kind(),
+            php_heap::ZvalType::Reference | php_heap::ZvalType::Indirect
+        );
+    plain.then_some(Ok(OwnedEntry {
+        entry,
+        table: held,
+        free_dim: key.is_some_and(|(_, free)| free),
+    }))
+}
+
+/// An entry [`owned_entry`] found or laid down: the place, the zval of
+/// the table it stands in, and whether the dimension is a temporary
+/// string the opcode gives up after the write (`FREE_OP2`).
+#[derive(Clone, Copy)]
+struct OwnedEntry {
+    entry: php_heap::ZvalRef,
+    table: Zval,
+    free_dim: bool,
+}
+
+/// `FREE_OP1_VAR_PTR()` and `FREE_OP2()` after a dimension write's
+/// inline path: the `VAR` the container was named through, an
+/// `IS_INDIRECT` that owns nothing, emptied as [`exec::free_operand`]
+/// empties it, and a temporary string the dimension was, given up,
+/// which serves no code.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn free_dim_operands(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, free_dim): (impl Operand, bool),
+) {
+    if a.kind() == OperandKind::Var
+        && let Some(var) = a
+            .slot(code, op.op1)
+            .and_then(|at| req.slots_mut(frame).get_mut(at))
+    {
+        *var = Zval::UNDEF;
+    }
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
 }
 
 /// `ZEND_FETCH_DIM_RW` (`Z/Zend/zend_vm_def.h:2024`), the link of a
@@ -10465,6 +10987,12 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             "InternalError: {opcode} with no call frame under it"
         )));
     };
+    // A user function is never a trampoline, so the call it names is
+    // entered before the trampolines are asked about it.
+    if let Some(user) = req.user_function(function) {
+        let shape = user.shape;
+        return enter(req, frame, code, op, call, shape);
+    }
     let function = match crate::trampoline::hand_to_magic(req, function) {
         Ok(function) => function,
         Err(thrown) => {
@@ -10563,6 +11091,9 @@ pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_init_fcall(req, frame, op, req.vm().opline(frame)) {
+        return edge;
+    }
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     let unqualified = ConstIdx(op.op2.saturating_add(2));
@@ -10610,7 +11141,8 @@ pub(crate) fn jmp_frameless<T: Tier>(
         Cached::Unprimed
         | Cached::Function(_)
         | Cached::Class(_)
-        | Cached::ClassAndCallee { .. } => {
+        | Cached::ClassAndCallee { .. }
+        | Cached::Property { .. } => {
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
                 .as_str_bytes()
@@ -11464,7 +11996,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         write_out(req, frame, code, op, &landed);
         req.release(garbage);
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     }
     // The owner the source had of `held` is the cell's now.
     let cell = match req.make_ref(source) {
@@ -11511,7 +12043,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     write_out(req, frame, code, op, &bound);
     req.release(garbage);
     exec::free_operand(req, frame, code, data_type, data_at);
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two
@@ -11737,12 +12269,125 @@ pub(crate) fn assign_obj_ref<T: Tier>(
 /// int(0)
 /// DONE
 /// ```
-pub(crate) fn assign_obj<T: Tier>(
+pub(crate) fn assign_obj<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_assign_obj(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    assigned_obj(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_ASSIGN_OBJ` over a constant name
+/// (`ZEND_ASSIGN_OBJ_SPEC_CV_CONST_OP_DATA_*`, `_UNUSED_CONST_*`,
+/// `Z/Zend/zend_vm_def.h:2489-2520`): the declared slot the cache slot
+/// names on a receiver of the class it was primed with, holding a value
+/// that owns nothing, takes the `OP_DATA` value as
+/// `zend_assign_to_variable` takes it, a constant copied, a temporary
+/// moved and a CV copied with one more owner, and the temporary takes it
+/// too under `RETURN_VALUE_USED`; nothing is given up, so nothing runs.
+/// `None`, with nothing touched, as [`inline_fetch_obj_r`]'s, and for a
+/// typed slot, which `zend_assign_to_typed_prop` holds to its type, its
+/// readonly and its set visibility among it, a slot holding an owner or
+/// a reference, a value that is a reference or nothing written, and a
+/// temporary holding an owner.
+///
+/// ```php
+/// class C { public $p = 1; public $q; private $r = 0;
+///     function set($v) { $this->r = $v; return $this->r; } }
+/// $c = new C; $s = str_repeat("s", 2);
+/// for ($i = 0; $i < 3; $i++) { $x = $c->p = $i; $c->q = $s; echo $c->set($i * 2), $x, "|"; }
+/// $c->p = new ArrayObject([1]); $c->p = 2; $c->q = null;
+/// var_dump($c, $s);
+/// ```
+/// ```expect
+/// 00|21|42|object(C)#1 (3) {
+///   ["p"]=>
+///   int(2)
+///   ["q"]=>
+///   NULL
+///   ["r":"C":private]=>
+///   int(4)
+/// }
+/// string(2) "ss"
+/// ```
+#[inline(always)] // as `inline_fetch_obj_r`
+#[allow(clippy::inline_always)]
+fn inline_assign_obj(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let object = inline_receiver(req, frame, code, op, a, b)?;
+    let (slot, typed) = req.cached_property(
+        frame,
+        property_cache_slot(op),
+        crate::api::values::ClassId(object.class()),
+    )?;
+    let place = object.slot_ref(slot).filter(|place| {
+        let held = place.read();
+        !typed && !held.is_undef() && !held.is_refcounted()
+    })?;
+    let z = data_value(req, frame, code, op, at)?;
+    place.write(z);
+    Some(Ok(Next::Jump(at.saturating_add(2))))
+}
+
+/// The `OP_DATA` value an assignment's inline path takes, as
+/// `zend_assign_to_variable` takes it: a constant that counts no owner
+/// copied, a temporary moved out of its slot and a CV copied with one
+/// more owner, and, under `RETURN_VALUE_USED`, one more owner for the
+/// temporary, which takes it too. None, with nothing touched, for a
+/// value nothing wrote, whose warning is the kernel's, a reference,
+/// whose value is what is assigned, a refcounted constant, and a
+/// temporary holding an owner.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn data_value(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+) -> Option<Zval> {
+    let data =
+        exec::opline_at(code, at.saturating_add(1)).filter(|data| data.opcode == Opcode::OpData)?;
+    let value = ByKind(data.op1_type);
+    let slots = req.slots_mut(frame);
+    let z = value.read(slots, code, data.op1);
+    let used = op.out_type != OperandKind::Unused;
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if !crate::operand::movable(z)
+        || (value.kind() == OperandKind::Const && !crate::operand::owns_nothing(z))
+        || (used && slots.get(out)?.is_refcounted())
+    {
+        return None;
+    }
+    if matches!(value.kind(), OperandKind::Tmp | OperandKind::Var) {
+        *slots.get_mut(value.slot(code, data.op1)?)? = Zval::UNDEF;
+    } else {
+        req.heap_mut().addref(z);
+    }
+    if used {
+        req.heap_mut().addref(z);
+        *req.slots_mut(frame).get_mut(out)? = z;
+    }
+    Some(z)
+}
+
+/// `ASSIGN_OBJ` past its inline path: the value, the receiver and the
+/// name read as php reads them, and the write [`assign_property`] makes.
+/// A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let (at, data) = data_after(req, frame, code, op)?;
     // A CV is read through its slot after the value, as php reads
     // `object` after `GET_OP_DATA_ZVAL_PTR`: an undefined value's
@@ -11775,6 +12420,11 @@ pub(crate) fn assign_obj<T: Tier>(
         container.as_object().copied(),
     ) {
         (Ok(name), Some(object)) => {
+            if op.op2_type == OperandKind::Const
+                && let Some(bytes) = name.as_str_bytes()
+            {
+                req.prime_property(frame, property_cache_slot(op), object, bytes);
+            }
             match assign_property(req, frame, code, op, object, &name, value) {
                 Ok(written) => written,
                 Err(fatal) => {
@@ -11810,7 +12460,7 @@ pub(crate) fn assign_obj<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `ASSIGN_OBJ`'s body over an object: the name placed
@@ -12138,7 +12788,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     };
     let Some(info) = placed else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     // `zend_assign_to_typed_prop`'s set-visibility arm, after the value
@@ -12158,7 +12808,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
         Ok(pair) => landed_out(req, frame, code, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// The slot one of the five read-modify-write opcodes over a
@@ -12403,7 +13053,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
@@ -12451,7 +13101,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
         write_out(req, frame, code, op, &cell.get());
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     }
     let stepped = match ty {
         None => stepped,
@@ -12471,7 +13121,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // time: a weak conversion raises a deprecation and php raises it
     // once.
     req.store_static_property(declaring, &name, stepped);
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `zend_binary_assign_op_typed_prop` (`Z/Zend/zend_execute.c:1693`):
@@ -12829,7 +13479,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     };
     let Some(source) = write_place(req, frame, code, data_type, data_at) else {
         return Err(Fatal::Error(String::from(
@@ -12901,7 +13551,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             },
         );
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
@@ -13194,12 +13844,82 @@ fn assign_text_dim(
 /// Undefined variable $y
 /// NULL
 /// ```
-pub(crate) fn assign_dim<T: Tier>(
+pub(crate) fn assign_dim<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_assign_dim(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    assigned_dim(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_ASSIGN_DIM` over a CV
+/// (`ZEND_ASSIGN_DIM_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:2621-2660`): an
+/// array the CV alone owns, whose element at the key holds a value that
+/// owns nothing, takes the `OP_DATA` value ([`data_value`]); nothing is
+/// given up, so nothing runs. `None`, with nothing touched, as
+/// [`inline_fetch_dim_w`]'s, for an append, an element holding an
+/// owner, and a value or a temporary [`data_value`] refuses.
+///
+/// ```php
+/// $a = [1, 2, 3]; $h = ["x" => 1, "y" => [1]]; $b = $a; $s = str_repeat("s", 2);
+/// for ($i = 0; $i < 3; $i++) { $a[$i] = $i * 2; $r = $h["x"] = $s; }
+/// $a[1] = 9; $h["y"] = 0; $a[5] = 1; $h["x"] = 2;
+/// var_dump($a, $b[1], $h, $r);
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   int(9)
+///   [2]=>
+///   int(4)
+///   [5]=>
+///   int(1)
+/// }
+/// int(2)
+/// array(2) {
+///   ["x"]=>
+///   int(2)
+///   ["y"]=>
+///   int(0)
+/// }
+/// string(2) "ss"
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_assign_dim(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
+        Ok(placed) => placed,
+        Err(edge) => return Some(edge),
+    };
+    if placed.entry.read().is_refcounted() {
+        return None;
+    }
+    let z = data_value(req, frame, code, op, at)?;
+    placed.entry.write(z);
+    free_dim_operands(req, frame, code, op, (a, placed.free_dim));
+    Some(Ok(Next::Jump(at.saturating_add(2))))
+}
+
+/// `ASSIGN_DIM` past its inline path: the container placed for the
+/// write ([`write_container`]) and the write each kind of container
+/// takes. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let (at, data) = data_after(req, frame, code, op)?;
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
@@ -14102,7 +14822,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// The operation of a compound assignment over a declared property
@@ -17033,12 +17753,99 @@ fn set_fe_iter(req: &mut Request, frame: FrameRef, slot: u32, walk: Option<HashI
 /// ```expect
 /// n=1 s=x n=1 p=2 s=x q=3
 /// ```
-pub(crate) fn fe_fetch_r<T: Tier>(
+pub(crate) fn fe_fetch_r<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fe_fetch_r(req, frame, code, op, A::default()) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_element(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_FE_FETCH_R` over an array into a CV
+/// (`ZEND_FE_FETCH_R_SPEC_VAR_HANDLER`, `Z/Zend/zend_vm_def.h:7090-7140`):
+/// the next live position from `Z_FE_POS`, the jump to
+/// `extended_value` past the end, and otherwise the position moved past
+/// it, the key into the temporary under `RETURN_VALUE_USED` and the
+/// value, a reference followed, into the CV with one more owner. `None`,
+/// with nothing touched, for an object or an iterator, a target that is
+/// no CV, an element that is a symbol table's `IS_INDIRECT`, a CV that
+/// holds an owner other than a string, a reference among them, whose
+/// write is `zend_assign_to_variable`'s, and a temporary holding an
+/// owner. A string the CV held is given up after the write, which
+/// serves no code.
+///
+/// ```php
+/// $a = [1, "s" => str_repeat("b", 2), 3 => [4]]; unset($a[0]); $a[] = 5;
+/// foreach ($a as $k => $v) { echo $k, "=", is_array($v) ? "A" : $v, " "; }
+/// $r = 7; $x = [&$r, 8]; foreach ($x as $v) echo $v; foreach ([] as $v) echo "never";
+/// echo "\n";
+/// ```
+/// ```expect
+/// s=bb 3=A 4=5 78
+/// ```
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_fe_fetch_r(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    if op.op2_type != OperandKind::Cv {
+        return None;
+    }
+    let var = a.slot(code, op.op1)?;
+    let target = op.op2 as usize;
+    let out = exec::temporary_slot(code, op.out) as usize;
+    let slots = req.slots_mut(frame);
+    let held = *slots.get(var)?;
+    let array = held.as_arr()?;
+    let Some((found, key, value)) = array.live_from(held.fe_pos()) else {
+        return Some(jump_to(op.extended_value));
+    };
+    let value = crate::operand::deref(value);
+    let keyed = op.out_type != OperandKind::Unused;
+    let old = *slots.get(target)?;
+    if value.is_undef()
+        || value.kind() == php_heap::ZvalType::Indirect
+        || (old.is_refcounted() && old.kind() != php_heap::ZvalType::String)
+        || (keyed && slots.get(out)?.is_refcounted())
+    {
+        return None;
+    }
+    let key = match key {
+        php_heap::Key::Long(n) => Zval::long(n),
+        php_heap::Key::Str(name) => Zval::string(name),
+    };
+    slots.get_mut(var)?.set_fe_pos(found.saturating_add(1));
+    if keyed {
+        *slots.get_mut(out)? = key;
+    }
+    *slots.get_mut(target)? = value;
+    let heap = req.heap_mut();
+    if keyed {
+        heap.addref(key);
+    }
+    heap.addref(value);
+    // What the CV held, a string at most, which serves no code as it goes.
+    if old.is_refcounted() {
+        req.release_nogc(Value::of_zval(old));
+    }
+    Some(Ok(advanced()))
+}
+
+/// `FE_FETCH_R` past its inline path: the next element of an array, an
+/// object's properties or an iterator, by [`foreach_var`]'s decoding.
+/// A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let slot = exec::temporary_slot(code, op.op1);
     let Some(at) = req.slot_ptr(frame, slot) else {
         return Err(Fatal::Error(String::from(
@@ -17944,13 +18751,83 @@ pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op
 /// string(1) "b"
 /// string(1) "a"
 /// ```
-pub(crate) fn concat<T: Tier>(
+pub(crate) fn concat<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_concat(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     concat_into(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_CONCAT` and `ZEND_FAST_CONCAT` over two
+/// strings (`Z/Zend/zend_vm_def.h:382-431`, `:3293-3341`), the arm
+/// [`concat_into`] takes for them read off the zvals as they stand: a
+/// left temporary's string grown where it stands
+/// ([`Request::string_append`]), any other left side joined into a new
+/// string ([`crate::ops::join`]), the right side given up where it is a
+/// temporary, and the string into the temporary. `None`, with nothing
+/// touched, for anything but two strings, an empty side that is no
+/// constant, which hands the other on, and a temporary holding an
+/// owner. What the join refuses, the memory limit or php's
+/// `String size overflow`, is raised at this opline, as the kernel's.
+///
+/// ```php
+/// $a = "ab"; $b = "cd"; $e = "";
+/// for ($i = 0; $i < 2; $i++) { echo $a . $b, "|", "x$a", "|", $a . "", "|", $a . $e, "|", strtoupper($a) . $b, "\n"; }
+/// ```
+/// ```expect
+/// abcd|xab|ab|ab|ABcd
+/// abcd|xab|ab|ab|ABcd
+/// ```
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_concat(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (left, right) = (a.read(slots, code, op.op1), b.read(slots, code, op.op2));
+    let (x, y) = (left.as_str()?, right.as_str()?);
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if (a.kind() != OperandKind::Const && x.is_empty())
+        || (b.kind() != OperandKind::Const && y.is_empty())
+        || slots.get(out)?.is_refcounted()
+    {
+        return None;
+    }
+    let (x, y) = (PhpString::of(x), PhpString::of(y));
+    let joined = if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) {
+        // The temporary's owner is the append's now.
+        *slots.get_mut(a.slot(code, op.op1)?)? = Zval::UNDEF;
+        req.string_append(x, y)
+    } else {
+        crate::ops::join(req, x, y)
+    };
+    if matches!(b.kind(), OperandKind::Tmp | OperandKind::Var) {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    Some(match joined {
+        Ok(joined) => {
+            if let Some(into) = req.slots_mut(frame).get_mut(out) {
+                *into = Zval::string(joined.heap());
+            }
+            Ok(advanced())
+        }
+        Err(thrown) => {
+            req.vm_mut().stand(frame, at);
+            threw(req, frame, &thrown)
+        }
+    })
 }
 
 /// The body `CONCAT` and `FAST_CONCAT` share, php's arms for two
@@ -17996,6 +18873,7 @@ pub(crate) fn concat<T: Tier>(
 /// Warning: Undefined variable $v in %s on line 2
 /// |
 /// ```
+#[inline(never)]
 fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     // Each operand is read once: a `CV` that is undefined warns where
     // it is read.
@@ -18061,12 +18939,17 @@ fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
 /// Stack trace:
 /// #0 {main}
 /// ```
-pub(crate) fn fast_concat<T: Tier>(
+pub(crate) fn fast_concat<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_concat(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     concat_into(req, frame, code, op)
 }
 
@@ -18084,6 +18967,12 @@ pub(crate) fn fast_concat<T: Tier>(
 /// string of their joined length at the `ROPE_END`. A piece whose
 /// conversion threw leaves the throwable pending
 /// (`ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`).
+///
+/// The three rope opcodes dispatch unspecialised, unlike the rest of
+/// design §5.8's hot list: what a rope costs is the array, laid down,
+/// appended to, walked and destroyed for every interpolated string,
+/// and not the reading of its pieces, which an inline path would save
+/// (#2580).
 ///
 /// ```php
 /// $a = 1; $b = 2; echo "$a-$b-$a";
@@ -18384,13 +19273,79 @@ pub(crate) fn is_not_equal<T: Tier>(
 /// `ZEND_IS_IDENTICAL`: [`crate::ops::is_identical`], the same way, both
 /// operands dereferenced (`GET_OP*_ZVAL_PTR_DEREF`), which the kernel
 /// does.
-pub(crate) fn is_identical<T: Tier>(
+pub(crate) fn is_identical<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) =
+        inline_identical::<T>(req, frame, code, op, at, (A::default(), B::default()))
+    {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     compared_branch::<T>(req, frame, code, op, crate::ops::is_identical)
+}
+
+/// The inline path of `ZEND_IS_IDENTICAL` (`ZEND_IS_IDENTICAL_SPEC_*`,
+/// `Z/Zend/zend_vm_def.h:477-497`): both operands, a reference followed
+/// (`GET_OP*_ZVAL_PTR_DEREF`), compared as [`inline::identical`]
+/// compares them, the answer branched on where a `JMPZ` or a `JMPNZ`
+/// is fused to it ([`fused_jump`]) and written into the temporary
+/// otherwise. `None`, with nothing touched, for a pair the kernel
+/// compares, a temporary operand that holds an owner, which the opcode
+/// would give up (`FREE_OP1`, `FREE_OP2`), and a temporary for the answer
+/// holding an owner.
+///
+/// ```php
+/// $a = 1; $b = "x"; $c = [1]; $o = new stdClass;
+/// for ($i = 0; $i < 3; $i++) { if ($i === 1) echo "one"; var_dump($a === $i, $b === "x", $c === [1], $o === $o); }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// onebool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+#[inline(always)] // as `inline_arith`
+#[allow(clippy::inline_always)]
+fn inline_identical<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let side = |kind: OperandKind, z: Zval| match kind {
+        OperandKind::Tmp | OperandKind::Var if z.is_refcounted() => None,
+        _ => Some(crate::operand::deref(z)),
+    };
+    let x = side(a.kind(), a.read(slots, code, op.op1))?;
+    let y = side(b.kind(), b.read(slots, code, op.op2))?;
+    let answer = inline::identical(x, y)?;
+    if let Some(jump) = fused_jump(code, op, at) {
+        return Some(branch_fused::<T>(
+            req,
+            frame,
+            at.saturating_add(1),
+            &jump,
+            answer,
+        ));
+    }
+    write_owning_nothing(slots, code, op, Zval::bool(answer))?;
+    Some(Ok(advanced()))
 }
 
 /// `ZEND_IS_NOT_IDENTICAL`: [`crate::ops::is_not_identical`], the same
@@ -18966,6 +19921,88 @@ pub(crate) fn isset_isempty_dim_obj<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    // Read through `ByKind` and not specialised: this compiler writes
+    // `isset($this[0])` over an `UNUSED` container where php's writes a
+    // `FETCH_THIS` first, a kind the spec does not list.
+    let at = req.vm().opline(frame);
+    let operands = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_isset_dim::<T>(req, frame, code, op, at, operands) {
+        return edge;
+    }
+    tested_dim::<T>(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_ISSET_ISEMPTY_DIM_OBJ` over an array
+/// (`Z/Zend/zend_vm_def.h:7539-7570`, `isset_again`): the element at
+/// a long or string key ([`inline::dim_key`], [`inline::element`])
+/// read as `isset` reads it, set where it is anything but `null`, and
+/// as `empty` reads it, its truth as [`inline::truth`] reads a scalar;
+/// a key the array has not got is unset and empty. The answer is
+/// branched on where a `JMPZ` or a `JMPNZ` is fused to it
+/// ([`fused_jump`]) and written into the temporary otherwise. `None`,
+/// with nothing touched, as [`inline_fetch_dim_r`]'s, for an `empty` of
+/// an element whose truth is the kernel's, and a temporary holding an
+/// owner.
+///
+/// ```php
+/// $a = [0, null, "", "0", [], 1.5, "k" => "v"]; $k = "k"; $n = 1;
+/// foreach ([0, 1, 2, 3, 4, 5, 6, "k"] as $i) echo isset($a[$i]) ? "s" : "u", empty($a[$i]) ? "e" : "f", " ";
+/// var_dump(isset($a[$k]), isset($a[$n]), !empty($a[$k]));
+/// if (isset($a[0])) echo "branch\n";
+/// ```
+/// ```expect
+/// se ue se se se sf ue sf bool(true)
+/// bool(false)
+/// bool(true)
+/// branch
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_isset_dim<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (array, (key, free_dim)) = inline_dim(slots, code, op, a, b)?;
+    let found = inline::element(array, key);
+    let answer = if op.extended_value & ISEMPTY == 0 {
+        found.is_some_and(|z| z.kind() != php_heap::ZvalType::Null)
+    } else {
+        match found {
+            None => true,
+            Some(z) => !inline::truth(z)?,
+        }
+    };
+    let out = exec::temporary_slot(code, op.out) as usize;
+    let fused = fused_jump(code, op, at);
+    if fused.is_none() && slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    if let Some(jump) = fused {
+        return Some(branch_fused::<T>(
+            req,
+            frame,
+            at.saturating_add(1),
+            &jump,
+            answer,
+        ));
+    }
+    write_owning_nothing(req.slots_mut(frame), code, op, Zval::bool(answer))?;
+    Some(Ok(advanced()))
+}
+
+/// `ISSET_ISEMPTY_DIM_OBJ` past its inline path: the container read as
+/// `BP_VAR_IS` reads it and the test each kind of container takes. A
+/// call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
     let answer = if let Some(array) = container.as_array().copied() {
@@ -19528,12 +20565,68 @@ pub(crate) fn array_key_exists<T: Tier>(
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
 /// bit in `extended_value`, into the temporary; the operand freed after
 /// it.
-pub(crate) fn count<T: Tier>(
+pub(crate) fn count<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_count(req, frame, code, op, A::default()) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    counted(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_COUNT` over an array
+/// (`Z/Zend/zend_vm_def.h:9178-9182`): `zend_hash_num_elements` into
+/// the temporary. `None`, with nothing touched, for an operand that is
+/// no array, one a temporary holds that counts owners, which the count
+/// would give up, a symbol table holding emptied `IS_INDIRECT` slots,
+/// which `zend_array_count` walks, and a temporary holding an owner.
+///
+/// ```php
+/// $a = [1, 2, [3, 4]]; $r = &$a; $e = [];
+/// var_dump(count($a), count($r), count($e), count($a[2]), sizeof($a), count([1, 2]));
+/// function f() { $x = 1; $y = 2; return count(get_defined_vars()); }
+/// var_dump(f());
+/// ```
+/// ```expect
+/// int(3)
+/// int(3)
+/// int(0)
+/// int(2)
+/// int(3)
+/// int(2)
+/// int(2)
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_count(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let z = a.read(slots, code, op.op1);
+    let z = match a.kind() {
+        OperandKind::Cv => crate::operand::deref(z),
+        _ if z.is_refcounted() => return None,
+        _ => z,
+    };
+    let array = z.as_arr().filter(|array| !array.has_empty_ind())?;
+    let n = i64::try_from(array.len()).ok()?;
+    write_owning_nothing(slots, code, op, Zval::long(n))?;
+    Some(Ok(advanced()))
+}
+
+/// `COUNT` past its inline path: [`crate::ops::count`] over the
+/// operand. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn counted(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let sizeof = op.extended_value != 0;
     unary(req, frame, code, op, |req, value| {
         crate::ops::count(req, value, sizeof).map(Value::int)
@@ -20109,14 +21202,114 @@ pub(crate) fn copy_tmp<T: Tier>(
 ///   int(1)
 /// }
 /// ```
-pub(crate) fn r#return<T: Tier>(
+pub(crate) fn r#return<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_return::<T>(req, frame, code, op, A::default()) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    returned::<T>(req, frame, code, op)
+}
+
+/// `RETURN` past its inline path: the operand taken as the handler's
+/// own ([`exec::take_operand`]) and the frame left with it
+/// ([`returned_to_caller`]). A call of its own, so that the inline path
+/// before it keeps to the registers it needs.
+#[inline(never)]
+fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller::<T>(req, frame, op, returned)
+}
+
+/// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
+/// `_CV`, `Z/Zend/zend_vm_def.h:4598`, into `zend_leave_helper`'s first
+/// arm): the value copied into the caller's temporary, a temporary's
+/// moved, and a frame whose leave destroys nothing popped, the caller
+/// going on past its call. php's arm frees the CVs, which here gives up
+/// strings at most; so no destructor runs and nothing can be pending
+/// after it. The return safepoint is raised as
+/// [`returned_to_caller`] raises it, once every test has passed, so the
+/// kernel is never asked after it. `None`, with nothing touched, while
+/// an observer is declared, on the serving's entry frame, for a value
+/// that is a reference, or a CV's or a constant's that counts owners,
+/// one nothing reads that would have to be given up, a caller's
+/// temporary that holds an owner, and a frame [`Request::leaves_plainly`]
+/// refuses.
+///
+/// A temporary string is moved into the caller's temporary, a string
+/// parameter and a local are given up with the frame, a string nothing
+/// reads and an object a local holds leave by the kernel, the object's
+/// destructor served before the caller goes on:
+///
+/// ```php
+/// class D { function __destruct() { echo "d\n"; } }
+/// function t() { $s = str_repeat("ab", 2); return $s . "!"; }
+/// function p($x) { $y = $x . "-"; return 1; }
+/// function u() { return str_repeat("x", 2); }
+/// function o() { $d = new D; return 2.5; }
+/// $m = memory_get_usage();
+/// var_dump(t(), p(str_repeat("q", 2)), o());
+/// u();
+/// var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// d
+/// string(5) "abab!"
+/// int(1)
+/// float(2.5)
+/// int(32)
+/// ```
+#[inline(always)] // as `inline_send`
+#[allow(clippy::inline_always)]
+fn inline_return<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    if crate::observer::observing(req) || req.stack_mut().entry() == frame {
+        return None;
+    }
+    let z = a.read(req.slots_mut(frame), code, op.op1);
+    let moved = match a.kind() {
+        OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => a.slot(code, op.op1),
+        OperandKind::Const | OperandKind::Cv | OperandKind::Tmp | OperandKind::Var
+            if crate::operand::owns_nothing(z) =>
+        {
+            None
+        }
+        _ => return None,
+    };
+    let leave = req.leaves_plainly(frame, moved)?;
+    match leave.returns_to {
+        Some(slot)
+            if req
+                .slots_mut(leave.caller)
+                .get(slot as usize)?
+                .is_refcounted() =>
+        {
+            return None;
+        }
+        None if z.is_refcounted() => return None,
+        _ => {}
+    }
+    if let Err(fatal) = continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)))) {
+        return Some(Err(fatal));
+    }
+    req.leave_plainly(leave);
+    if let Some(slot) = leave.returns_to
+        && let Some(into) = req.slots_mut(leave.caller).get_mut(slot as usize)
+    {
+        *into = z;
+    }
+    req.vm_mut().advance(leave.caller);
+    Some(Ok(Stepped::Popped(leave.caller).into()))
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`
@@ -20832,6 +22025,27 @@ fn advance(req: &Request, frame: FrameRef) -> Next {
 /// oplines, the `OP_DATA` after it carrying the value: the opline after
 /// the pair, and the `Threw` edge at this one where a throwable is
 /// pending, which a handler php carries on past a diagnostic leaves.
+/// Every such handler ends here, so what a destructor or a `__set` it
+/// served threw is raised at the pair and never by the opline after it,
+/// which an inline path serves with no pending test of its own:
+///
+/// ```php
+/// class D { function __destruct() { throw new Exception("d"); } }
+/// class S { public static $s = [0]; }
+/// $o = (object)["p" => [0]];
+/// try { var_dump($o->p += [new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { var_dump(S::$s += [new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { var_dump($o->q = new D, 1); } catch (Exception $e) { echo "never\n"; }
+/// try { $o->q = 2; echo "past\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// caught d
+/// caught d
+/// object(D)#3 (0) {
+/// }
+/// int(1)
+/// caught d
+/// ```
 fn advance_over_data(req: &Request, frame: FrameRef, at: u32) -> Next {
     if req.is_pending() {
         return Stepped::Threw(frame).into();
@@ -22155,7 +23369,7 @@ mod tests {
         let op = code.oplines.first().copied().unwrap_or_default();
 
         assert_eq!(
-            served!(req, inner, at => r#return::<Probe>(&mut req, inner, code, &op)),
+            served!(req, inner, at => r#return::<Probe, crate::operand::Const>(&mut req, inner, code, &op, at)),
             Ok(Stepped::Popped(outer))
         );
         assert_eq!(
@@ -22165,7 +23379,7 @@ mod tests {
 
         // The entry frame's own return raises nothing and ends the loop.
         assert_eq!(
-            served!(req, outer, at => r#return::<Probe>(&mut req, outer, code, &op)),
+            served!(req, outer, at => r#return::<Probe, crate::operand::Const>(&mut req, outer, code, &op, at)),
             Ok(Stepped::Done)
         );
         assert_eq!(req.state::<Asked>().sites.len(), 1);

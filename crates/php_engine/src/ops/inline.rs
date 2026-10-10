@@ -12,7 +12,7 @@
 
 use std::cmp::Ordering;
 
-use php_heap::{Number, Zval, ZvalType};
+use php_heap::{Arr, Key, Number, Zval, ZvalType};
 
 use crate::api::values::Value;
 
@@ -165,5 +165,120 @@ pub(crate) fn truth(z: Zval) -> Option<bool> {
         ZvalType::Long => z.as_long().map(|n| n != 0),
         ZvalType::Double => z.as_double().filter(|d| !d.is_nan()).map(|d| d != 0.0),
         _ => None,
+    }
+}
+
+/// The key `zend_fetch_dimension_address_inner` reads out of a
+/// dimension it takes inline (`Z/Zend/zend_execute.c:2600-2640`): a long
+/// as itself, and a string as `ZEND_HANDLE_NUMERIC_STR` reads it, a
+/// canonical decimal integer as that integer and any other string as
+/// itself; a constant string is itself, since the compiler wrote the
+/// integer in its place where it was one (`zend_handle_numeric_dim`).
+/// Everything else, `null`, a bool, a float, a resource, an array or an
+/// object, is the kernel's to convert or refuse ([`crate::ops::array_offset`]).
+///
+/// ```php
+/// $a = [5 => "five", "05" => "zero five", "x" => "ex", -3 => "minus"];
+/// $i = 5; $s = "5"; $t = "05"; $m = "-3"; $x = "x";
+/// var_dump($a[$i], $a[$s], $a[$t], $a[$m], $a[$x], $a["5"], isset($a[$t]), count($a));
+/// ```
+/// ```expect
+/// string(4) "five"
+/// string(4) "five"
+/// string(9) "zero five"
+/// string(5) "minus"
+/// string(2) "ex"
+/// string(4) "five"
+/// bool(true)
+/// int(4)
+/// ```
+#[inline(always)] // a test of the type byte, on an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn dim_key(dim: Zval, constant: bool) -> Option<Key> {
+    match dim.kind() {
+        ZvalType::Long => dim.as_long().map(Key::Long),
+        ZvalType::String => {
+            let text = dim.as_str()?;
+            if constant {
+                return Some(Key::Str(text));
+            }
+            Some(php_heap::canonical_int(text.bytes()).map_or(Key::Str(text), Key::Long))
+        }
+        _ => None,
+    }
+}
+
+/// The element `key` names in `array` as a read takes it inline, a
+/// reference followed (`ZVAL_COPY_DEREF`), no owner taken. None for a
+/// key the array has not got, whose read warns, and for a slot of a
+/// symbol table, an `IS_INDIRECT` php follows into a CV, which the
+/// kernel reads.
+///
+/// ```php
+/// $a = [1, [2], "k" => "v"]; $r = &$a[0]; $r = 7;
+/// var_dump($a[0], $a[1][0], $a["k"], $a[9] ?? "none", isset($a[0]), empty($a[1]));
+/// ```
+/// ```expect
+/// int(7)
+/// int(2)
+/// string(1) "v"
+/// string(4) "none"
+/// bool(true)
+/// bool(false)
+/// ```
+#[inline(always)] // as `dim_key`
+#[allow(clippy::inline_always)]
+pub(crate) fn element(array: Arr, key: Key) -> Option<Zval> {
+    let found = array.get(key)?;
+    let found = found.as_reference().map_or(found, |cell| cell.val());
+    (!found.is_undef() && found.kind() != ZvalType::Indirect).then_some(found)
+}
+
+/// `zend_is_identical` (`Z/Zend/zend_operators.c:2445`) over two zvals
+/// a reference was followed for, where it reads no table: two of
+/// different types are not identical, two scalars or two strings are
+/// [`php_heap::identical`], two objects are one object, and an array
+/// is identical to itself. Two different arrays, which
+/// `zend_hash_compare` walks, and an operand nothing wrote are the
+/// kernel's.
+///
+/// ```php
+/// $o = new stdClass; $p = new stdClass; $a = [1]; $b = [1]; $n = NAN; $s = "1"; $r = &$s;
+/// var_dump(1 === 1.0, "1" === $s, $r === "1", $o === $o, $o === $p, $a === $a, $a === $b, $n === $n, null === false, 0.5 === 0.5);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// ```
+#[inline(always)] // as `number`
+#[allow(clippy::inline_always)]
+pub(crate) fn identical(a: Zval, b: Zval) -> Option<bool> {
+    let scalar = |z: Zval| match z.kind() {
+        ZvalType::Null => Some(php_heap::Scalar::Null),
+        ZvalType::False => Some(php_heap::Scalar::Bool(false)),
+        ZvalType::True => Some(php_heap::Scalar::Bool(true)),
+        ZvalType::Long => z.as_long().map(php_heap::Scalar::Long),
+        ZvalType::Double => z.as_double().map(php_heap::Scalar::Double),
+        _ => None,
+    };
+    if a.is_undef() || b.is_undef() {
+        return None;
+    }
+    if a.kind() != b.kind() {
+        return Some(false);
+    }
+    match a.kind() {
+        ZvalType::String => Some(a.as_str()?.bytes() == b.as_str()?.bytes()),
+        ZvalType::Object => Some(a.as_obj()?.is_same(b.as_obj()?)),
+        ZvalType::Array => a.as_arr()?.is_same(b.as_arr()?).then_some(true),
+        _ => Some(php_heap::identical(scalar(a)?, scalar(b)?)),
     }
 }
