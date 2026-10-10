@@ -221,7 +221,11 @@ mod dispatch {
 /// the whole of it while `Nop` is the only adapter; a handler cannot
 /// dispatch from another frame, so a tier that served code at a
 /// handler's site lands with `php_jit` (ADR-0006). The loop's own sites
-/// take a `Resume` through [`answered`].
+/// take a `Resume` through [`answered`]. Inlined into every handler
+/// that raises a site, so that under `Nop` the whole of it folds away
+/// with the site (design §5.7).
+#[inline(always)]
+#[allow(clippy::inline_always)]
 pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
     match flow {
         Flow::Continue => Ok(()),

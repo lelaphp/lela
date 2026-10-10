@@ -594,6 +594,15 @@ pub(crate) struct FrameShape {
 }
 
 impl FrameShape {
+    /// `zend_vm_calc_used_stack` past the header for a call passing
+    /// `count` arguments: the CVs and the temporaries, and the arguments
+    /// past the declared parameters, which the activation moves past
+    /// them (`zend_copy_extra_args`).
+    pub(crate) fn room(self, count: u32) -> u32 {
+        self.slots
+            .saturating_add(count.saturating_sub(self.parameters))
+    }
+
     pub(crate) fn of(decl: &FunctionDecl, code: Option<&php_unit::OpArray>) -> FrameShape {
         let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
         FrameShape {

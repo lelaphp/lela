@@ -505,11 +505,13 @@ impl Header {
     }
 
     /// A call made a user frame over `code`, `i_init_func_execute_data`:
-    /// the opline it stands at and the runtime cache it reads.
-    pub(crate) fn activate(&mut self, run_time_cache: u32, opline: u32) {
+    /// the opline it stands at, the runtime cache it reads, and whether
+    /// it was passed arguments past its parameters.
+    pub(crate) fn activate(&mut self, run_time_cache: u32, opline: u32, extra_args: bool) {
         self.run_time_cache = run_time_cache;
         self.opline = opline;
         self.info.set(CallInfo::CALL | CallInfo::BUILDING, false);
+        self.info.set(CallInfo::EXTRA_ARGS, extra_args);
     }
 
     /// `EX(This)` as a receiver, with whether the frame owns it.
@@ -591,6 +593,10 @@ impl CallInfo {
     /// written over the argument, as `Z_FLF_PARAM_STR` converts in a
     /// temporary of the body's and a trace still reads the operand.
     const FRAMELESS: u32 = 1 << 8;
+    /// `ZEND_CALL_FREE_EXTRA_ARGS`: the activation moved arguments past
+    /// the declared parameters beyond the CVs and the temporaries
+    /// (`zend_copy_extra_args`), which the frame's leave gives up.
+    const EXTRA_ARGS: u32 = 1 << 9;
 
     fn has(self, bit: u32) -> bool {
         self.0 & bit != 0
@@ -626,6 +632,11 @@ impl CallInfo {
 
     pub(crate) fn set_at_exception_op(&mut self, on: bool) {
         self.set(Self::AT_EXCEPTION_OP, on);
+    }
+
+    /// The frame holds arguments past its declared parameters.
+    pub(crate) fn extra_args(self) -> bool {
+        self.has(Self::EXTRA_ARGS)
     }
 
     /// The record is a call, being built or a native's being served.

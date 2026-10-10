@@ -470,6 +470,14 @@ pub struct Removed<H> {
     pub next: Option<H>,
 }
 
+/// Whether any observer is declared, which every home tests first: what
+/// an inline path that serves no home asks before it stands in for one.
+#[inline(always)] // as `call`
+#[allow(clippy::inline_always)]
+pub(crate) fn observing(req: &Request) -> bool {
+    req.shared.observers != 0
+}
+
 /// The call home: `frame` pushed, its prologue not yet served. One load and
 /// one compare while no observer is declared.
 #[inline(always)] // design §4.3 seam 9: the home pays the load and the branch, never a call

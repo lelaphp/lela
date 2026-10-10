@@ -301,14 +301,14 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
     Ok(out)
 }
 
-/// The operand kind's type in `crate::operand`, as `ops.toml` names it;
-/// none for `UNUSED`, which no inline path reads.
+/// The operand kind's type in `crate::operand`, as `ops.toml` names it.
 fn kind_type(kind: &str) -> Option<&'static str> {
     match kind {
         "CONST" => Some("Const"),
         "TMP" => Some("Tmp"),
         "VAR" => Some("Var"),
         "CV" => Some("Cv"),
+        "UNUSED" => Some("Unused"),
         _ => None,
     }
 }

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use php_heap::{Fatal, FrameRef, MapPtr, Slot, Zval, ZvalRef};
+use php_heap::{Fatal, FrameRef, MapPtr, Slot, Zval, ZvalRef, ZvalType};
 use php_unit::{CacheSlot, Unit};
 
 use crate::api::call::Function;
@@ -502,6 +502,70 @@ impl Request {
         }
     }
 
+    /// How `frame`, the top of the stack, returns with no PHP code
+    /// served, `zend_leave_helper`'s first arm with
+    /// `i_free_compiled_variables` giving up only strings: a user
+    /// function's frame its caller pushed, with no annex, no receiver,
+    /// no closure and no argument past its parameters, none of whose
+    /// slots but `moved`, which the caller has taken the value out of,
+    /// owns anything but a string. A string given up serves no
+    /// destructor and is offered to no collector, so such a frame is
+    /// left by [`Request::leave_plainly`] and [`Request::pop_frame`]
+    /// alike, and nothing is pending after it. None for every other
+    /// frame.
+    pub(crate) fn leaves_plainly(
+        &self,
+        frame: FrameRef,
+        moved: Option<usize>,
+    ) -> Option<PlainLeave> {
+        if frame != self.vm.stack.current() {
+            return None;
+        }
+        let laid = self.vm.stack.frame(frame)?;
+        let header = laid.header();
+        let plain = header.function.is_some()
+            && header.annex.is_none()
+            && header.this().is_none()
+            && header.closure.is_none()
+            && !header.info.call()
+            && !header.info.extra_args();
+        let caller = header.caller.frame().filter(|_| plain)?;
+        let mut strings = false;
+        for (at, z) in laid.slots().iter().enumerate() {
+            if !z.is_refcounted() || Some(at) == moved {
+                continue;
+            }
+            if z.kind() != ZvalType::String {
+                return None;
+            }
+            strings = true;
+        }
+        Some(PlainLeave {
+            caller,
+            returns_to: header.returns_to,
+            moved,
+            strings,
+        })
+    }
+
+    /// The top frame left, as [`Request::leaves_plainly`] found it: each
+    /// string its slots but the moved one own given up, in slot order as
+    /// `i_free_compiled_variables` gives them up, then
+    /// `zend_vm_stack_free_call_frame`.
+    pub(crate) fn leave_plainly(&mut self, leave: PlainLeave) {
+        let frame = self.vm.stack.current();
+        let mut from = 0;
+        while leave.strings
+            && let Some((at, value)) = self.take_next_owner(frame, from, usize::MAX)
+        {
+            if Some(at) != leave.moved {
+                self.release_nogc(value);
+            }
+            from = at.saturating_add(1);
+        }
+        self.vm.stack.pop_frame(&mut self.heap);
+    }
+
     /// `EX(func)`: the function `frame` serves, `None` for an included,
     /// evaluated or main file's op array, which is no function.
     pub(crate) fn frame_function(&self, frame: FrameRef) -> Option<Function> {
@@ -574,18 +638,15 @@ impl Request {
     /// two, as `zend_get_call_trampoline_func` sizes the frame it
     /// reuses.
     pub(crate) fn call_room(&self, function: Function, count: u32) -> usize {
-        let user_room = |function: Function| {
-            let shape = self.user_function(function)?.shape;
-            Some((shape.slots, shape.parameters))
-        };
-        let room = if let Some((own, parameters)) = user_room(function) {
-            own.saturating_add(count.saturating_sub(parameters))
+        let shape = |function: Function| Some(self.user_function(function)?.shape);
+        let room = if let Some(shape) = shape(function) {
+            shape.room(count)
         } else if let Some(magic) = self
             .trampoline_of(function)
             .and_then(|(trampoline, _)| trampoline.magic())
-            && let Some((own, _)) = user_room(magic)
+            && let Some(magic) = shape(magic)
         {
-            count.saturating_add(own.max(2))
+            count.saturating_add(magic.slots.max(2))
         } else {
             count
         };
@@ -603,6 +664,17 @@ impl Request {
             )));
         };
         let room = self.call_room(function, header.num_args);
+        self.push_room(room, header)
+    }
+
+    /// A call pushed with `room` slots past its header, which the caller
+    /// sized for its callee ([`Request::call_room`]), `header` laid
+    /// down whole; the fatal is the memory limit, as [`Request::push_call`]'s.
+    pub(crate) fn push_room(
+        &mut self,
+        room: usize,
+        header: exec::Header,
+    ) -> Result<FrameRef, Fatal> {
         self.vm.push(&mut self.heap, room, 0, header)
     }
 
@@ -695,7 +767,11 @@ impl Request {
         returns_to: Option<u32>,
         caller: exec::Caller,
     ) -> Result<exec::Activated, Fatal> {
-        let num_args = self.vm.at(call).map_or(0, |header| header.num_args);
+        let (num_args, len) = self
+            .vm
+            .stack
+            .frame(call)
+            .map_or((0, 0), |frame| (frame.header().num_args, frame.len()));
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it past the temporaries
@@ -706,11 +782,6 @@ impl Request {
         let extra = passed.saturating_sub(parameters);
         let opline =
             exec::skipped_recv(num_args, shape.parameters, shape.typed, shape.entry).unwrap_or(0);
-        let len = self
-            .vm
-            .stack
-            .frame(call)
-            .map_or(0, crate::exec::HeapFrame::len);
         if len < own + extra {
             self.vm
                 .stack
@@ -718,7 +789,7 @@ impl Request {
         }
         if let Some(frame) = self.vm.stack.frame_mut(call) {
             let laid = frame.header_mut();
-            laid.activate(shape.cache, opline);
+            laid.activate(shape.cache, opline, extra > 0);
             laid.returns_to = returns_to;
             laid.caller = caller;
             let slots = frame.slots_mut();
@@ -1180,4 +1251,16 @@ impl Request {
                 })
             })
     }
+}
+
+/// A frame [`Request::leaves_plainly`] found returns with no PHP code
+/// served: the frame it returns into and the slot of it that takes the
+/// value, where the call reads one, the slot the returned value was
+/// moved out of, and whether any other slot owns a string to give up.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PlainLeave {
+    pub(crate) caller: FrameRef,
+    pub(crate) returns_to: Option<u32>,
+    moved: Option<usize>,
+    strings: bool,
 }

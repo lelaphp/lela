@@ -62,6 +62,12 @@ pub(crate) struct Var;
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Cv;
 
+/// `IS_UNUSED`: no operand at all, which reads as `UNDEF`; where the
+/// opcode reads one as `&EX(This)` (`FETCH_OBJ_R`, `ASSIGN_OBJ`), the
+/// handler reads the frame's receiver itself.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Unused;
+
 /// An operand of the kind the opline's byte names, read with one test
 /// of the kind: what a handler the spec does not specialise addresses
 /// its inline path through.
@@ -111,6 +117,16 @@ impl Operand for Cv {
     #[allow(clippy::inline_always)]
     fn slot(self, _: &OpArray, field: u32) -> Option<usize> {
         Some(field as usize)
+    }
+}
+
+impl Operand for Unused {
+    fn kind(self) -> OperandKind {
+        OperandKind::Unused
+    }
+
+    fn slot(self, _: &OpArray, _: u32) -> Option<usize> {
+        None
     }
 }
 
