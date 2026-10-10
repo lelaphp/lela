@@ -179,6 +179,27 @@ fn gzcompress(
 /// 0300
 /// gzdeflate(): Argument #2 ($level) must be between -1 and 9
 /// ```
+///
+/// zlib's state is allocated on the request's heap as `php_zlib_alloc`
+/// allocates it, uninitialised, so the peak a call raises and what it
+/// leaves behind are php's:
+///
+/// ```php
+/// $d = str_repeat("The quick brown fox jumps over the lazy dog. 0123456789\n", 400);
+/// gzdeflate('warm');
+/// $m = memory_get_usage(); memory_reset_peak_usage();
+/// $c = gzdeflate($d);
+/// var_dump(memory_get_usage() - $m, memory_get_peak_usage() - $m);
+/// $m = memory_get_usage(); memory_reset_peak_usage();
+/// $c = gzdeflate($d, 9, ZLIB_ENCODING_GZIP);
+/// var_dump(memory_get_usage() - $m, memory_get_peak_usage() - $m);
+/// ```
+/// ```expect
+/// int(192)
+/// int(425984)
+/// int(0)
+/// int(425984)
+/// ```
 #[php_function]
 fn gzdeflate(
     req: &mut Request,

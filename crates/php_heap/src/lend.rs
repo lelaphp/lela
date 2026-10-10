@@ -30,6 +30,15 @@
 //! refusal is what [`Heap::lend`] answers, for the caller to end the
 //! request in.
 //!
+//! A library whose allocator callbacks take an argument of their own
+//! (zlib's `zalloc`, uriparser's memory manager, libtidy's allocator) is
+//! pointed at four of the six from Rust as php points it at its own:
+//! [`emalloc`], [`ecalloc`], [`erealloc`] and [`efree`] are public, and
+//! the extension makes each call into the library under a lend. They
+//! zero exactly where php's do: `emalloc` and `erealloc` leave the bytes
+//! as they find them (`Z/Zend/zend_alloc.c:2776`, `:2797`), and
+//! `ecalloc` alone writes zeroes (`Z/Zend/zend_alloc.c:2842-2850`).
+//!
 //! The symbols resolve at link time, the library's undefined references
 //! against this crate's definitions, with no edge between the two
 //! crates (seams.toml's edges). [`enter`] and [`leave`] are never
@@ -189,10 +198,12 @@ fn system_alloc(size: usize) -> *mut c_void {
     unsafe { libc::malloc(size.max(1)) }
 }
 
-/// `emalloc(size)`: the lent heap's, the system allocator's outside a
-/// lend.
+/// `emalloc(size)`: `size` bytes of the lent heap, counted by the bin,
+/// `run` or huge block the size falls in and left as the heap finds them;
+/// the system allocator's outside a lend, and where the memory limit
+/// refused them, whose fatal the lend answers.
 #[unsafe(no_mangle)]
-extern "C" fn emalloc(size: usize) -> *mut c_void {
+pub extern "C" fn emalloc(size: usize) -> *mut c_void {
     match lending() {
         Some(lending) => lending.alloc(size),
         None => system_alloc(size),
@@ -202,7 +213,7 @@ extern "C" fn emalloc(size: usize) -> *mut c_void {
 /// `ecalloc(count, size)`: [`emalloc`] of the product, zeroed; a product
 /// past the address space is the system's `calloc`'s to refuse.
 #[unsafe(no_mangle)]
-extern "C" fn ecalloc(count: usize, size: usize) -> *mut c_void {
+pub extern "C" fn ecalloc(count: usize, size: usize) -> *mut c_void {
     let Some(total) = count.checked_mul(size) else {
         // SAFETY: `calloc` takes two sizes and answers null for this one.
         return unsafe { libc::calloc(count, size) };
@@ -216,7 +227,8 @@ extern "C" fn ecalloc(count: usize, size: usize) -> *mut c_void {
 }
 
 /// `erealloc(at, size)`: a block of the lent heap resized there, any
-/// other one by the system allocator; null is [`emalloc`].
+/// other one by the system allocator, the bytes past the old length left
+/// as they are found; null is [`emalloc`].
 ///
 /// # Safety
 ///
@@ -224,7 +236,7 @@ extern "C" fn ecalloc(count: usize, size: usize) -> *mut c_void {
 /// outside a lend one they answered outside a lend: the caller resizes
 /// a heap's block only under a lend of that heap.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn erealloc(at: *mut c_void, size: usize) -> *mut c_void {
+pub unsafe extern "C" fn erealloc(at: *mut c_void, size: usize) -> *mut c_void {
     let Some(block) = NonNull::new(at.cast::<u8>()) else {
         return emalloc(size);
     };
@@ -280,7 +292,7 @@ unsafe extern "C" fn estrndup(s: *const c_char, len: usize) -> *mut c_char {
 ///
 /// `at` is null or a live block one of these entries answered.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn efree(at: *mut c_void) {
+pub unsafe extern "C" fn efree(at: *mut c_void) {
     let Some(block) = NonNull::new(at.cast::<u8>()) else {
         return;
     };

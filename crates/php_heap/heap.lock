@@ -382,6 +382,10 @@ canonical_int
 compare
 compare_constants
 double_to_string
+ecalloc
+efree
+emalloc
+erealloc
 identical
 identical_constants
 numeric_prefix

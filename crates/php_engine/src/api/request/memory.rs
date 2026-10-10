@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
 use php_heap::{Arr, Fatal, Heap, Intern, Ref, SortEntry, ZvalRef};
+pub use php_heap::{ecalloc, efree, emalloc, erealloc};
 
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::Thrown;
@@ -501,6 +502,10 @@ impl Request {
     /// `estrndup` and `efree` (timelib, through its `timelib_config.h`)
     /// allocates on this request's heap while `call` runs, as php's
     /// library does, and a block of the heap it frees goes back to it.
+    /// A library whose allocator callbacks take an argument of their own
+    /// (zlib's `zalloc`, uriparser's memory manager) is pointed at
+    /// [`emalloc`], [`ecalloc`], [`erealloc`] and [`efree`] as php points
+    /// it at its own, and each call into it is made inside `call`.
     /// `call` reaches nothing of the request, which is borrowed for its
     /// length, and the lend ends when it returns. Every free of a block
     /// a lend made is made under a lend of the same request; outside one

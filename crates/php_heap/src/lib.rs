@@ -67,6 +67,7 @@ pub use collector::GcStatus;
 pub use compare::{Scalar, compare, compare_constants, identical, identical_constants};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, GcTable, HeapHooks};
+pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
