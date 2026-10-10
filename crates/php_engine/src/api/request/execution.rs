@@ -189,7 +189,7 @@ impl Request {
                 return Ok(None);
             };
             let vm = self.stack_of(&standing);
-            let links = links_of(self, vm, 0..vm.depth(), 0..vm.calls().len(), &|root| {
+            let links = links_of(self, vm, 0..vm.depth(), &|root| {
                 self.placeholder_links(root)
             });
             self.trace_rows(&links)
@@ -313,21 +313,12 @@ impl Request {
     }
 }
 
-/// The links of the frames `from` to `to` of one stack and of the calls
-/// served between them: a trace that starts at a frame names no native
-/// that frame is calling.
+/// The links of the records `from` to `to` of one stack, the frames and
+/// the natives' calls served between them: a trace that starts at a
+/// frame names no native that frame is calling.
 fn frames_between<'a>(req: &'a Request, vm: &'a Vm, from: usize, to: usize) -> Vec<Link<'a>> {
-    let calls_below = |at: usize| {
-        u32::try_from(at)
-            .ok()
-            .and_then(|at| vm.at(php_heap::FrameRef(at)))
-            .map_or(vm.calls().len(), |state| {
-                usize::try_from(state.calls_below).unwrap_or(usize::MAX)
-            })
-    };
-    let calls = calls_below(from)..calls_below(to);
     // The generators a delegation runs through stand on the stack here,
     // put there by the reader ([`generator::with_frames`]), so no
     // placeholder is expanded a second time.
-    links_of(req, vm, from..to.saturating_add(1), calls, &|_| Vec::new())
+    links_of(req, vm, from..to.saturating_add(1), &|_| Vec::new())
 }

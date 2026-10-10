@@ -36,7 +36,7 @@ use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::classes::{Exception, Throwable};
-use crate::exec::{self, CallState, FrameAt};
+use crate::exec::{self, FrameAt, HeapFrame};
 use crate::interfaces::Iterator;
 
 /// Where a generator's frame is: php's `execute_data`, and
@@ -58,7 +58,7 @@ enum Execution {
 /// body was building (`frozen_call_stack`).
 pub(crate) struct Suspended {
     frame: crate::exec::HeapFrame,
-    calls: Vec<CallState>,
+    calls: Vec<HeapFrame>,
 }
 
 /// php's `generator->values`: what a `yield from` over something that
@@ -249,7 +249,12 @@ impl ObjectHandlers for GeneratorHandlers {
             }
             Execution::Running => {}
             Execution::Suspended(frame) => {
-                frame_gc(generator, req.kept_frame(&frame.frame), &frame.calls, visit);
+                let calls: Vec<FrameAt<'_>> = frame
+                    .calls
+                    .iter()
+                    .map(|call| req.kept_frame(call))
+                    .collect();
+                frame_gc(generator, req.kept_frame(&frame.frame), &calls, visit);
             }
         }
     }
@@ -291,7 +296,7 @@ pub(crate) fn value(req: &Request, generator: PhpObject) -> Value {
 pub(crate) fn frame_gc(
     generator: &ZendGenerator,
     state: FrameAt<'_>,
-    calls: &[CallState],
+    calls: &[FrameAt<'_>],
     visit: &mut dyn FnMut(Value),
 ) {
     visit(generator.value);
@@ -623,7 +628,7 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
     let Suspended { mut frame, calls } = *suspended;
     frame.header_mut().caller = crate::exec::Caller::Outside;
     let table = req.kept_frame(&frame).symbol_table();
-    let frame = req.vm_mut().resume(frame, calls);
+    let frame = req.resume_frame(frame, calls).ok()?;
     if let Some(table) = table {
         req.resume_generator_table(table, frame);
     }
@@ -775,9 +780,9 @@ pub(crate) fn with_frames<R>(
 pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::Stepped, Fatal> {
     let entry = req.stack_mut().entry() == frame;
     let returns_to = req.vm().returns_to(frame);
+    let caller = req.returns_into(frame);
     if !entry && returns_to.is_none() {
         req.leave_frame(frame);
-        let caller = req.stack_mut().current();
         req.vm_mut().advance(caller);
         return Ok(crate::tier::Stepped::Popped(caller));
     }
@@ -824,7 +829,6 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
         req.set_returned(object.as_value());
         return Ok(crate::tier::Stepped::Done);
     }
-    let caller = req.stack_mut().current();
     if let Some((at, slot)) = returns_to {
         req.replace_slot(at, slot, object.as_value());
     }
@@ -1339,9 +1343,9 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
     // A generator running inside a suspended fiber has its frame on the
     // fiber's stack and not on the one the request runs on; the fiber's
     // teardown gives that frame up ([`crate::fiber`]).
-    let top = req.vm().depth().checked_sub(1);
-    let on_top = top
-        .and_then(|top| req.frame_at(FrameRef(u32::try_from(top).ok()?)))
+    let on_top = req
+        .innermost_user_frame()
+        .and_then(|top| req.frame_at(top))
         .and_then(FrameAt::generator)
         .is_some_and(|running| same(running, generator));
     if !on_top {
@@ -1421,14 +1425,17 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
     if let Some(this) = header.receiver().and_then(crate::exec::Receiver::owned) {
         req.release(this.as_value());
     }
-    for extra in extra.extra_args {
-        req.release(extra);
+    // `zend_vm_stack_free_extra_args`: the arguments past the declared
+    // ones, past the CVs and the temporaries.
+    let own = code.map_or(0, |code| code.num_cvs.saturating_add(code.num_tmps));
+    for at in own..u32::try_from(slots.len()).unwrap_or(u32::MAX) {
+        let value = take(&mut slots, at);
+        req.release(value);
     }
     let opline = header.opline;
     if !finished && opline != 0 {
         for call in calls.into_iter().rev() {
-            req.vm_mut().push_call(call);
-            req.pop_call();
+            req.release_frozen_call(call);
         }
         if let Some(code) = code {
             for range in &code.live_ranges {
@@ -1451,8 +1458,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         }
     } else {
         for call in calls.into_iter().rev() {
-            req.vm_mut().push_call(call);
-            req.pop_call();
+            req.release_frozen_call(call);
         }
     }
     let len = u32::try_from(slots.len()).unwrap_or(u32::MAX);

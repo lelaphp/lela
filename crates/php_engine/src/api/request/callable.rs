@@ -529,7 +529,7 @@ impl Request {
             let state = match link {
                 super::Link::Call(call) => {
                     if walking
-                        && (call.this().is_some() || self.method_class(call.function).is_some())
+                        && (call.this().is_some() || self.method_class(call.callee()).is_some())
                     {
                         current_this = call.this();
                         walking = false;

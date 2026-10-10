@@ -258,10 +258,7 @@ impl<'a> FrameView<'a> {
                     .filter_map(|link| ChainFrame::of(req, self.stack, self.vm, link)),
             );
         }
-        let calls = state.map_or(0, |state| {
-            usize::try_from(state.header().calls_below).unwrap_or(usize::MAX)
-        });
-        walk.extend(req.stack_walk(self.stack, self.vm, 0..self.at.0 as usize, 0..calls));
+        walk.extend(req.stack_walk(self.stack, self.vm, 0..self.at.0 as usize));
         req.walk_below(self.stack, &mut walk);
         walk.into_iter()
     }
@@ -328,7 +325,7 @@ impl<'a> ChainFrame<'a> {
                 at: FrameRef(u32::try_from(at).unwrap_or(u32::MAX)),
             }),
             Link::Frame(Slots::Kept, state) => Read::Kept(state),
-            Link::Call(call) => Read::Native(call.function),
+            Link::Call(call) => Read::Native(call.callee()),
             Link::Site(site) => Read::Site(site),
             Link::Fake(_) => return None,
         };
@@ -549,27 +546,14 @@ impl Request {
             read: Read::Native(function),
         }];
         let vm = &self.vm;
-        let served = vm.calls().len();
-        let (frames, calls) = match vm.serving_call() {
-            Some(call) if call.function == function => {
-                let at = served.saturating_sub(1);
-                // The frames pushed before the call: a frame pushed while
-                // it is served counts it among the calls below.
-                let frames = (0..vm.depth())
-                    .take_while(|&place| {
-                        u32::try_from(place)
-                            .ok()
-                            .and_then(|place| vm.at(FrameRef(place)))
-                            .is_some_and(|state| {
-                                usize::try_from(state.calls_below).is_ok_and(|below| below <= at)
-                            })
-                    })
-                    .count();
-                (frames, at)
+        // The records pushed before the call, which stand below it.
+        let below = match self.serving_call() {
+            Some(call) if call.function() == Some(function) => {
+                vm.serving_at().map_or(0, |at| at.0 as usize)
             }
-            _ => (vm.depth(), served),
+            _ => vm.depth(),
         };
-        walk.extend(self.stack_walk(0, vm, 0..frames, 0..calls));
+        walk.extend(self.stack_walk(0, vm, 0..below));
         self.walk_below(0, &mut walk);
         walk.into_iter()
     }
@@ -581,14 +565,11 @@ impl Request {
         &'a self,
         stack: usize,
         vm: &'a Vm,
-        frames: Range<usize>,
-        calls: Range<usize>,
+        records: Range<usize>,
     ) -> impl Iterator<Item = ChainFrame<'a>> {
-        links_of(self, vm, frames, calls, &|root| {
-            self.placeholder_links(root)
-        })
-        .into_iter()
-        .filter_map(move |link| ChainFrame::of(self, stack, vm, &link))
+        links_of(self, vm, records, &|root| self.placeholder_links(root))
+            .into_iter()
+            .filter_map(move |link| ChainFrame::of(self, stack, vm, &link))
     }
 
     /// The stacks below the one `from` counts down the chain, each
@@ -600,7 +581,7 @@ impl Request {
                 req: self,
                 read: Read::FiberBottom,
             });
-            walk.extend(self.stack_walk(stack, vm, 0..vm.depth(), 0..vm.calls().len()));
+            walk.extend(self.stack_walk(stack, vm, 0..vm.depth()));
         }
     }
 }

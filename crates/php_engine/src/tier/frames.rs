@@ -41,8 +41,8 @@ pub fn entry(req: &Request) -> FrameRef {
 /// (`Z/sapi/phpdbg/phpdbg_prompt.c:1672-1684`).
 #[must_use]
 pub fn below(req: &Request, frame: FrameRef) -> Option<FrameRef> {
-    let under = FrameRef(frame.0.checked_sub(1)?);
-    req.vm().at(under).map(|_| under)
+    let under = req.vm().below(frame.0 as usize)?;
+    Some(FrameRef(u32::try_from(under).ok()?))
 }
 
 /// Whether `frame` takes the throwable pending on the request, as

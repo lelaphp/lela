@@ -42,7 +42,7 @@ impl Request {
     pub(crate) fn serving_include(&self) -> bool {
         self.include
             .including
-            .is_some_and(|(_, depth)| depth == self.vm.call_depth())
+            .is_some_and(|(_, depth)| depth == self.vm.depth())
     }
 
     /// The construct of the include being opened where the code being
@@ -244,7 +244,7 @@ impl Request {
         if kind.once() {
             self.note_included(&path)?;
         }
-        let outer = self.include.including.replace((kind, self.vm.call_depth()));
+        let outer = self.include.including.replace((kind, self.vm.depth()));
         let replaced = self.compile_file_source(&path);
         self.include.including = outer;
         if let Some(source) = replaced? {
@@ -352,7 +352,7 @@ impl Request {
     /// bool(false)
     /// ```
     fn include_guard(&mut self, kind: IncludeKind, path: &[u8]) -> Result<HostPath, Refused> {
-        let outer = self.include.including.replace((kind, self.vm.call_depth()));
+        let outer = self.include.including.replace((kind, self.vm.depth()));
         let guarded = self.check_open_basedir(path, true);
         self.include.including = outer;
         guarded
@@ -449,7 +449,7 @@ impl Request {
         let Some(hooks) = self.stream_hooks() else {
             return self.failed_opening(kind, written);
         };
-        let outer = self.include.including.replace((kind, self.vm.call_depth()));
+        let outer = self.include.including.replace((kind, self.vm.depth()));
         let read = (hooks.open)(self, path);
         self.include.including = outer;
         let read = read?;

@@ -604,6 +604,29 @@ impl<H> VmStack<H> {
         FrameRef(at)
     }
 
+    /// A frame [`VmStack::move_to_heap`] took, copied back onto this
+    /// stack's pages, header and slots, and its own allocation given
+    /// back: `zend_generator_restore_call_stack`, which copies the calls
+    /// a generator froze back where its resumer stands, so they are
+    /// built on and grown as any call on the stack is. A frame that
+    /// stands on no allocation of its own is pushed as it is.
+    pub fn restore_frame(&mut self, heap: &mut Heap, frame: Frame<H>) -> Result<FrameRef, Fatal> {
+        if !matches!(frame.placed, Placed::Heap { .. }) {
+            return Ok(self.resume_frame(frame));
+        }
+        let len = frame.len;
+        // SAFETY: the frame's header owns nothing (`FITS`), so the bytes
+        // copied below are the whole of it and the read leaves no second
+        // owner behind; the room was written by the push or the move.
+        let header = unsafe { frame.header_at().read() };
+        let at = self.push_frame(heap, len, 0, header)?;
+        if let (Some(cells), Some(to)) = (frame.cells().get(..len), self.frames.last_mut()) {
+            to.cells_mut().copy_from_slice(cells);
+        }
+        frame.free(heap);
+        Ok(at)
+    }
+
     /// The frame at `f`, if it is live.
     #[must_use]
     pub fn frame(&self, f: FrameRef) -> Option<&Frame<H>> {
@@ -976,6 +999,52 @@ mod tests {
         );
         stack.pop_frame(&mut heap);
         assert_ne!(g, f);
+        stack.pop_frame(&mut heap);
+        stack.close(&mut heap);
+        assert_eq!(heap.memory_usage(false), start);
+    }
+
+    /// A call a generator froze goes back onto the pages, header and
+    /// slots, where it can be grown as any call on the stack, and the
+    /// allocation it was kept in goes back to the heap.
+    #[test]
+    fn a_frozen_frame_is_restored_onto_the_pages() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let mut stack = VmStack::<Head>::new();
+        let written = Head {
+            function: 3,
+            ..Head::default()
+        };
+        let pushed = stack.push_frame(&mut heap, 2, 0, written.clone());
+        assert!(pushed.is_ok());
+        let Ok(f) = pushed else {
+            return;
+        };
+        if let Some(frame) = stack.frame_mut(f) {
+            frame.set(Slot(1), Zval::long(8));
+        }
+        let moved = stack.move_to_heap(&mut heap);
+        let Ok(Some(moved)) = moved else {
+            return;
+        };
+        let held = heap.memory_usage(false);
+        let back = stack.restore_frame(&mut heap, moved);
+        assert!(back.is_ok());
+        let Ok(back) = back else {
+            return;
+        };
+        assert!(
+            heap.memory_usage(false) < held,
+            "the frame's own allocation is given back"
+        );
+        assert_eq!(stack.header(back), Some(&written));
+        assert_eq!(
+            stack.frame(back).map(|f| f.slot(Slot(1))),
+            Some(Zval::long(8))
+        );
+        assert_eq!(stack.grow_top(&mut heap, back, 2), Ok(()));
         stack.pop_frame(&mut heap);
         stack.close(&mut heap);
         assert_eq!(heap.memory_usage(false), start);

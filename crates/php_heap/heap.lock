@@ -336,6 +336,7 @@ VmStack::pop_frame
 VmStack::push_entry
 VmStack::push_frame
 VmStack::put_back
+VmStack::restore_frame
 VmStack::resume_frame
 VmStack::set_aside
 Zval

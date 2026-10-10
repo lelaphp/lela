@@ -473,12 +473,17 @@ impl ObjectHandlers for FiberHandlers {
         let Some(execution) = &fiber.coroutine.execution else {
             return;
         };
+        let mut calls = Vec::new();
         for at in (0..execution.vm.depth()).rev() {
             let frame = php_heap::FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
             let Some(slots) = execution.vm.stack.frame(frame) else {
                 continue;
             };
             let state = req.kept_frame(slots);
+            if state.info().call() {
+                calls.push(state);
+                continue;
+            }
             match state.generator() {
                 Some(generator) => {
                     crate::generator::running_frame_gc(req, generator, state, visit);
@@ -486,7 +491,8 @@ impl ObjectHandlers for FiberHandlers {
                 None => exec::unfinished_execution_gc(state, &[], visit),
             }
         }
-        exec::unfinished_calls_gc(execution.vm.calls(), visit);
+        calls.reverse();
+        exec::unfinished_calls_gc(&calls, visit);
     }
 }
 

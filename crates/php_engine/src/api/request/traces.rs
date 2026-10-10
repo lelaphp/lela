@@ -596,13 +596,9 @@ impl Request {
     pub(super) fn chain(&self) -> impl Iterator<Item = Link<'_>> {
         let mut chain: Vec<Link> = Vec::new();
         for vm in self.executions() {
-            chain.extend(links_of(
-                self,
-                vm,
-                0..vm.depth(),
-                0..vm.calls().len(),
-                &|root| self.placeholder_links(root),
-            ));
+            chain.extend(links_of(self, vm, 0..vm.depth(), &|root| {
+                self.placeholder_links(root)
+            }));
         }
         chain.into_iter()
     }
@@ -811,11 +807,11 @@ impl Request {
                 Link::Site(_) | Link::Fake(_) => {}
                 Link::Call(call) => {
                     rows.push((
-                        Traced::Function(call.function),
+                        Traced::Function(call.callee()),
                         call.this(),
-                        self.closure_scope(call.closure),
-                        call.arguments.clone(),
-                        call.extra_named.to_vec(),
+                        self.closure_scope(call.closure()),
+                        call.arguments(),
+                        call.extra_named().to_vec(),
                         site,
                     ));
                 }
@@ -839,7 +835,7 @@ impl Request {
                     .file()
                     .map(|file| (file.to_vec(), i64::from(below.line()))),
                 Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
-                Some(Link::Call(call)) if self.via_trampoline(call.function) => {
+                Some(Link::Call(call)) if self.via_trampoline(call.callee()) => {
                     below = below.saturating_add(1);
                     continue;
                 }

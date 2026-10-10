@@ -256,10 +256,10 @@ impl Request {
             let (function, closure, carried) = match link {
                 Link::Frame(_, state) => (state.function(), state.closure(), state.scope()),
                 Link::Call(call) => (
-                    Some(call.function),
-                    call.closure,
-                    self.is_parent_hook_trampoline(call.function)
-                        .then_some(call.called_scope)
+                    call.function(),
+                    call.closure(),
+                    self.is_parent_hook_trampoline(call.callee())
+                        .then_some(call.called_scope())
                         .flatten(),
                 ),
                 Link::Fake(_) => continue,

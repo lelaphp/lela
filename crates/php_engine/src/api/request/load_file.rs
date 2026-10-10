@@ -80,13 +80,10 @@ impl Request {
         let standing = self.vm.depth();
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let caller = self.innermost_user_frame();
         let mut header = exec::Header::of(None, code);
         let pushed = self.vm.push(&mut self.heap, slots, 0, header.clone());
         let frame = self.fatal_of(pushed)?;
-        let caller = standing
-            .checked_sub(1)
-            .and_then(|at| u32::try_from(at).ok())
-            .map(php_heap::FrameRef);
         let table = caller.map(|caller| self.rebuild_symbol_table(caller));
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
