@@ -1,0 +1,366 @@
+//! The test functions of php's `test.c` that reach past what a program
+//! sees, each over the face item that answers it here (#2388): the
+//! machine stack's bounds and `EG(stack_limit)`, whether an address is
+//! the request heap's, `CG(map_ptr_last)`, the log at a severity,
+//! opcache's preload, libxml's process defaults through ext/libxml, and
+//! the URI parsers through ext/standard and ext/uri (design §4.10). Each
+//! is laid into [`crate::functions`]' list at its place in the stub.
+//!
+//! Three of `test.stub.php`'s functions are not carried, each because it
+//! exists to break what the engine holds:
+//!
+//! - `zend_delref(mixed $variable)` drops a count by hand, so the value is
+//!   freed while the program still holds it. The face hands a native
+//!   owners (`Owner<_>`), never a count to write, and a native that could
+//!   free what a frame still names is what the design rules out.
+//! - `zend_test_crash(?string $message = null)` prints through an invalid
+//!   pointer to fault the process. This crate forbids `unsafe`, and no
+//!   panic reaches a request (design §10), so there is nothing to carry
+//!   it over.
+//! - `zend_test_gh18756()` starts a heap apart from the request's,
+//!   collects it twice and shuts it down, the regression GH-18756 where
+//!   `zend_mm_gc` freed a heap's main chunk. The face gives an extension
+//!   the request's heap alone, and a second heap for one test would be a
+//!   face item no extension has a use for; the property is `php_heap`'s,
+//!   held there by its own test (a heap collected twice keeps its main
+//!   chunk), and `Zend/tests/gh18756.phpt` misses for want of the
+//!   function.
+//!
+//! `zend_test_set_fmode` is Windows' alone, and is left out as php
+//! leaves it out on every other platform.
+
+use php_ext::attr::php_function;
+use php_ext::raising::{Thrown, argument_error};
+use php_ext::request::Request;
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value};
+use php_ext_standard::UriParser;
+use php_ext_uri::{ReadAs, UriStruct};
+
+/// `LOG_DEBUG`, the `syslog(3)` level `zend_test_log_err_debug` logs at.
+const LOG_DEBUG: i32 = 7;
+
+/// `zend_leak_bytes(int $bytes = 3): void`: an `emalloc` the program
+/// never frees, which `memory_get_usage()` counts until the request's
+/// end; a size the heap's rounding overflows is php's fatal. php's leak
+/// lasts until its heap is freed whole; here the request state keeps
+/// the block and frees it at `RSHUTDOWN`, as [`crate::functions`]'
+/// `zend_leak_variable` keeps its owner, so nothing the program sees
+/// tells the two apart.
+///
+/// ```php
+/// $m = memory_get_usage();
+/// zend_leak_bytes();
+/// zend_leak_bytes(100);
+/// var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(128)
+/// ```
+///
+/// ```php
+/// zend_leak_bytes(-1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Possible integer overflow in memory allocation (18446744073709551615 + 16384) in %s on line 2
+/// ```
+#[php_function]
+pub(crate) fn zend_leak_bytes(
+    req: &mut Request,
+    #[php(default = 3)] bytes: i64,
+) -> Result<(), Thrown> {
+    let size = usize::try_from(u64::from_ne_bytes(bytes.to_ne_bytes())).unwrap_or(usize::MAX);
+    let leaked = Emalloc::new(req, size)?;
+    req.state::<crate::State>().leaked_bytes.push(leaked);
+    Ok(())
+}
+
+/// `zend_test_zend_call_stack_get(): ?array`: the calling thread's
+/// machine stack as `zend_call_stack_get` reads it, its base and size,
+/// with the frame's own address and `EG(stack_limit)`, each `%p` or
+/// `0x%zx`; `null` on a platform that cannot describe the thread.
+///
+/// ```php
+/// $s = zend_test_zend_call_stack_get();
+/// var_dump(array_keys($s), count(preg_grep('/^0x[0-9a-f]+$/', $s)));
+/// [$base, $size, $here, $limit] = array_map('hexdec', array_values($s));
+/// var_dump($base > $here, $here > $limit, $limit >= $base - $size);
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   string(4) "base"
+///   [1]=>
+///   string(8) "max_size"
+///   [2]=>
+///   string(8) "position"
+///   [3]=>
+///   string(15) "EG(stack_limit)"
+/// }
+/// int(4)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+#[php_function]
+pub(crate) fn zend_test_zend_call_stack_get(
+    req: &mut Request,
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
+    let Some(stack) = req.call_stack_bounds() else {
+        return Ok(None);
+    };
+    let rows = [
+        (&b"base"[..], stack.base),
+        (b"max_size", stack.max_size),
+        (b"position", position()),
+        (b"EG(stack_limit)", req.stack_limit_address()),
+    ];
+    let mut array = PhpArray::new(req)?;
+    for (name, address) in rows {
+        let text = PhpString::new(req, format!("{address:#x}").as_bytes())?;
+        array.set_str(req, name, text.into_value())?;
+    }
+    Ok(Some(array))
+}
+
+/// `zend_test_zend_call_stack_use_all(): int`: the native recursing until
+/// its frame reaches 4 KiB above the thread's end, the frames counted,
+/// which holds that the stack `zend_call_stack_get` describes is the
+/// stack the thread has; nothing where the platform cannot describe it.
+///
+/// ```php
+/// var_dump(zend_test_zend_call_stack_use_all() > 1000);
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
+#[php_function]
+pub(crate) fn zend_test_zend_call_stack_use_all(req: &mut Request) -> Option<i64> {
+    let stack = req.call_stack_bounds()?;
+    // `zend_call_stack_limit(base, max_size, 4096)`.
+    let limit = (stack.base.saturating_sub(stack.max_size)).saturating_add(4096);
+    Some(use_all(limit))
+}
+
+/// `zend_call_stack_use_all`: one frame more until
+/// `zend_call_stack_overflowed(limit)`, through a function pointer the
+/// optimiser cannot see through, as php's `volatile` one, so every level
+/// is a frame of its own.
+fn use_all(limit: usize) -> i64 {
+    if position() <= limit {
+        return 1;
+    }
+    let next: fn(usize) -> i64 = std::hint::black_box(use_all);
+    1 + next(limit)
+}
+
+/// `zend_call_stack_position`: the address of a local of this frame, or
+/// of the caller's where it is inlined; either stands at the caller's
+/// depth to within a frame.
+#[inline]
+fn position() -> usize {
+    let here = 0u8;
+    std::ptr::addr_of!(here).addr()
+}
+
+/// `zend_get_map_ptr_last(): int`, `CG(map_ptr_last)`: the map pointers
+/// the engine has handed the units it published, which a request that
+/// declares a class leaves where it was (GH-8646). The count is the
+/// engine's, not php's, so only its standing still is held to the oracle.
+///
+/// ```php
+/// $before = zend_get_map_ptr_last();
+/// class MyClass {}
+/// var_dump(is_int($before), zend_get_map_ptr_last() === $before);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+#[php_function]
+pub(crate) fn zend_get_map_ptr_last(req: &mut Request) -> i64 {
+    i64::from(req.unit_cache().map_ptr_last())
+}
+
+/// `zend_test_override_libxml_global_state(): void`: libxml's deprecated
+/// process defaults set as a careless library leaves them, which no
+/// parse php's extensions make reads (GHSA-3qrf-m4j2-pcrr).
+///
+/// ```php
+/// zend_test_override_libxml_global_state();
+/// $d = new DOMDocument;
+/// $d->loadXML("<!DOCTYPE a [<!ENTITY e 'x'>]><a> &e; <b/> </a>");
+/// echo $d->saveXML();
+/// var_dump(simplexml_load_string("<a> <b/> </a>")->asXML());
+/// ```
+/// ```expect
+/// <?xml version="1.0"?>
+/// <!DOCTYPE a [
+/// <!ENTITY e "x">
+/// ]>
+/// <a> &e; <b/> </a>
+/// string(36) "<?xml version="1.0"?>
+/// <a> <b/> </a>
+/// "
+/// ```
+#[php_function]
+pub(crate) fn zend_test_override_libxml_global_state() {
+    php_ext_libxml::ffi::Library::override_global_state();
+}
+
+/// `zend_test_is_pcre_bundled(): bool`, `HAVE_BUNDLED_PCRE`: false, as the
+/// engine links the platform's libpcre2-8 and never php-src's
+/// `pcre2lib`, nor the copy `pcre2-sys` carries (ext/pcre's build).
+///
+/// ```php
+/// var_dump(zend_test_is_pcre_bundled());
+/// ```
+/// ```expect
+/// bool(false)
+/// ```
+#[php_function]
+pub(crate) fn zend_test_is_pcre_bundled() -> bool {
+    false
+}
+
+/// `zend_test_is_zend_ptr(int $addr): bool`, `is_zend_ptr`: whether the
+/// address lies inside the request heap's chunks or huge blocks, read
+/// off the heap's lists and never at the address (GH-14626).
+///
+/// ```php
+/// $s = str_repeat('a', 2 * 1024 * 1024);
+/// var_dump(zend_test_is_zend_ptr(0), zend_test_is_zend_ptr(1 << 30), zend_test_is_zend_ptr(-1));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+#[php_function]
+pub(crate) fn zend_test_is_zend_ptr(req: &mut Request, addr: i64) -> bool {
+    usize::try_from(u64::from_ne_bytes(addr.to_ne_bytes()))
+        .is_ok_and(|address| req.heap_holds(address))
+}
+
+/// `zend_test_log_err_debug(string $str): void`:
+/// `php_log_err_with_severity(str, LOG_DEBUG)`, one entry of the log
+/// `error_log` names.
+///
+/// ```php
+/// $f = sys_get_temp_dir() . "/zend-test-log-" . getmypid();
+/// ini_set('error_log', $f);
+/// zend_test_log_err_debug("a debug line");
+/// echo preg_replace('/^\[[^]]+\] /', '', file_get_contents($f));
+/// unlink($f);
+/// ```
+/// ```expect
+/// a debug line
+/// ```
+#[php_function]
+pub(crate) fn zend_test_log_err_debug(req: &mut Request, str: PhpString) {
+    req.log_err_with_severity(str.as_bytes(), LOG_DEBUG);
+}
+
+/// `zend_test_opcache_preloading(): bool`, `opcache_preloading()`:
+/// whether this is the request `opcache.preload`'s file is served in.
+///
+/// ```php
+/// var_dump(zend_test_opcache_preloading());
+/// ```
+/// ```expect
+/// bool(false)
+/// ```
+#[php_function]
+pub(crate) fn zend_test_opcache_preloading(req: &mut Request) -> bool {
+    req.preloading()
+}
+
+/// `zend_test_uri_parser(string $uri, string $parser): array`: `$uri`
+/// under the parser `php_uri_get_parser` names, its components read
+/// normalized and raw, and the struct `php_uri_parse_to_struct` makes,
+/// whose absent `port` is zero; a refused URI is the parser's throw.
+///
+/// ```php
+/// $r = zend_test_uri_parser("https://%75ser@%65x.com:8080/p%61th?q#f", "parse_url");
+/// echo json_encode($r), "\n";
+/// echo json_encode(zend_test_uri_parser("https://example.com", "Uri\\Rfc3986\\Uri")["struct"]), "\n";
+/// try { zend_test_uri_parser("x", "nope"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { zend_test_uri_parser("invalid uri", "Uri\\WhatWg\\Url"); } catch (Uri\WhatWg\InvalidUrlException $e) { echo $e->getMessage(), " ", count($e->errors), "\n"; }
+/// try { zend_test_uri_parser("http:///x", "parse_url"); } catch (Uri\InvalidUriException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// {"normalized":{"scheme":"https","username":"user","password":null,"host":"ex.com","port":8080,"path":"\/path","query":"q","fragment":"f"},"raw":{"scheme":"https","username":"%75ser","password":null,"host":"%65x.com","port":8080,"path":"\/p%61th","query":"q","fragment":"f"},"struct":{"scheme":"https","username":"%75ser","password":null,"host":"%65x.com","port":8080,"path":"\/p%61th","query":"q","fragment":"f"}}
+/// {"scheme":"https","username":null,"password":null,"host":"example.com","port":0,"path":"","query":null,"fragment":null}
+/// zend_test_uri_parser(): Argument #1 ($uri) Unknown parser
+/// The specified URI is malformed (MissingSchemeNonRelativeUrl) 1
+/// The specified URI is malformed
+/// ```
+#[php_function]
+pub(crate) fn zend_test_uri_parser(
+    req: &mut Request,
+    uri: PhpString,
+    parser: PhpString,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let Some(parser) = UriParser::named(parser.as_bytes()) else {
+        return Err(argument_error(req, "ValueError", 1, "Unknown parser"));
+    };
+    let text = uri.as_bytes();
+    // A parse that answers no struct and throws nothing is a component
+    // the parser could not read, whose `php_uri_get_*` php leaves unset.
+    let normalized = parser.parse_to_struct(req, text, ReadAs::NormalizedAscii, false)?;
+    let raw = parser.parse_to_struct(req, text, ReadAs::Raw, false)?;
+    let read = raw.clone();
+    let mut array = PhpArray::new(req)?;
+    for (name, components, struct_port) in [
+        (&b"normalized"[..], normalized, false),
+        (b"raw", raw, false),
+        (b"struct", read, true),
+    ] {
+        let row = components_array(req, components.unwrap_or_default(), struct_port)?;
+        array.set_str(req, name, row.into_value())?;
+    }
+    Ok(array)
+}
+
+/// One URI's components under php's keys, `ZEND_STR_SCHEME` to
+/// `ZEND_STR_FRAGMENT`: each string or `null`, and `port` an integer or
+/// `null`, or for the struct `php_uri.port`, zero where absent.
+fn components_array(
+    req: &mut Request,
+    uri: UriStruct,
+    struct_port: bool,
+) -> Result<Owner<PhpArray>, Thrown> {
+    let port = match uri.port {
+        Some(port) => Owner::int(port),
+        None if struct_port => Owner::int(0),
+        None => Owner::null(),
+    };
+    let mut array = PhpArray::new(req)?;
+    let strings = [
+        (&b"scheme"[..], uri.scheme),
+        (b"username", uri.user),
+        (b"password", uri.password),
+        (b"host", uri.host),
+    ];
+    for (name, value) in strings {
+        let value = string_or_null(req, value)?;
+        array.set_str(req, name, value)?;
+    }
+    array.set_str(req, b"port", port)?;
+    for (name, value) in [
+        (&b"path"[..], uri.path),
+        (b"query", uri.query),
+        (b"fragment", uri.fragment),
+    ] {
+        let value = string_or_null(req, value)?;
+        array.set_str(req, name, value)?;
+    }
+    Ok(array)
+}
+
+/// `ZVAL_STR_COPY` of a component, or `ZVAL_NULL` where there is none.
+fn string_or_null(req: &mut Request, value: Option<Vec<u8>>) -> Result<Owner<Value>, Thrown> {
+    match value {
+        Some(bytes) => Ok(PhpString::new(req, &bytes)?.into_value()),
+        None => Ok(Owner::null()),
+    }
+}

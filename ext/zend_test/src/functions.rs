@@ -2,7 +2,9 @@
 //! `test.stub.php` declares, in the stub's order: what a Zend-level
 //! `.phpt` calls to reach one API of php's engine, here the face's
 //! equivalent of it. The aliases and the type `gen_stub.php` cannot
-//! write are laid onto the declarations the attributes make.
+//! write are laid onto the declarations the attributes make. Those that
+//! reach past what a program sees are [`internals`]', laid into the list
+//! at their places.
 
 use php_ext::abi::{
     ExtensionBuilder, FromArgument, Instance, Iterable, NamedVariadic, Never, Passed, Path, Raw,
@@ -22,6 +24,7 @@ use php_ext::values::{
 };
 
 use crate::classes::{ZendTestUnitEnum, stdClass};
+use crate::internals;
 
 /// The functions onto the builder, in `ext_functions`' order, then
 /// `zend_test_internal_dnf_arguments`, which `MINIT` registers by hand,
@@ -45,6 +48,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         zend_create_unterminated_string::declared(),
         zend_terminate_string::declared(),
         zend_leak_variable::declared(),
+        internals::zend_leak_bytes::declared(),
         zend_string_or_object::declared(),
         zend_string_or_object_or_null::declared(),
         zend_string_or_stdclass::declared(),
@@ -65,12 +69,21 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         zend_test_zend_ini_parse_quantity::declared(),
         zend_test_zend_ini_parse_uquantity::declared(),
         zend_test_zend_ini_str::declared(),
+        internals::zend_test_zend_call_stack_get::declared(),
+        internals::zend_test_zend_call_stack_use_all::declared(),
         zend_test_is_string_marked_as_valid_utf8::declared(),
+        internals::zend_get_map_ptr_last::declared(),
         zend_test_fill_packed_array::declared(),
         zend_test_create_throwing_resource::declared(),
         get_open_basedir::declared(),
+        internals::zend_test_override_libxml_global_state::declared(),
+        internals::zend_test_is_pcre_bundled::declared(),
         zend_test_cast_fread::declared(),
+        internals::zend_test_is_zend_ptr::declared(),
+        internals::zend_test_log_err_debug::declared(),
         zend_test_compile_to_ast::declared(),
+        internals::zend_test_opcache_preloading::declared(),
+        internals::zend_test_uri_parser::declared(),
         zend_test_gh19792::declared(),
         namespaced_func::declared(),
         alias(void(), &ns2("namespaced_deprecated_func"), true),

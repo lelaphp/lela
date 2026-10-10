@@ -15,8 +15,15 @@ workspace = true
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 # ext/standard, whose `php_var_export_ex` the observer writes a return
-# value with (`ext/standard/php_var.h`, design §4.10).
+# value with (`ext/standard/php_var.h`), and whose `UriParser` is
+# `php_uri_get_parser` with its `parse_url` arm (design §4.10).
 php_ext_standard = { path = "../standard" }
+# ext/libxml, whose binding of libxml2 `test.c` sets the library's
+# process defaults through (`<libxml/globals.h>`, design §4.10).
+php_ext_libxml = { path = "../libxml" }
+# ext/uri, whose `php_uri.h` types `zend_test_uri_parser` reads a parse
+# in, the parsers named through ext/standard's `UriParser` (design §4.10).
+php_ext_uri = { path = "../uri" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
