@@ -538,7 +538,7 @@ pub(crate) const RUN: &str = "{RUN}";
 /// `tempnam(sys_get_temp_dir(), ...)` makes, and macOS's per-user
 /// temporary directory, 57 bytes resolved, leaves too few of a socket
 /// path's 104 for the run's directory and the name (`sapi/cli`'s
-/// 022.phpt).
+/// 022.phpt). [`Tree::short`] lays it there.
 static RUN_DIR: Mutex<Option<Tree>> = Mutex::new(None);
 
 /// Where the run's own directory stands, made now if no program has
@@ -548,9 +548,7 @@ pub(crate) fn run_dir() -> Result<PathBuf> {
     if let Some(tree) = &*held {
         return Ok(tree.path().to_path_buf());
     }
-    // The process id at the widest any platform numbers one, so the path
-    // is of one length whatever process runs.
-    let tree = Tree::under(Path::new("/tmp"), &format!("run-{:07}", std::process::id()))?;
+    let tree = Tree::short("run")?;
     let path = tree.path().to_path_buf();
     *held = Some(tree);
     Ok(path)
@@ -1273,11 +1271,12 @@ pub(crate) enum Place {
 }
 
 impl Place {
-    /// A scratch tree named for `name` in this place.
+    /// A scratch tree named for `name` in this place, at a path of one
+    /// length whatever the session and the process ([`Tree::short`]).
     pub(crate) fn tree(self, name: &str) -> Result<Tree> {
         match self {
-            Place::Named => Tree::new(name),
-            Place::Apart => Tree::new(&format!("{name}-apart-from-the-first")),
+            Place::Named => Tree::short(name),
+            Place::Apart => Tree::short(&format!("{name}-apart-from-the-first")),
         }
     }
 }
