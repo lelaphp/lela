@@ -1066,8 +1066,8 @@ impl<'a> Texts<'a> {
     }
 
     /// `make_str`: the string a row or a property takes for `text`, one
-    /// owner of it handed over, so a repeated text is [`Request::addref`]
-    /// over the first call's string.
+    /// owner of it handed over, so a repeated text is [`Owner::take`] of
+    /// the first call's string.
     fn make_str(&mut self, req: &mut Request, text: &'a [u8]) -> Result<Owner<Value>, Thrown> {
         let Texts::Shared(table) = self else {
             return Ok(PhpString::new(req, text)?.into_value());

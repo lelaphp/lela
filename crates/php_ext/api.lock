@@ -672,7 +672,6 @@ request::Request::absolutize
 request::Request::active_function_name
 request::Request::add_begin_handler
 request::Request::add_end_handler
-request::Request::addref
 request::Request::adopt
 request::Request::argument
 request::Request::argument_count
@@ -835,7 +834,6 @@ request::Request::register_shutdown_function
 request::Request::register_tick_function
 request::Request::register_variable
 request::Request::registered
-request::Request::release
 request::Request::remove_begin_handler
 request::Request::remove_end_handler
 request::Request::reporting_without
