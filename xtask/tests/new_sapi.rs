@@ -1,6 +1,8 @@
 //! `xtask new-sapi` over the fixture of `xtask/fixtures/new-sapi`
 //! (ADR-0008): the host it lays down has the topology of the CLI and CGI
-//! hosts, passes `budget`, `unsafe-audit` and `api-check` untouched, joins
+//! hosts, passes `budget`, `unsafe-audit`, `api-check` and `clippy`
+//! untouched, the last against the fixture's stand-ins for the facade and
+//! the bundle, which carry the items the template names (#2524), joins
 //! the workspace members, and a second run for the same name refuses, as
 //! one for a name without its row does. The fixture is copied to a scratch
 //! directory first; nothing is generated in place, and the workspace's own
@@ -12,7 +14,7 @@ use std::process::Command;
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status};
 use xtask::scratch::Tree;
-use xtask::{api_check, budget, new_sapi, unsafe_audit};
+use xtask::{api_check, budget, clippy, new_sapi, unsafe_audit};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -126,6 +128,9 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
     assert!(lib.contains("use php_sapi::{"), "{lib}");
     assert!(!lib.contains("php_engine"), "the facade alone: {lib}");
     assert!(lib.contains("#![forbid(unsafe_code)]"), "{lib}");
+    let main = read(&root, "sapi/demo/src/main.rs");
+    assert!(main.contains("php_sapi_demo::main()"), "{main}");
+    // Both crate roots, the library's and the binary's (#2524).
     for lint in manifest
         .rule("lints.no-panic")
         .unwrap()
@@ -134,13 +139,13 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
         .as_ref()
         .unwrap()
     {
-        assert!(
-            lib.contains(lint),
-            "{lint} is denied from the manifest: {lib}"
-        );
+        for root in [&lib, &main] {
+            assert!(
+                root.contains(lint),
+                "{lint} is denied from the manifest: {root}"
+            );
+        }
     }
-    let main = read(&root, "sapi/demo/src/main.rs");
-    assert!(main.contains("php_sapi_demo::main()"), "{main}");
     // No build script: the build's facts are the engine's own stamp, and
     // the bundle's `configure` switches are handed to it.
     assert!(!root.join("sapi/demo/build.rs").exists());
@@ -177,7 +182,7 @@ fn the_binary_is_named_as_the_line_names_it() {
 }
 
 #[test]
-fn the_host_laid_down_passes_the_three_instruments_untouched() {
+fn the_host_laid_down_passes_the_four_instruments_untouched() {
     let root = scratch("instruments");
     let manifest = Manifest::load(&root).unwrap();
     new_sapi::run(&root, &manifest, "demo", None).unwrap();
@@ -192,6 +197,12 @@ fn the_host_laid_down_passes_the_three_instruments_untouched() {
 
     let readings = api_check::hold(&manifest, &root, false).unwrap();
     assert!(failed(&readings).is_empty(), "{:?}", failed(&readings));
+    let demo = of(&readings, "sapi/demo");
+    assert_eq!(demo.status, Status::Pass, "{}", demo.message);
+
+    // Every target, warnings denied, and the `deny_lints` rules at both
+    // crate roots: a `let _ =` over an `io::Result` is `let_underscore_drop`.
+    let readings = clippy::run(&root, &manifest, &["sapi/demo".to_owned()]).unwrap();
     let demo = of(&readings, "sapi/demo");
     assert_eq!(demo.status, Status::Pass, "{}", demo.message);
 }

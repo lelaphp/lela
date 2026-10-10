@@ -11,3 +11,7 @@ rust-version = "1.95"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+# The workspace's own: a value with a destructor is not discarded by `let _ =`.
+[workspace.lints.rust]
+let_underscore_drop = "warn"
