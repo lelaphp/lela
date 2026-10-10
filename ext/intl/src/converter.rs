@@ -312,13 +312,13 @@ impl UConverter {
     const CESU8: i64 = 31;
     const IMAP_MAILBOX: i64 = 32;
 
+    #[php(before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] destination_encoding: Option<PhpString>,
         #[php(default = null)] source_encoding: Option<PhpString>,
     ) -> Answer<()> {
-        error::reset(req);
         let object = this.object();
         let utf8 = b"utf-8".as_slice();
         let src = source_encoding.as_ref().map_or(utf8, PhpString::as_bytes);

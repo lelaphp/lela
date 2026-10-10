@@ -385,18 +385,18 @@ impl IntlTimeZone {
         ))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn countEquivalentIDs(req: &mut Request, timezoneId: PhpString) -> Answer<i64> {
         count_equivalent_ids(req, timezoneId)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createDefault(req: &mut Request) -> Result<Owner<Instance<IntlTimeZone>>, Thrown> {
         special(req, 0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn createEnumeration(
         req: &mut Request,
@@ -405,7 +405,7 @@ impl IntlTimeZone {
         create_enumeration(req, countryOrRawOffset)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn createTimeZone(
         req: &mut Request,
@@ -414,7 +414,7 @@ impl IntlTimeZone {
         create_time_zone(req, timezoneId)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn createTimeZoneIDEnumeration(
         req: &mut Request,
@@ -425,7 +425,7 @@ impl IntlTimeZone {
         create_time_zone_id_enumeration(req, r#type, region, rawOffset)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn fromDateTimeZone(
         req: &mut Request,
@@ -434,7 +434,7 @@ impl IntlTimeZone {
         from_date_time_zone(req, timezone)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getCanonicalID(
         req: &mut Request,
@@ -444,7 +444,7 @@ impl IntlTimeZone {
         get_canonical_id(req, timezoneId, &isSystemId)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getDisplayName(
         req: &mut Request,
@@ -456,7 +456,7 @@ impl IntlTimeZone {
         get_display_name(req, this.object(), dst, style, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getDSTSavings(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         read(req, this.object(), |zone| {
@@ -464,7 +464,7 @@ impl IntlTimeZone {
         })
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getEquivalentID(
         req: &mut Request,
@@ -474,41 +474,40 @@ impl IntlTimeZone {
         get_equivalent_id(req, timezoneId, offset)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getErrorCode(req: &mut Request, this: This<Self>) -> OrFalse<i64> {
-        error::reset(req);
         OrFalse::Value(i64::from(
             error::object_code::<TimeZoneObject>(req, this.object()).0,
         ))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
-        error::reset(req);
         let message = error::object_message::<TimeZoneObject>(req, this.object());
         PhpString::new(req, &message).map(OrFalse::Value)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getGMT(req: &mut Request) -> Result<Owner<Instance<IntlTimeZone>>, Thrown> {
         special(req, 1)
     }
 
     #[allow(non_snake_case)]
+    #[php(before_args = error::reset)]
     fn getIanaID(req: &mut Request, timezoneId: PhpString) -> Answer<Owner<PhpString>> {
         lookup(req, timezoneId, &Lookup::Iana)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getID(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         get_id(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getOffset(
         req: &mut Request,
@@ -527,7 +526,7 @@ impl IntlTimeZone {
         )
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getRawOffset(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         read(req, this.object(), |zone| {
@@ -535,19 +534,19 @@ impl IntlTimeZone {
         })
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getRegion(req: &mut Request, timezoneId: PhpString) -> Answer<Owner<PhpString>> {
         get_region(req, timezoneId)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getTZDataVersion(req: &mut Request) -> Answer<Owner<PhpString>> {
         get_tz_data_version(req)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getUnknown(req: &mut Request) -> Result<Owner<Instance<IntlTimeZone>>, Thrown> {
         special(req, 2)
@@ -569,7 +568,7 @@ impl IntlTimeZone {
         lookup(req, timezoneId, &Lookup::ForWindows(region))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn hasSameRules(
         req: &mut Request,
@@ -579,7 +578,7 @@ impl IntlTimeZone {
         has_same_rules(req, this.object(), other.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn toDateTimeZone(
         req: &mut Request,
@@ -588,7 +587,7 @@ impl IntlTimeZone {
         to_date_time_zone(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn useDaylightTime(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         read(req, this.object(), |zone| tz::php_intl_tz_int(zone, 2) != 0)
@@ -599,7 +598,6 @@ impl IntlTimeZone {
 /// `createDefault()`, `getGMT()` or `getUnknown()`, as a zone of the
 /// object's own.
 fn special(req: &mut Request, which: i32) -> Result<Owner<Instance<IntlTimeZone>>, Thrown> {
-    error::reset(req);
     match tz::php_intl_tz_special(which) {
         Some(zone) => construct(req, zone),
         None => Err(fatal(req, "InternalError: ICU answered no zone")),
@@ -611,7 +609,6 @@ fn create_time_zone(
     req: &mut Request,
     id: PhpString,
 ) -> Result<Option<Owner<Instance<IntlTimeZone>>>, Thrown> {
-    error::reset(req);
     let units = match id_units(req, id.as_bytes()) {
         Ok(units) => units,
         Err(thrown) => return thrown.map_or(Ok(None), Err),
@@ -628,7 +625,6 @@ fn from_date_time_zone(
     req: &mut Request,
     timezone: Instance<DateTimeZone>,
 ) -> Result<Option<Owner<Instance<IntlTimeZone>>>, Thrown> {
-    error::reset(req);
     let Some(kind) = php_ext_date::timezone_obj(req, timezone.object()) else {
         return Err(throw_error(
             req,
@@ -648,7 +644,6 @@ fn create_enumeration(
     req: &mut Request,
     filter: Option<Union<PhpString, i64>>,
 ) -> Answer<Owner<Instance<iterator::IntlIterator>>> {
-    error::reset(req);
     let mut status = Code::ZERO;
     let enumeration = match filter {
         None => tz::enumeration(0, None, 0, None, &mut status),
@@ -688,7 +683,6 @@ fn create_enumeration(
 
 /// `intltz_count_equivalent_ids`.
 fn count_equivalent_ids(req: &mut Request, id: PhpString) -> Answer<i64> {
-    error::reset(req);
     or_false(id_units(req, id.as_bytes()).map(|units| {
         i64::from(tz::php_intl_tz_count_equivalent(Text::from(
             units.as_slice(),
@@ -704,7 +698,6 @@ fn create_time_zone_id_enumeration(
     region: Option<PhpString>,
     offset: Option<i64>,
 ) -> Answer<Owner<Instance<iterator::IntlIterator>>> {
-    error::reset(req);
     if !(0..=2).contains(&zone_type) {
         let message = "be one of IntlTimeZone::TYPE_ANY, IntlTimeZone::TYPE_CANONICAL, or IntlTimeZone::TYPE_CANONICAL_LOCATION";
         return Err(arg_value_error(req, 1, message));
@@ -748,7 +741,6 @@ fn get_canonical_id(
     id: PhpString,
     is_system: &Ref<Untyped<Value>>,
 ) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     let units = match id_units(req, id.as_bytes()) {
         Ok(units) => units,
         Err(thrown) => return or_false(Err(thrown)),
@@ -792,9 +784,6 @@ enum Lookup {
 /// `intltz_get_iana_id`, `intltz_get_windows_id` and
 /// `intltz_get_id_for_windows_id`.
 fn lookup(req: &mut Request, id: PhpString, which: &Lookup) -> Answer<Owner<PhpString>> {
-    if matches!(which, Lookup::Iana) {
-        error::reset(req);
-    }
     let units = match id_units(req, id.as_bytes()) {
         Ok(units) => units,
         Err(thrown) => return or_false(Err(thrown)),
@@ -844,7 +833,6 @@ fn lookup(req: &mut Request, id: PhpString, which: &Lookup) -> Answer<Owner<PhpS
 
 /// `intltz_get_equivalent_id`.
 fn get_equivalent_id(req: &mut Request, id: PhpString, index: i64) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     let Ok(index) = i32::try_from(index) else {
         return Err(arg_value_error(
             req,
@@ -874,7 +862,6 @@ fn get_equivalent_id(req: &mut Request, id: PhpString, index: i64) -> Answer<Own
 
 /// `intltz_get_region`: the two-letter country code of a zone.
 fn get_region(req: &mut Request, id: PhpString) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     let units = match id_units(req, id.as_bytes()) {
         Ok(units) => units,
         Err(thrown) => return or_false(Err(thrown)),
@@ -890,7 +877,6 @@ fn get_region(req: &mut Request, id: PhpString) -> Answer<Owner<PhpString>> {
 
 /// `intltz_get_tz_data_version`.
 fn get_tz_data_version(req: &mut Request) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     let mut status = Code::ZERO;
     let version = tz::data_version(&mut status);
     if let Err(thrown) = error::check(req, status, "error obtaining time zone data version") {
@@ -1011,7 +997,7 @@ fn to_date_time_zone(
 /// bool(false)
 /// string(%d) "intltz_count_equivalent_ids(): could not convert time zone id to UTF-16: U_INVALID_CHAR_FOUND"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_count_equivalent_ids(req: &mut Request, timezoneId: PhpString) -> Answer<i64> {
     count_equivalent_ids(req, timezoneId)
@@ -1025,7 +1011,7 @@ fn intltz_count_equivalent_ids(req: &mut Request, timezoneId: PhpString) -> Answ
 /// ```expect
 /// string(12) "IntlTimeZone"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_create_default(req: &mut Request) -> Result<Owner<Instance<IntlTimeZone>>, Thrown> {
     special(req, 0)
 }
@@ -1042,7 +1028,7 @@ fn intltz_create_default(req: &mut Request) -> Result<Owner<Instance<IntlTimeZon
 /// bool(true)
 /// intltz_create_enumeration(): Argument #1 ($countryOrRawOffset) must be between -2147483648 and 2147483647
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_create_enumeration(
     req: &mut Request,
@@ -1061,7 +1047,7 @@ fn intltz_create_enumeration(
 /// NULL
 /// int(10)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_create_time_zone(
     req: &mut Request,
@@ -1085,7 +1071,7 @@ fn intltz_create_time_zone(
 /// }
 /// intltz_create_time_zone_id_enumeration(): Argument #1 ($type) must be one of IntlTimeZone::TYPE_ANY, IntlTimeZone::TYPE_CANONICAL, or IntlTimeZone::TYPE_CANONICAL_LOCATION
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_create_time_zone_id_enumeration(
     req: &mut Request,
@@ -1113,7 +1099,7 @@ fn intltz_create_time_zone_id_enumeration(
 /// intltz_from_date_time_zone(): object has an time zone offset that's too large: U_ILLEGAL_ARGUMENT_ERROR
 /// DateTimeZone object is unconstructed
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_from_date_time_zone(
     req: &mut Request,
     timezone: Instance<DateTimeZone>,
@@ -1133,7 +1119,7 @@ fn intltz_from_date_time_zone(
 /// bool(false)
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_get_canonical_id(
     req: &mut Request,
@@ -1155,7 +1141,7 @@ fn intltz_get_canonical_id(
 /// bool(false)
 /// string(76) "IntlTimeZone::getDisplayName(): wrong display type: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_display_name(
     req: &mut Request,
     timezone: Instance<IntlTimeZone>,
@@ -1175,7 +1161,7 @@ fn intltz_get_display_name(
 /// int(3600000)
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_dst_savings(
     req: &mut Request,
     timezone: Instance<IntlTimeZone>,
@@ -1196,7 +1182,7 @@ fn intltz_get_dst_savings(
 /// string(0) ""
 /// intltz_get_equivalent_id(): Argument #2 ($offset) must be between -2147483648 and 2147483647
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_get_equivalent_id(
     req: &mut Request,
@@ -1216,9 +1202,8 @@ fn intltz_get_equivalent_id(
 /// int(1)
 /// int(1)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_error_code(req: &mut Request, timezone: Instance<IntlTimeZone>) -> OrFalse<i64> {
-    error::reset(req);
     OrFalse::Value(i64::from(
         error::object_code::<TimeZoneObject>(req, timezone.object()).0,
     ))
@@ -1235,12 +1220,11 @@ fn intltz_get_error_code(req: &mut Request, timezone: Instance<IntlTimeZone>) ->
 /// string(%d) "IntlTimeZone::getDisplayName(): wrong display type: U_ILLEGAL_ARGUMENT_ERROR"
 /// string(%d) "IntlTimeZone::getDisplayName(): wrong display type: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_error_message(
     req: &mut Request,
     timezone: Instance<IntlTimeZone>,
 ) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     let message = error::object_message::<TimeZoneObject>(req, timezone.object());
     PhpString::new(req, &message).map(OrFalse::Value)
 }
@@ -1254,7 +1238,7 @@ fn intltz_get_error_message(
 /// string(3) "GMT"
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_gmt(req: &mut Request) -> Result<Owner<Instance<IntlTimeZone>>, Thrown> {
     special(req, 1)
 }
@@ -1269,7 +1253,7 @@ fn intltz_get_gmt(req: &mut Request) -> Result<Owner<Instance<IntlTimeZone>>, Th
 /// string(16) "America/New_York"
 /// Found unconstructed IntlTimeZone
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_id(req: &mut Request, timezone: Instance<IntlTimeZone>) -> Answer<Owner<PhpString>> {
     get_id(req, timezone.object())
 }
@@ -1287,7 +1271,7 @@ fn intltz_get_id(req: &mut Request, timezone: Instance<IntlTimeZone>) -> Answer<
 /// bool(true)
 /// int(3600000)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_get_offset(
     req: &mut Request,
@@ -1315,7 +1299,7 @@ fn intltz_get_offset(
 /// int(19800000)
 /// int(19800000)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_raw_offset(
     req: &mut Request,
     timezone: Instance<IntlTimeZone>,
@@ -1335,7 +1319,7 @@ fn intltz_get_raw_offset(
 /// bool(false)
 /// string(%d) "IntlTimeZone::getRegion(): error obtaining region: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_get_region(req: &mut Request, timezoneId: PhpString) -> Answer<Owner<PhpString>> {
     get_region(req, timezoneId)
@@ -1350,7 +1334,7 @@ fn intltz_get_region(req: &mut Request, timezoneId: PhpString) -> Answer<Owner<P
 /// bool(true)
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_tz_data_version(req: &mut Request) -> Answer<Owner<PhpString>> {
     get_tz_data_version(req)
 }
@@ -1364,7 +1348,7 @@ fn intltz_get_tz_data_version(req: &mut Request) -> Answer<Owner<PhpString>> {
 /// string(11) "Etc/Unknown"
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_get_unknown(req: &mut Request) -> Result<Owner<Instance<IntlTimeZone>>, Thrown> {
     special(req, 2)
 }
@@ -1414,7 +1398,7 @@ fn intltz_get_id_for_windows_id(
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_has_same_rules(
     req: &mut Request,
     timezone: Instance<IntlTimeZone>,
@@ -1432,7 +1416,7 @@ fn intltz_has_same_rules(
 /// string(13) "Europe/Berlin"
 /// string(6) "+05:30"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_to_date_time_zone(
     req: &mut Request,
     timezone: Instance<IntlTimeZone>,
@@ -1449,7 +1433,7 @@ fn intltz_to_date_time_zone(
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intltz_use_daylight_time(
     req: &mut Request,
     timezone: Instance<IntlTimeZone>,
@@ -1468,7 +1452,7 @@ fn intltz_use_daylight_time(
 /// string(12) "Asia/Kolkata"
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intltz_get_iana_id(req: &mut Request, timezoneId: PhpString) -> Answer<Owner<PhpString>> {
     lookup(req, timezoneId, &Lookup::Iana)

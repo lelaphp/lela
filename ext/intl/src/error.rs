@@ -63,18 +63,50 @@ fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
     [req.active_function_name().as_bytes(), b"(): ", message].concat()
 }
 
-/// `intl_error_reset(NULL)`.
+/// `intl_error_reset(NULL)`. A native whose php counterpart resets the
+/// request's error ahead of its ZPP (`INTL_METHOD_INIT_VARS` and the
+/// area macros built on it) names this as its `before_args`, so an
+/// argument's `TypeError` or `ArgumentCountError` leaves no earlier
+/// failure standing; `IntlListFormatter` and the `grapheme_*` functions
+/// reset nothing there, and the failure stands.
+///
+/// ```php
+/// $cal = IntlCalendar::createInstance('UTC'); $col = new Collator('en'); $bi = IntlBreakIterator::createWordInstance('en');
+/// $nf = new NumberFormatter('en', NumberFormatter::DECIMAL); $tz = IntlTimeZone::createTimeZone('UTC'); $df = new IntlDateFormatter('en');
+/// $lf = new IntlListFormatter('en'); $pg = new IntlDatePatternGenerator('en'); $x = $y = 0;
+/// $calls = [
+///     'calendar' => fn() => $cal->get([]), 'collator' => fn() => $col->compare([], 'a'),
+///     'breakiterator' => fn() => $bi->following([]), 'formatter' => fn() => $nf->format([]),
+///     'timezone' => fn() => $tz->getOffset([], true, $x, $y), 'normalizer' => fn() => normalizer_normalize([]),
+///     'locale' => fn() => locale_get_display_name([]), 'transliterator' => fn() => transliterator_transliterate([], 'a'),
+///     'dateformat' => fn() => $df->format([]), 'listformatter' => fn() => $lf->format(1),
+///     'datepatterngenerator' => fn() => $pg->getBestPattern([]), 'idn' => fn() => idn_to_ascii([]),
+///     'grapheme' => fn() => grapheme_strlen([]), 'iterator' => fn() => $bi->getPartsIterator()->key(1),
+/// ];
+/// foreach ($calls as $area => $f) {
+///     IntlChar::isalpha(0x110000);
+///     try { $f(); } catch (TypeError|ArgumentCountError $e) {}
+///     echo $area, ' ', intl_get_error_code(), "\n";
+/// }
+/// ```
+/// ```expect
+/// calendar 0
+/// collator 0
+/// breakiterator 0
+/// formatter 0
+/// timezone 0
+/// normalizer 0
+/// locale 0
+/// transliterator 0
+/// dateformat 0
+/// listformatter 1
+/// datepatterngenerator 0
+/// idn 0
+/// grapheme 1
+/// iterator 0
+/// ```
 pub(crate) fn reset(req: &mut Request) {
     global(req).reset();
-}
-
-/// `INTL_METHOD_INIT_VARS` before the arguments are parsed, as most of
-/// php's natives reset the request's error: the reset, then the count of
-/// arguments held to `min..=max`; the native holds each one itself
-/// (`arity = manual`).
-pub(crate) fn init_vars(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    reset(req);
-    php_ext::raising::arity(req, min, Some(max))
 }
 
 /// `intl_error_set_code(NULL, code)`.

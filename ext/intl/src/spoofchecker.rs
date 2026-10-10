@@ -4,7 +4,7 @@
 //! check reads `uspoof_check2UTF8` into the object's `USpoofCheckResult`, and a
 //! new checker starts at `USPOOF_HIGHLY_RESTRICTIVE`.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, Raw, Ref, This, Untyped};
+use php_ext::abi::{CloneObj, ObjectHandlers, Ref, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::clone_with;
 use php_ext::raising::{
@@ -210,10 +210,9 @@ impl Spoofchecker {
 
     /// `uspoof_open`, at `USPOOF_HIGHLY_RESTRICTIVE`, with a
     /// `USpoofCheckResult` beside it; php's `IntlException` where ICU opened none.
-    #[php(arity = manual)]
+    #[php(before_args = error::reset)]
     fn __construct(req: &mut Request, this: This<Self>) -> Answer<()> {
         let object = this.object();
-        error::init_vars(req, 0, 0)?;
         if object
             .native::<SpoofObject>(req)
             .is_some_and(|o| o.uspoof.is_some())
@@ -235,15 +234,13 @@ impl Spoofchecker {
         Ok(())
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn isSuspicious(
         req: &mut Request,
         this: This<Self>,
-        string: Raw<PhpString>,
+        string: PhpString,
         #[php(default = null)] errorCode: Ref<Untyped<Value>>,
     ) -> Answer<bool> {
-        error::init_vars(req, 1, 2)?;
-        let string = string.hold(req)?;
         let object = this.object();
         let mut status = Code::ZERO;
         let (checks, mask) = with(req, object, |checker, mut result| {
@@ -264,16 +261,14 @@ impl Spoofchecker {
         Ok(checks != 0)
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn areConfusable(
         req: &mut Request,
         this: This<Self>,
-        string1: Raw<PhpString>,
-        string2: Raw<PhpString>,
+        string1: PhpString,
+        string2: PhpString,
         #[php(default = null)] errorCode: Ref<Untyped<Value>>,
     ) -> Answer<bool> {
-        error::init_vars(req, 2, 3)?;
-        let (string1, string2) = (string1.hold(req)?, string2.hold(req)?);
         let object = this.object();
         let mut status = Code::ZERO;
         let checks = with(req, object, |checker, _| {
@@ -286,14 +281,9 @@ impl Spoofchecker {
         Ok(checks != 0)
     }
 
-    #[php(tentative, arity = manual)]
-    fn setAllowedLocales(
-        req: &mut Request,
-        this: This<Self>,
-        locales: Raw<PhpString>,
-    ) -> Answer<()> {
-        error::init_vars(req, 1, 1)?;
-        let locales = c_string(locales.hold(req)?.as_bytes());
+    #[php(tentative, before_args = error::reset)]
+    fn setAllowedLocales(req: &mut Request, this: This<Self>, locales: PhpString) -> Answer<()> {
+        let locales = c_string(locales.as_bytes());
         let object = this.object();
         let mut status = Code::ZERO;
         with(req, object, |checker, _| {
@@ -303,10 +293,8 @@ impl Spoofchecker {
         Ok(())
     }
 
-    #[php(tentative, arity = manual)]
-    fn setChecks(req: &mut Request, this: This<Self>, checks: Raw<i64>) -> Answer<()> {
-        error::init_vars(req, 1, 1)?;
-        let checks = checks.hold(req)?;
+    #[php(tentative, before_args = error::reset)]
+    fn setChecks(req: &mut Request, this: This<Self>, checks: i64) -> Answer<()> {
         let object = this.object();
         let mut status = Code::ZERO;
         with(req, object, |checker, _| {
@@ -316,10 +304,8 @@ impl Spoofchecker {
         Ok(())
     }
 
-    #[php(tentative, arity = manual)]
-    fn setRestrictionLevel(req: &mut Request, this: This<Self>, level: Raw<i64>) -> Answer<()> {
-        error::init_vars(req, 1, 1)?;
-        let level = level.hold(req)?;
+    #[php(tentative, before_args = error::reset)]
+    fn setRestrictionLevel(req: &mut Request, this: This<Self>, level: i64) -> Answer<()> {
         let object = this.object();
         constructed(req, object)?;
         if !LEVELS.contains(&level) {
@@ -331,15 +317,13 @@ impl Spoofchecker {
         })
     }
 
-    #[php(arity = manual)]
+    #[php(before_args = error::reset)]
     fn setAllowedChars(
         req: &mut Request,
         this: This<Self>,
-        pattern: Raw<PhpString>,
-        #[php(default = 0)] patternOptions: Raw<i64>,
+        pattern: PhpString,
+        #[php(default = 0)] patternOptions: i64,
     ) -> Answer<()> {
-        error::init_vars(req, 1, 2)?;
-        let (pattern, patternOptions) = (pattern.hold(req)?, patternOptions.hold(req)?);
         let object = this.object();
         constructed(req, object)?;
         let pattern = pattern.as_bytes();

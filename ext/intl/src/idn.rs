@@ -37,7 +37,7 @@ pub(crate) fn functions(b: ExtensionBuilder) -> ExtensionBuilder {
 /// idn_to_ascii(): Argument #1 ($domain) must not be empty
 /// idn_to_ascii(): Argument #2 ($flags) must be INTL_IDNA_VARIANT_UTS46
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn idn_to_ascii(
     req: &mut Request,
     domain: PhpString,
@@ -58,7 +58,7 @@ fn idn_to_ascii(
 /// bool(false)
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn idn_to_utf8(
     req: &mut Request,
     domain: PhpString,
@@ -78,7 +78,6 @@ fn convert(
     idna_info: &Ref<Untyped<Value>>,
     to_ascii: bool,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     let name = domain.as_bytes();
     if name.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));

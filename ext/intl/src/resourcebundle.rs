@@ -222,15 +222,16 @@ fn unconstructed(status: &mut Code) -> Option<Bundle> {
     None
 }
 
-/// `resourcebundle_ctor`'s arguments: the request's error reset before
-/// they are counted and held.
+/// `resourcebundle_ctor`'s arguments, counted and held where the native
+/// says, the constructor's inside its [`error::constructing`] span; the
+/// request's error was reset before them (`before_args`).
 fn arguments(
     req: &mut Request,
     locale: &Raw<Option<PhpString>>,
     bundle: &Raw<Option<PhpString>>,
     fallback: &Raw<bool>,
 ) -> Result<Given, Thrown> {
-    error::init_vars(req, 2, 3)?;
+    php_ext::raising::arity(req, 2, Some(3))?;
     Ok(Given {
         locale: locale.hold(req)?,
         bundle: bundle.hold(req)?,
@@ -360,9 +361,7 @@ fn count(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
 
 /// `resourcebundle_locales`: the locales a bundle's package holds, ICU's
 /// own for an empty name.
-fn locales(req: &mut Request, name: &Raw<PhpString>) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    error::init_vars(req, 1, 1)?;
-    let name = name.hold(req)?;
+fn locales(req: &mut Request, name: PhpString) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let name = name.as_bytes();
     if name.len() >= MAXPATHLEN {
         return Err(argument_error(req, "ValueError", 1, "is too long"));
@@ -655,7 +654,7 @@ type Bundles = Instance<ResourceBundle>;
 #[php_class]
 #[allow(non_snake_case)]
 impl ResourceBundle {
-    #[php(arity = manual)]
+    #[php(arity = manual, before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -670,7 +669,7 @@ impl ResourceBundle {
         })
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, arity = manual, before_args = error::reset)]
     fn create(
         req: &mut Request,
         locale: Raw<Option<PhpString>>,
@@ -691,29 +690,26 @@ impl ResourceBundle {
         fetch(req, this.object(), &offset(&index), fallback, 1)
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        error::init_vars(req, 0, 0)?;
         count(req, this.object())
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getLocales(
         req: &mut Request,
-        bundle: Raw<PhpString>,
+        bundle: PhpString,
     ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-        locales(req, &bundle)
+        locales(req, bundle)
     }
 
-    #[php(tentative, arity = manual)]
-    fn getErrorCode(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        error::init_vars(req, 0, 0)?;
-        Ok(error_code(req, this.object()))
+    #[php(tentative, before_args = error::reset)]
+    fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
+        error_code(req, this.object())
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
-        error::init_vars(req, 0, 0)?;
         error_message(req, this.object())
     }
 
@@ -746,7 +742,7 @@ fn offset(index: &Union<PhpString, i64>) -> Offset<'_> {
 /// string(85) "resourcebundle_create(): Cannot load libICU resource bundle: U_MISSING_RESOURCE_ERROR"
 /// resourcebundle_create(): Argument #2 ($bundle) is too long
 /// ```
-#[php_function(arity = manual)]
+#[php_function(arity = manual, before_args = error::reset)]
 fn resourcebundle_create(
     req: &mut Request,
     locale: Raw<Option<PhpString>>,
@@ -793,10 +789,9 @@ fn resourcebundle_get(
 /// resourcebundle_count(): Argument #1 ($bundle) must be of type ResourceBundle, int given
 /// int(0)
 /// ```
-#[php_function(arity = manual)]
-fn resourcebundle_count(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, Thrown> {
-    let bundle = held(req, &bundle)?;
-    count(req, bundle)
+#[php_function(before_args = error::reset)]
+fn resourcebundle_count(req: &mut Request, bundle: Bundles) -> Result<i64, Thrown> {
+    count(req, bundle.object())
 }
 
 /// `resourcebundle_locales`.
@@ -809,12 +804,12 @@ fn resourcebundle_count(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, 
 /// bool(false)
 /// string(77) "resourcebundle_locales(): Cannot fetch locales list: U_MISSING_RESOURCE_ERROR"
 /// ```
-#[php_function(arity = manual)]
+#[php_function(before_args = error::reset)]
 fn resourcebundle_locales(
     req: &mut Request,
-    bundle: Raw<PhpString>,
+    bundle: PhpString,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    locales(req, &bundle)
+    locales(req, bundle)
 }
 
 /// `resourcebundle_get_error_code`.
@@ -828,10 +823,9 @@ fn resourcebundle_locales(
 /// int(2)
 /// int(0)
 /// ```
-#[php_function(arity = manual)]
-fn resourcebundle_get_error_code(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, Thrown> {
-    let bundle = held(req, &bundle)?;
-    Ok(error_code(req, bundle))
+#[php_function(before_args = error::reset)]
+fn resourcebundle_get_error_code(req: &mut Request, bundle: Bundles) -> i64 {
+    error_code(req, bundle.object())
 }
 
 /// `resourcebundle_get_error_message`.
@@ -846,22 +840,16 @@ fn resourcebundle_get_error_code(req: &mut Request, bundle: Raw<Bundles>) -> Res
 /// string(12) "U_ZERO_ERROR"
 /// string(80) "ResourceBundle::get(): Cannot load resource element -1: U_MISSING_RESOURCE_ERROR"
 /// ```
-#[php_function(arity = manual)]
+#[php_function(before_args = error::reset)]
 fn resourcebundle_get_error_message(
     req: &mut Request,
-    bundle: Raw<Bundles>,
+    bundle: Bundles,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let bundle = held(req, &bundle)?;
-    error_message(req, bundle)
+    error_message(req, bundle.object())
 }
 
 /// `RESOURCEBUNDLE_METHOD_INIT_VARS` and the function's one argument,
 /// `ResourceBundle $bundle`, held after the reset.
-fn held(req: &mut Request, bundle: &Raw<Bundles>) -> Result<PhpObject, Thrown> {
-    error::init_vars(req, 1, 1)?;
-    Ok(bundle.hold(req)?.object())
-}
-
 /// `php_intl.stub.php`'s `resourcebundle_*` block.
 pub(crate) fn functions(builder: php_ext::abi::ExtensionBuilder) -> php_ext::abi::ExtensionBuilder {
     builder.functions(vec![

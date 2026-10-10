@@ -1,11 +1,11 @@
 //! `uchar/`: the `IntlChar` class over ICU's `uchar.h` (`uchar.cpp`),
 //! every method static, each resetting the request's error before its
-//! arguments are held ([`code_point`]). A code
-//! point is taken as `int|string`, a string being exactly one UTF-8 code
+//! arguments are held (`before_args = error::reset`). A code point is
+//! taken as `int|string`, a string being exactly one UTF-8 code
 //! point (`convert_cp`); the case and mirror mappings answer in the form
 //! they were handed.
 
-use php_ext::abi::{Callable, IntoConst, OrFalse, Raw, Union};
+use php_ext::abi::{Callable, IntoConst, OrFalse, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::decl::{ClassConstDecl, Name, Visibility};
@@ -111,66 +111,57 @@ pub(crate) struct IntlChar;
 #[php_class]
 #[allow(non_snake_case)]
 impl IntlChar {
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn hasBinaryProperty(
         req: &mut Request,
-        codepoint: Raw<Codepoint>,
-        property: Raw<i64>,
+        codepoint: Codepoint,
+        property: i64,
     ) -> Result<Option<bool>, Thrown> {
-        error::init_vars(req, 2, 2)?;
-        let (codepoint, property) = (codepoint.hold(req)?, property.hold(req)?);
         let c = convert(req, &codepoint)?;
         Ok(c.map(|c| icu::u_hasBinaryProperty(c, int(property)) != 0))
     }
 
-    #[php(tentative, arity = manual)]
-    fn charAge(
-        req: &mut Request,
-        codepoint: Raw<Codepoint>,
-    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-        match code_point(req, codepoint)? {
+    #[php(tentative, before_args = error::reset)]
+    fn charAge(req: &mut Request, codepoint: Codepoint) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        match convert(req, &codepoint)? {
             Some(c) => version(req, Some(c)).map(Some),
             None => Ok(None),
         }
     }
 
-    #[php(tentative, arity = manual)]
-    fn charDigitValue(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<i64>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn charDigitValue(req: &mut Request, codepoint: Codepoint) -> Result<Option<i64>, Thrown> {
         long(req, codepoint, |c| icu::u_charDigitValue(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn charDirection(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<i64>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn charDirection(req: &mut Request, codepoint: Codepoint) -> Result<Option<i64>, Thrown> {
         long(req, codepoint, |c| icu::u_charDirection(c))
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn charFromName(
         req: &mut Request,
-        name: Raw<PhpString>,
-        #[php(default = IntlChar::UNICODE_CHAR_NAME)] r#type: Raw<i64>,
-    ) -> Result<Option<i64>, Thrown> {
-        error::init_vars(req, 1, 2)?;
-        let (name, r#type) = (name.hold(req)?, r#type.hold(req)?);
+        name: PhpString,
+        #[php(default = IntlChar::UNICODE_CHAR_NAME)] r#type: i64,
+    ) -> Option<i64> {
         let (c, status) = char_from_name(int(r#type), name.as_bytes());
         // php's INTL_CHECK_STATUS_OR_NULL with no message: the code alone.
         error::set_code(req, status);
-        Ok((!status.is_failure()).then_some(i64::from(c)))
+        (!status.is_failure()).then_some(i64::from(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn charMirror(req: &mut Request, codepoint: Raw<Codepoint>) -> Mapped {
-        char_method(req, codepoint, |c| icu::u_charMirror(c))
+    #[php(tentative, before_args = error::reset)]
+    fn charMirror(req: &mut Request, codepoint: Codepoint) -> Mapped {
+        mapped(req, codepoint, |c| icu::u_charMirror(c))
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn charName(
         req: &mut Request,
-        codepoint: Raw<Codepoint>,
-        #[php(default = IntlChar::UNICODE_CHAR_NAME)] r#type: Raw<i64>,
+        codepoint: Codepoint,
+        #[php(default = IntlChar::UNICODE_CHAR_NAME)] r#type: i64,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        error::init_vars(req, 1, 2)?;
-        let (codepoint, r#type) = (codepoint.hold(req)?, r#type.hold(req)?);
         let Some(c) = convert(req, &codepoint)? else {
             return Ok(None);
         };
@@ -183,30 +174,25 @@ impl IntlChar {
         }
     }
 
-    #[php(tentative, arity = manual)]
-    fn charType(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<i64>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn charType(req: &mut Request, codepoint: Codepoint) -> Result<Option<i64>, Thrown> {
         long(req, codepoint, |c| i32::from(icu::u_charType(c)))
     }
 
-    #[php(tentative, arity = manual)]
-    fn chr(
-        req: &mut Request,
-        codepoint: Raw<Codepoint>,
-    ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        match code_point(req, codepoint)? {
+    #[php(tentative, before_args = error::reset)]
+    fn chr(req: &mut Request, codepoint: Codepoint) -> Result<Option<Owner<PhpString>>, Thrown> {
+        match convert(req, &codepoint)? {
             Some(c) => PhpString::new(req, &utf8::encode(c)).map(Some),
             None => Ok(None),
         }
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn digit(
         req: &mut Request,
-        codepoint: Raw<Codepoint>,
-        #[php(default = 10)] base: Raw<i64>,
+        codepoint: Codepoint,
+        #[php(default = 10)] base: i64,
     ) -> Result<Option<OrFalse<i64>>, Thrown> {
-        error::init_vars(req, 1, 2)?;
-        let (codepoint, base) = (codepoint.hold(req)?, base.hold(req)?);
         let Some(c) = convert(req, &codepoint)? else {
             return Ok(None);
         };
@@ -218,17 +204,14 @@ impl IntlChar {
         Ok(Some(OrFalse::Value(i64::from(digit))))
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn enumCharNames(
         req: &mut Request,
-        start: Raw<Codepoint>,
-        end: Raw<Codepoint>,
-        callback: Raw<Callable>,
-        #[php(default = IntlChar::UNICODE_CHAR_NAME)] r#type: Raw<i64>,
+        start: Codepoint,
+        end: Codepoint,
+        callback: Callable,
+        #[php(default = IntlChar::UNICODE_CHAR_NAME)] r#type: i64,
     ) -> Result<bool, Thrown> {
-        error::init_vars(req, 3, 4)?;
-        let (start, end) = (start.hold(req)?, end.hold(req)?);
-        let (callback, r#type) = (callback.hold(req)?, r#type.hold(req)?);
         let Some(start) = convert(req, &start)? else {
             return Ok(false);
         };
@@ -252,10 +235,8 @@ impl IntlChar {
         Ok(!status.is_failure())
     }
 
-    #[php(tentative, arity = manual)]
-    fn enumCharTypes(req: &mut Request, callback: Raw<Callable>) -> Result<(), Thrown> {
-        error::init_vars(req, 1, 1)?;
-        let callback = callback.hold(req)?;
+    #[php(tentative, before_args = error::reset)]
+    fn enumCharTypes(req: &mut Request, callback: Callable) -> Result<(), Thrown> {
         for range in char_types() {
             let args = range.map(|n| Value::int(i64::from(n)));
             let answer = call(req, &callback, &args)?;
@@ -264,55 +245,44 @@ impl IntlChar {
         Ok(())
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn foldCase(
         req: &mut Request,
-        codepoint: Raw<Codepoint>,
-        #[php(default = IntlChar::FOLD_CASE_DEFAULT)] options: Raw<i64>,
+        codepoint: Codepoint,
+        #[php(default = IntlChar::FOLD_CASE_DEFAULT)] options: i64,
     ) -> Mapped {
-        error::init_vars(req, 1, 2)?;
-        let (codepoint, options) = (codepoint.hold(req)?, options.hold(req)?);
         // `uint32_t options`: the low half of the long, as C passes it.
         mapped(req, codepoint, |c| {
             icu::u_foldCase(c, u32::from_le_bytes(int(options).to_le_bytes()))
         })
     }
 
-    #[php(tentative, arity = manual)]
-    fn forDigit(
-        req: &mut Request,
-        digit: Raw<i64>,
-        #[php(default = 10)] base: Raw<i64>,
-    ) -> Result<i64, Thrown> {
-        error::init_vars(req, 1, 2)?;
-        let (digit, base) = (digit.hold(req)?, base.hold(req)?);
-        Ok(i64::from(icu::u_forDigit(int(digit), radix(base))))
+    #[php(tentative, before_args = error::reset)]
+    fn forDigit(digit: i64, #[php(default = 10)] base: i64) -> i64 {
+        i64::from(icu::u_forDigit(int(digit), radix(base)))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getBidiPairedBracket(req: &mut Request, codepoint: Raw<Codepoint>) -> Mapped {
-        char_method(req, codepoint, |c| icu::u_getBidiPairedBracket(c))
+    #[php(tentative, before_args = error::reset)]
+    fn getBidiPairedBracket(req: &mut Request, codepoint: Codepoint) -> Mapped {
+        mapped(req, codepoint, |c| icu::u_getBidiPairedBracket(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getBlockCode(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<i64>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn getBlockCode(req: &mut Request, codepoint: Codepoint) -> Result<Option<i64>, Thrown> {
         long(req, codepoint, |c| icu::ublock_getCode(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getCombiningClass(
-        req: &mut Request,
-        codepoint: Raw<Codepoint>,
-    ) -> Result<Option<i64>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn getCombiningClass(req: &mut Request, codepoint: Codepoint) -> Result<Option<i64>, Thrown> {
         long(req, codepoint, |c| i32::from(icu::u_getCombiningClass(c)))
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getFC_NFKC_Closure(
         req: &mut Request,
-        codepoint: Raw<Codepoint>,
+        codepoint: Codepoint,
     ) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
-        let Some(c) = code_point(req, codepoint)? else {
+        let Some(c) = convert(req, &codepoint)? else {
             return Ok(None);
         };
         let (closure, status) = icu::fc_nfkc_closure(c);
@@ -332,253 +302,224 @@ impl IntlChar {
         PhpString::new(req, &bytes).map(|s| Some(OrFalse::Value(s)))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getIntPropertyMaxValue(req: &mut Request, property: Raw<i64>) -> Result<i64, Thrown> {
-        error::init_vars(req, 1, 1)?;
-        let property = property.hold(req)?;
-        Ok(i64::from(icu::u_getIntPropertyMaxValue(int(property))))
+    #[php(tentative, before_args = error::reset)]
+    fn getIntPropertyMaxValue(property: i64) -> i64 {
+        i64::from(icu::u_getIntPropertyMaxValue(int(property)))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getIntPropertyMinValue(req: &mut Request, property: Raw<i64>) -> Result<i64, Thrown> {
-        error::init_vars(req, 1, 1)?;
-        let property = property.hold(req)?;
-        Ok(i64::from(icu::u_getIntPropertyMinValue(int(property))))
+    #[php(tentative, before_args = error::reset)]
+    fn getIntPropertyMinValue(property: i64) -> i64 {
+        i64::from(icu::u_getIntPropertyMinValue(int(property)))
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getIntPropertyValue(
         req: &mut Request,
-        codepoint: Raw<Codepoint>,
-        property: Raw<i64>,
+        codepoint: Codepoint,
+        property: i64,
     ) -> Result<Option<i64>, Thrown> {
-        error::init_vars(req, 2, 2)?;
-        let (codepoint, property) = (codepoint.hold(req)?, property.hold(req)?);
         let c = convert(req, &codepoint)?;
         Ok(c.map(|c| i64::from(icu::u_getIntPropertyValue(c, int(property)))))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getNumericValue(
-        req: &mut Request,
-        codepoint: Raw<Codepoint>,
-    ) -> Result<Option<f64>, Thrown> {
-        Ok(code_point(req, codepoint)?.map(|c| icu::u_getNumericValue(c)))
+    #[php(tentative, before_args = error::reset)]
+    fn getNumericValue(req: &mut Request, codepoint: Codepoint) -> Result<Option<f64>, Thrown> {
+        Ok(convert(req, &codepoint)?.map(|c| icu::u_getNumericValue(c)))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getPropertyEnum(req: &mut Request, alias: Raw<PhpString>) -> Result<i64, Thrown> {
-        error::init_vars(req, 1, 1)?;
-        let alias = alias.hold(req)?;
-        Ok(i64::from(icu::property_enum(None, alias.as_bytes())))
+    #[php(tentative, before_args = error::reset)]
+    fn getPropertyEnum(alias: PhpString) -> i64 {
+        i64::from(icu::property_enum(None, alias.as_bytes()))
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getPropertyName(
         req: &mut Request,
-        property: Raw<i64>,
-        #[php(default = IntlChar::LONG_PROPERTY_NAME)] r#type: Raw<i64>,
+        property: i64,
+        #[php(default = IntlChar::LONG_PROPERTY_NAME)] r#type: i64,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-        error::init_vars(req, 1, 2)?;
-        let (property, r#type) = (property.hold(req)?, r#type.hold(req)?);
         property_name(req, icu::property_name(int(property), None, int(r#type)))
     }
 
-    #[php(tentative, arity = manual)]
-    fn getPropertyValueEnum(
-        req: &mut Request,
-        property: Raw<i64>,
-        name: Raw<PhpString>,
-    ) -> Result<i64, Thrown> {
-        error::init_vars(req, 2, 2)?;
-        let (property, name) = (property.hold(req)?, name.hold(req)?);
-        Ok(i64::from(icu::property_enum(
-            Some(int(property)),
-            name.as_bytes(),
-        )))
+    #[php(tentative, before_args = error::reset)]
+    fn getPropertyValueEnum(property: i64, name: PhpString) -> i64 {
+        i64::from(icu::property_enum(Some(int(property)), name.as_bytes()))
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getPropertyValueName(
         req: &mut Request,
-        property: Raw<i64>,
-        value: Raw<i64>,
-        #[php(default = IntlChar::LONG_PROPERTY_NAME)] r#type: Raw<i64>,
+        property: i64,
+        value: i64,
+        #[php(default = IntlChar::LONG_PROPERTY_NAME)] r#type: i64,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-        error::init_vars(req, 2, 3)?;
-        let (property, value) = (property.hold(req)?, value.hold(req)?);
-        let r#type = r#type.hold(req)?;
         let name = icu::property_name(int(property), Some(int(value)), int(r#type));
         property_name(req, name)
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, before_args = error::reset)]
     fn getUnicodeVersion(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-        error::init_vars(req, 0, 0)?;
         version(req, None)
     }
 
-    #[php(tentative, arity = manual)]
-    fn isalnum(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isalnum(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isalnum(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isalpha(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isalpha(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isalpha(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isbase(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isbase(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isbase(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isblank(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isblank(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isblank(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn iscntrl(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn iscntrl(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_iscntrl(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isdefined(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isdefined(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isdefined(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isdigit(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isdigit(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isdigit(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isgraph(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isgraph(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isgraph(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isIDIgnorable(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isIDIgnorable(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isIDIgnorable(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isIDPart(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isIDPart(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isIDPart(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isIDStart(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isIDStart(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isIDStart(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isISOControl(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isISOControl(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isISOControl(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isJavaIDPart(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isJavaIDPart(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isJavaIDPart(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isJavaIDStart(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isJavaIDStart(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isJavaIDStart(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isJavaSpaceChar(
-        req: &mut Request,
-        codepoint: Raw<Codepoint>,
-    ) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isJavaSpaceChar(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isJavaSpaceChar(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn islower(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn islower(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_islower(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isMirrored(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isMirrored(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isMirrored(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isprint(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isprint(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isprint(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn ispunct(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn ispunct(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_ispunct(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isspace(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isspace(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isspace(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn istitle(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn istitle(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_istitle(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isUAlphabetic(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isUAlphabetic(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isUAlphabetic(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isULowercase(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isULowercase(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isULowercase(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isupper(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isupper(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isupper(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isUUppercase(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isUUppercase(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isUUppercase(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isUWhiteSpace(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isUWhiteSpace(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isUWhiteSpace(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isWhitespace(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isWhitespace(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isWhitespace(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn isxdigit(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<bool>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn isxdigit(req: &mut Request, codepoint: Codepoint) -> Result<Option<bool>, Thrown> {
         test(req, codepoint, |c| icu::u_isxdigit(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn ord(req: &mut Request, character: Raw<Codepoint>) -> Result<Option<i64>, Thrown> {
+    #[php(tentative, before_args = error::reset)]
+    fn ord(req: &mut Request, character: Codepoint) -> Result<Option<i64>, Thrown> {
         long(req, character, |c| c)
     }
 
-    #[php(tentative, arity = manual)]
-    fn tolower(req: &mut Request, codepoint: Raw<Codepoint>) -> Mapped {
-        char_method(req, codepoint, |c| icu::u_tolower(c))
+    #[php(tentative, before_args = error::reset)]
+    fn tolower(req: &mut Request, codepoint: Codepoint) -> Mapped {
+        mapped(req, codepoint, |c| icu::u_tolower(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn totitle(req: &mut Request, codepoint: Raw<Codepoint>) -> Mapped {
-        char_method(req, codepoint, |c| icu::u_totitle(c))
+    #[php(tentative, before_args = error::reset)]
+    fn totitle(req: &mut Request, codepoint: Codepoint) -> Mapped {
+        mapped(req, codepoint, |c| icu::u_totitle(c))
     }
 
-    #[php(tentative, arity = manual)]
-    fn toupper(req: &mut Request, codepoint: Raw<Codepoint>) -> Mapped {
-        char_method(req, codepoint, |c| icu::u_toupper(c))
+    #[php(tentative, before_args = error::reset)]
+    fn toupper(req: &mut Request, codepoint: Codepoint) -> Mapped {
+        mapped(req, codepoint, |c| icu::u_toupper(c))
     }
 }
 
@@ -596,7 +537,34 @@ fn radix(n: i64) -> i8 {
 
 /// `convert_cp`: the code point an int names or a one-code-point UTF-8
 /// string holds, `None` with the request's error set where it is out of
-/// range or the string holds other than one.
+/// range or the string holds other than one. Each of uchar.cpp's methods
+/// resets the request's error ahead of its ZPP (`before_args`), so a
+/// `TypeError` leaves no earlier failure standing.
+///
+/// ```php
+/// IntlChar::isalpha(0x110000);
+/// try { IntlChar::isalpha([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// IntlChar::chr(-1);
+/// try { IntlChar::charName('A', 'x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// IntlChar::ord('ab');
+/// try { IntlChar::getUnicodeVersion(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// IntlChar::tolower(-1);
+/// try { IntlChar::forDigit('x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// ```
+/// ```expect
+/// IntlChar::isalpha(): Argument #1 ($codepoint) must be of type string|int, array given
+/// int(0)
+/// IntlChar::charName(): Argument #2 ($type) must be of type int, string given
+/// int(0)
+/// IntlChar::getUnicodeVersion() expects exactly 0 arguments, 1 given
+/// int(0)
+/// IntlChar::forDigit(): Argument #1 ($digit) must be of type int, string given
+/// int(0)
+/// ```
 fn convert(req: &mut Request, codepoint: &Codepoint) -> Result<Option<i32>, Thrown> {
     let c = match codepoint {
         Union::A(text) => {
@@ -623,69 +591,26 @@ fn convert(req: &mut Request, codepoint: &Codepoint) -> Result<Option<i32>, Thro
     Ok(i32::try_from(c).ok())
 }
 
-/// `intl_error_reset(NULL)`, then `parse_code_point_param`: the
-/// request's error reset before the one argument is held, as each of
-/// uchar.cpp's methods resets it ahead of its ZPP, so a `TypeError`
-/// leaves no earlier failure standing; then the code point it names.
-///
-/// ```php
-/// IntlChar::isalpha(0x110000);
-/// try { IntlChar::isalpha([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// var_dump(intl_get_error_code());
-/// IntlChar::chr(-1);
-/// try { IntlChar::charName('A', 'x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// var_dump(intl_get_error_code());
-/// IntlChar::ord('ab');
-/// try { IntlChar::getUnicodeVersion(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// var_dump(intl_get_error_code());
-/// IntlChar::tolower(-1);
-/// try { IntlChar::forDigit('x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// var_dump(intl_get_error_code());
-/// ```
-/// ```expect
-/// IntlChar::isalpha(): Argument #1 ($codepoint) must be of type string|int, array given
-/// int(0)
-/// IntlChar::charName(): Argument #2 ($type) must be of type int, string given
-/// int(0)
-/// IntlChar::getUnicodeVersion() expects exactly 0 arguments, 1 given
-/// int(0)
-/// IntlChar::forDigit(): Argument #1 ($digit) must be of type int, string given
-/// int(0)
-/// ```
-fn code_point(req: &mut Request, codepoint: Raw<Codepoint>) -> Result<Option<i32>, Thrown> {
-    error::init_vars(req, 1, 1)?;
-    let codepoint = codepoint.hold(req)?;
-    convert(req, &codepoint)
-}
-
 /// `IC_BOOL_METHOD_CHAR`.
 fn test(
     req: &mut Request,
-    codepoint: Raw<Codepoint>,
+    codepoint: Codepoint,
     f: impl Fn(i32) -> i8,
 ) -> Result<Option<bool>, Thrown> {
-    Ok(code_point(req, codepoint)?.map(|c| f(c) != 0))
+    Ok(convert(req, &codepoint)?.map(|c| f(c) != 0))
 }
 
 /// `IC_INT_METHOD_CHAR`.
 fn long(
     req: &mut Request,
-    codepoint: Raw<Codepoint>,
+    codepoint: Codepoint,
     f: impl Fn(i32) -> i32,
 ) -> Result<Option<i64>, Thrown> {
-    Ok(code_point(req, codepoint)?.map(|c| i64::from(f(c))))
+    Ok(convert(req, &codepoint)?.map(|c| i64::from(f(c))))
 }
 
-/// `IC_CHAR_METHOD_CHAR`: the request's error reset before the one
-/// argument is held, then [`mapped`].
-fn char_method(req: &mut Request, codepoint: Raw<Codepoint>, f: impl Fn(i32) -> i32) -> Mapped {
-    error::init_vars(req, 1, 1)?;
-    let codepoint = codepoint.hold(req)?;
-    mapped(req, codepoint, f)
-}
-
-/// The mapping of a held code point as a string where a string was
-/// handed, else as an int.
+/// `IC_CHAR_METHOD_CHAR`: the mapping of a code point as a string where
+/// a string was handed, else as an int.
 fn mapped(req: &mut Request, codepoint: Codepoint, f: impl Fn(i32) -> i32) -> Mapped {
     let Some(c) = convert(req, &codepoint)? else {
         return Ok(None);
