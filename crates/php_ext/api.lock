@@ -1302,6 +1302,7 @@ values::PhpObject::set_row
 values::PhpObject::set_slot
 values::PhpObject::slot
 values::PhpObject::slots_without_table
+values::PhpObject::table_from_symtable
 values::PhpObject::typed_row_ref
 values::PhpObject::unprotect
 values::PhpObject::unprotect_in
