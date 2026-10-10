@@ -8565,7 +8565,7 @@ fn inline_fetch_dim_r(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
-    let (array, key) = inline_dim(slots, code, op, a, b)?;
+    let (array, (key, free_dim)) = inline_dim(slots, code, op, a, b)?;
     let z = inline::element(array, key)?;
     let out = exec::temporary_slot(code, op.out) as usize;
     if slots.get(out)?.is_refcounted() {
@@ -8573,15 +8573,17 @@ fn inline_fetch_dim_r(
     }
     *slots.get_mut(out)? = z;
     req.heap_mut().addref(z);
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
     Some(Ok(advanced()))
 }
 
-/// The array and the key a dimension opcode's inline path works on:
-/// the array a CV holds, a reference followed, or one a constant or a
+/// The array and the key a dimension read's inline path works on: the
+/// array a CV holds, a reference followed, or one a constant or a
 /// temporary holds that counts no owner, so the opcode has nothing to
-/// give up (`FREE_OP1`); and the key [`inline::dim_key`] reads out of
-/// a dimension that counts no owner either (`FREE_OP2`). None for
-/// every other pair.
+/// give up (`FREE_OP1`); and the key [`inline_key`] reads, with whether
+/// the dimension is given up after. None for every other pair.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn inline_dim(
@@ -8590,7 +8592,7 @@ fn inline_dim(
     op: &Opline,
     a: impl Operand,
     b: impl Operand,
-) -> Option<(php_heap::Arr, php_heap::Key)> {
+) -> Option<(php_heap::Arr, (php_heap::Key, bool))> {
     let container = a.read(slots, code, op.op1);
     let container = match a.kind() {
         OperandKind::Cv => crate::operand::deref(container),
@@ -8601,9 +8603,10 @@ fn inline_dim(
     Some((container.as_arr()?, inline_key(slots, code, op, b)?))
 }
 
-/// The key [`inline::dim_key`] reads out of a dimension that counts no
-/// owner, or a CV's, so the opcode has nothing to give up
-/// (`FREE_OP2`); none for an append and every other dimension.
+/// The key [`inline::dim_key`] reads out of a dimension, and whether
+/// the opcode gives the dimension up after it (`FREE_OP2`): a
+/// temporary string, which serves no code as it goes. None for an
+/// append and for a temporary holding any other owner.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn inline_key(
@@ -8611,12 +8614,13 @@ fn inline_key(
     code: &OpArray,
     op: &Opline,
     b: impl Operand,
-) -> Option<php_heap::Key> {
+) -> Option<(php_heap::Key, bool)> {
     let dim = b.read(slots, code, op.op2);
-    if b.kind() == OperandKind::Unused || (b.kind() != OperandKind::Cv && dim.is_refcounted()) {
+    let free = matches!(b.kind(), OperandKind::Tmp | OperandKind::Var) && dim.is_refcounted();
+    if b.kind() == OperandKind::Unused || (free && dim.kind() != php_heap::ZvalType::String) {
         return None;
     }
-    inline::dim_key(dim, b.kind() == OperandKind::Const)
+    Some((inline::dim_key(dim, b.kind() == OperandKind::Const)?, free))
 }
 
 /// `FETCH_DIM_R` past its inline path: the container read as
@@ -9930,7 +9934,7 @@ pub(crate) fn fetch_dim_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_fetch_dim_w(req, frame, code, op, (A::default(), B::default())) {
+    if let Some(edge) = inline_fetch_dim_w(req, frame, code, op, at, (A::default(), B::default())) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -9962,38 +9966,48 @@ fn inline_fetch_dim_w(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
-    let slots = req.slots_mut(frame);
-    let (entry, table) = owned_entry(slots, code, op, a, b)?;
     let out = exec::temporary_slot(code, op.out) as usize;
-    if slots.get(out)?.is_refcounted() {
+    if req.slots_mut(frame).get(out)?.is_refcounted() {
         return None;
     }
-    free_place_var(slots, code, op, a);
-    *slots.get_mut(out)? = Zval::indirect(entry);
+    let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
+        Ok(placed) => placed,
+        Err(edge) => return Some(edge),
+    };
+    free_dim_operands(req, frame, code, op, (a, placed.free_dim));
+    *req.slots_mut(frame).get_mut(out)? = Zval::indirect(placed.entry);
     // The table the entry stands in, for the write after this to hold
     // across what it serves, as every `FETCH_DIM_W` notes it.
-    req.note_walk(Some((entry, Value::of_zval(table))));
+    req.note_walk(Some((placed.entry, Value::of_zval(placed.table))));
     Some(Ok(advanced()))
 }
 
-/// The element a dimension write's inline path writes in place: the
-/// entry at the key [`inline_key`] reads of the array a CV holds, or the
-/// place a `FETCH_*_W` left in a `VAR` as an `IS_INDIRECT` holds
-/// (`GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`), where that array is
-/// refcounted with one owner and is no reference's, so `SEPARATE_ARRAY`
-/// copies nothing, and the entry holds a value that is no reference and
-/// no `IS_INDIRECT`; with the array's zval, the table the entry stands in.
+/// The element a dimension write's inline path writes in place, as
+/// `zend_fetch_dimension_address_inner_W` finds or lays it down: the
+/// array a CV holds, or the place a `FETCH_*_W` left in a `VAR` as an
+/// `IS_INDIRECT` holds (`GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`), where
+/// that array is refcounted with one owner and is no reference's, so
+/// `SEPARATE_ARRAY` copies nothing; the entry at the key [`inline_key`]
+/// reads, or the next one for an append, laid down holding `null` where
+/// the table has none (`zend_hash_lookup`, `zend_hash_next_index_insert`),
+/// which serves no code. None, with nothing touched, for every other
+/// container, an entry that is a reference or a symbol table's
+/// `IS_INDIRECT`, and an append past the last index, whose `Error` is
+/// the kernel's; the memory limit a laying-down meets is raised at the
+/// opline at `at`, the `Err`.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn owned_entry(
-    slots: &[Zval],
-    code: &OpArray,
-    op: &Opline,
+    req: &mut Request,
+    frame: FrameRef,
+    (code, op, at): (&OpArray, &Opline, u32),
     a: impl Operand,
     b: impl Operand,
-) -> Option<(php_heap::ZvalRef, Zval)> {
+) -> Option<Result<OwnedEntry, Edge>> {
+    let slots = req.slots_mut(frame);
     let held = a.read(slots, code, op.op1);
     let held = match a.kind() {
         OperandKind::Cv => held,
@@ -10004,14 +10018,76 @@ fn owned_entry(
     if !held.is_refcounted() || array.refcount() != 1 {
         return None;
     }
-    let entry = array.value_ref(inline_key(slots, code, op, b)?)?;
+    let key = match b.kind() {
+        OperandKind::Unused => None,
+        _ => Some(inline_key(slots, code, op, b)?),
+    };
+    let found = match key {
+        Some((key, _)) => array.value_ref(key),
+        None => None,
+    };
+    let entry = if let Some(entry) = found {
+        entry
+    } else {
+        let laid = match key {
+            Some((key, _)) => req.array_lookup(array, key),
+            None => req.array_next_entry(array),
+        };
+        match laid {
+            Ok(entry) => entry?,
+            Err(thrown) => {
+                req.vm_mut().stand(frame, at);
+                return Some(Err(threw(req, frame, &thrown)));
+            }
+        }
+    };
     let z = entry.read();
     let plain = !z.is_undef()
         && !matches!(
             z.kind(),
             php_heap::ZvalType::Reference | php_heap::ZvalType::Indirect
         );
-    plain.then_some((entry, held))
+    plain.then_some(Ok(OwnedEntry {
+        entry,
+        table: held,
+        free_dim: key.is_some_and(|(_, free)| free),
+    }))
+}
+
+/// An entry [`owned_entry`] found or laid down: the place, the zval of
+/// the table it stands in, and whether the dimension is a temporary
+/// string the opcode gives up after the write (`FREE_OP2`).
+#[derive(Clone, Copy)]
+struct OwnedEntry {
+    entry: php_heap::ZvalRef,
+    table: Zval,
+    free_dim: bool,
+}
+
+/// `FREE_OP1_VAR_PTR()` and `FREE_OP2()` after a dimension write's
+/// inline path: the `VAR` the container was named through, an
+/// `IS_INDIRECT` that owns nothing, emptied as [`exec::free_operand`]
+/// empties it, and a temporary string the dimension was, given up,
+/// which serves no code.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn free_dim_operands(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, free_dim): (impl Operand, bool),
+) {
+    if a.kind() == OperandKind::Var
+        && let Some(var) = a
+            .slot(code, op.op1)
+            .and_then(|at| req.slots_mut(frame).get_mut(at))
+    {
+        *var = Zval::UNDEF;
+    }
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
 }
 
 /// `ZEND_FETCH_DIM_RW` (`Z/Zend/zend_vm_def.h:2024`), the link of a
@@ -13774,26 +13850,17 @@ fn inline_assign_dim(
     at: u32,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
-    let slots = req.slots_mut(frame);
-    let (entry, _) =
-        owned_entry(slots, code, op, a, b).filter(|(entry, _)| !entry.read().is_refcounted())?;
-    let z = data_value(req, frame, code, op, at)?;
-    entry.write(z);
-    free_place_var(req.slots_mut(frame), code, op, a);
-    Some(Ok(Next::Jump(at.saturating_add(2))))
-}
-
-/// `FREE_OP1_VAR_PTR()`: the `VAR` a write's container was named
-/// through, an `IS_INDIRECT` that owns nothing, emptied as
-/// [`exec::free_operand`] empties it; nothing for a CV.
-#[inline(always)] // as `inline_fetch_dim_r`
-#[allow(clippy::inline_always)]
-fn free_place_var(slots: &mut [Zval], code: &OpArray, op: &Opline, a: impl Operand) {
-    if a.kind() == OperandKind::Var
-        && let Some(var) = a.slot(code, op.op1).and_then(|at| slots.get_mut(at))
-    {
-        *var = Zval::UNDEF;
+    let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
+        Ok(placed) => placed,
+        Err(edge) => return Some(edge),
+    };
+    if placed.entry.read().is_refcounted() {
+        return None;
     }
+    let z = data_value(req, frame, code, op, at)?;
+    placed.entry.write(z);
+    free_dim_operands(req, frame, code, op, (a, placed.free_dim));
+    Some(Ok(Next::Jump(at.saturating_add(2))))
 }
 
 /// `ASSIGN_DIM` past its inline path: the container placed for the
@@ -19613,7 +19680,7 @@ fn inline_isset_dim<T: Tier>(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
-    let (array, key) = inline_dim(slots, code, op, a, b)?;
+    let (array, (key, free_dim)) = inline_dim(slots, code, op, a, b)?;
     let found = inline::element(array, key);
     let answer = if op.extended_value & ISEMPTY == 0 {
         found.is_some_and(|z| z.kind() != php_heap::ZvalType::Null)
@@ -19623,7 +19690,15 @@ fn inline_isset_dim<T: Tier>(
             Some(z) => !inline::truth(z)?,
         }
     };
-    if let Some(jump) = fused_jump(code, op, at) {
+    let out = exec::temporary_slot(code, op.out) as usize;
+    let fused = fused_jump(code, op, at);
+    if fused.is_none() && slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    if let Some(jump) = fused {
         return Some(branch_fused::<T>(
             req,
             frame,
@@ -19632,7 +19707,7 @@ fn inline_isset_dim<T: Tier>(
             answer,
         ));
     }
-    write_owning_nothing(slots, code, op, Zval::bool(answer))?;
+    write_owning_nothing(req.slots_mut(frame), code, op, Zval::bool(answer))?;
     Some(Ok(advanced()))
 }
 
