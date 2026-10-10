@@ -10649,7 +10649,7 @@ impl Emit<'_> {
             tree::Expr::InterpolatedStringExpr(id) => self.double_quoted_expr(id, line),
             tree::Expr::HeredocExpr(id) => self.heredoc_expr(id, line),
             tree::Expr::ShellExecExpr(id) => self.shell_exec(id, line),
-            tree::Expr::SimpleVarExpr(id) => self.simple_var_expr(id, line),
+            tree::Expr::SimpleVarExpr(id) => self.simple_var_expr(id, line, fetch),
             tree::Expr::VarVarExpr(id) => {
                 self.operand_of(tree[id].inner, "a variable", Self::var_var)
             }
@@ -10761,17 +10761,19 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_simple_var` through `zend_try_compile_cv`: the
-    /// variable is its CV, and no opline reads it into anything; `$this`
-    /// under `BP_VAR_R` is `FETCH_THIS` into a temporary, and an
-    /// auto-global `FETCH_R (global)` over its name.
+    /// variable is its CV, fetched under `fetch` ([`Self::cv_fetched`]),
+    /// and no opline reads it into anything; `$this` under `BP_VAR_R` is
+    /// `FETCH_THIS` into a temporary, and an auto-global `FETCH_R
+    /// (global)` over its name.
     fn simple_var_expr(
         &mut self,
         id: NodeId<tree::SimpleVarExpr>,
         line: u32,
+        fetch: Fetch,
     ) -> Result<Where, CompileError> {
         match self.simple_var_of(id, line)? {
             SimpleVar::Cv(name) => {
-                self.cv_fetched(&name, Fetch::Read);
+                self.cv_fetched(&name, fetch);
                 Ok(Where::Cv(self.lookup_cv(&name)))
             }
             SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
@@ -11808,11 +11810,34 @@ impl Emit<'_> {
     /// `zend_compile_var` under `BP_VAR_IS`
     /// (`Z/Zend/zend_compile.c:12009`), the read that raises nothing
     /// where what it reads is not there. A `ZEND_AST_VAR` is the CV
-    /// itself, whatever the type, and everything below the four
-    /// variable nodes is `zend_compile_expr`, which is what a call, a
-    /// number as written or an operator is; the three nodes with a
+    /// itself, whatever the type, fetched under `BP_VAR_IS`, which
+    /// raises no deprecation over `$http_response_header`; a call, the
+    /// chain's own or one under it, is compiled under `BP_VAR_IS` too,
+    /// which keeps it from the frameless calls php compiles only for a
+    /// read; and everything else is `zend_compile_expr`, which is what a
+    /// number as written or an operator is. The three nodes with a
     /// fetch of their own are `FETCH_DIM_IS`, `FETCH_OBJ_IS` and
     /// `FETCH_STATIC_PROP_IS`, one per link of the chain.
+    ///
+    /// ```php
+    /// var_dump($http_response_header ?? 1);
+    /// var_dump(isset($http_response_header[0]));
+    /// var_dump($http_response_header[0] ?? 2);
+    /// var_dump(empty($http_response_header));
+    /// var_dump(str_contains("x", "y")["a"] ?? 3);
+    /// echo "--\n";
+    /// var_dump(@$http_response_header);
+    /// ```
+    /// ```expect
+    /// Deprecated: The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead in %s on line 8
+    /// int(1)
+    /// bool(false)
+    /// int(2)
+    /// bool(true)
+    /// int(3)
+    /// --
+    /// NULL
+    /// ```
     ///
     /// php holds each fetch back while the rest of the chain compiles
     /// (`zend_delayed_compile_var`) and flushes them in written order
@@ -11836,7 +11861,7 @@ impl Emit<'_> {
             };
         }
         if !self.is_fetch(expr) {
-            return self.expr(expr);
+            return self.expr_under(expr, Fetch::Is);
         }
         let checkpoint = self.short_circuits.len();
         let mut delayed = Vec::new();
@@ -12016,7 +12041,7 @@ impl Emit<'_> {
             }
             return Ok(Under::Value(self.fetch_this(OperandKind::Var)));
         }
-        Ok(Under::Value(self.chain_link(expr)?))
+        Ok(Under::Value(self.chain_link_under(expr, Fetch::Is)?))
     }
 
     /// The `op1` a link carries: nothing where it reads the link under
