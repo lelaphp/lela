@@ -73,6 +73,8 @@ abi::DebugInfo
 abi::Dependency
 abi::DependencyKind
 abi::DimensionRead
+abi::DtorObj
+abi::DtorObj::serve
 abi::Encoding
 abi::Encodings
 abi::Encodings::convert

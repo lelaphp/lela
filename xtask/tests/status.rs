@@ -1445,6 +1445,9 @@ fn parity_store(name: &str, pin: &Path) -> Tree {
             phpt("ext/pgsql", &held(3, 3)),
             phpt("ext/enchant", &held(20, 20)),
             phpt("sapi/cli", &held(99, 99)),
+            // A second host's run of tests other suites count: the HTTP-served
+            // lane under its host's name, whose row owns no subset (#2334).
+            phpt("sapi/makala", &held(267, 260)),
             phpt("ext/lexbor", &[("tests", 0), ("run", 0)]),
             phpt(
                 "ext/pcre",
@@ -1460,7 +1463,9 @@ fn parity_store(name: &str, pin: &Path) -> Tree {
 /// the suites held to a target, and the suites outside parity with the
 /// ruling that put them there or as not built; a control, a lane, a
 /// comparison and a narrower run are no suite's own, and a reading held to
-/// no target is in no total.
+/// no target is in no total. A host's reading whose row owns no subset,
+/// `sapi/makala`'s run of the CGI-shaped tests over HTTP, is no suite and
+/// none outside, so a test met through two hosts counts once (#2334).
 #[test]
 fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outside() {
     let root = parity_store("parity", Path::new(NO_TREE));
@@ -1512,7 +1517,8 @@ fn parity_states_met_of_target_per_suite_and_in_total_and_names_the_suites_outsi
             .iter()
             .all(|s| !s["suite"].as_str().unwrap().contains('@')
                 && s["suite"] != "ext/standard/tests/serialize"
-                && s["suite"] != "ext/pgsql"),
+                && s["suite"] != "ext/pgsql"
+                && s["suite"] != "sapi/makala"),
         "{json}"
     );
     assert_eq!(

@@ -38,7 +38,9 @@
 //! change in [`approval`], the audit record of each change it admitted in
 //! [`audit`], whether a line can write one of them in [`writes`], the
 //! `unless` qualifier's sensor in [`unless`], the `exempt_label`
-//! qualifier's in [`label`], the adapters and the
+//! qualifier's in [`label`], the operation in progress in a checkout and
+//! whose it is, which `where = "operating"` reads, in [`operation`], the
+//! adapters and the
 //! recording in [`adapters`], the call handed to a worktree's own build in
 //! [`hand_off`], the diff judge in [`diff`] and the bench of
 //! §4.4's cost bar in [`bench`]. The ids a reading
@@ -56,6 +58,7 @@ mod diff;
 mod hand_off;
 mod kept;
 mod label;
+mod operation;
 mod region;
 mod rules;
 mod unless;

@@ -30,7 +30,7 @@ use php_heap::{Fatal, FrameRef};
 use php_macros::php_class;
 use php_unit::Opcode;
 
-use crate::api::abi::{CloneObj, Instance, ObjectHandlers, This};
+use crate::api::abi::{CloneObj, DtorObj, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
@@ -171,8 +171,8 @@ struct GeneratorHandlers;
 
 impl ObjectHandlers for GeneratorHandlers {
     /// `zend_generator_dtor_storage`.
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        dtor_storage(req, object);
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(dtor_storage)
     }
 
     /// `zend_generator_free_storage`: the frame closed, and the

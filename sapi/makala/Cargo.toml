@@ -1,0 +1,37 @@
+# sapi/makala: the production web server beside `php -S`, one crate under
+# `sapi/` (ADR-0008 as amended by #2332), laid down by `xtask new-sapi`: the
+# binary `makala`. A host php does not ship, so it ports nothing of php-src;
+# its design is #2337's. The connection side is hyper's HTTP/1.1 server on
+# a one-thread tokio runtime that owns the sockets and never runs PHP; the
+# request side a bounded pool of request threads, each request through its
+# own `Engine::serve`. Edges php_bundle, php_sapi, and php_proto for the CGI
+# environment's codec and the path normalisation `php -S` uses; the engine
+# is named through the facade alone.
+[package]
+name = "php_sapi_makala"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "the production web server beside php -S, the binary makala"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "makala"
+path = "src/main.rs"
+
+[dependencies]
+# The CLI's set (sapi/cli/Cargo.toml says why each) without `pcntl` and
+# `posix`, which no host that serves requests on threads carries (design
+# §7.2): a fork of this process would copy its other request threads'
+# state in the middle of their work. The test
+# `the_bundle_is_the_clis_without_pcntl_and_posix` holds the list.
+php_bundle = { path = "../../crates/php_bundle", features = ["sockets", "bz2", "openssl", "bcmath", "calendar", "mbstring", "curl", "exif", "shmop", "sysvsem", "sysvmsg", "sysvshm", "ftp", "pdo_mysql", "mysqli", "dba", "zip", "gmp", "tidy", "soap", "gd", "sodium", "gettext", "readline", "ffi", "intl"] }
+php_proto = { path = "../../crates/php_proto" }
+php_sapi = { path = "../../crates/php_sapi" }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tokio = { workspace = true }

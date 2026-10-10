@@ -17,7 +17,7 @@
 //! branch with no record names no ticket, which is stated, and no reader
 //! guesses one from a number in the branch's name.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -177,9 +177,7 @@ pub(crate) fn record_ticket(root: &Path, branch: &str, ticket: Ticket) -> Result
 /// The branch whose record names `ticket`, if one does: what refuses a
 /// second branch on the same ticket, so no ticket is closed twice.
 pub(crate) fn branch_of_ticket(root: &Path, ticket: Ticket) -> Option<String> {
-    Records::of(branch_records(root), &BTreeSet::new())
-        .branch(ticket)
-        .map(str::to_owned)
+    Records::read(root).branch(ticket).map(str::to_owned)
 }
 
 /// Every branch record of the repository, each branch with the ticket it
@@ -205,54 +203,26 @@ fn branch_records(root: &Path) -> Vec<(String, Ticket)> {
 }
 
 /// The repository's branch records as the frontier reads them, once per
-/// `track next` (#1850): the branch recording each ticket, and the
-/// tickets recorded by a branch `main` does not contain yet, each with
-/// that branch, which a held ticket waits on (#1857). Containment
-/// is git's own reachability, the test `merge-base --is-ancestor` makes,
-/// asked of every branch in one `for-each-ref --no-merged`; a record
-/// whose branch is gone names no branch `main` could lack.
+/// `track next`: the branch recording each ticket, which takes the ticket
+/// off the frontier. Whether `main` contains that branch is not read: a
+/// ticket closes when its work is on `main` (#2270), so what waits on a
+/// branch's merge is the ticket's own open state (#2326).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Records {
     branches: BTreeMap<Ticket, String>,
-    unmerged: BTreeMap<Ticket, String>,
 }
 
 impl Records {
-    /// The records of the repository at `root`, held to its `main`, its
-    /// own or `origin`'s; a repository with neither is an error, since
-    /// nothing can be said contained in it.
-    pub(crate) fn read(root: &Path) -> Result<Records> {
-        let main = ref_of(root, MAIN).with_context(|| {
-            format!("the repository has no {MAIN}, its own or origin's, to hold a branch to")
-        })?;
-        let unmerged = git(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(refname:lstrip=2)",
-                &format!("--no-merged={main}"),
-                "refs/heads/",
-            ],
-            None,
-        )
-        .with_context(|| format!("the branches {main} does not contain could not be listed"))?;
-        let unmerged: BTreeSet<&str> = unmerged.lines().collect();
-        Ok(Records::of(branch_records(root), &unmerged))
+    /// The records of the repository at `root`.
+    pub(crate) fn read(root: &Path) -> Records {
+        Records::of(branch_records(root))
     }
 
-    /// Each branch of `pairs` with the ticket it records, the branches in
-    /// `unmerged` being the ones `main` does not contain; the first branch
-    /// recording a ticket is the one named for it, and the first not in
-    /// `main` holds it and is the one named for that.
-    pub(crate) fn of(pairs: Vec<(String, Ticket)>, unmerged: &BTreeSet<&str>) -> Records {
+    /// Each branch of `pairs` with the ticket it records; the first
+    /// branch recording a ticket is the one named for it.
+    pub(crate) fn of(pairs: impl IntoIterator<Item = (String, Ticket)>) -> Records {
         let mut records = Records::default();
         for (branch, ticket) in pairs {
-            if unmerged.contains(branch.as_str()) {
-                records
-                    .unmerged
-                    .entry(ticket)
-                    .or_insert_with(|| branch.clone());
-            }
             records.branches.entry(ticket).or_insert(branch);
         }
         records
@@ -261,12 +231,6 @@ impl Records {
     /// The branch recording `ticket`, if one does.
     pub(crate) fn branch(&self, ticket: Ticket) -> Option<&str> {
         self.branches.get(&ticket).map(String::as_str)
-    }
-
-    /// The branch recording `ticket` that `main` does not contain, if one
-    /// does.
-    pub(crate) fn unmerged(&self, ticket: Ticket) -> Option<&str> {
-        self.unmerged.get(&ticket).map(String::as_str)
     }
 }
 

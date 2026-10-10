@@ -176,7 +176,10 @@ pub(super) fn open_blob(
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
             return Ok(Owner::bool(false));
         };
-        let blob = match handle.db.blob_open(&dbname, &table, &column, row, writable) {
+        let Some(db) = handle.db() else {
+            return Ok(Owner::bool(false));
+        };
+        let blob = match db.blob_open(req, &dbname, &table, &column, row, writable) {
             Ok(blob) => blob,
             Err(text) => {
                 let text = String::from_utf8_lossy(&text).into_owned();

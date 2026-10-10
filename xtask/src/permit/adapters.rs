@@ -9,14 +9,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::approval::Evidence;
+use super::argv::Line;
 use super::audit;
 use super::call::Call;
 use super::hand_off::hand_off;
+use super::operation;
 use super::rules::{Judgement, Kind, deny_output, judge};
 use super::{INSTRUMENT, STALE_RULE, UNJUDGED_RULE};
 use crate::built::{self, Judge, Refusal};
 use crate::key::Snapshot;
-use crate::manifest::{self, Manifest};
+use crate::manifest::{self, Manifest, Where};
 use crate::reading::{Reading, Status, Store};
 
 /// Which adapter judges the call: the command hook records every
@@ -172,6 +174,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
                 println!("{output}");
             }
             record_the_approvals(&checkout, &call, &judgement);
+            record_the_operation(&manifest, &workspace, &call, &judgement);
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
@@ -201,6 +204,23 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
         if let Err(err) = audit::record(checkout, call, admission) {
             eprintln!("xtask permit: the approval stands but its entry was not written: {err:#}");
         }
+    }
+}
+
+/// The session whose `git merge`, `rebase` or kin this admits, as the
+/// starter of the operation it begins ([`operation::record`]), where a
+/// rule judges by it; a manifest with no `where = "operating"` rule
+/// records nothing. Best effort, as recording the decision is.
+fn record_the_operation(manifest: &Manifest, root: &Path, call: &Call, judgement: &Judgement) {
+    let Some(command) = call.command() else {
+        return;
+    };
+    if judgement.denial().is_some() || !manifest.rules.iter().any(|r| r.within == Where::Operating)
+    {
+        return;
+    }
+    if let Err(err) = operation::record(root, call, &Line::read(command)) {
+        eprintln!("xtask permit: the operation's starter was not recorded: {err:#}");
     }
 }
 
@@ -252,5 +272,76 @@ fn record_the_refusal(root: &Path, call: &Call, refusal: &Refusal) {
     // The refusal is the exit already; the outcome of recording it is not.
     if let Err(err) = recorded {
         eprintln!("xtask permit: the refusal to judge was not recorded: {err:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{Call, Manifest, Where, judge, record_the_operation};
+    use crate::manifest::{OneOrMany, Rule};
+    use crate::scratch::Tree;
+
+    /// The whole path a starter takes (#2476): the adapter records the
+    /// session whose `git merge` it admits, and the judge then lets that
+    /// session's `git add` through the merge and refuses another's. A
+    /// manifest without a `where = "operating"` rule records nothing.
+    #[test]
+    fn the_session_whose_merge_permit_admitted_stages_through_it_and_no_other() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let without = Manifest::load(workspace).unwrap();
+        let mut manifest = without.clone();
+        let mut rule = Rule::named("probe.operating", "");
+        rule.scope = OneOrMany::None;
+        rule.tool = OneOrMany::One("Bash".to_owned());
+        rule.within = Where::Operating;
+        rule.predicate.deny = None;
+        rule.predicate.deny_argv = Some(vec!["add".to_owned()]);
+        rule.predicate.with = OneOrMany::One("git".to_owned());
+        manifest.rules.push(rule);
+
+        let dir = Tree::new("permit-operating").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &[
+                "-c",
+                "user.name=x",
+                "-c",
+                "user.email=x@x",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "one",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let bash = |session: &str, line: &str| {
+            let call = serde_json::json!({"tool_name": "Bash", "session_id": session, "tool_input": {"command": line}});
+            Call::parse(&call.to_string()).unwrap()
+        };
+        let start = bash("s1", "git merge --no-commit topic");
+        let admitted = judge(&without, &dir, &start).unwrap();
+        record_the_operation(&without, &dir, &start, &admitted);
+        assert!(!dir.join("target").exists(), "inert without the rule");
+        record_the_operation(&manifest, &dir, &start, &admitted);
+        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
+
+        let add = |session: &str| {
+            let judged = judge(&manifest, &dir, &bash(session, "git add -- a")).unwrap();
+            judged.denial().map(|f| f.rule.clone())
+        };
+        assert_eq!(add("s1"), None);
+        assert_eq!(add("s2").as_deref(), Some("probe.operating"));
     }
 }

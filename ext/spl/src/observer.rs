@@ -1555,7 +1555,20 @@ fn storage_contains(req: &mut Request, this: PhpObject, object: PhpObject) -> Re
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_SplObjectStorage_free_storage`: `zend_object_std_dtor`, then
+    /// the storage destroyed.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n, "\n"; } }
+    /// class S extends SplObjectStorage { public $p; }
+    /// $o = new S; $o[new D('storage')] = 1; $o->p = new D('prop'); unset($o);
+    /// ```
+    /// ```expect
+    /// prop
+    /// storage
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
         let (rows, mut table) = object
             .native_mut::<Storage>(req)
             .map(|s| {

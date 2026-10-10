@@ -6,7 +6,7 @@
 //! [`from_enumeration`]; `IntlPartsIterator` walks a break iterator's parts
 //! through the same object.
 
-use php_ext::abi::{ClassIterator, ObjectHandlers, Refusals, This};
+use php_ext::abi::{ClassIterator, DtorObj, ObjectHandlers, Refusals, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
@@ -357,14 +357,8 @@ impl ObjectHandlers for Handlers {
     /// string(12) "IntlIterator"
     /// end
     /// ```
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        take_released(req, object);
-    }
-
-    /// `IntlIterator_objects_free`: what a collection left of the
-    /// cursor, which it frees with no destructor served, released.
-    fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        take_released(req, object);
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(take_released)
     }
 
     /// `IntlIterator_object_get_gc` through `zoi_with_current_get_gc`:

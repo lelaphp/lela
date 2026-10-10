@@ -181,8 +181,8 @@ use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status};
 use crate::steer::STEERABLE;
-use crate::track::{MAIN, Records, Ticket, Track};
-use crate::track_next::{READY, TRACK_LABEL, tracks_of, waits};
+use crate::track::{MAIN, Ticket, Track};
+use crate::track_next::{READY, TRACK_LABEL, tracks_of};
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -823,15 +823,44 @@ const STAYING: [&str; 9] = [
     "untouched",
 ];
 
+/// The words that say a thing kept is changed all the same, so the
+/// clause asks for the write (#2396): "keeps its ceiling raised to
+/// 40000". `set` is one of them only before `to`, since "the set of
+/// rules" changes nothing.
+const CHANGING: [&str; 4] = ["raised", "lowered", "changed", "moved"];
+
 /// Whether what follows a clause's subject says the subject stays as it
 /// is (#2391): one of [`STAYING`] among its first two words, as #630's
 /// "`.claude/harness.local.md` still renders this machine's live numbers"
-/// or "`seams.toml` is unchanged" says. A word of staying further on is
+/// or "`seams.toml` is unchanged" says, and no word of [`CHANGING`] after
+/// it (#2396). A possessive subject, "`seams.toml`'s ceiling stays", is
+/// read past the noun it possesses. A word of staying further on is
 /// about something else the clause names.
 fn kept(after: &str) -> bool {
-    words(after)
+    let after = after.trim_start_matches(['`', '"']);
+    let after = match after
+        .strip_prefix("'s")
+        .or_else(|| after.strip_prefix("\u{2019}s"))
+    {
+        Some(owned) => owned
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .map_or("", |(_noun, rest)| rest),
+        None => after,
+    };
+    let words: Vec<String> = words(after).collect();
+    let Some(at) = words
+        .iter()
         .take(2)
-        .any(|word| STAYING.contains(&word.as_str()))
+        .position(|word| STAYING.contains(&word.as_str()))
+    else {
+        return false;
+    };
+    let rest = &words[at + 1..];
+    !rest.iter().enumerate().any(|(i, word)| {
+        CHANGING.contains(&word.as_str())
+            || (word == "set" && rest.get(i + 1).is_some_and(|next| next == "to"))
+    })
 }
 
 /// Whether a path is a path character: what a token naming one is made of.
@@ -941,6 +970,19 @@ pub struct Label {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct BlockedBy {
     pub nodes: Vec<Blocker>,
+}
+
+impl BlockedBy {
+    /// The blockers still open, by number: what blocks a ticket, since a
+    /// ticket closes when its work is on `main` (#2270, #2326). The
+    /// frontier, the chains and a merge's partial landing (#2394) read
+    /// the rule here.
+    pub(crate) fn open(&self) -> impl Iterator<Item = u64> + '_ {
+        self.nodes
+            .iter()
+            .filter(|blocker| blocker.state == State::Open)
+            .map(|blocker| blocker.number)
+    }
 }
 
 /// One ticket in a blocking relation: its number and whether it is open.
@@ -1464,23 +1506,22 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     }
     // The commit `since` names now, for a message read after `HEAD` moves.
     let parent = crate::git::git(root, &["rev-parse", "--short", since], None)?;
-    let records = Records::read(root)?;
     for issue in unready.into_iter().filter_map(open) {
-        readings.push(left_open(root, &issue, &records, parent.trim())?);
+        readings.push(left_open(root, &issue, parent.trim())?);
     }
     Ok(readings)
 }
 
 /// The reading of a ticket a merge names with no ready record, which it
 /// leaves open. It is a partial landing (#2394) while a box stands
-/// unticked and something still blocks it as the frontier reads a
-/// blocker ([`waits`]): the build skill leaves a ticket
+/// unticked and an open ticket still blocks it ([`BlockedBy::open`]):
+/// the build skill leaves a ticket
 /// whose last box waits on another open and wires that one on, so the
 /// reading skips the close, saying so and what holds it. Otherwise it
 /// fails, named, the merge stands, and `done` names it ([`stranded`])
 /// until a close, or [`merged`] run again once the blocker is wired,
 /// replaces it.
-fn left_open(root: &Path, issue: &Issue, records: &Records, parent: &str) -> Result<Reading> {
+fn left_open(root: &Path, issue: &Issue, parent: &str) -> Result<Reading> {
     let ticket = Ticket::new(issue.number);
     let mut left = Reading::stamped_over(
         INSTRUMENT,
@@ -1488,8 +1529,10 @@ fn left_open(root: &Path, issue: &Issue, records: &Records, parent: &str) -> Res
         &Snapshot::disk(root)?,
         Path::new(STAMPED_OVER),
     )?;
-    let blockers: Vec<String> = waits(&issue.blocked_by, records)
-        .map(|wait| Ticket::new(wait.number()).to_string())
+    let blockers: Vec<String> = issue
+        .blocked_by
+        .open()
+        .map(|number| Ticket::new(number).to_string())
         .collect();
     if blockers.is_empty() || Criteria::parse(&issue.body).unticked.is_empty() {
         left.status = Status::Fail;
@@ -1774,7 +1817,9 @@ mod tests {
 
     /// A subject said to stay as it is asks for no write (#2391), and a
     /// word of staying past the two after the subject is about something
-    /// else the clause names, so the write stands.
+    /// else the clause names, so the write stands. A possessive subject
+    /// is read past the noun it possesses, and a word of change after
+    /// the staying word is the write it says (#2396).
     #[test]
     fn a_criterion_whose_denied_subject_stays_as_it_is_asks_for_no_write() {
         for kept in [
@@ -1782,12 +1827,18 @@ mod tests {
             "`seams.toml` keeps its ceilings",
             "`oracle.toml` stays as it is",
             "`seams.toml` is unchanged",
+            "`seams.toml`'s ceiling stays",
+            "`seams.toml`\u{2019}s ceiling remains unchanged",
+            "`seams.toml` keeps the set of rules it has",
         ] {
             assert!(read("ready-for-agent", kept).is_empty(), "{kept}");
         }
         for written in [
             "`oracle.toml` carries a `[regime.dump]` the lane still reads",
             "`.claude/settings.json` still gains a hook",
+            "`seams.toml` keeps its ceiling raised to 40000",
+            "`seams.toml` keeps its ceiling set to 40000",
+            "`seams.toml`'s ceiling stays lowered",
         ] {
             assert_eq!(read("ready-for-agent", written).len(), 1, "{written}");
         }

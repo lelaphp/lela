@@ -4,7 +4,7 @@
 //! function share one body here, handed the object and the argument
 //! position the object takes up, which a method reports one lower.
 
-use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Path, Refusals, This, Union};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Path, Refusals, Std, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_long, to_string};
@@ -75,8 +75,10 @@ impl ObjectHandlers for Handlers {
         Ok(())
     }
 
-    /// `tidy_object_free_storage`: the document one owner fewer.
+    /// `tidy_object_free_storage`: `zend_object_std_dtor`, then the
+    /// document one owner fewer.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
         if let Some(id) = object.native_mut::<Obj>(req).and_then(|obj| obj.doc.take()) {
             forget(req, id);
         }

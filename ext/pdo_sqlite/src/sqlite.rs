@@ -6,7 +6,7 @@
 use php_ext::abi::Callable;
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Foreign, Request, Stream};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
     BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, Executed, Failure,
@@ -15,7 +15,7 @@ use php_ext_pdo::connector::{
 };
 
 use crate::Sqlite;
-use crate::ffi::{self, Db, Function, Registration};
+use crate::ffi::{self, Conn, Db, Function, Handler, Registration};
 
 /// `PDO_ATTR_TIMEOUT` and `PDO_ATTR_CURSOR`, which the connector reads.
 const ATTR_TIMEOUT: i64 = 2;
@@ -134,16 +134,17 @@ impl Einfo {
 /// `H->einfo`, with its message where it is an error; the SQLSTATE the code
 /// maps to, `00000` for `SQLITE_OK`, with what a callback threw, or the
 /// memory limit's fatal where the message could not be kept.
-fn failed(req: &mut Request, db: &Db, thrown: Option<Thrown>) -> Failure {
-    let code = db.errcode();
-    let mut einfo = db.replace_einfo(Einfo::default());
+fn failed(req: &mut Request, db: Db, thrown: Option<Thrown>) -> Failure {
+    let code = db.errcode(req);
+    let mut einfo = db.replace_einfo(req, Einfo::default());
     einfo.code = code;
     let (state, kept) = if code == ffi::SQLITE_OK {
         (SqlState::NONE, Ok(()))
     } else {
-        (state_for(code), einfo.keep(req, &db.errmsg()))
+        let message = db.errmsg(req);
+        (state_for(code), einfo.keep(req, &message))
     };
-    db.replace_einfo(einfo);
+    db.replace_einfo(req, einfo).free(req);
     Failure {
         thrown: kept.err().or(thrown),
         ..Failure::error(state)
@@ -187,14 +188,16 @@ impl Connector for Driver {
             Some(Emalloc::new(req, DB_HANDLE)?)
         };
         match open_db(req, source) {
-            Ok(db) => {
-                db.replace_einfo(Einfo {
+            Ok(owner) => {
+                let einfo = Einfo {
                     persistent: source.persistent,
                     ..Einfo::default()
-                });
+                };
+                Db::of(&owner).replace_einfo(req, einfo).free(req);
                 Ok(Box::new(Handle {
-                    db,
+                    place: Place::Request(owner),
                     registrations: Vec::new(),
+                    authorizer: None,
                     transaction_mode: 0,
                     allocation,
                 }))
@@ -212,7 +215,7 @@ impl Connector for Driver {
 /// The rest of `pdo_sqlite_handle_factory`: the file made safe as
 /// `make_filename_safe` makes it, opened with the bits the options give,
 /// the busy timeout set.
-fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Db, Failure> {
+fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Foreign<Conn>, Failure> {
     {
         let Some(filename) = safe_filename(req, Some(source.dsn)) else {
             let shown = String::from_utf8_lossy(source.dsn).into_owned();
@@ -234,8 +237,8 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Db, Failure> {
         if !open_basedir(req) {
             flags |= ffi::SQLITE_OPEN_URI;
         }
-        let db = match Db::open(&filename, flags, &crate::callbacks::PDO_SQLITE) {
-            Ok(db) => db,
+        let owner = match Db::open(req, &filename, flags, &crate::callbacks::PDO_SQLITE) {
+            Ok(owner) => owner,
             Err((code, message)) => {
                 return Err(Failure::refused(SqlError {
                     state: state_for(code),
@@ -245,11 +248,17 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Db, Failure> {
             }
         };
         let timeout = match source.options {
-            Some(options) => option_long(req, Some(options), ATTR_TIMEOUT, 60)?,
+            Some(options) => match option_long(req, Some(options), ATTR_TIMEOUT, 60) {
+                Ok(timeout) => timeout,
+                Err(failure) => {
+                    drop(req.disown(owner));
+                    return Err(Failure::from(failure));
+                }
+            },
             None => 60,
         };
-        db.busy_timeout(timeout.saturating_mul(1000));
-        Ok(db)
+        Db::of(&owner).busy_timeout(req, timeout.saturating_mul(1000));
+        Ok(owner)
     }
 }
 
@@ -293,10 +302,13 @@ pub(super) fn safe_filename(req: &mut Request, name: Option<&[u8]>) -> Option<Ve
 }
 
 /// `pdo_sqlite_db_handle`: the connection, the functions and collations
-/// registered on it, and the transaction style.
+/// registered on it, the authorizer, and the transaction style.
 pub(crate) struct Handle {
-    pub(crate) db: Db,
+    place: Place,
     pub(crate) registrations: Vec<Registration>,
+    /// `authorizer_fcc`, the callable the connection's authorizer calls
+    /// through a view of it ([`Db::set_authorizer`]).
+    pub(crate) authorizer: Option<Handler>,
     transaction_mode: i64,
     /// The `pdo_sqlite_db_handle` the factory `pecalloc`s for the
     /// connection, on the request's heap where the connection is not
@@ -310,14 +322,55 @@ pub(crate) struct Handle {
 /// `transaction_mode` (`Z/ext/pdo_sqlite/php_pdo_sqlite_int.h:48-55`).
 const DB_HANDLE: usize = 96;
 
+/// Where a connection's [`Conn`] stands: kept by the request the
+/// connection serves (ADR-0013), or, given back with a persistent
+/// connection to PDO's pool, held here for the next request to take up,
+/// as `pdo_mysql` holds its connection idle.
+enum Place {
+    Request(Foreign<Conn>),
+    Idle(Conn),
+    /// Given up: closed, or kept past the request by a call still holding
+    /// it.
+    Gone,
+}
+
 impl Handle {
+    /// The connection's name, while the request keeps it.
+    pub(crate) fn db(&self) -> Option<Db> {
+        match &self.place {
+            Place::Request(owner) => Some(Db::of(owner)),
+            Place::Idle(_) | Place::Gone => None,
+        }
+    }
+
+    /// The connection's name, or php's `InternalError` where the request
+    /// does not keep it, which PDO, taking every connection up before it
+    /// lends it, never leaves a method to meet.
+    fn db_or(&self, req: &mut Request) -> Result<Db, Failure> {
+        self.db().ok_or_else(|| {
+            Failure::from(php_ext::raising::fatal(
+                req,
+                "InternalError: a pdo_sqlite connection is used outside the request that keeps it",
+            ))
+        })
+    }
+
+    /// A connection given back to the pool kept by this request again.
+    fn take_up(&mut self, req: &mut Request) {
+        self.place = match std::mem::replace(&mut self.place, Place::Gone) {
+            Place::Idle(conn) => Place::Request(req.adopt(conn)),
+            other => other,
+        };
+    }
+
     /// A statement served for its effect under the request, the failure
     /// handed back as the connection's error.
     fn run(&mut self, req: &mut Request, sql: &[u8]) -> Result<(), Failure> {
-        match self.db.exec(req, sql) {
+        let db = self.db_or(req)?;
+        match db.exec(req, sql) {
             (ffi::SQLITE_OK, None) => Ok(()),
             (ffi::SQLITE_OK, Some(thrown)) => Err(Failure::from(thrown)),
-            (_, thrown) => Err(failed(req, &self.db, thrown)),
+            (_, thrown) => Err(failed(req, db, thrown)),
         }
     }
 }
@@ -356,11 +409,18 @@ impl Connection for Handle {
         // `dtor` frees, as PDO's free of a statement its preparer failed
         // runs it.
         let held = Emalloc::new(req, PDO_SQLITE_STMT)?;
+        let db = match self.db_or(req) {
+            Ok(db) => db,
+            Err(failure) => {
+                held.free(req);
+                return Err(failure);
+            }
+        };
         if scrollable {
             held.free(req);
-            return Err(failed(req, &self.db, None));
+            return Err(failed(req, db, None));
         }
-        match self.db.prepare(req, sql) {
+        match db.prepare(req, sql) {
             (Ok(Some(stmt)), thrown) => {
                 if let Some(thrown) = thrown {
                     held.free(req);
@@ -383,7 +443,7 @@ impl Connection for Handle {
             }
             (Ok(None) | Err(_), thrown) => {
                 held.free(req);
-                Err(failed(req, &self.db, thrown))
+                Err(failed(req, db, thrown))
             }
         }
     }
@@ -391,7 +451,7 @@ impl Connection for Handle {
     /// `sqlite_handle_doer`.
     fn exec(&mut self, req: &mut Request, sql: &[u8]) -> Result<i64, Failure> {
         self.run(req, sql)?;
-        Ok(self.db.changes())
+        Ok(self.db_or(req)?.changes(req))
     }
 
     /// `sqlite_handle_quoter`: `'...'` with each `'` doubled, `%q`; a
@@ -453,8 +513,7 @@ impl Connection for Handle {
 
     /// `pdo_sqlite_in_transaction`: autocommit off.
     fn in_transaction(&mut self, req: &mut Request) -> Option<bool> {
-        let _ = req;
-        Some(!self.db.autocommit())
+        self.db().map(|db| !db.autocommit(req))
     }
 
     /// `pdo_sqlite_set_attr`.
@@ -467,12 +526,12 @@ impl Connection for Handle {
         match attr {
             ATTR_TIMEOUT => {
                 let n = long_attribute(req, value)?;
-                self.db.busy_timeout(n.saturating_mul(1000));
+                self.db_or(req)?.busy_timeout(req, n.saturating_mul(1000));
                 Ok(())
             }
             ATTR_EXTENDED_RESULT_CODES => {
                 let n = long_attribute(req, value)?;
-                self.db.extended_codes(n);
+                self.db_or(req)?.extended_codes(req, n);
                 Ok(())
             }
             ATTR_TRANSACTION_MODE => match long_attribute(req, value)? {
@@ -530,9 +589,12 @@ impl Connection for Handle {
         stmt: Option<&dyn Statement>,
     ) -> Result<Option<NativeError>, Thrown> {
         let _ = stmt;
-        let einfo = self.db.replace_einfo(Einfo::default());
+        let Some(db) = self.db() else {
+            return Ok(None);
+        };
+        let einfo = db.replace_einfo(req, Einfo::default());
         let native = einfo.fetch(req);
-        self.db.replace_einfo(einfo);
+        db.replace_einfo(req, einfo).free(req);
         native
     }
 
@@ -542,8 +604,9 @@ impl Connection for Handle {
         req: &mut Request,
         name: Option<&[u8]>,
     ) -> Result<Vec<u8>, Failure> {
-        let _ = (req, name);
-        Ok(self.db.last_insert_rowid().to_string().into_bytes())
+        let _ = name;
+        let rowid = self.db_or(req)?.last_insert_rowid(req);
+        Ok(rowid.to_string().into_bytes())
     }
 
     fn describes_at_execute(&self) -> bool {
@@ -554,11 +617,14 @@ impl Connection for Handle {
     /// every function and collation taken off the library and its
     /// callables given up, so none lingers for the next request.
     fn persistent_shutdown(&mut self, req: &mut Request) {
-        if let Some(handler) = self.db.set_authorizer(None) {
+        if let Some(db) = self.db() {
+            db.set_authorizer(req, None);
+        }
+        if let Some(handler) = self.authorizer.take() {
             handler.give_up(req);
         }
         for registration in std::mem::take(&mut self.registrations) {
-            for handler in registration.unregister() {
+            for handler in registration.unregister(req) {
                 handler.give_up(req);
             }
         }
@@ -566,20 +632,46 @@ impl Connection for Handle {
 
     /// `pdo_sqlite_get_gc`.
     fn gc(&self, visit: &mut dyn FnMut(Value)) {
-        self.db.visit_authorizer(visit);
+        if let Some(handler) = &self.authorizer {
+            handler.visit(visit);
+        }
         for registration in &self.registrations {
             registration.visit(visit);
         }
     }
 
-    /// `sqlite_handle_closer`: the callbacks cleaned up and `H`'s
-    /// allocation given back.
+    /// `sqlite_handle_closer`: the callbacks cleaned up, the connection
+    /// closed with `sqlite3_close_v2` and `H`'s allocation given back;
+    /// one given back to the pool taken up first, as PDO closes one past
+    /// its bound.
     fn close(&mut self, req: &mut Request) {
+        self.take_up(req);
         self.persistent_shutdown(req);
-        self.db.replace_einfo(Einfo::default()).free(req);
+        if let Place::Request(owner) = std::mem::replace(&mut self.place, Place::Gone) {
+            Db::of(&owner)
+                .replace_einfo(req, Einfo::default())
+                .free(req);
+            Db::release(req, owner, Vec::new());
+        }
         if let Some(allocation) = self.allocation.take() {
             allocation.free(req);
         }
+    }
+
+    /// A persistent connection found in the pool kept by this request
+    /// again, and alive: php's null `check_liveness`.
+    fn check_liveness(&mut self, req: &mut Request) -> bool {
+        self.take_up(req);
+        true
+    }
+
+    /// The connection out of the request's keeping, held here in PDO's
+    /// pool for the next request to take up.
+    fn give_back(&mut self, req: &mut Request) {
+        self.place = match std::mem::replace(&mut self.place, Place::Gone) {
+            Place::Request(owner) => req.disown(owner).map_or(Place::Gone, Place::Idle),
+            other => other,
+        };
     }
 }
 
@@ -640,7 +732,7 @@ impl Statement for Stmt {
             ffi::SQLITE_DONE => {
                 let done = Executed {
                     columns: self.handle.column_count(),
-                    rows: Some(self.handle.db().changes()),
+                    rows: Some(self.handle.changes()),
                 };
                 self.reset(req)?;
                 self.done = true;
@@ -1004,10 +1096,11 @@ pub(super) fn register(
         let function = function(req);
         // php hands the library its `zend_long`s as `int`s.
         #[allow(clippy::cast_possible_truncation)]
-        match handle
-            .db
-            .create_function(name, argc as i32, flags as i32, function)
-        {
+        let created = match handle.db() {
+            Some(db) => db.create_function(req, name, argc as i32, flags as i32, function),
+            None => Err((Box::new(function), ffi::SQLITE_MISUSE)),
+        };
+        match created {
             Ok(registration) => {
                 handle.registrations.push(registration);
                 Ok(true)
@@ -1033,7 +1126,11 @@ pub(super) fn register_collation(
         };
         // `zend_fcc_dup` once the connection stands.
         let handler = Owner::take(req, callback);
-        match handle.db.create_collation(name, handler) {
+        let created = match handle.db() {
+            Some(db) => db.create_collation(req, name, handler),
+            None => Err((handler, ffi::SQLITE_MISUSE)),
+        };
+        match created {
             Ok(registration) => {
                 handle.registrations.push(registration);
                 Ok(true)

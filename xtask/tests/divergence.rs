@@ -426,7 +426,7 @@ since = "2026-09-18"
     assert_eq!(Kind::Crosscheck.prefix(), "crosscheck:");
     assert_eq!(Kind::Crosscheck.as_str(), "crosscheck");
     assert!(parsed.accepted("crosscheck:ctype").is_some());
-    assert_eq!(Kind::ALL.len(), 6);
+    assert_eq!(Kind::ALL.len(), 7);
     assert_eq!(
         Kind::ALL.iter().position(|k| *k == Kind::Crosscheck),
         Kind::ALL
@@ -467,6 +467,46 @@ since = "2026-09-18"
     assert!(ok);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
+}
+
+/// The `wire` kind (#2334): a difference on the wire, held to the RFCs
+/// through a conformance suite rather than to the oracle, keyed by the
+/// suite and the case, `wire:<suite>/<case>`, the case free to carry
+/// slashes of its own as h2spec's `http2/6.5.3/1` does. An id without a
+/// suite or a case is refused, and `status` counts the kind with the rest.
+#[test]
+fn a_wire_row_is_keyed_by_suite_and_case_and_status_counts_its_kind() {
+    let row = r#"
+[[divergence]]
+id = "wire:h2spec/http2/6.5.3/1"
+kind = "wire"
+reason = "The fixture's frame (fixture)."
+status = "accepted"
+since = "2026-10-10"
+"#;
+    let parsed = Registry::parse(row).unwrap();
+    assert_eq!(parsed.rows()[0].kind, Kind::Wire);
+    assert_eq!(Kind::Wire.prefix(), "wire:");
+    assert_eq!(Kind::ALL.last(), Some(&Kind::Wire));
+    assert!(parsed.accepted("wire:h2spec/http2/6.5.3/1").is_some());
+    for bad in ["wire:h2spec", "wire:/6.5.3", "wire:h2spec/", "h2spec/6.5.3"] {
+        let err = Registry::parse(&row.replace("wire:h2spec/http2/6.5.3/1", bad))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(bad) && err.contains("wire:"), "{bad}: {err}");
+    }
+    assert!(divergence::Id::of(Kind::Wire, "wire:rfc9112/cl-te").is_ok());
+    assert!(divergence::Id::of(Kind::Wire, "wire:rfc9112").is_err());
+
+    let root = scratch("wire");
+    std::fs::write(root.join(divergence::FILE), row).unwrap();
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains("| wire:h2spec/http2/6.5.3/1 | wire | debt | accepted |"),
+        "{md}"
+    );
+    assert!(md.contains("| wire | 0 | 1 | 0 | 1 |"), "{md}");
 }
 
 /// A row's `cause` (#2460, #2462): `debt` where the file writes none, and
