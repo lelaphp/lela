@@ -24,7 +24,9 @@
 //! A fence with a `request` is served by `sapi/cgi`'s php-cgi, through a
 //! link of that name, beside php-cgi for the oracle ([`served_as_cgi`],
 //! #1197, ADR-0008); a fence with a `request fpm` by `sapi/fpm`'s
-//! php-fpm, beside php-fpm (`served_as_fpm`, #1291).
+//! php-fpm, beside php-fpm (`served_as_fpm`, #1291); and one with a
+//! `request makala` by `sapi/makala`'s makala over HTTP, beside php-fpm
+//! under the pin's `[fastcgi]` mapping (`makala::served`, #2347).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,7 +35,7 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
-use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
 use crate::oracle::profile;
 use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
 use crate::phpt::environment::Environment;
@@ -42,8 +44,9 @@ use crate::scratch::Tree;
 
 // The hosts a fence is served by, each its own binary: `sapi/cli`'s
 // serves a fence marked `process`, `sapi/cgi`'s one with a `request`,
-// `sapi/fpm`'s one with a `request fpm` (#1291) and `sapi/phpdbg`'s one
-// with a `request phpdbg` (#1348); `oracle::hosts` states each once.
+// `sapi/fpm`'s one with a `request fpm` (#1291), `sapi/phpdbg`'s one
+// with a `request phpdbg` (#1348) and `sapi/makala`'s one with a
+// `request makala` (#2347); `oracle::hosts` states each once.
 
 /// The variable the binaries read the trace file's path from
 /// (`php_sapi::start`).
@@ -58,6 +61,7 @@ pub(crate) struct Binary {
     cgi: OnceLock<Result<PathBuf, String>>,
     fpm: OnceLock<Result<PathBuf, String>>,
     phpdbg: OnceLock<Result<PathBuf, String>>,
+    makala: OnceLock<Result<PathBuf, String>>,
 }
 
 impl Binary {
@@ -69,6 +73,7 @@ impl Binary {
             cgi: OnceLock::new(),
             fpm: OnceLock::new(),
             phpdbg: OnceLock::new(),
+            makala: OnceLock::new(),
         }
     }
 
@@ -103,6 +108,7 @@ impl Binary {
             (CGI, &self.cgi),
             (FPM, &self.fpm),
             (PHPDBG, &self.phpdbg),
+            (MAKALA, &self.makala),
         ]
         .into_iter()
         .find_map(|(kind, slot)| (kind == host).then_some(slot))
@@ -120,19 +126,29 @@ impl Binary {
         regime: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.cli()?;
-        let traces = Tree::new("witness-trace")?;
-        let trace = traces.join("entered");
-        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
-        let observed = oracle.run_under(&Invocation {
-            regimes: regime.as_slice(),
-            env: &env,
-            ..Invocation::new(binary, Program::Snippet(snippet))
-        })?;
-        // A request that entered no native appends nothing, and a binary
-        // that never reached its end leaves no file: both are no entry.
-        let text = fs::read_to_string(&trace).unwrap_or_default();
-        Ok((observed, text.lines().filter_map(Entry::parse).collect()))
+        traced(|env| {
+            oracle.run_under(&Invocation {
+                regimes: regime.as_slice(),
+                env,
+                ..Invocation::new(binary, Program::Snippet(snippet))
+            })
+        })
     }
+}
+
+/// What `serve` observed, served with `PHP_WITNESS_TRACE` naming a file
+/// of its own in the environment it is handed, and the natives every
+/// request it served entered, in the order they were appended. A request
+/// that entered no native appends nothing, and a binary that never
+/// reached its end leaves no file: both are no entry.
+pub(super) fn traced(
+    serve: impl FnOnce(&[(String, std::ffi::OsString)]) -> Result<Observation>,
+) -> Result<(Observation, Vec<Entry>)> {
+    let traces = Tree::new("witness-trace")?;
+    let trace = traces.join("entered");
+    let observed = serve(&[(TRACE.to_owned(), trace.clone().into_os_string())])?;
+    let text = fs::read_to_string(&trace).unwrap_or_default();
+    Ok((observed, text.lines().filter_map(Entry::parse).collect()))
 }
 
 impl Binary {
@@ -150,12 +166,7 @@ impl Binary {
         let binary = self.host(CGI)?;
         let hosts = Tree::new("witness-cgi")?;
         let host = cgi::linked(binary, hosts.path())?;
-        let traces = Tree::new("witness-trace")?;
-        let trace = traces.join("entered");
-        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
-        let observed = served_as_cgi(oracle, &host, snippet, request, regime, &env)?;
-        let text = fs::read_to_string(&trace).unwrap_or_default();
-        Ok((observed, text.lines().filter_map(Entry::parse).collect()))
+        traced(|env| served_as_cgi(oracle, &host, snippet, request, regime, env))
     }
 
     /// `snippet` served as the request `request` describes by `sapi/fpm`'s
@@ -168,12 +179,7 @@ impl Binary {
         request: &str,
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.host(FPM)?;
-        let traces = Tree::new("witness-trace")?;
-        let trace = traces.join("entered");
-        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
-        let observed = super::fpm::served_as_fpm(oracle, binary, snippet, request, &env)?;
-        let text = fs::read_to_string(&trace).unwrap_or_default();
-        Ok((observed, text.lines().filter_map(Entry::parse).collect()))
+        traced(|env| super::fpm::served_as_fpm(oracle, binary, snippet, request, env))
     }
 
     /// `snippet` handed to `sapi/phpdbg`'s binary with `commands` on its
@@ -186,12 +192,7 @@ impl Binary {
         commands: &str,
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.host(PHPDBG)?;
-        let traces = Tree::new("witness-trace")?;
-        let trace = traces.join("entered");
-        let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
-        let observed = served_as_phpdbg(oracle, binary, snippet, commands, &env)?;
-        let text = fs::read_to_string(&trace).unwrap_or_default();
-        Ok((observed, text.lines().filter_map(Entry::parse).collect()))
+        traced(|env| served_as_phpdbg(oracle, binary, snippet, commands, env))
     }
 }
 
@@ -236,16 +237,8 @@ pub(crate) fn served_as_cgi(
     let recipe = &oracle.pin().recipe;
     let own = oracle.tree("witness-request")?;
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
-    let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
-    let path = own.join("witness.phpt");
-    let phpt = Phpt::parse(&path, test.as_bytes())
-        .map_err(|borked| anyhow!("the request fence is not a test's sections: {borked}"))?;
     let program = crate::oracle::run_by(&program)?;
-    let mut env = Environment::from(env.to_vec());
-    env.reset();
-    env.extend(crate::phpt::env_of(&phpt, &path));
-    let described = cgi::request(&phpt, &program, &env)
-        .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))?;
+    let described = described(&own, &program, request, env)?;
     let flags = [String::from("-C"), String::from("-f")];
     oracle.run_under(&Invocation {
         regimes: regime.as_slice(),
@@ -255,6 +248,27 @@ pub(crate) fn served_as_cgi(
         stdin: described.stdin.as_deref().map_or(Stdin::Null, Stdin::File),
         ..Invocation::new(host, Program::File(&program))
     })
+}
+
+/// The request a fence's `request` sections describe, translated in
+/// `own` as the phpt lane translates a CGI-shaped test's
+/// ([`cgi::request`]): over `env` with the CGI variables emptied and the
+/// sections' `--ENV--` after it, for `program`.
+pub(super) fn described(
+    own: &Tree,
+    program: &Path,
+    request: &str,
+    env: &[(String, std::ffi::OsString)],
+) -> Result<cgi::Request> {
+    let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
+    let path = own.join("witness.phpt");
+    let phpt = Phpt::parse(&path, test.as_bytes())
+        .map_err(|borked| anyhow!("the request fence is not a test's sections: {borked}"))?;
+    let mut env = Environment::from(env.to_vec());
+    env.reset();
+    env.extend(crate::phpt::env_of(&phpt, &path));
+    cgi::request(&phpt, program, &env)
+        .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))
 }
 
 /// Where `host`'s binary is, built into `slot` from the tree at `root`

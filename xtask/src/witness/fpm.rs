@@ -18,11 +18,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::oracle::{Ended, Observation, Oracle, normalise_in};
-use crate::phpt::environment::Environment;
-use crate::phpt::{cgi, file::Phpt};
+use crate::scratch::Tree;
 
 /// `FCGI_BEGIN_REQUEST`, `FCGI_END_REQUEST`, `FCGI_PARAMS`, `FCGI_STDIN`,
 /// `FCGI_STDOUT` and `FCGI_STDERR`, the record types a request uses.
@@ -72,7 +71,7 @@ const TAIL: usize = 10;
 
 /// A php-fpm master over a pool of one child listening on the socket at
 /// `socket`, its log at `log`; ended with `SIGTERM` when dropped.
-struct Pool {
+pub(super) struct Pool {
     master: Child,
     socket: PathBuf,
     address: SocketAddr,
@@ -84,7 +83,7 @@ impl Pool {
     /// ends first is named by its exit and the log's last lines as soon as
     /// it has ended, and one still not listening after [`PATIENCE`] by
     /// the same lines.
-    fn connect(&mut self) -> Result<UnixStream> {
+    pub(super) fn connect(&mut self) -> Result<UnixStream> {
         let started = Instant::now();
         loop {
             let refused = match UnixStream::connect_addr(&self.address) {
@@ -122,7 +121,7 @@ impl Pool {
     /// reached the end, which two runs at once on one machine made likely.
     /// The pool's one child takes the next connection only once its
     /// request has ended, so the ping page it answers says that it has.
-    fn settle(&mut self, timeout: Duration) -> Result<()> {
+    pub(super) fn settle(&mut self, timeout: Duration) -> Result<()> {
         let ping = self.connect()?;
         ping.set_read_timeout(Some(timeout))?;
         exchange(
@@ -138,26 +137,31 @@ impl Pool {
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        // A master that already ended, one that never listened among them,
-        // has nothing left to be sent.
-        if matches!(self.master.try_wait(), Ok(Some(_))) {
+        terminate(&mut self.master);
+    }
+}
+
+/// A server process ended as a service manager ends one: SIGTERM, and a
+/// kill once it has had five seconds; nothing where it has ended, one
+/// that never listened among them.
+pub(super) fn terminate(server: &mut Child) {
+    if matches!(server.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(server.id().to_string())
+        .status()
+        .ok();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if matches!(server.try_wait(), Ok(Some(_))) {
             return;
         }
-        Command::new("kill")
-            .arg("-TERM")
-            .arg(self.master.id().to_string())
-            .status()
-            .ok();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if matches!(self.master.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        self.master.kill().ok();
-        self.master.wait().ok();
+        std::thread::sleep(Duration::from_millis(10));
     }
+    server.kill().ok();
+    server.wait().ok();
 }
 
 /// `snippet` served as the request `request` describes by the php-fpm at
@@ -172,18 +176,8 @@ pub(crate) fn served_as_fpm(
     let recipe = &oracle.pin().recipe;
     let own = oracle.tree("witness-fpm")?;
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
-    let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
-    let path = own.join("witness.phpt");
-    let phpt = Phpt::parse(&path, test.as_bytes())
-        .map_err(|borked| anyhow!("the request fence is not a test's sections: {borked}"))?;
     let program = crate::oracle::run_by(&program)?;
-    // The CGI variables emptied and the fence's `--ENV--` over them, as
-    // the phpt lane builds a test's environment, then the request.
-    let mut own_env = Environment::default();
-    own_env.reset();
-    own_env.extend(crate::phpt::env_of(&phpt, &path));
-    let described = cgi::request(&phpt, &program, &own_env)
-        .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))?;
+    let described = super::process::described(&own, &program, request, &[])?;
     // A later entry of a name stands over an earlier, as for php-cgi; the
     // names in the order they were first given.
     let mut given: Vec<(String, OsString)> = Vec::new();
@@ -193,52 +187,7 @@ pub(crate) fn served_as_fpm(
             None => given.push((name, value)),
         }
     }
-    // The address is a path in the fence's own tree, so no other process
-    // can listen there before the master does (#1474): a loopback port
-    // found free and then let go was free for anyone between the letting
-    // go and the master's bind, and a request sent there reached whatever
-    // took it, another run's php-fpm among them.
-    let socket = own.join("php-fpm.sock");
-    let address = SocketAddr::from_pathname(&socket).with_context(|| {
-        format!(
-            "{} is longer than a socket's address holds",
-            socket.display()
-        )
-    })?;
-    let log = own.join("php-fpm.log");
-    let conf = own.write(
-        "php-fpm.conf",
-        format!(
-            "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = no\nping.path = {PING}\n",
-            log.display(),
-            socket.display()
-        ),
-    )?;
-    // `-O` keeps the master's log on its stderr, so the stderr is the log.
-    let logged = fs::File::options()
-        .create(true)
-        .append(true)
-        .open(&log)
-        .with_context(|| format!("opening {}", log.display()))?;
-    let mut master = Command::new(host);
-    master.args(["-n", "-F", "-O", "-y"]).arg(&conf);
-    for ini in &recipe.ini {
-        master.arg("-d").arg(ini);
-    }
-    recipe
-        .environ(&mut master)?
-        .envs(env.iter().map(|(name, value)| (name, value)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(logged);
-    let mut pool = Pool {
-        master: master
-            .spawn()
-            .with_context(|| format!("running {}", host.display()))?,
-        socket,
-        address,
-        log,
-    };
+    let mut pool = Pool::start(oracle, host, &own, env, false)?;
     let started = Instant::now();
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let stream = pool.connect()?;
@@ -253,6 +202,69 @@ pub(crate) fn served_as_fpm(
         exit: Ended::Status(0),
         wall: started.elapsed(),
     })
+}
+
+impl Pool {
+    /// The php-fpm at `host`, its master in the foreground over a pool of
+    /// one child on a Unix socket in `own`, under the recipe's ini as `-d`,
+    /// with `env` in the master's environment, which its child keeps, or
+    /// none of it where `clear_env` says, php-fpm's default.
+    pub(super) fn start(
+        oracle: &Oracle<'_>,
+        host: &Path,
+        own: &Tree,
+        env: &[(String, OsString)],
+        clear_env: bool,
+    ) -> Result<Pool> {
+        let recipe = &oracle.pin().recipe;
+        // The address is a path in the fence's own tree, so no other process
+        // can listen there before the master does (#1474): a loopback port
+        // found free and then let go was free for anyone between the letting
+        // go and the master's bind, and a request sent there reached whatever
+        // took it, another run's php-fpm among them.
+        let socket = own.join("php-fpm.sock");
+        let address = SocketAddr::from_pathname(&socket).with_context(|| {
+            format!(
+                "{} is longer than a socket's address holds",
+                socket.display()
+            )
+        })?;
+        let log = own.join("php-fpm.log");
+        let conf = own.write(
+            "php-fpm.conf",
+            format!(
+                "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = {}\nping.path = {PING}\n",
+                log.display(),
+                socket.display(),
+                if clear_env { "yes" } else { "no" }
+            ),
+        )?;
+        // `-O` keeps the master's log on its stderr, so the stderr is the log.
+        let logged = fs::File::options()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .with_context(|| format!("opening {}", log.display()))?;
+        let mut master = Command::new(host);
+        master.args(["-n", "-F", "-O", "-y"]).arg(&conf);
+        for ini in &recipe.ini {
+            master.arg("-d").arg(ini);
+        }
+        recipe
+            .environ(&mut master)?
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(logged);
+        Ok(Pool {
+            master: master
+                .spawn()
+                .with_context(|| format!("running {}", host.display()))?,
+            socket,
+            address,
+            log,
+        })
+    }
 }
 
 /// The last [`TAIL`] lines of the log at `log`, or what kept it unread.

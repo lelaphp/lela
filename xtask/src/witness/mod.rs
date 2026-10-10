@@ -125,6 +125,7 @@ pub(crate) mod fence;
 mod fpm;
 mod host;
 mod judge;
+mod makala;
 mod process;
 pub(crate) mod row;
 #[cfg(test)]
@@ -1241,8 +1242,8 @@ fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime
         fence::Served::Linked => Linked::of([regime]).err().map(|why| {
             format!("{why:#}; only a fence marked `process` stands under it")
         }),
-        fence::Served::Fpm | fence::Served::Phpdbg => Some(
-            "reaches neither php-fpm nor phpdbg, in the oracle's run or the engine's, so a `request fpm` or `request phpdbg` fence cannot stand under it"
+        fence::Served::Fpm | fence::Served::Phpdbg | fence::Served::Makala => Some(
+            "reaches neither php-fpm, phpdbg nor makala, in the oracle's run or the engine's, so a `request fpm`, `request phpdbg` or `request makala` fence cannot stand under it"
                 .to_owned(),
         ),
     };

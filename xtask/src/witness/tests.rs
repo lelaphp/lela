@@ -439,7 +439,7 @@ fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
         ));
         assert_eq!(request.served, fence::Served::Cgi);
         assert!(super::under(&pin, &request).unwrap().is_some());
-        for host in ["fpm", "phpdbg"] {
+        for host in ["fpm", "phpdbg", "makala"] {
             let request = witness(&format!(
                 "/// ```request {host}\n/// --GET--\n/// q=1\n/// ```\n/// ```expect regime={name}\n/// 1\n/// ```\n"
             ));
@@ -447,7 +447,7 @@ fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
             assert!(
                 refused.contains("ext/fixture/src/lib.rs:1")
                     && refused.contains(&format!("[regime.{name}]"))
-                    && refused.contains("reaches neither php-fpm nor phpdbg"),
+                    && refused.contains("reaches neither php-fpm, phpdbg nor makala"),
                 "{host}: {refused}"
             );
         }
