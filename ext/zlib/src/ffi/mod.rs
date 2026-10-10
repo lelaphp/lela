@@ -12,8 +12,9 @@
 //! is boxed, since zlib's state names the stream it was made for, and
 //! each call hands zlib the caller's slices for that call alone, which is
 //! all zlib reads of `next_in` and `next_out`. zlib allocates through
-//! [`alloc`] and [`free`], on the request's heap as `php_zlib_alloc`
-//! `ecalloc`s (design §5.13); a `gzFile` allocates through zlib's own.
+//! [`alloc`] and [`free`], on the request's heap as `php_zlib_alloc`'s
+//! `safe_emalloc` allocates (design §5.13); a `gzFile` allocates through
+//! zlib's own.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
@@ -26,8 +27,7 @@ use std::ptr::NonNull;
 
 use libz_sys as z;
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
-use php_ext::values::Emalloc;
+use php_ext::request::{Request, efree, emalloc};
 
 // SAFETY: zlib's own `zError`, which libz-sys does not declare, from the
 // library it links: an `int` in, a pointer into a static table out.
@@ -162,58 +162,22 @@ pub(crate) fn version() -> String {
     text.to_string_lossy().into_owned()
 }
 
-/// What zlib's allocator callbacks reach while one call into a stream
-/// runs, through the stream's `opaque`: the request whose heap
-/// `php_zlib_alloc` `ecalloc`s from, the allocations the stream holds,
-/// and the memory limit's fatal where one was refused.
-struct Zmm<'a> {
-    req: &'a mut Request,
-    held: &'a mut Vec<Emalloc>,
-    refused: Option<Thrown>,
+/// zlib's `zalloc`, `php_zlib_alloc` (`Z/ext/zlib/zlib.c:122-125`):
+/// `safe_emalloc(items, size, 0)`, `items * size` bytes of the heap the
+/// call is lent, left as the heap finds them, as php's `safe_emalloc`
+/// leaves them. Two `uInt`s multiply inside a 64-bit `size_t`, so php's
+/// overflow check never fires for them.
+extern "C" fn alloc(_opaque: z::voidpf, items: z::uInt, size: z::uInt) -> z::voidpf {
+    emalloc(items as usize * size as usize)
 }
 
-/// zlib's `zalloc`, `php_zlib_alloc` (`Z/ext/zlib/zlib.c`): `items *
-/// size` zeroed bytes of the request's heap, held by the stream until
-/// zlib frees them; null outside a call, and where the memory limit
-/// refused them, whose fatal the call answers.
-extern "C" fn alloc(opaque: z::voidpf, items: z::uInt, size: z::uInt) -> z::voidpf {
-    if opaque.is_null() {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: a non-null `opaque` is the `Zmm` `Stream::call` set for the
-    // length of the call it is making, which is the call zlib is in.
-    let zmm = unsafe { &mut *opaque.cast::<Zmm<'_>>() };
-    let Some(len) = (items as usize).checked_mul(size as usize) else {
-        return std::ptr::null_mut();
-    };
-    match Emalloc::new(zmm.req, len) {
-        Ok(mut block) => {
-            let at = block.as_mut_ptr();
-            zmm.held.push(block);
-            at.cast()
-        }
-        Err(thrown) => {
-            zmm.refused = Some(thrown);
-            std::ptr::null_mut()
-        }
-    }
-}
-
-/// zlib's `zfree`, `php_zlib_free`: the allocation [`alloc`] handed out
-/// at `address` given back to the request's heap.
-extern "C" fn free(opaque: z::voidpf, address: z::voidpf) {
-    if opaque.is_null() || address.is_null() {
-        return;
-    }
-    // SAFETY: as in `alloc`, the `Zmm` of the call zlib is in.
-    let zmm = unsafe { &mut *opaque.cast::<Zmm<'_>>() };
-    let at = zmm
-        .held
-        .iter_mut()
-        .position(|block| block.as_mut_ptr().cast::<std::ffi::c_void>() == address);
-    if let Some(at) = at {
-        zmm.held.swap_remove(at).free(zmm.req);
-    }
+/// zlib's `zfree`, `php_zlib_free` (`Z/ext/zlib/zlib.c:127-130`):
+/// `efree(address)`, under the lend of the call zlib is in.
+extern "C" fn free(_opaque: z::voidpf, address: z::voidpf) {
+    // SAFETY: zlib frees a block once, and only one [`alloc`] answered,
+    // so a block of the lent heap or, where the limit refused one, of
+    // the system allocator.
+    unsafe { efree(address) }
 }
 
 /// A `z_stream` before its init, with the allocator set and nothing
@@ -275,7 +239,7 @@ fn avail(len: usize) -> c_uint {
 
 /// One `z_stream` and what zlib allocated for it on the request's heap
 /// (design §5.13). Every call into zlib is made through [`Stream::call`],
-/// which lends the allocator the request for that call alone. A stream
+/// which lends the request's heap for that call alone. A stream
 /// is ended through [`Deflate::end`] or [`Inflate::end`], which gives its
 /// state back; one dropped without is left to the request's end, whose
 /// heap takes what zlib held, and zlib is not called again, since its
@@ -301,30 +265,20 @@ fn avail(len: usize) -> c_uint {
 /// ```
 struct Stream {
     z: Box<z::z_stream>,
-    held: Vec<Emalloc>,
 }
 
 impl Stream {
-    /// `call` over the stream, zlib's allocator reaching `req`'s heap for
-    /// its length; the `Err` is the memory limit's fatal an allocation
-    /// met, which ends the request as php's `emalloc` does.
+    /// `call` over the stream with `req`'s heap lent for its length
+    /// (ADR-0014), so what zlib allocates and frees is the request's;
+    /// the `Err` is the memory limit's fatal an allocation met, which
+    /// ends the request as php's `emalloc` does.
     fn call(
         &mut self,
         req: &mut Request,
         call: impl FnOnce(*mut z::z_stream) -> c_int,
     ) -> Result<c_int, Thrown> {
-        let mut zmm = Zmm {
-            req,
-            held: &mut self.held,
-            refused: None,
-        };
-        self.z.opaque = (&raw mut zmm).cast();
-        let code = call(&raw mut *self.z);
-        self.z.opaque = std::ptr::null_mut();
-        match zmm.refused {
-            Some(thrown) => Err(thrown),
-            None => Ok(code),
-        }
+        let stream = &raw mut *self.z;
+        req.lend_heap(|| call(stream))
     }
 
     /// One step over `input` into `output` for their length alone.
@@ -384,10 +338,7 @@ impl Deflate {
         else {
             return Ok(Err(Status::StreamError));
         };
-        let mut stream = Stream {
-            z: fresh(),
-            held: Vec::new(),
-        };
+        let mut stream = Stream { z: fresh() };
         let code = stream.call(req, |z| {
             // SAFETY: the stream is fresh with its allocator set, the
             // version is the header's static C string and the size the
@@ -472,10 +423,7 @@ impl Inflate {
         let Ok(window) = c_int::try_from(window) else {
             return Ok(Err(Status::StreamError));
         };
-        let mut stream = Stream {
-            z: fresh(),
-            held: Vec::new(),
-        };
+        let mut stream = Stream { z: fresh() };
         // SAFETY: the stream is fresh with its allocator set, the version
         // is the header's static C string and the size the struct's.
         let code = stream.call(req, |z| unsafe {

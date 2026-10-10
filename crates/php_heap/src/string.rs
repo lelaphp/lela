@@ -591,12 +591,10 @@ impl Str {
         self.gc().delref()
     }
 
-    /// The payload word of a zval naming this string. php stores the
-    /// pointer; so does this, with its provenance exposed, because a
-    /// zval is a plain sixteen bytes that crosses threads inside a
-    /// published unit.
-    pub(crate) fn payload(self) -> u64 {
-        self.0.as_ptr().expose_provenance() as u64
+    /// The payload word of a zval naming this string: the pointer, as
+    /// php stores it, with its provenance.
+    pub(crate) fn payload(self) -> crate::zval::Word {
+        crate::zval::Word::pointer(self.0)
     }
 
     /// The string a zval's payload word names.
@@ -605,10 +603,10 @@ impl Str {
     ///
     /// The word came from [`Str::payload`] for a string that is still
     /// live.
-    pub(crate) unsafe fn from_payload(payload: u64) -> Option<Str> {
-        let at: *mut StrHeader =
-            std::ptr::with_exposed_provenance_mut(usize::try_from(payload).unwrap_or(0));
-        NonNull::new(at).map(Str)
+    pub(crate) unsafe fn from_payload(payload: crate::zval::Word) -> Option<Str> {
+        // SAFETY: the word holds the pointer `payload` stored, by the
+        // contract.
+        unsafe { payload.as_pointer::<StrHeader>() }.map(Str)
     }
 }
 

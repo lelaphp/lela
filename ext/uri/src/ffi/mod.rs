@@ -17,8 +17,7 @@ use std::ffi::{c_int, c_void};
 use std::ptr;
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
-use php_ext::values::Emalloc;
+use php_ext::request::{Request, ecalloc, efree, emalloc, erealloc};
 
 /// uriparser's `URI_ERROR_*` other than `URI_SUCCESS`, the ones
 /// `uri_parser_rfc3986.c` tells apart named.
@@ -64,107 +63,40 @@ pub(crate) enum Refusal {
     Resolve(Error),
 }
 
-/// What uriparser's allocator reaches while one call runs, through the
-/// memory manager's `userData`: the request whose heap php's
-/// `php_uri_parser_rfc3986_memory_manager` allocates from, the
-/// allocations of the URI the call fills, and the memory limit's fatal
-/// where one was refused.
-struct Mm<'a> {
-    req: &'a mut Request,
-    held: &'a mut Vec<Emalloc>,
-    refused: Option<Thrown>,
+/// `php_uri_parser_rfc3986_memory_manager_malloc`
+/// (`Z/ext/uri/uri_parser_rfc3986.c:31-34`): `emalloc`, the bytes left
+/// as the heap the call is lent finds them.
+unsafe extern "C" fn mm_malloc(_manager: *mut sys::UriMemoryManager, size: usize) -> *mut c_void {
+    emalloc(size)
 }
 
-/// The [`Mm`] a call lent the manager.
-///
-/// # Safety
-///
-/// `manager` is the one [`Uri::call`] built, whose `userData` is the
-/// `Mm` of the call uriparser is in.
-unsafe fn lent<'a>(manager: *mut sys::UriMemoryManager) -> &'a mut Mm<'a> {
-    // SAFETY: the caller's contract: `manager` is the live manager.
-    let data = unsafe { (*manager).userData };
-    // SAFETY: the caller's contract: `userData` names the live `Mm`.
-    unsafe { &mut *data.cast::<Mm<'a>>() }
-}
-
-/// `emalloc(size)` held for the URI, its address; null where the memory
-/// limit refused it, whose fatal the call answers.
-fn allocate(mm: &mut Mm<'_>, size: usize) -> *mut c_void {
-    match Emalloc::new(mm.req, size) {
-        Ok(mut block) => {
-            let at = block.as_mut_ptr();
-            mm.held.push(block);
-            at.cast()
-        }
-        Err(thrown) => {
-            mm.refused = Some(thrown);
-            ptr::null_mut()
-        }
-    }
-}
-
-/// Where the allocation at `at` stands among the URI's.
-fn position(mm: &mut Mm<'_>, at: *mut c_void) -> Option<usize> {
-    mm.held
-        .iter_mut()
-        .position(|block| block.as_mut_ptr().cast::<c_void>() == at)
-}
-
-/// `php_uri_parser_rfc3986_memory_manager_malloc`: `emalloc`.
-unsafe extern "C" fn mm_malloc(manager: *mut sys::UriMemoryManager, size: usize) -> *mut c_void {
-    // SAFETY: uriparser hands back the manager the call lent.
-    allocate(unsafe { lent(manager) }, size)
-}
-
-/// `php_uri_parser_rfc3986_memory_manager_calloc`: `ecalloc`, zero as
-/// every [`Emalloc`] is.
+/// `php_uri_parser_rfc3986_memory_manager_calloc` (`:36-39`): `ecalloc`,
+/// the one of the five that zeroes.
 unsafe extern "C" fn mm_calloc(
-    manager: *mut sys::UriMemoryManager,
+    _manager: *mut sys::UriMemoryManager,
     nmemb: usize,
     size: usize,
 ) -> *mut c_void {
-    let Some(len) = nmemb.checked_mul(size) else {
-        return ptr::null_mut();
-    };
-    // SAFETY: as in `mm_malloc`.
-    allocate(unsafe { lent(manager) }, len)
+    ecalloc(nmemb, size)
 }
 
-/// `php_uri_parser_rfc3986_memory_manager_realloc`: `erealloc`, the
-/// allocation at `at` grown or cut where it is held, a fresh one where
-/// `at` is null.
+/// `php_uri_parser_rfc3986_memory_manager_realloc` (`:41-44`):
+/// `erealloc`, the bytes past the old length left as they are found.
 unsafe extern "C" fn mm_realloc(
-    manager: *mut sys::UriMemoryManager,
+    _manager: *mut sys::UriMemoryManager,
     at: *mut c_void,
     size: usize,
 ) -> *mut c_void {
-    // SAFETY: as in `mm_malloc`.
-    let mm = unsafe { lent(manager) };
-    if at.is_null() {
-        return allocate(mm, size);
-    }
-    let Some(index) = position(mm, at) else {
-        return ptr::null_mut();
-    };
-    let block = mm.held.swap_remove(index);
-    match block.resize(mm.req, size) {
-        Ok(mut block) => {
-            let moved = block.as_mut_ptr();
-            mm.held.push(block);
-            moved.cast()
-        }
-        Err(thrown) => {
-            mm.refused = Some(thrown);
-            ptr::null_mut()
-        }
-    }
+    // SAFETY: uriparser resizes only a block the manager answered, under
+    // the lend of the call it is in.
+    unsafe { erealloc(at, size) }
 }
 
-/// `php_uri_parser_rfc3986_memory_manager_reallocarray`:
-/// `safe_erealloc(ptr, nmemb, size, 0)`.
+/// `php_uri_parser_rfc3986_memory_manager_reallocarray` (`:46-49`):
+/// `safe_erealloc(ptr, nmemb, size, 0)`; a product past the address
+/// space is refused with null.
 unsafe extern "C" fn mm_reallocarray(
-    manager: *mut sys::UriMemoryManager,
+    _manager: *mut sys::UriMemoryManager,
     at: *mut c_void,
     nmemb: usize,
     size: usize,
@@ -172,20 +104,15 @@ unsafe extern "C" fn mm_reallocarray(
     let Some(len) = nmemb.checked_mul(size) else {
         return ptr::null_mut();
     };
-    // SAFETY: the manager uriparser handed this function.
-    unsafe { mm_realloc(manager, at, len) }
+    // SAFETY: as in `mm_realloc`.
+    unsafe { erealloc(at, len) }
 }
 
-/// `php_uri_parser_rfc3986_memory_manager_destroy`: `efree`.
-unsafe extern "C" fn mm_free(manager: *mut sys::UriMemoryManager, at: *mut c_void) {
-    if at.is_null() {
-        return;
-    }
-    // SAFETY: as in `mm_malloc`.
-    let mm = unsafe { lent(manager) };
-    if let Some(index) = position(mm, at) {
-        mm.held.swap_remove(index).free(mm.req);
-    }
+/// `php_uri_parser_rfc3986_memory_manager_destroy` (`:51-54`): `efree`.
+unsafe extern "C" fn mm_free(_manager: *mut sys::UriMemoryManager, at: *mut c_void) {
+    // SAFETY: uriparser frees a block once, and only one the manager
+    // answered, under the lend of the call it is in.
+    unsafe { efree(at) }
 }
 
 /// One `UriUriA` owning its text (`owner` set), boxed so the struct the
@@ -198,7 +125,6 @@ unsafe extern "C" fn mm_free(manager: *mut sys::UriMemoryManager, at: *mut c_voi
 /// have given back.
 pub(crate) struct Uri {
     uri: Box<sys::UriUriA>,
-    held: Vec<Emalloc>,
 }
 
 // SAFETY: the URI and every allocation it points at are owned by this
@@ -210,36 +136,29 @@ impl Uri {
     fn empty() -> Uri {
         Uri {
             uri: Box::new(sys::UriUriA::empty()),
-            held: Vec::new(),
         }
     }
 
-    /// `call` over the URI with php's memory manager, its allocations
-    /// this URI's and on `req`'s heap for the call's length; the `Err`
-    /// is the memory limit's fatal an allocation met.
+    /// `call` over the URI with php's memory manager and `req`'s heap
+    /// lent for its length (ADR-0014), so what uriparser allocates and
+    /// frees is the request's; the `Err` is the memory limit's fatal an
+    /// allocation met.
     fn call(
         &mut self,
         req: &mut Request,
         call: impl FnOnce(*mut sys::UriUriA, *mut c_void) -> c_int,
     ) -> Result<c_int, Thrown> {
-        let mut mm = Mm {
-            req,
-            held: &mut self.held,
-            refused: None,
-        };
         let mut manager = sys::UriMemoryManager {
             malloc: mm_malloc,
             calloc: mm_calloc,
             realloc: mm_realloc,
             reallocarray: mm_reallocarray,
             free: mm_free,
-            userData: (&raw mut mm).cast(),
+            userData: ptr::null_mut(),
         };
-        let code = call(&raw mut *self.uri, (&raw mut manager).cast());
-        match mm.refused {
-            Some(thrown) => Err(thrown),
-            None => Ok(code),
-        }
+        let uri = &raw mut *self.uri;
+        let manager = (&raw mut manager).cast();
+        req.lend_heap(|| call(uri, manager))
     }
 
     /// `uriFreeUriMembersMmA`: the members given back to the request's

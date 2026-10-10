@@ -863,6 +863,7 @@ request::Request::scope
 request::Request::script_name
 request::Request::serialize_precision
 request::Request::serve_string
+request::Request::serve_supplied
 request::Request::set_caller_var
 request::Request::set_ctype_locale
 request::Request::set_cwd
@@ -886,6 +887,7 @@ request::Request::status_line
 request::Request::stop_periodic
 request::Request::stream_thrown
 request::Request::superglobal
+request::Request::supplier
 request::Request::suspend_time_limit
 request::Request::take_http_status
 request::Request::take_pending
@@ -1041,6 +1043,7 @@ request::Streams::wrapper_restore
 request::Streams::wrapper_unregister
 request::Streams::wrapper_url_stat
 request::Streams::xport_create
+request::Supplier
 request::Syslog
 request::TimeLimitSuspended
 request::UnitCache
@@ -1068,6 +1071,10 @@ request::Zone::date
 request::Zone::midnight
 request::Zone::of
 request::Zone::offset
+request::ecalloc
+request::efree
+request::emalloc
+request::erealloc
 request::select
 request::take_signals
 request::url_decode

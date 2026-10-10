@@ -283,7 +283,8 @@ impl Funcs {
         let Walk { wrapper, data } = it;
         match self {
             Funcs::Places(place) if by_ref => {
-                Ok(place(req, data)?.map_or_else(Value::null, |cell| cell.into_value().hand_on()))
+                let placed = req.serve_as_table(data.class(), |req| place(req, data))?;
+                Ok(placed.map_or_else(Value::null, |cell| cell.into_value().hand_on()))
             }
             Funcs::Places(_) => crate::api::call::call_method_made(req, &data, b"current", &[]),
             Funcs::User => {

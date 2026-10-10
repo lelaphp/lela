@@ -180,14 +180,18 @@ impl ZvalRef {
         unsafe { self.0.as_ptr().write(z) };
     }
 
-    fn payload(self) -> u64 {
-        self.0.as_ptr().expose_provenance() as u64
+    fn payload(self) -> Word {
+        Word::pointer(self.0)
     }
 
-    fn from_payload(value: u64) -> Option<ZvalRef> {
-        let at: *mut Zval =
-            std::ptr::with_exposed_provenance_mut(usize::try_from(value).unwrap_or(0));
-        NonNull::new(at).map(ZvalRef)
+    /// The slot an `Indirect` zval's word names.
+    ///
+    /// # Safety
+    ///
+    /// The word came from [`ZvalRef::payload`].
+    unsafe fn from_payload(word: Word) -> Option<ZvalRef> {
+        // SAFETY: a pointer word, by the contract.
+        unsafe { word.as_pointer() }.map(ZvalRef)
     }
 }
 
@@ -204,6 +208,67 @@ pub(crate) struct WeakMarks {
     pub(crate) from_map: bool,
 }
 
+/// A zval's payload word, `zend_value` on the 64-bit targets the design
+/// names: the bits of a long, a double or one of a unit's indexes, or the
+/// pointer to a refcounted value or to a slot in place. A pointer is kept
+/// as a pointer, its provenance with it, so a value read back out of a
+/// zval reaches its block through the pointer that was stored and never
+/// through an integer (#2528, #2441). Which of the two a word holds is
+/// the zval's type byte's to say; the word itself does not know.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) union Word {
+    bits: u64,
+    pointer: *mut u8,
+}
+
+impl Word {
+    /// A word of `bits`, no pointer among them.
+    pub(crate) const fn bits(bits: u64) -> Word {
+        Word { bits }
+    }
+
+    /// A word holding `at`, provenance and all.
+    pub(crate) const fn pointer<T>(at: NonNull<T>) -> Word {
+        Word {
+            pointer: at.as_ptr().cast(),
+        }
+    }
+
+    /// The word's bits: a scalar's payload, or a pointer's address with
+    /// its provenance left behind.
+    pub(crate) const fn as_bits(self) -> u64 {
+        // SAFETY: every bit pattern of the eight bytes is a `u64`, and a
+        // pointer's bytes read as one are its address alone, as `addr`
+        // reads it.
+        unsafe { self.bits }
+    }
+
+    /// The pointer [`Word::pointer`] stored, none for a null word.
+    ///
+    /// # Safety
+    ///
+    /// The word was made by [`Word::pointer`] from a pointer to a `T`.
+    pub(crate) unsafe fn as_pointer<T>(self) -> Option<NonNull<T>> {
+        // SAFETY: the word holds a pointer, by the contract.
+        NonNull::new(unsafe { self.pointer }.cast())
+    }
+}
+
+/// Two words are equal when their bits are: a pointer is compared by its
+/// address, as php compares two `zend_value`s.
+impl PartialEq for Word {
+    fn eq(&self, other: &Word) -> bool {
+        self.as_bits() == other.as_bits()
+    }
+}
+
+impl std::fmt::Debug for Word {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#x}", self.as_bits())
+    }
+}
+
 /// One value slot: a payload word, the type byte, the type flags and the
 /// opline-specific `u2` word. Copying a zval is a bitwise copy and touches
 /// no refcount; [`crate::Heap::addref`] and [`crate::Heap::release`] are
@@ -211,7 +276,7 @@ pub(crate) struct WeakMarks {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct Zval {
-    value: u64,
+    value: Word,
     kind: ZvalType,
     type_flags: u8,
     /// The extra bits of php's `Z_TYPE_INFO` above the type flags,
@@ -221,10 +286,27 @@ pub struct Zval {
     u2: u32,
 }
 
+// SAFETY: a zval is the sixteen bytes php's is, and what its word points
+// at is the claim `Str`, `Arr`, `Obj`, `Ref` and `Res` make for the value
+// it names: a request's value moves with the request that owns it, whole,
+// to the thread that serves it, and an immutable one, an interned string
+// or a constant array of a published unit, is shared by every thread and
+// touched by none (design §3.4, §5.14). The integer word this replaced
+// let the compiler infer both; the pointer word states them.
+unsafe impl Send for Zval {}
+// SAFETY: as `Send`: a zval shared across threads is one inside a
+// published unit, whose values are immutable and never refcounted.
+unsafe impl Sync for Zval {}
+
+// The layout the design names: sixteen bytes, the word first.
+const _: () = assert!(std::mem::size_of::<Zval>() == 16);
+const _: () = assert!(std::mem::offset_of!(Zval, value) == 0);
+const _: () = assert!(std::mem::size_of::<Word>() == 8);
+
 impl Zval {
     /// The all-zero zval, `IS_UNDEF`.
     pub const UNDEF: Zval = Zval {
-        value: 0,
+        value: Word::bits(0),
         kind: ZvalType::Undef,
         type_flags: 0,
         extra: 0,
@@ -232,6 +314,10 @@ impl Zval {
     };
 
     const fn scalar(kind: ZvalType, value: u64) -> Zval {
+        Zval::with_word(kind, Word::bits(value))
+    }
+
+    const fn with_word(kind: ZvalType, value: Word) -> Zval {
         Zval {
             value,
             kind,
@@ -351,7 +437,7 @@ impl Zval {
     #[must_use]
     pub fn as_const_expr(self) -> Option<u32> {
         match self.kind {
-            ZvalType::ConstExpr => u32::try_from(self.value).ok(),
+            ZvalType::ConstExpr => u32::try_from(self.value.as_bits()).ok(),
             _ => None,
         }
     }
@@ -366,7 +452,7 @@ impl Zval {
     #[must_use]
     pub fn as_ptr(self) -> Option<u32> {
         match self.kind {
-            ZvalType::Ptr => u32::try_from(self.value).ok(),
+            ZvalType::Ptr => u32::try_from(self.value.as_bits()).ok(),
             _ => None,
         }
     }
@@ -374,14 +460,16 @@ impl Zval {
     /// `ZVAL_INDIRECT`: the zval that says where another stands.
     #[must_use]
     pub fn indirect(at: ZvalRef) -> Zval {
-        Zval::scalar(ZvalType::Indirect, at.payload())
+        Zval::with_word(ZvalType::Indirect, at.payload())
     }
 
     /// `Z_INDIRECT` of an `Indirect`, else `None`.
     #[must_use]
     pub fn as_indirect(self) -> Option<ZvalRef> {
         match self.kind {
-            ZvalType::Indirect => ZvalRef::from_payload(self.value),
+            // SAFETY: the word of an `Indirect` was written by
+            // `Zval::indirect` from a `ZvalRef`.
+            ZvalType::Indirect => unsafe { ZvalRef::from_payload(self.value) },
             _ => None,
         }
     }
@@ -458,7 +546,7 @@ impl Zval {
     #[must_use]
     pub const fn as_long(self) -> Option<i64> {
         match self.kind {
-            ZvalType::Long => Some(self.value.cast_signed()),
+            ZvalType::Long => Some(self.value.as_bits().cast_signed()),
             _ => None,
         }
     }
@@ -467,7 +555,7 @@ impl Zval {
     #[must_use]
     pub const fn as_double(self) -> Option<f64> {
         match self.kind {
-            ZvalType::Double => Some(f64::from_bits(self.value)),
+            ZvalType::Double => Some(f64::from_bits(self.value.as_bits())),
             _ => None,
         }
     }
@@ -555,9 +643,9 @@ impl Zval {
         if !self.is_refcounted() {
             return None;
         }
-        NonNull::new(std::ptr::with_exposed_provenance_mut(
-            usize::try_from(self.value).unwrap_or(0),
-        ))
+        // SAFETY: a refcounted zval's word is the pointer its value's
+        // `payload` wrote.
+        unsafe { self.value.as_pointer() }
     }
 
     /// Whether the value carries a refcounted header (`Z_REFCOUNTED`): a

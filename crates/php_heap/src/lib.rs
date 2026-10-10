@@ -67,6 +67,7 @@ pub use collector::GcStatus;
 pub use compare::{Scalar, compare, compare_constants, identical, identical_constants};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, GcTable, HeapHooks};
+pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
@@ -507,6 +508,14 @@ impl Heap {
     #[cfg(debug_assertions)]
     pub fn set_origin(&mut self, origin: Origin) -> Origin {
         self.mm.set_origin(origin)
+    }
+
+    /// The origin a debug build tags what it allocates now with: the
+    /// extension whose code the engine is serving ([`Heap::set_origin`]).
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn origin(&self) -> Origin {
+        self.mm.origin()
     }
 
     /// A debug build's opt-in tracing: every allocation from here

@@ -29,6 +29,7 @@ use crate::state::Layer;
 use crate::streams::StreamLayer;
 use crate::streams::filters::FilterLayer;
 use crate::streams::sockets::Transports;
+use crate::supplied::Supplied;
 use crate::wrapper::PlainFiles;
 pub use crate::zend::STREAM_HOOKS;
 
@@ -1729,6 +1730,7 @@ impl Streams for Request {
         ops: Box<dyn StreamOps>,
         mode: &[u8],
     ) -> Result<Owner<Stream>, Thrown> {
+        let ops = crate::supplied::kind(self, ops);
         self.stream_alloc(crate::streams::of_extension(ops, mode))
     }
 
@@ -1845,7 +1847,8 @@ impl Streams for Request {
         if !self.add_url_wrapper(row) {
             return false;
         }
-        self.streams().wrappers.push(wrapper);
+        let by = self.supplier();
+        self.streams().wrappers.push(Supplied { row: wrapper, by });
         true
     }
 
@@ -1864,11 +1867,12 @@ impl Streams for Request {
     }
 
     fn register_filter(&mut self, name: &[u8], factory: FilterFactory) -> bool {
+        let by = self.supplier();
         let rows = &mut self.streams().filters;
         if rows.iter().any(|(n, _)| n.as_slice() == name) {
             return false;
         }
-        rows.push((name.to_vec(), factory));
+        rows.push((name.to_vec(), Supplied { row: factory, by }));
         true
     }
 

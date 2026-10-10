@@ -1006,6 +1006,14 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
     let mut methods = Vec::new();
     for (at, declared) in declarations.iter_mut().enumerate() {
         for (mut decl, entries, table, native) in std::mem::take(&mut declared.classes) {
+            // A debug build serves an extension's table as the extension
+            // (#2113); Core's runs as whatever called it, as it always
+            // has, and keeps the identity its own tests compare.
+            #[cfg(debug_assertions)]
+            let table = match at {
+                0 => table,
+                _ => table.map(|table| crate::served::served(table, ExtensionId::at(at))),
+            };
             handlers.push(table);
             natives.push(native);
             modules.push(ExtensionId::at(at));

@@ -5,14 +5,15 @@
 //! `tidybuffio.h`'s, written here, no bindgen.
 //!
 //! php hands libtidy `emalloc`, `erealloc` and `efree` through
-//! `tidySetMallocCall` and its kin, so what a document holds is on the
-//! request's heap and `memory_get_usage()` sees it. Here each [`Doc`] is
-//! made by `tidyCreateWithAllocator` over a [`Heap`] of its own, whose
-//! callbacks take every block from the request's heap ([`Emalloc`]),
-//! and every buffer is initialised over the same allocator; a call into
-//! libtidy is made through [`Doc::lend`], which lends the allocator the
-//! request for that call alone. Where the memory limit refuses a block,
-//! libtidy, which checks no allocation, is handed one from the process's
+//! `tidySetMallocCall` and its kin (`Z/ext/tidy/tidy.c:175-188`), so what
+//! a document holds is on the request's heap and `memory_get_usage()`
+//! sees it. Here each [`Doc`] is made by `tidyCreateWithAllocator` over a
+//! [`Heap`] of its own, whose callbacks are the same three
+//! ([`emalloc`], [`erealloc`], [`efree`]), and every buffer is
+//! initialised over the same allocator; a call into libtidy is made
+//! through [`Doc::lend`], which lends the request's heap for that call
+//! alone (ADR-0014). Where the memory limit refuses a block, libtidy,
+//! which checks no allocation, is handed one from the process's
 //! allocator, and the call answers the limit's fatal, as php's `emalloc`
 //! bails out.
 //!
@@ -25,13 +26,11 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
-use std::alloc::Layout;
-use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_ulong, c_void};
 use std::ptr::NonNull;
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, efree, emalloc, erealloc};
 use php_ext::values::Emalloc;
 
 type Opaque = *const c_void;
@@ -158,23 +157,11 @@ pub(crate) fn release_date() -> String {
     String::from_utf8_lossy(&text(at).unwrap_or_default()).into_owned()
 }
 
-/// Where a block libtidy holds came from.
-enum Held {
-    /// The request's heap, as php's `emalloc` gives it.
-    Heap(Emalloc),
-    /// The process's allocator, where the memory limit refused the heap.
-    System(Layout),
-}
-
-/// One document's `TidyAllocator`: the vtable libtidy calls through, the
-/// request lent for the call being made, the blocks libtidy holds by
-/// address, and what the limit or libtidy's panic left to raise.
+/// One document's `TidyAllocator`: the vtable libtidy calls through and
+/// the reason libtidy's panic left to raise.
 #[repr(C)]
 struct Heap {
     base: Allocator,
-    req: *mut Request,
-    held: HashMap<usize, Held>,
-    refused: Option<Thrown>,
     panicked: Option<Vec<u8>>,
 }
 
@@ -185,109 +172,31 @@ static VTBL: Vtbl = Vtbl {
     panic,
 };
 
-/// A block of the process's allocator, for the refused and the unlent.
-fn system(len: usize) -> (*mut c_void, Layout) {
-    let layout = Layout::from_size_align(len.max(1), 16).unwrap_or(Layout::new::<u128>());
-    // SAFETY: the layout's size is not zero.
-    let at = unsafe { std::alloc::alloc(layout) };
-    if at.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
-    (at.cast(), layout)
-}
-
-/// `php_tidy_malloc`: `emalloc(len)` on the lent request's heap.
-extern "C" fn alloc(heap: *mut Allocator, len: usize) -> *mut c_void {
-    // SAFETY: libtidy hands back the allocator a document was made with,
-    // a `Heap` its `Doc` keeps boxed, and calls it from one thread.
-    let heap = unsafe { &mut *heap.cast::<Heap>() };
-    if !heap.req.is_null() && heap.refused.is_none() {
-        // SAFETY: a non-null `req` is the request `Doc::lend` lent for
-        // the call libtidy is in, unused by its caller meanwhile.
-        let req = unsafe { &mut *heap.req };
-        match Emalloc::new(req, len.max(1)) {
-            Ok(mut block) => {
-                let at = block.as_mut_ptr();
-                heap.held.insert(at.addr(), Held::Heap(block));
-                return at.cast();
-            }
-            Err(thrown) => heap.refused = Some(thrown),
-        }
-    }
-    let (at, layout) = system(len);
-    heap.held.insert(at.addr(), Held::System(layout));
-    at
+/// `php_tidy_malloc`: `emalloc(len)` on the lent request's heap, the
+/// bytes left as the heap finds them.
+extern "C" fn alloc(_heap: *mut Allocator, len: usize) -> *mut c_void {
+    emalloc(len)
 }
 
 /// `php_tidy_free`: `efree(ptr)`.
-extern "C" fn free(heap: *mut Allocator, block: *mut c_void) {
-    if block.is_null() {
-        return;
-    }
-    // SAFETY: as in `alloc`.
-    let heap = unsafe { &mut *heap.cast::<Heap>() };
-    match heap.held.remove(&block.addr()) {
-        Some(Held::Heap(held)) if !heap.req.is_null() => {
-            // SAFETY: as in `alloc`.
-            let req = unsafe { &mut *heap.req };
-            held.free(req);
-        }
-        Some(Held::System(layout)) => {
-            // SAFETY: the block was allocated by `system` with this layout.
-            unsafe { std::alloc::dealloc(block.cast(), layout) };
-        }
-        // Unlent, the heap's block is the request's end's.
-        Some(Held::Heap(_)) | None => {}
-    }
+extern "C" fn free(_heap: *mut Allocator, block: *mut c_void) {
+    // SAFETY: libtidy frees a block once, and only one this allocator
+    // answered, under the lend of the call it is in.
+    unsafe { efree(block) }
 }
 
 /// `php_tidy_realloc`: `erealloc(ptr, len)`, the bytes kept to the
-/// shorter length.
-extern "C" fn realloc(heap: *mut Allocator, block: *mut c_void, len: usize) -> *mut c_void {
-    if block.is_null() {
-        return alloc(heap, len);
-    }
-    // SAFETY: as in `alloc`.
-    let state = unsafe { &mut *heap.cast::<Heap>() };
-    let on_heap = matches!(state.held.get(&block.addr()), Some(Held::Heap(_)));
-    if on_heap
-        && !state.req.is_null()
-        && state.refused.is_none()
-        && let Some(Held::Heap(held)) = state.held.remove(&block.addr())
-    {
-        // SAFETY: as in `alloc`.
-        let req = unsafe { &mut *state.req };
-        match held.resize(req, len.max(1)) {
-            Ok(mut block) => {
-                let at = block.as_mut_ptr();
-                state.held.insert(at.addr(), Held::Heap(block));
-                return at.cast();
-            }
-            // What was held is the request's end's; its bytes are lost
-            // to a request that ends in the limit's fatal.
-            Err(thrown) => {
-                state.refused = Some(thrown);
-                return alloc(heap, len);
-            }
-        }
-    }
-    let old = match state.held.get(&block.addr()) {
-        Some(Held::Heap(held)) => held.len(),
-        Some(Held::System(layout)) => layout.size(),
-        None => 0,
-    };
-    let fresh = alloc(heap, len);
-    // SAFETY: both blocks are live and at least `min(old, len)` long, and
-    // two allocations do not overlap.
-    unsafe { std::ptr::copy_nonoverlapping(block.cast::<u8>(), fresh.cast(), old.min(len)) };
-    free(heap, block);
-    fresh
+/// shorter length and left past it as they are found.
+extern "C" fn realloc(_heap: *mut Allocator, block: *mut c_void, len: usize) -> *mut c_void {
+    // SAFETY: as in `free`, a block this allocator answered.
+    unsafe { erealloc(block, len) }
 }
 
 /// `php_tidy_panic`, kept for the call's caller to raise as php's
 /// `E_ERROR`.
 extern "C" fn panic(heap: *mut Allocator, message: *const c_char) {
-    // SAFETY: as in `alloc`.
+    // SAFETY: libtidy hands back the allocator a document was made with,
+    // a `Heap` its `Doc` keeps boxed, and calls it from one thread.
     let heap = unsafe { &mut *heap.cast::<Heap>() };
     heap.panicked = Some(text(message).unwrap_or_default());
 }
@@ -430,9 +339,6 @@ impl Doc {
             base: Allocator {
                 vtbl: &raw const VTBL,
             },
-            req: std::ptr::null_mut(),
-            held: HashMap::new(),
-            refused: None,
             panicked: None,
         });
         let mut doc = Doc {
@@ -471,22 +377,18 @@ impl Doc {
         Ok(Some(doc))
     }
 
-    /// `call` with the allocator lent `req`, and what it left to raise.
+    /// `call` with `req`'s heap lent for its length (ADR-0014), and what
+    /// it left to raise.
     fn lend<R>(&mut self, req: &mut Request, call: impl FnOnce(Opaque) -> R) -> Result<R, Failed> {
-        let heap = self.heap.as_ptr();
-        // SAFETY: the box is this document's, alive until `release`.
-        unsafe { (*heap).req = req };
-        let answer = call(self.raw);
-        // SAFETY: as above.
-        unsafe { (*heap).req = std::ptr::null_mut() };
-        // SAFETY: as above.
-        let refused = unsafe { (*heap).refused.take() };
-        // SAFETY: as above.
-        let panicked = unsafe { (*heap).panicked.take() };
-        match (refused, panicked) {
-            (Some(thrown), _) => Err(Failed::Limit(thrown)),
-            (None, Some(reason)) => Err(Failed::Panic(reason)),
-            (None, None) => Ok(answer),
+        let raw = self.raw;
+        let answer = req.lend_heap(|| call(raw));
+        // SAFETY: the box is this document's, alive until it drops, and
+        // libtidy, which wrote the panic, has returned.
+        let panicked = unsafe { (*self.heap.as_ptr()).panicked.take() };
+        match (answer, panicked) {
+            (Err(thrown), _) => Err(Failed::Limit(thrown)),
+            (Ok(_), Some(reason)) => Err(Failed::Panic(reason)),
+            (Ok(answer), None) => Ok(answer),
         }
     }
 
@@ -873,17 +775,10 @@ impl Doc {
 impl Drop for Doc {
     /// A document never released is the request's end's: the heap's
     /// blocks go with the heap, libtidy is not called again, and the
-    /// process's blocks and the allocator itself are given back.
+    /// allocator itself is given back.
     fn drop(&mut self) {
         // SAFETY: the box was leaked by `Doc::new` and is taken back once.
-        let heap = unsafe { Box::from_raw(self.heap.as_ptr()) };
-        for (at, held) in heap.held {
-            if let Held::System(layout) = held {
-                // SAFETY: allocated by `system` with this layout, and
-                // unreachable once the document is gone.
-                unsafe { std::alloc::dealloc(at as *mut u8, layout) };
-            }
-        }
+        drop(unsafe { Box::from_raw(self.heap.as_ptr()) });
     }
 }
 

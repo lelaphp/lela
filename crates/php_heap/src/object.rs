@@ -146,8 +146,8 @@ impl Obj {
     }
 
     /// The payload word of a zval naming this object.
-    pub(crate) fn payload(self) -> u64 {
-        self.0.as_ptr().expose_provenance() as u64
+    pub(crate) fn payload(self) -> crate::zval::Word {
+        crate::zval::Word::pointer(self.0)
     }
 
     /// The object a zval's payload word names.
@@ -155,10 +155,10 @@ impl Obj {
     /// # Safety
     ///
     /// The word came from [`Obj::payload`] for an object still live.
-    pub(crate) unsafe fn from_payload(payload: u64) -> Option<Obj> {
-        let at: *mut ObjHeader =
-            std::ptr::with_exposed_provenance_mut(usize::try_from(payload).unwrap_or(0));
-        NonNull::new(at).map(Obj)
+    pub(crate) unsafe fn from_payload(payload: crate::zval::Word) -> Option<Obj> {
+        // SAFETY: the word holds the pointer `payload` stored, by the
+        // contract.
+        unsafe { payload.as_pointer::<ObjHeader>() }.map(Obj)
     }
 
     /// `zend_object_alloc`'s arithmetic: the header, a zval per slot and

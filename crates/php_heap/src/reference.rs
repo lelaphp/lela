@@ -68,8 +68,8 @@ impl Ref {
     }
 
     /// The payload word of a zval naming this reference.
-    pub(crate) fn payload(self) -> u64 {
-        self.0.as_ptr().expose_provenance() as u64
+    pub(crate) fn payload(self) -> crate::zval::Word {
+        crate::zval::Word::pointer(self.0)
     }
 
     /// The reference a zval's payload word names.
@@ -77,10 +77,10 @@ impl Ref {
     /// # Safety
     ///
     /// The word came from [`Ref::payload`] for a reference still live.
-    pub(crate) unsafe fn from_payload(payload: u64) -> Option<Ref> {
-        let at: *mut RefHeader =
-            std::ptr::with_exposed_provenance_mut(usize::try_from(payload).unwrap_or(0));
-        NonNull::new(at).map(Ref)
+    pub(crate) unsafe fn from_payload(payload: crate::zval::Word) -> Option<Ref> {
+        // SAFETY: the word holds the pointer `payload` stored, by the
+        // contract.
+        unsafe { payload.as_pointer::<RefHeader>() }.map(Ref)
     }
 
     /// `ZVAL_NEW_REF` over a fresh allocation: one owner, `z` the

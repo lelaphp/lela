@@ -815,6 +815,32 @@ impl Request {
         self.own_handlers(class).unwrap_or(&Std)
     }
 
+    /// `serve` served as the extension that declared the table `class`
+    /// is reached through, where an extension did: what a slot that
+    /// answers a function (`dtor_obj`, `clone_obj`, `current_place`,
+    /// `unserialize`) serves when the function is called, which a debug
+    /// build tags as that extension's as [`crate::served`] tags the slots
+    /// that serve code (#2113). A release build serves it as it stands.
+    pub(crate) fn serve_as_table<T>(
+        &mut self,
+        class: ClassId,
+        serve: impl FnOnce(&mut Request) -> T,
+    ) -> T {
+        #[cfg(debug_assertions)]
+        {
+            let row = self
+                .lineage(class)
+                .find(|at| self.handler_row(*at).is_some());
+            let extension = row.and_then(|row| self.class_extension(row));
+            if let Some(extension) = extension.filter(|by| *by != super::ExtensionId::CORE) {
+                return self.serve_for(extension, serve);
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = class;
+        serve(self)
+    }
+
     /// [`PhpObject::set_class`]: `object` takes `class` where neither
     /// lays down a slot or a native payload, both are served by [`Std`],
     /// the object is not lazy and `class` is one `new` could make.
@@ -1717,7 +1743,7 @@ impl Request {
         let Some(clone_obj) = table.clone_obj() else {
             return Err(self.uncloneable(object));
         };
-        let new = clone_obj(self, object)?;
+        let new = self.serve_as_table(object.class(), |req| clone_obj(req, object))?;
         // "Unlock readonly properties once more" for the writes, and lock
         // them again after, whatever a write threw; `EG(fake_scope) =
         // scope` for the writes and put back after them.
@@ -1856,9 +1882,11 @@ impl Request {
                     ));
                 };
                 let scope = self.executed_scope();
-                clone_obj_with(self, object, scope, with)
+                self.serve_as_table(object.class(), |req| {
+                    clone_obj_with(req, object, scope, with)
+                })
             }
-            None => clone_obj(self, object),
+            None => self.serve_as_table(object.class(), |req| clone_obj(req, object)),
         }
     }
 

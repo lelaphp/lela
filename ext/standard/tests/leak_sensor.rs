@@ -1,9 +1,16 @@
 //! The request leak sensor (#1992) over this extension's natives: each
 //! request below gives up everything its natives took, so an armed
 //! engine ends it without the `InternalError` naming a block still held.
+//! A leak from a filter an extension supplies names that extension.
 #![cfg(debug_assertions)]
 
+use php_ext::abi::ExtensionBuilder;
+use php_ext::raising::Thrown;
+use php_ext::request::{
+    Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
+};
 use php_ext::test::{Capture, Engine, LeakSensor};
+use php_ext::values::{PhpString, Value};
 
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
@@ -454,4 +461,83 @@ echo "end\n";
 "#,
     );
     assert_eq!(stdout, "dtor D\ndtor X\nint(5)\nend\n");
+}
+
+/// A filter an extension's factory made, faulty on purpose: each call
+/// makes a string and forgets its owner, so it is neither given up nor
+/// reported dropped, then hands the buckets on.
+struct LeakyFilter;
+
+impl StreamFilter for LeakyFilter {
+    fn filter(
+        &mut self,
+        req: &mut Request,
+        _stream: Stream,
+        input: &mut Brigade,
+        output: &mut Brigade,
+        consumed: Option<&mut usize>,
+        _flags: FilterFlags,
+    ) -> Result<FilterStatus, Thrown> {
+        if let Ok(made) = PhpString::new(req, b"in filter") {
+            // The leak is the point: neither given up nor reported dropped.
+            #[allow(clippy::mem_forget)]
+            std::mem::forget(made);
+        }
+        let mut count = 0;
+        while let Some(bucket) = input.pop_front() {
+            count += bucket.len();
+            output.push_back(bucket);
+        }
+        if let Some(n) = consumed {
+            *n = count;
+        }
+        Ok(FilterStatus::PassOn)
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)] // `FilterFactory`'s signature
+fn leaky_factory(
+    _req: &mut Request,
+    _name: &[u8],
+    _params: Option<&Value>,
+) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+    Ok(Some(Box::new(LeakyFilter)))
+}
+
+#[allow(clippy::unnecessary_wraps)] // the ABI's `rinit` hook
+fn register_leaky(req: &mut Request) -> Result<(), Thrown> {
+    req.register_filter(b"leaky", leaky_factory);
+    Ok(())
+}
+
+/// A block a filter an extension supplied allocated is named with that
+/// extension, though `fwrite`, ext/standard's native, ran the filter
+/// (#2113).
+#[test]
+fn a_leak_from_a_supplied_filter_names_its_extension() {
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            ExtensionBuilder::default()
+                .rinit(register_leaky)
+                .build("leak_filter"),
+        ])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(
+        "<?php $m = fopen('php://memory', 'w+'); stream_filter_append($m, 'leaky', STREAM_FILTER_WRITE);\nfwrite($m, 'x'); echo 'written';\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(stdout.starts_with("written"), "{stdout}");
+    assert!(
+        stdout.contains("InternalError: the request ended with"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(", allocated by leak_filter in "),
+        "{stdout}"
+    );
 }

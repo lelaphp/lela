@@ -517,8 +517,8 @@ impl Arr {
     }
 
     /// The payload word of a zval naming this array.
-    pub(crate) fn payload(self) -> u64 {
-        self.0.as_ptr().expose_provenance() as u64
+    pub(crate) fn payload(self) -> crate::zval::Word {
+        crate::zval::Word::pointer(self.0)
     }
 
     /// The array a zval's payload word names.
@@ -526,10 +526,10 @@ impl Arr {
     /// # Safety
     ///
     /// The word came from [`Arr::payload`] for an array still live.
-    pub(crate) unsafe fn from_payload(payload: u64) -> Option<Arr> {
-        let at: *mut ArrHeader =
-            std::ptr::with_exposed_provenance_mut(usize::try_from(payload).unwrap_or(0));
-        NonNull::new(at).map(Arr)
+    pub(crate) unsafe fn from_payload(payload: crate::zval::Word) -> Option<Arr> {
+        // SAFETY: the word holds the pointer `payload` stored, by the
+        // contract.
+        unsafe { payload.as_pointer::<ArrHeader>() }.map(Arr)
     }
 
     /// `_zend_hash_init_int` over a fresh 56-byte allocation: one owner,

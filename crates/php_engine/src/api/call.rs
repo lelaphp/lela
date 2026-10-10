@@ -1492,7 +1492,7 @@ pub fn class_unserialize(
     data: &[u8],
 ) -> Result<bool, Thrown> {
     if let Some(unserialize) = object.handlers(req).unserialize() {
-        unserialize(req, object, data)?;
+        req.serve_as_table(object.class(), |req| unserialize(req, object, data))?;
         return Ok(true);
     }
     let serializable = req

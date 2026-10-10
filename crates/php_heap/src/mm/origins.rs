@@ -88,6 +88,11 @@ impl Mm {
         std::mem::replace(&mut self.origin, origin)
     }
 
+    /// What the heap allocates for now.
+    pub(crate) fn origin(&self) -> Origin {
+        self.origin
+    }
+
     /// Every allocation from here on keeps the backtrace that made it.
     pub(crate) fn trace_allocations(&mut self) {
         self.traces.get_or_insert_default();

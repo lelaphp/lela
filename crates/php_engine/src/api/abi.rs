@@ -2213,7 +2213,7 @@ impl DtorObj {
     pub fn serve(self, req: &mut Request, object: PhpObject) {
         match self {
             DtorObj::Destroy => req.destruct(object),
-            DtorObj::Own(own) => own(req, object),
+            DtorObj::Own(own) => req.serve_as_table(object.class(), |req| own(req, object)),
         }
     }
 }
