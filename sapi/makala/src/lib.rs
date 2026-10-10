@@ -27,8 +27,10 @@
 )]
 
 mod connection;
+mod framing;
 pub mod options;
 mod request;
+mod socket;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -53,7 +55,7 @@ pub fn main() -> ExitCode {
     let options = match Options::parse(&argv) {
         Ok(options) => options,
         Err(refusal) => {
-            say(&format!("makala: {refusal}\n{}", options::USAGE));
+            say(&format!("makala: {refusal}\n{}", options::usage()));
             return php_sapi::exit_code(1);
         }
     };
@@ -68,7 +70,7 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(1);
         }
     };
-    let (queue, pool) = match request::Pool::start(&engine, &options) {
+    let (queue, pool) = match request::Pool::start(&options, request::serving(&engine, &options)) {
         Ok(started) => started,
         Err(e) => {
             say(&format!("makala: cannot start a request thread: {e}\n"));
