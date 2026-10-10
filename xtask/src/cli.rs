@@ -140,6 +140,12 @@ pub(crate) enum Command {
         /// otherwise print the block JSON with the list while anything is unmet.
         #[arg(long)]
         hook: bool,
+        /// An instrument this run did not take: a missing reading of it is
+        /// a note that it did not run, never unmet and never met. CI names
+        /// the oracle job's two while that job is skipped (#2477).
+        #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook",
+              value_parser = clap::builder::PossibleValuesParser::new(crate::done::FRESH))]
+        not_run: Vec<String>,
     },
     /// Say the branch, the commit it was taken off main at, the store
     /// and the branch's ticket; as text or as one object. Writes no
