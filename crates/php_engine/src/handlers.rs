@@ -6260,7 +6260,7 @@ fn fetched_name(
     }
     let held = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let text = crate::ops::to_string(req, &held)?;
-    Ok(Owner::adopt(req, text))
+    Ok(Owner::adopt(text))
 }
 
 /// `zend_fetch_static_property_address_ex`'s first half

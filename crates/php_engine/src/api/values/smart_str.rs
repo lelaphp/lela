@@ -105,7 +105,7 @@ impl SmartStr {
             return PhpString::new(req, b"");
         };
         buf.set_len(self.len);
-        Ok(Owner::adopt(req, PhpString::of(buf.finish())))
+        Ok(Owner::adopt(PhpString::of(buf.finish())))
     }
 
     /// `smart_str_free`: the allocation back to the heap, nothing held.

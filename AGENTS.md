@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed -->
+<!-- /computed in=b7bcfbd8cfb198fda34e2fbf9fe5bfe9971742ebb163733df35304ee5587a9f0 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -119,20 +119,20 @@ third-engine-design.md
 <!-- /computed in=1783c270cbaa14d511bb59dd0b2653187b94a0bbfe68bff527a17ecf7c0ce468 out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
-| seam | lock | items | ceiling | reading |
-|---|---|---|---|---|
-| heap | heap.lock | 383 |  | no reading |
-| process | process.lock | 38 |  | no reading |
-| unit | unit.lock | 95 |  | no reading |
-| link | link.lock | 48 |  | no reading |
-| ops | ops.lock | 209 |  | no reading |
-| api | api.lock | 1395 | 1500 | no reading |
-| sapi | sapi.lock | 47 |  | no reading |
-| tier | tier.lock | 32 |  | no reading |
-| layer | layer.lock | 37 |  | no reading |
-| harness | xtask.lock | 401 |  | no reading |
+| seam | lock | items | ceiling |
+|---|---|---|---|
+| heap | heap.lock | 383 |  |
+| process | process.lock | 38 |  |
+| unit | unit.lock | 95 |  |
+| link | link.lock | 48 |  |
+| ops | ops.lock | 209 |  |
+| api | api.lock | 1393 | 1500 |
+| sapi | sapi.lock | 47 |  |
+| tier | tier.lock | 32 |  |
+| layer | layer.lock | 38 |  |
+| harness | xtask.lock | 400 |  |
 
-<!-- /computed -->
+<!-- /computed in=622efc207d208ab064ade3baff6a9c1dac94315bf291dcb05a95511c2a1e9af8 out=3947b5bd6c5c0de71873c0af9af6767ab0d8632e1a08b52e40bb0745207d012f -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
