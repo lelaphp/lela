@@ -64,6 +64,11 @@ pub(super) struct Ini {
     /// The entries a hot path reads, typed, as the request holds them
     /// now ([`TypedIni`]).
     typed: TypedIni,
+    /// `PG(open_basedir)` where `OnUpdateBaseDir` set it at runtime, the
+    /// list `ini_set()` took with each directory expanded
+    /// (`PG(open_basedir_modified)`); `None` where it is the entry's value
+    /// as set, at startup and once the request's end restored it.
+    open_basedir: Option<Vec<u8>>,
 }
 
 impl Ini {
@@ -76,6 +81,7 @@ impl Ini {
             locked: Vec::new(),
             stage: IniStage::Runtime,
             typed,
+            open_basedir: None,
         }
     }
 }
@@ -214,6 +220,35 @@ impl Request {
         match self.ini.changed.iter().find(|(n, ..)| n.as_slice() == name) {
             Some((_, value, _)) => value.as_deref(),
             None => self.shared.ini_default_value(name),
+        }
+    }
+
+    /// `PG(open_basedir)`, the list the `open_basedir` guard reads
+    /// ([`Request::check_open_basedir`]): the entry's value as it was set
+    /// at startup, and, once `ini_set()` or a `.user.ini` tightened it, the
+    /// list it took with each directory expanded (`OnUpdateBaseDir`,
+    /// `Z/main/fopen_wrappers.c:74`), where `ini_get()` still answers the
+    /// value as set. `None` where the entry holds php's `NULL`.
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $msg) { echo str_replace(__DIR__, 'DIR', $msg), "\n"; return true; });
+    /// ini_set('open_basedir', __DIR__ . '/./a/..' . PATH_SEPARATOR . __DIR__ . '/b/../');
+    /// var_dump(str_replace(__DIR__, 'DIR', ini_get('open_basedir')), fopen('/', 'r'));
+    /// var_dump(str_replace(__DIR__, 'DIR', ini_set('open_basedir', __DIR__ . '/.')), str_replace(__DIR__, 'DIR', ini_get('open_basedir')));
+    /// ```
+    /// ```expect
+    /// fopen(): open_basedir restriction in effect. File(/) is not within the allowed path(s): (DIR:DIR/)
+    /// fopen(/): Failed to open stream: Operation not permitted
+    /// string(20) "DIR/./a/..:DIR/b/../"
+    /// bool(false)
+    /// string(20) "DIR/./a/..:DIR/b/../"
+    /// string(5) "DIR/."
+    /// ```
+    #[must_use]
+    pub fn open_basedir(&self) -> Option<&[u8]> {
+        match &self.ini.open_basedir {
+            Some(expanded) => Some(expanded),
+            None => self.ini_value(b"open_basedir"),
         }
     }
 
@@ -394,17 +429,13 @@ impl Request {
         {
             return Ok(None);
         }
-        let tightened;
-        let value = if name == b"open_basedir" {
-            match self.tighter_open_basedir(value) {
-                Some(list) => {
-                    tightened = list;
-                    tightened.as_slice()
-                }
-                None => return Ok(None),
-            }
+        let expanded = if name == b"open_basedir" {
+            let Some(list) = self.tighter_open_basedir(value) else {
+                return Ok(None);
+            };
+            Some(list)
         } else {
-            value
+            None
         };
         let limited;
         let value = if name == b"memory_limit" {
@@ -434,6 +465,7 @@ impl Request {
         }
         self.ini_hold_string(name, value, string);
         match name {
+            b"open_basedir" => self.ini.open_basedir = expanded,
             b"max_execution_time" => self.arm_timer(),
             b"error_reporting" => self.update_error_reporting(),
             b"zend.enable_gc" => {
@@ -604,6 +636,9 @@ impl Request {
                 }
                 let master = self.shared.ini_default(&name);
                 self.ini.typed.update(&name, master);
+            }
+            if name == b"open_basedir" {
+                self.ini.open_basedir = None;
             }
             if name == b"error_reporting" {
                 self.update_error_reporting();

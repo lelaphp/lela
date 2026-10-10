@@ -818,6 +818,7 @@ request::Request::native_static_trampoline
 request::Request::native_trampoline
 request::Request::observe_allocations
 request::Request::op_array
+request::Request::open_basedir
 request::Request::os_error_text
 request::Request::output_buffer_op
 request::Request::output_started_at
