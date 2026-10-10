@@ -33,11 +33,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 
 use super::fpm::{Pool, round, terminate};
-use crate::oracle::{Ended, Mapping, Observation, Oracle, Piece, Variable, normalise_in};
+use crate::oracle::{Ended, Mapping, Observation, Oracle, Piece, Recipe, Variable, normalise_in};
+use crate::phpt::cgi;
 use crate::scratch::Tree;
 
 /// The request a fence describes, as a client sends it.
-struct Http {
+#[derive(Debug, Clone)]
+pub(crate) struct Http {
     method: String,
     query: String,
     /// The header fields in the order they are sent.
@@ -49,12 +51,28 @@ impl Http {
     /// The request the fence's sections describe, run-tests.php's CGI
     /// translation of them read back as HTTP.
     fn of(own: &Tree, program: &Path, request: &str) -> Result<Http> {
-        let described = super::process::described(own, program, request, &[])?;
+        Ok(Http::described(&super::process::described(
+            own,
+            program,
+            request,
+            &[],
+        )?))
+    }
+
+    /// The request a CGI-shaped test's translation describes
+    /// ([`cgi::request`]), read back as HTTP: its method, query string,
+    /// cookie, content type and length, and body. A value is one line, as
+    /// a header field carries it, so a section's line breaks, which an
+    /// environment variable holds and a field may not, are each a space.
+    pub(crate) fn described(described: &cgi::Request) -> Http {
         let var = |name: &str| {
             let entries = described.env.entries().iter().rev();
             let mut found = entries.filter(|(had, _)| had == name);
             found.next().map_or_else(String::new, |(_, value)| {
-                value.to_string_lossy().into_owned()
+                value
+                    .to_string_lossy()
+                    .replace("\r\n", " ")
+                    .replace(['\r', '\n'], " ")
             })
         };
         let fields = [
@@ -64,12 +82,22 @@ impl Http {
             ("Content-Length", var("CONTENT_LENGTH")),
         ];
         let method = Some(var("REQUEST_METHOD")).filter(|m| !m.is_empty());
-        Ok(Http {
+        Http {
             method: method.unwrap_or_else(|| "GET".to_owned()),
             query: var("QUERY_STRING"),
             fields: fields.into_iter().filter(|(_, v)| !v.is_empty()).collect(),
-            body: described.stdin.unwrap_or_default(),
-        })
+            body: described.stdin.clone().unwrap_or_default(),
+        }
+    }
+
+    /// A `GET` of the program with no query and no body.
+    pub(crate) fn get() -> Http {
+        Http {
+            method: "GET".to_owned(),
+            query: String::new(),
+            fields: vec![("Host", "localhost".to_owned())],
+            body: Vec::new(),
+        }
     }
 
     /// A field's value as sent, empty where it is not.
@@ -100,55 +128,166 @@ pub(crate) fn served(
     let own = oracle.tree("witness-makala")?;
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let http = Http::of(&own, &program, request)?;
-    let mut server = Command::new(host);
-    server.arg("-n");
-    for ini in &recipe.ini {
-        server.arg("-d").arg(ini);
-    }
-    server.args(["--listen", "127.0.0.1:0", "--threads", "1", "--root"]);
-    server
-        .arg(own.path())
-        .arg("--error-log")
-        .arg(own.join("errors"));
-    recipe
-        .environ(&mut server)?
-        .envs(env.iter().map(|(name, value)| (name, value)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut server = Server(
-        server
-            .spawn()
-            .with_context(|| format!("running {}", host.display()))?,
-    );
     let started = Instant::now();
-    let mut line = String::new();
-    BufReader::new(server.0.stderr.take().context("makala's stderr")?).read_line(&mut line)?;
-    let addr = (line
-        .split_once("http://")
-        .and_then(|(_, rest)| rest.split_once(',')))
-    .ok_or_else(|| anyhow!("makala did not say where it listens: {line:?}"))?
-    .0;
-    let mut stream = TcpStream::connect(addr).with_context(|| format!("connecting to {addr}"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(recipe.limits.timeout_s)))?;
-    let fields: String = (http.fields.iter())
-        .flat_map(|(name, value)| [*name, ": ", value, "\r\n"])
-        .collect();
-    let target = http.target(&recipe.script_name);
-    write!(stream, "{} {target} HTTP/1.0\r\n{fields}\r\n", http.method)?;
-    stream.write_all(&http.body)?;
-    let mut answer = Vec::new();
-    stream
-        .read_to_end(&mut answer)
-        .context("reading makala's response")?;
-    drop(server);
-    let logged = std::fs::read_to_string(own.join("errors")).unwrap_or_default();
+    let answered = by_makala(recipe, host, own.path(), &http, &[], env)?;
     Ok(Observation {
-        stdout: normalise_in(&recipe.normalise, own.path(), from_http(&answer)),
-        stderr: normalise_in(&recipe.normalise, own.path(), php_logged(&logged)),
+        stdout: normalise_in(&recipe.normalise, own.path(), from_http(&answered.response)),
+        stderr: normalise_in(&recipe.normalise, own.path(), php_logged(&answered.logged)),
         exit: Ended::Status(0),
         wall: started.elapsed(),
     })
+}
+
+/// What one makala answered for one request: the response as it came, the
+/// error log it wrote, the `SERVER_SOFTWARE` it named itself by and the
+/// two ports of the connection, each the run's own.
+pub(crate) struct Answered {
+    pub(crate) response: Vec<u8>,
+    pub(crate) logged: String,
+    pub(crate) software: String,
+    pub(crate) ports: Ports,
+}
+
+/// The two ports of one connection: the server's and the client's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Ports {
+    pub(crate) server: u16,
+    pub(crate) remote: u16,
+}
+
+/// `http` served by a makala of its own at `host` over the program in
+/// `dir` named by the recipe's `script_name`, under the recipe's ini and
+/// `ini` after it, ended once its response is read.
+pub(crate) fn by_makala(
+    recipe: &Recipe,
+    host: &Path,
+    dir: &Path,
+    http: &Http,
+    ini: &[String],
+    env: &[(String, OsString)],
+) -> Result<Answered> {
+    let log = dir.join("errors");
+    let server = Server::start(recipe, host, dir, ini, Some(1), &log, env)?;
+    let timeout = Duration::from_secs(recipe.limits.timeout_s);
+    let (response, remote) = server.ask(http, &recipe.script_name, timeout)?;
+    let (software, server_port) = (server.software.clone(), server.port);
+    drop(server);
+    Ok(Answered {
+        response,
+        logged: std::fs::read_to_string(&log).unwrap_or_default(),
+        software,
+        ports: Ports {
+            server: server_port,
+            remote,
+        },
+    })
+}
+
+/// A makala serving a document root on a loopback port, ended as a service
+/// manager ends it when dropped, so its drain lets a request run to its
+/// end, and the trace of the natives it entered with it, before the
+/// process ends.
+pub(crate) struct Server {
+    child: Child,
+    addr: String,
+    port: u16,
+    /// What it names itself by, `makala/<version>` (#2335), as its first
+    /// line on stderr says.
+    pub(crate) software: String,
+}
+
+impl Server {
+    /// The makala at `host` over `root` with `threads` request threads,
+    /// or as many as it takes by default, its error log at `log`, under the recipe's ini and `ini` after it
+    /// and the recipe's environment with `env` over it; started once it
+    /// says where it listens.
+    pub(crate) fn start(
+        recipe: &Recipe,
+        host: &Path,
+        root: &Path,
+        ini: &[String],
+        threads: Option<usize>,
+        log: &Path,
+        env: &[(String, OsString)],
+    ) -> Result<Server> {
+        let mut server = Command::new(host);
+        server.arg("-n");
+        for ini in recipe.ini.iter().chain(ini) {
+            server.arg("-d").arg(ini);
+        }
+        server.args(["--listen", "127.0.0.1:0"]);
+        if let Some(threads) = threads {
+            server.arg("--threads").arg(threads.to_string());
+        }
+        server.arg("--root").arg(root).arg("--error-log").arg(log);
+        recipe
+            .environ(&mut server)?
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = server
+            .spawn()
+            .with_context(|| format!("running {}", host.display()))?;
+        let stderr = child.stderr.take().context("makala's stderr");
+        let mut server = Server {
+            child,
+            addr: String::new(),
+            port: 0,
+            software: String::new(),
+        };
+        let mut line = String::new();
+        BufReader::new(stderr?).read_line(&mut line)?;
+        let said = line
+            .split_once(" listening on http://")
+            .and_then(|(software, rest)| Some((software, rest.split_once(',')?.0)));
+        let (software, addr) =
+            said.ok_or_else(|| anyhow!("makala did not say where it listens: {line:?}"))?;
+        server.port = (addr.rsplit(':').next().and_then(|p| p.parse().ok()))
+            .ok_or_else(|| anyhow!("makala names no port it listens on: {line:?}"))?;
+        software.clone_into(&mut server.software);
+        addr.clone_into(&mut server.addr);
+        Ok(server)
+    }
+
+    /// `http` sent to the program `script` over a connection of its own as
+    /// an HTTP/1.0 request, so the response ends at the close; the
+    /// response as it came, and the client's port.
+    pub(crate) fn ask(
+        &self,
+        http: &Http,
+        script: &str,
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, u16)> {
+        let addr = &self.addr;
+        let at: std::net::SocketAddr = addr.parse().with_context(|| format!("reading {addr}"))?;
+        let mut stream = TcpStream::connect_timeout(&at, timeout)
+            .with_context(|| format!("connecting to {addr}"))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let fields: String = (http.fields.iter())
+            .flat_map(|(name, value)| [*name, ": ", value, "\r\n"])
+            .collect();
+        let target = http.target(script);
+        write!(stream, "{} {target} HTTP/1.0\r\n{fields}\r\n", http.method)?;
+        stream.write_all(&http.body)?;
+        let mut answer = Vec::new();
+        stream
+            .read_to_end(&mut answer)
+            .context("reading makala's response")?;
+        Ok((answer, stream.local_addr()?.port()))
+    }
+
+    /// The process, for what a soak samples of it.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        terminate(&mut self.child);
+    }
 }
 
 /// `snippet` served as the request `request` describes by the php-fpm at
@@ -161,26 +300,12 @@ pub(crate) fn served_by_mapping(
     snippet: &str,
     request: &str,
 ) -> Result<Observation> {
-    let pin = oracle.pin();
-    let recipe = &pin.recipe;
+    let recipe = &oracle.pin().recipe;
     let own = oracle.tree("witness-makala-fpm")?;
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let http = Http::of(&own, &program, request)?;
-    let root = own.path().canonicalize()?.to_string_lossy().into_owned();
-    let params = mapped(pin.fastcgi()?, &http, &root, &recipe.script_name);
-    // The socket in a tree with a short name, since a socket's address
-    // holds no longer path than `SUN_LEN`; and php-fpm's default
-    // `clear_env`, so `$_SERVER` holds nothing of the process's
-    // environment, as makala's holds nothing.
-    let sockets = Tree::new("mkf")?;
-    let mut pool = Pool::start(oracle, host, &sockets, &[], true)?;
     let started = Instant::now();
-    let timeout = Duration::from_secs(recipe.limits.timeout_s);
-    let stream = pool.connect()?;
-    stream.set_read_timeout(Some(timeout))?;
-    let pairs = params.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes()));
-    let (stdout, stderr) = round(stream, pairs, Some(&http.body))?;
-    pool.settle(timeout)?;
+    let (stdout, stderr) = by_fpm(oracle, host, own.path(), &http, &[], Ports::default())?;
     Ok(Observation {
         stdout: normalise_in(&recipe.normalise, own.path(), from_cgi(&stdout)),
         stderr: normalise_in(&recipe.normalise, own.path(), stderr),
@@ -189,11 +314,49 @@ pub(crate) fn served_by_mapping(
     })
 }
 
+/// `http` handed by a pool of its own of the php-fpm at `host` the program
+/// in `dir`, under the pin's `[fastcgi]` mapping with `ports` as the
+/// connection's and the recipe's ini and `ini` after it; what it wrote on
+/// `FCGI_STDOUT` and `FCGI_STDERR`.
+pub(crate) fn by_fpm(
+    oracle: &Oracle<'_>,
+    host: &Path,
+    dir: &Path,
+    http: &Http,
+    ini: &[String],
+    ports: Ports,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let pin = oracle.pin();
+    let recipe = &pin.recipe;
+    let root = dir.canonicalize()?.to_string_lossy().into_owned();
+    let params = mapped(pin.fastcgi()?, http, &root, &recipe.script_name, ports);
+    // The socket in a tree with a short name, since a socket's address
+    // holds no longer path than `SUN_LEN`; and php-fpm's default
+    // `clear_env`, so `$_SERVER` holds nothing of the process's
+    // environment, as makala's holds nothing.
+    let sockets = Tree::new("mkf")?;
+    let mut pool = Pool::start(oracle, host, &sockets, &[], ini, true)?;
+    let timeout = Duration::from_secs(recipe.limits.timeout_s);
+    let stream = pool.connect()?;
+    stream.set_read_timeout(Some(timeout))?;
+    let pairs = params.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes()));
+    let answered = round(stream, pairs, Some(&http.body))?;
+    pool.settle(timeout)?;
+    Ok(answered)
+}
+
 /// The mapping's parameters filled for `http` to the program's file `script`
 /// under `root`, in the order nginx sends them, and then each header
 /// field as `HTTP_<NAME>`, as nginx's `fastcgi_pass_request_headers`
-/// passes it. The ports are the fence's own and no part of what it pins.
-fn mapped(mapping: &Mapping, http: &Http, root: &str, script: &str) -> Vec<(String, String)> {
+/// passes it. The ports are `ports`, a fence's 0 and no part of what it
+/// pins, and a comparison's those makala's connection had.
+fn mapped(
+    mapping: &Mapping,
+    http: &Http,
+    root: &str,
+    script: &str,
+    ports: Ports,
+) -> Vec<(String, String)> {
     let fill = |variable: Variable| -> String {
         match variable {
             Variable::DocumentRoot => root.to_owned(),
@@ -208,7 +371,8 @@ fn mapped(mapping: &Mapping, http: &Http, root: &str, script: &str) -> Vec<(Stri
             Variable::Https => String::new(),
             Variable::NginxVersion => mapping.nginx.clone(),
             Variable::RemoteAddr | Variable::ServerAddr => "127.0.0.1".to_owned(),
-            Variable::RemotePort | Variable::ServerPort => "0".to_owned(),
+            Variable::RemotePort => ports.remote.to_string(),
+            Variable::ServerPort => ports.server.to_string(),
             Variable::ServerName => "localhost".to_owned(),
         }
     };
@@ -234,7 +398,7 @@ fn mapped(mapping: &Mapping, http: &Http, root: &str, script: &str) -> Vec<(Stri
 /// makala's HTTP response as a client of nginx reads php-fpm's: the
 /// status line's code, the lines PHP set, the server's `date` and
 /// `connection` left out, and the body.
-fn from_http(answer: &[u8]) -> Vec<u8> {
+pub(crate) fn from_http(answer: &[u8]) -> Vec<u8> {
     let (head, body) = split_head(answer);
     let mut head = head.lines();
     let code = head.next().and_then(|status| status.split(' ').nth(1));
@@ -244,7 +408,7 @@ fn from_http(answer: &[u8]) -> Vec<u8> {
 
 /// php-fpm's CGI response as nginx hands it on: its `Status:` line the
 /// code, 200 without one, then the other lines, then the body.
-fn from_cgi(out: &[u8]) -> Vec<u8> {
+pub(crate) fn from_cgi(out: &[u8]) -> Vec<u8> {
     let (head, body) = split_head(out);
     let status = head.lines().find_map(|line| line.strip_prefix("Status: "));
     let code = status.and_then(|status| status.split(' ').next());
@@ -254,7 +418,7 @@ fn from_cgi(out: &[u8]) -> Vec<u8> {
 
 /// What php logged, from makala's error log: each entry's time taken off
 /// and the server's own entries, `makala: `, left out.
-fn php_logged(logged: &str) -> Vec<u8> {
+pub(crate) fn php_logged(logged: &str) -> Vec<u8> {
     let entries = logged.lines().map(|line| match line.split_once(' ') {
         Some((time, entry)) if time.len() == 24 && time.ends_with('Z') => entry,
         _ => line,
@@ -288,17 +452,6 @@ fn rendered<'a>(code: &str, lines: impl Iterator<Item = &'a str>, body: &[u8]) -
     out
 }
 
-/// The makala a fence runs, ended as a service manager ends it once its
-/// response is read, so its drain lets the request run to its end, and
-/// the trace of the natives it entered with it, before the process ends.
-struct Server(Child);
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        terminate(&mut self.0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -324,7 +477,13 @@ mod tests {
             ],
             body: b"hi".to_vec(),
         };
-        let params = mapped(pin.fastcgi().unwrap(), &http, "/root", "t.php");
+        let params = mapped(
+            pin.fastcgi().unwrap(),
+            &http,
+            "/root",
+            "t.php",
+            Ports::default(),
+        );
         let names: Vec<&str> = params.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names.first(), Some(&"SCRIPT_FILENAME"));
         assert!(!names.contains(&"HTTPS"));

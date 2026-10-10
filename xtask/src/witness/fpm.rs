@@ -187,7 +187,7 @@ pub(crate) fn served_as_fpm(
             None => given.push((name, value)),
         }
     }
-    let mut pool = Pool::start(oracle, host, &own, env, false)?;
+    let mut pool = Pool::start(oracle, host, &own, env, &[], false)?;
     let started = Instant::now();
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let stream = pool.connect()?;
@@ -206,14 +206,16 @@ pub(crate) fn served_as_fpm(
 
 impl Pool {
     /// The php-fpm at `host`, its master in the foreground over a pool of
-    /// one child on a Unix socket in `own`, under the recipe's ini as `-d`,
-    /// with `env` in the master's environment, which its child keeps, or
-    /// none of it where `clear_env` says, php-fpm's default.
+    /// one child on a Unix socket in `own`, under the recipe's ini and
+    /// `ini` after it as `-d`, with `env` in the master's environment, which
+    /// its child keeps, or none of it where `clear_env` says, php-fpm's
+    /// default.
     pub(super) fn start(
         oracle: &Oracle<'_>,
         host: &Path,
         own: &Tree,
         env: &[(String, OsString)],
+        ini: &[String],
         clear_env: bool,
     ) -> Result<Pool> {
         let recipe = &oracle.pin().recipe;
@@ -247,7 +249,7 @@ impl Pool {
             .with_context(|| format!("opening {}", log.display()))?;
         let mut master = Command::new(host);
         master.args(["-n", "-F", "-O", "-y"]).arg(&conf);
-        for ini in &recipe.ini {
+        for ini in recipe.ini.iter().chain(ini) {
             master.arg("-d").arg(ini);
         }
         recipe

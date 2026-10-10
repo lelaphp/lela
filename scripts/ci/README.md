@@ -15,7 +15,7 @@ Until `dax-build` is online (#2296), the Linux jobs run on GitHub-hosted Linux, 
 runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
 ```
 
-That is `regions`, `per-commit`, `miri`, `done` and `red-main` in `harness.yml`, and `measure`, `publish` and `deploy` in `dashboard.yml`.
+That is `regions`, `per-commit`, `miri`, `done` and `red-main` in `harness.yml`, and `measure`, `soak`, `publish` and `deploy` in `dashboard.yml`.
 
 - **Unset** (or empty), every job runs on `[self-hosted, linux, dax-build]`, as before the variable existed.
 - **Set**, its value is a JSON list of runner labels. The value to set is the hosted Ubuntu 26.04 image, the release `packages.txt` names (#1724):

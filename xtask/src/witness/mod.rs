@@ -125,7 +125,7 @@ pub(crate) mod fence;
 mod fpm;
 mod host;
 mod judge;
-mod makala;
+pub(crate) mod makala;
 mod process;
 pub(crate) mod row;
 #[cfg(test)]

@@ -685,7 +685,7 @@ fn trimmed(pin: &Pin, body: &[u8]) -> Vec<u8> {
 /// `settings2array` (run-tests.php:2950) splits and trims them, so an
 /// `input_encoding = ISO-8859-1` is the entry and not a name php knows
 /// nothing of.
-fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
     let Some(body) = phpt.text("INI") else {
         return Ok(Vec::new());
     };
