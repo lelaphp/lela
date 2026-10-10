@@ -7831,7 +7831,7 @@ pub(crate) fn fetch_dim_func_arg<T: Tier>(
         if matches!(op.op1_type, OperandKind::Const | OperandKind::Tmp) {
             return use_tmp_in_write_context(req, frame, code, op);
         }
-        return fetch_dim_w::<T>(req, frame, code, op);
+        return fetched_dim_place(req, frame, code, op);
     }
     if op.op2_type == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
@@ -7839,7 +7839,7 @@ pub(crate) fn fetch_dim_func_arg<T: Tier>(
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
     }
-    fetch_dim_r::<T>(req, frame, code, op)
+    fetched_dim(req, frame, code, op)
 }
 
 /// `ZEND_FETCH_STATIC_PROP_FUNC_ARG` (`Z/Zend/zend_vm_def.h:1912`), a
@@ -8534,12 +8534,96 @@ fn freeing_container(
 /// #0 {main}
 ///   thrown in %s on line 11
 /// ```
-pub(crate) fn fetch_dim_r<T: Tier>(
+pub(crate) fn fetch_dim_r<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fetch_dim_r(req, frame, code, op, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_dim(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_FETCH_DIM_R` (`ZEND_FETCH_DIM_R_SPEC_*`,
+/// `Z/Zend/zend_vm_def.h:1970-1995`, `fetch_dim_r_array`): an array's
+/// element at a long or string key ([`inline::dim_key`],
+/// [`inline::element`]) copied into the temporary with one more owner.
+/// `None`, with nothing touched, for a container that is no array, a
+/// key the array has not got, a dimension php converts, an operand the
+/// fetch would have to give up, and a temporary holding an owner.
+#[inline(always)] // the handler's fast half, as php's is in the handler
+#[allow(clippy::inline_always)]
+fn inline_fetch_dim_r(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (array, key) = inline_dim(slots, code, op, a, b)?;
+    let z = inline::element(array, key)?;
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    *slots.get_mut(out)? = z;
+    req.heap_mut().addref(z);
+    Some(Ok(advanced()))
+}
+
+/// The array and the key a dimension opcode's inline path works on:
+/// the array a CV holds, a reference followed, or one a constant or a
+/// temporary holds that counts no owner, so the opcode has nothing to
+/// give up (`FREE_OP1`); and the key [`inline::dim_key`] reads out of
+/// a dimension that counts no owner either (`FREE_OP2`). None for
+/// every other pair.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_dim(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+    b: impl Operand,
+) -> Option<(php_heap::Arr, php_heap::Key)> {
+    let container = a.read(slots, code, op.op1);
+    let container = match a.kind() {
+        OperandKind::Cv => crate::operand::deref(container),
+        OperandKind::Unused => return None,
+        _ if container.is_refcounted() => return None,
+        _ => container,
+    };
+    Some((container.as_arr()?, inline_key(slots, code, op, b)?))
+}
+
+/// The key [`inline::dim_key`] reads out of a dimension that counts no
+/// owner, or a CV's, so the opcode has nothing to give up
+/// (`FREE_OP2`); none for an append and every other dimension.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_key(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
+    b: impl Operand,
+) -> Option<php_heap::Key> {
+    let dim = b.read(slots, code, op.op2);
+    if b.kind() == OperandKind::Unused || (b.kind() != OperandKind::Cv && dim.is_refcounted()) {
+        return None;
+    }
+    inline::dim_key(dim, b.kind() == OperandKind::Const)
+}
+
+/// `FETCH_DIM_R` past its inline path: the container read as
+/// `zend_fetch_dimension_address_read_R` reads it and the read made by
+/// [`read_dimension`]. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn fetched_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
     let read = read_dimension(req, frame, code, op, &container, DimRead::Warning)?;
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
@@ -9839,13 +9923,95 @@ fn write_entry(req: &mut Request, array: PhpArray, at: WriteAt) -> Result<Landin
 /// #0 {main}
 ///   thrown in %s on line 9
 /// ```
-pub(crate) fn fetch_dim_w<T: Tier>(
+pub(crate) fn fetch_dim_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_fetch_dim_w(req, frame, code, op, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    fetched_dim_place(req, frame, code, op)
+}
+
+/// `FETCH_DIM_W` past its inline path: [`fetch_dim_place`] under
+/// `BP_VAR_W`. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn fetched_dim_place(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     fetch_dim_place(req, frame, code, op, DimRead::Silent, Keep::Nothing)
+}
+
+/// The inline path of `ZEND_FETCH_DIM_W` over a CV
+/// (`zend_fetch_dimension_address_W` into
+/// `zend_fetch_dimension_address_inner_W`): an array the CV alone owns,
+/// so `SEPARATE_ARRAY` copies nothing, whose element at the key holds a
+/// value, named in place by the `VAR` as an `IS_INDIRECT` for the write
+/// after it; and the same over a `VAR` a `FETCH_*_W` before it left
+/// naming such an array, `$a[1][0] = ...`'s inner link. `None`, with
+/// nothing touched, for every other container, a
+/// key the array has not got, which the write lays down, an element
+/// that is a reference or a symbol table's `IS_INDIRECT`, and a `VAR`
+/// holding an owner.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_fetch_dim_w(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (entry, table) = owned_entry(slots, code, op, a, b)?;
+    let out = exec::temporary_slot(code, op.out) as usize;
+    if slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    free_place_var(slots, code, op, a);
+    *slots.get_mut(out)? = Zval::indirect(entry);
+    // The table the entry stands in, for the write after this to hold
+    // across what it serves, as every `FETCH_DIM_W` notes it.
+    req.note_walk(Some((entry, Value::of_zval(table))));
+    Some(Ok(advanced()))
+}
+
+/// The element a dimension write's inline path writes in place: the
+/// entry at the key [`inline_key`] reads of the array a CV holds, or the
+/// place a `FETCH_*_W` left in a `VAR` as an `IS_INDIRECT` holds
+/// (`GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`), where that array is
+/// refcounted with one owner and is no reference's, so `SEPARATE_ARRAY`
+/// copies nothing, and the entry holds a value that is no reference and
+/// no `IS_INDIRECT`; with the array's zval, the table the entry stands in.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn owned_entry(
+    slots: &[Zval],
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+    b: impl Operand,
+) -> Option<(php_heap::ZvalRef, Zval)> {
+    let held = a.read(slots, code, op.op1);
+    let held = match a.kind() {
+        OperandKind::Cv => held,
+        OperandKind::Var => held.as_indirect()?.read(),
+        _ => return None,
+    };
+    let array = held.as_arr()?;
+    if !held.is_refcounted() || array.refcount() != 1 {
+        return None;
+    }
+    let entry = array.value_ref(inline_key(slots, code, op, b)?)?;
+    let z = entry.read();
+    let plain = !z.is_undef()
+        && !matches!(
+            z.kind(),
+            php_heap::ZvalType::Reference | php_heap::ZvalType::Indirect
+        );
+    plain.then_some((entry, held))
 }
 
 /// `ZEND_FETCH_DIM_RW` (`Z/Zend/zend_vm_def.h:2024`), the link of a
@@ -13550,12 +13716,91 @@ fn assign_text_dim(
 /// Undefined variable $y
 /// NULL
 /// ```
-pub(crate) fn assign_dim<T: Tier>(
+pub(crate) fn assign_dim<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_assign_dim(req, frame, code, op, at, (A::default(), B::default())) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    assigned_dim(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_ASSIGN_DIM` over a CV
+/// (`ZEND_ASSIGN_DIM_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:2621-2660`): an
+/// array the CV alone owns, whose element at the key holds a value that
+/// owns nothing, takes the `OP_DATA` value ([`data_value`]); nothing is
+/// given up, so nothing runs. `None`, with nothing touched, as
+/// [`inline_fetch_dim_w`]'s, for an append, an element holding an
+/// owner, and a value or a temporary [`data_value`] refuses.
+///
+/// ```php
+/// $a = [1, 2, 3]; $h = ["x" => 1, "y" => [1]]; $b = $a; $s = str_repeat("s", 2);
+/// for ($i = 0; $i < 3; $i++) { $a[$i] = $i * 2; $r = $h["x"] = $s; }
+/// $a[1] = 9; $h["y"] = 0; $a[5] = 1; $h["x"] = 2;
+/// var_dump($a, $b[1], $h, $r);
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   int(9)
+///   [2]=>
+///   int(4)
+///   [5]=>
+///   int(1)
+/// }
+/// int(2)
+/// array(2) {
+///   ["x"]=>
+///   int(2)
+///   ["y"]=>
+///   int(0)
+/// }
+/// string(2) "ss"
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_assign_dim(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (entry, _) =
+        owned_entry(slots, code, op, a, b).filter(|(entry, _)| !entry.read().is_refcounted())?;
+    let z = data_value(req, frame, code, op, at)?;
+    entry.write(z);
+    free_place_var(req.slots_mut(frame), code, op, a);
+    Some(Ok(Next::Jump(at.saturating_add(2))))
+}
+
+/// `FREE_OP1_VAR_PTR()`: the `VAR` a write's container was named
+/// through, an `IS_INDIRECT` that owns nothing, emptied as
+/// [`exec::free_operand`] empties it; nothing for a CV.
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn free_place_var(slots: &mut [Zval], code: &OpArray, op: &Opline, a: impl Operand) {
+    if a.kind() == OperandKind::Var
+        && let Some(var) = a.slot(code, op.op1).and_then(|at| slots.get_mut(at))
+    {
+        *var = Zval::UNDEF;
+    }
+}
+
+/// `ASSIGN_DIM` past its inline path: the container placed for the
+/// write ([`write_container`]) and the write each kind of container
+/// takes. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let (at, data) = data_after(req, frame, code, op)?;
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
@@ -19322,6 +19567,80 @@ pub(crate) fn isset_isempty_dim_obj<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    // Read through `ByKind` and not specialised: this compiler writes
+    // `isset($this[0])` over an `UNUSED` container where php's writes a
+    // `FETCH_THIS` first, a kind the spec does not list.
+    let at = req.vm().opline(frame);
+    let operands = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_isset_dim::<T>(req, frame, code, op, at, operands) {
+        return edge;
+    }
+    tested_dim::<T>(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_ISSET_ISEMPTY_DIM_OBJ` over an array
+/// (`Z/Zend/zend_vm_def.h:7539-7570`, `isset_again`): the element at
+/// a long or string key ([`inline::dim_key`], [`inline::element`])
+/// read as `isset` reads it, set where it is anything but `null`, and
+/// as `empty` reads it, its truth as [`inline::truth`] reads a scalar;
+/// a key the array has not got is unset and empty. The answer is
+/// branched on where a `JMPZ` or a `JMPNZ` is fused to it
+/// ([`fused_jump`]) and written into the temporary otherwise. `None`,
+/// with nothing touched, as [`inline_fetch_dim_r`]'s, for an `empty` of
+/// an element whose truth is the kernel's, and a temporary holding an
+/// owner.
+///
+/// ```php
+/// $a = [0, null, "", "0", [], 1.5, "k" => "v"]; $k = "k"; $n = 1;
+/// foreach ([0, 1, 2, 3, 4, 5, 6, "k"] as $i) echo isset($a[$i]) ? "s" : "u", empty($a[$i]) ? "e" : "f", " ";
+/// var_dump(isset($a[$k]), isset($a[$n]), !empty($a[$k]));
+/// if (isset($a[0])) echo "branch\n";
+/// ```
+/// ```expect
+/// se ue se se se sf ue sf bool(true)
+/// bool(false)
+/// bool(true)
+/// branch
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_isset_dim<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let (array, key) = inline_dim(slots, code, op, a, b)?;
+    let found = inline::element(array, key);
+    let answer = if op.extended_value & ISEMPTY == 0 {
+        found.is_some_and(|z| z.kind() != php_heap::ZvalType::Null)
+    } else {
+        match found {
+            None => true,
+            Some(z) => !inline::truth(z)?,
+        }
+    };
+    if let Some(jump) = fused_jump(code, op, at) {
+        return Some(branch_fused::<T>(
+            req,
+            frame,
+            at.saturating_add(1),
+            &jump,
+            answer,
+        ));
+    }
+    write_owning_nothing(slots, code, op, Zval::bool(answer))?;
+    Some(Ok(advanced()))
+}
+
+/// `ISSET_ISEMPTY_DIM_OBJ` past its inline path: the container read as
+/// `BP_VAR_IS` reads it and the test each kind of container takes. A
+/// call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
     let answer = if let Some(array) = container.as_array().copied() {
@@ -19884,12 +20203,68 @@ pub(crate) fn array_key_exists<T: Tier>(
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
 /// bit in `extended_value`, into the temporary; the operand freed after
 /// it.
-pub(crate) fn count<T: Tier>(
+pub(crate) fn count<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_count(req, frame, code, op, A::default()) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
+    counted(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_COUNT` over an array
+/// (`Z/Zend/zend_vm_def.h:9178-9182`): `zend_hash_num_elements` into
+/// the temporary. `None`, with nothing touched, for an operand that is
+/// no array, one a temporary holds that counts owners, which the count
+/// would give up, a symbol table holding emptied `IS_INDIRECT` slots,
+/// which `zend_array_count` walks, and a temporary holding an owner.
+///
+/// ```php
+/// $a = [1, 2, [3, 4]]; $r = &$a; $e = [];
+/// var_dump(count($a), count($r), count($e), count($a[2]), sizeof($a), count([1, 2]));
+/// function f() { $x = 1; $y = 2; return count(get_defined_vars()); }
+/// var_dump(f());
+/// ```
+/// ```expect
+/// int(3)
+/// int(3)
+/// int(0)
+/// int(2)
+/// int(3)
+/// int(2)
+/// int(2)
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_count(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let z = a.read(slots, code, op.op1);
+    let z = match a.kind() {
+        OperandKind::Cv => crate::operand::deref(z),
+        _ if z.is_refcounted() => return None,
+        _ => z,
+    };
+    let array = z.as_arr().filter(|array| !array.has_empty_ind())?;
+    let n = i64::try_from(array.len()).ok()?;
+    write_owning_nothing(slots, code, op, Zval::long(n))?;
+    Some(Ok(advanced()))
+}
+
+/// `COUNT` past its inline path: [`crate::ops::count`] over the
+/// operand. A call of its own, as [`fetched_obj`] is.
+#[inline(never)]
+fn counted(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let sizeof = op.extended_value != 0;
     unary(req, frame, code, op, |req, value| {
         crate::ops::count(req, value, sizeof).map(Value::int)

@@ -12,7 +12,7 @@
 
 use std::cmp::Ordering;
 
-use php_heap::{Number, Zval, ZvalType};
+use php_heap::{Arr, Key, Number, Zval, ZvalType};
 
 use crate::api::values::Value;
 
@@ -166,4 +166,70 @@ pub(crate) fn truth(z: Zval) -> Option<bool> {
         ZvalType::Double => z.as_double().filter(|d| !d.is_nan()).map(|d| d != 0.0),
         _ => None,
     }
+}
+
+/// The key `zend_fetch_dimension_address_inner` reads out of a
+/// dimension it takes inline (`Z/Zend/zend_execute.c:2600-2640`): a long
+/// as itself, and a string as `ZEND_HANDLE_NUMERIC_STR` reads it, a
+/// canonical decimal integer as that integer and any other string as
+/// itself; a constant string is itself, since the compiler wrote the
+/// integer in its place where it was one (`zend_handle_numeric_dim`).
+/// Everything else, `null`, a bool, a float, a resource, an array or an
+/// object, is the kernel's to convert or refuse ([`crate::ops::array_offset`]).
+///
+/// ```php
+/// $a = [5 => "five", "05" => "zero five", "x" => "ex", -3 => "minus"];
+/// $i = 5; $s = "5"; $t = "05"; $m = "-3"; $x = "x";
+/// var_dump($a[$i], $a[$s], $a[$t], $a[$m], $a[$x], $a["5"], isset($a[$t]), count($a));
+/// ```
+/// ```expect
+/// string(4) "five"
+/// string(4) "five"
+/// string(9) "zero five"
+/// string(5) "minus"
+/// string(2) "ex"
+/// string(4) "five"
+/// bool(true)
+/// int(4)
+/// ```
+#[inline(always)] // a test of the type byte, on an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn dim_key(dim: Zval, constant: bool) -> Option<Key> {
+    match dim.kind() {
+        ZvalType::Long => dim.as_long().map(Key::Long),
+        ZvalType::String => {
+            let text = dim.as_str()?;
+            if constant {
+                return Some(Key::Str(text));
+            }
+            Some(php_heap::canonical_int(text.bytes()).map_or(Key::Str(text), Key::Long))
+        }
+        _ => None,
+    }
+}
+
+/// The element `key` names in `array` as a read takes it inline, a
+/// reference followed (`ZVAL_COPY_DEREF`), no owner taken. None for a
+/// key the array has not got, whose read warns, and for a slot of a
+/// symbol table, an `IS_INDIRECT` php follows into a CV, which the
+/// kernel reads.
+///
+/// ```php
+/// $a = [1, [2], "k" => "v"]; $r = &$a[0]; $r = 7;
+/// var_dump($a[0], $a[1][0], $a["k"], $a[9] ?? "none", isset($a[0]), empty($a[1]));
+/// ```
+/// ```expect
+/// int(7)
+/// int(2)
+/// string(1) "v"
+/// string(4) "none"
+/// bool(true)
+/// bool(false)
+/// ```
+#[inline(always)] // as `dim_key`
+#[allow(clippy::inline_always)]
+pub(crate) fn element(array: Arr, key: Key) -> Option<Zval> {
+    let found = array.get(key)?;
+    let found = found.as_reference().map_or(found, |cell| cell.val());
+    (!found.is_undef() && found.kind() != ZvalType::Indirect).then_some(found)
 }
