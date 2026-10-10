@@ -556,6 +556,53 @@ pub(crate) struct FrameState {
     pub(crate) identity: Cell<Option<crate::api::request::Identity>>,
 }
 
+/// What a push lays down in a frame's state, all of it at once:
+/// `zend_vm_stack_push_call_frame` and `i_init_func_execute_data` for a
+/// function's frame, `i_init_code_execute_data` for a file's. The fields
+/// are [`FrameState`]'s of the same names; [`Activation::of`] is a
+/// file's main op array with nothing carried over, and a push names
+/// what differs from it.
+pub(crate) struct Activation {
+    pub(crate) unit: Arc<Unit>,
+    pub(crate) body: Body,
+    pub(crate) function: Option<Function>,
+    pub(crate) opline: u32,
+    pub(crate) receiver: Option<Receiver>,
+    pub(crate) called_scope: Option<ClassId>,
+    pub(crate) scope: Option<ClassId>,
+    pub(crate) symbol_table: Option<TableId>,
+    pub(crate) closure: Option<PhpObject>,
+    pub(crate) num_args: u32,
+    pub(crate) extra_args: Vec<Value>,
+    pub(crate) extra_named: ExtraNamed,
+    pub(crate) returns_to: Option<(FrameRef, u32)>,
+    pub(crate) caller: Caller,
+}
+
+impl Activation {
+    /// `body` of `unit` at its first opline, with no function, receiver,
+    /// scope, table, closure or argument, returning to no slot, pushed
+    /// from outside the loop.
+    pub(crate) fn of(unit: Arc<Unit>, body: Body) -> Activation {
+        Activation {
+            unit,
+            body,
+            function: None,
+            opline: 0,
+            receiver: None,
+            called_scope: None,
+            scope: None,
+            symbol_table: None,
+            closure: None,
+            num_args: 0,
+            extra_args: Vec::new(),
+            extra_named: ExtraNamed::default(),
+            returns_to: None,
+            caller: Caller::Outside,
+        }
+    }
+}
+
 /// One op array's runtime cache for one request, what
 /// `ZEND_MAP_PTR(op_array->run_time_cache)` reaches: `NULL`, which is
 /// what a fresh map table holds, until the op array's first activation
@@ -1051,50 +1098,46 @@ impl Vm {
         self.placeholders.pop();
     }
 
-    /// Push one frame's state; its place is the `FrameRef` the VM stack
-    /// gave the frame, and the two are pushed and popped together. The
-    /// slots are the stack's, every one `IS_UNDEF` until an opline
-    /// writes it (`i_init_func_execute_data`), which is what a read of
-    /// a CV warns of.
-    pub(crate) fn push(&mut self, unit: Arc<Unit>) {
-        self.push_body(unit, Body::Main, None, None, None, 0, None, Caller::Outside);
-    }
-
-    /// Push the state of a frame serving `body` of `unit`: the function
-    /// it is, its receiver and called scope, how many arguments the
-    /// call placed, where the caller wants what it returns, and the
-    /// frame whose opline pushed the call
-    /// (`zend_vm_stack_push_call_frame` with `i_init_func_execute_data`'s
-    /// fields filled).
-    #[allow(clippy::too_many_arguments)] // the frame header's fields, each one fact
-    pub(crate) fn push_body(
-        &mut self,
-        unit: Arc<Unit>,
-        body: Body,
-        function: Option<Function>,
-        receiver: Option<Receiver>,
-        called_scope: Option<ClassId>,
-        num_args: u32,
-        returns_to: Option<(FrameRef, u32)>,
-        caller: Caller,
-    ) {
+    /// Push one frame's state, laid down whole from `activation`; its
+    /// place is the `FrameRef` the VM stack gave the frame, and the two
+    /// are pushed and popped together. The slots are the stack's, every
+    /// one `IS_UNDEF` until an opline or a placed argument writes it
+    /// (`i_init_func_execute_data`), which is what a read of a CV warns
+    /// of.
+    pub(crate) fn push(&mut self, activation: Activation) {
+        let Activation {
+            unit,
+            body,
+            function,
+            opline,
+            receiver,
+            called_scope,
+            scope,
+            symbol_table,
+            closure,
+            num_args,
+            extra_args,
+            extra_named,
+            returns_to,
+            caller,
+        } = activation;
         let runtime_cache = body_of(&unit, body).map_or(MapPtr::new(0), runtime_cache_of);
         let calls_below = u32::try_from(self.calls.len()).unwrap_or(u32::MAX);
         self.frames.push(FrameState {
             unit,
             body,
             function,
-            opline: 0,
+            opline,
             returns_to,
             caller,
             receiver,
             called_scope,
-            scope: None,
-            symbol_table: None,
-            closure: None,
+            scope,
+            symbol_table,
+            closure,
             num_args,
-            extra_args: Vec::new(),
-            extra_named: ExtraNamed::default(),
+            extra_args,
+            extra_named,
             calls_below,
             leaving: false,
             at_exception_op: false,

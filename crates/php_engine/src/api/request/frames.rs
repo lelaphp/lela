@@ -282,13 +282,13 @@ impl Request {
         let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        self.vm.push(unit);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
         // stands in the table, in the compiler's order, from the start.
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.symbol_table = Some(TableId::GLOBAL);
-        }
+        self.vm.push(exec::Activation {
+            symbol_table: Some(TableId::GLOBAL),
+            ..exec::Activation::of(unit, exec::Body::Main)
+        });
         self.attach_symbol_table(frame);
         Ok(frame)
     }
@@ -326,20 +326,15 @@ impl Request {
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        self.vm.push_body(
-            unit,
-            exec::Body::Main,
-            None,
+        self.vm.push(exec::Activation {
             receiver,
             called_scope,
-            0,
+            scope,
+            symbol_table: Some(table),
             returns_to,
-            exec::Caller::Opline(caller),
-        );
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.scope = scope;
-            state.symbol_table = Some(table);
-        }
+            caller: exec::Caller::Opline(caller),
+            ..exec::Activation::of(unit, exec::Body::Main)
+        });
         self.attach_symbol_table(frame);
         crate::observer::call(self, frame);
         Ok(frame)
@@ -523,23 +518,11 @@ impl Request {
         let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let parameters = usize::try_from(arity.parameters).unwrap_or(usize::MAX);
-        let typed = arity.typed;
         let entry = code.safepoints.first().map_or(0, |at| at.0);
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let extra_args = call.arguments.len().saturating_sub(parameters);
         let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
-        let closure = call.closure;
         exec::init_runtime_cache(&mut self.map, code, body);
-        self.vm.push_body(
-            unit,
-            body,
-            Some(function),
-            call.receiver,
-            call.called_scope,
-            num_args,
-            returns_to,
-            caller,
-        );
         // The parameters' CVs of the frame just pushed hold `UNDEF`, so
         // each argument is written over nothing, as `SEND_*` writes into
         // the callee's slot; the rest are the extra arguments.
@@ -551,22 +534,28 @@ impl Request {
                 *cell = argument.to_zval();
             }
         }
-        let extra: Vec<Value> = placing.collect();
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.extra_args = extra;
-            state.extra_named = call.extra_named;
-            state.closure = closure;
-        }
+        let extra_args: Vec<Value> = placing.collect();
         self.vm.keep_arguments(arguments);
+        let opline =
+            exec::skipped_recv(num_args, arity.parameters, arity.typed, entry).unwrap_or(0);
+        self.vm.push(exec::Activation {
+            function: Some(function),
+            opline,
+            receiver: call.receiver,
+            called_scope: call.called_scope,
+            closure: call.closure,
+            num_args,
+            extra_args,
+            extra_named: call.extra_named,
+            returns_to,
+            caller,
+            ..exec::Activation::of(unit, body)
+        });
         if let Some(name) = call.name {
             self.release(Value::string(name));
         }
         for coerced in call.coerced {
             self.release(coerced);
-        }
-        let declared = arity.parameters;
-        if let Some(at) = exec::skipped_recv(num_args, declared, typed, entry) {
-            self.vm.stand(frame, at);
         }
         crate::observer::call(self, frame);
         Ok(frame)
