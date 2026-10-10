@@ -16,7 +16,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, This, Union
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_string};
-use php_ext::raising::{Thrown, fatal, throw_error};
+use php_ext::raising::{Thrown, fatal, throw_error, while_pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -503,135 +503,231 @@ fn quoted(head: &str, bytes: &[u8], tail: &str) -> Vec<u8> {
     [head.as_bytes(), b"'", shown(bytes), b"'", tail.as_bytes()].concat()
 }
 
-/// One argument's value as a string `Formattable`, its `__toString`
-/// served for an object; a failure's message set with `None`.
-fn string_arg(req: &mut Request, site: &mut Site, value: &Value) -> Answer<Formattable> {
-    let text = to_string(req, value)?;
-    let converted = ffi::to_utf16(text.as_bytes());
-    let answer = match converted {
-        Ok(units) => Ok(Some(Formattable::String(units))),
-        Err(code) => {
-            let message = quoted(
-                "Invalid UTF-8 data in string argument: ",
-                text.as_bytes(),
-                "",
-            );
-            site.set(req, code, message).map(|()| None)
-        }
-    };
-    text.give_up(req);
-    answer
+/// `umsg_format_helper`'s walk over the arguments: the site its errors
+/// are set on, and what a conversion threw, php's `EG(exception)`, which
+/// the walk goes on past as php's loop does: `zval_get_tmp_string`
+/// leaves the throwable pending and answers the empty string, and the
+/// later conversions are served as php serves them with one pending.
+struct Walk<'s, 'a> {
+    site: &'s mut Site<'a>,
+    pending: Option<Thrown>,
 }
 
-/// A `zend_long` or `double` held to the range of a 32-bit argument,
-/// php's `int32_t` cast of anything else.
-fn long_arg(req: &mut Request, site: &mut Site, value: &Value) -> Answer<Formattable> {
-    let (low, high) = (i32::MIN, i32::MAX);
-    #[allow(clippy::cast_possible_truncation, reason = "php's (int32_t) casts")]
-    let n = match value.as_ref() {
-        ValueRef::Float(d) if d > f64::from(high) || d < f64::from(low) => {
-            let message =
-                "Found PHP float with absolute value too large for 32 bit integer argument";
-            return site
-                .set(req, Code::ILLEGAL_ARGUMENT, message)
-                .map(|()| None);
+impl Walk<'_, '_> {
+    /// A conversion that can call PHP code: its value, or `None` where it
+    /// threw, the throwable pending from there on. With one pending
+    /// already it is served while that one stands, so a `__toString` is
+    /// refused and a warning raised past the handlers, and what it
+    /// throws besides is chained over it.
+    fn serve<T>(
+        &mut self,
+        req: &mut Request,
+        step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+    ) -> Option<T> {
+        let Some(pending) = self.pending.take() else {
+            return step(req).map_err(|thrown| self.pending = Some(thrown)).ok();
+        };
+        let answer = while_pending(req, &pending, step);
+        match answer {
+            Some(Ok(value)) => {
+                self.pending = Some(pending);
+                Some(value)
+            }
+            Some(Err(thrown)) if thrown.exception() != pending.exception() => {
+                self.pending = Some(pending.chain(req, thrown));
+                None
+            }
+            _ => {
+                self.pending = Some(pending);
+                None
+            }
         }
-        ValueRef::Float(d) => d as i32,
-        ValueRef::Int(n) => {
-            let Ok(n) = i32::try_from(n) else {
+    }
+
+    /// What a step threw, chained over what is pending.
+    fn keep(&mut self, req: &mut Request, thrown: Thrown) {
+        self.pending = Some(match self.pending.take() {
+            Some(pending) => pending.chain(req, thrown),
+            None => thrown,
+        });
+    }
+
+    /// `intl_errors_set(&err, code, message)`, its `IntlException`
+    /// chained over what is pending; `Err` where anything is pending
+    /// after it, which ends the walk, as the failure ends php's at its
+    /// next row.
+    fn set(
+        &mut self,
+        req: &mut Request,
+        code: Code,
+        message: impl AsRef<[u8]>,
+    ) -> Result<(), Thrown> {
+        match self.pending.take() {
+            None => self.site.set(req, code, message),
+            pending => self.site.outside().set_over(req, pending, code, message),
+        }
+    }
+
+    fn code(&mut self, req: &mut Request) -> Code {
+        self.site.code(req)
+    }
+
+    /// One argument's value as a string `Formattable`, its `__toString`
+    /// served for an object, the empty string where that threw; a
+    /// failure's message set with `None`.
+    fn string(&mut self, req: &mut Request, value: &Value) -> Answer<Formattable> {
+        let Some(text) = self.serve(req, |req| to_string(req, value)) else {
+            return Ok(Some(Formattable::String(Vec::new())));
+        };
+        let converted = ffi::to_utf16(text.as_bytes());
+        let answer = match converted {
+            Ok(units) => Ok(Some(Formattable::String(units))),
+            Err(code) => {
+                let message = quoted(
+                    "Invalid UTF-8 data in string argument: ",
+                    text.as_bytes(),
+                    "",
+                );
+                self.set(req, code, message).map(|()| None)
+            }
+        };
+        text.give_up(req);
+        answer
+    }
+
+    /// `zval_get_double`.
+    fn double(&mut self, req: &mut Request, value: &Value) -> Formattable {
+        Formattable::Double(self.serve(req, |req| to_double(req, value)).unwrap_or(0.0))
+    }
+
+    /// A `zend_long` or `double` held to the range of a 32-bit argument,
+    /// php's `int32_t` cast of anything else.
+    fn long(&mut self, req: &mut Request, value: &Value) -> Answer<Formattable> {
+        let (low, high) = (i32::MIN, i32::MAX);
+        #[allow(clippy::cast_possible_truncation, reason = "php's (int32_t) casts")]
+        let n = match value.as_ref() {
+            ValueRef::Float(d) if d > f64::from(high) || d < f64::from(low) => {
                 let message =
-                    "Found PHP integer with absolute value too large for 32 bit integer argument";
-                return site
+                    "Found PHP float with absolute value too large for 32 bit integer argument";
+                return self
                     .set(req, Code::ILLEGAL_ARGUMENT, message)
                     .map(|()| None);
-            };
-            n
-        }
-        _ => to_long(req, value)? as i32,
-    };
-    Ok(Some(Formattable::Long(n)))
-}
-
-/// A `double` held to the range of a 64-bit argument; an integer as it
-/// is, anything else through `zval_get_long`.
-fn int64_arg(req: &mut Request, site: &mut Site, value: &Value) -> Answer<Formattable> {
-    #[allow(clippy::cast_precision_loss, reason = "php's (double)U_INT64_MAX")]
-    let (low, high) = (i64::MIN as f64, i64::MAX as f64);
-    #[allow(clippy::cast_possible_truncation, reason = "php's (int64_t) cast")]
-    let n = match value.as_ref() {
-        ValueRef::Float(d) if d > high || d < low => {
-            let message =
-                "Found PHP float with absolute value too large for 64 bit integer argument";
-            return site
-                .set(req, Code::ILLEGAL_ARGUMENT, message)
-                .map(|()| None);
-        }
-        ValueRef::Float(d) => d as i64,
-        ValueRef::Int(n) => n,
-        _ => to_long(req, value)?,
-    };
-    Ok(Some(Formattable::Int64(n)))
-}
-
-/// A date argument's milliseconds; where the value is no date,
-/// `umsg_format_helper`'s message set over the one `intl_zval_to_millis`
-/// set, with what that threw chained beneath.
-fn date_arg(req: &mut Request, site: &mut Site, value: Value, name: &[u16]) -> Answer<Formattable> {
-    let millis = zval_to_millis(req, value, &mut site.outside());
-    let code = site.code(req);
-    if !code.is_failure() {
-        return millis.map(|d| Some(Formattable::Date(d)));
-    }
-    let Ok(key) = ffi::to_utf8(name) else {
-        return millis.map(|_| None);
-    };
-    let message = quoted(
-        "The argument for key ",
-        &key,
-        " cannot be used as a date or time",
-    );
-    match millis {
-        Ok(_) => site.set(req, code, message).map(|()| None),
-        Err(thrown) => site
-            .outside()
-            .set_over(req, Some(thrown), code, message)
-            .map(|()| None),
-    }
-}
-
-/// An argument the pattern does not type, by what the value is: a
-/// number as itself, `null` and the booleans as integers, a string or
-/// an object as a string; php's message for anything else.
-fn untyped_arg(
-    req: &mut Request,
-    site: &mut Site,
-    value: &Value,
-    name: &[u16],
-) -> Answer<Formattable> {
-    Ok(Some(match value.as_ref() {
-        ValueRef::Float(d) => Formattable::Double(d),
-        ValueRef::Int(n) => Formattable::Int64(n),
-        ValueRef::Null | ValueRef::Bool(false) => Formattable::Int64(0),
-        ValueRef::Bool(true) => Formattable::Int64(1),
-        ValueRef::Str(_) | ValueRef::Object(_) => return string_arg(req, site, value),
-        _ => {
-            if let Ok(key) = ffi::to_utf8(name) {
-                let message = quoted(
-                    "No strategy to convert the value given for the argument with key ",
-                    &key,
-                    " is available",
-                );
-                site.set(req, Code::ILLEGAL_ARGUMENT, message)?;
             }
-            return Ok(None);
+            ValueRef::Float(d) => d as i32,
+            ValueRef::Int(n) => {
+                let Ok(n) = i32::try_from(n) else {
+                    let message = "Found PHP integer with absolute value too large for 32 bit integer argument";
+                    return self
+                        .set(req, Code::ILLEGAL_ARGUMENT, message)
+                        .map(|()| None);
+                };
+                n
+            }
+            _ => self.serve(req, |req| to_long(req, value)).unwrap_or(0) as i32,
+        };
+        Ok(Some(Formattable::Long(n)))
+    }
+
+    /// A `double` held to the range of a 64-bit argument; an integer as
+    /// it is, anything else through `zval_get_long`.
+    fn int64(&mut self, req: &mut Request, value: &Value) -> Answer<Formattable> {
+        #[allow(clippy::cast_precision_loss, reason = "php's (double)U_INT64_MAX")]
+        let (low, high) = (i64::MIN as f64, i64::MAX as f64);
+        #[allow(clippy::cast_possible_truncation, reason = "php's (int64_t) cast")]
+        let n = match value.as_ref() {
+            ValueRef::Float(d) if d > high || d < low => {
+                let message =
+                    "Found PHP float with absolute value too large for 64 bit integer argument";
+                return self
+                    .set(req, Code::ILLEGAL_ARGUMENT, message)
+                    .map(|()| None);
+            }
+            ValueRef::Float(d) => d as i64,
+            ValueRef::Int(n) => n,
+            _ => self.serve(req, |req| to_long(req, value)).unwrap_or(0),
+        };
+        Ok(Some(Formattable::Int64(n)))
+    }
+
+    /// A date argument's milliseconds; where the value is no date,
+    /// `umsg_format_helper`'s message set over the one
+    /// `intl_zval_to_millis` set, with what that threw chained beneath.
+    fn date(&mut self, req: &mut Request, value: Value, name: &[u16]) -> Answer<Formattable> {
+        let millis = zval_to_millis(req, value, &mut self.site.outside());
+        let code = self.code(req);
+        if !code.is_failure() {
+            return match millis {
+                Ok(d) => Ok(Some(Formattable::Date(d))),
+                Err(thrown) => {
+                    self.keep(req, thrown);
+                    Ok(None)
+                }
+            };
         }
-    }))
+        if let Err(thrown) = millis {
+            self.keep(req, thrown);
+        }
+        let Ok(key) = ffi::to_utf8(name) else {
+            return Ok(None);
+        };
+        let message = quoted(
+            "The argument for key ",
+            &key,
+            " cannot be used as a date or time",
+        );
+        self.set(req, code, message).map(|()| None)
+    }
+
+    /// An argument the pattern does not type, by what the value is: a
+    /// number as itself, `null` and the booleans as integers, a string
+    /// or an object as a string; php's message for anything else.
+    fn untyped(&mut self, req: &mut Request, value: &Value, name: &[u16]) -> Answer<Formattable> {
+        Ok(Some(match value.as_ref() {
+            ValueRef::Float(d) => Formattable::Double(d),
+            ValueRef::Int(n) => Formattable::Int64(n),
+            ValueRef::Null | ValueRef::Bool(false) => Formattable::Int64(0),
+            ValueRef::Bool(true) => Formattable::Int64(1),
+            ValueRef::Str(_) | ValueRef::Object(_) => return self.string(req, value),
+            _ => {
+                if let Ok(key) = ffi::to_utf8(name) {
+                    let message = quoted(
+                        "No strategy to convert the value given for the argument with key ",
+                        &key,
+                        " is available",
+                    );
+                    self.set(req, Code::ILLEGAL_ARGUMENT, message)?;
+                }
+                return Ok(None);
+            }
+        }))
+    }
 }
 
 /// `umsg_format_helper`: each argument named and typed by the pattern
 /// (or by its value where the pattern does not say), then
 /// `MessageFormat::format`; none where any step failed, its error set
-/// on the site.
+/// on the site. A conversion that throws leaves its throwable pending
+/// while the walk goes on, `MessageFormat::format` runs, and the native
+/// returns into it, so what the later arguments raise is raised:
+///
+/// ```php
+/// class T { function __toString(): string { throw new Exception('t'); } }
+/// class U { function __toString(): string { echo "U::__toString\n"; return 'u'; } }
+/// class V { function __toString(): string { throw new Exception('v'); } }
+/// try { MessageFormatter::formatMessage('en', '{0} {1}', [new T, []]); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump(MessageFormatter::formatMessage('en', '{0} {1} {2} {3,number,integer} {4}', [new T, new U, new V, [], "\xff"])); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), ' ', var_export($e->getPrevious(), true), "\n"; }
+/// var_dump(intl_get_error_code());
+/// ini_set('intl.use_exceptions', 1);
+/// try { MessageFormatter::formatMessage('en', '{0} {1}', [new T, "\xff"]); } catch (Exception $e) { for (; $e; $e = $e->getPrevious()) echo get_class($e), ': ', bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// Warning: Array to string conversion in %s on line 5
+/// t
+/// Exception: t NULL
+/// int(10)
+/// IntlException: 4d657373616765466f726d61747465723a3a666f726d61744d65737361676528293a20496e76616c6964205554462d38206461746120696e20737472696e6720617267756d656e743a2027ff27
+/// Exception: 74
+/// ```
 fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer<Vec<u16>> {
     if site.code(req).is_failure() {
         return Ok(None);
@@ -639,18 +735,22 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
     let types = arg_types(req, site)?.unwrap_or_default();
     set_timezone(req, site)?;
     let mut args = Vec::with_capacity(values.len());
+    let mut walk = Walk {
+        site,
+        pending: None,
+    };
     // `ZEND_HASH_FOREACH_KEY_VAL(args, num_index, str_index, elem)` over
     // the argument, which holds the array while a conversion serves
     // `__toString` or a date argument's methods.
-    walk::foreach(req, values, Hold::None, |req, row| -> walk::Step {
-        if site.code(req).is_failure() {
+    let walked = walk::foreach(req, values, Hold::None, |req, row| -> walk::Step {
+        if walk.code(req).is_failure() {
             return Ok(ControlFlow::Break(()));
         }
         let value = row.value().deref();
         let (name, stored) = match row.key() {
             Key::Int(n) if !(0..=i64::from(i32::MAX)).contains(n) => {
                 let message = "Found negative or too large array key";
-                site.set(req, Code::ILLEGAL_ARGUMENT, message)?;
+                walk.set(req, Code::ILLEGAL_ARGUMENT, message)?;
                 return Ok(ControlFlow::Continue(()));
             }
             Key::Int(n) => (
@@ -664,20 +764,20 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
                 }
                 Err(code) => {
                     let message = quoted("Invalid UTF-8 data in argument key: ", s.as_bytes(), "");
-                    site.set(req, code, message)?;
+                    walk.set(req, code, message)?;
                     return Ok(ControlFlow::Continue(()));
                 }
             },
         };
         let arg = match stored.copied().unwrap_or(ArgType::Object) {
-            ArgType::String => string_arg(req, site, &value)?,
-            ArgType::Double => Some(Formattable::Double(to_double(req, &value)?)),
-            ArgType::Long => long_arg(req, site, &value)?,
-            ArgType::Int64 => int64_arg(req, site, &value)?,
-            ArgType::Date => date_arg(req, site, value, &name)?,
-            ArgType::Object => untyped_arg(req, site, &value, &name)?,
+            ArgType::String => walk.string(req, &value)?,
+            ArgType::Double => Some(walk.double(req, &value)),
+            ArgType::Long => walk.long(req, &value)?,
+            ArgType::Int64 => walk.int64(req, &value)?,
+            ArgType::Date => walk.date(req, value, &name)?,
+            ArgType::Object => walk.untyped(req, &value, &name)?,
             ArgType::Array => {
-                site.set(
+                walk.set(
                     req,
                     Code::ILLEGAL_ARGUMENT,
                     "Found unsupported argument type",
@@ -689,21 +789,41 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
             args.push((name, arg));
         }
         Ok(ControlFlow::Continue(()))
-    })?;
-    if site.code(req).is_failure() {
+    });
+    if let Err(thrown) = walked {
+        walk.keep(req, thrown);
+    }
+    let formatted = formatted(req, &mut walk, &args);
+    match walk.pending {
+        Some(pending) => Err(pending),
+        None => formatted,
+    }
+}
+
+/// `umsg_format_helper` after its walk: nothing where a row failed, else
+/// `MessageFormat::format` over the arguments, which runs with a
+/// throwable pending as php's does, its failure set over that one.
+fn formatted(
+    req: &mut Request,
+    walk: &mut Walk,
+    args: &[(Vec<u16>, Formattable)],
+) -> Answer<Vec<u16>> {
+    if walk.code(req).is_failure() {
         return Ok(None);
     }
     // The formatter is read again once the arguments' PHP code has run:
     // an object that code left unconstructed is the `Error`.
-    let Some(formatter) = site.formatter(req) else {
+    let Some(formatter) = walk.site.formatter(req) else {
         let message = "Found unconstructed MessageFormatter";
-        return Err(throw_error(req, "Error", message));
+        let thrown = throw_error(req, "Error", message);
+        walk.keep(req, thrown);
+        return Ok(None);
     };
     let mut status = Code::ZERO;
-    let text = formatter.umsgf.format(&args, &mut status);
+    let text = formatter.umsgf.format(args, &mut status);
     if status.is_failure() {
         let message = "Call to ICU MessageFormat::format() has failed";
-        site.set(req, status, message)?;
+        walk.set(req, status, message)?;
         return Ok(None);
     }
     Ok(Some(text.map(|t| t.units().to_vec()).unwrap_or_default()))
