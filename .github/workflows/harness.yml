@@ -18,6 +18,20 @@
 # the oracle (#678, #2200). The two stores meet in `done`. A runner keeps its
 # work directory between jobs, so each checkout is `clean: false` and the
 # workspace action cleans all but target/, the warm build.
+#
+# Until `dax-build` is online (#2296), the Linux jobs run on a GitHub-hosted
+# image, as Mitchell ruled on 2026-10-09 (#2218, #2477): each takes its
+# runner from the repository variable DAX_BUILD_RUNNER, a JSON list of
+# labels, and with the variable unset that is `[self-hosted, linux,
+# dax-build]`, so nothing here is reverted when the server comes. Set, the
+# self-hosted pair is not online: the `oracle` job, which only the Mac can
+# run, is skipped rather than queued for the 24 hours GitHub holds a job no
+# runner takes, and `done` says its lane did not run (scripts/ci/README.md).
+# `bench` and the nightly series (#2259) are no job here, and when they are
+# one they take the self-hosted label and not the variable: their numbers
+# need the quiet machine, and a hosted reading is noise a person could
+# mistake for a measurement, which is why `xtask bench` refuses a
+# GitHub-hosted runner whatever job runs it.
 name: harness
 on:
   push:
@@ -33,7 +47,7 @@ concurrency:
 jobs:
   regions:
     name: computed check
-    runs-on: [self-hosted, linux, dax-build]
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,8 +59,10 @@ jobs:
   per-commit:
     name: the instruments
     # Ubuntu 26.04 for libtidy 5.8, the oracle's (#1724); runner.sh refuses
-    # another release.
-    runs-on: [self-hosted, linux, dax-build]
+    # another release, and the hosted image DAX_BUILD_RUNNER names is
+    # `ubuntu-26.04` for the same reason, where packages.txt installs as it
+    # does on the server (scripts/ci/README.md).
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -149,7 +165,7 @@ jobs:
     # not yet; `xtask/tests/miri.rs` holds this line to the constant. The
     # negative control runs here too, since the build job has no nightly
     # and its copy of the test returns on the skip.
-    runs-on: [self-hosted, linux, dax-build]
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -170,6 +186,9 @@ jobs:
 
   oracle:
     name: the witnesses, the crosscheck and the oracle's tests
+    # Skipped while DAX_BUILD_RUNNER is set: the Mac is not online, and a
+    # job queued for it would hold `done` for GitHub's 24 hours (#2477).
+    if: ${{ !vars.DAX_BUILD_RUNNER }}
     runs-on: [self-hosted, macos, dax-oracle]
     # The dashboard's oracle job runs every lane in 150; this one runs the
     # witnesses, the crosscheck and xtask's tests. Its wall time from a run
@@ -222,7 +241,7 @@ jobs:
     needs: [per-commit, miri, oracle]
     # Run whatever the three found, so its list names every unmet condition.
     if: ${{ !cancelled() }}
-    runs-on: [self-hosted, linux, dax-build]
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     outputs:
       unmet: ${{ steps.unmet.outputs.unmet }}
     steps:
@@ -247,14 +266,29 @@ jobs:
       # `done`'s list is kept for the red-main job through `tee`, and the
       # step fails with `done`: `shell: bash` runs it with pipefail, where
       # a step that names no shell would end with tee's exit.
+      # While the oracle job is skipped (DAX_BUILD_RUNNER set, #2477), the
+      # two instruments its steps write readings for are named `--not-run`:
+      # a missing reading of either is `done`'s note and not unmet, its head
+      # line and its reading say the pass is over what ran, and the run
+      # carries a warning that the lane did not run. An oracle job that ran
+      # and failed is judged on the store it left, as ever.
       - name: done
         shell: bash
+        env:
+          ORACLE: ${{ needs.oracle.result }}
         run: |
+          set --
+          if [ "$ORACLE" = skipped ]; then
+            set -- --not-run witness --not-run crosscheck
+            said="the oracle job was skipped while DAX_BUILD_RUNNER is set, so done judged no witness or crosscheck reading (scripts/ci/README.md)"
+            echo "::warning title=the oracle lane did not run::$said"
+            echo "**The oracle lane did not run**: $said." >> "$GITHUB_STEP_SUMMARY"
+          fi
           # shellcheck disable=SC1010 # `done` is xtask's instrument, not the loop's keyword
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            cargo xtask done --base "$GITHUB_BASE_REF" 2>&1 | tee "$RUNNER_TEMP/done.txt"
+            cargo xtask done --base "$GITHUB_BASE_REF" "$@" 2>&1 | tee "$RUNNER_TEMP/done.txt"
           else
-            cargo xtask done 2>&1 | tee "$RUNNER_TEMP/done.txt"
+            cargo xtask done "$@" 2>&1 | tee "$RUNNER_TEMP/done.txt"
           fi
       # The unmet lines, which a red main's ticket quotes (#1156).
       - name: done's list, for the red-main job
@@ -286,7 +320,7 @@ jobs:
     name: a red main, filed
     needs: [regions, per-commit, miri, oracle, done]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: [self-hosted, linux, dax-build]
+    runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
     permissions:
       actions: read
       contents: read
