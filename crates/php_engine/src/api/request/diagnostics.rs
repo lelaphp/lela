@@ -1521,9 +1521,7 @@ impl Request {
                     // rendered as the tail would have.
                     if thrown.exception().is_some() {
                         self.leave_pending(&thrown);
-                        if let Err(fatal) = self.exception_error(Level::Error) {
-                            self.end_in(&fatal);
-                        }
+                        self.exception_error(Level::Error).ok();
                     }
                     self.release(throwable.as_value());
                     return ControlFlow::Break(());

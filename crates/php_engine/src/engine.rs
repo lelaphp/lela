@@ -5347,9 +5347,7 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
         Ok(_) => true,
         Err(thrown) => {
             req.leave_pending(&thrown);
-            if let Err(fatal) = req.uncaught() {
-                req.end_in(&fatal);
-            }
+            req.uncaught().ok();
             false
         }
     }
@@ -5415,9 +5413,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if req.is_pending() {
         match req.primary() {
             Primary::Wrapped => {
-                if let Err(fatal) = req.uncaught() {
-                    req.end_in(&fatal);
-                }
+                req.uncaught().ok();
             }
             Primary::Bare => req.keep_uncaught(),
         }

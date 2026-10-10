@@ -7,13 +7,21 @@
 //! stay on the request, since the tier face, the native face and the
 //! loader read them.
 
-use php_heap::Fatal;
-
 use crate::api::call::write_prop;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpObject, PhpString, Value};
 
 use super::Request;
+
+/// Where an uncaught throwable ended the request: rendered as the fatal
+/// it is (`zend_exception_error` at `E_ERROR`), or, where the handler
+/// `set_exception_handler()` set or the throwable's `__toString` raised
+/// in its place, what that raised rendered or its `exit` taken, and in each
+/// case the request leaving by `zend_bailout` ([`Request::bailing_out`]).
+/// The ending is written and nothing is left to render: what the caller
+/// does next is unwind to the `zend_try` that catches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Leaving;
 
 impl Request {
     /// What the entry frame of the innermost serving returned.
@@ -180,7 +188,7 @@ impl Request {
     /// throws one here, and its witness in `ext/tokenizer` pins the
     /// rendering; `a_parse_error_is_rendered_as_its_level` in
     /// `api::raising` holds it without the extension.
-    pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
+    pub(crate) fn uncaught(&mut self) -> Result<(), Leaving> {
         // `zend_execute_scripts` and `zend_throw_exception_internal` with
         // no frame standing: a user exception handler takes the
         // throwable first, and what it leaves is rendered. A handler
@@ -188,7 +196,7 @@ impl Request {
         // `zend_bailout`, past everything after it here; that fatal is
         // already the request's ending, and nothing is added to it.
         if self.user_exception_handler().is_break() {
-            return Err(Fatal::Error(String::new()));
+            return Err(Leaving);
         }
         self.exception_error(Level::Error)
     }
@@ -224,10 +232,10 @@ impl Request {
     /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936`): what is
     /// pending rendered "Uncaught" at `severity`, with no handler asked,
     /// and nothing rendered for either exit. At `E_ERROR` it is the
-    /// uncaught fatal and the request ends; below it, php's
+    /// uncaught fatal and the request ends, [`Leaving`]; below it, php's
     /// `severity | E_DONT_BAIL` as `assert.bail` asks, it is a diagnostic
     /// like any other, and the throwable is given up.
-    pub(crate) fn exception_error(&mut self, severity: Level) -> Result<(), Fatal> {
+    pub(crate) fn exception_error(&mut self, severity: Level) -> Result<(), Leaving> {
         let Some(throwable) = self.take_pending_view() else {
             // `zend_exception_error` on either exit: "We successfully
             // unwound, nothing more to do", and the object is released
@@ -271,7 +279,7 @@ impl Request {
                     if let Ok(undef) = self.thrown_without_frame(&inner) {
                         self.release(undef);
                     }
-                    return Err(Fatal::Error(String::new()));
+                    return Err(Leaving);
                 }
             }
             [
@@ -296,11 +304,10 @@ impl Request {
             return Ok(());
         }
         self.end_in_uncaught(compile_time.unwrap_or(Level::Error), &message, &file, line);
-        let fatal = Fatal::Error(String::from_utf8_lossy(&message).into_owned());
         // `zend_exception_error` ends with `OBJ_RELEASE(ex)`: the pending
         // slot's owner, given up once the rendering has read it.
         self.release(throwable.as_value());
-        Err(fatal)
+        Err(Leaving)
     }
 
     /// The tail of `zend_call_function` where the callee left something
@@ -317,18 +324,13 @@ impl Request {
     pub(crate) fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown> {
         let threw = thrown.exception().is_some();
         self.leave_pending(thrown);
-        match self.uncaught() {
-            Err(fatal) => {
-                self.end_in(&fatal);
-                self.bail_out();
-                Err(Thrown::of(None))
-            }
-            Ok(()) if threw => Ok(Value::undef()),
-            Ok(()) => {
-                self.bail_out();
-                Err(Thrown::of(None))
-            }
+        // The handler took the throwable; or it was rendered, or an exit
+        // was dropped, and the call leaves.
+        if self.uncaught().is_ok() && threw {
+            return Ok(Value::undef());
         }
+        self.bail_out();
+        Err(Thrown::of(None))
     }
 
     /// The declared name of a throwable's class, `Error` for one the

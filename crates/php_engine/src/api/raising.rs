@@ -152,7 +152,7 @@ pub fn uncaught_at(req: &mut Request, thrown: Thrown, severity: Level) -> Result
     }
     req.leave_pending(&thrown);
     req.exception_error(severity)
-        .or_else(|fatal| req.fatal_of(Err(fatal)))
+        .map_err(|crate::api::request::Leaving| Thrown::of(None))
 }
 
 /// `zend_error` with `EG(exception)` set: the diagnostic raised while

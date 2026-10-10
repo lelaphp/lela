@@ -104,6 +104,7 @@ pub(crate) mod paths;
 pub use paths::RealpathEntry;
 pub(crate) use paths::is_wrapper_url;
 mod pending;
+pub(crate) use pending::Leaving;
 pub use pending::Raised;
 mod post;
 mod preload;

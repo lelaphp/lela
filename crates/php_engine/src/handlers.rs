@@ -21867,6 +21867,7 @@ mod tests {
     use php_unit::{Opcode, OperandKind, Unit};
 
     use super::*;
+    use crate::api::request::Leaving;
     use crate::api::values::{ClassId, PhpObject};
     use crate::engine::{Engine, RequestDescription};
     use crate::probe::{Asked, Probe};
@@ -22470,7 +22471,7 @@ mod tests {
             );
             assert_eq!(req.vm().lookups, pass);
             assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
-            assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
+            assert_eq!(req.uncaught(), Err(Leaving));
             // Each pass is a serving of its own, whose end catches the
             // bailout the rendering began.
             req.catch_bailout();
@@ -22786,7 +22787,7 @@ mod tests {
             assert_eq!(req.vm().lookups, pass, "looked up again on pass {pass}");
             assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
         }
-        assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
+        assert_eq!(req.uncaught(), Err(Leaving));
     }
 
     /// The other three handlers that resolve a class off a constant
@@ -22890,8 +22891,9 @@ mod tests {
             served!(req, frame, at => fetch_class_constant::<Nop>(&mut req, frame, code, &constant_op)),
             Ok(Stepped::Threw(frame))
         );
-        assert!(
-            matches!(req.uncaught(), Err(Fatal::Error(message)) if message.contains("Undefined constant stdClass::NOPE")),
+        assert_eq!(
+            pending_message(&req),
+            "Undefined constant stdClass::NOPE",
             "FETCH_CLASS_CONSTANT took its class off extended_value's slot"
         );
         assert_eq!(req.vm().lookups, 0, "no handler looked the table up");
@@ -23135,15 +23137,16 @@ mod tests {
             served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
             Ok(Stepped::Threw(frame))
         );
-        assert!(req.is_pending());
-        let message = match req.uncaught() {
-            Err(Fatal::Error(message)) => message,
-            other => format!("{other:?}"),
-        };
-        assert!(
-            message.starts_with("Uncaught Error: Call to undefined function NoPe() in "),
-            "{message}"
-        );
+        assert_eq!(pending_message(&req), "Call to undefined function NoPe()");
+    }
+
+    /// The message of the throwable pending, empty where none is.
+    fn pending_message(req: &Request) -> String {
+        req.pending()
+            .and_then(|throwable| throwable.prop(req, b"message"))
+            .and_then(|message| message.as_str_bytes().map(<[u8]>::to_vec))
+            .map(|message| String::from_utf8_lossy(&message).into_owned())
+            .unwrap_or_default()
     }
 
     /// A unit whose main op array has one CV, one temporary and one

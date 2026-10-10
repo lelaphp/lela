@@ -630,8 +630,7 @@ impl Request {
     fn end_the_walk(&mut self) {
         self.objects.shutdown_walk_ended = true;
         self.heap.mark_destructed();
-        if let Err(fatal) = self.uncaught() {
-            self.end_in(&fatal);
+        if self.uncaught().is_err() {
             self.bail_out();
         }
     }
@@ -817,9 +816,7 @@ impl Request {
     /// ```
     pub(crate) fn call_destructors(&mut self) {
         Heap::call_destructors(&mut Hooks(self));
-        if let Err(fatal) = self.uncaught() {
-            self.end_in(&fatal);
-        }
+        self.uncaught().ok();
     }
 
     /// `zend_objects_store_free_object_storage`, in `shutdown_executor`
