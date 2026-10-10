@@ -25,10 +25,12 @@
 //! lend, for the length of the call; and hands back what a callback
 //! threw, which the library cannot carry. A trampoline outside such a
 //! call reaches no request and answers as php answers a callback that
-//! was not served. The lend is a `*mut Request` rather than a hold of
-//! the request's own: the library hands a trampoline only the pointer it
-//! was given, and the request it must reach is the one the call lent. What a callback does in PHP
-//! is the extension's, a [`Callbacks`] value the connection serves with,
+//! was not served, as one does whose function was taken off while the
+//! library kept it ([`Registration::unregister`]). The lend is a
+//! `*mut Request` rather than a hold of the request's own: the library
+//! hands a trampoline only the pointer it was given, and the request it
+//! must reach is the one the call lent. What a callback does in PHP is
+//! the extension's, a [`Callbacks`] value the connection serves with,
 //! since `pdo_sqlite`'s and `sqlite3`'s callbacks are two algorithms over
 //! the one library.
 #![allow(unsafe_code)]
@@ -288,6 +290,20 @@ struct Lend {
     authorizer: Option<Callable>,
     /// What the callbacks do in PHP.
     callbacks: &'static dyn Callbacks,
+    /// The data of each function or collation taken off the connection
+    /// while the library refused to let go of it, a statement on it being
+    /// active ([`Registration::unregister`]): the library may still call
+    /// back with it, so it is freed with the lend, after the last
+    /// callback the connection can make.
+    kept: Vec<Kind>,
+}
+
+impl Drop for Lend {
+    fn drop(&mut self) {
+        for kind in self.kept.drain(..) {
+            kind.free();
+        }
+    }
 }
 
 // SAFETY: `req` is null but for the length of one call into the library,
@@ -369,6 +385,7 @@ impl Conn {
             pending: None,
             authorizer: None,
             callbacks,
+            kept: Vec::new(),
         })));
         // SAFETY: a live connection, a static name, and the lend with the
         // destructor that frees it, which the library calls where it
@@ -534,10 +551,11 @@ impl Db {
         let Some(conn) = req.disown(owner) else {
             // No call holds it, or `serving` would have answered; were one
             // to, it closes as the call ends and may call back with what
-            // is registered on it until then, so that is kept: dropped,
-            // its data not freed, as a `Raw` frees nothing.
-            drop(registrations);
-            return Ok(Vec::new());
+            // is registered on it until then, so the data is left to it.
+            return Ok(registrations
+                .into_iter()
+                .flat_map(Registration::abandoned)
+                .collect());
         };
         match conn.close() {
             Ok(()) => Ok(registrations
@@ -773,7 +791,10 @@ impl Db {
         };
         let (raw, lend) = (conn.raw.get(), conn.lend);
         let aggregate = matches!(function, Function::Aggregate { .. });
-        let registered = NonNull::from(Box::leak(Box::new(Registered { lend, function })));
+        let registered = NonNull::from(Box::leak(Box::new(Registered {
+            lend,
+            function: None,
+        })));
         let c_name = c_string(name);
         let (func, step, fin): (Scalar, Scalar, Final) = if aggregate {
             (None, Some(step), Some(finalize))
@@ -781,9 +802,9 @@ impl Db {
             (Some(scalar), None, None)
         };
         // SAFETY: a live connection, a NUL-terminated name, and as the
-        // function's data the registration, which lives until
-        // `unregister` removes the function from the library or the
-        // connection closes.
+        // function's data the registration, which lives until the library
+        // lets go of it: `unregister` removing the function, or the
+        // connection closing.
         let rc = unsafe {
             sys::sqlite3_create_function_v2(
                 raw,
@@ -797,16 +818,19 @@ impl Db {
                 None,
             )
         };
+        let kind = Kind::Function(Raw(registered));
         if rc != SQLITE_OK {
-            // SAFETY: the box made above, which the library did not take.
-            let registered = unsafe { Box::from_raw(registered.as_ptr()) };
-            return Err((Box::new(registered.function), rc));
+            kind.free();
+            return Err((Box::new(function), rc));
         }
+        // SAFETY: the box made above, which the library holds but calls
+        // back with only from inside a later call; the one access.
+        unsafe { (*registered.as_ptr()).function = Some(function) };
         Ok(Registration {
             db: self,
             name: c_name,
             argc,
-            kind: Kind::Function(Raw(registered)),
+            kind,
         })
     }
 
@@ -821,7 +845,10 @@ impl Db {
             return Err((handler, SQLITE_MISUSE));
         };
         let (raw, lend) = (conn.raw.get(), conn.lend);
-        let registered = NonNull::from(Box::leak(Box::new(Collation { lend, handler })));
+        let registered = NonNull::from(Box::leak(Box::new(Collation {
+            lend,
+            handler: None,
+        })));
         let c_name = c_string(name);
         // SAFETY: as in `create_function`.
         let rc = unsafe {
@@ -834,16 +861,18 @@ impl Db {
                 None,
             )
         };
+        let kind = Kind::Collation(Raw(registered));
         if rc != SQLITE_OK {
-            // SAFETY: the box made above, which the library did not take.
-            let registered = unsafe { Box::from_raw(registered.as_ptr()) };
-            return Err((registered.handler, rc));
+            kind.free();
+            return Err((handler, rc));
         }
+        // SAFETY: as in `create_function`.
+        unsafe { (*registered.as_ptr()).handler = Some(handler) };
         Ok(Registration {
             db: self,
             name: c_name,
             argc: 0,
-            kind: Kind::Collation(Raw(registered)),
+            kind,
         })
     }
 
@@ -945,28 +974,67 @@ type Scalar =
 type Final = Option<unsafe extern "C" fn(*mut sys::sqlite3_context)>;
 
 /// A function's data as the library holds it: its connection's lend and
-/// what it serves.
+/// what it serves, none once it was taken off ([`Registration`]).
 struct Registered {
     lend: Raw<Lend>,
-    function: Function,
+    function: Option<Function>,
 }
 
 /// A collation's data as the library holds it.
 struct Collation {
     lend: Raw<Lend>,
-    handler: Handler,
+    handler: Option<Handler>,
 }
 
+/// The data a function or a collation is registered with, which the
+/// library holds and calls back with. Dropped, it frees nothing.
 enum Kind {
     Function(Raw<Registered>),
     Collation(Raw<Collation>),
 }
 
+impl Kind {
+    /// The handlers taken out of the data, which stays, serving none.
+    fn take_handlers(&self) -> Vec<Handler> {
+        match *self {
+            Kind::Function(registered) => {
+                // SAFETY: a registration's live data; no borrow of it spans
+                // this write, as a trampoline copies out what it reads
+                // before it runs PHP code.
+                let function = unsafe { (*registered.get()).function.take() };
+                function.map_or_else(Vec::new, Function::into_handlers)
+            }
+            Kind::Collation(registered) => {
+                // SAFETY: as above.
+                let handler = unsafe { (*registered.get()).handler.take() };
+                handler.into_iter().collect()
+            }
+        }
+    }
+
+    /// The data freed, once the library holds it no more: the function
+    /// or the collation taken off, the connection closed, or the data
+    /// never taken.
+    fn free(self) {
+        match self {
+            Kind::Function(registered) => {
+                // SAFETY: the box `create_function` made, freed once.
+                drop(unsafe { Box::from_raw(registered.get()) });
+            }
+            Kind::Collation(registered) => {
+                // SAFETY: the box `create_collation` made, freed once.
+                drop(unsafe { Box::from_raw(registered.get()) });
+            }
+        }
+    }
+}
+
 /// One function or collation registered on a connection, php's
 /// `pdo_sqlite_func` or `pdo_sqlite_collation`, which the connection's
 /// object keeps until it closes ([`Registration::unregister`],
-/// [`Db::close`]), so the data the library holds for it is freed only
-/// once the library can no longer call back with it.
+/// [`Db::close`]). Its handlers are given up there whatever the library
+/// answers, as php gives them up; the data the library holds is freed
+/// only once the library can no longer call back with it.
 pub struct Registration {
     db: Db,
     name: CString,
@@ -977,16 +1045,23 @@ pub struct Registration {
 impl Registration {
     /// Taken off the library, `sqlite3_create_function` or
     /// `sqlite3_create_collation` with no callback, and the handlers it
-    /// held handed back for the caller to release. Where the connection
-    /// is gone already, the library may hold the data until the last
-    /// statement on it is finalized, so the data stays with it, and the
-    /// handlers in it.
+    /// held handed back for the caller to give up whatever the library
+    /// answered, as `pdo_sqlite_cleanup_callbacks` and
+    /// `php_sqlite3_object_free_storage` give them up. The data is freed
+    /// where the library let go of it. Where it refused, a statement on
+    /// the connection being active (`SQLITE_BUSY`), it keeps the function
+    /// and calls back with the data, which now serves none, so the
+    /// connection's lend keeps the data until the connection closes.
+    /// Where the connection is gone already, the library may hold the
+    /// data until the last statement on it is finalized, which nothing
+    /// here can see, so the data is left to it.
     pub fn unregister(self, req: &mut Request) -> Vec<Handler> {
-        let Some(raw) = self.db.raw(req) else {
-            // Dropped, its data not freed: a `Raw` frees nothing.
-            return Vec::new();
+        let handlers = self.kind.take_handlers();
+        let Some(conn) = self.db.conn(req) else {
+            return handlers;
         };
-        match self.kind {
+        let raw = conn.raw.get();
+        let rc = match self.kind {
             Kind::Function(_) => {
                 // SAFETY: the registration's live connection; no callback
                 // and no data, which deletes the function.
@@ -1002,7 +1077,7 @@ impl Registration {
                         None,
                         None,
                     )
-                };
+                }
             }
             Kind::Collation(_) => {
                 // SAFETY: as above, for a collation.
@@ -1015,43 +1090,48 @@ impl Registration {
                         None,
                         None,
                     )
-                };
+                }
             }
+        };
+        if rc == SQLITE_OK {
+            self.kind.free();
+        } else {
+            conn.lend().kept.push(self.kind);
         }
-        self.closed()
+        handlers
     }
 
-    /// The data freed and its handlers handed back, the library holding
-    /// it no more: taken off, or its connection closed.
+    /// The data freed and its handlers handed back, the library having
+    /// closed the connection.
     fn closed(self) -> Vec<Handler> {
-        match self.kind {
-            Kind::Function(registered) => {
-                // SAFETY: the registration's own box, no longer the
-                // library's data.
-                let registered = unsafe { Box::from_raw(registered.get()) };
-                registered.function.into_handlers()
-            }
-            Kind::Collation(registered) => {
-                // SAFETY: as above.
-                let registered = unsafe { Box::from_raw(registered.get()) };
-                vec![registered.handler]
-            }
-        }
+        let handlers = self.kind.take_handlers();
+        self.kind.free();
+        handlers
+    }
+
+    /// Its handlers handed back and its data left to the library, which
+    /// closes the connection as the call holding it ends.
+    fn abandoned(self) -> Vec<Handler> {
+        self.kind.take_handlers()
     }
 
     /// What its handlers count, for the cycle collector.
     pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
         match self.kind {
             Kind::Function(registered) => {
-                // SAFETY: a registration's box, live until it is freed, and
-                // read only.
+                // SAFETY: a registration's data, live while the library
+                // holds it, and read only.
                 let registered = unsafe { &*registered.get() };
-                registered.function.visit(visit);
+                if let Some(function) = &registered.function {
+                    function.visit(visit);
+                }
             }
             Kind::Collation(registered) => {
                 // SAFETY: as above.
                 let registered = unsafe { &*registered.get() };
-                registered.handler.visit(visit);
+                if let Some(handler) = &registered.handler {
+                    handler.visit(visit);
+                }
             }
         }
     }
@@ -1209,13 +1289,23 @@ fn slice(at: *const u8, len: c_int) -> Vec<u8> {
     unsafe { std::slice::from_raw_parts(at, len) }.to_vec()
 }
 
-/// The registration a call of a function carries.
-fn registered<'a>(ctx: *mut sys::sqlite3_context) -> Option<&'a Registered> {
+/// What a call of a function finds in the data it carries: its
+/// connection's lend, and a view of the handler `pick` names, none once
+/// the function was taken off ([`Registration::unregister`]). The view
+/// is copied out, so no borrow of the data spans the PHP code the handler
+/// runs, which may take the function off.
+fn served(
+    ctx: *mut sys::sqlite3_context,
+    pick: impl FnOnce(&Function) -> Option<&Handler>,
+) -> Option<(Raw<Lend>, Option<Callable>)> {
     // SAFETY: the context of a call the library is making.
     let data = unsafe { sys::sqlite3_user_data(ctx) };
-    // SAFETY: the data `create_function` gave the library, a live
-    // registration until `unregister`, read and never written.
-    unsafe { data.cast::<Registered>().as_ref() }
+    // SAFETY: the data `create_function` gave the library, live while the
+    // library holds it, read for the copy alone.
+    let registered = unsafe { data.cast::<Registered>().as_ref() }?;
+    let handler = registered.function.as_ref().and_then(pick);
+    let view = handler.map(|handler| Callable::clone(handler));
+    Some((registered.lend, view))
 }
 
 /// The arguments of a call as a slice.
@@ -1234,7 +1324,9 @@ fn arguments<'a>(
     unsafe { std::slice::from_raw_parts(values, count) }
 }
 
-/// `php_sqlite3_func_callback`.
+/// `php_sqlite3_func_callback`: `failed to invoke callback`, php's
+/// answer for a callback not served, where the function was taken off or
+/// no call lends a request.
 unsafe extern "C" fn scalar(
     ctx: *mut sys::sqlite3_context,
     count: c_int,
@@ -1244,22 +1336,23 @@ unsafe extern "C" fn scalar(
         ctx,
         args: arguments(count, values),
     };
-    let Some(registered) = registered(ctx) else {
+    let found = served(ctx, |function| match function {
+        Function::Scalar(handler) => Some(handler),
+        Function::Aggregate { .. } => None,
+    });
+    let Some((lend, Some(handler))) = found else {
         return call.failed();
     };
-    let Function::Scalar(handler) = &registered.function else {
-        return call.failed();
-    };
-    let lend = registered.lend;
     let Some(req) = request(lend).filter(|_| !pending(lend)) else {
         return call.failed();
     };
-    if let Err(thrown) = callbacks(lend).scalar(req, handler, &mut call) {
+    if let Err(thrown) = callbacks(lend).scalar(req, &handler, &mut call) {
         throw_out(lend, thrown);
     }
 }
 
-/// `php_sqlite3_func_step_callback`.
+/// `php_sqlite3_func_step_callback`: nothing, as php's step not served
+/// answers, where the function was taken off or no call lends a request.
 unsafe extern "C" fn step(
     ctx: *mut sys::sqlite3_context,
     count: c_int,
@@ -1269,13 +1362,13 @@ unsafe extern "C" fn step(
         ctx,
         args: arguments(count, values),
     };
-    let Some(registered) = registered(ctx) else {
+    let found = served(ctx, |function| match function {
+        Function::Aggregate { step, .. } => Some(step),
+        Function::Scalar(_) => None,
+    });
+    let Some((lend, Some(handler))) = found else {
         return;
     };
-    let Function::Aggregate { step, .. } = &registered.function else {
-        return;
-    };
-    let lend = registered.lend;
     let Some(req) = request(lend).filter(|_| !pending(lend)) else {
         return;
     };
@@ -1283,35 +1376,38 @@ unsafe extern "C" fn step(
     let Some(state) = call.aggregate() else {
         return;
     };
-    if let Err(thrown) = callbacks(lend).step(req, step, state, args) {
+    if let Err(thrown) = callbacks(lend).step(req, &handler, state, args) {
         throw_out(lend, thrown);
     }
 }
 
-/// `php_sqlite3_func_final_callback`.
+/// `php_sqlite3_func_final_callback`: the group's state given up and
+/// `failed to invoke callback` where a callback already threw or the
+/// function was taken off.
 unsafe extern "C" fn finalize(ctx: *mut sys::sqlite3_context) {
     let mut call = Invocation { ctx, args: &[] };
-    let Some(registered) = registered(ctx) else {
+    let found = served(ctx, |function| match function {
+        Function::Aggregate { finalize, .. } => Some(finalize),
+        Function::Scalar(_) => None,
+    });
+    let Some((lend, handler)) = found else {
         return;
     };
-    let Function::Aggregate { finalize, .. } = &registered.function else {
-        return;
-    };
-    let lend = registered.lend;
     let state = call.aggregate().and_then(Option::take);
     let Some(req) = request(lend) else {
         return;
     };
-    if pending(lend) {
+    let Some(handler) = handler.filter(|_| !pending(lend)) else {
         drop_aggregate(req, state);
         return call.failed();
-    }
-    if let Err(thrown) = callbacks(lend).finalize(req, finalize, state, &mut call) {
+    };
+    if let Err(thrown) = callbacks(lend).finalize(req, &handler, state, &mut call) {
         throw_out(lend, thrown);
     }
 }
 
-/// `php_sqlite3_collation_callback`.
+/// `php_sqlite3_collation_callback`: `0`, php's answer for a callback not
+/// served, where the collation was taken off or no call lends a request.
 unsafe extern "C" fn collate(
     data: *mut c_void,
     left_len: c_int,
@@ -1319,18 +1415,22 @@ unsafe extern "C" fn collate(
     right_len: c_int,
     right: *const c_void,
 ) -> c_int {
-    // SAFETY: the data `create_collation` gave the library, a live
-    // registration until `unregister`, read and never written.
+    // SAFETY: the data `create_collation` gave the library, live while
+    // the library holds it, read for the copy alone, so no borrow of it
+    // spans the PHP code the handler runs.
     let Some(collation) = (unsafe { data.cast::<Collation>().as_ref() }) else {
         return 0;
     };
-    let lend = collation.lend;
+    let (lend, handler) = (collation.lend, collation.handler.as_ref());
+    let Some(handler) = handler.map(|handler| Callable::clone(handler)) else {
+        return 0;
+    };
     let Some(req) = request(lend).filter(|_| !pending(lend)) else {
         return 0;
     };
     let left = slice(left.cast(), left_len);
     let right = slice(right.cast(), right_len);
-    let (order, thrown) = callbacks(lend).collate(req, &collation.handler, &left, &right);
+    let (order, thrown) = callbacks(lend).collate(req, &handler, &left, &right);
     if let Some(thrown) = thrown {
         throw_out(lend, thrown);
     }
