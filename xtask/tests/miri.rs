@@ -62,7 +62,7 @@ fn the_ci_job_installs_the_toolchain_the_instrument_runs_on() {
     let workflow = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/harness.yml");
     let text = std::fs::read_to_string(workflow).unwrap();
     let install = format!(
-        "rustup toolchain install {} --profile minimal --component miri",
+        "rustup toolchain install {} --profile minimal --component miri,rust-src\n",
         miri::TOOLCHAIN
     );
     assert!(

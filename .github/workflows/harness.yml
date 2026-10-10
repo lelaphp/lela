@@ -156,7 +156,7 @@ jobs:
           clean: false
           fetch-depth: 0 # one history the runner keeps, fetched incrementally
       - uses: ./.github/actions/workspace
-      - run: rustup toolchain install nightly-2025-01-08 --profile minimal --component miri,rust-src
+      - run: rustup toolchain install nightly-2026-02-20 --profile minimal --component miri,rust-src
       - run: cargo xtask miri
       - run: cargo test -p xtask --test miri
       - name: this job's readings

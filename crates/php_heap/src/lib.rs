@@ -860,10 +860,6 @@ mod tests {
     /// and every size lands in the bin, `run` or huge block php's
     /// arithmetic puts it in.
     #[test]
-    #[cfg_attr(
-        all(miri, target_os = "macos"),
-        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
-    )]
     fn what_a_request_allocates_and_frees_reads_back_where_it_started() {
         let _alone = alone();
         let mut heap = Heap::new();
@@ -1028,20 +1024,18 @@ mod tests {
     /// nothing. The peak is the node and then the block, so it reads the
     /// same sum, and freeing the block gives the node back with it.
     #[test]
-    #[cfg_attr(
-        all(miri, target_os = "macos"),
-        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
-    )]
     fn a_huge_block_rounds_to_the_page_the_machine_reports() {
         let _alone = alone();
         let page = mm::real_page_size();
         // The same page through a second door, so that what this crate
         // asks the machine is held to what the machine says and not to
         // itself: `getconf PAGESIZE` is POSIX's own reader of
-        // `_SC_PAGESIZE`, which is the number php reads.
-        if let Ok(said) = std::process::Command::new("getconf")
-            .arg("PAGESIZE")
-            .output()
+        // `_SC_PAGESIZE`, which is the number php reads. Miri starts no
+        // process, and the page it answers is its own.
+        if !cfg!(miri)
+            && let Ok(said) = std::process::Command::new("getconf")
+                .arg("PAGESIZE")
+                .output()
         {
             let said = String::from_utf8_lossy(&said.stdout)
                 .trim()
