@@ -1248,6 +1248,30 @@ mod tests {
         }
     }
 
+    /// A size the page rounding carries past the top of memory is php's
+    /// `E_ERROR`, with the size and the page in its words, before the
+    /// limit is asked (`zend_mm_alloc_huge`, `Z/Zend/zend_alloc.c:1929`),
+    /// and the heap is left as it was.
+    #[test]
+    fn a_size_the_rounding_overflows_is_php_s_integer_overflow() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let before = heap.memory_usage(false);
+        let page = mm::real_page_size();
+        let refused = heap.block(usize::MAX).err();
+        let said = format!(
+            "Possible integer overflow in memory allocation ({} + {page})",
+            usize::MAX
+        );
+        assert!(matches!(refused, Some(Fatal::Error(ref text)) if *text == said));
+        assert_eq!(heap.memory_usage(false), before);
+        let small = heap.block(16);
+        assert!(small.is_ok(), "the heap still allocates");
+        if let Ok(small) = small {
+            heap.free_block(small);
+        }
+    }
+
     /// A request that outgrows one chunk takes more of them, gives the
     /// pages back as it frees, and leaves no mapping behind when it ends,
     /// which is php's mass release at request end.

@@ -1291,9 +1291,16 @@ impl Mm {
     /// 24-byte bin of the same heap, so the bin accounting moves by 24
     /// and then by the rounded block, and the peak is the sum. A node
     /// the bin cannot give ends php's request there; here the mapping
-    /// goes back and the fatal is the bin's.
+    /// goes back and the fatal is the bin's. A size the rounding would
+    /// carry past the top of memory is php's `E_ERROR` before any of
+    /// that, the limit not consulted.
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
-        let new_size = size.next_multiple_of(real_page_size());
+        let page = real_page_size();
+        let Some(new_size) = size.checked_next_multiple_of(page) else {
+            return Err(Fatal::Error(format!(
+                "Possible integer overflow in memory allocation ({size} + {page})"
+            )));
+        };
         if new_size > self.limit - self.real_size.min(self.limit)
             && (self.gc_heap() == 0 || new_size > self.limit - self.real_size.min(self.limit))
             && !self.overflow
