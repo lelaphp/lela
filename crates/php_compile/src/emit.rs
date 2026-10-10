@@ -18423,14 +18423,23 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_const`: php substitutes a persistent constant's
     /// value where it stands, so a `T_*` of the tokenizer reaches no
     /// opline. The table is the engine's, what its extensions declared
-    /// ([`Options::persistent`]); `INF` and `NAN`, which php reads from
-    /// the table `ext/standard` registers
-    /// (`REGISTER_DOUBLE_CONSTANT("INF", ZEND_INFINITY, CONST_PERSISTENT)`,
-    /// `Z/ext/standard/basic_functions_arginfo.h:3580`), stand here until
-    /// that extension declares them. A constant's name is case-sensitive,
+    /// ([`Options::persistent`]). A constant's name is case-sensitive,
     /// and a leading `\` names the same global constant as none. A
     /// declared value that is no scalar is not folded, as php folds none
     /// whose value is not yet evaluated.
+    ///
+    /// `ext/standard`'s `INF` and `NAN` are two of them, folded where
+    /// they are written:
+    ///
+    /// ```php
+    /// var_dump(INF, -NAN, \INF, -INF);
+    /// ```
+    /// ```expect
+    /// float(INF)
+    /// float(NAN)
+    /// float(INF)
+    /// float(-INF)
+    /// ```
     pub(crate) fn persistent(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
         if self.substitution == Substitution::NoPersistent {
             return Ok(None);
@@ -18440,11 +18449,6 @@ impl Emit<'_> {
             at += 1;
         }
         let name = name.get(at..).unwrap_or(&[]);
-        match name {
-            b"INF" => return Ok(Some(Zval::double(f64::INFINITY))),
-            b"NAN" => return Ok(Some(Zval::double(f64::NAN))),
-            _ => {}
-        }
         let Some((_, declared)) = self.persistent.find(name) else {
             return Ok(None);
         };
