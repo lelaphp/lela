@@ -32,8 +32,8 @@
 //! connection linger: its write side is shut, which the client reads as
 //! the response's end, and what the client still sends is read and
 //! dropped until it closes its side or [`LINGER`] has passed. A socket
-//! let go outside the runtime, which only the process's end does, closes
-//! at once. A lingering socket holds its descriptor, and its connection's
+//! let go outside the runtime, or as the runtime is dropped at the
+//! drain's deadline (#2344), closes at once. A lingering socket holds its descriptor, and its connection's
 //! slot under the cap, for that second beyond its connection.
 
 use std::io;

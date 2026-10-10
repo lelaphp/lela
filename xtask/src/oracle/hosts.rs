@@ -70,6 +70,14 @@ pub(crate) const PHPDBG: EngineHost = EngineHost {
     binary: "phpdbg",
 };
 
+/// The production server, which a `request makala` fence is served by
+/// (#2347), and no phpt test yet (#2348); its oracle is php-fpm under the
+/// pin's `[fastcgi]` mapping, so `[sapi]` pins none of its own.
+pub(crate) const MAKALA: EngineHost = EngineHost {
+    krate: "sapi/makala",
+    binary: "makala",
+};
+
 /// Every host the phpt lane hands a test to, the binary under test first.
 pub(crate) const HOSTS: [EngineHost; 4] = [CLI, CGI, FPM, PHPDBG];
 
@@ -107,7 +115,7 @@ mod tests {
     #[test]
     fn every_host_is_a_sapi_crate_of_the_workspace_as_its_cargo_toml_declares_it() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        for host in HOSTS {
+        for host in HOSTS.into_iter().chain([MAKALA]) {
             let text = std::fs::read_to_string(root.join(host.krate).join("Cargo.toml"))
                 .unwrap_or_else(|e| panic!("{}: {e}", host.krate));
             let cargo: toml::Table = toml::from_str(&text).unwrap();

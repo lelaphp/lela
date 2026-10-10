@@ -28,6 +28,8 @@
 
 mod connection;
 mod framing;
+mod log;
+mod natives;
 pub mod options;
 mod request;
 mod socket;
@@ -49,7 +51,11 @@ pub const SERVER_SOFTWARE: &str = concat!("makala/", env!("CARGO_PKG_VERSION"));
 /// The host's `main`: the line read into its [`Options`], one engine of
 /// the bundle's enabled set started, the listening socket bound, the
 /// request threads started, and the connection side run on this thread
-/// for as long as the process serves (the drain that ends it is #2344's).
+/// for as long as the process serves, until the drain SIGTERM begins
+/// has ended (#2344). The engine is the last to end, once the request
+/// threads have: where one is still in a request at the drain's
+/// deadline, the process ends around it, the engine's end not run, as a
+/// php-fpm child killed at its master's timeout ends.
 pub fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let options = match Options::parse(&argv) {
@@ -60,6 +66,21 @@ pub fn main() -> ExitCode {
         }
     };
     let engine = engine(&options);
+    // The log thread once the engine has started, so what php logs while
+    // it starts, and a startup it refuses, reach stderr before the process
+    // ends. The thread is held, never joined, so a destination that
+    // blocks holds only it.
+    let _log = match log::start(
+        options.access_log.clone(),
+        options.error_log.clone(),
+        options.limits.log_lines,
+    ) {
+        Ok(thread) => thread,
+        Err(e) => {
+            say(&format!("makala: cannot start the log thread: {e}\n"));
+            return php_sapi::exit_code(1);
+        }
+    };
     let listener = match std::net::TcpListener::bind(options.listen) {
         Ok(listener) => listener,
         Err(e) => {
@@ -67,6 +88,13 @@ pub fn main() -> ExitCode {
                 "makala: cannot listen on {}: {e}\n",
                 options.listen
             ));
+            return php_sapi::exit_code(1);
+        }
+    };
+    let side = match connection::ConnectionSide::new() {
+        Ok(side) => side,
+        Err(e) => {
+            say(&format!("makala: cannot start the connection side: {e}\n"));
             return php_sapi::exit_code(1);
         }
     };
@@ -83,15 +111,27 @@ pub fn main() -> ExitCode {
             options.document_root.display()
         ));
     }
-    let ended = connection::run(&options, listener, queue);
-    pool.join();
-    match ended {
-        Ok(()) => php_sapi::exit_code(0),
+    let drained = match side.run(options.limits, listener, queue) {
+        Ok(drained) => drained,
         Err(e) => {
             say(&format!("makala: {e}\n"));
-            php_sapi::exit_code(1)
+            return php_sapi::exit_code(1);
         }
+    };
+    if drained.whole && pool.join_by(drained.deadline) {
+        log::error(b"makala: drained");
+    } else {
+        log::error(
+            b"makala: the shutdown timeout passed with requests in flight; they were aborted",
+        );
     }
+    // The engine's end runs here, where `engine` is the last clone: once
+    // every request thread is joined, and never while one is left in a
+    // request, which holds a clone of its own. What it logs is written
+    // before the process ends, as is every line queued before it.
+    drop(engine);
+    log::settle(log::SETTLE);
+    php_sapi::exit_code(0)
 }
 
 /// One engine of the bundle's enabled set, under the host's name, with the
@@ -99,22 +139,19 @@ pub fn main() -> ExitCode {
 /// them; a startup php refuses ends the process here, before the socket
 /// is bound ([`php_sapi::start`]).
 fn engine(options: &Options) -> Engine {
-    let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
+    // On threads: never pcntl nor posix, whatever features a build of the
+    // workspace unified into php_bundle (design §7.2).
+    let extensions: Vec<_> = php_bundle::enabled_for(php_bundle::Serving::Threads)
+        .iter()
+        .map(|start| start())
+        .collect();
     let builder = Engine::builder()
         .ini_files(php_sapi::ini::search(NAME, &options.ini_search, true))
         .sapi_name(NAME)
         .extensions(&extensions)
-        .configure(php_bundle::CONFIGURE)
+        .configure(php_bundle::configure_for(php_bundle::Serving::Threads))
         .tier::<php_bundle::Tier>();
-    php_sapi::start(builder, &options.ini, log)
-}
-
-/// The error log, until the server's own (#2345): one entry on the
-/// process's stderr, whole, with `\n` after it.
-pub(crate) fn log(entry: &[u8]) {
-    let mut stderr = std::io::stderr().lock();
-    stderr.write_all(entry).ok();
-    stderr.write_all(b"\n").ok();
+    php_sapi::start(natives::declare(builder), &options.ini, log::error)
 }
 
 /// A line of the server's own on stderr.

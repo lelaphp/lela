@@ -11,8 +11,10 @@
 //! description and the response's head written, which php's CGI and its
 //! `FastCGI` process manager both do; [`ini`], the line's `-d` entries as
 //! `php_ini_builder` reads them, and `php_init_config`'s search for the
-//! php.ini files; and [`start`], `php_module_startup` over
-//! them, with what a host prints before it serves anything. [`tier`] is
+//! php.ini files; [`vpath`], the built-in server's path rules, which
+//! `php -S` and the production server both find a request's file by
+//! (#2346); and [`start`], `php_module_startup` over them, with what a
+//! host prints before it serves anything. [`tier`] is
 //! the tier face beside the host face, for the debugging host (#1308).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -28,6 +30,7 @@
 pub mod cgi;
 pub mod getopt;
 pub mod ini;
+pub mod vpath;
 
 use std::io::Write;
 use std::process::ExitCode;

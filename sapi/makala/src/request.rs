@@ -7,18 +7,26 @@
 //! channel its connection feeds, pulled as the request reads it (#2338);
 //! and its sink writes onto the channel its connection's response reads.
 //!
-//! The environment is provisional: the mapping the oracle holds, nginx's
-//! stock `fastcgi_params` against the pinned php-fpm, is #2334's and
-//! arrives with #2347.
+//! The environment is the mapping the oracle holds (#2334, #2347): the
+//! stock `fastcgi_params` of the nginx release `oracle.toml`'s
+//! `[fastcgi]` names, as it records it, with `SCRIPT_FILENAME` first and
+//! the header fields after, and `SERVER_SOFTWARE` the host's own (#2335),
+//! registered in php-fpm's order. The witnesses of `request makala` fences hold it to the pinned
+//! php-fpm handed the same request under that recipe.
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::convert::Infallible;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hyper::body::Bytes;
-use php_proto::cgi::{Environment, RequestInfo};
+use php_proto::cgi::{Environment, RequestInfo, Settings};
 use php_sapi::cgi::Disk;
+use php_sapi::vpath::{self, Translated};
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
@@ -52,6 +60,9 @@ pub(crate) struct Head {
 /// The request threads.
 pub(crate) struct Pool {
     threads: Vec<HostThread>,
+    /// Closed once every thread has ended: each holds a sender, which
+    /// nothing is ever sent on, until it ends.
+    ended: std::sync::mpsc::Receiver<Infallible>,
 }
 
 impl Pool {
@@ -65,23 +76,38 @@ impl Pool {
     ) -> std::io::Result<(mpsc::Sender<Job>, Pool)> {
         let (queue, jobs) = mpsc::channel(options.request_queue);
         let jobs = Arc::new(Mutex::new(jobs));
+        let (alive, ended) = std::sync::mpsc::channel();
         let mut threads = Vec::with_capacity(options.request_threads);
         for n in 0..options.request_threads {
-            let (jobs, serve) = (Arc::clone(&jobs), serve.clone());
+            let (jobs, serve, alive) = (Arc::clone(&jobs), serve.clone(), alive.clone());
             threads.push(php_sapi::host_thread(
                 &format!("makala-request-{n}"),
                 options.stack_size,
-                move || serve_each(&jobs, &serve),
+                move || {
+                    serve_each(&jobs, &serve);
+                    drop(alive);
+                },
             )?);
         }
-        Ok((queue, Pool { threads }))
+        Ok((queue, Pool { threads, ended }))
     }
 
-    /// Every thread joined, once the queue's senders are gone.
-    pub(crate) fn join(self) {
+    /// Every thread joined, once the queue's senders are gone and each
+    /// has ended its request, where that is before `deadline`; whether it
+    /// was. A thread still in a request at the deadline is left to the
+    /// process's end, as php-fpm's master kills a child still serving
+    /// when its `process_control_timeout` has passed.
+    pub(crate) fn join_by(self, deadline: std::time::Instant) -> bool {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match self.ended.recv_timeout(left) {
+            Err(RecvTimeoutError::Disconnected) => {}
+            Err(RecvTimeoutError::Timeout) => return false,
+            Ok(never) => match never {},
+        }
         for thread in self.threads {
             thread.join();
         }
+        true
     }
 }
 
@@ -99,9 +125,25 @@ fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
         let Some(job) = next else {
             return;
         };
-        if std::panic::catch_unwind(AssertUnwindSafe(|| serve(job))).is_err() {
-            crate::log(
-                b"makala: a request panicked; its connection is answered 500, or cut where its response was under way",
+        let who = (
+            job.head.peer,
+            job.head.method.clone(),
+            job.head.target.clone(),
+        );
+        if let Err(panicked) = std::panic::catch_unwind(AssertUnwindSafe(|| serve(job))) {
+            let (peer, method, target) = who;
+            let why = panicked
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panicked.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("a panic with no message");
+            crate::log::error(
+                format!(
+                    "makala: {peer} \"{} {}\" panicked: {why}; its connection is answered 500, or cut where its response was under way",
+                    String::from_utf8_lossy(&method),
+                    String::from_utf8_lossy(&target)
+                )
+                .as_bytes(),
             );
         }
     }
@@ -115,15 +157,44 @@ pub(crate) fn serving(engine: &Engine, options: &Options) -> impl Fn(Job) + Clon
     move |job| serve(&engine, &root, job)
 }
 
-/// One request through its own `Engine::serve`.
+/// One request: a program's through its own `Engine::serve`, and a
+/// static file's served from the disk, as `php -S` tells them apart
+/// (`php_sapi::vpath`, #2346). The path is `normalize_vpath`'s, decoded
+/// and with every `..` taken, so no request names a file outside the
+/// root; a file whose path holds a NUL is refused, as `php -S` refuses
+/// one, though `stat(2)` finds none such.
 fn serve(engine: &Engine, root: &[u8], job: Job) {
     let Job {
         head,
         body,
         mut sink,
     } = job;
-    let mut env = environment(&head, root);
-    let settings = php_sapi::cgi::settings(engine);
+    let (path, query) = match head.target.iter().position(|b| *b == b'?') {
+        Some(at) => (&head.target[..at], &head.target[at + 1..]),
+        None => (&head.target[..], &[][..]),
+    };
+    let mut uri = php_proto::http::normalize_vpath(path);
+    if !uri.starts_with(b"/") {
+        uri.insert(0, b'/');
+    }
+    let found = vpath::translate(&uri, root);
+    if found
+        .as_ref()
+        .is_some_and(|found| found.path_translated.contains(&0))
+    {
+        return refuse(&mut sink, 400, Vec::new());
+    }
+    let program = match found {
+        Some(found) if found.is_program() => found,
+        found => return serve_static(&head, found.as_ref(), &mut sink),
+    };
+    let mut script = program.vpath;
+    script.extend_from_slice(&program.path_info.unwrap_or_default());
+    let mut env = environment(&head, root, &script, query);
+    // php-fpm's defaults of the entries `init_request_info` reads, which
+    // this host declares none of: `cgi.fix_pathinfo` on, so a path's info
+    // after the script is taken apart as php-fpm takes it.
+    let settings = Settings::default();
     let info = php_proto::cgi::request_info(&mut env, settings, None, &Disk);
     let cwd = info
         .path_translated
@@ -134,17 +205,22 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
                 .map(std::path::Path::to_path_buf)
         })
         .unwrap_or_else(|| php_sapi::cgi::path_of(root));
+    // php-fpm registers the parameters newest first, as `fcgi_hash_apply`
+    // walks them (`Z/main/fastcgi.c:399-407`): the header fields first and
+    // `SCRIPT_FILENAME` last, in `$_SERVER` and `getallheaders()` alike.
+    let newest = Environment(php_proto::fcgi::newest_first(&env).cloned().collect());
     let web = WebRequest {
         body: Body::Stream(Box::new(Arriving {
             pieces: body,
             held: Bytes::new(),
         })),
         head_ini: &[],
+        headers: php_proto::cgi::request_headers(&newest),
         ..php_sapi::cgi::web(&env, &info)
     };
     let description = RequestDescription {
         server: php_sapi::cgi::server_variables(&env, &info, settings),
-        params: env.0,
+        params: newest.0,
         cwd,
         sapi_name: crate::NAME.to_owned(),
         web: Some(web),
@@ -159,7 +235,7 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
 /// where the path names no script; `Access denied.` with a 403 for a
 /// script whose name does not end in `.php`, the default of its
 /// `security.limit_extensions`, so no file of another kind runs as a
-/// program (static files are #2346's); for one that does not open,
+/// program, `T.PHP` among them; for one that does not open,
 /// `Access denied.` with a 403 where it may not be read and `No input
 /// file specified.` with a 404 otherwise; and else the program.
 fn look(info: &RequestInfo) -> HostServes {
@@ -186,24 +262,67 @@ fn look(info: &RequestInfo) -> HostServes {
 }
 
 /// The CGI environment a web server hands php-fpm for `head`, after
-/// nginx's stock `fastcgi_params`: the script the path names under the
-/// root, the request's own variables, and each header field as an
-/// `HTTP_` variable. The path is `php -S`'s `normalize_vpath` of it
-/// (`Z/sapi/cli/php_cli_server.c:1538`), percent-decoded with `..` held at
-/// the root, so no request names a file outside it; a path that ends in
-/// `/` names its directory's `index.php`.
-fn environment(head: &Head, root: &[u8]) -> Environment {
-    let (path, query) = match head.target.iter().position(|b| *b == b'?') {
-        Some(at) => (&head.target[..at], &head.target[at + 1..]),
-        None => (&head.target[..], &[][..]),
-    };
-    let mut script = php_proto::http::normalize_vpath(path);
-    if !script.starts_with(b"/") {
-        script.insert(0, b'/');
-    }
-    if script.ends_with(b"/") {
-        script.extend_from_slice(b"index.php");
-    }
+/// nginx's stock `fastcgi_params`: the script the request found under
+/// the root, the request's own variables, and each header field as an
+/// `HTTP_` variable. `script` is both nginx's `$uri`, after the internal
+/// redirect its `index` makes of a directory, and its
+/// `$fastcgi_script_name`: the path `php -S`'s rules translated to, with
+/// the index file where it named a directory and the path's info after
+/// it, which php-fpm's `cgi.fix_pathinfo` takes apart again.
+///
+/// `$_SERVER` in php-fpm's order, held to the pinned php-fpm handed the
+/// same request under the recipe with its default `clear_env`: every row
+/// but php-fpm's own, `FCGI_ROLE`, the `FastCGI` role, which a host that speaks
+/// HTTP has none of, and `USER` and `HOME`, which `fpm_env_init_child`
+/// puts in a child's emptied environment; the ports, which are the run's
+/// own, and `SERVER_SOFTWARE`, nginx's in the recipe and
+/// `makala/<version>` here (#2335), masked.
+///
+/// ```php
+/// foreach ($_SERVER as $name => $value) {
+///     if (in_array($name, ['FCGI_ROLE', 'USER', 'HOME', 'REQUEST_TIME', 'REQUEST_TIME_FLOAT'])) continue;
+///     echo $name, '=', in_array($name, ['REMOTE_PORT', 'SERVER_PORT', 'SERVER_SOFTWARE']) ? '(the run)' : $value, "\n";
+/// }
+/// ```
+/// ```request makala
+/// --GET--
+/// a=1
+/// --COOKIE--
+/// c=v
+/// --POST--
+/// p=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// HTTP_CONTENT_LENGTH=3
+/// HTTP_CONTENT_TYPE=application/x-www-form-urlencoded
+/// HTTP_COOKIE=c=v
+/// HTTP_HOST=localhost
+/// REDIRECT_STATUS=200
+/// SERVER_NAME=localhost
+/// SERVER_PORT=(the run)
+/// SERVER_ADDR=127.0.0.1
+/// REMOTE_PORT=(the run)
+/// REMOTE_ADDR=127.0.0.1
+/// SERVER_SOFTWARE=(the run)
+/// GATEWAY_INTERFACE=CGI/1.1
+/// REQUEST_SCHEME=http
+/// SERVER_PROTOCOL=HTTP/1.0
+/// DOCUMENT_ROOT=%SCRATCH%
+/// DOCUMENT_URI=/witness.php
+/// REQUEST_URI=/witness.php?a=1
+/// SCRIPT_NAME=/witness.php
+/// CONTENT_LENGTH=3
+/// CONTENT_TYPE=application/x-www-form-urlencoded
+/// REQUEST_METHOD=POST
+/// QUERY_STRING=a=1
+/// SCRIPT_FILENAME=%SCRATCH%/witness.php
+/// PHP_SELF=/witness.php
+/// ```
+fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environment {
     let field = |name: &[u8]| {
         head.fields
             .iter()
@@ -218,7 +337,7 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
         },
     );
     let mut filename = root.to_vec();
-    filename.extend_from_slice(&script);
+    filename.extend_from_slice(script);
     let mut env = vec![
         (b"SCRIPT_FILENAME".to_vec(), filename),
         (b"QUERY_STRING".to_vec(), query.to_vec()),
@@ -231,9 +350,9 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
             b"CONTENT_LENGTH".to_vec(),
             field(b"content-length").unwrap_or_default(),
         ),
-        (b"SCRIPT_NAME".to_vec(), script.clone()),
+        (b"SCRIPT_NAME".to_vec(), script.to_vec()),
         (b"REQUEST_URI".to_vec(), head.target.clone()),
-        (b"DOCUMENT_URI".to_vec(), script),
+        (b"DOCUMENT_URI".to_vec(), script.to_vec()),
         (b"DOCUMENT_ROOT".to_vec(), root.to_vec()),
         (
             b"SERVER_PROTOCOL".to_vec(),
@@ -264,7 +383,12 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
         (b"SERVER_NAME".to_vec(), host),
         (b"REDIRECT_STATUS".to_vec(), b"200".to_vec()),
     ];
-    for (name, value) in &head.fields {
+    // nginx's `fastcgi_pass_request_headers`: each field after the
+    // parameters, a name sent twice joined as nginx joins it since 1.23,
+    // and a name with `_` in it left out, as nginx ignores one by its
+    // `underscores_in_headers off`, so no field can pose as another
+    // whose `-` reads as the same `_`.
+    for (name, value) in head.fields.iter().filter(|(name, _)| !name.contains(&b'_')) {
         let mut var = b"HTTP_".to_vec();
         var.extend(name.iter().map(|b| match b {
             b'-' => b'_',
@@ -279,6 +403,64 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
         }
     }
     Environment(env)
+}
+
+/// How many bytes of a static file go in one write to the connection.
+const STATIC_PIECE: usize = 64 << 10;
+
+/// A request that is not a program's, served as `php -S` serves a static
+/// file (`php_cli_server_begin_send_static`,
+/// `Z/sapi/cli/php_cli_server.c:2144`) on this request thread, which may
+/// wait on the disk where the connection side may not (M4): a method that
+/// writes refused with 405, a path that translated to nothing or a file
+/// that does not open with 404; else the type its extension has in php's
+/// table and the length of the file opened, and that many of its bytes
+/// after them but for `HEAD`, so a file that grows while it goes is sent
+/// as it was and one that shrinks cuts its connection. The
+/// refusals' bodies are empty, as the server's other refusals are. A
+/// static file holds its request thread while it goes, bounded by the
+/// minimum response data rate as a program's response is.
+fn serve_static(head: &Head, found: Option<&Translated>, sink: &mut Sink) {
+    if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&head.method.as_slice()) {
+        return refuse(sink, 405, vec![b"Allow: GET, HEAD, POST".to_vec()]);
+    }
+    let Some((found, file, length)) = found.and_then(|found| {
+        let file = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated)).ok()?;
+        let length = file.metadata().ok()?.len();
+        Some((found, file, length))
+    }) else {
+        return refuse(sink, 404, Vec::new());
+    };
+    let mut lines = Vec::new();
+    if let Some(content_type) = php_proto::mime::content_type(vpath::extension(&found.vpath)) {
+        lines.push(format!("Content-Type: {content_type}").into_bytes());
+    }
+    lines.push(format!("Content-Length: {length}").into_bytes());
+    sink.send_headers(&ResponseHead {
+        code: 200,
+        lines,
+        ..ResponseHead::default()
+    });
+    if head.method == b"HEAD" {
+        return;
+    }
+    let mut file = file.take(length);
+    let mut piece = vec![0; STATIC_PIECE];
+    while let Ok(read @ 1..) = file.read(&mut piece) {
+        if sink.write(&piece[..read]).is_err() {
+            return;
+        }
+    }
+}
+
+/// A response of the server's own, with `code`, header `lines` and no
+/// body.
+fn refuse(sink: &mut Sink, code: i64, lines: Vec<Vec<u8>>) {
+    sink.send_headers(&ResponseHead {
+        code,
+        lines,
+        ..ResponseHead::default()
+    });
 }
 
 /// The body as the connection reads it: each read hands out what is left
@@ -369,6 +551,41 @@ impl OutputSink for Sink {
     /// Every write is handed over as it is made.
     fn flush(&mut self) {}
 
+    /// php-fpm's `sapi_cgibin_flush` sends the head first, so `flush()`
+    /// before any output sends it here too.
+    ///
+    /// ```php
+    /// var_dump(headers_sent());
+    /// flush();
+    /// var_dump(headers_sent());
+    /// ```
+    /// ```request makala
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect capture
+    /// 200
+    /// x-powered-by: PHP/8.5.9
+    /// content-type: text/html; charset=UTF-8
+    ///
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn flush_sends_head(&self) -> bool {
+        true
+    }
+
+    /// `fastcgi_finish_request()`: the body's channel closed and the body
+    /// said whole, so the connection ends the response while the program
+    /// runs on; the response is closed after, whatever came before.
+    fn finish(&mut self) -> bool {
+        self.body = None;
+        if let Some(whole) = self.whole.take() {
+            whole.send(()).ok();
+        }
+        true
+    }
+
     fn send_headers(&mut self, head: &ResponseHead) {
         if let Some(waiting) = self.head.take() {
             waiting.send(head.clone()).ok();
@@ -376,7 +593,7 @@ impl OutputSink for Sink {
     }
 
     fn log(&mut self, entry: &[u8]) {
-        crate::log(entry);
+        crate::log::error(entry);
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
@@ -469,7 +686,9 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         std::thread::spawn(move || {
             let _pool = pool;
-            crate::connection::run(&options, listener, queue).ok();
+            if let Ok(side) = crate::connection::ConnectionSide::new() {
+                side.run(options.limits, listener, queue).ok();
+            }
         });
         addr
     }
@@ -497,13 +716,38 @@ mod tests {
         stream
     }
 
+    /// The error log of this test binary, one file every test that
+    /// starts the server shares, as the process's one log thread does.
+    fn error_log() -> &'static std::path::Path {
+        static LOG: std::sync::OnceLock<(std::path::PathBuf, HostThread)> =
+            std::sync::OnceLock::new();
+        let (path, _) = LOG.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("makala-errors-{}", std::process::id()));
+            std::fs::remove_file(&path).ok();
+            let thread = crate::log::start(None, crate::log::Destination::File(path.clone()), 64)
+                .unwrap_or_else(|e| panic!("{e}"));
+            (path, thread)
+        });
+        path
+    }
+
+    /// A request that panics is answered 500, its thread serves the next,
+    /// and the error log names the request and the panic's message.
     #[test]
     fn a_request_that_panics_is_answered_500_and_its_thread_serves_the_next() {
+        let log = error_log();
         let addr = start();
         let panicked = exchange(addr, "/panic");
         assert!(
             panicked.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
             "{panicked}"
+        );
+        crate::log::settle(Duration::from_secs(5));
+        let logged = std::fs::read_to_string(log).unwrap_or_default();
+        assert!(
+            logged.lines().any(|line| line.contains("makala: 127.0.0.1:")
+                && line.contains(" \"GET /panic\" panicked: a request panicked before its head, on cue; its connection is answered 500")),
+            "{logged}"
         );
         let next = exchange(addr, "/next");
         assert!(next.starts_with("HTTP/1.1 200 OK\r\n"), "{next}");

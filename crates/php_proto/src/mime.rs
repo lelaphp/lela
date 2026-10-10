@@ -14,6 +14,22 @@ pub fn mime_type(ext: &[u8]) -> Option<&'static str> {
         .map(|(_, mime)| *mime)
 }
 
+/// The `Content-Type` php's built-in server sends a static file with, by
+/// its extension (`php_cli_server_begin_send_static`,
+/// `Z/sapi/cli/php_cli_server.c:2198-2204`): the type, with `;
+/// charset=UTF-8` after a `text/` one; none where the extension has no
+/// row.
+#[must_use]
+pub fn content_type(ext: &[u8]) -> Option<String> {
+    mime_type(ext).map(|mime| {
+        if mime.starts_with("text/") {
+            format!("{mime}; charset=UTF-8")
+        } else {
+            mime.to_owned()
+        }
+    })
+}
+
 /// The rows, in the header's order.
 const MAP: &[(&str, &str)] = &[
     ("123", "application/vnd.lotus-1-2-3"),

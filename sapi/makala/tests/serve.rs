@@ -20,8 +20,9 @@ use common::{Server, read_response, root, unchunked};
 /// the program set, php's own `X-Powered-By` and `Content-type`, the
 /// server's `Date`, and the body the program wrote, chunked, since it
 /// set no length; the program served under the host's name, with its
-/// query string and `$_SERVER` as the request described them, and with
-/// neither `pcntl` nor `posix` loaded.
+/// query string and `$_SERVER` as the request described them, with
+/// neither `pcntl` nor `posix` loaded, and `PHP_ZTS` and
+/// `ZEND_THREAD_SAFE` false, as #2335 ruled.
 #[test]
 fn a_get_is_answered_with_php_s_status_headers_and_body() {
     let root = root(
@@ -31,7 +32,8 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
             "<?php http_response_code(201); header('X-Test: yes'); \
              echo PHP_SAPI, ' ', $_GET['x'], ' ', $_SERVER['SERVER_SOFTWARE'], ' ', \
              $_SERVER['REQUEST_METHOD'], ' ', $_SERVER['SCRIPT_NAME'], ' ', \
-             var_export(extension_loaded('pcntl') || extension_loaded('posix'), true);",
+             var_export(extension_loaded('pcntl') || extension_loaded('posix'), true), ' ', \
+             var_export([PHP_ZTS, ZEND_THREAD_SAFE, php_sapi_name()], true);",
         )],
     );
     let server = Server::start(&root);
@@ -50,14 +52,13 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
     assert!(response.header("Date").is_some(), "{response:?}");
     assert_eq!(
         String::from_utf8_lossy(&response.body),
-        "makala 1 makala/0.0.0 GET /index.php false"
+        "makala 1 makala/0.0.0 GET /index.php false array (\n  0 => false,\n  1 => false,\n  2 => 'makala',\n)"
     );
 }
 
-/// A path that names no script is php-fpm's 404; one that climbs out of
-/// the root to a PHP file beside it stays under the root and finds
-/// nothing there; and one that names a file other than PHP's is its 403
-/// `Access denied.`, never served as a program.
+/// A path that names nothing under the root is a 404, a `.php` one
+/// among them, and so is one that climbs out of the root to a file beside
+/// it; a file that is not PHP is served as itself, never run.
 #[test]
 fn a_path_with_no_php_file_is_not_served_as_a_program() {
     let root = root("missing", &[("notes.txt", "<?php echo 'ran';")]);
@@ -65,17 +66,9 @@ fn a_path_with_no_php_file_is_not_served_as_a_program() {
     std::fs::write(&outside, "<?php echo 'escaped';").unwrap_or_else(|e| panic!("{e}"));
     let server = Server::start(&root);
     for (path, status, body) in [
-        (
-            "/nothing.php",
-            "HTTP/1.1 404 Not Found",
-            "No input file specified.\n",
-        ),
-        ("/notes.txt", "HTTP/1.1 403 Forbidden", "Access denied.\n"),
-        (
-            "/../makala-outside.php",
-            "HTTP/1.1 404 Not Found",
-            "No input file specified.\n",
-        ),
+        ("/nothing.php", "HTTP/1.1 404 Not Found", ""),
+        ("/notes.txt", "HTTP/1.1 200 OK", "<?php echo 'ran';"),
+        ("/../makala-outside.php", "HTTP/1.1 404 Not Found", ""),
     ] {
         let mut stream = server.connect();
         write!(
@@ -227,4 +220,36 @@ fn connection_aborted_turns_true_on_the_write_after_the_client_closes() {
     let logged = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("the log: {e}"));
     assert_eq!(logged, "0 1 early");
     drop(server);
+}
+
+/// The header fields reach `$_SERVER` as nginx passes them to php-fpm
+/// (#2347): a name with `_` in it left out, as nginx's
+/// `underscores_in_headers off` ignores it, so `X_Forwarded_For` cannot
+/// pose as `X-Forwarded-For`; a name sent twice joined with `, `, a
+/// cookie's with `; `; and the fields first, newest first, as php-fpm
+/// registers them.
+#[test]
+fn header_fields_reach_server_as_nginx_passes_them() {
+    let root = root(
+        "fields",
+        &[(
+            "fields.php",
+            "<?php foreach ($_SERVER as $k => $v) if (str_starts_with($k, 'HTTP_')) echo \"$k=$v\\n\";",
+        )],
+    );
+    let server = Server::start(&root);
+    let mut stream = server.connect();
+    stream
+        .write_all(
+            b"GET /fields.php HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 10.0.0.1\r\n\
+              X_Forwarded_For: 6.6.6.6\r\nCookie: a=1\r\nX-Two: 1\r\nCookie: b=2\r\n\
+              X-Two: 2\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    let response = read_response(&mut stream);
+    assert_eq!(
+        String::from_utf8_lossy(&response.body),
+        "HTTP_CONNECTION=close\nHTTP_X_TWO=1, 2\nHTTP_COOKIE=a=1; b=2\n\
+         HTTP_X_FORWARDED_FOR=10.0.0.1\nHTTP_HOST=a\n"
+    );
 }

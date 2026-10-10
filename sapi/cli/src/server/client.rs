@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use php_proto::http::{self, Credentials, Events, Parser};
 use php_sapi::{
     Aborted, Method, OutputSink, PHP_VERSION, ProgramFile, RequestDescription, ResponseHead,
-    Routed, WebRequest,
+    Routed, WebRequest, vpath,
 };
 
 use super::Site;
@@ -230,10 +230,8 @@ impl Events for Building {
     fn message_complete(&mut self, major: u16, minor: u16) -> bool {
         self.request.version = major.saturating_mul(100).saturating_add(minor);
         translate_vpath(&mut self.request, &self.root);
-        if let Some(vpath) = &self.request.vpath
-            && let Some(dot) = vpath.iter().rposition(|&b| b == b'.')
-        {
-            self.request.ext = vpath[dot + 1..].to_vec();
+        if let Some(vpath) = &self.request.vpath {
+            self.request.ext = vpath::extension(vpath).to_vec();
         }
         self.read = true;
         true
@@ -274,58 +272,21 @@ impl Building {
     }
 }
 
-/// `php_cli_server_request_translate_vpath`
-/// (`Z/sapi/cli/php_cli_server.c:1440`): the path under the document
-/// root, walked back a segment at a time until something is there, what
-/// was walked off the path's info; a directory is its `index.php` or
-/// `index.html`, and one with neither translates to nothing.
+/// `php_cli_server_request_translate_vpath`, the rule `php_sapi::vpath`
+/// holds for both servers: the request's path under the document root,
+/// left as it was where it translates to nothing.
 fn translate_vpath(request: &mut Request, root: &[u8]) {
-    let Some(vpath) = request.vpath.clone() else {
+    let Some(translated) = request
+        .vpath
+        .as_deref()
+        .and_then(|vpath| vpath::translate(vpath, root))
+    else {
         return;
     };
-    let mut buf = root.to_vec();
-    let start = buf.len();
-    if !vpath.is_empty() && vpath[0] != b'/' {
-        buf.push(b'/');
-    }
-    buf.extend_from_slice(&vpath);
-    let end = buf.len();
-    let mut q = end;
-    let mut path_info: Option<Vec<u8>> = None;
-    let mut size = 0;
-    while q > 0 {
-        if let Ok(meta) = std::fs::metadata(os(&buf[..q])) {
-            size = meta.len();
-            if meta.is_dir() {
-                let mut dir = buf[..q].to_vec();
-                if dir.last() != Some(&b'/') {
-                    dir.push(b'/');
-                }
-                let index = [&b"index.php"[..], b"index.html"]
-                    .into_iter()
-                    .find_map(|file| {
-                        let candidate = [dir.as_slice(), file].concat();
-                        let meta = std::fs::metadata(os(&candidate)).ok()?;
-                        meta.is_file().then_some((candidate, meta.len()))
-                    });
-                let Some((candidate, len)) = index else {
-                    return;
-                };
-                size = len;
-                buf = candidate;
-                q = buf.len();
-            }
-            break;
-        }
-        let cut = buf[..q].iter().rposition(|&b| b == b'/').unwrap_or(0);
-        path_info = Some(buf[cut..end.max(cut)].to_vec());
-        q = cut;
-    }
-    let q = q.max(start.min(buf.len()));
-    request.vpath = Some(buf[start.min(q)..q].to_vec());
-    request.path_translated = Some(buf[..q].to_vec());
-    request.path_info = path_info;
-    request.size = size;
+    request.vpath = Some(translated.vpath);
+    request.path_translated = Some(translated.path_translated);
+    request.path_info = translated.path_info;
+    request.size = translated.size;
 }
 
 /// A path's bytes as the file system names it.
@@ -396,7 +357,7 @@ fn close(site: &Site, client: &Client) -> Connection {
 /// and a static file after it where it declined.
 fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
     let request = &client.building.request;
-    let is_static = !request.ext.eq_ignore_ascii_case(b"php") || request.path_translated.is_none();
+    let is_static = !vpath::is_program(&request.ext, request.path_translated.is_some());
     if site.router.is_none() && is_static {
         return send_static(site, client);
     }
@@ -756,12 +717,9 @@ fn send_static(site: &Site, client: Client) -> Connection {
     };
     let mut head = status_line(request.version, 200);
     essential_headers(&mut head, request.header(b"host"), true);
-    if let Some(mime) = php_proto::mime::mime_type(&request.ext) {
+    if let Some(content_type) = php_proto::mime::content_type(&request.ext) {
         head.extend_from_slice(b"Content-Type: ");
-        head.extend_from_slice(mime.as_bytes());
-        if mime.starts_with("text/") {
-            head.extend_from_slice(b"; charset=UTF-8");
-        }
+        head.extend_from_slice(content_type.as_bytes());
         head.extend_from_slice(b"\r\n");
     }
     head.extend_from_slice(format!("Content-Length: {}\r\n\r\n", request.size).as_bytes());

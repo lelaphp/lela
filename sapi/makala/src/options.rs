@@ -3,7 +3,10 @@
 //! starts with, and the limits (#2337's Implementation Decisions, #2341):
 //! one table of Kestrel's defaults, each overridden by `--limit
 //! <name>=<value>`, and each applied by the connection side, the
-//! connection cap by its accept loop (#2342).
+//! connection cap by its accept loop (#2342) and the shutdown timeout by
+//! the drain SIGTERM begins (#2344).
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -13,12 +16,15 @@ use std::time::Duration;
 
 use php_sapi::ini::Search;
 
+pub use crate::log::Destination;
+
 /// The line's grammar, printed with a refusal: the options, then each
 /// limit `--limit` names, from [`LIMITS`].
 #[must_use]
 pub fn usage() -> String {
     let mut usage = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --listen <addr>:<port> \
-                     --root <dir> [--threads <n>] [--queue <n>] [--limit <name>=<value>]...\n\
+                     --root <dir> [--threads <n>] [--queue <n>] [--access-log <path>] \
+                     [--error-log <path>] [--limit <name>=<value>]...\n\
                      limits, a time being <n>s or <n>ms and a rate <bytes a second>,<grace time> or off:\n"
         .to_owned();
     for (name, shape, _) in LIMITS {
@@ -34,6 +40,34 @@ pub fn usage() -> String {
 /// The stack of each request thread, php-fpm's main thread's on the
 /// reference machine (#2335): the engine reads the serving thread's
 /// bounds for php's "Maximum call stack size", so a program sees this.
+/// Held to the pinned php-fpm, serving on its main thread under the same
+/// 8 MiB limit, where recursion that runs through a native, and so takes
+/// the thread's stack, fails: the size php reports is 8 MiB to the
+/// nearest MiB under both. The bytes differ by less than a page table's
+/// worth, 8,368,128 here against php-fpm's 8,339,456 on the reference
+/// machine, since a thread's stack is whole 16 KiB pages there and the
+/// main thread's ends below its guard, a size no thread's stack can take;
+/// whether the bytes must match is a person's (#2589).
+///
+/// ```php
+/// function down($n) { return array_map('down', [$n + 1]); }
+/// try { down(0); } catch (Error $e) {
+///     echo preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()), "\n";
+///     echo round((int) preg_replace('/\D+/', '', strstr($e->getMessage(), ' bytes', true)) / (1 << 20)), " MiB\n";
+/// }
+/// ```
+/// ```request makala
+/// --GET--
+/// q=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// 8 MiB
+/// ```
 pub const REQUEST_STACK: usize = 8 << 20;
 
 /// The server as the operator's line set it.
@@ -56,6 +90,11 @@ pub struct Options {
     pub ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// `-n` and `-c`, which steer the ini file search.
     pub ini_search: Search,
+    /// Where the access log goes, a line for each response; none is kept
+    /// without `--access-log` (#2345).
+    pub access_log: Option<Destination>,
+    /// Where the error log goes: stderr without `--error-log`.
+    pub error_log: Destination,
     pub limits: Limits,
 }
 
@@ -92,7 +131,16 @@ pub struct Limits {
     pub requests_per_connection: u32,
     /// How many connections the server holds open at once, past which it
     /// stops accepting and the kernel's queue holds the rest: 10,000.
-    pub connections: usize,
+    pub connections: u32,
+    /// How long the drain SIGTERM begins may take before what is still in
+    /// flight is aborted and the process ends: 30 s, the default of
+    /// Kestrel's host since .NET 6 (research/production-server.r2.md
+    /// §1.4).
+    pub shutdown_timeout: Duration,
+    /// How many log lines wait for the log thread, past which a line is
+    /// dropped and counted rather than waited for, so a slow destination
+    /// never stalls a request: 4096 (#2345).
+    pub log_lines: usize,
 }
 
 /// A minimum data rate, Kestrel's `MinDataRate`: so many bytes a second,
@@ -144,6 +192,8 @@ impl Default for Limits {
             min_response_rate: Some(MinDataRate::default()),
             requests_per_connection: 1000,
             connections: 10_000,
+            shutdown_timeout: Duration::from_secs(30),
+            log_lines: 4096,
         }
     }
 }
@@ -185,6 +235,10 @@ const LIMITS: &[(&str, &str, SetLimit)] = &[
     ("connections", "<n>", |l, v| {
         set(&mut l.connections, count(v))
     }),
+    ("shutdown-timeout", "<time>", |l, v| {
+        set(&mut l.shutdown_timeout, time(v))
+    }),
+    ("log-lines", "<n>", |l, v| set(&mut l.log_lines, count(v))),
 ];
 
 /// `read` into `field` where it was read.
@@ -269,6 +323,8 @@ impl Options {
         let mut ini = Vec::new();
         let mut ini_search = Search::default();
         let mut limits = Limits::default();
+        let mut access_log = None;
+        let mut error_log = Destination::Stderr;
         while let Some(word) = words.next() {
             let mut value = |name: &str| {
                 words
@@ -287,6 +343,10 @@ impl Options {
                 }
                 b"--queue" => queue = Some(option_count("--queue", &value("--queue")?)?),
                 b"--limit" => limits.set(&value("--limit")?)?,
+                b"--access-log" => {
+                    access_log = Some(Destination::File(path(&value("--access-log")?)));
+                }
+                b"--error-log" => error_log = Destination::File(path(&value("--error-log")?)),
                 other => {
                     return Err(format!("unknown option {}", String::from_utf8_lossy(other)));
                 }
@@ -307,9 +367,16 @@ impl Options {
             stack_size: REQUEST_STACK,
             ini,
             ini_search,
+            access_log,
+            error_log,
             limits,
         })
     }
+}
+
+/// A path the line names, as its bytes are.
+fn path(bytes: &[u8]) -> PathBuf {
+    php_sapi::cgi::path_of(bytes)
 }
 
 /// An option's value read as a `T`.
@@ -385,6 +452,10 @@ mod tests {
             "requests-per-connection=2",
             "--limit",
             "connections=1",
+            "--limit",
+            "shutdown-timeout=3s",
+            "--limit",
+            "log-lines=7",
         ])?;
         assert_eq!(
             options.limits,
@@ -405,6 +476,8 @@ mod tests {
                 }),
                 requests_per_connection: 2,
                 connections: 1,
+                shutdown_timeout: Duration::from_secs(3),
+                log_lines: 7,
             }
         );
         let off = parse(&[
