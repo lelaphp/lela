@@ -116,7 +116,7 @@ third-engine-design.md
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 - ADR-0014 (accepted, 2026-10-09): A request's heap is lent to C for the length of one call
 
-<!-- /computed in=617798cdff5d3cdb034b42e03774e6f044b533bb8342329575d40e69fd38d180 out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
+<!-- /computed in=1783c270cbaa14d511bb59dd0b2653187b94a0bbfe68bff527a17ecf7c0ce468 out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
