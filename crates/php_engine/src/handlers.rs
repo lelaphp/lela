@@ -2883,11 +2883,19 @@ impl ArgAt {
     }
 }
 
-/// A slot of the call being built a send writes into: a positional
+/// A slot of the call being built a send writes into, the call's own
+/// record named once where the send reserved it: a positional
 /// argument's, or the one `zend_handle_named_arg` reserved for a named
 /// one.
 #[derive(Debug, Clone, Copy)]
-enum ArgSlot {
+struct ArgSlot {
+    call: FrameRef,
+    to: ArgTo,
+}
+
+/// Where in its call an [`ArgSlot`] stands.
+#[derive(Debug, Clone, Copy)]
+enum ArgTo {
     Positional(usize),
     Named(crate::api::call::NamedAt),
 }
@@ -2922,10 +2930,10 @@ fn reserve_arg(
     match ArgAt::of(op) {
         ArgAt::Number(number) => {
             let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-            let Some(passed) = req
-                .building_call()
-                .and_then(|call| req.vm().at(call))
-                .map(|call| call.num_args as usize)
+            let Some((call, passed)) = req
+                .vm()
+                .building_at()
+                .and_then(|call| Some((call, req.vm().at(call)?.num_args as usize)))
             else {
                 return no_call();
             };
@@ -2938,7 +2946,10 @@ fn reserve_arg(
                 ))));
             }
             Ok(Reserved {
-                slot: ArgSlot::Positional(at),
+                slot: ArgSlot {
+                    call,
+                    to: ArgTo::Positional(at),
+                },
                 number,
             })
         }
@@ -3042,7 +3053,10 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
         }
     };
     Ok(Ok(Reserved {
-        slot: ArgSlot::Named(at),
+        slot: ArgSlot {
+            call,
+            to: ArgTo::Named(at),
+        },
         number,
     }))
 }
@@ -3074,7 +3088,10 @@ fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
         header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
     }
     Ok(Reserved {
-        slot: ArgSlot::Positional(at),
+        slot: ArgSlot {
+            call,
+            to: ArgTo::Positional(at),
+        },
         number: u32::try_from(at + 1).unwrap_or(u32::MAX),
     })
 }
@@ -3491,17 +3508,16 @@ fn enter(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    function: Function,
+    call: FrameRef,
+    shape: crate::api::request::FrameShape,
 ) -> Edge {
-    let _ = function;
-    let call = req.vm().stack.current();
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| exec::temporary_slot(code, op.out));
-    let callee = req.activate_user(call, returns_to, exec::Caller::Opline(frame))?;
-    if let Some(at) = exec::parameter_prologue(req, callee)? {
+    let activated = req.activate_user(call, shape, returns_to, exec::Caller::Opline(frame))?;
+    if let Some(at) = exec::parameter_prologue(req, activated)? {
         return Ok(Stepped::Threw(at).into());
     }
-    Ok(Stepped::Pushed(callee).into())
+    Ok(Stepped::Pushed(activated.frame).into())
 }
 
 /// `ZEND_RECV` (`Z/Zend/zend_vm_def.h:5692`): the parameter numbered
@@ -10374,7 +10390,7 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
         req.pop_call();
         return threw(req, frame, &thrown);
     }
-    let Some((_, function)) = req.activate_call(op.out_type != OperandKind::Unused) else {
+    let Some((call, function)) = req.activate_call(op.out_type != OperandKind::Unused) else {
         return Err(Fatal::Error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
@@ -10386,8 +10402,9 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             return threw(req, frame, &thrown);
         }
     };
-    if req.user_function(function).is_some() {
-        return enter(req, frame, code, op, function);
+    if let Some(user) = req.user_function(function) {
+        let shape = user.shape;
+        return enter(req, frame, code, op, call, shape);
     }
     let served = req.serve_native(function, OnThrow::Nothing);
     // `ZEND_VM_FCALL_INTERRUPT_CHECK(call)`: the check php makes after a
@@ -20048,8 +20065,7 @@ fn returned_to_caller<T: Tier>(
         return Ok(Stepped::Done.into());
     }
     continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
-    let returns_to = req.vm().returns_to(frame);
-    let caller = req.returns_into(frame);
+    let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {
         return Ok(Stepped::Threw(caller).into());
@@ -20773,20 +20789,15 @@ fn place_argument(req: &mut Request, frame: FrameRef, slot: ArgSlot, value: Valu
 /// `value` written into `slot` of the call being built, the call owning
 /// it from here.
 fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fatal> {
-    let Some(call) = req.building_call() else {
-        req.release(value);
-        return Err(Fatal::Error(String::from(
-            "InternalError: a SEND_* opline with no call frame under it",
-        )));
-    };
-    let previous = match slot {
-        ArgSlot::Positional(at) | ArgSlot::Named(crate::api::call::NamedAt::Argument(at)) => req
+    let call = slot.call;
+    let previous = match slot.to {
+        ArgTo::Positional(at) | ArgTo::Named(crate::api::call::NamedAt::Argument(at)) => req
             .vm_mut()
             .stack
             .frame_mut(call)
             .and_then(|frame| frame.slots_mut().get_mut(at))
             .map(|placed| Value::of_zval(std::mem::replace(placed, value.to_zval()))),
-        ArgSlot::Named(crate::api::call::NamedAt::Extra(at)) => req
+        ArgTo::Named(crate::api::call::NamedAt::Extra(at)) => req
             .annex_mut(call)
             .and_then(|annex| annex.extra_named.get_mut(at))
             .map(|(_, placed)| std::mem::replace(placed, value)),
@@ -21283,8 +21294,7 @@ fn unwind_from<T: Tier>(
         }
         return Ok(Stepped::Threw(frame).into());
     }
-    let returns_to = req.vm().returns_to(frame);
-    let caller = req.returns_into(frame);
+    let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     // `zend_leave_helper`: the callee wrote no return value, so the
     // caller's temporary for the call is left undefined, and the caller
@@ -22286,8 +22296,11 @@ mod tests {
             header.info.set_serving();
             let frame = req
                 .push_call(header)
-                .and_then(|call| req.activate_user(call, None, crate::exec::Caller::Opline(main)))
-                .unwrap_or(main);
+                .and_then(|call| {
+                    let shape = req.call_shape(call).unwrap_or_default();
+                    req.activate_user(call, shape, None, crate::exec::Caller::Opline(main))
+                })
+                .map_or(main, |activated| activated.frame);
             assert_eq!(
                 served!(req, frame, at => init_fcall_by_name::<Nop>(&mut req, frame, &code, &init)),
                 Ok(Stepped::Same(frame)),

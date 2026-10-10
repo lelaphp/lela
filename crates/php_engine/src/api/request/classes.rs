@@ -21,8 +21,8 @@ use crate::exec;
 use crate::observer::LinkedAtLoad;
 
 use super::{
-    Arity, Bound, Declared, Deprecations, Keyed, Member, MemberAt, Named, Request, UserFunction,
-    lowered_key, preload, user_function_decl,
+    Bound, Declared, Deprecations, FrameShape, Keyed, Member, MemberAt, Named, Request,
+    UserFunction, lowered_key, preload, user_function_decl,
 };
 
 /// A class's members before they are numbered ([`Request::members_of`]):
@@ -628,6 +628,7 @@ impl Request {
                 at: MemberAt::Method(method),
             });
             let flags = crate::attributes::Flags::of(&decl.function.attributes);
+            let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body));
             rows.push((
                 Some(method),
                 UserFunction {
@@ -635,7 +636,7 @@ impl Request {
                     body,
                     member,
                     flags,
-                    arity: Arity::of(&decl.function),
+                    shape,
                 },
             ));
         }
@@ -654,6 +655,7 @@ impl Request {
                     at: MemberAt::Hook { property, kind },
                 });
                 let flags = crate::attributes::Flags::of(&hook.function.attributes);
+                let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body));
                 rows.push((
                     None,
                     UserFunction {
@@ -661,7 +663,7 @@ impl Request {
                         body,
                         member,
                         flags,
-                        arity: Arity::of(&hook.function),
+                        shape,
                     },
                 ));
             }
@@ -1473,13 +1475,13 @@ impl Request {
             return Err(crate::api::raising::fatal(self, &message));
         }
         let declared = Function::local(self.user_functions.len());
-        let (flags, arity) = dynamic_traits(unit, at);
+        let (flags, shape) = dynamic_traits(unit, at);
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body: exec::Body::Dynamic(at),
             member: None,
             flags,
-            arity,
+            shape,
         });
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
@@ -1509,13 +1511,13 @@ impl Request {
             return Function::local(position);
         }
         let function = Function::local(self.user_functions.len())?;
-        let (flags, arity) = dynamic_traits(unit, at);
+        let (flags, shape) = dynamic_traits(unit, at);
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body,
             member: None,
             flags,
-            arity,
+            shape,
         });
         Some(function)
     }
@@ -1598,7 +1600,7 @@ impl Request {
                 body,
                 member: None,
                 flags: crate::attributes::Flags::of(&decl.attributes),
-                arity: Arity::of(decl),
+                shape: FrameShape::of(decl, exec::body_of(unit, body)),
             });
         }
         true
@@ -1905,14 +1907,14 @@ fn class_in(
 /// The flags and the arity of the function at `at` of a unit's
 /// `dynamic` table, one a `DECLARE_FUNCTION` binds or a closure is made
 /// of.
-fn dynamic_traits(unit: &Unit, at: u32) -> (crate::attributes::Flags, Arity) {
+fn dynamic_traits(unit: &Unit, at: u32) -> (crate::attributes::Flags, FrameShape) {
     usize::try_from(at)
         .ok()
         .and_then(|at| unit.dynamic.get(at))
-        .map(|(decl, _)| {
+        .map(|(decl, code)| {
             (
                 crate::attributes::Flags::of(&decl.attributes),
-                Arity::of(decl),
+                FrameShape::of(decl, Some(code)),
             )
         })
         .unwrap_or_default()

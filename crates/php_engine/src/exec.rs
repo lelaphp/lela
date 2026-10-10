@@ -506,8 +506,8 @@ impl Header {
 
     /// A call made a user frame over `code`, `i_init_func_execute_data`:
     /// the opline it stands at and the runtime cache it reads.
-    pub(crate) fn activate(&mut self, code: &OpArray, opline: u32) {
-        self.run_time_cache = code.runtime_cache;
+    pub(crate) fn activate(&mut self, run_time_cache: u32, opline: u32) {
+        self.run_time_cache = run_time_cache;
         self.opline = opline;
         self.info.set(CallInfo::CALL | CallInfo::BUILDING, false);
     }
@@ -901,7 +901,7 @@ impl<'a> FrameAt<'a> {
         let declared = self
             .function()
             .and_then(|function| self.req.user_function(function))
-            .map_or(0, |user| user.arity.parameters);
+            .map_or(0, |user| user.shape.parameters);
         let count = self.num_args().saturating_sub(declared) as usize;
         let from = code.num_cvs.saturating_add(code.num_tmps) as usize;
         self.frame
@@ -1084,19 +1084,25 @@ pub(crate) fn observer_slot_of<'map>(
 /// from and answers no other. The day a slot here holds a property
 /// offset, a rebound closure takes its own cache there.
 pub(crate) fn init_runtime_cache(map: &mut MapTable<RuntimeCache>, code: &OpArray, body: Body) {
-    init_runtime_cache_at(map, runtime_cache_of(code), code.cache_size, body);
+    let at = runtime_cache_of(code);
+    if body == Body::Main {
+        map.map(at).lay_down(code.cache_size);
+    } else {
+        lay_runtime_cache(map, at, code.cache_size);
+    }
 }
 
-/// [`init_runtime_cache`] over the op array's cache pointer and size,
-/// read off it before the request is borrowed again.
-pub(crate) fn init_runtime_cache_at(
+/// `zend_init_func_run_time_cache` over a function's cache pointer and
+/// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
+/// the function's first activation in the request, found laid down by
+/// every one after.
+pub(crate) fn lay_runtime_cache(
     map: &mut MapTable<RuntimeCache>,
     at: MapPtr<RuntimeCache>,
     cache_size: u32,
-    body: Body,
 ) {
     let cache = map.map(at);
-    if body == Body::Main || cache.slots.is_none() {
+    if cache.slots.is_none() {
         cache.lay_down(cache_size);
     }
 }
@@ -2284,22 +2290,24 @@ pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32
 #[inline]
 pub(crate) fn parameter_prologue(
     req: &mut Request,
-    callee: FrameRef,
+    activated: Activated,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
     // A frame whose push skipped every `RECV*` stands at its entry
-    // already, which is told where the caller stands, and its op array
-    // is not held for a run of none.
-    let Some(state) = req.frame_at(callee) else {
-        return Ok(None);
-    };
-    let entry = state
-        .code()
-        .and_then(|body| body.safepoints.first())
-        .map_or(0, |at| at.0);
-    if state.opline() >= entry {
-        return Ok(None);
+    // already, which its activation told, and its op array is not held
+    // for a run of none.
+    match activated.prologue {
+        None => Ok(None),
+        Some(entry) => prologue_from(req, activated.frame, entry),
     }
-    prologue_from(req, callee, entry)
+}
+
+/// A call made a user frame ([`Request::activate_user`]): the frame, and
+/// the entry safepoint its `RECV*` prologue runs to where the activation
+/// did not skip it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Activated {
+    pub(crate) frame: FrameRef,
+    pub(crate) prologue: Option<u32>,
 }
 
 /// The `RECV*` oplines of [`parameter_prologue`], up to the entry

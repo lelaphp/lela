@@ -553,30 +553,51 @@ pub(crate) struct UserFunction {
     /// from the declaration's attributes, decoded where the function is
     /// declared.
     pub(crate) flags: crate::attributes::Flags,
-    /// What every call's frame push reads of the declaration, read off
-    /// it once where the function is declared ([`Arity`]).
-    pub(crate) arity: Arity,
+    /// What every call's frame push and activation read of the
+    /// function, read once where it is declared ([`FrameShape`]).
+    pub(crate) shape: FrameShape,
 }
 
-/// `op_array.num_args` and `ZEND_ACC_HAS_TYPE_HINTS`: how many
-/// parameters a declaration has before a variadic, and whether any of
-/// them declares a type, which `i_init_func_execute_data` reads off the
-/// function to place a call's arguments and to choose the `RECV*` it
-/// skips (design §5.6). php's compiler writes both onto the op array;
-/// the engine reads them off the declaration where the function is
-/// declared, so a call reads two fields and walks no parameter.
+/// What `zend_vm_stack_push_call_frame` and `i_init_func_execute_data`
+/// read off a user function (design §5.6): `op_array.num_args` and
+/// `ZEND_ACC_HAS_TYPE_HINTS`, how many parameters the declaration has
+/// before a variadic and whether any of them declares a type, which
+/// place a call's arguments and choose the `RECV*` it skips; and of its
+/// op array, `last_var + T`, the room its frame takes, the entry
+/// safepoint its prologue runs to, and its runtime cache's map pointer
+/// and size. php's compiler writes them all onto the op array; the
+/// engine reads them once where the function is declared, so a call
+/// reads them off the function table and walks neither the declaration
+/// nor the unit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Arity {
+pub(crate) struct FrameShape {
     pub(crate) parameters: u32,
     pub(crate) typed: bool,
+    /// The CVs, `last_var`.
+    pub(crate) cvs: u32,
+    /// The CVs and the temporaries.
+    pub(crate) slots: u32,
+    /// The first opline past the `RECV*` prologue, `safepoints[0]`.
+    pub(crate) entry: u32,
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
+    pub(crate) cache: u32,
+    /// `op_array.cache_size`.
+    pub(crate) cache_size: u32,
 }
 
-impl Arity {
-    pub(crate) fn of(decl: &FunctionDecl) -> Arity {
+impl FrameShape {
+    pub(crate) fn of(decl: &FunctionDecl, code: Option<&php_unit::OpArray>) -> FrameShape {
         let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
-        Arity {
+        FrameShape {
             parameters: u32::try_from(declared).unwrap_or(u32::MAX),
             typed: decl.parameters.iter().any(|p| p.ty.is_some()),
+            cvs: code.map_or(0, |code| code.num_cvs),
+            slots: code.map_or(0, |code| code.num_cvs.saturating_add(code.num_tmps)),
+            entry: code
+                .and_then(|code| code.safepoints.first())
+                .map_or(0, |at| at.0),
+            cache: code.map_or(0, |code| code.runtime_cache),
+            cache_size: code.map_or(0, |code| code.cache_size),
         }
     }
 }

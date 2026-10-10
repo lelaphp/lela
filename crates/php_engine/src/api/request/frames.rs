@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef};
+use php_heap::{Fatal, FrameRef, MapPtr, Slot, Zval, ZvalRef};
 use php_unit::{CacheSlot, Unit};
 
 use crate::api::call::Function;
@@ -575,12 +575,8 @@ impl Request {
     /// reuses.
     pub(crate) fn call_room(&self, function: Function, count: u32) -> usize {
         let user_room = |function: Function| {
-            let user = self.user_function(function)?;
-            let code = exec::body_of(&user.unit, user.body)?;
-            Some((
-                code.num_cvs.saturating_add(code.num_tmps),
-                user.arity.parameters,
-            ))
+            let shape = self.user_function(function)?.shape;
+            Some((shape.slots, shape.parameters))
         };
         let room = if let Some((own, parameters)) = user_room(function) {
             own.saturating_add(count.saturating_sub(parameters))
@@ -616,9 +612,29 @@ impl Request {
         self.vm.stack.grow_top(&mut self.heap, call, more)
     }
 
+    /// The [`FrameShape`](crate::api::request::FrameShape) of the user
+    /// function `call` names; none for a call to anything else.
+    pub(crate) fn call_shape(&self, call: FrameRef) -> Option<crate::api::request::FrameShape> {
+        Some(self.user_function(self.vm.at(call)?.function?)?.shape)
+    }
+
     /// The innermost user frame of the running stack ([`Vm::innermost_at`]).
     pub(crate) fn innermost_user_frame(&self) -> Option<FrameRef> {
         Some(FrameRef(u32::try_from(self.vm.innermost_at()?).ok()?))
+    }
+
+    /// Where `frame` returns: the frame it returns into
+    /// ([`Request::returns_into`]) and the slot of it that takes what it
+    /// returns, where the call wants the value, read off one header.
+    pub(crate) fn returning(&self, frame: FrameRef) -> (FrameRef, Option<(FrameRef, u32)>) {
+        let named = self
+            .vm
+            .at(frame)
+            .map(|header| (header.caller.frame(), header.returns_to));
+        match named {
+            Some((Some(caller), returns_to)) => (caller, returns_to.map(|slot| (caller, slot))),
+            _ => (self.returns_into(frame), None),
+        }
     }
 
     /// The frame `frame` returns to: the caller its push named, or the
@@ -675,37 +691,21 @@ impl Request {
     pub(crate) fn activate_user(
         &mut self,
         call: FrameRef,
+        shape: crate::api::request::FrameShape,
         returns_to: Option<u32>,
         caller: exec::Caller,
-    ) -> Result<FrameRef, Fatal> {
-        let no_body = || {
-            Fatal::Error(String::from(
-                "InternalError: a user function whose body the unit has not",
-            ))
-        };
-        let header = self.vm.at(call).ok_or_else(no_body)?;
-        let num_args = header.num_args;
-        let function = header.function.ok_or_else(no_body)?;
+    ) -> Result<exec::Activated, Fatal> {
+        let num_args = self.vm.at(call).map_or(0, |header| header.num_args);
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it past the temporaries
         // for `RECV_VARIADIC` to collect.
-        let user = self.user_function(function).ok_or_else(no_body)?;
-        let (body, arity) = (user.body, user.arity);
-        let code = exec::body_of(&user.unit, body).ok_or_else(no_body)?;
-        let own = code.num_cvs.saturating_add(code.num_tmps) as usize;
-        let entry = code.safepoints.first().map_or(0, |at| at.0);
-        let parameters = arity.parameters as usize;
+        let own = shape.slots as usize;
+        let parameters = shape.parameters as usize;
         let passed = num_args as usize;
         let extra = passed.saturating_sub(parameters);
         let opline =
-            exec::skipped_recv(num_args, arity.parameters, arity.typed, entry).unwrap_or(0);
-        let cache = exec::runtime_cache_of(code);
-        let lay = code.cache_size;
-        let mut laid = header.clone();
-        laid.activate(code, opline);
-        laid.returns_to = returns_to;
-        laid.caller = caller;
+            exec::skipped_recv(num_args, shape.parameters, shape.typed, shape.entry).unwrap_or(0);
         let len = self
             .vm
             .stack
@@ -717,18 +717,24 @@ impl Request {
                 .grow_top(&mut self.heap, call, own + extra - len)?;
         }
         if let Some(frame) = self.vm.stack.frame_mut(call) {
-            *frame.header_mut() = laid;
-            if extra > 0 {
-                let slots = frame.slots_mut();
+            let laid = frame.header_mut();
+            laid.activate(shape.cache, opline);
+            laid.returns_to = returns_to;
+            laid.caller = caller;
+            let slots = frame.slots_mut();
+            if extra > 0 && passed <= slots.len() && own + extra <= slots.len() {
                 slots.copy_within(parameters..passed, own);
                 if let Some(left) = slots.get_mut(parameters..passed.min(own)) {
                     left.fill(Zval::UNDEF);
                 }
             }
         }
-        exec::init_runtime_cache_at(&mut self.map, cache, lay, body);
+        exec::lay_runtime_cache(&mut self.map, MapPtr::new(shape.cache), shape.cache_size);
         crate::observer::call(self, call);
-        Ok(call)
+        Ok(exec::Activated {
+            frame: call,
+            prologue: (opline < shape.entry).then_some(shape.entry),
+        })
     }
 
     /// The frame off both stacks, every owner its slots held given up
@@ -792,25 +798,32 @@ impl Request {
     /// ```
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.vm.stack.current();
-        if self.vm.at(frame).is_some_and(|header| header.info.call()) {
+        let Some(header) = self.vm.at_mut(frame) else {
+            return;
+        };
+        if header.info.call() {
             self.pop_call();
             return;
         }
-        if let Some(state) = self.vm.at_mut(frame) {
-            state.info.set_leaving(true);
-        }
+        // `EG(current_execute_data) = EX(prev_execute_data)`: off the
+        // chain from here, its receiver and closure taken off the header
+        // for the release.
+        header.info.set_leaving(true);
+        let receiver = header.receiver();
+        header.set_receiver(None);
+        let closure = header.closure.take();
+        let (function, annex, num_args) = (header.function, header.annex, header.num_args);
         if !self.bailout {
-            self.release_frame(frame);
+            self.release_frame(frame, function, annex, num_args, receiver, closure);
         }
         // `destroy_op_array`, which frees the heap runtime cache, then
         // `efree_size(EX(func))`.
-        let popped = self.vm.at(frame).cloned();
-        let extra = popped.as_ref().and_then(|header| self.take_annex(header));
+        let annex = annex.and_then(|id| self.annexes.take(id));
         self.vm.stack.pop_frame(&mut self.heap);
-        let Some(mut extra) = extra else {
+        let Some(mut annex) = annex else {
             return;
         };
-        if let Some(held) = extra.op_array.take() {
+        if let Some(held) = annex.op_array.take() {
             if let Some(cache) = held.run_time_cache {
                 cache.free(self);
             }
@@ -818,27 +831,48 @@ impl Request {
         }
         // An `eval`'s main op array is destroyed when its execution ends,
         // and the names its compile made with it.
-        if popped.is_some_and(|header| header.function.is_none()) && !self.bailout {
-            self.release_unit_names(extra.unit.as_ref());
+        if function.is_none() && !self.bailout {
+            self.release_unit_names(annex.unit.as_ref());
         }
     }
 
-    /// What [`Request::pop_frame`] gives up of `frame`, in its order.
-    fn release_frame(&mut self, frame: FrameRef) {
+    /// What [`Request::pop_frame`] gives up of `frame`, in its order:
+    /// the CVs and the temporaries, the rebuilt table and the extra named
+    /// arguments where the frame has an annex, the extra arguments past
+    /// the temporaries where it was passed more than it declares, the
+    /// receiver and the closure. A frame with no annex and no extra
+    /// argument, nearly every one, walks its own slots and nothing else.
+    fn release_frame(
+        &mut self,
+        frame: FrameRef,
+        function: Option<Function>,
+        annex: Option<exec::AnnexId>,
+        num_args: u32,
+        receiver: Option<exec::Receiver>,
+        closure: Option<PhpObject>,
+    ) {
         let slots = self
             .vm
             .stack
             .frame(frame)
             .map_or(0, crate::exec::HeapFrame::len);
-        let (cvs, own) =
-            self.frame_at(frame)
-                .and_then(exec::FrameAt::code)
-                .map_or((slots, slots), |code| {
+        let (cvs, own, parameters) = match function.and_then(|f| self.user_function(f)) {
+            Some(user) => (
+                user.shape.cvs as usize,
+                user.shape.slots as usize,
+                user.shape.parameters,
+            ),
+            None => self.frame_at(frame).and_then(exec::FrameAt::code).map_or(
+                (slots, slots, 0),
+                |code| {
                     (
                         code.num_cvs as usize,
                         code.num_cvs.saturating_add(code.num_tmps) as usize,
+                        0,
                     )
-                });
+                },
+            ),
+        };
         let mut from = 0;
         while let Some((at, value)) = self.take_next_owner(frame, from, own) {
             if at < cvs {
@@ -848,44 +882,36 @@ impl Request {
             }
             from = at.saturating_add(1);
         }
-        self.free_rebuilt_table(frame);
         // A generator's frame leaves its closure to the generator
         // (`ZendGenerator::closure`), which keeps it until it is freed.
-        let generator = self.annex_of(frame).and_then(|extra| extra.generator);
-        let named = self
-            .vm
-            .at(frame)
-            .and_then(|header| header.annex)
-            .and_then(|id| self.annexes.get_mut(id))
-            .map(|extra| std::mem::take(&mut extra.extra_named))
-            .unwrap_or_default();
-        let held = self.vm.at_mut(frame).map(|state| {
-            let receiver = state.receiver();
-            state.set_receiver(None);
-            (
-                named,
-                receiver,
-                state.closure.take().filter(|_| generator.is_none()),
-            )
-        });
-        if let Some((named, receiver, closure)) = held {
-            self.release_named(named);
-            // `zend_vm_stack_free_extra_args_ex`'s `i_zval_ptr_dtor`: an
-            // extra argument, past the CVs and the temporaries, that
-            // keeps owners after the release is a possible root, so a
-            // cycle a collection in the callee found reachable through it
-            // is found again.
+        let mut generator = None;
+        if let Some(id) = annex {
+            self.free_rebuilt_table(frame);
+            let named = self.annexes.get_mut(id).map(|annex| {
+                generator = annex.generator;
+                std::mem::take(&mut annex.extra_named)
+            });
+            if let Some(named) = named {
+                self.release_named(named);
+            }
+        }
+        // `zend_vm_stack_free_extra_args_ex`'s `i_zval_ptr_dtor`: an
+        // extra argument, past the CVs and the temporaries, that keeps
+        // owners after the release is a possible root, so a cycle a
+        // collection in the callee found reachable through it is found
+        // again.
+        if num_args > parameters || function.is_none() {
             let mut from = own;
             while let Some((at, value)) = self.take_next_owner(frame, from, usize::MAX) {
                 self.release(value);
                 from = at.saturating_add(1);
             }
-            if let Some(receiver) = receiver {
-                self.give_up_receiver(receiver);
-            }
-            if let Some(closure) = closure {
-                self.release(closure.as_value());
-            }
+        }
+        if let Some(receiver) = receiver {
+            self.give_up_receiver(receiver);
+        }
+        if let Some(closure) = closure.filter(|_| generator.is_none()) {
+            self.release(closure.as_value());
         }
     }
 

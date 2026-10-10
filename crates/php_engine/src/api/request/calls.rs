@@ -698,9 +698,10 @@ impl Request {
         caller: exec::Caller,
     ) -> Result<Value, Thrown> {
         let standing = call.0 as usize;
-        let pushed = self.activate_user(call, None, caller);
-        let frame = match pushed {
-            Ok(frame) => frame,
+        let shape = self.call_shape(call).unwrap_or_default();
+        let pushed = self.activate_user(call, shape, None, caller);
+        let activated = match pushed {
+            Ok(activated) => activated,
             Err(fatal) => {
                 while self.vm.depth() > standing {
                     self.pop_frame();
@@ -713,7 +714,8 @@ impl Request {
         // php runs is run, which is where a declared parameter type is
         // checked and a scalar argument coerced, and the entry
         // safepoint is raised after them by the loop below.
-        let raised = crate::exec::parameter_prologue(self, frame);
+        let frame = activated.frame;
+        let raised = crate::exec::parameter_prologue(self, activated);
         let raised = match self.fatal_of(raised) {
             Ok(raised) => raised,
             Err(thrown) => {
