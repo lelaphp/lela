@@ -232,13 +232,8 @@ fn connect(
     };
     let control = match req.xport_create(&transport, xport)? {
         Ok(stream) => stream,
-        Err(XportFailure { text, .. }) => {
-            let text = if text.is_empty() {
-                "Unspecified error"
-            } else {
-                &text
-            };
-            docref(req, Level::Warning, &format!("connect() failed: {text}"));
+        Err(failed) => {
+            docref(req, Level::Warning, &failed.warning());
             return Ok(None);
         }
     };
@@ -819,7 +814,7 @@ fn start(
     let data = match req.xport_create(&transport, xport)? {
         Ok(data) => data,
         Err(XportFailure { text, .. }) => {
-            return Ok(Started::Refused(Reply::default(), Some(text)));
+            return Ok(Started::Refused(Reply::default(), text));
         }
     };
     let reply = match get_result(req, control) {
@@ -929,13 +924,8 @@ fn listing(
     };
     let data = match req.xport_create(&transport, xport)? {
         Ok(data) => data,
-        Err(XportFailure { text, .. }) => {
-            let text = if text.is_empty() {
-                "Unspecified error"
-            } else {
-                &text
-            };
-            docref(req, Level::Warning, &format!("connect() failed: {text}"));
+        Err(failed) => {
+            docref(req, Level::Warning, &failed.warning());
             return Ok(Listed::Refused(Reply::default()));
         }
     };
