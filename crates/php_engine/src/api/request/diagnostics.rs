@@ -1558,13 +1558,14 @@ const E_ALL: i64 = 32767 & !Level::Strict.bit();
 /// 8.5 has no case for, so it falls to the `default:` every level php
 /// dropped falls to.
 ///
-/// No fence reaches either word, so the two arms are held by the test
-/// below and not by a witness. php 8.5 raises `E_RECOVERABLE_ERROR` at
-/// one site, `zend_object_is_true` (`Z/Zend/zend_operators.c:2918`),
-/// when an object's `cast_object` handler refuses `_IS_BOOL`; the
-/// standard handler answers `true` for every user class, and no class
-/// in the bundle brings a handler that refuses, so no PHP source raises
-/// it, and `trigger_error()` takes the four `E_USER_*` levels alone.
+/// No fence of this crate reaches either word, so the two arms are held
+/// by the test below. php 8.5 raises `E_RECOVERABLE_ERROR` at one site,
+/// `zend_object_is_true` (`Z/Zend/zend_operators.c:2918`), when an
+/// object's `cast_object` handler refuses `_IS_BOOL`; the standard
+/// handler answers `true` for every user class, and of the bundle only
+/// `ext/zend_test`'s classes bring a handler that refuses, so the word
+/// is witnessed there, and `trigger_error()` takes the four `E_USER_*`
+/// levels alone.
 /// `E_STRICT` has no raise anywhere: its constant stands `#[Deprecated]`
 /// since 8.4 with the message that the level was removed.
 /// `E_FATAL_ERRORS` (`Z/Zend/zend_errors.h:47`): the six levels
