@@ -540,17 +540,18 @@ impl Request {
             returns_to,
             caller,
         );
-        let mut extra = Vec::new();
+        // The parameters' CVs of the frame just pushed hold `UNDEF`, so
+        // each argument is written over nothing, as `SEND_*` writes into
+        // the callee's slot; the rest are the extra arguments.
         let mut arguments = call.arguments;
-        for (at, argument) in arguments.drain(..).enumerate() {
-            if at < parameters {
-                let previous =
-                    self.set_slot(frame, u32::try_from(at).unwrap_or(u32::MAX), argument);
-                self.release(previous);
-            } else {
-                extra.push(argument);
+        let mut placing = arguments.drain(..);
+        if let Some(slots) = self.stack.frame_mut(frame) {
+            let cells = slots.slots_mut().iter_mut().take(parameters);
+            for (cell, argument) in cells.zip(placing.by_ref()) {
+                *cell = argument.to_zval();
             }
         }
+        let extra: Vec<Value> = placing.collect();
         if let Some(state) = self.vm.at_mut(frame) {
             state.extra_args = extra;
             state.extra_named = call.extra_named;
