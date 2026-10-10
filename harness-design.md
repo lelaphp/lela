@@ -257,6 +257,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **116. Revision 116 (2026-10-10).** §12 item 16 and §14 item 3 count the rows whose cause is `debt` against the day-30 target, and every other cause on its own line, settled by Mitchell on #2429 (2026-10-09, restated for #2460's field). #2460 gave a divergence row a `cause` beside its `kind`, and #2462 built it at 57f46b7b. The `cause` is `debt` by default, or `php-ub`, `by-design` or `oracle-build` (`Cause::ALL`, `xtask/src/divergence.rs:313-318`). `kind` now says only which lane reads a row, and `status --section divergence` writes the total from `debt` rows alone against `seams.toml`'s `[divergence] target` and a line for each other cause after it. Item 16 said the registry counts every kind against one target, and item 3 said the target counts all kinds. Design revision 124 carries §8's sentence and CONTEXT.md's **Divergence** names the cause. §4.3's sentence is not here. The restated words have an `oracle-build` row's reason name what it retires at, but Mitchell ruled later the same day on #2462 that the retirement is a structured field, `retires`. `divergence-reason` reads that field for it and never the reason (`divergence.rs:569`, `:582`), so #2535 asks a person for §4.3's words, and §4.3 still says the target counts every kind until it lands. Rejected, by #2460's ruling: a kind per cause, lanes times causes. Nothing is reversed, so there is no ADR. Check: `grep -n 'counts all kinds\|counts every kind against' harness-design.md` matches ledger rows alone; `cargo xtask status --section divergence` prints the `debt` total and then a line for each other cause.
 
+**117. Revision 117 (2026-10-10).** §4.1, §6 and §3 say what the generated clippy configuration and the re-entry rule are since #1950 and #2464, settled by Mitchell on #2465 (2026-10-09, a session), the sentences word for word. Since branch `t1917` (644fe4ab, c71f8c03), a `clippy.toml` is rendered at each directory that a `deny_types` or `deny_methods` rule's scope names. Each file carries every such rule whose scope reaches it: `crates/clippy.toml` and `sapi/clippy.toml` hold `fork.threads`, and `ext/clippy.toml` holds `ext.no-locks` and `fork.threads`. Yet §4.1's derived bullet still said that `ext/clippy.toml` was generated from `ext.no-locks` alone and covered nothing under `crates/`. It now says each such rule renders into the file at each directory its scope names, and it names no file list, so a fourth directory does not stale it. §4.1's readers name the generator of each `clippy.toml`, and its deletion test names the generated clippy.toml files. §6 gains a row for `fork.threads`, the fork home and the engine's counted threads, and its generated-config row names each generated clippy.toml. #2464's third diff, approved by Mitchell and landed at e27db22f, deleted `engine.reentry-signature`. Measured on #2464 at a1299fa1, over php_engine and php_streams, 298 of the 300 functions that call `execute`, `reenter` or a `release` take `&mut Request`, and the other two hold one or make the request they serve. So §6's re-entry row cites the type and design principle 9, not a lint, with compile as its cadence. §3's row is now **Re-entry in signatures**, and its last column says this revision retires the lint. §4.1's excerpt shows `lints.no-panic` at its scope since e27db22f, and the `engine.reentry-signature` row is struck. Rejected, by the ruling: listing the three files in the prose, §6 keeping "the parameter" (it claims more than the types enforce, e.g. `api::syntax::InRequest`), and reversing the deletion. Design revision 125 carries principle 9 and strikes §10's lint bullet, and #2475 asks what stops a crate-level clippy.toml from hiding the generated rules. Nothing is reversed, so there is no ADR. Check: `grep -n 'reentry-signature\|Re-entry lint' harness-design.md` matches ledger rows alone, and `cargo xtask budget` reads each of `crates/clippy.toml`, `ext/clippy.toml` and `sapi/clippy.toml` as matching its rendering.
+
 ---
 
 ## 2. Vocabulary
@@ -285,7 +287,7 @@ The design never uses the word harness, but most of it is one. Each mechanism, i
 | **Budgets** | sensor | r1 §3, §4.1; r4 §4.1; r7 §4.1 | Line ceilings per crate and for the workspace: the total, the new lines, `docs/`, the harness's own prose and the pooled bindings; the lock packages and the clean release build. | Ceilings declared in the manifest; no design document restates one. |
 | **`unsafe` audit** | sensor | r1 §10; r4 §10; r7 §4.1 | Four homes: `php_heap`, `ext/*/src/ffi/`, `php_jit::table::code`, `php_jit::enter`; a fifth fails. | Homes declared in the manifest; ADR-0004's two-home sentence is superseded (§14). |
 | **Lints** | sensor | r1 §10 | `clippy::pedantic`, `-D warnings`, panic family denied in engine crates. | Unchanged. |
-| **Re-entry lint** | sensor | r2 §10 | Any `php_engine` function calling `execute` or `release` must take `&mut Request`. | Unchanged. |
+| **Re-entry in signatures** | guide | r2 §10; design principle 9 | Any function that can run PHP code holds a `&mut Request`, as a parameter or in a value whose lifetime names it; the type carries it now. | The lint is retired by revision 117 (#2464). |
 | **Request leak gate** | sensor | r2 §5.14; r5 §8; ADR-0005 | Asserted after every request-state drop in tests; names the state type. | Unchanged. |
 | **Bundle features** | guide | r4 §4.10; ADR-0004 | One feature per non-default extension on `php_bundle`; `enabled()` in module-startup order, checked against the crate graph. | Unchanged. |
 | **Gates G1 to G8** | sensor | r7 §9; jit-research §E.11; llvm-research §G8 | Numbered bars under the measurement protocol (paired reps, A/A control); G1 per commit from the day `php_engine::tier` exists. | Readings of instrument `bench` (§4.2). |
@@ -308,7 +310,7 @@ Five modules, each deep: a small interface, most of the harness's behaviour behi
 
 ### 4.1 The seam manifest: `seams.toml`
 
-**Interface.** One tracked file. Readers: `api-check`, `unsafe-audit`, `budget`, `permit`, `status`, the generator of `ext/clippy.toml`, and the test that runs one negative-control fixture per rule. Writers: people, in the same commit as the design change that alters a rule; the commit that lands a revision of the design of record is the commit that changes the manifest.
+**Interface.** One tracked file. Readers: `api-check`, `unsafe-audit`, `budget`, `permit`, `status`, the generator of each `clippy.toml`, and the test that runs one negative-control fixture per rule. Writers: people, in the same commit as the design change that alters a rule; the commit that lands a revision of the design of record is the commit that changes the manifest.
 
 **What it declares, once.** Every rule the design of record states as a sentence today. The list is the acceptance test for the format: a rule below that the format cannot carry is a design error in this section.
 
@@ -364,15 +366,10 @@ adr = "0006"
 text = "unsafe is permitted only in the homes this rule names; see design §4.1."
 [[rule]]
 id = "lints.no-panic"
-scope = ["crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*"]
-exempt = ["tests", "xtask"]
+scope = ["crates/*", "ext/*", "sapi/*"]
+exempt = ["tests", "xtask", "crates/php_macros"]
 deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
 text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
-[[rule]]
-id = "engine.reentry-signature"
-scope = "crates/php_engine/**"
-check = "reentry-signature"
-text = "A function in php_engine that calls execute or release takes &mut Request."
 [[rule]]
 id = "witness.exit-authored"
 scope = "**/*.rs"
@@ -402,12 +399,12 @@ Two tables beside the rules. `[telemetry]` carries the sensor telemetry's one nu
 
 - `api-check` reads `[[seam]]` and `[[edge]]`: it regenerates each lock from the compiled crate's public items (`lock_from` says which crate for `api.lock`, r4 §4.5), the harness's own included (the `harness` seam, `xtask/xtask.lock`, whose consumers are none: nothing in the workspace imports `xtask`), fails on a diff, tags the seam's reading with the `<lock>-line` rule the manifest carries for it (`api.lock-line`, `xtask.lock-line`), fails a manifest edge not in `[[edge]]`, fails a `use` path crossing a seam, checks the bundle against the `order` its `[[edge]]` names, fails an `ext/*` crate's library dependency on another that no row of design §4.10's list of surfaces names with both crates, writes each extension's `pub` beyond `extension()` to `ext/<name>/surface.lock` and diffs it as an item lock (revision 100), holds `api.lock` to `[budget] api_items` over every line but `__private`'s and to `[budget] api_private_items` over those (design revision 34: the helpers only a macro expansion names, listed and diffed like any line, capped apart so their growth is also a person's decision), and treats `allowlist = true` as "the consumer may import only what the lock names" (r7 §4.2).
 - `unsafe-audit` reads `unsafe.homes`. `budget` reads `[budget]` and every `[[crate]]`.
-- `ext/clippy.toml` is generated from `ext.no-locks`, `reason` strings included, and committed; a stale copy is a `budget` failure (the same rule as generated code, r1 §3 principle 7, applied to a config file). Clippy finds it by nearest-file search, so it covers every `ext/<name>` and nothing under `crates/` (revision 1 D.2).
+- Each rule with `deny_types` or `deny_methods` renders into a generated, committed `clippy.toml` at each directory its scope names, and the file in a directory carries every such rule whose scope reaches it, reasons included; the files are the ones `generated.committed` names. A stale copy is a `budget` failure (r1 §3 principle 7, applied to a config file). Clippy reads only the nearest file, so a crate is held by its directory's, and a clippy.toml nearer than that would hold it to nothing (revision 1 D.2).
 - `permit` reads every `[[rule]]` with a `tool` or a `scope` (§4.4).
 - `status --section rules` renders the rule list with its ADR numbers; that rendering is the map's item 7 (§5).
 - One fixture per `[[rule]]` under `xtask/fixtures/rules/<id>/` that must fail, run by `cargo test -p xtask`; a rule without a fixture fails the test. This is Mahout's "a new instrument ships with its negative control" (r1 §2.1) as a structural fact.
 
-**The deletion test.** Delete the manifest and every number and edge reappears in six places: `api-check`'s source, `unsafe-audit`'s source, `budget`'s source, `ext/clippy.toml`, the hook's rules, and the map. That is what the inventory found had already happened in the design revisions.
+**The deletion test.** Delete the manifest and every number and edge reappears in six places: `api-check`'s source, `unsafe-audit`'s source, `budget`'s source, the generated clippy.toml files, the hook's rules, and the map. That is what the inventory found had already happened in the design revisions.
 
 **What is not in it.** The oracle pin (`oracle.toml`, a human decision with its own nightly sensor, §10 rule 5). Divergences (`docs/divergence.toml`, §4.3). Anything decided in prose: the deletion-test arguments, the ledger, the principles.
 
@@ -584,16 +581,17 @@ The constraint table of revision 1 stands, with its column of where each rule no
 | Constraint | Mechanism | Cadence | Declared in |
 |---|---|---|---|
 | An extension cannot reach the engine | crate visibility (`ext/*` depends on `php_ext` only) | compile | `[[edge]]` `ext/* → php_ext only`, ADR-0004 |
-| A native cannot re-enter without saying so | `&mut Request` plus the re-entry lint | compile, per commit | `xtask` lint (unchanged) |
+| A native cannot re-enter without saying so | `&mut Request`: running PHP code needs one, as a parameter or in a value whose lifetime names it | compile | design principle 9, ADR-0002 |
 | Shared structures cannot hold per-request values | `MapPtr<T>` newtype | compile | design r2 §5.14 |
 | An extension cannot hold a lock | generated `ext/clippy.toml`; `permit` at the edit | at the tool call, on save, per commit | `ext.no-locks`, ADR-0005 |
+| A process forks through one home, and every engine thread is counted | generated `disallowed-methods` in each clippy.toml; `#[expect(clippy::disallowed_methods)]` at the home | on save, per commit | `fork.threads`, ADR-0010 |
 | No `unsafe` outside the homes `unsafe.homes` names | `forbid(unsafe_code)` at crate roots; `unsafe-audit`; `permit` | at the tool call, compile, per commit | `unsafe.homes` |
 | No panic reaches a request | panic family denied; `catch_unwind` at the boundary | on save, per commit | lints (unchanged) |
 | No interface growth without a lock line | `api-check`; `permit` note | at the tool call, per commit | `[[seam]]`, `api.lock-line` |
 | Only a macro expansion names `api::__private` | a `deny_pattern` over `ext/*` sources; `permit` at the edit | at the tool call, per commit | a manifest rule a person adds (design revision 34) |
 | No hand-authored exit status in a witness | `witness --accept` the only writer; `permit` | at the tool call, pre-commit | `witness.exit-authored` |
 | No second registry | bundle features checked against requirements | per commit | `[[edge]]` `php_bundle`, `order = "registration"` |
-| No committed generated code, except the generated config | `budget` path check; `ext/clippy.toml` regenerated and diffed | per commit | `[[crate]]` |
+| No committed generated code, except the generated config | `budget` path check; each generated clippy.toml regenerated and diffed | per commit | `[[crate]]` |
 | No process weight | `docs/**` and the three living documents under `[budget] docs`; `.claude/**` and `harness-plugins/**` hand-written under `[budget] harness` | per commit | `[budget]` |
 | An agent does not touch the harness's own configuration | `permit` | at the tool call | `harness.self`, `harness.self-shell`, `harness.transcript` |
 
