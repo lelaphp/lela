@@ -34,4 +34,5 @@ php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+httpdate = { workspace = true }
 tokio = { workspace = true }
