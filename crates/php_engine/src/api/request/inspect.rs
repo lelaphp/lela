@@ -453,6 +453,11 @@ impl Request {
         self.description.primary
     }
 
+    /// How the host hands a wrapped program's file over.
+    pub(crate) fn program_file(&self) -> crate::engine::ProgramFile {
+        self.description.program_file
+    }
+
     /// `zend_try_exception_handler`, then what is left kept for the host
     /// as phpdbg's `phpdbg_handle_exception` reads it
     /// (`Z/sapi/phpdbg/phpdbg_prompt.c:688`): its class, `file` and

@@ -65,11 +65,15 @@ impl Poller {
         self.change(fd.as_raw_fd(), flags)
     }
 
-    /// `fpm_event_kqueue_remove`.
+    /// `fpm_event_kqueue_remove`, whose failure is logged.
     pub(crate) fn remove(&self, fd: BorrowedFd<'_>) {
         use std::os::fd::AsRawFd;
-        self.change(fd.as_raw_fd(), nix::sys::event::EvFlags::EV_DELETE)
-            .ok();
+        if self
+            .change(fd.as_raw_fd(), nix::sys::event::EvFlags::EV_DELETE)
+            .is_err()
+        {
+            crate::zlog!(Error @ fpm_event_kqueue_remove:192, "kevent: unable to delete event");
+        }
     }
 
     /// `fpm_event_kqueue_wait`: the descriptors ready within `timeout_ms`,
@@ -130,9 +134,12 @@ impl Poller {
         self.ep.add(fd, EpollEvent::new(flags, token))
     }
 
-    /// `fpm_event_epoll_remove`.
+    /// `fpm_event_epoll_remove`, whose failure is logged.
     pub(crate) fn remove(&self, fd: BorrowedFd<'_>) {
-        let _ = self.ep.delete(fd);
+        use std::os::fd::AsRawFd;
+        if self.ep.delete(fd).is_err() {
+            crate::zlog!(Error @ fpm_event_epoll_remove:203, "epoll: unable to remove fd {}", fd.as_raw_fd());
+        }
     }
 
     /// `fpm_event_epoll_wait`.
