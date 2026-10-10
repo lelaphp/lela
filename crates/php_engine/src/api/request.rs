@@ -74,7 +74,7 @@ mod frame_writes;
 pub(crate) use frame_reads::Identity;
 pub use frame_reads::{ChainFrame, FrameId, FrameView};
 mod frames;
-use frames::{Link, Slots, links_of};
+use frames::{Expand, Link, Slots, links_of};
 mod hash_bytes;
 mod include;
 mod ini;

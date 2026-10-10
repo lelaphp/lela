@@ -22,7 +22,7 @@ use crate::api::values::{
 use crate::exec::{self, IncludeKind};
 
 use super::{
-    DEBUG_BACKTRACE_IGNORE_ARGS, DEBUG_BACKTRACE_PROVIDE_OBJECT, Link, Request, Slots,
+    DEBUG_BACKTRACE_IGNORE_ARGS, DEBUG_BACKTRACE_PROVIDE_OBJECT, Expand, Link, Request, Slots,
     append_escaped, links_of,
 };
 
@@ -582,13 +582,8 @@ impl Request {
     /// expands into the kept frames of the generators between
     /// ([`crate::generator::placeholder_frames`]).
     pub(super) fn chain(&self) -> impl Iterator<Item = Link<'_>> {
-        let mut chain: Vec<Link> = Vec::new();
-        for vm in self.executions() {
-            chain.extend(links_of(self, vm, 0..vm.depth(), &|root| {
-                self.placeholder_links(root)
-            }));
-        }
-        chain.into_iter()
+        self.executions()
+            .flat_map(|vm| links_of(self, vm, 0..vm.depth(), Expand::Generators))
     }
 
     /// The links a placeholder for `root` expands into, innermost first.
