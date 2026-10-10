@@ -34,7 +34,7 @@ That is `regions`, `per-commit`, `miri`, `done` and `red-main` in `harness.yml`,
 
 ### What the hosted image needs that the server has
 
-Nothing beyond what the jobs already install. The image is the same release as the server, so `packages.txt` installs the same packages under the same names through `.github/actions/platform-libraries`, and `runner.sh`'s release check stays at 26.04. What `runner.sh linux` adds to the server, the image already carries:
+Nothing beyond what the jobs already install. The image is the same release as the server, so `packages.txt` installs the same packages under the same names through `.github/actions/platform-libraries` in `per-commit`, the one Linux job that links them (xtask links none, #2166), and `runner.sh`'s release check stays at 26.04. What `runner.sh linux` adds to the server, the image already carries:
 
 | `runner.sh linux` installs | on `ubuntu-26.04` (image 20260927) |
 |---|---|
