@@ -149,11 +149,12 @@ impl Of {
     }
 }
 
-/// `CALENDAR_METHOD_INIT_VARS` and `CALENDAR_METHOD_FETCH_OBJECT`: the
-/// request's error reset, then the object's, and php's `Error` for an
+/// `CALENDAR_METHOD_FETCH_OBJECT`: the object's error reset, the
+/// request's having been reset before the arguments
+/// (`CALENDAR_METHOD_INIT_VARS`, `before_args`), and php's `Error` for an
 /// object no factory made.
 fn fetch(req: &mut Request, o: Of) -> Result<(), Thrown> {
-    error::errors_reset::<CalendarObject>(req, o.object);
+    error::reset_object::<CalendarObject>(req, o.object);
     if held(req, o.object).is_none() {
         return Err(throw_error(
             req,

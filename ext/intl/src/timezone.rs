@@ -63,10 +63,12 @@ pub(crate) fn construct(
     Ok(object.into_instance())
 }
 
-/// `TIMEZONE_METHOD_INIT_VARS` and `TIMEZONE_METHOD_FETCH_OBJECT`: both
-/// errors reset, and php's `Error` for an object no factory made.
+/// `TIMEZONE_METHOD_FETCH_OBJECT`: the object's error reset, the
+/// request's having been reset before the arguments
+/// (`TIMEZONE_METHOD_INIT_VARS`, `before_args`), and php's `Error` for an
+/// object no factory made.
 fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    error::errors_reset::<TimeZoneObject>(req, object);
+    error::reset_object::<TimeZoneObject>(req, object);
     if zone(req, object).is_none() {
         return Err(throw_error(
             req,

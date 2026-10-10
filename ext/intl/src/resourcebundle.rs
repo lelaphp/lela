@@ -339,11 +339,12 @@ fn create(req: &mut Request, given: &Given) -> Result<Option<Owner<Bundles>>, Th
     }
 }
 
-/// `RESOURCEBUNDLE_METHOD_INIT_VARS` and `RESOURCEBUNDLE_METHOD_FETCH_OBJECT`:
-/// both errors reset, and php's `Error` where no constructor opened a
-/// bundle.
+/// `RESOURCEBUNDLE_METHOD_FETCH_OBJECT`: the object's error reset, the
+/// request's having been reset before the arguments
+/// (`RESOURCEBUNDLE_METHOD_INIT_VARS`, `before_args`), and php's `Error`
+/// where no constructor opened a bundle.
 fn fetch_object(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    error::errors_reset::<BundleObject>(req, object);
+    error::reset_object::<BundleObject>(req, object);
     if bundle(req, object).is_none() {
         return Err(throw_error(
             req,
@@ -829,8 +830,6 @@ fn resourcebundle_get_error_message(
     error_message(req, bundle.object())
 }
 
-/// `RESOURCEBUNDLE_METHOD_INIT_VARS` and the function's one argument,
-/// `ResourceBundle $bundle`, held after the reset.
 /// `php_intl.stub.php`'s `resourcebundle_*` block.
 pub(crate) fn functions(builder: php_ext::abi::ExtensionBuilder) -> php_ext::abi::ExtensionBuilder {
     builder.functions(vec![
