@@ -4908,7 +4908,7 @@ pub(crate) fn new<T: Tier>(
     // `Z_OBJ_HT_P(result)->get_constructor`: the table's answer, which
     // is `zend_std_get_constructor`'s visibility check for a user class
     // and a refusal for a class php reserves, `Generator`'s.
-    let constructor = match req.handlers_of(class).get_constructor(req, object) {
+    let constructor = match req.made(class).handlers.get_constructor(req, object) {
         Ok(constructor) => constructor,
         Err(thrown) => return threw(req, frame, &thrown),
     };

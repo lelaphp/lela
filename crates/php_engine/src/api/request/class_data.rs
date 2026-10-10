@@ -12,16 +12,15 @@
 //! and marks nothing, so the next `new` or the next read tries again
 //! and fails again where it failed.
 
-use std::collections::HashMap;
-
 use php_unit::decl::ClassKind;
 
 use super::{PropertyInfo, Request};
+use crate::api::abi::{NativeNew, ObjectHandlers};
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, Value};
 
 /// One class's row of [`Request`]'s `class_data`.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct ClassData {
     /// `ZEND_ACC_CONSTANTS_UPDATED` in `mutable_data->ce_flags`.
     updated: bool,
@@ -40,19 +39,103 @@ pub(super) struct ClassData {
     /// `IS_CONSTANT_VISITED` (`MARK_CONSTANT_VISITED`) while
     /// `zend_get_class_constant_ex` evaluates them, by name.
     visiting: Vec<Box<[u8]>>,
-    /// [`Request::object_custom`] once read: what the linked class, an
-    /// immutable one, makes every object of it count.
-    layout: Option<Layout>,
+    /// What `new` reads of the class ([`Made`]), resolved on its first
+    /// object in the request.
+    made: Option<Made>,
 }
 
-/// What `zend_object_alloc` and the `create_object` around it allocate
-/// for an object of one class: the struct's bytes past the header and
-/// the declared slots, and the class whose declaration names the struct
-/// and what is allocated beside it.
-#[derive(Debug, Clone, Copy)]
-struct Layout {
-    custom: usize,
+/// What `object_init_ex` reads of a class to make an object of it, which
+/// php keeps on the class entry, set where the class is linked and
+/// inherited by `zend_do_inheritance`: `ce->create_object`, the handler
+/// table it installs, `ce->default_properties_count`, and the size
+/// `zend_object_alloc` asks for. Each is the linked class's and
+/// immutable, read off its lineage once per request and kept on its row,
+/// so making an object walks no lineage and hashes nothing.
+#[derive(Clone, Copy)]
+pub(crate) struct Made {
+    /// `ce->default_properties_count` ([`Request::class_slots`]).
+    pub(crate) slots: u32,
+    /// The struct's bytes past the header and the declared slots
+    /// ([`Request::object_custom`]).
+    pub(crate) custom: usize,
+    /// The class whose declaration names the struct and what is
+    /// allocated beside it ([`Request::lay_beside`]).
     declared_by: Option<ClassId>,
+    /// `ce->create_object` where it lays a native payload
+    /// ([`Request::native_new_of`]).
+    pub(crate) create: Option<NativeNew>,
+    /// The handler table objects of the class are reached through
+    /// ([`Request::handlers_of`]).
+    pub(crate) handlers: &'static dyn ObjectHandlers,
+    /// Whether `create_object` is `zend_default_exception_new`'s
+    /// ([`Request::records_throw_site`]).
+    throw_site: bool,
+}
+
+/// Each class's row by the class's number, as php reaches a class's
+/// `mutable_data` through its map pointer (design §5.14): the classes
+/// every request shares at their published number, the request's own at
+/// theirs, one word a class until its row is made. Reading a row is one
+/// index.
+#[derive(Default)]
+struct Rows {
+    published: Vec<Option<Box<ClassData>>>,
+    own: Vec<Option<Box<ClassData>>>,
+}
+
+impl Rows {
+    fn place(class: ClassId) -> (bool, usize) {
+        match class.local_at() {
+            Some(at) => (false, at),
+            None => (true, class.0 as usize),
+        }
+    }
+
+    fn table(&self, published: bool) -> &Vec<Option<Box<ClassData>>> {
+        if published {
+            &self.published
+        } else {
+            &self.own
+        }
+    }
+
+    #[inline]
+    fn get(&self, class: ClassId) -> Option<&ClassData> {
+        let (published, at) = Rows::place(class);
+        self.table(published).get(at)?.as_deref()
+    }
+
+    fn get_mut(&mut self, class: ClassId) -> Option<&mut ClassData> {
+        let (published, at) = Rows::place(class);
+        let table = if published {
+            &mut self.published
+        } else {
+            &mut self.own
+        };
+        table.get_mut(at)?.as_deref_mut()
+    }
+
+    /// The row of `class`, made empty where the request had none.
+    fn row(&mut self, class: ClassId) -> &mut ClassData {
+        let (published, at) = Rows::place(class);
+        let table = if published {
+            &mut self.published
+        } else {
+            &mut self.own
+        };
+        if table.len() <= at {
+            table.resize_with(at + 1, || None);
+        }
+        let slot = &mut table[at];
+        slot.get_or_insert_with(Box::default)
+    }
+
+    /// Every row made, the table left empty.
+    #[cfg(debug_assertions)]
+    fn take(&mut self) -> impl Iterator<Item = ClassData> + use<> {
+        let Rows { published, own } = std::mem::take(self);
+        published.into_iter().chain(own).flatten().map(|row| *row)
+    }
 }
 
 /// Each class's mutable data and the blocks made beside each object, whose fields no file but this one
@@ -60,11 +143,11 @@ struct Layout {
 #[derive(Default)]
 pub(super) struct ClassDataTables {
     /// `zend_class_mutable_data` of each class the request updated or
-    /// read a constant of ([`class_data`]).
-    rows: HashMap<ClassId, ClassData>,
+    /// read a constant of, or made an object of.
+    rows: Rows,
     /// The `emalloc`s php's `create_object` made beside each object
     /// that has them, by the object's id ([`Request::lay_beside`]).
-    beside: HashMap<u32, Vec<php_heap::Block>>,
+    beside: super::WordMap<u32, Vec<php_heap::Block>>,
 }
 
 impl Request {
@@ -76,7 +159,7 @@ impl Request {
     /// A release build leaves them to the heap's mass release.
     #[cfg(debug_assertions)]
     pub(super) fn free_class_data(&mut self) {
-        for (_, data) in std::mem::take(&mut self.class_data.rows) {
+        for data in self.class_data.rows.take() {
             for (_, value) in data.constants {
                 self.release(value);
             }
@@ -103,33 +186,47 @@ impl Request {
     /// P 82.16
     /// ```
     pub(crate) fn object_custom(&mut self, class: ClassId) -> usize {
-        self.object_layout(class).custom
+        self.made(class).custom
     }
 
-    /// [`Request::object_custom`] and the class it was read from, walked
-    /// once per class.
-    fn object_layout(&mut self, class: ClassId) -> Layout {
-        const ZEND_OBJECT: usize = 56;
-        if let Some(layout) = self
-            .class_data
-            .rows
-            .get(&class)
-            .and_then(|data| data.layout)
-        {
-            return layout;
+    /// What `new` read of `class` ([`Made`]) where the request has made
+    /// an object of it, through a request held shared.
+    #[inline]
+    pub(crate) fn made_ref(&self, class: ClassId) -> Option<Made> {
+        self.class_data.rows.get(class)?.made
+    }
+
+    /// What `new` reads of `class` ([`Made`]), read off its lineage once
+    /// per request and kept on its row.
+    #[inline]
+    pub(crate) fn made(&mut self, class: ClassId) -> Made {
+        match self.made_ref(class) {
+            Some(made) => made,
+            None => self.resolve_made(class),
         }
+    }
+
+    /// [`Request::made`] read off the lineage, the class's first `new`
+    /// in the request.
+    #[cold]
+    fn resolve_made(&mut self, class: ClassId) -> Made {
+        const ZEND_OBJECT: usize = 56;
         let (size, declared_by) = self
             .lineage(class)
             .map_while(|at| self.class_decl(at).map(|decl| (at, decl.object_size)))
             .find(|&(_, size)| size != 0)
             .map_or((0, None), |(at, size)| (size as usize, Some(at)));
         let guards = if self.uses_guards(class) { 16 } else { 0 };
-        let layout = Layout {
+        let made = Made {
+            slots: self.class_slots(class),
             custom: size.saturating_sub(ZEND_OBJECT) + guards,
             declared_by,
+            create: self.native_new_of(class),
+            handlers: self.handlers_of(class),
+            throw_site: self.records_throw_site(class),
         };
-        self.class_data.rows.entry(class).or_default().layout = Some(layout);
-        layout
+        self.class_data.rows.row(class).made = Some(made);
+        made
     }
 
     /// The `emalloc`s `create_object` makes beside a new `object`, each
@@ -140,7 +237,7 @@ impl Request {
     /// witnesses stand beside the classes that declare them, `SplHeap`'s
     /// and the random engines' among them.
     pub(crate) fn lay_beside(&mut self, object: PhpObject) -> Result<(), Thrown> {
-        let Some(declared_by) = self.object_layout(object.class()).declared_by else {
+        let Some(declared_by) = self.made(object.class()).declared_by else {
             return Ok(());
         };
         let count = self
@@ -197,9 +294,17 @@ impl Request {
     /// down with it ([`crate::api::abi::ObjectHandlers::create_object`]);
     /// the object released where any fails.
     pub(crate) fn object_created(&mut self, object: PhpObject) -> Result<(), Thrown> {
-        self.lay_beside(object)?;
-        let handlers = self.handlers_of(object.class());
-        let thrown = if self.records_throw_site(object.class()) {
+        let made = self.made(object.class());
+        self.object_made(object, made)
+    }
+
+    /// [`Request::object_created`] with what `new` read of the class.
+    pub(super) fn object_made(&mut self, object: PhpObject, made: Made) -> Result<(), Thrown> {
+        if made.declared_by.is_some() {
+            self.lay_beside(object)?;
+        }
+        let handlers = made.handlers;
+        let thrown = if made.throw_site {
             self.note_throw_site(object).err()
         } else {
             None
@@ -301,7 +406,7 @@ impl Request {
         if self
             .class_data
             .rows
-            .get(&class)
+            .get(class)
             .is_some_and(|data| data.updated)
         {
             return Ok(());
@@ -342,7 +447,7 @@ impl Request {
             self.lay_down_static(info)?;
         }
         self.evaluate_defaults(class)?;
-        self.class_data.rows.entry(class).or_default().updated = true;
+        self.class_data.rows.row(class).updated = true;
         Ok(())
     }
 
@@ -398,7 +503,7 @@ impl Request {
         if let Some((_, value)) = self
             .class_data
             .rows
-            .get(&declaring)
+            .get(declaring)
             .and_then(|data| data.constants.iter().find(|(held, _)| **held == *name))
         {
             let value = *value;
@@ -437,8 +542,7 @@ impl Request {
         self.addref(&value);
         self.class_data
             .rows
-            .entry(declaring)
-            .or_default()
+            .row(declaring)
             .constants
             .push((name.into(), value));
         Ok(value)
@@ -503,7 +607,7 @@ impl Request {
         name: &[u8],
         class_name: &str,
     ) -> Result<Value, Thrown> {
-        let data = self.class_data.rows.entry(declaring).or_default();
+        let data = self.class_data.rows.row(declaring);
         if data.constants.iter().any(|(held, _)| **held == *name) {
             return self.evaluated_class_constant(declaring, name);
         }
@@ -519,7 +623,7 @@ impl Request {
         }
         data.visiting.push(name.into());
         let evaluated = self.evaluated_class_constant(declaring, name);
-        if let Some(data) = self.class_data.rows.get_mut(&declaring) {
+        if let Some(data) = self.class_data.rows.get_mut(declaring) {
             data.visiting.retain(|held| **held != *name);
         }
         evaluated
@@ -620,12 +724,35 @@ impl Request {
         let defaults: Vec<Option<Value>> = self
             .class_data
             .rows
-            .get(&class)
+            .get(class)
             .map_or_else(Vec::new, |data| data.defaults.clone());
         for value in defaults.iter().flatten() {
             self.addref(value);
         }
         Ok(defaults)
+    }
+
+    /// `object_properties_init` over a new `object` of a class
+    /// [`Request::update_class_constants`] updated: each slot its
+    /// class's default with one more owner, the object's
+    /// (`ZVAL_COPY_PROP`), read off the class's row in place; a typed
+    /// slot with none stays `IS_UNDEF` and `IS_PROP_UNINIT`.
+    pub(super) fn init_properties(&mut self, object: PhpObject) {
+        let Some(data) = self.class_data.rows.get(object.class()) else {
+            return;
+        };
+        let o = object.heap();
+        for (slot, value) in (0u32..).zip(&data.defaults) {
+            match value {
+                Some(value) => {
+                    self.heap.addref(value.to_zval());
+                    if let Some(at) = o.slot_ref(slot) {
+                        at.write(value.to_zval());
+                    }
+                }
+                None => o.set_slot_bit(slot, php_heap::PropBit::Uninit, true),
+            }
+        }
     }
 
     /// The loop of `zend_update_class_constants` over
@@ -658,7 +785,7 @@ impl Request {
         let data = self
             .class_data
             .rows
-            .get(&class)
+            .get(class)
             .filter(|data| data.updated)?;
         let (at, _, _) = self
             .placed(class)
@@ -671,7 +798,7 @@ impl Request {
         let done = self
             .class_data
             .rows
-            .get(&class)
+            .get(class)
             .map_or(0, |data| data.defaults.len());
         // The rows not yet evaluated, which is none once the class's
         // defaults stood.
@@ -696,12 +823,7 @@ impl Request {
                 None if typed => None,
                 None => Some(Value::null()),
             };
-            self.class_data
-                .rows
-                .entry(class)
-                .or_default()
-                .defaults
-                .push(value);
+            self.class_data.rows.row(class).defaults.push(value);
         }
         Ok(())
     }

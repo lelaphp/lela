@@ -705,6 +705,38 @@ pub(crate) struct PropertyInfo {
     pub(crate) at: u32,
 }
 
+/// A table keyed by a number, an object's id or a type's: php's
+/// `HashTable` over an integer key, whose hash is the key
+/// (`ZEND_HANDLE_NUMERIC`), here spread by one multiply so the lookup's
+/// tag bits are not all zero for small numbers. Nothing to seed, so
+/// nothing a request pays `SipHash` for.
+pub(crate) type WordMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<WordHasher>>;
+
+/// [`WordMap`]'s hash: the key's word times the golden ratio's.
+#[derive(Default)]
+pub(crate) struct WordHasher(u64);
+
+impl std::hash::Hasher for WordHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(self.0.rotate_left(8) ^ u64::from(byte));
+        }
+    }
+
+    fn write_u32(&mut self, word: u32) {
+        self.write_u64(u64::from(word));
+    }
+
+    fn write_u64(&mut self, word: u64) {
+        self.0 = (self.0 ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
 /// `zend_string_tolower` for a lookup: `find` over `name` lowered, on the
 /// stack where it fits, since the key is only read, and over `name`
 /// itself where it has nothing to lower.
