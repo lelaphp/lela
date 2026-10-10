@@ -139,12 +139,17 @@ pub fn main() -> ExitCode {
 /// them; a startup php refuses ends the process here, before the socket
 /// is bound ([`php_sapi::start`]).
 fn engine(options: &Options) -> Engine {
-    let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
+    // On threads: never pcntl nor posix, whatever features a build of the
+    // workspace unified into php_bundle (design §7.2).
+    let extensions: Vec<_> = php_bundle::enabled_for(php_bundle::Serving::Threads)
+        .iter()
+        .map(|start| start())
+        .collect();
     let builder = Engine::builder()
         .ini_files(php_sapi::ini::search(NAME, &options.ini_search, true))
         .sapi_name(NAME)
         .extensions(&extensions)
-        .configure(php_bundle::CONFIGURE)
+        .configure(php_bundle::configure_for(php_bundle::Serving::Threads))
         .tier::<php_bundle::Tier>();
     php_sapi::start(natives::declare(builder), &options.ini, log::error)
 }

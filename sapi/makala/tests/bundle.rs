@@ -3,7 +3,17 @@
 //! carries (design §7.2), and a startup php refuses ending the process
 //! before it binds its socket.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
+mod common;
+
+use std::io::Write;
 use std::process::{Command, Stdio};
+
+use common::{Server, read_response};
 
 /// The `features` a host's manifest turns on in its `php_bundle`
 /// dependency, as written on its one line.
@@ -33,6 +43,37 @@ fn the_bundle_is_the_clis_without_pcntl_and_posix() {
         .filter(|feature| !matches!(*feature, "pcntl" | "posix"))
         .collect();
     assert_eq!(bundle_features(makala), threaded);
+}
+
+/// The engine makala starts carries neither `pcntl` nor `posix`, though
+/// the build this test runs under turns both features on, as a build of
+/// the workspace beside the CLI does (`[dev-dependencies]`): the host
+/// leaves them out as a host that serves on threads
+/// (`php_bundle::Serving::Threads`, design §7.2), and its configure line
+/// says so.
+#[test]
+fn a_build_with_pcntl_and_posix_on_serves_without_them() {
+    let root = common::root(
+        "threaded",
+        &[(
+            "t.php",
+            "<?php var_export([extension_loaded('pcntl'), extension_loaded('posix'), \
+             function_exists('pcntl_fork'), function_exists('posix_getpid')]); \
+             ob_start(); phpinfo(INFO_GENERAL); $info = ob_get_clean(); \
+             echo ' ', str_contains($info, '--enable-pcntl') ? 'pcntl' : '-', \
+             ' ', str_contains($info, '--disable-posix') ? 'no posix' : '-';",
+        )],
+    );
+    let server = Server::start(&root);
+    let mut stream = server.connect();
+    stream
+        .write_all(b"GET /t.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let response = read_response(&mut stream);
+    assert_eq!(
+        String::from_utf8_lossy(&response.body),
+        "array (\n  0 => false,\n  1 => false,\n  2 => false,\n  3 => false,\n) - no posix"
+    );
 }
 
 /// opcache's `accel_post_startup` refuses `opcache.file_cache_only` with

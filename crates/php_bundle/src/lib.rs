@@ -298,6 +298,66 @@ pub const CONFIGURE: &[&str] = &[
     "--with-zlib",
 ];
 
+/// How a host serves its requests, which decides whether the extensions
+/// that act on the process itself are in its set (design §7.2, revision
+/// 35).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Serving {
+    /// One request at a time on its process's one thread: the CLI, CGI,
+    /// php-fpm's children and phpdbg, where `pcntl` and `posix` may fork,
+    /// take signals and set the process's ids.
+    OneThread,
+    /// Requests on threads of one process, as the production server serves
+    /// them: never `pcntl` nor `posix`, whose `fork()` would copy one
+    /// thread of a process whose other threads are in the middle of their
+    /// requests.
+    Threads,
+}
+
+/// The extensions that act on the process itself, behind their features.
+const PROCESS: &[fn() -> Extension] = &[
+    #[cfg(feature = "pcntl")]
+    php_ext_pcntl::extension,
+    #[cfg(feature = "posix")]
+    php_ext_posix::extension,
+];
+
+/// The enabled set for a host that serves as `serving` says: [`enabled()`]
+/// whole for one thread, and on threads without `pcntl` and `posix`,
+/// whichever features the build turned on. One build of the workspace
+/// turns on the features every host names, so a host on threads cannot
+/// leave them out by its own manifest alone.
+#[must_use]
+pub fn enabled_for(serving: Serving) -> Vec<fn() -> Extension> {
+    let carried = |start: &&fn() -> Extension| {
+        serving == Serving::OneThread
+            || !PROCESS
+                .iter()
+                .any(|process| std::ptr::fn_addr_eq(*process, **start))
+    };
+    enabled().iter().filter(carried).copied().collect()
+}
+
+/// [`CONFIGURE`] for a host that serves as `serving` says: on threads
+/// without `--enable-pcntl` and with `--disable-posix`, as php's configure
+/// would have built the set [`enabled_for`] hands it.
+#[must_use]
+pub fn configure_for(serving: Serving) -> &'static [&'static str] {
+    static THREADS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    if serving == Serving::OneThread {
+        return CONFIGURE;
+    }
+    THREADS.get_or_init(|| {
+        let mut switches: Vec<&'static str> = (CONFIGURE.iter().copied())
+            .filter(|switch| *switch != "--enable-pcntl")
+            .collect();
+        if !switches.contains(&"--disable-posix") {
+            switches.push("--disable-posix");
+        }
+        switches
+    })
+}
+
 /// The tier, named once (design §4.3 seam 8): the interpreter alone until
 /// the `jit` feature binds the compiled tier. Never in [`enabled()`].
 pub type Tier = php_ext::Nop;
@@ -331,5 +391,29 @@ pub mod test {
             builder = builder.ini(name, value);
         }
         builder.build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On threads the set is the enabled set less the extensions that act
+    /// on the process, whichever of them the build carries; on one thread
+    /// it is the enabled set whole, and so is its configure line.
+    #[test]
+    fn a_host_on_threads_carries_no_extension_that_acts_on_the_process() {
+        let threads = enabled_for(Serving::Threads);
+        assert_eq!(threads.len(), enabled().len() - PROCESS.len());
+        assert!(!threads.iter().any(|start| {
+            PROCESS
+                .iter()
+                .any(|process| std::ptr::fn_addr_eq(*process, *start))
+        }));
+        assert_eq!(enabled_for(Serving::OneThread).len(), enabled().len());
+        assert_eq!(configure_for(Serving::OneThread), CONFIGURE);
+        let on_threads = configure_for(Serving::Threads);
+        assert!(!on_threads.contains(&"--enable-pcntl"));
+        assert!(on_threads.contains(&"--disable-posix"));
     }
 }

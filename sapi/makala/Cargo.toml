@@ -39,3 +39,11 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 httpdate = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+# pcntl and posix turned on for the tests' build, as one build of the
+# workspace turns them on for every host the CLI's features reach: the
+# binary the tests start is then built with them, and the bundle test
+# holds that makala leaves them out by its own choice
+# (`php_bundle::Serving::Threads`), never by cargo's features alone.
+php_bundle = { path = "../../crates/php_bundle", features = ["pcntl", "posix"] }
