@@ -1727,9 +1727,12 @@ impl Request {
     /// earlier declaration's file and line and ends the request before
     /// the frame is pushed, so nothing of a file that redeclares runs:
     /// none says so, and otherwise whether the function was declared,
-    /// which one the preload holds is not.
+    /// which one the preload holds, or a place the unit has no function
+    /// at, is not.
     fn declare_function(&mut self, unit: &Arc<Unit>, at: usize) -> Option<bool> {
-        let (decl, _) = unit.functions.get(at)?;
+        let Some((decl, _)) = unit.functions.get(at) else {
+            return Some(false);
+        };
         let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
         if self.preloaded_function(unit, body) {
             return Some(false);
