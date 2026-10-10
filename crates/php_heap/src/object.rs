@@ -63,9 +63,12 @@ const SLOT: usize = size_of::<Zval>();
 /// `init_executor` (`Z/Zend/zend_execute_API.c:171`).
 const INIT_SIZE: u32 = 1024;
 /// `sizeof(zend_object *)`, one bucket of the store.
-const BUCKET: usize = size_of::<usize>();
+const BUCKET: usize = size_of::<Bucket>();
 /// `OBJ_BUCKET_INVALID`: the low bit of a bucket that holds no object.
 const BUCKET_INVALID: usize = 1;
+/// One bucket of the store, php's `zend_object *`: an object's pointer,
+/// or a word tagged [`BUCKET_INVALID`] in the same place ([`Store`]).
+type Bucket = *mut ObjHeader;
 /// The store's table at request start, what `memory_get_usage()` reads
 /// before the request serves a line: 1024 buckets of a pointer each.
 pub(crate) const INIT_BYTES: usize = INIT_SIZE as usize * BUCKET;
@@ -534,9 +537,15 @@ impl std::fmt::Debug for Obj {
 /// A bucket holds the object's address, or, with `OBJ_BUCKET_INVALID`
 /// set in its low bit, the next free id shifted up one
 /// (`SET_OBJ_BUCKET_NUMBER`), exactly as php packs it; bucket zero is
-/// never given, so an id is never false.
+/// never given, so an id is never false. The word is a pointer, as
+/// php's is (#2529): a live bucket is the object's pointer with its
+/// provenance, an invalidated one the same pointer tagged in place
+/// (`map_addr`), and a free-list entry an address with no provenance
+/// at all, so nothing is exposed and nothing is read back from an
+/// integer. The growth's copy is the heap's untyped one, which carries
+/// provenance with the bytes.
 pub(crate) struct Store {
-    buckets: Option<NonNull<usize>>,
+    buckets: Option<NonNull<Bucket>>,
     size: u32,
     top: u32,
     free_list_head: Option<u32>,
@@ -565,16 +574,16 @@ impl Store {
         if self.buckets.is_some() {
             return Ok(());
         }
-        let at = mm.alloc(INIT_BYTES)?.cast::<usize>();
+        let at = mm.alloc(INIT_BYTES)?.cast::<Bucket>();
         // SAFETY: the allocation is `INIT_SIZE` buckets and nothing else
         // holds it; php zeroes bucket zero and no other.
-        unsafe { at.as_ptr().write(0) };
+        unsafe { at.as_ptr().write(std::ptr::null_mut()) };
         self.buckets = Some(at);
         self.size = INIT_SIZE;
         Ok(())
     }
 
-    fn bucket_ptr(&self, handle: u32) -> Option<*mut usize> {
+    fn bucket_ptr(&self, handle: u32) -> Option<*mut Bucket> {
         let buckets = self.buckets?;
         if handle >= self.size {
             return None;
@@ -583,7 +592,7 @@ impl Store {
         Some(unsafe { buckets.as_ptr().add(handle as usize) })
     }
 
-    fn read(&self, handle: u32) -> Option<usize> {
+    fn read(&self, handle: u32) -> Option<Bucket> {
         let at = self.bucket_ptr(handle)?;
         // SAFETY: the bucket is inside the allocation and below `top`
         // or being written, so it was written by `put`, `lay_down` or
@@ -591,7 +600,7 @@ impl Store {
         Some(unsafe { at.read() })
     }
 
-    fn write(&self, handle: u32, word: usize) {
+    fn write(&self, handle: u32, word: Bucket) {
         if let Some(at) = self.bucket_ptr(handle) {
             // SAFETY: the bucket is inside the allocation.
             unsafe { at.write(word) };
@@ -604,10 +613,10 @@ impl Store {
             return None;
         }
         let word = self.read(handle)?;
-        if word & BUCKET_INVALID != 0 {
+        if word.addr() & BUCKET_INVALID != 0 {
             return None;
         }
-        NonNull::new(std::ptr::with_exposed_provenance_mut(word)).map(Obj)
+        NonNull::new(word).map(Obj)
     }
 
     /// `zend_objects_store_put` (`Z/Zend/zend_objects_API.c:142`): the
@@ -618,7 +627,7 @@ impl Store {
         self.lay_down(mm)?;
         let handle = match self.free_list_head {
             Some(handle) if !self.no_reuse => {
-                let word = self.read(handle).unwrap_or(BUCKET_INVALID);
+                let word = self.read(handle).map_or(BUCKET_INVALID, Bucket::addr);
                 let next = (word >> 1) as u32;
                 self.free_list_head = if next == u32::MAX { None } else { Some(next) };
                 handle
@@ -633,7 +642,7 @@ impl Store {
             }
         };
         o.header().handle.set(handle);
-        self.write(handle, o.address().as_ptr().expose_provenance());
+        self.write(handle, o.0.as_ptr());
         Ok(handle)
     }
 
@@ -656,7 +665,7 @@ impl Store {
                 new_size as usize * BUCKET,
             )
         }?;
-        self.buckets = Some(at.cast::<usize>());
+        self.buckets = Some(at.cast::<Bucket>());
         self.size = new_size;
         Ok(())
     }
@@ -664,14 +673,17 @@ impl Store {
     /// `SET_OBJ_INVALID`: the bucket no longer names a live object.
     pub(crate) fn invalidate(&self, handle: u32) {
         if let Some(word) = self.read(handle) {
-            self.write(handle, word | BUCKET_INVALID);
+            self.write(handle, word.map_addr(|a| a | BUCKET_INVALID));
         }
     }
 
     /// `ZEND_OBJECTS_STORE_ADD_TO_FREE_LIST`.
     pub(crate) fn add_to_free_list(&mut self, handle: u32) {
         let next = self.free_list_head.unwrap_or(u32::MAX) as usize;
-        self.write(handle, (next << 1) | BUCKET_INVALID);
+        self.write(
+            handle,
+            std::ptr::without_provenance_mut((next << 1) | BUCKET_INVALID),
+        );
         self.free_list_head = Some(handle);
     }
 
