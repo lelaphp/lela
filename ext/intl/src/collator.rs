@@ -62,10 +62,11 @@ fn with_mut<T>(req: &mut Request, object: PhpObject, f: impl FnOnce(&mut Coll) -
         .map(f)
 }
 
-/// `COLLATOR_METHOD_INIT_VARS` and `COLLATOR_METHOD_FETCH_OBJECT`: the
-/// request's error reset, then the object's; whether it has a collator.
+/// `COLLATOR_METHOD_FETCH_OBJECT`: the object's error reset, the
+/// request's having been reset before the arguments
+/// (`COLLATOR_METHOD_INIT_VARS`, `before_args`); whether it has a
+/// collator.
 fn fetch(req: &mut Request, object: PhpObject) -> bool {
-    error::reset(req);
     error::reset_object::<CollatorObject>(req, object);
     with(req, object, |_| ()).is_some()
 }
@@ -113,7 +114,6 @@ fn check(
 /// `collator_ctor`: the collator opened for the locale, the default for
 /// the empty string; `Ok(false)` where it failed and nothing was thrown.
 fn ctor(req: &mut Request, object: PhpObject, locale: &[u8]) -> Result<bool, Thrown> {
-    error::reset(req);
     if locale.len() > 156 {
         error::set(
             req,
@@ -623,7 +623,7 @@ type Object = Instance<Collator>;
 /// NULL
 /// string(108) "collator_create(): Locale string too long, should be no longer than 156 characters: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_create(
     req: &mut Request,
     locale: PhpString,
@@ -643,7 +643,7 @@ fn collator_create(
 /// bool(false)
 /// string(83) "collator_compare(): Error converting first argument to UTF-16: U_INVALID_CHAR_FOUND"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_compare(
     req: &mut Request,
     object: Object,
@@ -664,7 +664,7 @@ fn collator_compare(
 /// bool(false)
 /// string(81) "collator_get_attribute(): Error getting attribute value: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_get_attribute(
     req: &mut Request,
     object: Object,
@@ -684,7 +684,7 @@ fn collator_get_attribute(
 /// int(1)
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_set_attribute(
     req: &mut Request,
     object: Object,
@@ -702,7 +702,7 @@ fn collator_set_attribute(
 /// ```expect
 /// int(2)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_get_strength(req: &mut Request, object: Object) -> Result<i64, Thrown> {
     get_strength(req, object.object())
 }
@@ -718,7 +718,7 @@ fn collator_get_strength(req: &mut Request, object: Object) -> Result<i64, Throw
 /// int(0)
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_set_strength(req: &mut Request, object: Object, strength: i64) -> Result<True, Thrown> {
     set_strength(req, object.object(), strength)
 }
@@ -740,7 +740,7 @@ fn collator_set_strength(req: &mut Request, object: Object, strength: i64) -> Re
 /// bool(false)
 /// string(81) "collator_sort(): Error converting hash from UTF-8 to UTF-16: U_INVALID_CHAR_FOUND"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_sort(
     req: &mut Request,
     object: Object,
@@ -760,7 +760,7 @@ fn collator_sort(
 /// bool(true)
 /// [3,"a","A","b"]
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_sort_with_sort_keys(
     req: &mut Request,
     object: Object,
@@ -779,7 +779,7 @@ fn collator_sort_with_sort_keys(
 /// bool(true)
 /// {"z":"a","y":"A","x":"b"}
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_asort(
     req: &mut Request,
     object: Object,
@@ -800,7 +800,7 @@ fn collator_asort(
 /// bool(false)
 /// string(77) "collator_get_locale(): Error getting locale by type: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_get_locale(
     req: &mut Request,
     object: Object,
@@ -818,7 +818,7 @@ fn collator_get_locale(
 /// int(-127)
 /// string(23) "U_USING_DEFAULT_WARNING"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_get_error_code(req: &mut Request, object: Object) -> OrFalse<i64> {
     get_error_code(req, object.object())
 }
@@ -831,7 +831,7 @@ fn collator_get_error_code(req: &mut Request, object: Object) -> OrFalse<i64> {
 /// ```expect
 /// string(81) "collator_get_attribute(): Error getting attribute value: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_get_error_message(
     req: &mut Request,
     object: Object,
@@ -847,7 +847,7 @@ fn collator_get_error_message(
 /// ```expect
 /// string(12) "2b2d01060106"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn collator_get_sort_key(
     req: &mut Request,
     object: Object,
@@ -937,12 +937,13 @@ impl Collator {
     const SORT_STRING: i64 = 1;
     const SORT_NUMERIC: i64 = 2;
 
+    #[php(before_args = error::reset)]
     fn __construct(req: &mut Request, this: This<Self>, locale: PhpString) -> Result<(), Thrown> {
         let object = this.object();
         error::constructing(req, |req| ctor(req, object, locale.as_bytes())).map(|_| ())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn create(
         req: &mut Request,
         locale: PhpString,
@@ -950,7 +951,7 @@ impl Collator {
         create(req, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn compare(
         req: &mut Request,
         this: This<Self>,
@@ -960,7 +961,7 @@ impl Collator {
         compare(req, this.object(), string1, string2)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn sort(
         req: &mut Request,
         this: This<Self>,
@@ -970,7 +971,7 @@ impl Collator {
         sort(req, this.object(), &array, flags, true)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn sortWithSortKeys(
         req: &mut Request,
         this: This<Self>,
@@ -979,7 +980,7 @@ impl Collator {
         sort_with_sort_keys(req, this.object(), &array)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn asort(
         req: &mut Request,
         this: This<Self>,
@@ -989,7 +990,7 @@ impl Collator {
         sort(req, this.object(), &array, flags, false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getAttribute(
         req: &mut Request,
         this: This<Self>,
@@ -998,7 +999,7 @@ impl Collator {
         get_attribute(req, this.object(), attribute)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setAttribute(
         req: &mut Request,
         this: This<Self>,
@@ -1008,17 +1009,17 @@ impl Collator {
         set_attribute(req, this.object(), attribute, value)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getStrength(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         get_strength(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setStrength(req: &mut Request, this: This<Self>, strength: i64) -> Result<True, Thrown> {
         set_strength(req, this.object(), strength)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getLocale(
         req: &mut Request,
         this: This<Self>,
@@ -1027,12 +1028,12 @@ impl Collator {
         get_locale(req, this.object(), r#type)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorCode(req: &mut Request, this: This<Self>) -> OrFalse<i64> {
         get_error_code(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorMessage(
         req: &mut Request,
         this: This<Self>,
@@ -1040,7 +1041,7 @@ impl Collator {
         get_error_message(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getSortKey(
         req: &mut Request,
         this: This<Self>,

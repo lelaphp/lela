@@ -21,6 +21,28 @@ pub struct ConstIdx(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct CacheSlot(pub u32);
 
+/// `ZEND_MAP_PTR(op_array->run_time_cache)` as an op array carries it
+/// (design §5.14): which of the runtime caches of the request serving
+/// it is the op array's. The engine gives each op array of a unit it
+/// publishes an offset of its own map-pointer space
+/// (`ZEND_MAP_PTR_NEW`), and each op array of a unit compiled for one
+/// request alone a number of that request's, where php gives such an op
+/// array a cache on the heap and no offset (`ZEND_ACC_HEAP_RT_CACHE`).
+/// The cache itself is the request's and its type the engine's, which
+/// converts this where it reads it. The compiler leaves the engine's
+/// first offset, which the engine overwrites before the unit is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MapPtrOffset {
+    Engine(u32),
+    Request(u32),
+}
+
+impl Default for MapPtrOffset {
+    fn default() -> MapPtrOffset {
+        MapPtrOffset::Engine(0)
+    }
+}
+
 /// What an operand field holds, numbered as `IS_*` in `zend_compile.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
@@ -294,14 +316,10 @@ pub struct OpArray {
     pub line_start: u32,
     pub line_end: u32,
     pub cache_size: u32,
-    /// `ZEND_MAP_PTR(op_array->run_time_cache)` as the offset it is: the
-    /// request's map-table entry the engine assigned the op array when
-    /// the unit was published (`ZEND_MAP_PTR_NEW`, design §5.14), and
-    /// zero until it did. The cache itself is the request's, laid down
-    /// on the op array's first activation and read through the entry;
-    /// what lives there is the engine's, so the offset is typed where
-    /// it is read and the unit carries the number alone.
-    pub runtime_cache: u32,
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`: which runtime cache of
+    /// the request serving the op array is its own ([`MapPtrOffset`]),
+    /// laid down on the op array's first activation.
+    pub runtime_cache: MapPtrOffset,
     /// `op_array->dynamic_func_defs` (`Z/Zend/zend_compile.h:559`): the
     /// functions written inside this op array that no name binds while
     /// the file compiles, in the order `zend_add_dynamic_func_def` took

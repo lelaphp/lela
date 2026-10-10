@@ -4,7 +4,7 @@
 //! entities or notations, or the node set an `XPath` query answered.
 
 use php_ext::abi::{
-    ClassIterator, DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead,
+    ClassIterator, DimensionRead, GcTable, Instance, ObjectHandlers, PropertyPlace, PropertyRead,
     PropertyTest, Raw, Refusals, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
@@ -492,16 +492,15 @@ pub(crate) fn float_offset(req: &mut Request, f: f64) -> Result<i64, Thrown> {
     Ok(n)
 }
 
-/// `zend_illegal_container_offset`.
-fn illegal_offset(req: &mut Request, object: PhpObject, value: &Value, isset: bool) -> Thrown {
-    let given = php_ext::coerce::type_name(req, value);
-    let message = if isset {
-        format!("Cannot access offset of type {given} in isset or empty")
-    } else {
-        let class = class_name(req, object.class());
-        format!("Cannot access offset of type {given} on {class}")
-    };
-    throw_error(req, "TypeError", &message)
+/// `zend_illegal_container_offset(object->ce->name, offset, read)`.
+fn illegal_offset(
+    req: &mut Request,
+    object: PhpObject,
+    value: &Value,
+    read: DimensionRead,
+) -> Thrown {
+    let class = req.class_name(object.class());
+    php_ext::raising::illegal_container_offset(req, &class, value, read)
 }
 
 /// The dimensions a map's class reads, `Dims`.
@@ -633,7 +632,6 @@ impl ObjectHandlers for MapHandlers {
         offset_value: Option<&Value>,
         read: DimensionRead,
     ) -> Result<Owner<Value>, Thrown> {
-        let isset = read == DimensionRead::Silent;
         let dims = dims(req, object);
         let Some(offset_value) = offset_value else {
             let name = class_name(req, object.class());
@@ -651,7 +649,7 @@ impl ObjectHandlers for MapHandlers {
                 (Dims::Collection, Index::Str(name)) => {
                     collection_named(req, object, name.as_bytes())
                 }
-                _ => Err(illegal_offset(req, object, offset_value, isset)),
+                _ => Err(illegal_offset(req, object, offset_value, read)),
             };
         }
         let is_list = !named_keys(req, object);
@@ -698,7 +696,12 @@ impl ObjectHandlers for MapHandlers {
                     found.give_up(req);
                     Ok(present)
                 }
-                _ => Err(illegal_offset(req, object, offset_value, true)),
+                _ => Err(illegal_offset(
+                    req,
+                    object,
+                    offset_value,
+                    DimensionRead::Silent,
+                )),
             };
         }
         let is_list = !named_keys(req, object);
@@ -750,7 +753,12 @@ impl ObjectHandlers for MapHandlers {
         crate::release_libxml(req, object);
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(Dom {
             extra: Extra::Map(map),
             ..
@@ -763,6 +771,7 @@ impl ObjectHandlers for MapHandlers {
                 visit(Value::array(**array));
             }
         }
+        GcTable::Properties
     }
 }
 

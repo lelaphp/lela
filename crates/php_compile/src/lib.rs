@@ -49,7 +49,7 @@ pub mod syntax {
 use php_heap::{Fatal, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
-use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
+use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name, Visibility};
 use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
@@ -522,7 +522,7 @@ fn compile_scanned<'p>(
             unit.diagnostics = raised;
             let interned = match options.kind {
                 SourceKind::File => intern_names(&unit, strings),
-                SourceKind::Eval(_) => Ok(()),
+                SourceKind::Eval(_) => intern_declared(&unit, strings),
             };
             match interned {
                 Ok(()) => Ok(unit),
@@ -580,7 +580,61 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
     for name in op_array_names(unit) {
         strings.intern(name)?;
     }
+    intern_declared(unit, strings)
+}
+
+/// The names php's compile interns into whichever home it compiles
+/// into, an `eval`'s among them: each op array's variables, which
+/// `zend_try_compile_cv` interns (`zval_make_interned_string`) before
+/// `lookup_cv` keeps them in `op_array->vars`, and each declared
+/// property's name with the key `zend_declare_typed_property` interns
+/// as `prop_info->name`, mangled for a protected or a private one. A
+/// symbol table keys a variable by its CV's name and an object's table
+/// a declared row by its key, so neither costs a read anything. An
+/// `eval`'d variable's name is the request's from its compile on:
+///
+/// ```php
+/// $m = memory_get_usage(); eval('$abcd = 1;'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('$abcd = 2;'); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 0
+/// ```
+pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
+    let bodies = std::iter::once(&unit.main)
+        .chain(unit.functions.iter().map(|(_, body)| body))
+        .chain(unit.dynamic.iter().map(|(_, body)| body))
+        .chain(unit.methods.iter().map(|method| &method.body))
+        .chain(unit.hooks.iter().map(|hook| &hook.body));
+    for body in bodies {
+        for var in &body.vars {
+            strings.intern(&var.0)?;
+        }
+    }
+    for class in &unit.classes {
+        for property in &class.properties {
+            strings.intern(&property.name.0)?;
+            if let Some(prefix) = mangling(property.visibility, &class.name.0) {
+                strings.intern(&[prefix.as_slice(), &property.name.0].concat())?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// `zend_mangle_property_name`'s prefix (`Z/Zend/zend_compile.c`) for a
+/// property `class` declares under `visibility`, what
+/// `zend_declare_typed_property` puts before the name it keys
+/// `prop_info->name` by: none for a public one, `\0*\0` for a protected
+/// one and `\0Class\0` for a private one.
+#[must_use]
+pub fn mangling(visibility: Visibility, class: &[u8]) -> Option<Vec<u8>> {
+    match visibility {
+        Visibility::Public => None,
+        Visibility::Protected => Some(b"\0*\0".to_vec()),
+        Visibility::Private => Some([&b"\0"[..], class, &b"\0"[..]].concat()),
+    }
 }
 
 /// The names a unit's op arrays carry, the ones [`intern_names`]
@@ -757,7 +811,10 @@ mod tests {
     /// `special::TABLE` and every name of [`CALLED`] as a native, which
     /// php's `-n` has, and then [`frameless_natives`]: what
     /// `zend_compile_call` reads as `CG(function_table)`, so the tests
-    /// below compile under the table php compiles under.
+    /// below compile under the table php compiles under; and `INF` and
+    /// `NAN` among its persistent constants, as `ext/standard` declares
+    /// them (`REGISTER_DOUBLE_CONSTANT("INF", ZEND_INFINITY,
+    /// CONST_PERSISTENT)`).
     fn bundled() -> Options<'static> {
         static NATIVES: std::sync::LazyLock<Vec<FunctionDecl>> = std::sync::LazyLock::new(|| {
             special::TABLE
@@ -784,9 +841,22 @@ mod tests {
             std::sync::LazyLock::new(|| Names::over(&NATIVES));
         static FRAMELESS: std::sync::LazyLock<Vec<php_unit::FramelessEntry>> =
             std::sync::LazyLock::new(|| frameless_table(NATIVES.iter()));
+        static PERSISTENT: std::sync::LazyLock<Vec<ConstDecl>> = std::sync::LazyLock::new(|| {
+            [(&b"INF"[..], f64::INFINITY), (b"NAN", f64::NAN)]
+                .into_iter()
+                .map(|(name, value)| ConstDecl {
+                    name: Name(name.into()),
+                    value: php_unit::decl::ConstExpr::Double(value),
+                    attributes: Vec::new(),
+                })
+                .collect()
+        });
+        static CONSTANT_NAMES: std::sync::LazyLock<Names<Exact>> =
+            std::sync::LazyLock::new(|| Names::over(&PERSISTENT));
         Options {
             functions: Indexed::new(&NATIVES, &NAMES),
             frameless: &FRAMELESS,
+            persistent: Indexed::new(&PERSISTENT, &CONSTANT_NAMES),
             ..Options::default()
         }
     }

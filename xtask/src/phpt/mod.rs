@@ -96,12 +96,12 @@
 //! a queue a test creates and leaves outlives its process, and the
 //! kernel's tables are small; after each subset the objects the run's own
 //! processes left are removed, told by the processes the kernel names on
-//! them, and one that names none by its maker, its private key and the
-//! second it was made in, inside one of the subset's programs' runs; the
-//! reading counts them as `sysv_removed` (the `sysv` module, #1412,
-//! #1482). A System V subset holds a claim while it runs and first takes
+//! them; the reading counts them as `sysv_removed` (the `sysv` module,
+//! #1412). A System V subset holds a claim while it runs, first takes
 //! what subsets and witness runs killed before their sweeps left, which
-//! its reading names (#2448). On Linux a System V subset's programs run in
+//! its reading names (#2448), and takes too what names no process by its
+//! maker, its private key and the second it was made in, inside one of
+//! its programs' runs and before any other run's claim (#1482, #2563). On Linux a System V subset's programs run in
 //! a private IPC namespace where `unshare` permits, and the run's line
 //! says so.
 //!
@@ -1519,11 +1519,10 @@ fn swept_around<T>(
     let ran = run();
     oracle.journal(None);
     let tally = ran?;
-    let sweep = || before.and_then(|before| sysv::sweep(&before, &oracle.take_spawned()));
-    let swept = match claim {
-        Some(claim) => claim.settled_by(sweep),
-        None => sweep(),
-    };
+    let swept = before.and_then(|before| match claim {
+        Some(claim) => claim.swept(&before, &oracle.take_spawned()),
+        None => sysv::sweep(&before, &oracle.take_spawned()),
+    });
     removed.add("of what its tests left", swept);
     Ok((tally, removed))
 }

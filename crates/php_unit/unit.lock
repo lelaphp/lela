@@ -19,6 +19,7 @@ Level
 Level::bit
 LiveKind
 LiveRange
+MapPtrOffset
 MethodBody
 OpArray
 OpArray::dimension_written
@@ -94,3 +95,4 @@ decl::shown_bytes
 enum_methods
 frameless_table
 type_to_string
+type_to_string_called

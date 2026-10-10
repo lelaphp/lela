@@ -71,8 +71,8 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers, OrFalse,
-    PropertyPlace, Raw, Refusals, Std, This, Union, ZendExtension,
+    DependencyKind, Extension, ExtensionBuilder, FromArgument, GcTable, Instance, ObjectHandlers,
+    OrFalse, PropertyPlace, Raw, Refusals, Std, This, Union, ZendExtension,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -4650,9 +4650,14 @@ impl ObjectHandlers for ReflectorHandlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(reflected) = object.native::<Reflected>(req) else {
-            return;
+            return GcTable::Properties;
         };
         if let Some(kept) = &reflected.object {
             visit(kept.as_value());
@@ -4660,6 +4665,7 @@ impl ObjectHandlers for ReflectorHandlers {
         if let Some(reference) = &reflected.reference {
             visit(reference.as_value());
         }
+        GcTable::Properties
     }
 }
 

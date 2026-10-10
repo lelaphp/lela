@@ -45,7 +45,9 @@ use php_compile::StackLimit;
 use php_heap::{Block, FiberStack, Host, StackRefused, Suspensions, Switched};
 use php_macros::php_class;
 
-use crate::api::abi::{Callable, CloneObj, DtorObj, Instance, NamedVariadic, ObjectHandlers, This};
+use crate::api::abi::{
+    Callable, CloneObj, DtorObj, GcTable, Instance, NamedVariadic, ObjectHandlers, This,
+};
 use crate::api::call::call_named_made;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::{ObservedChain, Raised, Request};
@@ -180,7 +182,6 @@ pub enum Transfer {
 /// ([`crate::observer`]).
 #[derive(Default)]
 pub(crate) struct Execution {
-    pub(crate) stack: php_heap::VmStack,
     pub(crate) vm: Vm,
     pub(crate) observing: ObservedChain,
     pub(crate) error_reporting: i64,
@@ -335,15 +336,15 @@ impl Fibers {
     /// The request's own VM stack, below every fiber running, which is
     /// the one `EG(symbol_table)`'s attached CVs stand on; none while no
     /// fiber runs and the request runs on it.
-    pub(crate) fn request_stack(&self) -> Option<&php_heap::VmStack> {
-        self.running.first().map(|running| &running.below.stack)
+    pub(crate) fn request_stack(&self) -> Option<&crate::exec::Stack> {
+        self.running.first().map(|running| &running.below.vm.stack)
     }
 
     /// [`Fibers::request_stack`], to write.
-    pub(crate) fn request_stack_mut(&mut self) -> Option<&mut php_heap::VmStack> {
+    pub(crate) fn request_stack_mut(&mut self) -> Option<&mut crate::exec::Stack> {
         self.running
             .first_mut()
-            .map(|running| &mut running.below.stack)
+            .map(|running| &mut running.below.vm.stack)
     }
 
     /// The execution states below the running stack, the innermost
@@ -414,14 +415,23 @@ impl ObjectHandlers for FiberHandlers {
         None
     }
 
-    /// `zend_fiber_object_gc` (`Z/Zend/zend_fibers.c:817`): the callable
+    /// `zend_fiber_object_gc` (`Z/Zend/zend_fibers.c:818`): the callable
     /// and `fiber->result`, and for a suspended fiber every frame it
     /// holds, innermost first, each by [`exec::unfinished_execution_gc`]
-    /// or, for a generator running on it, by
-    /// [`crate::generator::running_frame_gc`]; then the calls its frames
-    /// were building. Each is an owner the fiber's frames hold, so a
-    /// cycle through a suspended fiber's variables is found. A running
-    /// fiber's frames are the running execution's, and are not named.
+    /// with the calls it was building or, for a generator running on it,
+    /// by [`crate::generator::running_frame_gc`]. Each is an owner the
+    /// fiber's frames hold, so a cycle through a suspended fiber's
+    /// variables is found. A running fiber's frames are the running
+    /// execution's, and are not named.
+    ///
+    /// The outermost symbol table a frame rebuilt is returned as the
+    /// fiber's table and walked after everything else, and the rows of
+    /// each one inside it are named where the next frame out with a table
+    /// stands, as php's `lastSymTable` does. One table two frames share,
+    /// a function's and a file it included, is named once: php names it
+    /// twice, which takes two owners from what it holds where the table
+    /// is one, so a collection while the fiber is live frees what its
+    /// variables hold.
     ///
     /// ```php
     /// function park() {
@@ -444,49 +454,111 @@ impl ObjectHandlers for FiberHandlers {
     /// done
     /// ```
     ///
-    /// A variable a frame made by name lives in its symbol table, which
-    /// the walk names too:
+    /// A call a frame was building is named with that frame, after its
+    /// CVs and before the frames outside it, as php names `ex->call`;
+    /// each `D` survives the fiber's destruction through its own cycle,
+    /// and is served by the collection in the order the walk found it:
     ///
     /// ```php
-    /// class C { function __destruct() { echo "C::__destruct\n"; } }
-    /// function f() { $c = new C; $y = 'a'; $$y = Fiber::getCurrent(); Fiber::suspend(); }
-    /// $fiber = new Fiber(function () { f(); });
+    /// class D { public $self; function __construct(public $n) { $this->self = $this; } function __destruct() { echo $this->n, "\n"; } }
+    /// function foo($a, $b) {}
+    /// function f() { $c = new D('cv'); $h = Fiber::getCurrent(); foo(new D('argument'), Fiber::suspend()); }
+    /// $fiber = new Fiber(function () { $q = new D('outer'); f(); });
     /// $fiber->start();
+    /// gc_collect_cycles();
     /// $fiber = null;
     /// gc_collect_cycles();
     /// echo "done\n";
     /// ```
     /// ```expect
-    /// C::__destruct
+    /// outer
+    /// argument
+    /// cv
     /// done
     /// ```
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    ///
+    /// A variable a frame made by name lives in its symbol table, which
+    /// the walk names too, its rows after the fiber's values and the CVs
+    /// among them, so what the variables hold is found before what the
+    /// callable reaches; each `D` below survives the fiber's destruction
+    /// through its own cycle, and is served by the collection in the
+    /// order the walk found it:
+    ///
+    /// ```php
+    /// class D { public $self; function __construct(public $n) { $this->self = $this; } function __destruct() { echo $this->n, "\n"; } }
+    /// function f() { $c = new D('cv'); $y = 'x'; $$y = new D('by name'); $z = 'fiber'; $$z = Fiber::getCurrent(); Fiber::suspend(); }
+    /// $fiber = new Fiber(function () { f(); });
+    /// $fiber->start();
+    /// gc_collect_cycles();
+    /// $fiber = null;
+    /// gc_collect_cycles();
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// cv
+    /// by name
+    /// done
+    /// ```
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(fiber) = object.native::<ZendFiber>(req) else {
-            return;
+            return GcTable::Properties;
         };
         if let Some(callable) = &fiber.callable {
             visit(callable.value());
         }
         visit(fiber.result);
         if fiber.coroutine.status != CoroutineStatus::Suspended {
-            return;
+            return GcTable::Properties;
         }
         let Some(execution) = &fiber.coroutine.execution else {
-            return;
+            return GcTable::Properties;
         };
-        for (at, state) in execution.vm.frames().iter().enumerate().rev() {
+        let stack = &execution.vm.stack;
+        let cv = |frame, at| {
+            stack.frame(frame).map_or(php_heap::Zval::UNDEF, |frame| {
+                frame.slot(php_heap::Slot(at))
+            })
+        };
+        let mut last = None;
+        let mut calls = Vec::new();
+        for at in (0..execution.vm.depth()).rev() {
             let frame = php_heap::FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
-            let Some(slots) = execution.stack.frame(frame) else {
+            let Some(slots) = execution.vm.stack.frame(frame) else {
                 continue;
             };
-            match state.generator {
-                Some(generator) => {
-                    crate::generator::running_frame_gc(req, generator, slots, state, visit);
+            let state = req.kept_frame(slots);
+            if state.info().call() {
+                calls.push(state);
+                continue;
+            }
+            // The calls standing above a frame are the ones it was
+            // building, its `ex->call`. A running generator's are named
+            // by none: `zend_generator_frame_gc` reads its frozen call
+            // stack, which is empty while it runs.
+            calls.reverse();
+            let table = match state.generator() {
+                Some(generator) => crate::generator::running_frame_gc(req, generator, state, visit),
+                None => exec::unfinished_execution_gc(state, &calls, visit),
+            };
+            calls.clear();
+            if let Some(table) = table {
+                if let Some(inner) = last.filter(|&inner| inner != table) {
+                    req.gc_symbol_rows(inner, &cv, visit);
                 }
-                None => exec::unfinished_execution_gc(req, slots, state, &[], visit),
+                last = Some(table);
             }
         }
-        exec::unfinished_calls_gc(execution.vm.calls(), visit);
+        let Some(table) = last else {
+            return GcTable::Properties;
+        };
+        let mut rows = Vec::new();
+        req.gc_symbol_rows(table, &cv, &mut |value| rows.push(value));
+        GcTable::Rows(rows)
     }
 }
 
@@ -1374,7 +1446,7 @@ fn switch_into<P: HoldsCoroutine>(
             if let Some(record) = record {
                 req.heap_mut().free_block(record);
             }
-            execution.stack.close(req.heap_mut());
+            execution.vm.stack.close(req.heap_mut());
             if matches!(back, Transfer::Fatal) {
                 // `zend_fiber_switch_to` raises the fiber's bailout again
                 // on the resumer, which leaves its own open frames to
@@ -1386,7 +1458,7 @@ fn switch_into<P: HoldsCoroutine>(
         }
         Err(fatal) => {
             coroutine.status = CoroutineStatus::Dead;
-            execution.stack.close(req.heap_mut());
+            execution.vm.stack.close(req.heap_mut());
             req.fatal_of::<()>(Err(fatal))?;
             Ok(Transfer::Fatal)
         }
@@ -1753,8 +1825,7 @@ fn lay_down<P: HoldsCoroutine>(
         }
     };
     let execution = Execution {
-        stack: php_heap::VmStack::fiber(),
-        vm: Vm::default(),
+        vm: Vm::fiber(),
         observing: ObservedChain::default(),
         error_reporting,
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
@@ -1942,10 +2013,8 @@ impl Coroutine {
                 if let Some(before) = before {
                     req.raise_under(before);
                 }
-                if !req.executing()
-                    && let Err(fatal) = req.exception_error(crate::api::raising::Level::Error)
-                {
-                    req.end_in(&fatal);
+                if !req.executing() {
+                    req.exception_error(crate::api::raising::Level::Error).ok();
                 }
             }
             Ok(Transfer::Value(value)) => {

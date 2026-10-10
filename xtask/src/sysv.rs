@@ -26,16 +26,18 @@
 //! from, as php's `msg_get_queue(0)` leaves one of mode 0 that nobody can
 //! use, a semaphore set nobody operated on, or one whose semaphores this
 //! user may not read: the kernel names no process on it. Such an object is
-//! the run's, and removed, when all three of these hold, as Mitchell ruled
-//! on #1469 (#1482): its creator is the runner's own user; its key is
-//! `IPC_PRIVATE`, which no database or other program can look up; and the
-//! kernel's whole-second `CTIME` falls inside the run of one of the
-//! subset's own programs, the oracle's or the engine's, from spawn to exit
-//! rounded out to whole seconds. The only object of another program the
-//! rule can take is one of this user's, private, made in the same second
-//! as one of the subset's programs ran, which nothing but its maker could
-//! ever address. Any other new object that names no process stands, and
-//! the run counts it apart from those it removed.
+//! a System V subset's, and removed, when all three of these hold, as
+//! Mitchell ruled on #1469 (#1482): its creator is the runner's own user;
+//! its key is `IPC_PRIVATE`, which no database or other program can look
+//! up; and the kernel's whole-second `CTIME` falls inside the run of one
+//! of the subset's own programs, the oracle's or the engine's, from spawn
+//! to exit rounded out to whole seconds. Any other new object that names
+//! no process stands, and the run counts it apart from those it removed.
+//! Only the subsets of [`SUBSETS`] make such objects, the only ones whose
+//! tests call System V IPC, and only they hold the claim the next
+//! paragraphs and the one on two runs at once rest on, so any other subset
+//! removes only what its own processes are named on: a pooled run of
+//! `echo`s took another run's private queue of the same second (#2563).
 //!
 //! **A witness run's.** The witness lane serves most fences in the
 //! harness's own process, through the linked engine, and the oracle's
@@ -64,6 +66,18 @@
 //! object in it that names a process the claim started and no living one,
 //! under a key or not, as the subset's own sweep would have. A subset not
 //! cut off settles its claim by that sweep, so its rule is unchanged.
+//!
+//! **Two runs at once.** The kernel keeps no maker for an object that
+//! names no process, so a window tells a run's from another's only while
+//! no other run is making them: a private queue a concurrent run made in
+//! the same second, still its test's to use, met every clause above and
+//! was taken (#2563). So a claim another run holds, still locked, covers
+//! the machine from the second it was made ([`Held`]): no window takes an
+//! object made since, nor does [`abandoned`], and a run that settles while
+//! one is held leaves its claim standing, its lock released, for a later
+//! run's [`reclaim`], which takes what the window holds once every run
+//! that was going in its seconds has ended. What a run's own processes
+//! are named on is its own whatever else runs.
 //!
 //! **On Linux.** The System V subsets run in a private IPC namespace where
 //! `unshare` permits, so nothing they make outlives its program, and the
@@ -691,25 +705,15 @@ impl fmt::Display for Swept {
     }
 }
 
-/// Remove what the programs of `spawned` left since `before`, read again
-/// now, and say what was done.
+/// Remove what the programs of `spawned` named on themselves since
+/// `before`, read again now, and say what was done: how a subset that
+/// holds no claim sweeps, by its own processes alone (#2563).
 pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
-    let clock = Clock::now()?;
-    let after = Standing::now()?;
-    let mut gone = left(before, &after, &spawned.pids, alive);
-    let unnamed_gone = unnamed_left(before, &after, &spawned.runs, (&Runner::now(), &clock));
-    let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
-    let unnamed = after
-        .0
-        .iter()
-        .filter(|o| o.named.is_empty() && !stood.contains(&(o.kind, o.id)))
-        .count();
-    let mut swept = Swept {
-        unnamed: unnamed - unnamed_gone.len(),
-        ..Swept::default()
-    };
-    gone.extend(unnamed_gone);
-    remove(gone, &mut swept)?;
+    let mut swept = Swept::default();
+    remove(
+        left(before, &Standing::now()?, &spawned.pids, alive),
+        &mut swept,
+    )?;
     Ok(swept)
 }
 
@@ -768,6 +772,137 @@ fn claims() -> PathBuf {
     std::env::temp_dir().join("xtask-sysv-claims")
 }
 
+/// The second from which a claim another run still holds covers the
+/// machine (#2563): the earliest making of one, none where no other run
+/// holds one. An object made since may be that run's, made in a second
+/// one of this run's windows holds too, and no window takes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Held(Option<i64>);
+
+impl Held {
+    /// Held from `at` too, where that is earlier.
+    fn since(&mut self, at: i64) {
+        self.0 = Some(self.0.map_or(at, |held| held.min(at)));
+    }
+
+    /// Whether `object` was made, as `clock` reads it, while another run
+    /// held its claim: one whose time the kernel does not give is.
+    fn covers(self, object: &Object, clock: &Clock) -> bool {
+        self.0
+            .is_some_and(|held| object.ctime.is_none_or(|ctime| clock.at(ctime) >= held))
+    }
+
+    /// Whether a window ending at `to`, a second since the epoch, reaches a
+    /// second another run's claim covers.
+    fn reaches(self, to: i64) -> bool {
+        self.0.is_some_and(|held| held <= to)
+    }
+}
+
+/// The claims of one directory as a sweep reads them: those of runs that
+/// ended without settling, each locked while this value lives, and from
+/// when one another run holds covers the machine (#2115, #2448, #2563).
+#[derive(Debug)]
+struct Claims {
+    ended: Vec<Ended>,
+    held: Held,
+}
+
+/// One claim of a run that ended without settling it: its window from its
+/// making to its last write, and the processes its journal started.
+#[derive(Debug)]
+struct Ended {
+    path: PathBuf,
+    from: SystemTime,
+    last: SystemTime,
+    started: BTreeSet<u32>,
+    _lock: File,
+}
+
+impl Claims {
+    /// The claims of `dir` but `own`: one whose lock comes is ended, and
+    /// one whose lock will not, or that is being taken, is held from its
+    /// making, or from the first second where the file gives none.
+    fn read(dir: &Path, own: Option<&Path>) -> Claims {
+        let mut claims = Claims {
+            ended: Vec::new(),
+            held: Held::default(),
+        };
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if own == Some(path.as_path()) {
+                continue;
+            }
+            let made = entry.metadata().and_then(|meta| meta.created()).ok();
+            let held = made.map_or(i64::MIN, |made| seconds(made, false));
+            if path.extension().is_some_and(|e| e == TAKING) {
+                claims.held.since(held);
+                continue;
+            }
+            let Ok(file) = File::options().write(true).open(&path) else {
+                continue;
+            };
+            if file.try_lock().is_err() {
+                claims.held.since(held);
+                continue;
+            }
+            let Ok(last) = file.metadata().and_then(|meta| meta.modified()) else {
+                continue;
+            };
+            claims.ended.push(Ended {
+                started: started(&fs::read_to_string(&path).unwrap_or_default()).collect(),
+                from: made.unwrap_or(last),
+                last,
+                path,
+                _lock: file,
+            });
+        }
+        claims
+    }
+
+    /// Each ended claim's window, from its making to `grace` past its last
+    /// write, since a program in flight may run that long after it.
+    fn windows(&self, grace: Duration, clock: &Clock) -> Vec<(i64, i64)> {
+        self.ended
+            .iter()
+            .map(|ended| window(ended.from, Some(ended.last + grace), clock))
+            .collect()
+    }
+
+    /// What the ended claims take of `standing`, over `grace`: what is
+    /// [`claimed`] in their windows, what the processes their journals
+    /// started left in them ([`journaled`]) and every segment
+    /// [`abandoned`], but nothing made while another run held its claim.
+    fn taken<'a>(
+        &self,
+        standing: &'a Standing,
+        grace: Duration,
+        (runner, clock): (&Runner, &Clock),
+        alive: impl Fn(u32) -> bool,
+    ) -> Vec<&'a Object> {
+        let windows = self.windows(grace, clock);
+        let spawned: BTreeSet<u32> = self.ended.iter().flat_map(|e| e.started.clone()).collect();
+        let mut gone = claimed(standing, &windows, (runner, clock), &alive);
+        gone.extend(journaled(standing, &spawned, (&windows, clock), &alive));
+        gone.extend(abandoned(standing, runner, &alive));
+        let mut seen = BTreeSet::new();
+        gone.retain(|o| seen.insert((o.kind, o.id)) && !self.held.covers(o, clock));
+        gone
+    }
+
+    /// The ended claims whose windows, over `grace`, reach no second
+    /// another run's claim covers, taken away; the others stand for a
+    /// later reclaim, which takes the rest of what they hold.
+    fn settle(self, grace: Duration, clock: &Clock) {
+        let windows = self.windows(grace, clock);
+        for (ended, (_, to)) in self.ended.into_iter().zip(windows) {
+            if !self.held.reaches(to) {
+                fs::remove_file(ended.path).ok();
+            }
+        }
+    }
+}
+
 /// What a claim is named while its lock is being taken, a name
 /// [`reclaim`] passes over, as a scratch tree's is ([`crate::scratch`]).
 const TAKING: &str = "taking";
@@ -793,10 +928,10 @@ fn started(journal: &str) -> impl Iterator<Item = u32> + '_ {
 /// A run's claim on the System V objects made while it runs, a witness
 /// run's (#2115) or a System V subset's (#2448): a file of the claims
 /// directory, locked for as long as this value lives, which the run
-/// writes to as it goes. Settled, what the run
-/// left is removed and the file goes; a run that ends without settling
-/// leaves the file with its lock released, for the next run's
-/// [`reclaim`].
+/// writes to as it goes. Settled, what the run left is removed and the
+/// file goes, unless another run held its claim meanwhile (#2563); a run
+/// that ends without settling leaves the file with its lock released, for
+/// the next run's [`reclaim`].
 #[derive(Debug)]
 pub(crate) struct Claim {
     path: PathBuf,
@@ -805,11 +940,15 @@ pub(crate) struct Claim {
 }
 
 impl Claim {
-    /// A claim of `lane`'s, from now.
+    /// A claim of `lane`'s in the user's claims directory, from now.
     pub(crate) fn new(lane: &str) -> Result<Claim> {
+        Claim::within(&claims(), lane)
+    }
+
+    /// A claim of `lane`'s in `dir`, from now.
+    fn within(dir: &Path, lane: &str) -> Result<Claim> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = claims();
-        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let path = dir.join(format!(
             "{lane}-{}-{}",
             std::process::id(),
@@ -854,29 +993,55 @@ impl Claim {
     }
 
     /// What the run left removed: every object forsaken by the runner and
-    /// made from the claim's making until now. The claim goes with it.
+    /// made from the claim's making until now, as a witness run settles.
     pub(crate) fn settle(self) -> Result<Swept> {
         let from = self.from;
-        self.settled_by(|| {
+        self.settled(|held| {
             let clock = Clock::now()?;
             let standing = Standing::now()?;
             let windows = [window(from, None, &clock)];
+            let mut gone = claimed(&standing, &windows, (&Runner::now(), &clock), alive);
+            gone.retain(|o| !held.covers(o, &clock));
             let mut swept = Swept::default();
-            remove(
-                claimed(&standing, &windows, (&Runner::now(), &clock), alive),
-                &mut swept,
-            )?;
+            remove(gone, &mut swept)?;
             Ok(swept)
         })
     }
 
-    /// The claim settled by `sweep`, the lane's own rule for what its run
-    /// left, as a phpt subset sweeps by the processes it spawned (#2448):
-    /// the claim goes once the sweep has done, and stands, its lock
-    /// released, for the next run's [`reclaim`] where the sweep failed.
-    pub(crate) fn settled_by(self, sweep: impl FnOnce() -> Result<Swept>) -> Result<Swept> {
-        let swept = sweep()?;
-        fs::remove_file(&self.path).ok();
+    /// What the programs of `spawned` left since `before` removed, as a
+    /// System V subset settles: what they are named on ([`left`]), and of
+    /// what names no process, what [`unnamed_left`] takes.
+    pub(crate) fn swept(self, before: &Standing, spawned: &Programs) -> Result<Swept> {
+        self.settled(|held| {
+            let clock = Clock::now()?;
+            let after = Standing::now()?;
+            let mut gone = left(before, &after, &spawned.pids, alive);
+            let runs = (&Runner::now(), &clock);
+            let mut unnamed = unnamed_left(before, &after, &spawned.runs, runs);
+            unnamed.retain(|o| !held.covers(o, &clock));
+            let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
+            let new = after.0.iter().filter(|o| !stood.contains(&(o.kind, o.id)));
+            let mut swept = Swept {
+                unnamed: new.filter(|o| o.named.is_empty()).count() - unnamed.len(),
+                ..Swept::default()
+            };
+            gone.extend(unnamed);
+            remove(gone, &mut swept)?;
+            Ok(swept)
+        })
+    }
+
+    /// The claim settled by `sweep`, given from when another run's claim
+    /// covers the machine: the claim goes once the sweep has done where no
+    /// other run holds one, and stands, its lock released, for a later
+    /// run's [`reclaim`] where one does or the sweep failed (#2563).
+    fn settled(self, sweep: impl FnOnce(Held) -> Result<Swept>) -> Result<Swept> {
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        let held = Claims::read(dir, Some(&self.path)).held;
+        let swept = sweep(held)?;
+        if held == Held::default() {
+            fs::remove_file(&self.path).ok();
+        }
         Ok(swept)
     }
 }
@@ -927,52 +1092,20 @@ impl Removed {
 }
 
 /// What runs that ended without settling their claims left, removed
-/// before a run starts (#2115): each such claim's window from its making
-/// to `grace` past its last write, what is [`claimed`] in it and what the
-/// processes its journal started left in it ([`journaled`], #2448), and
-/// every segment [`abandoned`]. The
-/// claims go with it; a claim whose lock will not come is a run still
-/// going, and is passed over.
+/// before a run starts (#2115): what [`Claims::taken`] takes of the user's
+/// claims, each window ending `grace` past its claim's last write. The
+/// claims go with it but those whose windows reach a second another run's
+/// claim covers; a claim whose lock will not come is a run still going.
 pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
-    let mut ended = Vec::new();
-    let mut spawned = BTreeSet::new();
-    for entry in fs::read_dir(claims()).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == TAKING) {
-            continue;
-        }
-        let Ok(file) = File::options().write(true).open(&path) else {
-            continue;
-        };
-        let Ok(meta) = file.metadata() else {
-            continue;
-        };
-        if file.try_lock().is_err() {
-            continue;
-        }
-        let Ok(last) = meta.modified() else {
-            continue;
-        };
-        spawned.extend(started(&fs::read_to_string(&path).unwrap_or_default()));
-        ended.push((path, meta.created().unwrap_or(last), last + grace, file));
-    }
+    let claims = Claims::read(&claims(), None);
     let clock = Clock::now()?;
     let standing = Standing::now()?;
-    let runner = Runner::now();
-    let windows: Vec<(i64, i64)> = ended
-        .iter()
-        .map(|(_, from, to, _)| window(*from, Some(*to), &clock))
-        .collect();
-    let mut gone = claimed(&standing, &windows, (&runner, &clock), alive);
-    gone.extend(journaled(&standing, &spawned, (&windows, &clock), alive));
-    gone.extend(abandoned(&standing, &runner, alive));
-    let mut seen = BTreeSet::new();
-    gone.retain(|o| seen.insert((o.kind, o.id)));
     let mut swept = Swept::default();
-    remove(gone, &mut swept)?;
-    for (path, ..) in ended {
-        fs::remove_file(path).ok();
-    }
+    remove(
+        claims.taken(&standing, grace, (&Runner::now(), &clock), alive),
+        &mut swept,
+    )?;
+    claims.settle(grace, &clock);
     Ok(swept)
 }
 

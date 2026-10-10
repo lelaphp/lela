@@ -17,16 +17,15 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use php_heap::{
-    Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, VmStack, Zval, ZvalRef,
-};
+use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Obj, Ref, Res, ResourceType, Zval, ZvalRef};
 use php_link::LinkedClass;
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
 
+use crate::api::abi::GcTable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, PhpRef, Resource, Value};
+use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
@@ -60,7 +59,7 @@ pub(crate) use constants::halt_offset_key;
 mod diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
 pub use diagnostics::{FormatDate, Syslog};
-pub(crate) use diagnostics::{append_escaped, escape_html, escaped_html_sizes};
+pub(crate) use diagnostics::{append_escaped, escape_html};
 mod ending;
 pub(crate) use ending::{Ending, Phase};
 mod environment;
@@ -104,6 +103,7 @@ pub(crate) mod paths;
 pub use paths::RealpathEntry;
 pub(crate) use paths::is_wrapper_url;
 mod pending;
+pub(crate) use pending::Leaving;
 pub use pending::Raised;
 mod post;
 mod preload;
@@ -117,6 +117,7 @@ pub use resources::{ResourceDtor, Resources};
 mod response;
 #[cfg(debug_assertions)]
 mod sensing;
+pub use crate::output::HttpStatus;
 pub(crate) use response::Sink;
 pub use response::{
     BufferHandler, BufferInit, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp,
@@ -244,13 +245,18 @@ pub struct Request {
     _inside: crate::fork::Inside,
     /// The calls' state ([`calls::Calls`]).
     calls: calls::Calls,
-    stack: VmStack,
+    /// The VM stack the request runs on and its frames (design §5.6).
     vm: Vm,
+    /// What the frames own beyond their headers, every stack's
+    /// ([`crate::exec::Annex`]).
+    annexes: crate::exec::Annexes,
     /// The map table of design §5.14, php's `CG(map_ptr_base)`: what a
     /// published unit's map pointers index, laid down with the request,
-    /// every entry `NULL` until touched. Every op array's runtime cache
-    /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
-    map: MapTable,
+    /// every entry `NULL` until touched, and beside it the caches of the
+    /// units compiled for the request alone, php's heap caches. Every op
+    /// array's runtime cache stands in one of them
+    /// ([`exec::RuntimeCaches`]) and nowhere else.
+    map: crate::exec::RuntimeCaches,
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
@@ -499,10 +505,12 @@ pub(crate) enum Symbol {
 #[derive(Debug, Default)]
 pub(crate) struct SymbolTable {
     owner: Option<FrameRef>,
-    entries: Vec<(Vec<u8>, Symbol)>,
-    /// What a rebuilt table holds on the request's heap
-    /// ([`Request::rebuilt_table_bytes`]); `EG(symbol_table)`'s are not
-    /// held.
+    /// Each name with what it holds, the name one owner the table holds:
+    /// a CV's interned name, or the string the program wrote it with.
+    entries: Vec<(PhpString, Symbol)>,
+    /// What the table holds on the request's heap: a rebuilt table's
+    /// ([`Request::rebuilt_table_bytes`]), and `EG(symbol_table)`'s data,
+    /// its `zend_array` being `EG`'s own ([`SymbolTable::global`]).
     bytes: Option<hash_bytes::HashBytes>,
 }
 
@@ -534,8 +542,10 @@ struct DeclaredSlot {
     readonly: bool,
     /// `property_info->prototype->ce`: the class that first declared the
     /// property up the chain, through every redeclaration that was not
-    /// over a private one, which a protected property's access is
-    /// measured against (`is_protected_compatible_scope`).
+    /// over a private one, which a protected property's access and a
+    /// `protected(set)` one's write are measured against
+    /// (`is_protected_compatible_scope`); the declaring class for any
+    /// other.
     root: ClassId,
 }
 
@@ -555,30 +565,53 @@ pub(crate) struct UserFunction {
     /// from the declaration's attributes, decoded where the function is
     /// declared.
     pub(crate) flags: crate::attributes::Flags,
-    /// What every call's frame push reads of the declaration, read off
-    /// it once where the function is declared ([`Arity`]).
-    pub(crate) arity: Arity,
+    /// What every call's frame push and activation read of the
+    /// function, read once where it is declared ([`FrameShape`]).
+    pub(crate) shape: FrameShape,
 }
 
-/// `op_array.num_args` and `ZEND_ACC_HAS_TYPE_HINTS`: how many
-/// parameters a declaration has before a variadic, and whether any of
-/// them declares a type, which `i_init_func_execute_data` reads off the
-/// function to place a call's arguments and to choose the `RECV*` it
-/// skips (design §5.6). php's compiler writes both onto the op array;
-/// the engine reads them off the declaration where the function is
-/// declared, so a call reads two fields and walks no parameter.
+/// What `zend_vm_stack_push_call_frame` and `i_init_func_execute_data`
+/// read off a user function (design §5.6): `op_array.num_args` and
+/// `ZEND_ACC_HAS_TYPE_HINTS`, how many parameters the declaration has
+/// before a variadic and whether any of them declares a type, which
+/// place a call's arguments and choose the `RECV*` it skips; and of its
+/// op array, `last_var + T`, the room its frame takes, the entry
+/// safepoint its prologue runs to, and its runtime cache's map pointer
+/// and size. php's compiler writes them all onto the op array; the
+/// engine reads them once where the function is declared, so a call
+/// reads them off the function table and walks neither the declaration
+/// nor the unit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Arity {
+pub(crate) struct FrameShape {
     pub(crate) parameters: u32,
     pub(crate) typed: bool,
+    /// The CVs, `last_var`.
+    pub(crate) cvs: u32,
+    /// The CVs and the temporaries.
+    pub(crate) slots: u32,
+    /// The first opline past the `RECV*` prologue, `safepoints[0]`.
+    pub(crate) entry: u32,
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
+    pub(crate) cache: exec::CacheAt,
+    /// `op_array.cache_size`.
+    pub(crate) cache_size: u32,
 }
 
-impl Arity {
-    pub(crate) fn of(decl: &FunctionDecl) -> Arity {
+impl FrameShape {
+    pub(crate) fn of(decl: &FunctionDecl, code: Option<&php_unit::OpArray>) -> FrameShape {
         let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
-        Arity {
+        FrameShape {
             parameters: u32::try_from(declared).unwrap_or(u32::MAX),
             typed: decl.parameters.iter().any(|p| p.ty.is_some()),
+            cvs: code.map_or(0, |code| code.num_cvs),
+            slots: code.map_or(0, |code| code.num_cvs.saturating_add(code.num_tmps)),
+            entry: code
+                .and_then(|code| code.safepoints.first())
+                .map_or(0, |at| at.0),
+            cache: code.map_or_else(exec::CacheAt::default, |code| {
+                exec::CacheAt::of(code.runtime_cache)
+            }),
+            cache_size: code.map_or(0, |code| code.cache_size),
         }
     }
 }
@@ -725,8 +758,8 @@ impl Request {
         if shared.sense_leaks == crate::engine::LeakSensor::Traced {
             heap.trace_allocations();
         }
-        let mut stack = VmStack::new();
-        let _laid = stack.open(&mut heap);
+        let mut vm = Vm::default();
+        let _laid = vm.stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
         let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
         // `accel_activate`'s restart, where one is pending: a new epoch,
@@ -745,9 +778,9 @@ impl Request {
             inspect: inspect::Inspected::default(),
             _inside: crate::fork::Inside::enter(),
             heap,
-            stack,
-            vm: Vm::default(),
-            map: MapTable::new(),
+            vm,
+            annexes: crate::exec::Annexes::default(),
+            map: crate::exec::RuntimeCaches::default(),
             state: state::RequestState::default(),
             ini: ini::Ini::new(typed_ini),
             diagnostics: diagnostics::Diagnostics::default(),
@@ -758,7 +791,7 @@ impl Request {
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
             variables: variables::Variables::default(),
-            tables: vec![SymbolTable::default()],
+            tables: vec![SymbolTable::global()],
             included_files: hash_bytes::IncludedFiles::default(),
             hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),
@@ -998,16 +1031,20 @@ impl HeapHooks for Hooks<'_> {
     /// ```
     fn gc_live_temporaries(&mut self, visit: &mut dyn FnMut(Zval)) {
         let req = &*self.0;
-        for (at, state) in req.vm.frames().iter().enumerate().rev() {
-            let Some(code) = crate::exec::body_of(&state.unit, state.body) else {
+        for at in (0..req.vm.depth()).rev() {
+            let Some(state) = req.frame_on(&req.vm, at) else {
                 continue;
             };
+            let Some(code) = state.code() else {
+                continue;
+            };
+            let opline = state.opline();
             let frame = FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
             for range in &code.live_ranges {
-                if range.start.0 > state.opline {
+                if range.start.0 > opline {
                     break;
                 }
-                if range.end.0 <= state.opline {
+                if range.end.0 <= opline {
                     continue;
                 }
                 if matches!(
@@ -1033,15 +1070,28 @@ impl HeapHooks for Hooks<'_> {
     }
 
     /// `get_gc`, through the table: what the payload owns, handed to the
-    /// collector's walk as zvals.
-    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) {
-        let table = self.0.object_handlers(obj);
-        table.get_gc(self.0, PhpObject::of(obj), &mut |value| {
+    /// collector's walk as zvals, and the table the handler returns.
+    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) -> php_heap::GcTable {
+        let handlers = self.0.object_handlers(obj);
+        let table = handlers.get_gc(self.0, PhpObject::of(obj), &mut |value| {
             visit(value.to_zval());
         });
         // `zend_lazy_object_get_gc`: the initializer a lazy object waits
         // for, or the instance a proxy forwards to.
         self.0.lazy_gc(obj, &mut |value| visit(value.to_zval()));
+        match table {
+            GcTable::Properties => php_heap::GcTable::Properties,
+            GcTable::Owned(table) => php_heap::GcTable::Arr(table.heap()),
+            GcTable::Rows(rows) => {
+                php_heap::GcTable::Rows(rows.into_iter().map(Value::to_zval).collect())
+            }
+        }
+    }
+
+    /// `GC buffer overflow (GC disabled)`, php's warning with its own
+    /// newline, raised where the request stands.
+    fn gc_overflow(&mut self) {
+        crate::api::raising::warning(self.0, "GC buffer overflow (GC disabled)\n");
     }
 
     /// `list_dtor_ex`: the type's destructor as registered, handed the

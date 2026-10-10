@@ -292,7 +292,11 @@ impl Errors {
             list.push(error);
             return;
         }
-        docref(req, Level::Warning, &String::from_utf8_lossy(&text));
+        docref(
+            req,
+            Level::Warning,
+            String::from_utf8_lossy(&text).as_bytes(),
+        );
     }
 
     /// `php_libxml_ctx_error` from php's own code, the entity loader's:

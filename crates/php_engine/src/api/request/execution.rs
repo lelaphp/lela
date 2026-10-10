@@ -4,14 +4,12 @@
 //! `generator->execute_data` and `fiber->execute_data`, and the trace
 //! `zend_fetch_debug_backtrace` makes over that execution alone.
 
-use php_heap::VmStack;
-
 use super::{Link, Request, Slots, links_of};
 use crate::api::abi::Callable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, adopted_some};
-use crate::exec::{self, FrameState, Vm};
+use crate::exec::{FrameAt, Vm};
 use crate::fiber::Standing;
 use crate::generator;
 
@@ -46,9 +44,8 @@ pub struct Execution {
 
 impl Execution {
     /// What a view says of one frame's engine half.
-    fn stand(&mut self, state: &FrameState) {
-        self.site = exec::body_of(&state.unit, state.body)
-            .map(|code| (code.filename.0.to_vec(), exec::line_of(state)));
+    fn stand(&mut self, state: FrameAt<'_>) {
+        self.site = state.file().map(|file| (file.to_vec(), state.line()));
         self.this = state.this();
     }
 }
@@ -94,11 +91,11 @@ impl Request {
             site: None,
             this: None,
         };
-        let (_, vm) = match standing {
+        let vm = match standing {
             None => return Some(execution),
             Some(standing) => self.stack_of(&standing),
         };
-        if let Some(state) = vm.innermost() {
+        if let Some(state) = vm.innermost_at().and_then(|at| self.frame_on(vm, at)) {
             execution.stand(state);
         }
         Some(execution)
@@ -191,24 +188,20 @@ impl Request {
             let Some((_, Some(standing))) = crate::fiber::view(self, object) else {
                 return Ok(None);
             };
-            let (stack, vm) = self.stack_of(&standing);
-            let links = links_of(
-                stack,
-                vm,
-                0..vm.frames().len(),
-                0..vm.calls().len(),
-                &|root| self.placeholder_links(root),
-            );
+            let vm = self.stack_of(&standing);
+            let links = links_of(self, vm, 0..vm.depth(), &|root| {
+                self.placeholder_links(root)
+            });
             self.trace_rows(&links)
         };
         self.render_trace(rows, options).map(Some)
     }
 
     /// The stack a fiber's execution stands on.
-    fn stack_of<'a>(&'a self, standing: &Standing<'a>) -> (&'a VmStack, &'a Vm) {
+    fn stack_of<'a>(&'a self, standing: &Standing<'a>) -> &'a Vm {
         match standing {
-            Standing::Active => (&self.stack, &self.vm),
-            Standing::Held(held) => (&held.stack, &held.vm),
+            Standing::Active => &self.vm,
+            Standing::Held(held) => &held.vm,
         }
     }
 
@@ -231,7 +224,7 @@ impl Request {
             Some(state) => Some(state),
             None => self
                 .running_frame(object)
-                .and_then(|(_, vm, at)| vm.frames().get(at)),
+                .and_then(|(vm, at)| self.frame_on(vm, at)),
         };
         if let Some(state) = state {
             execution.stand(state);
@@ -254,12 +247,12 @@ impl Request {
         let root = generator::current(self, object);
         if generator::is_running(self, object) {
             let rows = match self.running_frame(object) {
-                Some((stack, vm, at)) => {
+                Some((vm, at)) => {
                     let top = self
                         .running_frame(root)
-                        .filter(|(on, _, top)| std::ptr::eq(*on, stack) && *top >= at)
-                        .map_or(at, |(_, _, top)| top);
-                    let links = frames_between(stack, vm, at, top);
+                        .filter(|(on, top)| std::ptr::eq(*on, vm) && *top >= at)
+                        .map_or(at, |(_, top)| top);
+                    let links = frames_between(self, vm, at, top);
                     self.trace_rows(&links)
                 }
                 None => Vec::new(),
@@ -269,24 +262,24 @@ impl Request {
         // The root runs, and `object` delegates to it: php links the
         // root's frame to `object`'s `execute_fake`, which the walk
         // expands into the frames between, cut under `object`'s.
-        if let Some((stack, vm, at)) = self.running_frame(root)
-            && let Some(state) = vm.frames().get(at)
+        if let Some((vm, at)) = self.running_frame(root)
+            && let Some(state) = self.frame_on(vm, at)
         {
-            let mut links = vec![Link::Frame(Slots::Stack(stack, at), state)];
+            let mut links = vec![Link::Frame(Slots::Stack(vm, at), state)];
             links.extend(
                 generator::kept_frames(self, object, root)
                     .into_iter()
-                    .map(|(slots, state)| Link::Frame(Slots::Kept(slots), state)),
+                    .map(|state| Link::Frame(Slots::Kept, state)),
             );
             let rows = self.trace_rows(&links);
             return self.render_trace(rows, options).map(Some);
         }
         generator::with_frames(self, object, |req, floor| {
-            let top = req.vm.frames().len().saturating_sub(1);
+            let top = req.vm.depth().saturating_sub(1);
             let rows = if top < floor {
                 Vec::new()
             } else {
-                let links = frames_between(&req.stack, &req.vm, floor, top);
+                let links = frames_between(req, &req.vm, floor, top);
                 req.trace_rows(&links)
             };
             req.render_trace(rows, options)
@@ -298,17 +291,17 @@ impl Request {
     /// frames' engine half and the frame's place, on the stack the
     /// request runs on, on one below it, or on the stack of the
     /// suspended fiber the resumption runs on.
-    fn running_frame(&self, generator: PhpObject) -> Option<(&VmStack, &Vm, usize)> {
+    fn running_frame(&self, generator: PhpObject) -> Option<(&Vm, usize)> {
         let place = |vm: &Vm| {
-            vm.frames().iter().rposition(|state| {
-                state
-                    .generator
+            (0..vm.depth()).rev().find(|&at| {
+                self.frame_on(vm, at)
+                    .and_then(FrameAt::generator)
                     .is_some_and(|running| running.index() == generator.index())
             })
         };
         if let Some(found) = self
             .executions()
-            .find_map(|(stack, vm)| place(vm).map(|at| (stack, vm, at)))
+            .find_map(|vm| place(vm).map(|at| (vm, at)))
         {
             return Some(found);
         }
@@ -316,25 +309,16 @@ impl Request {
         let Some((_, Some(Standing::Held(held)))) = crate::fiber::view(self, fiber) else {
             return None;
         };
-        place(&held.vm).map(|at| (&held.stack, &held.vm, at))
+        place(&held.vm).map(|at| (&held.vm, at))
     }
 }
 
-/// The links of the frames `from` to `to` of one stack and of the calls
-/// served between them: a trace that starts at a frame names no native
-/// that frame is calling.
-fn frames_between<'a>(stack: &'a VmStack, vm: &'a Vm, from: usize, to: usize) -> Vec<Link<'a>> {
-    let frames = vm.frames();
-    let calls_below = |at: usize| {
-        frames.get(at).map_or(vm.calls().len(), |state| {
-            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
-        })
-    };
-    let calls = calls_below(from)..calls_below(to);
+/// The links of the records `from` to `to` of one stack, the frames and
+/// the natives' calls served between them: a trace that starts at a
+/// frame names no native that frame is calling.
+fn frames_between<'a>(req: &'a Request, vm: &'a Vm, from: usize, to: usize) -> Vec<Link<'a>> {
     // The generators a delegation runs through stand on the stack here,
     // put there by the reader ([`generator::with_frames`]), so no
     // placeholder is expanded a second time.
-    links_of(stack, vm, from..to.saturating_add(1), calls, &|_| {
-        Vec::new()
-    })
+    links_of(req, vm, from..to.saturating_add(1), &|_| Vec::new())
 }

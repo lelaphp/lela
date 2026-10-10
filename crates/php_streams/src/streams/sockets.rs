@@ -31,7 +31,7 @@ use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerr
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
     BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, OwnedStream, Request,
-    SocketOptions, Stream, StreamCtx, StreamOption, Xport, XportFactory, XportFailure,
+    SocketOptions, Stream, StreamCtx, StreamOption, Xport, XportFactory, XportFailure, XportStep,
 };
 use crate::api::values::PhpString;
 use crate::streams::StreamLayer;
@@ -966,10 +966,33 @@ fn unix_path(req: &mut Request, name: &[u8]) -> std::path::PathBuf {
     std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path))
 }
 
-/// An error of `std`'s as the failure `php_stream_xport_create` reports.
-fn failure(error: &std::io::Error) -> XportFailure {
+/// An error of `std`'s as the failure `php_stream_xport_create` reports
+/// of `step`.
+fn failure(step: XportStep, error: &std::io::Error) -> XportFailure {
     let (code, text) = socket_error(error);
-    XportFailure { code, text }
+    XportFailure {
+        step,
+        code,
+        text: Some(text),
+    }
+}
+
+/// A failure of `step` with php's text and no `errno`.
+fn text_only(step: XportStep, text: String) -> XportFailure {
+    XportFailure {
+        step,
+        code: 0,
+        text: Some(text),
+    }
+}
+
+/// A failure of `step` that gave no text, php's `NULL` `error_text`.
+const fn textless(step: XportStep) -> XportFailure {
+    XportFailure {
+        step,
+        code: 0,
+        text: None,
+    }
 }
 
 /// `php_tcp_sockop_connect` (`Z/main/streams/xp_socket.c:747`) for
@@ -981,7 +1004,8 @@ fn failure(error: &std::io::Error) -> XportFailure {
 /// family (php's `Invalid IP Address` and `Failed to bind` warnings where
 /// it is not one, or will not bind), `SO_BROADCAST` on a UDP one and
 /// `TCP_NODELAY` on a TCP one as the options say, and connected. The last
-/// failure is the error.
+/// failure is the error, and one with no text where no address was
+/// tried, as php leaves `error_string` unwritten then.
 fn connect_inet(
     req: &mut Request,
     name: &[u8],
@@ -989,25 +1013,22 @@ fn connect_inet(
     timeout: Option<Duration>,
     options: &SocketOptions,
 ) -> Result<Sock, XportFailure> {
-    let text_only = |text| XportFailure { code: 0, text };
-    let (host, port) = parse_ip_address(name).map_err(text_only)?;
+    let refused = |text| text_only(XportStep::Connect, text);
+    let (host, port) = parse_ip_address(name).map_err(refused)?;
     // A `bindto` that does not parse is php's error text, which the first
     // attempt clears, and no bind.
     let mut bindto = match &options.bindto {
         Some(BindTo::NotAString) => {
-            return Err(text_only(String::from(
+            return Err(refused(String::from(
                 "local_addr context option is not a string.",
             )));
         }
         Some(BindTo::Address(text)) => parse_ip_address(text).ok(),
         None => None,
     };
-    let addrs = addresses(req, &host, port).map_err(text_only)?;
+    let addrs = addresses(req, &host, port).map_err(refused)?;
     let deadline = timeout.map(|t| Instant::now() + t);
-    let mut last = XportFailure {
-        code: 0,
-        text: String::new(),
-    };
+    let mut last = textless(XportStep::Connect);
     for addr in addrs {
         if let Some((local, _)) = &bindto {
             if addr.is_ipv6() && !local.contains(':') {
@@ -1037,7 +1058,7 @@ fn connect_inet(
         ) {
             Ok(()) if udp => return Ok(Sock::Udp(UdpSocket::from(fd))),
             Ok(()) => return Ok(Sock::Tcp(TcpStream::from(fd))),
-            Err(error) => last = failure(&error),
+            Err(error) => last = failure(XportStep::Connect, &error),
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
@@ -1095,18 +1116,15 @@ fn bind_inet(
     listen: bool,
     options: &SocketOptions,
 ) -> Result<Sock, XportFailure> {
-    let text_only = |text| XportFailure { code: 0, text };
-    let (host, port) = parse_ip_address(name).map_err(text_only)?;
-    let addrs = addresses(req, &host, port).map_err(text_only)?;
-    let mut last = XportFailure {
-        code: 0,
-        text: String::new(),
-    };
+    let refused = |text| text_only(XportStep::Bind, text);
+    let (host, port) = parse_ip_address(name).map_err(refused)?;
+    let addrs = addresses(req, &host, port).map_err(refused)?;
+    let mut last = textless(XportStep::Bind);
     for addr in addrs {
         let fd = match crate::api::layer::new_socket(&addr, udp) {
             Ok(fd) => fd,
             Err(error) => {
-                last = failure(&error);
+                last = failure(XportStep::Bind, &error);
                 continue;
             }
         };
@@ -1123,7 +1141,7 @@ fn bind_inet(
             crate::api::layer::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true).ok();
         }
         if let Err(error) = crate::api::layer::bind_fd(fd.as_fd(), &addr) {
-            last = failure(&error);
+            last = failure(XportStep::Bind, &error);
             continue;
         }
         if udp {
@@ -1133,7 +1151,8 @@ fn bind_inet(
             let backlog = options.listen_queue.unwrap_or(32);
             let backlog =
                 i32::try_from(backlog).unwrap_or(if backlog < 0 { i32::MIN } else { i32::MAX });
-            crate::api::layer::listen_fd(fd.as_fd(), backlog).map_err(|error| failure(&error))?;
+            crate::api::layer::listen_fd(fd.as_fd(), backlog)
+                .map_err(|error| failure(XportStep::Listen, &error))?;
         }
         return Ok(Sock::TcpServer(TcpListener::from(fd)));
     }
@@ -1227,31 +1246,25 @@ impl Transports for Request {
                 let path = unix_path(self, rest);
                 UnixStream::connect(path)
                     .map(Sock::Unix)
-                    .map_err(|e| failure(&e))
+                    .map_err(|e| failure(XportStep::Connect, &e))
             }
             ("unix_socket", Xport::Server { .. }) => {
                 let path = unix_path(self, rest);
                 UnixListener::bind(path)
                     .map(Sock::UnixServer)
-                    .map_err(|_| XportFailure {
-                        code: 0,
-                        text: String::new(),
-                    })
+                    .map_err(|_| textless(XportStep::Bind))
             }
             ("udg_socket", Xport::Client { .. }) => {
                 let path = unix_path(self, rest);
                 UnixDatagram::unbound()
                     .and_then(|s| s.connect(path).map(|()| Sock::Udg(s)))
-                    .map_err(|e| failure(&e))
+                    .map_err(|e| failure(XportStep::Connect, &e))
             }
             (_, _) => {
                 let path = unix_path(self, rest);
                 UnixDatagram::bind(path)
                     .map(Sock::Udg)
-                    .map_err(|_| XportFailure {
-                        code: 0,
-                        text: String::new(),
-                    })
+                    .map_err(|_| textless(XportStep::Bind))
             }
         }
     }
@@ -1381,12 +1394,12 @@ impl Transports for Request {
         }
         let Some(found) = self.transport_named(protocol) else {
             let shown = String::from_utf8_lossy(&protocol[..protocol.len().min(31)]);
-            return Ok(Err(XportFailure {
-                code: 0,
-                text: format!(
+            return Ok(Err(text_only(
+                XportStep::Unregistered,
+                format!(
                     "Unable to find the socket transport \"{shown}\" - did you forget to enable it when you configured PHP?"
                 ),
-            }));
+            )));
         };
         let xport = context_options(self, xport)?;
         let (Xport::Client { context, .. } | Xport::Server { context, .. }) = xport;
@@ -1448,10 +1461,7 @@ impl Transports for Request {
                 .unwrap_or(Ok(()));
             if connected.is_err() {
                 stream.free(self);
-                return Ok(Err(XportFailure {
-                    code: 0,
-                    text: String::new(),
-                }));
+                return Ok(Err(textless(XportStep::Connect)));
             }
         }
         if let Some(key) = persistent {

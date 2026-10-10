@@ -819,7 +819,8 @@ impl Ftp {
             };
             return Ok(match req.xport_create(&target, xport)? {
                 Ok(stream) => Some(Data::Connected(stream)),
-                Err(XportFailure { code, text }) => {
+                Err(XportFailure { code, text, .. }) => {
+                    let text = text.unwrap_or_default();
                     let text = format!("php_connect_nonb() failed: {text} ({code})");
                     docref(req, Level::Warning, &text);
                     None
@@ -842,7 +843,8 @@ impl Ftp {
         };
         let listener = match req.xport_create(any, xport)? {
             Ok(stream) => stream,
-            Err(XportFailure { code, text }) => {
+            Err(XportFailure { code, text, .. }) => {
+                let text = text.unwrap_or_default();
                 docref(
                     req,
                     Level::Warning,

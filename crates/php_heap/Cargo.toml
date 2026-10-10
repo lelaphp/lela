@@ -19,3 +19,9 @@ workspace = true
 [dependencies]
 libc = { workspace = true }
 corosensei = { workspace = true }
+
+# The main thread's bounds are read only by a test that is the process's
+# own `main`, which the libtest harness never runs a test on.
+[[test]]
+name = "main_thread_stack"
+harness = false

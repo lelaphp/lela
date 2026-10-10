@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Claim, Clock, Ctime, Kind, Namespace, Object, Runner, STARTED, Standing, Swept, abandoned,
-    claimed, left, offset, reclaim, second_of_day, started, unnamed_left,
+    Claim, Claims, Clock, Ctime, Held, Kind, Namespace, Object, Runner, STARTED, Standing, Swept,
+    abandoned, alive, claimed, left, offset, second_of_day, started, unnamed_left, window,
 };
 use crate::oracle::Ran;
+use crate::scratch::Tree;
 
 /// `ipcs -a` as macOS printed it on 2026-10-01, cut to one object or two
 /// of each kind: a database's segment and semaphores, and what the
@@ -486,50 +487,104 @@ fn a_dead_creators_private_segment_is_abandoned_whatever_run_made_it() {
     assert_eq!(gone, [1]);
 }
 
-/// A claim its run never settled, as a run killed whole leaves one, is
-/// taken by the next run's reclaim with what was made under it: here a
-/// private queue of mode 0 nobody sent to, as php's `msg_get_queue(0)`
-/// leaves one, made by a process gone since. Another run's reclaim on the
-/// machine may take it first, so what is held is that neither stands.
-#[test]
-fn a_claim_left_unsettled_is_reclaimed_with_what_was_made_under_it() {
-    let claim = Claim::new("sysv-test").unwrap();
-    let path = claim.path().to_path_buf();
-    let made = std::process::Command::new("perl")
-        .args([
-            "-MIPC::SysV=IPC_PRIVATE",
-            "-e",
-            "print msgget(IPC_PRIVATE, 0) // die $!",
-        ])
-        .output()
-        .unwrap();
-    assert!(made.status.success(), "{made:?}");
-    let id: u64 = String::from_utf8_lossy(&made.stdout).parse().unwrap();
-    std::fs::write(&path, "{}\n").unwrap();
-    drop(claim);
-    assert!(
-        path.exists(),
-        "the claim outlives a run that did not settle it"
-    );
-    // A reclaim that meets the claim's lock held passes it over, and a
-    // process forked in the moment between holds the descriptors of the
-    // one it came from until it execs: the next reclaim takes it.
+/// The claims of `dir` once no other process holds the ones a test let
+/// go: a process forked in the moment a claim was let go holds the
+/// descriptors of the one it came from until it execs, its lock with them.
+fn ended(dir: &Tree, claims: usize) -> Claims {
     for _ in 0..20 {
-        reclaim(Duration::from_secs(1)).unwrap();
-        if !path.exists() {
-            break;
+        let read = Claims::read(dir, None);
+        if read.held == Held::default() && read.ended.len() == claims {
+            return read;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let standing = Standing::now().unwrap();
-    assert!(
-        !standing
-            .0
-            .iter()
-            .any(|o| o.kind == Kind::Queue && o.id == id),
-        "queue {id} stands after the reclaim"
+    panic!("the claims of {} are still held", dir.display());
+}
+
+/// The ids of what `perl` prints, made by `script`, a space between each.
+fn perl(script: &str) -> Vec<u64> {
+    let made = std::process::Command::new("perl")
+        .args(["-MIPC::SysV=IPC_PRIVATE,IPC_CREAT", "-e", script])
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let printed = String::from_utf8(made.stdout).unwrap();
+    printed.split(' ').map(|id| id.parse().unwrap()).collect()
+}
+
+/// `ids`' queues among `taken`, in order.
+fn queues(taken: &[&Object], ids: &[u64]) -> Vec<u64> {
+    let mut queues: Vec<u64> = taken
+        .iter()
+        .filter(|o| o.kind == Kind::Queue && ids.contains(&o.id))
+        .map(|o| o.id)
+        .collect();
+    queues.sort_unstable();
+    queues
+}
+
+/// Two runs at once (#2563), each with a claim in one directory, and a
+/// private queue of mode 0 nobody sent to standing for each, as php's
+/// `msg_get_queue(0)` leaves one, made in one second: the kernel names no
+/// maker on either, so one run's and the other's look alike. The first
+/// run's window took both before; while the second run holds its claim
+/// it takes neither. Once both runs have ended unsettled, as runs killed
+/// whole leave their claims, a reclaim takes both and the claims with
+/// them. Only what is decided is read: the test removes its own two
+/// queues and nothing else on the machine.
+#[test]
+fn what_is_made_while_another_run_holds_its_claim_is_left_until_both_end() {
+    let dir = Tree::new("sysv-held").unwrap();
+    let ours = Claim::within(&dir, "ours").unwrap();
+    let theirs = Claim::within(&dir, "theirs").unwrap();
+    let mut ids =
+        perl("print msgget(IPC_PRIVATE, 0) // die $!, ' ', msgget(IPC_PRIVATE, 0) // die $!");
+    ids.sort_unstable();
+    let (standing, runner, clock) = (
+        Standing::now().unwrap(),
+        Runner::now(),
+        Clock::now().unwrap(),
     );
-    assert!(!path.exists(), "the claim is taken with what it claimed");
+    let windows = [window(ours.from, None, &clock)];
+    let mut taken = claimed(&standing, &windows, (&runner, &clock), alive);
+    assert_eq!(queues(&taken, &ids), ids, "the rule before #2563");
+    let held = Claims::read(&dir, Some(ours.path())).held;
+    taken.retain(|o| !held.covers(o, &clock));
+    let refused = queues(&taken, &ids);
+    let paths = [ours.path().to_path_buf(), theirs.path().to_path_buf()];
+    drop((ours, theirs));
+    let grace = Duration::from_secs(1);
+    let claims = ended(&dir, 2);
+    let reclaimed = queues(
+        &claims.taken(&standing, grace, (&runner, &clock), alive),
+        &ids,
+    );
+    for id in &ids {
+        std::process::Command::new("ipcrm")
+            .args(["-q", &id.to_string()])
+            .status()
+            .ok();
+    }
+    assert_eq!(refused, [0u64; 0], "taken while another run held its claim");
+    assert_eq!(reclaimed, ids, "both reclaimed once both runs ended");
+    claims.settle(grace, &clock);
+    assert!(paths.iter().all(|path| !path.exists()), "the claims go");
+}
+
+/// A claim of a run that ended unsettled whose window reaches a second
+/// another run's claim covers stands for a later reclaim, and goes once
+/// no other run holds one.
+#[test]
+fn an_ended_claim_another_run_held_beside_stands_until_it_ends() {
+    let dir = Tree::new("sysv-beside").unwrap();
+    let theirs = Claim::within(&dir, "theirs").unwrap();
+    let path = Claim::within(&dir, "ours").unwrap().path().to_path_buf();
+    let clock = Clock::now().unwrap();
+    Claims::read(&dir, None).settle(Duration::from_secs(1), &clock);
+    assert!(path.exists(), "taken while another run held its claim");
+    drop(theirs);
+    ended(&dir, 2).settle(Duration::from_secs(1), &clock);
+    assert!(!path.exists(), "the claim goes once no other run holds one");
 }
 
 /// A claim's journal names the processes of its [`STARTED`] lines alone:
@@ -549,51 +604,37 @@ fn a_claims_journal_names_the_processes_it_started() {
 /// removed, while the same queue of a process no journal names stands.
 #[test]
 fn a_claim_left_unsettled_takes_what_its_journaled_programs_left() {
-    let claim = Claim::new("sysv-test").unwrap();
+    let dir = Tree::new("sysv-journaled").unwrap();
+    let claim = Claim::within(&dir, "sysv-test").unwrap();
     let path = claim.path().to_path_buf();
     let queue = || {
-        let made = std::process::Command::new("perl")
-            .args([
-                "-MIPC::SysV=IPC_CREAT",
-                "-e",
-                "my $id = msgget(0x5d000000 + $$, IPC_CREAT | 0600) // die $!; msgsnd($id, pack('l! a*', 1, 'x'), 0) or die $!; print \"$$ $id\"",
-            ])
-            .output()
-            .unwrap();
-        assert!(made.status.success(), "{made:?}");
-        let printed = String::from_utf8(made.stdout).unwrap();
-        let (pid, id) = printed.split_once(' ').unwrap();
-        (pid.to_owned(), id.parse::<u64>().unwrap())
+        perl(
+            "my $id = msgget(0x5d000000 + $$, IPC_CREAT | 0600) // die $!; msgsnd($id, pack('l! a*', 1, 'x'), 0) or die $!; print \"$$ $id\"",
+        )
     };
-    let (pid, journaled) = queue();
-    let (_, unjournaled) = queue();
+    let [pid, journaled] = queue()[..] else {
+        panic!()
+    };
+    let [_, unjournaled] = queue()[..] else {
+        panic!()
+    };
     std::fs::write(&path, format!("{STARTED} 0 {pid}\nended 0\n")).unwrap();
     drop(claim);
-    for _ in 0..20 {
-        reclaim(Duration::from_secs(1)).unwrap();
-        if !path.exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let (standing, runner, clock) = (
+        Standing::now().unwrap(),
+        Runner::now(),
+        Clock::now().unwrap(),
+    );
+    let ids = [journaled, unjournaled];
+    let taken = queues(
+        &ended(&dir, 1).taken(&standing, Duration::from_secs(1), (&runner, &clock), alive),
+        &ids,
+    );
+    for id in ids {
+        std::process::Command::new("ipcrm")
+            .args(["-q", &id.to_string()])
+            .status()
+            .ok();
     }
-    let standing = Standing::now().unwrap();
-    let stands = |id: u64| {
-        standing
-            .0
-            .iter()
-            .any(|o| o.kind == Kind::Queue && o.id == id)
-    };
-    std::process::Command::new("ipcrm")
-        .args(["-q", &unjournaled.to_string()])
-        .status()
-        .ok();
-    assert!(
-        !stands(journaled),
-        "queue {journaled} stands after the reclaim"
-    );
-    assert!(
-        stands(unjournaled),
-        "queue {unjournaled}, no journal's, was taken"
-    );
-    assert!(!path.exists(), "the claim is taken with what it claimed");
+    assert_eq!(taken, [journaled], "the journaled queue alone");
 }

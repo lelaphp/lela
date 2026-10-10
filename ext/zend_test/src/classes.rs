@@ -541,6 +541,7 @@ impl ZendTestAttribute {}
 /// ```php
 /// #[ZendTestRepeatableAttribute, ZendTestRepeatableAttribute] class Twice {}
 /// var_dump(count((new ReflectionClass('Twice'))->getAttributes()));
+/// #[ZendTestRepeatableAttribute] #[ZendTestRepeatableAttribute] const MY_CONST = true;
 /// ```
 /// ```expect
 /// int(2)
@@ -566,6 +567,36 @@ impl ZendTestRepeatableAttribute {}
 ///   string(1) "p"
 /// }
 /// ```
+///
+/// The compiler reads its targets as it reads Core's attributes': on a
+/// promoted parameter it stays on the parameter alone, and on a function
+/// or twice over it is php's compile-time error.
+///
+/// ```php
+/// class AttrTest { function __construct(#[ZendTestParameterAttribute('foo')] public $param) {} }
+/// $ref = new ReflectionClass(AttrTest::class);
+/// var_dump(count($ref->getConstructor()->getParameters()[0]->getAttributes()));
+/// var_dump(count($ref->getProperty('param')->getAttributes()));
+/// ```
+/// ```expect
+/// int(1)
+/// int(0)
+/// ```
+///
+/// ```php
+/// #[ZendTestParameterAttribute('f')]
+/// function f() {}
+/// ```
+/// ```expect exit=255
+/// Fatal error: Attribute "ZendTestParameterAttribute" cannot target function (allowed targets: parameter) in %s on line 3
+/// ```
+///
+/// ```php
+/// function f(#[ZendTestParameterAttribute('a'), ZendTestParameterAttribute('b')] $a) {}
+/// ```
+/// ```expect exit=255
+/// Fatal error: Attribute "ZendTestParameterAttribute" must not be repeated in %s on line 2
+/// ```
 #[php_class(final, attribute_class(Attribute::TARGET_PARAMETER))]
 pub(crate) struct ZendTestParameterAttribute;
 
@@ -588,6 +619,19 @@ impl ZendTestParameterAttribute {
 /// `#[Attribute(Attribute::TARGET_PROPERTY)] final class
 /// ZendTestPropertyAttribute`, the doc comments its stub exposes laid on
 /// by [`declared`].
+///
+/// On a promoted parameter it stays on the property alone:
+///
+/// ```php
+/// class AttrTest { function __construct(#[ZendTestPropertyAttribute('foo')] public $param) {} }
+/// $ref = new ReflectionClass(AttrTest::class);
+/// var_dump(count($ref->getConstructor()->getParameters()[0]->getAttributes()));
+/// var_dump(count($ref->getProperty('param')->getAttributes()));
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// ```
 ///
 /// ```php
 /// var_dump(new ZendTestPropertyAttribute("p"));

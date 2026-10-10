@@ -2171,6 +2171,23 @@ impl From<Owner<PhpArray>> for DebugInfo {
     }
 }
 
+/// The table php's `get_gc` returns beside the values it names, which
+/// the cycle collector colours and walks after them (`Z/Zend/zend_gc.c:1112`)
+/// in place of the object's properties, so the order its garbage is
+/// found in, and its destructors served in, is php's.
+pub enum GcTable {
+    /// `zend_std_get_properties(obj)`, or php's `NULL`: the object's
+    /// declared slots and dynamic table, which the heap walks itself.
+    Properties,
+    /// A table the payload owns and frees, as `zend_closure_get_gc`
+    /// returns the closure's static variables.
+    Owned(PhpArray),
+    /// A table that is no value, the symbol table a frame rebuilt, which
+    /// `zend_fiber_object_gc` and `zend_generator_get_gc` return: what
+    /// its rows hold, in order.
+    Rows(Vec<Value>),
+}
+
 /// What the `dtor_obj` slot holds: `zend_objects_destroy_object`, or a
 /// destructor of the table's own. The difference is php's own test,
 /// `dtor_obj != zend_objects_destroy_object || ce->destructor`, which
@@ -2734,10 +2751,18 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `get_gc`: the values the object's payload owns, for the cycle
-    /// collector's walk. The declared slots and the dynamic table are
-    /// the heap's to walk; `Std` names nothing more.
-    fn get_gc(&self, req: &mut Request, object: PhpObject, _visit: &mut dyn FnMut(Value)) {
+    /// collector's walk, handed to `visit` as php's handler fills
+    /// `*table`, and the table php's handler returns beside them. The
+    /// declared slots and the dynamic table are the heap's to walk;
+    /// `Std` names nothing more and hands back [`GcTable::Properties`].
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        _visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let _ = (req, object);
+        GcTable::Properties
     }
 
     /// `do_operation`: the value an operator over the object answers,

@@ -111,11 +111,11 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
     Err(throw_error(req, "Error", message))
 }
 
-/// `DATE_FORMAT_METHOD_INIT_VARS` and `DATE_FORMAT_METHOD_FETCH_OBJECT`:
-/// the request's error reset, then the object's, and php's `Error` for
-/// an object no constructor finished.
+/// `DATE_FORMAT_METHOD_FETCH_OBJECT`: the object's error reset, the
+/// request's having been reset before the arguments
+/// (`DATE_FORMAT_METHOD_INIT_VARS`, `before_args`), and php's `Error`
+/// for an object no constructor finished.
 fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    error::reset(req);
     error::reset_object::<DateFormatObject>(req, object);
     let held = object
         .native::<DateFormatObject>(req)
@@ -209,9 +209,9 @@ struct RawArgs<C> {
 }
 
 impl<C: php_ext::abi::FromArgument> RawArgs<C> {
-    /// `intl_error_reset(NULL)`, then `ZEND_PARSE_PARAMETERS_START(1, 6)`.
+    /// `ZEND_PARSE_PARAMETERS_START(1, 6)`, the request's error reset
+    /// before it (`before_args`).
     fn hold(&self, req: &mut Request, calendar: impl FnOnce(C) -> CalArg) -> Result<Args, Thrown> {
-        error::reset(req);
         arity(req, 1, Some(6))?;
         let locale = self.locale.hold(req)?;
         let date_type = self.date_type.hold(req)?;
@@ -1117,13 +1117,11 @@ fn parse_text(
 
 /// `datefmt_get_error_code`: the object's.
 fn error_code(req: &mut Request, object: PhpObject) -> i64 {
-    error::reset(req);
     i64::from(error::object_code::<DateFormatObject>(req, object).0)
 }
 
 /// `datefmt_get_error_message`: the object's.
 fn error_message(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
-    error::reset(req);
     let message = error::object_message::<DateFormatObject>(req, object);
     PhpString::new(req, &message)
 }
@@ -1220,7 +1218,7 @@ impl IntlDateFormatter {
     const GREGORIAN: i64 = 1;
     const TRADITIONAL: i64 = 0;
 
-    #[php(arity = manual)]
+    #[php(arity = manual, before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -1246,7 +1244,7 @@ impl IntlDateFormatter {
         })
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, arity = manual, before_args = error::reset)]
     fn create(
         req: &mut Request,
         locale: Raw<Option<PhpString>>,
@@ -1268,32 +1266,32 @@ impl IntlDateFormatter {
         create(req, args)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getDateType(req: &mut Request, this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
         get_type(req, this.object(), true).map(OrFalse::Value)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getTimeType(req: &mut Request, this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
         get_type(req, this.object(), false).map(OrFalse::Value)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getCalendar(req: &mut Request, this: This<Self>) -> Answer<i64> {
         get_calendar(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setCalendar(req: &mut Request, this: This<Self>, calendar: CalArg) -> Result<bool, Thrown> {
         set_calendar(req, this.object(), calendar)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getTimeZoneId(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         get_timezone_id(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getCalendarObject(
         req: &mut Request,
         this: This<Self>,
@@ -1301,28 +1299,28 @@ impl IntlDateFormatter {
         get_calendar_object(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getTimeZone(req: &mut Request, this: This<Self>) -> Answer<Owner<Instance<IntlTimeZone>>> {
         get_timezone(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setTimeZone(req: &mut Request, this: This<Self>, timezone: ZoneRaw) -> Result<bool, Thrown> {
         let zone = zone_held(req, timezone.value(), 1)?;
         set_timezone(req, this.object(), zone)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setPattern(req: &mut Request, this: This<Self>, pattern: PhpString) -> Result<bool, Thrown> {
         set_pattern(req, this.object(), pattern).map(|a| matches!(a, OrFalse::Value(true)))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getPattern(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         get_pattern(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getLocale(
         req: &mut Request,
         this: This<Self>,
@@ -1331,17 +1329,17 @@ impl IntlDateFormatter {
         get_locale(req, this.object(), r#type)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setLenient(req: &mut Request, this: This<Self>, lenient: bool) -> Result<(), Thrown> {
         set_lenient(req, this.object(), lenient)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn isLenient(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         is_lenient(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn format(
         req: &mut Request,
         this: This<Self>,
@@ -1360,7 +1358,7 @@ impl IntlDateFormatter {
         format_object(req, datetime.0, format.0, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn parse(
         req: &mut Request,
         this: This<Self>,
@@ -1371,6 +1369,7 @@ impl IntlDateFormatter {
             .map(|parsed| instant(req, parsed))
     }
 
+    #[php(before_args = error::reset)]
     fn parseToCalendar(
         req: &mut Request,
         this: This<Self>,
@@ -1381,7 +1380,7 @@ impl IntlDateFormatter {
             .map(|parsed| instant(req, parsed))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn localtime(
         req: &mut Request,
         this: This<Self>,
@@ -1391,12 +1390,12 @@ impl IntlDateFormatter {
         parse(req, this.object(), string, &offset, Parse::Fields).map(fields)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
         error_code(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         error_message(req, this.object())
     }
@@ -1412,7 +1411,7 @@ impl IntlDateFormatter {
 /// NULL
 /// string(234) "datefmt_create(): Invalid value for calendar type; it must be one of IntlDateFormatter::TRADITIONAL (locale's default calendar) or IntlDateFormatter::GREGORIAN. Alternatively, it can be an IntlCalendar object: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function(arity = manual)]
+#[php_function(arity = manual, before_args = error::reset)]
 #[allow(non_snake_case)]
 fn datefmt_create(
     req: &mut Request,
@@ -1443,7 +1442,7 @@ fn datefmt_create(
 /// ```expect
 /// int(3)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_datetype(req: &mut Request, formatter: Fmt) -> Result<OrFalse<i64>, Thrown> {
     get_type(req, formatter.object(), true).map(OrFalse::Value)
 }
@@ -1456,7 +1455,7 @@ fn datefmt_get_datetype(req: &mut Request, formatter: Fmt) -> Result<OrFalse<i64
 /// ```expect
 /// int(-1)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_timetype(req: &mut Request, formatter: Fmt) -> Result<OrFalse<i64>, Thrown> {
     get_type(req, formatter.object(), false).map(OrFalse::Value)
 }
@@ -1471,7 +1470,7 @@ fn datefmt_get_timetype(req: &mut Request, formatter: Fmt) -> Result<OrFalse<i64
 /// int(0)
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_calendar(req: &mut Request, formatter: Fmt) -> Answer<i64> {
     get_calendar(req, formatter.object())
 }
@@ -1495,7 +1494,7 @@ fn datefmt_get_calendar(req: &mut Request, formatter: Fmt) -> Answer<i64> {
 /// bool(false)
 /// string(250) "IntlDateFormatter::setCalendar(): Invalid value for calendar type; it must be one of IntlDateFormatter::TRADITIONAL (locale's default calendar) or IntlDateFormatter::GREGORIAN. Alternatively, it can be an IntlCalendar object: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_set_calendar(
     req: &mut Request,
     formatter: Fmt,
@@ -1512,7 +1511,7 @@ fn datefmt_set_calendar(
 /// ```expect
 /// string(13) "Europe/Lisbon"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_timezone_id(req: &mut Request, formatter: Fmt) -> Answer<Owner<PhpString>> {
     get_timezone_id(req, formatter.object())
 }
@@ -1528,7 +1527,7 @@ fn datefmt_get_timezone_id(req: &mut Request, formatter: Fmt) -> Answer<Owner<Ph
 /// string(13) "Europe/Lisbon"
 /// string(9) "gregorian"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_calendar_object(
     req: &mut Request,
     formatter: Fmt,
@@ -1544,7 +1543,7 @@ fn datefmt_get_calendar_object(
 /// ```expect
 /// string(10) "Asia/Tokyo"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_timezone(
     req: &mut Request,
     formatter: Fmt,
@@ -1570,7 +1569,7 @@ fn datefmt_get_timezone(
 /// IntlDateFormatter::setTimeZone(): No such time zone: "Nowhere/Else"
 /// IntlDateFormatter::setTimeZone(): Argument #1 ($timezone) must be of type object|string|null, array given
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_set_timezone(
     req: &mut Request,
     formatter: Fmt,
@@ -1592,7 +1591,7 @@ fn datefmt_set_timezone(
 /// string(9) "yyyy'-'MM"
 /// string(7) "1970-01"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_set_pattern(
     req: &mut Request,
     formatter: Fmt,
@@ -1609,7 +1608,7 @@ fn datefmt_set_pattern(
 /// ```expect
 /// string(7) "dd.MM.y"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_pattern(req: &mut Request, formatter: Fmt) -> Answer<Owner<PhpString>> {
     get_pattern(req, formatter.object())
 }
@@ -1626,7 +1625,7 @@ fn datefmt_get_pattern(req: &mut Request, formatter: Fmt) -> Answer<Owner<PhpStr
 /// bool(false)
 /// string(78) "IntlDateFormatter::getLocale(): Error getting locale: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_locale(
     req: &mut Request,
     formatter: Fmt,
@@ -1650,7 +1649,7 @@ fn datefmt_get_locale(
 /// bool(false)
 /// string(62) "IntlDateFormatter::parse(): Date parsing failed: U_PARSE_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_set_lenient(req: &mut Request, formatter: Fmt, lenient: bool) -> Result<(), Thrown> {
     set_lenient(req, formatter.object(), lenient)
 }
@@ -1663,7 +1662,7 @@ fn datefmt_set_lenient(req: &mut Request, formatter: Fmt, lenient: bool) -> Resu
 /// ```expect
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_is_lenient(req: &mut Request, formatter: Fmt) -> Result<bool, Thrown> {
     is_lenient(req, formatter.object())
 }
@@ -1691,7 +1690,7 @@ fn datefmt_is_lenient(req: &mut Request, formatter: Fmt) -> Result<bool, Thrown>
 /// bool(false)
 /// string(77) "IntlDateFormatter::format(): date formatting failed: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_format(
     req: &mut Request,
     formatter: Fmt,
@@ -1751,7 +1750,7 @@ fn datefmt_format_object(
 /// int(10)
 /// string(10) "Asia/Tokyo"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_parse(
     req: &mut Request,
     formatter: Fmt,
@@ -1791,7 +1790,7 @@ fn datefmt_parse(
 /// }
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_localtime(
     req: &mut Request,
     formatter: Fmt,
@@ -1811,7 +1810,7 @@ fn datefmt_localtime(
 /// int(9)
 /// string(62) "IntlDateFormatter::parse(): Date parsing failed: U_PARSE_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_error_code(req: &mut Request, formatter: Fmt) -> i64 {
     error_code(req, formatter.object())
 }
@@ -1824,7 +1823,7 @@ fn datefmt_get_error_code(req: &mut Request, formatter: Fmt) -> i64 {
 /// ```expect
 /// string(12) "U_ZERO_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn datefmt_get_error_message(
     req: &mut Request,
     formatter: Fmt,

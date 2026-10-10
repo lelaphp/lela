@@ -164,18 +164,20 @@ impl Request {
     /// shutdown collects and its leak sensor reads the request as a debug
     /// php does (#2058). Where no frame stands, php bails out after the
     /// rendering ([`Request::thrown_without_frame`]).
-    pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+    pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &[u8], file: &[u8], line: u32) {
         if self.bailout {
             return;
         }
         self.clear_fatal_error_backtrace();
         // `zend_strpprintf`'s message, handed to `zend_error_cb` and
-        // released after.
-        if let Ok(string) = self.string(message.as_bytes()) {
+        // released after: the throwable's bytes as they stand, which
+        // every display form writes.
+        if let Ok(string) = self.string(message) {
             // `zend_exception_error`'s `zend_observer_error_notify`
             // before `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`).
             crate::observer::uncaught(self, level, file, line, string.as_bytes());
-            self.zend_error_cb(level, Bail::DontBail, string, message, file, line);
+            let text = String::from_utf8_lossy(message);
+            self.zend_error_cb(level, Bail::DontBail, string, &text, file, line);
             self.release(Value::string(string));
         }
         self.leave();
@@ -323,7 +325,7 @@ impl Request {
         line: u32,
     ) {
         if level == Level::Parse {
-            self.end_in_uncaught(level, message, file, line);
+            self.end_in_uncaught(level, message.as_bytes(), file, line);
             return;
         }
         self.note_error_in(level, message, file, line);

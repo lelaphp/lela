@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use php_heap::FrameRef;
+
 use php_unit::decl::{ConstExpr, HookKind, MethodDecl, Name, ParameterDefault};
 use php_unit::{ConstIdx, Opcode, Unit};
 
@@ -18,7 +20,7 @@ use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted, adopted_some,
     walk,
 };
-use crate::exec::{self, Body, CallStage};
+use crate::exec::{self, Body};
 
 /// A linked function: user or native, by identity, one word (design
 /// §5.14, *Identities*). With its top bit clear it is one every request
@@ -730,49 +732,49 @@ impl NamedRefused {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-pub(crate) fn handle_undef_args(req: &mut Request) -> Result<(), Thrown> {
-    let Some(call) = req.vm_mut().building_call() else {
+pub(crate) fn handle_undef_args(req: &mut Request, call: FrameRef) -> Result<(), Thrown> {
+    let Some(header) = req.vm().at(call) else {
         return Ok(());
     };
-    let function = call.function;
-    let stage = std::mem::replace(&mut call.stage, CallStage::Serving);
-    let filled = fill_undef_args(req, function);
-    if let Some(call) = req.vm_mut().building_call() {
-        call.stage = stage;
+    let (Some(function), building) = (header.function, header.info.building()) else {
+        return Ok(());
+    };
+    // `start_fake_frame`: the call current while its defaults are found.
+    if let Some(header) = req.vm_mut().at_mut(call) {
+        header.info.set_building(false);
+    }
+    let filled = fill_undef_args(req, call, function);
+    if let Some(header) = req.vm_mut().at_mut(call) {
+        header.info.set_building(building);
     }
     filled
 }
 
 /// The walk of [`handle_undef_args`] under the callee's frame.
-fn fill_undef_args(req: &mut Request, function: Function) -> Result<(), Thrown> {
+fn fill_undef_args(req: &mut Request, call: FrameRef, function: Function) -> Result<(), Thrown> {
     let user = req
         .user_function(function)
         .map(|user| (Arc::clone(&user.unit), user.body));
-    let count = req
-        .vm()
-        .calls()
-        .last()
-        .map_or(0, |call| call.arguments.len());
+    let count = req.vm().at(call).map_or(0, |header| header.num_args);
     for at in 0..count {
-        let undef = req
-            .vm()
-            .calls()
-            .last()
-            .and_then(|call| call.arguments.get(at))
-            .is_some_and(|held| matches!(held.as_ref(), ValueRef::Undef));
+        let undef = req.vm().stack.frame(call).is_some_and(|frame| {
+            frame.slot(php_heap::Slot(at)).kind() == php_heap::ZvalType::Undef
+        });
         if !undef {
             continue;
         }
+        let place = at as usize;
         let value = match &user {
-            Some((unit, body)) => user_default(req, unit, *body, at)?,
-            None => native_default(req, function, at)?,
+            Some((unit, body)) => user_default(req, unit, *body, place)?,
+            None => native_default(req, function, place)?,
         };
         let placed = req
             .vm_mut()
-            .building_call()
-            .and_then(|call| call.arguments.get_mut(at));
+            .stack
+            .frame_mut(call)
+            .and_then(|frame| frame.slots_mut().get_mut(place));
         match placed {
-            Some(slot) => *slot = value,
+            Some(slot) => *slot = value.to_zval(),
             None => req.release(value),
         }
     }
@@ -878,12 +880,30 @@ fn at_site(req: &mut Request, thrown: Thrown, file: &[u8], line: u32) -> Thrown 
 /// refused. The slot is left `UNDEF` for the caller to write, as php
 /// hands back the zval; the name is pushed as it is given, and whether
 /// it carries one more owner is the caller's to say.
-pub(crate) fn handle_named_arg(
+/// Where [`named_arg_place`] puts a named argument: the slot of the
+/// declared parameter, the call grown to it where it stands past what
+/// the call was given, or a new row of the extra named arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedTo {
+    Argument(usize),
+    Extra,
+}
+
+/// `zend_handle_named_arg`'s decision (`Z/Zend/zend_execute.c:5518`),
+/// the one rule both a call site's `SEND_*` and `zend_call_function`'s
+/// walk place by: an unknown name refused; a name a variadic collects
+/// placed as a new extra named row, refused where one of that name
+/// stands; a declared parameter placed at its slot, refused where an
+/// argument already fills it (`set`), the call's `passed` arguments
+/// telling a slot past them, which is not yet filled; and the
+/// parameter's number.
+pub(crate) fn named_arg_place(
     offset: ArgOffset,
-    arguments: &mut Vec<Value>,
-    extra_named: &mut Vec<(PhpString, Value)>,
+    passed: usize,
+    set: impl Fn(usize) -> bool,
+    extra_named: &[(PhpString, Value)],
     name: PhpString,
-) -> Result<Named, NamedRefused> {
+) -> Result<(NamedTo, u32), NamedRefused> {
     let number = offset.number().ok_or(NamedRefused::Unknown)?;
     match offset {
         ArgOffset::Unknown => Err(NamedRefused::Unknown),
@@ -894,28 +914,42 @@ pub(crate) fn handle_named_arg(
             {
                 return Err(NamedRefused::Overwrites);
             }
-            extra_named.push((name, Value::undef()));
-            Ok(Named {
-                at: NamedAt::Extra(extra_named.len() - 1),
-                number,
-            })
+            Ok((NamedTo::Extra, number))
         }
         ArgOffset::Declared(at) => {
-            if arguments
-                .get(at)
-                .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
-            {
+            if at < passed && set(at) {
                 return Err(NamedRefused::Overwrites);
             }
+            Ok((NamedTo::Argument(at), number))
+        }
+    }
+}
+
+pub(crate) fn handle_named_arg(
+    offset: ArgOffset,
+    arguments: &mut Vec<Value>,
+    extra_named: &mut Vec<(PhpString, Value)>,
+    name: PhpString,
+) -> Result<Named, NamedRefused> {
+    let set = |at: usize| {
+        arguments
+            .get(at)
+            .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
+    };
+    let (to, number) = named_arg_place(offset, arguments.len(), set, extra_named, name)?;
+    let at = match to {
+        NamedTo::Extra => {
+            extra_named.push((name, Value::undef()));
+            NamedAt::Extra(extra_named.len() - 1)
+        }
+        NamedTo::Argument(at) => {
             if arguments.len() <= at {
                 arguments.resize(at + 1, Value::undef());
             }
-            Ok(Named {
-                at: NamedAt::Argument(at),
-                number,
-            })
+            NamedAt::Argument(at)
         }
-    }
+    };
+    Ok(Named { at, number })
 }
 
 /// `zend_call_method` on `object`: the method looked up on the
@@ -1176,48 +1210,151 @@ pub(crate) fn instantiate_named_made(
     named: &[(PhpString, Value)],
 ) -> Result<PhpObject, Thrown> {
     let object = new_object_made(req, class)?;
+    match construct_object(req, object, arguments, named, Constructed::ByInstantiation) {
+        Ok(()) => Ok(object),
+        Err(thrown) => {
+            req.release(object.as_value());
+            Err(thrown)
+        }
+    }
+}
+
+/// Which of php's two constructor calls outside an opcode serves an
+/// object, which differ where the class has no constructor to take a
+/// named argument and where its `get_constructor` refuses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Constructed {
+    /// `object_init_with_constructor`: a named argument with no
+    /// constructor to take it is php's `Unknown named parameter`, and an
+    /// object `get_constructor` refused is given up as it stands, its
+    /// destructor served unless the refusal marked it.
+    ByInstantiation,
+    /// `zend_ast_evaluate`'s `ZEND_AST_NEW` arm: named arguments with no
+    /// constructor to take them are dropped, and whatever is pending
+    /// once the constructor ran, `get_constructor`'s refusal included,
+    /// marks the object (`if (EG(exception))
+    /// zend_object_store_ctor_failed`).
+    ByConstantExpression,
+}
+
+/// The one constructor call [`instantiate_named`] and a constant
+/// expression's `new` share: the constructor `object`'s
+/// `get_constructor` answers, served on it with the positional
+/// arguments and the named ones placed as `zend_call_function` places
+/// them ([`placed`]), and none served for a class with no constructor,
+/// whose named arguments `by` decides. On the `Err` the object is
+/// marked as one whose constructor failed where php marks it
+/// (`zend_object_store_ctor_failed`), so its destructor is not served,
+/// and is the caller's to give up, before or after the arguments as its
+/// path orders it. The arguments stay the caller's.
+fn construct_object(
+    req: &mut Request,
+    object: PhpObject,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
+    by: Constructed,
+) -> Result<(), Thrown> {
     let constructor = match object.handlers(req).get_constructor(req, object) {
         Ok(constructor) => constructor,
         Err(thrown) => {
-            req.release(object.as_value());
+            if by == Constructed::ByConstantExpression {
+                object.mark_destructor_called();
+            }
             return Err(thrown);
         }
     };
     let Some(constructor) = constructor else {
-        if let Some((name, _)) = named.first() {
-            // `zend_object_store_ctor_failed`: no destructor is served.
+        if by == Constructed::ByInstantiation
+            && let Some((name, _)) = named.first()
+        {
             object.mark_destructor_called();
-            req.release(object.as_value());
             let message = format!(
                 "Unknown named parameter ${}",
                 String::from_utf8_lossy(name.as_bytes())
             );
             return Err(throw_error(req, "Error", &message));
         }
-        return Ok(object);
+        return Ok(());
     };
-    let mut placement = Placement::new(constructor, arguments);
-    let served = named
-        .iter()
-        .try_for_each(|(name, value)| placement.named(req, *name, *value))
-        .and_then(|()| {
-            req.serve_method_made(
-                constructor,
-                Some(object),
-                class,
-                &placement.arguments,
-                &placement.extra_named,
-            )
-        });
+    let served = placed(req, constructor, arguments, named).and_then(|placement| {
+        req.serve_method_made(
+            constructor,
+            Some(object),
+            object.class(),
+            &placement.arguments,
+            &placement.extra_named,
+        )
+    });
     match served {
         Ok(returned) => {
             req.release(returned);
-            Ok(object)
+            Ok(())
         }
         Err(thrown) => {
             object.mark_destructor_called();
-            req.release(object.as_value());
             Err(thrown)
+        }
+    }
+}
+
+/// The arguments a constructor outside an opcode is handed, each
+/// evaluated as a constant expression in written order, the named ones
+/// with their names; what an argument threw gives up the ones before
+/// it, as `zend_ast_evaluate`'s `ZEND_AST_NEW` arm and
+/// `zend_get_attribute_object` give them up:
+///
+/// ```php
+/// define('Q', 'x');
+/// class P { function __construct($a, $b = null) {} }
+/// function f($x = new P([Q], NOPE)) {}
+/// try { f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// function g($x = new P(b: [Q], a: NOPE)) {}
+/// try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Undefined constant "NOPE"
+/// Undefined constant "NOPE"
+/// ```
+#[derive(Default)]
+struct Arguments {
+    positional: Vec<Value>,
+    named: Vec<(PhpString, Value)>,
+}
+
+impl Arguments {
+    /// Each of `written` evaluated by `evaluate`, in order.
+    fn evaluated<'a, E: 'a>(
+        req: &mut Request,
+        written: impl IntoIterator<Item = (Option<&'a Name>, &'a E)>,
+        mut evaluate: impl FnMut(&mut Request, &'a E) -> Result<Value, Thrown>,
+    ) -> Result<Arguments, Thrown> {
+        let mut arguments = Arguments::default();
+        for (name, expr) in written {
+            let pushed = evaluate(req, expr).and_then(|value| {
+                let Some(name) = name else {
+                    arguments.positional.push(value);
+                    return Ok(());
+                };
+                let name = req.string(&name.0).inspect_err(|_| req.release(value))?;
+                arguments.named.push((name, value));
+                Ok(())
+            });
+            if let Err(thrown) = pushed {
+                arguments.give_up(req);
+                return Err(thrown);
+            }
+        }
+        Ok(arguments)
+    }
+
+    /// Every argument's owner given up, its name's with it.
+    fn give_up(self, req: &mut Request) {
+        for value in self.positional {
+            req.release(value);
+        }
+        for (name, value) in self.named {
+            req.release(Value::string(name));
+            req.release(value);
         }
     }
 }
@@ -1297,37 +1434,15 @@ fn attribute_object_at(
     attribute: &php_unit::decl::Attribute,
     scope: Option<ClassId>,
 ) -> Result<PhpObject, Thrown> {
-    let mut positional = Vec::new();
-    let mut named: Vec<(PhpString, Value)> = Vec::new();
-    let mut evaluated = Ok(());
-    for argument in &attribute.arguments {
-        let value = match eval_declared_made(req, &argument.value, scope) {
-            Ok(value) => value,
-            Err(thrown) => {
-                evaluated = Err(thrown);
-                break;
-            }
-        };
-        match &argument.name {
-            Some(name) => match req.string(&name.0) {
-                Ok(name) => named.push((name, value)),
-                Err(thrown) => {
-                    req.release(value);
-                    evaluated = Err(thrown);
-                    break;
-                }
-            },
-            None => positional.push(value),
-        }
-    }
-    let made = evaluated.and_then(|()| instantiate_named_made(req, class, &positional, &named));
-    for value in positional {
-        req.release(value);
-    }
-    for (name, value) in named {
-        req.release(Value::string(name));
-        req.release(value);
-    }
+    let written = attribute
+        .arguments
+        .iter()
+        .map(|argument| (argument.name.as_ref(), &argument.value));
+    let arguments = Arguments::evaluated(req, written, |req, expr| {
+        eval_declared_made(req, expr, scope)
+    })?;
+    let made = instantiate_named_made(req, class, &arguments.positional, &arguments.named);
+    arguments.give_up(req);
     made
 }
 
@@ -2196,7 +2311,7 @@ fn evaluate_node(
         ConstExpr::Dim { .. } | ConstExpr::Prop { .. } => Ok(chain(req, expr, scope, false)?.value),
         ConstExpr::New {
             class, arguments, ..
-        } => construct(req, &class.0, arguments, scope),
+        } => new_expression(req, &class.0, arguments, scope),
         ConstExpr::Unpack(_) => Err(invalid_operations(req)),
     }
 }
@@ -2634,12 +2749,40 @@ fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, 
     })
 }
 
-/// `zend_ast_evaluate`'s `ZEND_AST_NEW` arm (`Z/Zend/zend_ast.c:1019`):
+/// `zend_ast_evaluate`'s `ZEND_AST_NEW` arm (`Z/Zend/zend_ast.c:969`):
 /// the class fetched in `scope` ([`const_class`]), the instance made,
-/// each argument evaluated in written order, and the constructor served
-/// with them, the named ones by their names as `zend_call_function`
-/// places them. The instance is given up where the constructor threw.
-fn construct(
+/// each argument evaluated in written order ([`Arguments::evaluated`]),
+/// and the constructor served with them ([`construct_object`]). An
+/// argument that throws gives the instance up as it stands, its
+/// destructor served; a constructor that throws, or one
+/// `get_constructor` refuses, gives it up marked, with none, after the
+/// arguments. A class with no constructor drops named arguments where
+/// `new` in code refuses them:
+///
+/// ```php
+/// class C { function __construct($x) { throw new Exception("ctor"); } function __destruct() { echo "dtor\n"; } }
+/// function f($a = new C(1)) { }
+/// try { f(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// function g($a = new C(NOPE)) { }
+/// try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class P { private function __construct() {} function __destruct() { echo "P dtor\n"; } }
+/// function h($p = new P) { }
+/// try { h(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class N { function __destruct() { echo "N dtor\n"; } }
+/// function k($n = new N(a: 1)) { echo get_class($n), "\n"; }
+/// k();
+/// try { new N(a: 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ctor
+/// dtor
+/// Undefined constant "NOPE"
+/// Call to private P::__construct() from global scope
+/// N
+/// N dtor
+/// Unknown named parameter $a
+/// ```
+fn new_expression(
     req: &mut Request,
     class: &[u8],
     arguments: &[(Option<Name>, ConstExpr)],
@@ -2647,97 +2790,29 @@ fn construct(
 ) -> Result<Value, Thrown> {
     let id = const_class(req, class, scope)?;
     let object = new_object_made(req, id)?;
-    let mut positional = Vec::new();
-    let mut named = Vec::new();
-    let evaluated = construct_arguments(req, arguments, scope, &mut positional, &mut named);
-    let served = match evaluated {
-        Err(thrown) => Err(thrown),
-        Ok(()) => serve_constructor(req, id, object, &positional, &named),
-    };
-    for value in positional {
-        req.release(value);
-    }
-    for (name, value) in named {
-        req.release(Value::string(name));
-        req.release(value);
-    }
-    match served {
-        Ok(value) => {
-            req.release(value);
-            Ok(object.as_value())
+    let written = arguments.iter().map(|(name, expr)| (name.as_ref(), expr));
+    let arguments = match Arguments::evaluated(req, written, |req, expr| evaluate(req, expr, scope))
+    {
+        Ok(arguments) => arguments,
+        Err(thrown) => {
+            req.release(object.as_value());
+            return Err(thrown);
         }
+    };
+    let constructed = construct_object(
+        req,
+        object,
+        &arguments.positional,
+        &arguments.named,
+        Constructed::ByConstantExpression,
+    );
+    arguments.give_up(req);
+    match constructed {
+        Ok(()) => Ok(object.as_value()),
         Err(thrown) => {
             req.release(object.as_value());
             Err(thrown)
         }
-    }
-}
-
-/// [`construct`]'s arguments, each evaluated in written order into
-/// `positional` or `named`, which stay the caller's to give up whether
-/// every argument was or one threw, as `zend_ast_evaluate`'s
-/// `ZEND_AST_NEW` arm gives up the ones before it:
-///
-/// ```php
-/// define('Q', 'x');
-/// class P { function __construct($a, $b = null) {} }
-/// function f($x = new P([Q], NOPE)) {}
-/// try { f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// function g($x = new P(b: [Q], a: NOPE)) {}
-/// try { g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Undefined constant "NOPE"
-/// Undefined constant "NOPE"
-/// ```
-fn construct_arguments(
-    req: &mut Request,
-    arguments: &[(Option<Name>, ConstExpr)],
-    scope: Option<ClassId>,
-    positional: &mut Vec<Value>,
-    named: &mut Vec<(PhpString, Value)>,
-) -> Result<(), Thrown> {
-    for (name, argument) in arguments {
-        let value = evaluate(req, argument, scope)?;
-        match name {
-            Some(name) => match req.string(&name.0) {
-                Ok(name) => named.push((name, value)),
-                Err(thrown) => {
-                    req.release(value);
-                    return Err(thrown);
-                }
-            },
-            None => positional.push(value),
-        }
-    }
-    Ok(())
-}
-
-/// [`construct`]'s constructor served over `object` with the arguments
-/// it evaluated, the named ones by their names as `zend_call_function`
-/// places them; what it returned, or `null` where the class has none.
-fn serve_constructor(
-    req: &mut Request,
-    id: ClassId,
-    object: PhpObject,
-    positional: &[Value],
-    named: &[(PhpString, Value)],
-) -> Result<Value, Thrown> {
-    match req.method_named(id, b"__construct") {
-        None => Ok(Value::null()),
-        Some(_) if named.is_empty() => {
-            let constructor = req.method_named(id, b"__construct");
-            match constructor {
-                Some(constructor) => {
-                    req.serve_method_made(constructor, Some(object), id, positional, &[])
-                }
-                None => Ok(Value::null()),
-            }
-        }
-        Some(_) => match known_method(req, id, &Name(b"__construct"[..].into()), Some(object)) {
-            Some(callable) => call_named_made(req, &callable, positional, named),
-            None => Ok(Value::null()),
-        },
     }
 }
 

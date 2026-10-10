@@ -135,6 +135,41 @@ impl ObjectHandlers for Donc {
 /// Unsupported operand types: LongCastableNoOperations + int
 /// Cannot increment LongCastableNoOperations
 /// ```
+///
+/// Its handler refuses `_IS_BOOL`, so its truth is
+/// `zend_object_is_true`'s `E_RECOVERABLE_ERROR`, which `php_error_cb`
+/// bails out of: the request ends there, every object standing marked
+/// destructed, and a shutdown function still runs.
+///
+/// ```php
+/// class D { function __destruct() { echo "d\n"; } }
+/// $d = new D;
+/// register_shutdown_function(function () { echo "sd\n"; });
+/// if (new LongCastableNoOperations(1)) { echo "t\n"; }
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+/// Recoverable fatal error: Object of class LongCastableNoOperations could not be converted to bool in %s on line 5
+/// sd
+/// ```
+///
+/// A user error handler that takes it lets the request go on, the truth
+/// `false`.
+///
+/// ```php
+/// set_error_handler(function ($no, $message) { echo "$no: $message\n"; return true; });
+/// $o = new LongCastableNoOperations(1);
+/// var_dump((bool) $o, !$o);
+/// echo $o ? "t" : "f", "\n";
+/// ```
+/// ```expect
+/// 4096: Object of class LongCastableNoOperations could not be converted to bool
+/// 4096: Object of class LongCastableNoOperations could not be converted to bool
+/// bool(false)
+/// bool(true)
+/// 4096: Object of class LongCastableNoOperations could not be converted to bool
+/// f
+/// ```
 #[php_class(final, handlers = crate::object_handlers::LONG_CASTABLE)]
 pub(crate) struct LongCastableNoOperations;
 

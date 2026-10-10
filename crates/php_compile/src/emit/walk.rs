@@ -224,12 +224,27 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_top_stmt` over a list of top statements, the
-    /// file's own or a bracketed namespace's: each at its own line, a
-    /// function or a class declaration leaving the line at its closing
-    /// brace (`CG(zend_lineno) = decl->end_lineno`), and after each but
-    /// a `namespace` and a `__halt_compiler` php's
+    /// file's own, a bracketed namespace's or a block's among them: each
+    /// at its own line, a function or a class declaration leaving the
+    /// line at its closing brace (`CG(zend_lineno) = decl->end_lineno`),
+    /// and after each but a `namespace` and a `__halt_compiler` php's
     /// `zend_verify_namespace`. An empty statement is php's `NULL`
     /// child, which the walk returns from before either.
+    ///
+    /// A function or a class in a block among the top statements is
+    /// bound before the line above the block runs, as php binds it:
+    ///
+    /// ```php
+    /// var_dump(function_exists('f'), class_exists('C'));
+    /// { function f() {} class C {} echo 1, "\n"; }
+    /// var_dump(f());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// 1
+    /// NULL
+    /// ```
     pub(super) fn top_statements(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
         let mut after = 0;
         for stmt in stmts {
@@ -247,6 +262,17 @@ impl Emit<'_> {
                 self.top_list = super::TopList::Other;
             }
             if matches!(stmt, Stmt::EmptyStmt(_)) {
+                continue;
+            }
+            // A block is `zend_compile_top_stmt`'s `ZEND_AST_STMT_LIST`
+            // arm: each statement inside is a top statement, a function
+            // or a class among them bound at compile time, and the block
+            // itself takes no line and no `zend_verify_namespace`. It is
+            // still a statement `zend_is_first_statement` finds ahead of
+            // a `namespace` or a `strict_types` declaration.
+            if let Stmt::Block(block) = stmt {
+                self.statements_seen = self.statements_seen.saturating_add(1);
+                self.top_statements(&self.parsed.tree[*block].stmts)?;
                 continue;
             }
             self.line = stmt.line(self.parsed);

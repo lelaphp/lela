@@ -57,6 +57,10 @@ impl Built {
             .filter(|t| match targets {
                 Targets::Tests => t.test && t.required_features.is_empty(),
                 Targets::All => !t.kind.iter().any(|k| k == "custom-build"),
+                Targets::Shipped => t
+                    .kind
+                    .iter()
+                    .any(|k| k.contains("lib") || k == "proc-macro" || k == "bin"),
             })
             .map(|t| t.name.clone())
             .collect();
@@ -206,6 +210,10 @@ pub(crate) enum Targets {
     /// selects, so its reading out of the one run is the one a run over
     /// it alone gives.
     All,
+    /// The library and binaries under every feature, cargo's default
+    /// targets, `--lib --bins` without its refusal of a package with no
+    /// library: what the release lint reads (#2392).
+    Shipped,
 }
 
 impl Targets {
@@ -214,6 +222,7 @@ impl Targets {
         match self {
             Targets::Tests => &["--tests"],
             Targets::All => &["--all-targets", "--all-features"],
+            Targets::Shipped => &["--all-features"],
         }
     }
 }

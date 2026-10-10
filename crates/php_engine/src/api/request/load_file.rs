@@ -77,34 +77,36 @@ impl Request {
     /// and popped with everything above where the stack stood; what the
     /// file left pending is the `Err`, and what it returned is given up.
     fn serve_top_code(&mut self, unit: Arc<php_unit::Unit>) -> Result<(), Thrown> {
-        let standing = self.vm.frames().len();
+        let standing = self.vm.depth();
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        let pushed = self.stack.push_frame(&mut self.heap, slots, 0);
+        let caller = self.innermost_user_frame();
+        let mut header = exec::Header::of(None, code);
+        let pushed = self.vm.push(&mut self.heap, slots, 0, header.clone());
         let frame = self.fatal_of(pushed)?;
-        let caller = standing
-            .checked_sub(1)
-            .and_then(|at| u32::try_from(at).ok())
-            .map(php_heap::FrameRef);
         let table = caller.map(|caller| self.rebuild_symbol_table(caller));
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        self.vm.push(exec::Activation {
+        header.caller = caller.map_or(exec::Caller::Outside, exec::Caller::Opline);
+        header.annex = Some(self.annexes_mut().insert(exec::Annex {
+            unit: Some(unit),
             symbol_table: table,
-            caller: caller.map_or(exec::Caller::Outside, exec::Caller::Opline),
-            ..exec::Activation::of(unit, exec::Body::Main)
-        });
+            ..exec::Annex::default()
+        }));
+        if let Some(laid) = self.vm.at_mut(frame) {
+            *laid = header;
+        }
         self.attach_symbol_table(frame);
         crate::observer::call(self, frame);
         let reenter = self.shared.loops.reenter;
         let served = reenter(self, frame);
         let served = self.fatal_of(served);
-        while self.vm.frames().len() > standing + 1 {
+        while self.vm.depth() > standing + 1 {
             self.pop_frame();
         }
         // `zend_detach_symbol_table` on the way out, so what the file
         // wrote to a variable of the caller's is in the caller's CV.
-        if self.vm.frames().len() > standing {
+        if self.vm.depth() > standing {
             self.leave_frame(frame);
         }
         served?;

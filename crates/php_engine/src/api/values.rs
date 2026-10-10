@@ -54,12 +54,14 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 
+mod charset;
 mod emalloc;
 mod fresh;
 mod identity;
 mod owner;
 mod smart_str;
 pub mod walk;
+pub use charset::Charset;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
 pub use identity::Identity;
@@ -1634,6 +1636,36 @@ impl PhpObject {
         after: Option<PointerMove>,
     ) -> Result<Option<(Key, Value)>, Thrown> {
         req.pointer_row(*self, after)
+    }
+
+    /// `zobj->properties = zend_symtable_to_proptable(table)`, how
+    /// `mysqli_fetch_object` lays a row down as the object of a class
+    /// that declares no property and no `__set`
+    /// (`Z/ext/mysqli/mysqli.c:793-796`): the array itself, one more
+    /// owner of it, where its keys are all strings, and otherwise a copy
+    /// with each integer key spelt in decimal
+    /// ([`Request::symtable_to_proptable`], the rule the `(object)` cast
+    /// lays its table down by); one owner of `table` passed and given up,
+    /// as php's `zval_ptr_dtor(&dataset)` gives it up after, so a row
+    /// nothing else holds is the object's table alone. The table the
+    /// object held is released. An object whose class places a declared
+    /// property is php's other arm, `zend_merge_properties`, and refused
+    /// here as the `InternalError` it would be.
+    pub fn table_from_symtable(
+        &self,
+        req: &mut Request,
+        table: Owner<PhpArray>,
+    ) -> Result<(), Thrown> {
+        if self.heap().slots() > 0 {
+            table.give_up(req);
+            return Err(crate::api::raising::fatal(
+                req,
+                "InternalError: an object whose class places a declared property takes no symbol table as its own",
+            ));
+        }
+        let laid = req.properties_from_array(*self, *table);
+        table.give_up(req);
+        laid
     }
 
     /// `zobj->properties = table`, how `spl_array_method` puts back the

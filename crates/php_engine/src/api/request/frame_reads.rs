@@ -39,11 +39,11 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::ops::Range;
 
-use php_heap::{FrameRef, VmStack};
+use php_heap::FrameRef;
 
 use crate::api::call::Function;
 use crate::api::values::{ClassId, Value};
-use crate::exec::{self, FrameState, Site, Vm};
+use crate::exec::{self, FrameAt, Site, Vm};
 
 use super::{Link, OpArrayView, OplineIdx, Request, Slots, links_of};
 
@@ -56,7 +56,7 @@ pub struct FrameId {
     /// Where the frame stood when the identity was read: where
     /// [`Request::frame_of`] looks first.
     at: FrameRef,
-    /// The frame's identity, which [`FrameState`] holds.
+    /// The frame's identity, which [`exec::Header`] holds.
     id: Identity,
     /// The generator whose frame it is, no owner: where
     /// [`Request::in_frame`] looks for it while the generator is
@@ -116,25 +116,25 @@ impl<'a> FrameView<'a> {
     pub fn id(&self) -> FrameId {
         let state = self.state();
         let id = state
-            .and_then(|state| state.identity.get())
+            .and_then(|state| state.header().identity.get())
             .unwrap_or_else(|| {
                 let id = self.req.frame_ids.give();
                 if let Some(state) = state {
-                    state.identity.set(Some(id));
+                    state.header().identity.set(Some(id));
                 }
                 id
             });
         FrameId {
             at: self.at,
             id,
-            generator: state.and_then(|state| state.generator),
+            generator: state.and_then(FrameAt::generator),
         }
     }
 
     /// The frame's state; a view is only made of a frame that stands, so
     /// none is this engine's error, read as an empty frame.
-    fn state(&self) -> Option<&'a FrameState> {
-        self.vm.at(self.at)
+    fn state(&self) -> Option<FrameAt<'a>> {
+        self.req.frame_on(self.vm, self.at.0 as usize)
     }
 
     /// `EX(func)` where the frame serves a function or a method; `None`
@@ -142,7 +142,7 @@ impl<'a> FrameView<'a> {
     /// names by its `filename` alone.
     #[must_use]
     pub fn function(&self) -> Option<Function> {
-        self.state()?.function
+        self.state()?.function()
     }
 
     /// `EX(func)->common.scope`: the class a method is declared in, the
@@ -156,7 +156,7 @@ impl<'a> FrameView<'a> {
     /// from, `… : eval()'d code` for an evaluated string's.
     #[must_use]
     pub fn filename(&self) -> &'a [u8] {
-        self.state().and_then(file_of).unwrap_or_default()
+        self.state().and_then(FrameAt::file).unwrap_or_default()
     }
 
     /// `EX(func)->op_array`: the op array the frame serves, a
@@ -164,15 +164,15 @@ impl<'a> FrameView<'a> {
     /// ([`OpArrayView`]).
     #[must_use]
     pub fn op_array(&self) -> Option<OpArrayView<'a>> {
-        let state = self.state()?;
-        exec::body_of(&state.unit, state.body).map(|code| OpArrayView::of(&state.unit, code))
+        let (unit, body) = self.state()?.unit()?;
+        exec::body_of(unit, body).map(|code| OpArrayView::of(unit, code))
     }
 
     /// `EX(opline)->lineno`: the line the frame stands on, the call's
     /// for a frame below the innermost; zero past its op array.
     #[must_use]
     pub fn line(&self) -> u32 {
-        self.state().map_or(0, exec::line_of)
+        self.state().map_or(0, FrameAt::line)
     }
 
     /// `EX(opline) - EX(func)->op_array.opcodes`: where in its op array
@@ -180,7 +180,7 @@ impl<'a> FrameView<'a> {
     /// innermost frame and the call's for a frame below it.
     #[must_use]
     pub fn opline(&self) -> OplineIdx {
-        OplineIdx(self.state().map_or(0, |state| state.opline))
+        OplineIdx(self.state().map_or(0, FrameAt::opline))
     }
 
     /// `zend_get_opcode_name(EX(opline)->opcode)`: the opcode of the
@@ -193,14 +193,11 @@ impl<'a> FrameView<'a> {
     /// empty past its op array.
     #[must_use]
     pub fn opcode(&self) -> &'static str {
-        if self.state().is_some_and(|state| state.at_exception_op) {
+        if self.state().is_some_and(FrameAt::at_exception_op) {
             return "ZEND_HANDLE_EXCEPTION";
         }
         self.state()
-            .and_then(|state| {
-                exec::body_of(&state.unit, state.body)
-                    .and_then(|code| exec::opline_at(code, state.opline))
-            })
+            .and_then(|state| exec::opline_at(state.code()?, state.opline()))
             .map_or("", |op| op.opcode.name())
     }
 
@@ -222,8 +219,8 @@ impl<'a> FrameView<'a> {
                 break lower;
             }
             stack += 1;
-            vm = self.req.executions().nth(stack)?.1;
-            above = vm.frames().len();
+            vm = self.req.executions().nth(stack)?;
+            above = vm.depth();
         };
         Some(FrameView {
             req: self.req,
@@ -254,25 +251,14 @@ impl<'a> FrameView<'a> {
         let state = self.state();
         // The generators the frame's own generator runs through stand
         // below it, ahead of the calls and frames it was pushed over.
-        if let Some(generator) = state.and_then(|state| state.generator) {
+        if let Some(generator) = state.and_then(FrameAt::generator) {
             walk.extend(
                 req.placeholder_links(generator)
                     .iter()
                     .filter_map(|link| ChainFrame::of(req, self.stack, self.vm, link)),
             );
         }
-        let calls = state.map_or(0, |state| {
-            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
-        });
-        if let Some((stack, _)) = req.executions().nth(self.stack) {
-            walk.extend(req.stack_walk(
-                self.stack,
-                stack,
-                self.vm,
-                0..self.at.0 as usize,
-                0..calls,
-            ));
-        }
+        walk.extend(req.stack_walk(self.stack, self.vm, 0..self.at.0 as usize));
         req.walk_below(self.stack, &mut walk);
         walk.into_iter()
     }
@@ -298,7 +284,7 @@ enum Read<'a> {
     /// A user frame on a stack.
     Stack(FrameView<'a>),
     /// A suspended generator's frame, kept on its object.
-    Kept(&'a FrameState),
+    Kept(FrameAt<'a>),
     /// A native's call being served.
     Native(Function),
     /// `zend_get_attribute_object`'s dummy frame.
@@ -322,8 +308,8 @@ impl std::fmt::Debug for ChainFrame<'_> {
 }
 
 /// `EX(func)->op_array.filename` of the op array a frame's state serves.
-fn file_of(state: &FrameState) -> Option<&[u8]> {
-    exec::body_of(&state.unit, state.body).map(|code| code.filename.0.as_ref())
+fn file_of(state: FrameAt<'_>) -> Option<&[u8]> {
+    state.file()
 }
 
 impl<'a> ChainFrame<'a> {
@@ -338,8 +324,8 @@ impl<'a> ChainFrame<'a> {
                 vm,
                 at: FrameRef(u32::try_from(at).unwrap_or(u32::MAX)),
             }),
-            Link::Frame(Slots::Kept(_), state) => Read::Kept(state),
-            Link::Call(call) => Read::Native(call.function),
+            Link::Frame(Slots::Kept, state) => Read::Kept(state),
+            Link::Call(call) => Read::Native(call.callee()),
             Link::Site(site) => Read::Site(site),
             Link::Fake(_) => return None,
         };
@@ -365,7 +351,7 @@ impl<'a> ChainFrame<'a> {
     pub fn function(&self) -> Option<Function> {
         match self.read {
             Read::Stack(view) => view.function(),
-            Read::Kept(state) => state.function,
+            Read::Kept(state) => state.function(),
             Read::Native(function) => Some(function),
             Read::Site(_) | Read::FiberBottom => None,
         }
@@ -423,11 +409,12 @@ impl Request {
     /// walks the whole chain.
     #[must_use]
     pub fn frame_of(&self, id: FrameId) -> Option<FrameView<'_>> {
-        let names = |state: &FrameState| !state.leaving && state.identity.get() == Some(id.id);
+        let names =
+            |state: &exec::Header| !state.info.leaving() && state.identity.get() == Some(id.id);
         let found = self
             .executions()
             .enumerate()
-            .find_map(|(stack, (_, vm))| {
+            .find_map(|(stack, vm)| {
                 vm.at(id.at)
                     .is_some_and(names)
                     .then_some((stack, vm, id.at))
@@ -435,8 +422,13 @@ impl Request {
             .or_else(|| {
                 // A generator's frame pushed back where another resumer
                 // stands.
-                self.executions().enumerate().find_map(|(stack, (_, vm))| {
-                    let at = vm.frames().iter().rposition(names)?;
+                self.executions().enumerate().find_map(|(stack, vm)| {
+                    let at = (0..vm.depth()).rev().find(|&at| {
+                        u32::try_from(at)
+                            .ok()
+                            .and_then(|at| vm.at(FrameRef(at)))
+                            .is_some_and(names)
+                    })?;
                     Some((stack, vm, FrameRef(u32::try_from(at).ok()?)))
                 })
             });
@@ -458,13 +450,14 @@ impl Request {
     /// ([`Request::in_frame`]).
     pub fn frame_var(&mut self, frame: FrameId, name: &[u8]) -> Option<Value> {
         self.in_frame(frame, |req, at| {
-            if let Some(table) = req.vm.at(at).and_then(|state| state.symbol_table) {
+            if let Some(table) = req.frame_at(at).and_then(FrameAt::symbol_table) {
                 return req.symbol_value(table, name);
             }
             let cv = req
                 .frame_var_names(at)
+                .ok()?
                 .iter()
-                .position(|held| held.as_slice() == name)?;
+                .position(|held| held.as_bytes() == name)?;
             Some(req.slot(at, u32::try_from(cv).ok()?))
         })
         .flatten()
@@ -485,7 +478,7 @@ impl Request {
                     .into_iter()
                     .map(|(name, symbol)| {
                         let value = req.symbol_read(table, symbol);
-                        (name, value)
+                        (name.as_bytes().to_vec(), value)
                     })
                     .collect(),
             )
@@ -531,7 +524,7 @@ impl Request {
     /// native's call stands, read ([`crate::observer::Observed::caller`]),
     /// on a fiber whose callable is a native the resumer's.
     pub(crate) fn innermost_frame_view(&self) -> Option<FrameView<'_>> {
-        self.executions().enumerate().find_map(|(stack, (_, vm))| {
+        self.executions().enumerate().find_map(|(stack, vm)| {
             let at = vm.innermost_at()?;
             Some(FrameView {
                 req: self,
@@ -554,24 +547,14 @@ impl Request {
             read: Read::Native(function),
         }];
         let vm = &self.vm;
-        let served = vm.calls().len();
-        let (frames, calls) = match vm.serving_call() {
-            Some(call) if call.function == function => {
-                let at = served.saturating_sub(1);
-                // The frames pushed before the call: a frame pushed while
-                // it is served counts it among the calls below.
-                let frames = vm
-                    .frames()
-                    .iter()
-                    .take_while(|state| {
-                        usize::try_from(state.calls_below).is_ok_and(|below| below <= at)
-                    })
-                    .count();
-                (frames, at)
+        // The records pushed before the call, which stand below it.
+        let below = match self.serving_call() {
+            Some(call) if call.function() == Some(function) => {
+                vm.serving_at().map_or(0, |at| at.0 as usize)
             }
-            _ => (vm.frames().len(), served),
+            _ => vm.depth(),
         };
-        walk.extend(self.stack_walk(0, &self.stack, vm, 0..frames, 0..calls));
+        walk.extend(self.stack_walk(0, vm, 0..below));
         self.walk_below(0, &mut walk);
         walk.into_iter()
     }
@@ -582,12 +565,10 @@ impl Request {
     fn stack_walk<'a>(
         &'a self,
         stack: usize,
-        on: &'a VmStack,
         vm: &'a Vm,
-        frames: Range<usize>,
-        calls: Range<usize>,
+        records: Range<usize>,
     ) -> impl Iterator<Item = ChainFrame<'a>> {
-        links_of(on, vm, frames, calls, &|root| self.placeholder_links(root))
+        links_of(self, vm, records, &|root| self.placeholder_links(root))
             .into_iter()
             .filter_map(move |link| ChainFrame::of(self, stack, vm, &link))
     }
@@ -596,12 +577,12 @@ impl Request {
     /// under the bottom frame of the fiber it resumed: php links
     /// `fiber->stack_bottom` to the frame that resumed the fiber.
     fn walk_below<'a>(&'a self, from: usize, walk: &mut Vec<ChainFrame<'a>>) {
-        for (stack, (on, vm)) in self.executions().enumerate().skip(from.saturating_add(1)) {
+        for (stack, vm) in self.executions().enumerate().skip(from.saturating_add(1)) {
             walk.push(ChainFrame {
                 req: self,
                 read: Read::FiberBottom,
             });
-            walk.extend(self.stack_walk(stack, on, vm, 0..vm.frames().len(), 0..vm.calls().len()));
+            walk.extend(self.stack_walk(stack, vm, 0..vm.depth()));
         }
     }
 }

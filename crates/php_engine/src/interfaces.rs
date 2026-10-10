@@ -24,7 +24,7 @@ use php_macros::php_class;
 use php_unit::decl::ClassKind;
 
 use crate::api::abi::{
-    ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, Instance, IteratorElement,
+    ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, GcTable, Instance, IteratorElement,
     ObjectHandlers, This, Untyped,
 };
 use crate::api::raising::{Thrown, throw, throw_error};
@@ -528,7 +528,12 @@ impl ObjectHandlers for WrapperHandlers {
         DtorObj::Own(|_, _| {})
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(it) = object.native::<Wrapped>(req) {
             if let Some(held) = it.data {
                 visit(held.as_value());
@@ -537,6 +542,7 @@ impl ObjectHandlers for WrapperHandlers {
                 visit(kept);
             }
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<crate::api::abi::CloneObj> {
@@ -989,12 +995,18 @@ impl ObjectHandlers for InternalHandlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(Internal::Elements { object: held, .. } | Internal::Own { iter: held, .. }) =
             object.native::<Internal>(req)
         {
             visit(held.as_value());
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<crate::api::abi::CloneObj> {

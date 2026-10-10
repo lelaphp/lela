@@ -123,9 +123,22 @@ pub(crate) fn set_priority(priority: i32) -> bool {
     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, priority) == 0 }
 }
 
+/// C's `time_t`, the type the libc crate binds `localtime_r` with. The
+/// crate deprecates the alias on musl, whose 1.2.0 made `time_t` 64 bits
+/// on every target, a width the crate has yet to follow on 32-bit ones
+/// (rust-lang/libc#1848). Every value reaches it through `try_from`,
+/// which is right at either width, so the deprecation is expected on
+/// musl and nowhere else; once the crate lifts it, the unmet expectation
+/// fails the build.
+#[cfg_attr(
+    target_env = "musl",
+    expect(deprecated, reason = "every value reaches it through try_from")
+)]
+type TimeT = libc::time_t;
+
 /// The local time of `epoch` as `localtime_r` breaks it down.
 fn local(epoch: i64) -> Option<libc::tm> {
-    let seconds = libc::time_t::try_from(epoch).ok()?;
+    let seconds = TimeT::try_from(epoch).ok()?;
     let mut tm = MaybeUninit::<libc::tm>::uninit();
     // SAFETY: `localtime_r` reads the one `time_t` it is handed and writes
     // the whole of the `tm` it is handed, both live for the call; it

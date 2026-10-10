@@ -17,6 +17,7 @@ abi::Admission
 abi::AfterLog
 abi::BeginHandler
 abi::Beneath
+abi::Beneath::bails
 abi::Beneath::event
 abi::Beneath::file
 abi::Beneath::level
@@ -163,6 +164,7 @@ abi::FromArgument::declared
 abi::FromArgument::from_default
 abi::FromArgument::from_value
 abi::FromArgument::hold
+abi::GcTable
 abi::Header
 abi::Header::header
 abi::Header::register
@@ -493,6 +495,7 @@ raising::docref_parameter
 raising::exit
 raising::fatal
 raising::fatal_while_pending
+raising::illegal_container_offset
 raising::leave_pending
 raising::new_throwable
 raising::notice
@@ -588,6 +591,7 @@ request::Handshake
 request::Held
 request::Held::get
 request::HostPath
+request::HttpStatus
 request::InfoRow
 request::IniEntry
 request::IniFiles
@@ -824,6 +828,7 @@ request::Request::periods_elapsed
 request::Request::phpinfo_as_text
 request::Request::precision
 request::Request::preloading
+request::Request::put_back_http_status
 request::Request::raised
 request::Request::realpath
 request::Request::realpath_cache
@@ -882,6 +887,7 @@ request::Request::stop_periodic
 request::Request::stream_thrown
 request::Request::superglobal
 request::Request::suspend_time_limit
+request::Request::take_http_status
 request::Request::take_pending
 request::Request::take_uploaded_file
 request::Request::temp_dir
@@ -1055,6 +1061,8 @@ request::WrapperOp
 request::Xport
 request::XportFactory
 request::XportFailure
+request::XportFailure::warning
+request::XportStep
 request::Zone
 request::Zone::date
 request::Zone::midnight
@@ -1139,6 +1147,12 @@ test::Engine::unit
 test::Engine::zend_version_info
 test::Entered
 test::LeakSensor
+values::Charset
+values::Charset::named
+values::Charset::next_char
+values::Charset::partial
+values::Charset::single_byte
+values::Charset::unicode_compat
 values::ClassId
 values::ClassId::is_published
 values::ClosureInfo
@@ -1151,6 +1165,7 @@ values::Emalloc::free
 values::Emalloc::is_empty
 values::Emalloc::len
 values::Emalloc::new
+values::Emalloc::printf_buffer
 values::Emalloc::resize
 values::FreshString
 values::FreshString::bytes
@@ -1300,6 +1315,7 @@ values::PhpObject::set_row
 values::PhpObject::set_slot
 values::PhpObject::slot
 values::PhpObject::slots_without_table
+values::PhpObject::table_from_symtable
 values::PhpObject::typed_row_ref
 values::PhpObject::unprotect
 values::PhpObject::unprotect_in
@@ -1351,6 +1367,7 @@ values::SmartStr
 values::SmartStr::append
 values::SmartStr::as_bytes
 values::SmartStr::clear
+values::SmartStr::finish
 values::SmartStr::free
 values::SmartStr::remove
 values::TypeTag

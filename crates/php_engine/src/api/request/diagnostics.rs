@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::api::abi::{AfterLog, Callable, IniStage};
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
+use crate::api::values::{Charset, Key, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
@@ -23,10 +23,10 @@ use super::{Phase, Raised, Request, ini_atol, ini_truth, zone};
 /// A diagnostic's message as `php_error_cb` is handed it.
 #[derive(Clone, Copy)]
 pub(crate) enum Message<'a> {
-    /// Text the engine formatted, of which `zend_error` makes one string
-    /// of the request's with `zend_vstrpprintf` before any handler reads
-    /// it.
-    Text(&'a str),
+    /// Bytes the engine formatted, of which `zend_error` makes one
+    /// string of the request's with `zend_vstrpprintf` before any
+    /// handler reads it.
+    Text(&'a [u8]),
     /// A string of the request's a native raised as it stands,
     /// `zend_error_zstr_at`'s, which is `trigger_error()`'s message.
     String(PhpString),
@@ -62,7 +62,7 @@ impl Message<'_> {
     /// What the display and the log write.
     fn text(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            Message::Text(text) => std::borrow::Cow::Borrowed(text),
+            Message::Text(text) => String::from_utf8_lossy(text),
             Message::String(s) => String::from_utf8_lossy(s.as_bytes()),
         }
     }
@@ -518,6 +518,19 @@ impl Request {
         file: &[u8],
         line: u32,
     ) -> bool {
+        self.note_message_in(level, Message::Text(message.as_bytes()), file, line)
+    }
+
+    /// [`Request::note_error_in`] over bytes the engine formatted that
+    /// need not be UTF-8, which every form writes as they stand, as
+    /// `zend_exception_error` hands `zend_error_va` a throwable's string.
+    pub(crate) fn note_error_bytes_in(
+        &mut self,
+        level: Level,
+        message: &[u8],
+        file: &[u8],
+        line: u32,
+    ) -> bool {
         self.note_message_in(level, Message::Text(message), file, line)
     }
 
@@ -537,7 +550,7 @@ impl Request {
     fn note_message_in(&mut self, level: Level, raised: Message, file: &[u8], line: u32) -> bool {
         if let Some(held) = self.diagnostics.startup.as_mut() {
             let bytes = match raised {
-                Message::Text(text) => text.as_bytes().to_vec(),
+                Message::Text(text) => text.to_vec(),
                 Message::String(string) => string.as_bytes().to_vec(),
             };
             held.push((level, bytes));
@@ -590,7 +603,7 @@ impl Request {
             Message::String(string) => (string, false),
             // The memory limit refusing the message has rendered its
             // fatal, and the request is ending.
-            Message::Text(text) => match crate::api::raising::strpprintf(self, text.as_bytes()) {
+            Message::Text(text) => match crate::api::raising::strpprintf(self, text) {
                 Ok(string) => (string, true),
                 Err(_) => return false,
             },
@@ -675,25 +688,17 @@ impl Request {
         let ErrorArgs {
             level,
             string,
-            message,
             file,
             line,
             ..
         } = error;
-        self.stored_and_shown(level, string, message, file, line);
+        self.stored_and_shown(level, string, file, line);
         self.cannot_recover(error);
     }
 
     /// `php_error_cb` up to its last arm: the diagnostic stored unless it
     /// repeats, then logged and displayed unless masked.
-    fn stored_and_shown(
-        &mut self,
-        level: Level,
-        string: PhpString,
-        message: &str,
-        file: &[u8],
-        line: u32,
-    ) {
+    fn stored_and_shown(&mut self, level: Level, string: PhpString, file: &[u8], line: u32) {
         if !self.displayed(string, file, line) {
             return;
         }
@@ -789,16 +794,11 @@ impl Request {
             let prepend = self.ini_text(b"error_prepend_string");
             let append = self.ini_text(b"error_append_string");
             if let Level::Error | Level::Parse = level {
-                // `escape_html`'s string stands while it is printed.
-                let Ok(escaped) = self.heap.block(escaped_html_size(message)) else {
-                    return;
-                };
-                let text = format!(
-                    "{prepend}<br />\n<b>{name}</b>:  {} in <b>{named}</b> on line <b>{line}</b><br />\n{append}",
-                    escape_html(message)
+                self.printed_escaped(
+                    &format!("{prepend}<br />\n<b>{name}</b>:  "),
+                    string.as_bytes(),
+                    &format!(" in <b>{named}</b> on line <b>{line}</b><br />\n{append}"),
                 );
-                self.printed(text.as_bytes());
-                self.heap.free_block(escaped);
             } else {
                 let text = said(
                     format!("{prepend}<br />\n<b>{name}</b>:  "),
@@ -818,6 +818,20 @@ impl Request {
             let after = format!("{site}\n{}", self.ini_text(b"error_append_string"));
             self.printed(&said(before, &after));
         }
+    }
+
+    /// [`Request::printed`] of `message` escaped ([`escape_html`]) between
+    /// `before` and `after`, with `escape_html`'s string standing while
+    /// it is printed; the memory limit refusing that string prints
+    /// nothing.
+    fn printed_escaped(&mut self, before: &str, message: &[u8], after: &str) {
+        let escaped = escape_html(message, self.html_charset());
+        let laid = escaped.sizes.last().copied().unwrap_or(24 + 128 + 1);
+        let Ok(block) = self.heap.block(laid) else {
+            return;
+        };
+        self.printed(&[before.as_bytes(), &escaped.bytes, after.as_bytes()].concat());
+        self.heap.free_block(block);
     }
 
     /// `php_printf` (`Z/main/main.c:1003`) of a diagnostic's display:
@@ -978,6 +992,24 @@ impl Request {
     /// takes: the plain one, or `<br />\n<b>Warning</b>:  …`.
     fn html_errors(&self) -> bool {
         ini_truth(self.ini_get(b"html_errors"))
+    }
+
+    /// `determine_charset(NULL, quiet)` (`Z/ext/standard/html.c:364`),
+    /// the charset [`escape_html`] reads a message in: the name
+    /// `get_default_charset` gives, `internal_encoding` where it is set
+    /// and `default_charset` otherwise, each as php's C string reads it,
+    /// to its first NUL, and UTF-8 where it names none `charset_map`
+    /// takes.
+    pub(crate) fn html_charset(&self) -> Charset {
+        [b"internal_encoding".as_slice(), b"default_charset"]
+            .iter()
+            .find_map(|name| {
+                let value = self.ini_get(name)?;
+                let named = value.split(|&byte| byte == 0).next().unwrap_or_default();
+                (!named.is_empty()).then_some(named)
+            })
+            .and_then(Charset::named)
+            .unwrap_or(Charset::Utf8)
     }
 
     /// `xmlrpc_errors`, whether a diagnostic takes php's xml fault form
@@ -1489,9 +1521,7 @@ impl Request {
                     // rendered as the tail would have.
                     if thrown.exception().is_some() {
                         self.leave_pending(&thrown);
-                        if let Err(fatal) = self.exception_error(Level::Error) {
-                            self.end_in(&fatal);
-                        }
+                        self.exception_error(Level::Error).ok();
                     }
                     self.release(throwable.as_value());
                     return ControlFlow::Break(());
@@ -1558,13 +1588,14 @@ const E_ALL: i64 = 32767 & !Level::Strict.bit();
 /// 8.5 has no case for, so it falls to the `default:` every level php
 /// dropped falls to.
 ///
-/// No fence reaches either word, so the two arms are held by the test
-/// below and not by a witness. php 8.5 raises `E_RECOVERABLE_ERROR` at
-/// one site, `zend_object_is_true` (`Z/Zend/zend_operators.c:2918`),
-/// when an object's `cast_object` handler refuses `_IS_BOOL`; the
-/// standard handler answers `true` for every user class, and no class
-/// in the bundle brings a handler that refuses, so no PHP source raises
-/// it, and `trigger_error()` takes the four `E_USER_*` levels alone.
+/// No fence of this crate reaches either word, so the two arms are held
+/// by the test below. php 8.5 raises `E_RECOVERABLE_ERROR` at one site,
+/// `zend_object_is_true` (`Z/Zend/zend_operators.c:2918`), when an
+/// object's `cast_object` handler refuses `_IS_BOOL`; the standard
+/// handler answers `true` for every user class, and of the bundle only
+/// `ext/zend_test`'s classes bring a handler that refuses, so the word
+/// is witnessed there, and `trigger_error()` takes the four `E_USER_*`
+/// levels alone.
 /// `E_STRICT` has no raise anywhere: its constant stands `#[Deprecated]`
 /// since 8.4 with the message that the level was removed.
 /// `E_FATAL_ERRORS` (`Z/Zend/zend_errors.h:47`): the six levels
@@ -1588,43 +1619,73 @@ fn level_name(level: Level) -> &'static str {
     }
 }
 
+/// What php's `escape_html` (`Z/main/main.c:1038-1050`) leaves of a
+/// message: the escaped bytes, and each size `php_escape_html_entities_ex`
+/// asked for in the pass that wrote them, the string it grows as it
+/// writes (`Z/ext/standard/html.c:1173-1194`): `zend_string_alloc(maxlen)`
+/// with `maxlen` 128 for a message under 64 bytes and twice its length
+/// otherwise, then each `zend_string_safe_realloc` by 128 before a
+/// character that finds fewer than 40 bytes left, every one
+/// `_ZSTR_STRUCT_SIZE(maxlen)`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct EscapedHtml {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) sizes: Vec<usize>,
+}
+
 /// php's `escape_html` (`Z/main/main.c:1038-1050`): the message of an
-/// `E_ERROR` or an `E_PARSE` through `php_escape_html_entities_ex` at
-/// `ENT_COMPAT` with `double_encode`, which is `htmlspecialchars`'s four
-/// — `&`, `<`, `>` and `"`, an already-written entity escaped again —
-/// and leaves `'` alone. php's retry with the invalid bytes substituted
-/// is for a message that is not its charset, and a message this engine
-/// renders is a `&str`.
-pub(crate) fn escape_html(message: &str) -> String {
-    let mut escaped = String::with_capacity(message.len());
-    for letter in message.chars() {
-        match letter {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            _ => escaped.push(letter),
-        }
-    }
-    escaped
+/// `E_ERROR` or an `E_PARSE`, and `php_verror`'s message and origin,
+/// through `php_escape_html_entities_ex` at `ENT_COMPAT` with
+/// `double_encode`, in the charset `determine_charset(NULL)` finds
+/// ([`Request::html_charset`]): `htmlspecialchars`'s four, `&`, `<`, `>`
+/// and `"`, an already-written entity escaped again, `'` left alone,
+/// and every other character's bytes as they stand. A message that is
+/// not that charset comes back empty from the first pass, and the
+/// second substitutes each ill-formed sequence, U+FFFD in UTF-8 and
+/// `&#xFFFD;` in any other charset.
+///
+/// So an uncaught throwable's message in a single-byte charset keeps its
+/// bytes, php's own `bug74725.phpt`; the `ob_start()` callback spells
+/// out the two bytes the fence could not hold:
+///
+/// ```php
+/// ini_set('html_errors', '1');
+/// ini_set('default_charset', 'Windows-1251');
+/// ob_start(fn ($out) => strtr($out, ["\xF2" => '\xF2', "\xE5" => '\xE5']));
+/// throw new Exception("\xF2\xE5");
+/// ```
+/// ```expect exit=255
+/// <br />
+/// <b>Fatal error</b>:  Uncaught Exception: \xF2\xE5 in %s:5
+/// Stack trace:
+/// #0 {main}
+///   thrown in <b>%s</b> on line <b>5</b><br />
+/// ```
+///
+/// and the same bytes are not UTF-8, so `php_verror`'s origin, escaped
+/// the same way, has each substituted:
+///
+/// ```php
+/// ini_set('html_errors', '1');
+/// ob_start(fn ($out) => strtr($out, ["\u{FFFD}" => '\u{FFFD}']));
+/// @fopen("\xF2\xE5<", 'r');
+/// echo error_get_last()['message'], "\n";
+/// ```
+/// ```expect
+/// fopen(\u{FFFD}\u{FFFD}&lt;): Failed to open stream: No such file or directory
+/// ```
+pub(crate) fn escape_html(message: &[u8], charset: Charset) -> EscapedHtml {
+    escape_pass(message, charset, false)
+        .filter(|escaped| !escaped.bytes.is_empty())
+        .or_else(|| escape_pass(message, charset, true))
+        .unwrap_or_default()
 }
 
-/// The bytes `php_escape_html_entities_ex` asks for the string
-/// [`escape_html`] writes, once grown ([`escaped_html_sizes`]).
-fn escaped_html_size(message: &str) -> usize {
-    escaped_html_sizes(message)
-        .last()
-        .copied()
-        .unwrap_or(24 + 128 + 1)
-}
-
-/// Each size `php_escape_html_entities_ex` asks for the string
-/// [`escape_html`] writes, in turn (`Z/ext/standard/html.c:1173-1194`):
-/// `zend_string_alloc(maxlen)` with `maxlen` 128 for a message under 64
-/// bytes and twice its length otherwise, then each
-/// `zend_string_safe_realloc` by 128 before a character that finds
-/// fewer than 40 bytes left, every one `_ZSTR_STRUCT_SIZE(maxlen)`.
-pub(crate) fn escaped_html_sizes(message: &str) -> Vec<usize> {
+/// One pass of `php_escape_html_entities_ex` over `message` at
+/// `ENT_COMPAT` with `double_encode`: `None` where a character is
+/// ill-formed and `substitute`, `ENT_HTML_SUBSTITUTE_ERRORS`, is not
+/// set, which php answers with the empty string.
+fn escape_pass(message: &[u8], charset: Charset, substitute: bool) -> Option<EscapedHtml> {
     // `_ZSTR_STRUCT_SIZE`: the header, the bytes and the terminator.
     let size = |maxlen: usize| 24 + maxlen + 1;
     let mut maxlen = if message.len() < 64 {
@@ -1632,21 +1693,39 @@ pub(crate) fn escaped_html_sizes(message: &str) -> Vec<usize> {
     } else {
         message.len() * 2
     };
-    let mut sizes = vec![size(maxlen)];
-    let mut len = 0;
-    for letter in message.chars() {
-        if len > maxlen - 40 {
+    let replacement: &[u8] = if charset == Charset::Utf8 {
+        b"\xEF\xBF\xBD"
+    } else {
+        b"&#xFFFD;"
+    };
+    let mut escaped = EscapedHtml {
+        bytes: Vec::with_capacity(message.len()),
+        sizes: vec![size(maxlen)],
+    };
+    let mut cursor = 0;
+    while cursor < message.len() {
+        let before = cursor;
+        let (letter, next) = charset.next_char(message, cursor);
+        cursor = next;
+        if escaped.bytes.len() > maxlen - 40 {
             maxlen += 128;
-            sizes.push(size(maxlen));
+            escaped.sizes.push(size(maxlen));
         }
-        len += match letter {
-            '&' => 5,
-            '<' | '>' => 4,
-            '"' => 6,
-            _ => letter.len_utf8(),
+        // `find_entity_for_char_basic`: the basic table holds the code
+        // points under 64 alone, so a multi-byte code unit is passed
+        // through whatever its bytes are.
+        let entity: &[u8] = match letter {
+            None if substitute => replacement,
+            None => return None,
+            Some(0x26) => b"&amp;",
+            Some(0x3C) => b"&lt;",
+            Some(0x3E) => b"&gt;",
+            Some(0x22) => b"&quot;",
+            Some(_) => &message[before..cursor],
         };
+        escaped.bytes.extend_from_slice(entity);
     }
-    sizes
+    Some(escaped)
 }
 
 /// `smart_str_append_escaped` (`Z/Zend/zend_smart_str.c:77`): a byte
@@ -1677,7 +1756,7 @@ pub(crate) fn append_escaped(out: &mut String, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_escaped, escape_html, level_name};
+    use super::{Charset, append_escaped, escape_html, level_name};
     use crate::api::raising::Level;
     use crate::engine::Engine;
 
@@ -1753,16 +1832,36 @@ mod tests {
     /// apostrophe `ENT_QUOTES` would take stands as it is.
     #[test]
     fn the_message_of_a_fatal_is_escaped_as_php_escapes_it() {
+        let utf8 = |message: &str| escape_html(message.as_bytes(), Charset::Utf8).bytes;
         assert_eq!(
-            escape_html("syntax error, unexpected token \"<\""),
-            "syntax error, unexpected token &quot;&lt;&quot;"
+            utf8("syntax error, unexpected token \"<\""),
+            b"syntax error, unexpected token &quot;&lt;&quot;"
         );
-        assert_eq!(escape_html("<a&b'c\"d"), "&lt;a&amp;b'c&quot;d");
+        assert_eq!(utf8("<a&b'c\"d"), b"&lt;a&amp;b'c&quot;d");
         assert_eq!(
-            escape_html("&amp; &gt;"),
-            "&amp;amp; &amp;gt;",
+            utf8("&amp; &gt;"),
+            b"&amp;amp; &amp;gt;",
             "php passes double_encode, so a written entity is written again"
         );
-        assert_eq!(escape_html("nothing to escape"), "nothing to escape");
+        assert_eq!(utf8("nothing to escape"), b"nothing to escape");
+    }
+
+    /// `htmlspecialchars($s, ENT_COMPAT | ENT_SUBSTITUTE, $charset)`
+    /// under the pinned oracle, which is `escape_html`'s second pass: a
+    /// message valid in its charset keeps its bytes, and one that is not
+    /// has each ill-formed sequence substituted.
+    #[test]
+    fn a_message_keeps_its_bytes_in_its_charset() {
+        let escaped = |message: &[u8], charset| escape_html(message, charset).bytes;
+        assert_eq!(escaped(b"\xF2\xE5<", Charset::Cp1251), b"\xF2\xE5&lt;");
+        assert_eq!(
+            escaped(b"\xF2\xE5<", Charset::Utf8),
+            b"\xEF\xBF\xBD\xEF\xBF\xBD&lt;"
+        );
+        assert_eq!(
+            escaped(b"\x82\xA0\x82<", Charset::Sjis),
+            b"\x82\xA0&#xFFFD;&lt;"
+        );
+        assert_eq!(escaped(b"", Charset::Utf8), b"");
     }
 }

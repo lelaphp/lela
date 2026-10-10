@@ -369,12 +369,9 @@ impl<T: View> Owner<T> {
     /// What the owner was made of, moved out, and the owner forgotten:
     /// the view's own drop glue, a callable's name, moved out with it, so
     /// the forgotten owner holds none.
-    #[cfg_attr(
-        debug_assertions,
-        expect(
-            clippy::mem_forget,
-            reason = "a consumed owner skips the debug sensor's Drop, the one thing it would run"
-        )
+    #[expect(
+        clippy::mem_forget,
+        reason = "a consumed owner skips the debug sensor's Drop, and in either build the view left behind holds nothing to drop"
     )]
     fn disarmed(mut self) -> (T, T::Kept) {
         let view = sealed::Counted::moved_out(&mut self.view);

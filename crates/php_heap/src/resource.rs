@@ -788,7 +788,9 @@ mod tests {
         }
         fn destruct(&mut self, _: Obj) {}
         fn free_native(&mut self, _: Obj) {}
-        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) -> crate::GcTable {
+            crate::GcTable::Properties
+        }
         fn free_resource(&mut self, res: Res, kind: ResourceType) {
             self.freed.push((res.id(), kind.0, res.is_closed()));
         }

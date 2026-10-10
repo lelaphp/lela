@@ -267,20 +267,11 @@ impl Request {
         }
     }
 
-    /// `zend_asymmetric_property_has_set_access` over a hooked property:
-    /// the declaring class writes it, and a `protected(set)` one a scope
-    /// related to its prototype's class.
-    fn hooked_settable(&self, hooked: &Hooked, set: Visibility) -> bool {
-        let scope = self.property_scope();
-        scope == Some(hooked.declaring)
-            || (set == Visibility::Protected && self.check_protected(hooked.root, scope))
-    }
-
     /// `EG(current_execute_data)`'s function and `$this`.
     fn current_call(&self) -> Option<(Option<Function>, Option<PhpObject>)> {
         Some(match self.chain().next()? {
-            Link::Frame(_, state) => (state.function, state.this()),
-            Link::Call(call) => (Some(call.function), call.this()),
+            Link::Frame(_, state) => (state.function(), state.this()),
+            Link::Call(call) => (call.function(), call.this()),
             Link::Site(_) | Link::Fake(_) => (None, None),
         })
     }
@@ -305,12 +296,12 @@ impl Request {
     /// less its `$` and its hook, beside the property's class, the
     /// call's scope.
     fn trampoline_property(&self) -> Option<(Vec<u8>, Option<ClassId>)> {
-        let call = self.vm.serving_call()?;
-        let written = call.name?;
+        let call = self.serving_call()?;
+        let written = call.annex()?.name?;
         let bytes = written.as_bytes();
         let name = bytes.strip_prefix(b"$")?;
         let end = name.iter().rposition(|b| *b == b':')?.checked_sub(1)?;
-        Some((name.get(..end)?.to_vec(), call.called_scope))
+        Some((name.get(..end)?.to_vec(), call.called_scope()))
     }
 
     /// `zend_is_in_hook`: whether the function running is a hook of the
@@ -642,7 +633,7 @@ impl Request {
             return self.write_backing(object, name, value, hooked);
         }
         if let Some(set_visibility) = hooked.set_visibility
-            && !self.hooked_settable(&hooked, set_visibility)
+            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
         {
             let thrown = self.set_inaccessible_property(
                 object.class(),
@@ -675,7 +666,7 @@ impl Request {
         hooked: Hooked,
     ) -> Result<(), Thrown> {
         if let Some(set_visibility) = hooked.set_visibility
-            && !self.hooked_settable(&hooked, set_visibility)
+            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
         {
             let thrown = self.set_inaccessible_property(
                 object.class(),

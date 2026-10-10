@@ -90,7 +90,6 @@ fn with<T>(
     object: PhpObject,
     body: impl FnOnce(&mut Request, &mut NumberFormat) -> Answer<T>,
 ) -> Answer<T> {
-    error::reset(req);
     error::reset_object::<FormatterObject>(req, object);
     let taken = object
         .native_mut::<FormatterObject>(req)
@@ -183,15 +182,16 @@ pub(crate) fn locale_too_long(req: &mut Request, len: usize) -> Result<bool, Thr
     Ok(false)
 }
 
-/// `FORMATTER_METHOD_INIT_VARS` and the constructor's ZPP: the
-/// request's error reset before the arguments are counted and held.
+/// The constructor's ZPP, counted and held where the native says, the
+/// constructor's inside its [`error::constructing`] span; the request's
+/// error was reset before it (`FORMATTER_METHOD_INIT_VARS`,
+/// `before_args`).
 fn held(
     req: &mut Request,
     locale: &Raw<PhpString>,
     style: &Raw<i64>,
     pattern: &Raw<Option<PhpString>>,
 ) -> Result<(PhpString, i64, Option<PhpString>), Thrown> {
-    error::reset(req);
     arity(req, 2, Some(3))?;
     Ok((locale.hold(req)?, style.hold(req)?, pattern.hold(req)?))
 }
@@ -525,7 +525,6 @@ fn get_text(
     key: i64,
     message: &str,
 ) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     if which == 1 && !(0..29).contains(&key) {
         error::set(req, Code::ILLEGAL_ARGUMENT, "invalid symbol value")?;
         return Ok(None);
@@ -548,7 +547,6 @@ fn set_text(
     value: PhpString,
     messages: [&str; 2],
 ) -> Answer<()> {
-    error::reset(req);
     if which == 1 && !(0..29).contains(&key) {
         error::set(req, Code::ILLEGAL_ARGUMENT, "invalid symbol value")?;
         return Ok(None);
@@ -589,13 +587,11 @@ fn get_locale(req: &mut Request, object: PhpObject, kind: i64) -> Answer<Owner<P
 
 /// `numfmt_get_error_code`.
 fn error_code(req: &mut Request, object: PhpObject) -> i64 {
-    error::reset(req);
     i64::from(error::object_code::<FormatterObject>(req, object).0)
 }
 
 /// `numfmt_get_error_message`.
 fn error_message(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
-    error::reset(req);
     let message = error::object_message::<FormatterObject>(req, object);
     PhpString::new(req, &message)
 }
@@ -736,7 +732,7 @@ impl NumberFormatter {
     #[php(deprecated(since = "8.3"))]
     const TYPE_CURRENCY: i64 = 4;
 
-    #[php(arity = manual)]
+    #[php(arity = manual, before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -751,7 +747,7 @@ impl NumberFormatter {
         })
     }
 
-    #[php(tentative, arity = manual)]
+    #[php(tentative, arity = manual, before_args = error::reset)]
     fn create(
         req: &mut Request,
         locale: Raw<PhpString>,
@@ -761,7 +757,7 @@ impl NumberFormatter {
         create(req, &locale, &style, &pattern)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn format(
         req: &mut Request,
         this: This<Self>,
@@ -771,7 +767,7 @@ impl NumberFormatter {
         format(req, this.object(), num, r#type, 0).map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn parse(
         req: &mut Request,
         this: This<Self>,
@@ -782,7 +778,7 @@ impl NumberFormatter {
         parse(req, this.object(), string, r#type, &offset, 0).map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn formatCurrency(
         req: &mut Request,
         this: This<Self>,
@@ -792,7 +788,7 @@ impl NumberFormatter {
         format_currency(req, this.object(), amount, currency).map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn parseCurrency(
         req: &mut Request,
         this: This<Self>,
@@ -803,7 +799,7 @@ impl NumberFormatter {
         parse_currency(req, this.object(), string, &currency, &offset).map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setAttribute(
         req: &mut Request,
         this: This<Self>,
@@ -813,7 +809,7 @@ impl NumberFormatter {
         set_attribute(req, this.object(), attribute, &value).map(|a| a.is_some())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getAttribute(
         req: &mut Request,
         this: This<Self>,
@@ -822,7 +818,7 @@ impl NumberFormatter {
         get_attribute(req, this.object(), attribute).map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setTextAttribute(
         req: &mut Request,
         this: This<Self>,
@@ -832,7 +828,7 @@ impl NumberFormatter {
         set_text(req, this.object(), 0, attribute, value, TEXT_SETTER).map(|a| a.is_some())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getTextAttribute(
         req: &mut Request,
         this: This<Self>,
@@ -848,7 +844,7 @@ impl NumberFormatter {
         .map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setSymbol(
         req: &mut Request,
         this: This<Self>,
@@ -858,7 +854,7 @@ impl NumberFormatter {
         set_text(req, this.object(), 1, symbol, value, SYMBOL_SETTER).map(|a| a.is_some())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getSymbol(
         req: &mut Request,
         this: This<Self>,
@@ -867,12 +863,12 @@ impl NumberFormatter {
         get_text(req, this.object(), 1, symbol, "Error getting symbol value").map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn setPattern(req: &mut Request, this: This<Self>, pattern: PhpString) -> Result<bool, Thrown> {
         set_text(req, this.object(), 2, 0, pattern, PATTERN_SETTER).map(|a| a.is_some())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getPattern(
         req: &mut Request,
         this: This<Self>,
@@ -880,7 +876,7 @@ impl NumberFormatter {
         get_text(req, this.object(), 2, 0, "Error getting formatter pattern").map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getLocale(
         req: &mut Request,
         this: This<Self>,
@@ -889,12 +885,12 @@ impl NumberFormatter {
         get_locale(req, this.object(), r#type).map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
         error_code(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         error_message(req, this.object())
     }
@@ -923,7 +919,7 @@ type Fmt = Instance<NumberFormatter>;
 /// NULL
 /// string(106) "numfmt_create(): Locale string too long, should be no longer than 156 characters: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function(arity = manual)]
+#[php_function(arity = manual, before_args = error::reset)]
 fn numfmt_create(
     req: &mut Request,
     locale: Raw<PhpString>,
@@ -953,7 +949,7 @@ fn numfmt_create(
 /// string(90) "one hundred twenty-three million four hundred fifty-six thousand seven hundred eighty-nine"
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_format(
     req: &mut Request,
     formatter: Fmt,
@@ -977,7 +973,7 @@ fn numfmt_format(
 /// bool(false)
 /// string(62) "NumberFormatter::parse(): Number parsing failed: U_PARSE_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_parse(
     req: &mut Request,
     formatter: Fmt,
@@ -998,7 +994,7 @@ fn numfmt_parse(
 /// string(11) "€1,234.50"
 /// string(4) "-¥3"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_format_currency(
     req: &mut Request,
     formatter: Fmt,
@@ -1020,7 +1016,7 @@ fn numfmt_format_currency(
 /// bool(false)
 /// string(5) "unset"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_parse_currency(
     req: &mut Request,
     formatter: Fmt,
@@ -1049,7 +1045,7 @@ fn numfmt_parse_currency(
 /// bool(false)
 /// string(83) "NumberFormatter::getAttribute(): Error getting attribute value: U_UNSUPPORTED_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_set_attribute(
     req: &mut Request,
     formatter: Fmt,
@@ -1067,7 +1063,7 @@ fn numfmt_set_attribute(
 /// ```expect
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_get_attribute(
     req: &mut Request,
     formatter: Fmt,
@@ -1090,7 +1086,7 @@ fn numfmt_get_attribute(
 /// bool(false)
 /// int(16)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_set_text_attribute(
     req: &mut Request,
     formatter: Fmt,
@@ -1108,7 +1104,7 @@ fn numfmt_set_text_attribute(
 /// ```expect
 /// string(3) "XXX"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_get_text_attribute(
     req: &mut Request,
     formatter: Fmt,
@@ -1140,7 +1136,7 @@ fn numfmt_get_text_attribute(
 /// bool(false)
 /// string(76) "NumberFormatter::setSymbol(): invalid symbol value: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_set_symbol(
     req: &mut Request,
     formatter: Fmt,
@@ -1158,7 +1154,7 @@ fn numfmt_set_symbol(
 /// ```expect
 /// string(1) ","
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_get_symbol(
     req: &mut Request,
     formatter: Fmt,
@@ -1189,7 +1185,7 @@ fn numfmt_get_symbol(
 /// bool(false)
 /// string(102) "NumberFormatter::setPattern(): Error setting pattern value at line 0, offset 0: U_PATTERN_SYNTAX_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_set_pattern(
     req: &mut Request,
     formatter: Fmt,
@@ -1206,7 +1202,7 @@ fn numfmt_set_pattern(
 /// ```expect
 /// string(6) "#,##0%"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_get_pattern(
     req: &mut Request,
     formatter: Fmt,
@@ -1232,7 +1228,7 @@ fn numfmt_get_pattern(
 /// string(5) "de_CH"
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_get_locale(
     req: &mut Request,
     formatter: Fmt,
@@ -1251,7 +1247,7 @@ fn numfmt_get_locale(
 /// int(9)
 /// string(62) "NumberFormatter::parse(): Number parsing failed: U_PARSE_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_get_error_code(req: &mut Request, formatter: Fmt) -> i64 {
     error_code(req, formatter.object())
 }
@@ -1264,7 +1260,7 @@ fn numfmt_get_error_code(req: &mut Request, formatter: Fmt) -> i64 {
 /// ```expect
 /// string(23) "U_USING_DEFAULT_WARNING"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn numfmt_get_error_message(req: &mut Request, formatter: Fmt) -> Result<Owner<PhpString>, Thrown> {
     error_message(req, formatter.object())
 }

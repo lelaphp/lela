@@ -179,6 +179,19 @@ impl Context {
     }
 }
 
+/// `SG(sapi_headers).http_status_line` and `http_response_code` as they
+/// stood, the line taken off the response with the request heap it
+/// holds: what `soap_real_error_handler` keeps in `_old_http_status_line`
+/// and `_old_http_response_code` (`Z/ext/soap/soap.c:1881-1884`). Dropped
+/// without being put back, the line is gone from the response and its
+/// bytes stay the request heap's until it ends, as php's pointer, set to
+/// `NULL`, is.
+#[derive(Debug)]
+pub struct HttpStatus {
+    line: Option<(Vec<u8>, Block)>,
+    code: i64,
+}
+
 /// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the
 /// `sapi_globals` the header ops and the first write move:
 /// `SG(sapi_headers)` and `SG(headers_sent)`.
@@ -291,6 +304,16 @@ impl Output {
     /// `SG(sapi_headers).http_status_line`, while one is held.
     pub(crate) fn status_line(&self) -> Option<&[u8]> {
         self.status_line.as_ref().map(|(line, _)| line.as_slice())
+    }
+
+    /// The status line and the response code as they stand, the line
+    /// taken off, `SG(sapi_headers).http_status_line = NULL`, and the code
+    /// left standing.
+    pub(crate) fn take_status(&mut self) -> HttpStatus {
+        HttpStatus {
+            line: self.status_line.take(),
+            code: self.response_code,
+        }
     }
 
     pub(crate) fn started_at(&self) -> Option<(Vec<u8>, u32)> {
@@ -1041,6 +1064,17 @@ fn send_headers_free(req: &mut Request) {
     if let Some((_, block)) = output.status_line.take() {
         heap.free_block(block);
     }
+}
+
+/// `status` put back as it was taken: the status line standing now
+/// freed, `efree(SG(sapi_headers).http_status_line)`, then the line and
+/// the code that stood, as `soap_real_error_handler`'s `zend_catch` puts
+/// them back (`Z/ext/soap/soap.c:1950-1957`).
+pub(crate) fn put_back_status(req: &mut Request, status: HttpStatus) {
+    send_headers_free(req);
+    let output = req.output_mut();
+    output.status_line = status.line;
+    output.response_code = status.code;
 }
 
 /// `sapi_header_op`'s refusal once the block is sent

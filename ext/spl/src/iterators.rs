@@ -15,8 +15,8 @@
 //! compiled once, by ext/pcre, whichever extension asked.
 
 use php_ext::abi::{
-    Callable, Class, ClassIterator, ExtensionBuilder, False, FromArgument, Instance, Never,
-    ObjectHandlers, OrFalse, Raw, Refusals, Std, This, Union, Untyped,
+    Callable, Class, ClassIterator, ExtensionBuilder, False, FromArgument, GcTable, Instance,
+    Never, ObjectHandlers, OrFalse, Raw, Refusals, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -2849,7 +2849,12 @@ impl ObjectHandlers for DualHandlers {
     /// freed
     /// done
     /// ```
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(it) = object.native::<DualIt>(req) {
             for value in [&it.data, &it.key, &it.string].into_iter().flatten() {
                 visit(**value);
@@ -2870,6 +2875,7 @@ impl ObjectHandlers for DualHandlers {
                 visit(Value::array(**cache));
             }
         }
+        GcTable::Properties
     }
 
     /// `spl_dual_it_get_method`: the inner iterator.
@@ -3663,13 +3669,19 @@ impl ObjectHandlers for RecHandlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(it) = object.native::<RecIt>(req) {
             for level in &it.levels {
                 visit(level.iterator.as_value());
                 visit(level.sub.as_value());
             }
         }
+        GcTable::Properties
     }
 
     /// `spl_recursive_it_get_iterator`: the walk the methods make,

@@ -312,13 +312,13 @@ impl UConverter {
     const CESU8: i64 = 31;
     const IMAP_MAILBOX: i64 = 32;
 
+    #[php(before_args = error::reset)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] destination_encoding: Option<PhpString>,
         #[php(default = null)] source_encoding: Option<PhpString>,
     ) -> Answer<()> {
-        error::reset(req);
         let object = this.object();
         let utf8 = b"utf-8".as_slice();
         let src = source_encoding.as_ref().map_or(utf8, PhpString::as_bytes);
@@ -847,6 +847,50 @@ fn default_callback(
 /// error set where ICU fails. A throwable a callback raised is the
 /// answer, once the conversion has gone on to its end as php's does with
 /// one pending.
+///
+/// Each converter is held for the conversion (ADR-0013), so a callback
+/// that replaces the one ICU is converting with leaves its close to the
+/// conversion's end: the conversion goes on with the old converter and
+/// the next uses the new. `trace:intl-converter-replaced-in-callback` is
+/// its divergence row, so this fence is held to the engine alone:
+///
+/// ```php
+/// class Swap extends UConverter {
+///     public $swapped = 0;
+///     public function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null {
+///         echo 'to ', UConverter::reasonText($reason), "\n";
+///         if ($reason == UConverter::REASON_ILLEGAL && !$this->swapped++) {
+///             var_dump($this->setSourceEncoding('latin1'), $this->getSourceEncoding());
+///         }
+///         $error = U_ZERO_ERROR;
+///         return '?';
+///     }
+/// }
+/// $c = new Swap('utf-8', 'ascii');
+/// var_dump($c->convert("a\x80b\x81c"));
+/// var_dump($c->getSourceEncoding(), $c->convert("\xE4"));
+/// $c = null;
+/// echo "done\n";
+/// ```
+/// ```expect
+/// to REASON_RESET
+/// to REASON_ILLEGAL
+/// to REASON_CLOSE
+/// bool(true)
+/// string(10) "ISO-8859-1"
+/// to REASON_ILLEGAL
+/// to REASON_RESET
+/// to REASON_ILLEGAL
+/// to REASON_ILLEGAL
+/// string(5) "a?b?c"
+/// to REASON_RESET
+/// to REASON_RESET
+/// string(10) "ISO-8859-1"
+/// string(2) "ä"
+/// to REASON_CLOSE
+/// to REASON_CLOSE
+/// done
+/// ```
 fn convert(
     req: &mut Request,
     object: Option<PhpObject>,

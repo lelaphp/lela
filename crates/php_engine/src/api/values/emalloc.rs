@@ -43,6 +43,18 @@ impl Emalloc {
         })
     }
 
+    /// The `char *` `spprintf` and `zend_vspprintf` answer for `len`
+    /// bytes of text: a `smart_string` laid down at its 255-byte start,
+    /// or grown to the page past the text and its terminator, the
+    /// buffer [`crate::api::raising::throw_error`] holds. A native holds
+    /// it where php holds a sentence it printed, such as the
+    /// `warning_message` a callee hands back, writes the text into its
+    /// first `len` bytes and frees it where php calls `efree`. The `Err`
+    /// is the memory limit's fatal.
+    pub fn printf_buffer(req: &mut Request, len: usize) -> Result<Emalloc, Thrown> {
+        crate::api::raising::printf_buffer(req, len).map(|block| Emalloc { block })
+    }
+
     /// The bytes asked for.
     #[must_use]
     pub fn len(&self) -> usize {

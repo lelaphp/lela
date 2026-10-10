@@ -152,7 +152,7 @@ pub fn uncaught_at(req: &mut Request, thrown: Thrown, severity: Level) -> Result
     }
     req.leave_pending(&thrown);
     req.exception_error(severity)
-        .or_else(|fatal| req.fatal_of(Err(fatal)))
+        .map_err(|crate::api::request::Leaving| Thrown::of(None))
 }
 
 /// `zend_error` with `EG(exception)` set: the diagnostic raised while
@@ -308,7 +308,9 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// which is how `ext/standard`'s natives raise most of what they raise
 /// (`chr(): Providing a value not in-between 0 and 255 is deprecated,
 /// ...`). The docref itself, php's link into the manual, is off in the
-/// CLI's ini and is not rendered here.
+/// CLI's ini and is not rendered here. The message is bytes, as php's
+/// `"%s"` prints a `char *`, so a text that is not UTF-8 is raised as it
+/// is; ext/intl's error raised at `intl.error_level` is the witness.
 ///
 /// Where no native is active, `php_verror` names the code being served,
 /// as `get_active_function_name` and `get_active_class_name` name it,
@@ -333,30 +335,19 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 ///
 /// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 5
 /// ```
-pub fn docref(req: &mut Request, level: Level, message: &str) {
+pub fn docref(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Sized)) {
+    let message = message.as_ref();
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
     // A fatal in flight is no native served: `_zend_bailout` empties
     // `EG(current_execute_data)` before it jumps (`Z/Zend/zend.c:1267`),
     // so what a `zend_catch` raises names no function.
     if req.ini_stage() == crate::api::abi::IniStage::Startup {
-        return verror(
-            req,
-            level,
-            Origin::Phase("PHP Startup"),
-            b"",
-            message.as_bytes(),
-        );
+        return verror(req, level, Origin::Phase("PHP Startup"), b"", message);
     }
     if (req.vm_serving_native() || req.serving_include()) && !req.bailing_out() {
         let function = req.active_native();
-        return verror(
-            req,
-            level,
-            Origin::Function(&function),
-            b"",
-            message.as_bytes(),
-        );
+        return verror(req, level, Origin::Function(&function), b"", message);
     }
     let phase = match req.phase() {
         crate::api::request::Phase::Startup => "PHP Request Startup",
@@ -364,7 +355,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         // `get_active_function_name` does when a handler raises it.
         crate::api::request::Phase::Running if !req.bailing_out() => {
             if let Some(name) = req.active_user_function() {
-                return verror(req, level, Origin::Function(&name), b"", message.as_bytes());
+                return verror(req, level, Origin::Function(&name), b"", message);
             }
             "Unknown"
         }
@@ -374,7 +365,7 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         }
         crate::api::request::Phase::EngineEnd => "PHP Shutdown",
     };
-    verror(req, level, Origin::Phase(phase), b"", message.as_bytes());
+    verror(req, level, Origin::Phase(phase), b"", message);
 }
 
 /// `php_error_docref1(NULL, param, level, ...)`: [`docref`] from a native
@@ -454,12 +445,12 @@ pub(crate) fn verror(
 ) {
     let mut laid = Laid::default();
     let sentence = laid.lay(req, &origin, params, message).and_then(|()| {
-        let params = String::from_utf8_lossy(&escaped(req, params)).into_owned();
+        let params = escaped(req, params);
         let origin = match origin {
             Origin::Function(function) => self::origin(req, function, &params),
-            Origin::Phase(phase) => phase.to_owned(),
+            Origin::Phase(phase) => phase.as_bytes().to_vec(),
         };
-        let text = [format!("{origin}: ").as_bytes(), &escaped(req, message)].concat();
+        let text = [origin.as_slice(), b": ", &escaped(req, message)].concat();
         strpprintf(req, &text)
     });
     laid.free(req);
@@ -493,15 +484,14 @@ impl Laid {
         let html = req.ini_flag(b"html_errors");
         self.message = Some(strpprintf(req, message)?);
         if html {
-            self.blocks
-                .push(escape_buffer(req, &String::from_utf8_lossy(message))?);
+            self.blocks.push(escape_buffer(req, message)?);
             if let Some(printed) = self.message.take() {
                 req.release(Value::string(printed));
             }
         }
         let (block, text, docref) = match origin {
             Origin::Function(function) => {
-                let text = format!("{function}({})", String::from_utf8_lossy(params));
+                let text = [function.as_bytes(), b"(", params, b")"].concat();
                 let docref = match function.split_once("::") {
                     Some((class, method)) => class.len() + 1 + method.trim_start_matches('_').len(),
                     None => 9 + function.trim_start_matches('_').len(),
@@ -510,7 +500,7 @@ impl Laid {
             }
             Origin::Phase(phase) => {
                 let block = req.heap_mut().block(phase.len() + 1);
-                (req.fatal_of(block)?, (*phase).to_owned(), None)
+                (req.fatal_of(block)?, phase.as_bytes().to_vec(), None)
             }
         };
         self.blocks.push(block);
@@ -543,9 +533,12 @@ impl Laid {
 /// `zend_string_alloc(maxlen)` it starts with, then each
 /// `zend_string_safe_realloc` it grows it by as it writes, laid as
 /// `zend_mm_realloc_heap` lays them
-/// ([`crate::api::request::escaped_html_sizes`]).
-fn escape_buffer(req: &mut Request, text: &str) -> Result<php_heap::Block, Thrown> {
-    let mut sizes = crate::api::request::escaped_html_sizes(text).into_iter();
+/// ([`crate::api::request::escape_html`]).
+fn escape_buffer(req: &mut Request, text: &[u8]) -> Result<php_heap::Block, Thrown> {
+    let charset = req.html_charset();
+    let mut sizes = crate::api::request::escape_html(text, charset)
+        .sizes
+        .into_iter();
     let first = req.heap_mut().block(sizes.next().unwrap_or(24 + 128 + 1));
     let mut block = req.fatal_of(first)?;
     for size in sizes {
@@ -557,12 +550,14 @@ fn escape_buffer(req: &mut Request, text: &str) -> Result<php_heap::Block, Throw
 
 /// `php_verror`'s `escape_html` of its message and its parameters under
 /// `html_errors` (`Z/main/main.c:1074`, `:1139`): `&`, `<`, `>` and `"`
-/// as entities, a byte that was not UTF-8 already the replacement
-/// character the message was read with. ext/fileinfo's `bug68996.phpt`
-/// is the witness. Without it the bytes stand as raised.
+/// as entities and every other character's bytes as they stand in the
+/// request's charset, each ill-formed sequence substituted where the
+/// text is not that charset ([`crate::api::request::escape_html`]).
+/// ext/fileinfo's `bug68996.phpt` is the witness. Without it the bytes
+/// stand as raised.
 fn escaped(req: &Request, text: &[u8]) -> Vec<u8> {
     if req.ini_flag(b"html_errors") {
-        crate::api::request::escape_html(&String::from_utf8_lossy(text)).into_bytes()
+        crate::api::request::escape_html(text, req.html_charset()).bytes
     } else {
         text.to_vec()
     }
@@ -583,10 +578,11 @@ fn escaped(req: &Request, text: &[u8]) -> Vec<u8> {
 /// ```expect
 /// fopen(nope.txt) [function.fopen.html]: Failed to open stream: No such file or directory
 /// ```
-pub(crate) fn origin(req: &Request, function: &str, params: &str) -> String {
+pub(crate) fn origin(req: &Request, function: &str, params: &[u8]) -> Vec<u8> {
+    let called = [function.as_bytes(), b"(", params, b")"].concat();
     match docref_link(req, function) {
-        Some(link) => format!("{function}({params}) {link}"),
-        None => format!("{function}({params})"),
+        Some(link) => [called.as_slice(), b" ", link.as_bytes()].concat(),
+        None => called,
     }
 }
 
@@ -839,6 +835,49 @@ fn throwable_at(
     let line = Owner::int(i64::from(line));
     write_prop(req, &object, b"line", line)?;
     Ok(object)
+}
+
+/// `zend_illegal_container_offset` (`Z/Zend/zend.c:1846`): the one
+/// sentence every container throws for an offset it refuses, named as
+/// `zend_zval_type_name` names the offset and `container` as php prints
+/// `ce->name` (or `array`, `string`): "Cannot access offset of type T in
+/// isset or empty" for the read an `isset`, an `empty` or a `??` makes,
+/// "Cannot unset offset of type T on C" for an unset (and php's `Error`
+/// "Cannot unset string offsets" for a string), and "Cannot access
+/// offset of type T on C" for every other fetch.
+///
+/// ```php
+/// $a = [1]; $o = new ArrayObject([1]);
+/// foreach ([fn() => $a[[]], fn() => isset($a[new stdClass]), function () use ($a) { unset($a[[]]); },
+///           fn() => $o[[]], fn() => isset($o[[]]), function () use ($o) { unset($o[new stdClass]); }] as $f) {
+///     try { $f(); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// TypeError: Cannot access offset of type array on array
+/// TypeError: Cannot access offset of type stdClass in isset or empty
+/// TypeError: Cannot unset offset of type array on array
+/// TypeError: Cannot access offset of type array on ArrayObject
+/// TypeError: Cannot access offset of type array in isset or empty
+/// TypeError: Cannot unset offset of type stdClass on ArrayObject
+/// ```
+pub fn illegal_container_offset(
+    req: &mut Request,
+    container: &str,
+    offset: &Value,
+    read: crate::api::abi::DimensionRead,
+) -> Thrown {
+    use crate::api::abi::DimensionRead;
+    let given = crate::ops::zval_type_name(req, &offset.deref());
+    let message = match read {
+        DimensionRead::Silent => format!("Cannot access offset of type {given} in isset or empty"),
+        DimensionRead::Unset if container == "string" => {
+            return throw_error(req, "Error", "Cannot unset string offsets");
+        }
+        DimensionRead::Unset => format!("Cannot unset offset of type {given} on {container}"),
+        _ => format!("Cannot access offset of type {given} on {container}"),
+    };
+    throw_error(req, "TypeError", &message)
 }
 
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of

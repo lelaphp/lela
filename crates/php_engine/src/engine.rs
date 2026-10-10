@@ -37,7 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, Placed, PropertyInfo, Request, Sink, TypedIni, placed_of,
+    BuildDefs, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request, Sink, TypedIni,
+    placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -125,14 +126,23 @@ pub enum Primary {
 /// served, as `phpdbg_compile` closes it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProgramFile {
-    /// The file's name, which `zend_stream_open` opens unless opcache
-    /// holds the file, `persistent_stream_open_function` answering it
-    /// without opening it: the `zend_file_handle` of
-    /// `php_fopen_primary_script` (`Z/main/fopen_wrappers.c:468-473`), or
-    /// of `zend_stream_init_filename` and the scanner, which the host
+    /// The file's name, which `zend_stream_open` opens before the
+    /// program is served unless opcache holds the file,
+    /// `persistent_stream_open_function` answering it without opening
+    /// it: the `zend_file_handle` of `php_fopen_primary_script`
+    /// (`Z/main/fopen_wrappers.c:468-473`), php-cgi's, which the host
     /// destroys once the program has been served.
     #[default]
     Named,
+    /// The file's name alone, as `zend_stream_init_filename` leaves it
+    /// and the host hands it to `php_execute_script` unopened: the
+    /// built-in server's (`php_cli_server_dispatch_script`,
+    /// `Z/sapi/cli/php_cli_server.c:2132-2138`), opened as the program
+    /// compiles, once `auto_prepend_file` is served, where the unit cache
+    /// does not answer it by its name, as the server's router is
+    /// ([`Engine::dispatch`]), and destroyed once the program has been
+    /// served.
+    Unopened,
     /// php's CLI, `cli_seek_file_begin`'s `fopen` before the request
     /// starts (`Z/sapi/cli/php_cli.c:566`), open whatever opcache holds,
     /// and destroyed once the program has been served, before
@@ -881,19 +891,12 @@ pub(crate) struct Shared {
 /// `ZEND_MAP_PTR_NEW` over every op array of `unit`, at its publication:
 /// each takes the next offset the engine has, so a request serving the
 /// unit finds each op array's runtime cache at its own entry
-/// ([`exec::init_runtime_cache`]). A unit compiled for one request,
-/// from source the host handed over, takes its offsets here too: php
-/// gives such an op array a cache on the heap (`ZEND_ACC_HEAP_RT_CACHE`)
-/// and no offset, so its count does not move for it, where this one
-/// does.
+/// ([`exec::init_runtime_cache`]). A unit compiled for one request
+/// alone takes none ([`exec::RuntimeCaches::take`]).
 pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
-    let bodies = std::iter::once(&mut unit.main)
-        .chain(unit.functions.iter_mut().map(|(_, code)| code))
-        .chain(unit.dynamic.iter_mut().map(|(_, code)| code))
-        .chain(unit.methods.iter_mut().map(|method| &mut method.body))
-        .chain(unit.hooks.iter_mut().map(|hook| &mut hook.body));
-    for code in bodies {
-        code.runtime_cache = map_ptr_last.fetch_add(1, Ordering::Relaxed);
+    for code in exec::op_arrays_mut(unit) {
+        code.runtime_cache =
+            php_unit::MapPtrOffset::Engine(map_ptr_last.fetch_add(1, Ordering::Relaxed));
     }
 }
 
@@ -1410,15 +1413,17 @@ impl Shared {
             // ended holding the lock left is consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        compile(
+        let mut unit = compile(
             source,
             origin,
             self.compile_ini(),
             self.declared(),
             stack,
             &mut *strings,
-            &self.map_ptr_last,
-        )
+        )?;
+        drop(strings);
+        assign_map_ptrs(&mut unit, &self.map_ptr_last);
+        Ok(unit.published())
     }
 
     /// One source compiled for one request alone, under the request's
@@ -1475,19 +1480,11 @@ impl Shared {
                 request_classes,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
-            compile(
-                source,
-                origin,
-                ini,
-                declared,
-                stack,
-                heap,
-                &self.map_ptr_last,
-            )
+            compile(source, origin, ini, declared, stack, heap)
         })?;
         let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
         req.keys_made = req.keys_made.saturating_add(made);
-        Ok(unit)
+        Ok(req.take_unit(unit))
     }
 
     /// `zend_call_stack_init` on the calling thread, from the startup
@@ -3445,6 +3442,25 @@ fn permanent_names(
     for name in declared {
         names.intern(&name.0).ok();
     }
+    // `prop_info->name`, the key a protected or a private property's
+    // row is held under, mangled and interned as it is declared.
+    for decl in classes {
+        for property in &decl.properties {
+            if let Some(prefix) = php_compile::mangling(property.visibility, &decl.name.0) {
+                names
+                    .intern(&[prefix.as_slice(), &property.name.0].concat())
+                    .ok();
+            }
+        }
+    }
+    // `php_startup_auto_globals` and the session's `MINIT` register each
+    // auto-global under `zend_string_init_interned`.
+    {
+        use php_unit::AutoGlobal::{Cookie, Env, Files, Get, Post, Request, Server, Session};
+        for global in [Get, Post, Cookie, Server, Env, Request, Files, Session] {
+            names.intern(global.name()).ok();
+        }
+    }
     let keyed = functions
         .iter()
         .map(|decl| &decl.name)
@@ -4696,7 +4712,7 @@ impl Engine {
             req.open_primary_file();
         }
         let ran = self.execute_wrapped(req, source, script);
-        req.close_primary_file();
+        req.close_served_files();
         ran
     }
 
@@ -4746,31 +4762,33 @@ impl Engine {
             );
         }
         let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
-        self.compile_file(req, &script)
+        // A bare program is opened as phpdbg's `phpdbg_compile` opens it,
+        // a stream through `php_stream_open_for_zend_ex`, and spends a
+        // resource id where the CLI's `FILE *` spends none; the built-in
+        // server's is opened by its compile, as its router is.
+        let handle = match (req.primary(), req.program_file()) {
+            (Primary::Wrapped, ProgramFile::Unopened) => HandlePath::Kept,
+            (Primary::Wrapped, _) => HandlePath::Host,
+            (Primary::Bare, _) => HandlePath::Opened,
+        };
+        self.compile_file(req, &script, handle)
     }
 
-    /// The file at `path` compiled for the request: what an extension's
-    /// `zend_compile_file` answers, or the unit cache's. A bare program
-    /// is opened as phpdbg's `phpdbg_compile` opens it, a stream through
-    /// `php_stream_open_for_zend_ex`, and spends a resource id where the
-    /// CLI's `FILE *` spends none.
+    /// The file at `path` compiled for the request through a
+    /// `zend_file_handle` of the kind `handle` names: what an extension's
+    /// `zend_compile_file` answers, or the unit cache's.
     fn compile_file(
         &self,
         req: &mut Request,
         path: &[u8],
+        handle: HandlePath,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
         match req.compile_file_source(path) {
             Ok(Some(source)) => Some(
                 self.shared
                     .compile_for(req, &source, path, SourceKind::File),
             ),
-            Ok(None) => {
-                let handle = match req.primary() {
-                    Primary::Wrapped => crate::api::request::HandlePath::Host,
-                    Primary::Bare => crate::api::request::HandlePath::Opened,
-                };
-                req.cached_file(path, Some(path), handle)
-            }
+            Ok(None) => req.cached_file(path, Some(path), handle),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 None
@@ -4835,8 +4853,21 @@ impl Engine {
     }
 
     /// `php_cli_server_dispatch_router`: `router` served as
-    /// `php_execute_script_ex` serves a program, and whether it declined.
+    /// `php_execute_script_ex` serves a program, through the path alone
+    /// as `zend_stream_init_filename` leaves it, so its file is opened as
+    /// it compiles, where the unit cache does not answer it by its name,
+    /// and held open until the router and the append file are served, as
+    /// `zend_destroy_file_handle` closes it after `php_execute_script_ex`
+    /// ([`HandlePath::Kept`]); and whether it declined.
     fn execute_router(&self, req: &mut Request, router: &[u8]) -> Routed {
+        let answered = self.execute_router_files(req, router);
+        req.close_served_files();
+        answered
+    }
+
+    /// [`Engine::execute_router`] with the files it opens held:
+    /// `auto_prepend_file`, the router and `auto_append_file`.
+    fn execute_router_files(&self, req: &mut Request, router: &[u8]) -> Routed {
         let entry = self.shared.loops.entry;
         if !auto_file(req, b"auto_prepend_file", entry) {
             return Routed::Taken;
@@ -4844,7 +4875,7 @@ impl Engine {
         let path = req
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
-        let ran = match self.compile_file(req, &path) {
+        let ran = match self.compile_file(req, &path, HandlePath::Kept) {
             Some(Ok(unit)) => serve_unit(req, &unit, entry),
             Some(Err(refused)) => {
                 refused_program(req, &refused, &path);
@@ -5089,9 +5120,11 @@ struct CompileIni {
 /// reads as `CG(function_table)` before it serves a call of
 /// `zend_try_compile_special_func`'s table itself, and the classes, which
 /// it reads as `CG(class_table)` to know a method's callee; and `stack`
-/// the calling thread's limit, which the compiler's recursion is held to;
-/// and `map_ptr_last` the engine's count of map pointers, which every op
-/// array of the unit takes one from ([`assign_map_ptrs`]).
+/// the calling thread's limit, which the compiler's recursion is held to.
+/// The unit's op arrays take their runtime caches where it is shared:
+/// offsets of the engine's as it is published ([`assign_map_ptrs`]), or
+/// numbers of the request's it was compiled for
+/// ([`exec::RuntimeCaches::take`]).
 fn compile(
     source: &[u8],
     origin: Origin<'_>,
@@ -5099,8 +5132,7 @@ fn compile(
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
-    map_ptr_last: &AtomicU32,
-) -> Result<Arc<Unit>, CompileError> {
+) -> Result<Unit, CompileError> {
     let options = php_compile::Options {
         filename: Name(origin.filename.into()),
         kind: origin.kind,
@@ -5121,9 +5153,7 @@ fn compile(
         hooked: declared.hooked,
         extended_info: declared.extended_info,
     };
-    let mut unit = php_compile::compile_source(source, &options, strings)?;
-    assign_map_ptrs(&mut unit, map_ptr_last);
-    Ok(unit.published())
+    php_compile::compile_source(source, &options, strings)
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -5300,7 +5330,12 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
             req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
         }
         (php_compile::Stage::Compiling, true) => {
-            req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
+            req.end_in_uncaught(
+                refused.level,
+                refused.message.as_bytes(),
+                file,
+                refused.line,
+            );
         }
         (php_compile::Stage::Compiling, false) => {
             req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
@@ -5310,22 +5345,21 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
 
 /// `zend_execute_script(ZEND_REQUIRE, NULL, file)` over the file the
 /// ini entry `name` gives, `auto_prepend_file` or `auto_append_file`
-/// (`Z/main/main.c:2621-2645`): required as `require` resolves it and
-/// served where the program is, and whether it ran to its end; an entry
-/// left empty is nothing to serve.
+/// (`Z/main/main.c:2621-2645`): required as `require` resolves it, its
+/// file held open until the program has been served
+/// ([`Request::require_kept`]), and served where the program is, and
+/// whether it ran to its end; an entry left empty is nothing to serve.
 pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
     let Some(file) = req.ini_get(name).filter(|file| !file.is_empty()) else {
         return true;
     };
     let file = file.to_vec();
-    match req.include_file(crate::exec::IncludeKind::Require, &file) {
+    match req.require_kept(&file) {
         Ok(crate::api::request::Opened::Unit(unit)) => serve_unit(req, &unit, entry),
         Ok(_) => true,
         Err(thrown) => {
             req.leave_pending(&thrown);
-            if let Err(fatal) = req.uncaught() {
-                req.end_in(&fatal);
-            }
+            req.uncaught().ok();
             false
         }
     }
@@ -5369,7 +5403,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
-    let standing = req.vm().frames().len();
+    let standing = req.vm().depth();
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
@@ -5380,7 +5414,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
-    while req.vm().frames().len() > standing + 1 {
+    while req.vm().depth() > standing + 1 {
         req.pop_frame();
     }
     req.detach_symbol_table(frame);
@@ -5391,9 +5425,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if req.is_pending() {
         match req.primary() {
             Primary::Wrapped => {
-                if let Err(fatal) = req.uncaught() {
-                    req.end_in(&fatal);
-                }
+                req.uncaught().ok();
             }
             Primary::Bare => req.keep_uncaught(),
         }
@@ -5600,6 +5632,26 @@ mod tests {
             String::from_utf8_lossy(&sink.body).into_owned(),
             observables,
         )
+    }
+
+    /// A unit compiled from source the host handed over is the request's
+    /// alone, and so is every `eval`'s: their op arrays take runtime
+    /// caches of the request's own and no map-pointer offset of the
+    /// engine's, so `CG(map_ptr_last)` moves only for what the engine
+    /// publishes, as php's moves only for what opcache persists, and a
+    /// request that evaluates in a loop grows it by nothing (#528).
+    #[test]
+    fn a_unit_compiled_for_one_request_moves_the_engine_s_map_pointer_count_by_nothing() {
+        let engine = Engine::cli_builder().build();
+        let count = || engine.shared.map_ptr_last.load(Ordering::Relaxed);
+        let before = count();
+        let (body, _) = served(
+            &engine,
+            "<?php function f($s) { return strlen($s); } echo f('ab'), f('abc');\n\
+             for ($i = 0; $i < 3; $i++) { echo eval('return $i;'); }",
+        );
+        assert_eq!(body, "23012");
+        assert_eq!(count(), before, "the engine's count is where it was");
     }
 
     /// What the pinned oracle answers for
@@ -6376,7 +6428,7 @@ mod tests {
     #[test]
     fn a_diagnostic_is_displayed_or_logged_as_the_ini_entries_say() {
         let mut displayed = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .build()
             .serve(description("<?php echo NAN;"), &mut displayed);
         assert_eq!(
@@ -6389,7 +6441,7 @@ mod tests {
         );
 
         let mut logged = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -6399,6 +6451,25 @@ mod tests {
             logged.logged(),
             "PHP Warning:  unexpected NAN value was coerced to string in witness.php on line 1\n"
         );
+    }
+
+    /// `builder` with `INF` and `NAN` among its persistent constants, as
+    /// ext/standard declares them, which the bundle of these tests has
+    /// not: what the diagnostics tests below echo to raise php's warning.
+    fn declaring_nan(builder: EngineBuilder) -> EngineBuilder {
+        let constant = |name: &str, value: f64| php_unit::decl::ConstDecl {
+            name: Name::from(name),
+            value: php_unit::decl::ConstExpr::Double(value),
+            attributes: Vec::new(),
+        };
+        builder.additional_extension(
+            crate::api::abi::ExtensionBuilder::default()
+                .constants(vec![
+                    constant("INF", f64::INFINITY),
+                    constant("NAN", f64::NAN),
+                ])
+                .build("standard"),
+        )
     }
 
     /// The warning php writes for `echo NAN;` on line 2 of the witness
@@ -6414,7 +6485,7 @@ mod tests {
     #[test]
     fn the_two_error_strings_stand_around_the_display_form() {
         let mut around = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
             .ini("log_errors", "1")
@@ -6439,7 +6510,7 @@ mod tests {
     #[test]
     fn html_errors_is_phps_other_display_form() {
         let mut html = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("html_errors", "1")
             .build()
             .serve(description("<?php\necho NAN;"), &mut html);
@@ -6451,7 +6522,7 @@ mod tests {
         );
 
         let mut around = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("html_errors", "1")
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
@@ -6479,7 +6550,7 @@ mod tests {
             |line: u32| format!("\nWarning: {NAN_WARNING} in witness.php on line {line}\n");
 
         let mut every = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .build()
             .serve(description(source), &mut every);
         assert_eq!(
@@ -6488,7 +6559,7 @@ mod tests {
         );
 
         let mut once_a_site = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .build()
             .serve(description(source), &mut once_a_site);
@@ -6499,7 +6570,7 @@ mod tests {
         );
 
         let mut once = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .build()
@@ -6521,7 +6592,7 @@ mod tests {
     #[test]
     fn xmlrpc_errors_is_phps_first_display_form() {
         let mut fault = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("xmlrpc_errors", "1")
             .ini("xmlrpc_error_number", "42")
             .ini("error_prepend_string", "<PRE>")
@@ -6550,7 +6621,7 @@ mod tests {
     /// `sapi_module.name` fails and the `else` is the plain form.
     #[test]
     fn stderr_is_the_error_stream_only_under_the_hosts_php_names() {
-        let engine = Engine::cli_builder()
+        let engine = declaring_nan(Engine::cli_builder())
             .ini("display_errors", "stderr")
             .build();
         let under = |host: &str| {
@@ -6600,7 +6671,9 @@ mod tests {
     #[test]
     fn a_numeric_display_errors_is_read_as_phps_uint8_mode() {
         let under = |value: &str| {
-            let engine = Engine::cli_builder().ini("display_errors", value).build();
+            let engine = declaring_nan(Engine::cli_builder())
+                .ini("display_errors", value)
+                .build();
             let mut kept = Kept::default();
             engine.serve(description("<?php\necho NAN;"), &mut kept);
             (
@@ -6642,7 +6715,7 @@ mod tests {
     #[test]
     fn the_stderr_form_and_the_log_entry_are_two_calls_in_phps_order() {
         let mut kept = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "stderr")
             .ini("log_errors", "1")
             .build()
@@ -6668,7 +6741,7 @@ mod tests {
     #[test]
     fn a_dropped_repeat_is_neither_logged_nor_stored() {
         let mut logged = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .ini("display_errors", "0")
@@ -7057,7 +7130,7 @@ mod tests {
     /// is one.
     #[test]
     fn a_cached_unit_raises_what_compiling_it_raised_on_every_request() {
-        let engine = Engine::cli_builder().build();
+        let engine = declaring_nan(Engine::cli_builder()).build();
         let path = std::env::temp_dir().join(format!("dax-{}-nan.php", std::process::id()));
         assert!(std::fs::write(&path, b"<?php\necho 'a';\necho NAN . 'z';").is_ok());
         let name = path.to_string_lossy().as_bytes().to_vec();
@@ -7081,7 +7154,7 @@ mod tests {
             );
         }
         let mut masked = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("error_reporting", "0")
             .build()
             .serve(described(), &mut masked);
@@ -7123,7 +7196,6 @@ mod tests {
                 Declared::default(),
                 StackLimit::UNCHECKED,
                 req.heap_mut(),
-                &engine.shared.map_ptr_last,
             );
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
@@ -7340,7 +7412,7 @@ mod tests {
     #[test]
     fn the_sink_is_given_one_call_per_diagnostic_whatever_its_lines() {
         let mut fatal = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
@@ -7356,7 +7428,7 @@ mod tests {
         );
 
         let mut warned = Kept::default();
-        Engine::cli_builder()
+        declaring_nan(Engine::cli_builder())
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()

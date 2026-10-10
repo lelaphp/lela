@@ -84,6 +84,10 @@ impl Engine {
                         b"auto_prepend_file",
                         self.shared.loops.entry,
                     );
+                    // `readline_shell` destroys the file's
+                    // `zend_file_handle` once it has run, before the
+                    // shell reads a line.
+                    req.close_served_files();
                     if !req.bailing_out() {
                         req.end_in_exit(0);
                         let status = (shell.serve)(&mut req);
@@ -203,7 +207,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
         if !crate::engine::note_compiled(req, &unit, SourceKind::EVAL) {
             return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
         }
-        let standing = req.vm().frames().len();
+        let standing = req.vm().depth();
         let frame = match req.push_frame(Arc::clone(&unit)) {
             Ok(frame) => frame,
             Err(fatal) => {
@@ -214,7 +218,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
         let served = req.serve_host_string(|req| (shared.loops.entry)(req, frame));
         // What a fatal left standing above the main frame, as
         // `serve_unit` pops it.
-        while req.vm().frames().len() > standing + 1 {
+        while req.vm().depth() > standing + 1 {
             req.pop_frame();
         }
         req.detach_symbol_table(frame);

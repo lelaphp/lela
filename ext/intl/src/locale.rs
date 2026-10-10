@@ -245,7 +245,6 @@ fn get_value(
     locale: Path,
     tag: Option<&str>,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     let locale = or_default(req, locale.0.as_bytes());
     or_null(check_len(req, locale.len()))?.map_or(Ok(None), |()| {
         match icu_value(&locale, tag, false) {
@@ -269,7 +268,6 @@ fn get_display(
     shown: Shown,
     tag: &str,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     let locale = locale.0.as_bytes();
     if locale.len() > ffi::FULLNAME_CAPACITY {
         error::set(req, Code::ILLEGAL_ARGUMENT, "name too long")?;
@@ -327,7 +325,6 @@ fn get_keywords(
     req: &mut Request,
     locale: Path,
 ) -> Result<Option<OrFalse<Owner<PhpArray>>>, Thrown> {
-    error::reset(req);
     let locale = locale.0.as_bytes();
     if or_null(check_len(req, locale.len()))?.is_none() {
         return Ok(None);
@@ -430,7 +427,6 @@ fn append_multiple(req: &Request, out: &mut Vec<u8>, array: PhpArray, key: &str)
 
 /// `locale_compose`: an ID from its subtags.
 fn compose(req: &mut Request, subtags: PhpArray) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     if subtags.is_empty() {
         return Ok(OrFalse::False);
     }
@@ -538,7 +534,6 @@ fn add_entry(
 
 /// `locale_parse`: an ID's subtags by name.
 fn parse(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    error::reset(req);
     let locale = locale.0.as_bytes();
     if or_null(check_len(req, locale.len()))?.is_none() {
         return Ok(None);
@@ -557,7 +552,6 @@ fn parse(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thr
 
 /// `locale_get_all_variants`: the variant subtags as a list.
 fn all_variants(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    error::reset(req);
     let locale = or_default(req, locale.0.as_bytes());
     if or_null(check_len(req, locale.len()))?.is_none() {
         return Ok(None);
@@ -582,7 +576,6 @@ fn filter_matches(
     range: Path,
     canonicalize: bool,
 ) -> Result<Option<bool>, Thrown> {
-    error::reset(req);
     let range = or_default(req, range.0.as_bytes());
     if range == b"*" {
         return Ok(Some(true));
@@ -690,7 +683,6 @@ fn lookup(
     canonicalize: bool,
     fallback: Option<Path>,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
-    error::reset(req);
     let range = match (range.0.as_bytes(), fallback) {
         (b"", Some(fallback)) => fallback.0.as_bytes().to_vec(),
         (range, _) => or_default(req, range),
@@ -833,7 +825,7 @@ fn locale_set_default(req: &mut Request, locale: Path) -> Result<True, Thrown> {
 /// NULL
 /// string(120) "locale_get_primary_language(): Locale string too long, should be no longer than 156 characters: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_get_primary_language(
     req: &mut Request,
     locale: Path,
@@ -852,7 +844,7 @@ fn locale_get_primary_language(
 /// NULL
 /// string(62) "locale_get_script(): unable to get locale script: U_ZERO_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_get_script(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
     get_value(req, locale, Some(SCRIPT))
 }
@@ -866,7 +858,7 @@ fn locale_get_script(req: &mut Request, locale: Path) -> Result<Option<Owner<Php
 /// string(2) "RS"
 /// string(0) ""
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_get_region(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
     get_value(req, locale, Some(REGION))
 }
@@ -885,7 +877,7 @@ fn locale_get_region(req: &mut Request, locale: Path) -> Result<Option<Owner<Php
 /// }
 /// NULL
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_get_keywords(
     req: &mut Request,
     locale: Path,
@@ -902,7 +894,7 @@ fn locale_get_keywords(
 /// string(8) "Cyrillic"
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn locale_get_display_script(
     req: &mut Request,
@@ -922,7 +914,7 @@ fn locale_get_display_script(
 /// bool(false)
 /// string(68) "locale_get_display_region(): name too long: U_ILLEGAL_ARGUMENT_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn locale_get_display_region(
     req: &mut Request,
@@ -941,7 +933,7 @@ fn locale_get_display_region(
 /// string(35) "Slovenian (Italy, Natisone dialect)"
 /// string(11) "Klingonisch"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn locale_get_display_name(
     req: &mut Request,
@@ -960,7 +952,7 @@ fn locale_get_display_name(
 /// string(12) "Französisch"
 /// string(7) "Klingon"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn locale_get_display_language(
     req: &mut Request,
@@ -978,7 +970,7 @@ fn locale_get_display_language(
 /// ```expect
 /// string(6) "Resian"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn locale_get_display_variant(
     req: &mut Request,
@@ -1002,7 +994,7 @@ fn locale_get_display_variant(
 /// string(83) "locale_compose(): parameter array element is not a string: U_ILLEGAL_ARGUMENT_ERROR"
 /// locale_compose(): Argument #1 ($subtags) must contain a "language" key
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_compose(
     req: &mut Request,
     subtags: PhpArray,
@@ -1037,7 +1029,7 @@ fn locale_compose(
 ///   string(9) "i-klingon"
 /// }
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_parse(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
     parse(req, locale)
 }
@@ -1057,7 +1049,7 @@ fn locale_parse(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray
 /// array(0) {
 /// }
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_get_all_variants(
     req: &mut Request,
     locale: Path,
@@ -1076,7 +1068,7 @@ fn locale_get_all_variants(
 /// bool(false)
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn locale_filter_matches(
     req: &mut Request,
@@ -1096,7 +1088,7 @@ fn locale_filter_matches(
 /// string(10) "de_DE_1901"
 /// string(23) "sr_Latn_RS@currency=EUR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn locale_canonicalize(
     req: &mut Request,
     locale: Path,
@@ -1116,7 +1108,7 @@ fn locale_canonicalize(
 /// string(5) "de_de"
 /// locale_lookup(): Argument #2 ($locale) must only contain string values
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn locale_lookup(
     req: &mut Request,
@@ -1302,7 +1294,7 @@ impl Locale {
         set_default(req, locale).map(|_| True)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getPrimaryLanguage(
         req: &mut Request,
         locale: Path,
@@ -1310,17 +1302,17 @@ impl Locale {
         get_value(req, locale, Some(LANG))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getScript(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
         get_value(req, locale, Some(SCRIPT))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getRegion(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
         get_value(req, locale, Some(REGION))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getKeywords(
         req: &mut Request,
         locale: Path,
@@ -1328,7 +1320,7 @@ impl Locale {
         get_keywords(req, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getDisplayScript(
         req: &mut Request,
         locale: Path,
@@ -1337,7 +1329,7 @@ impl Locale {
         get_display(req, locale, displayLocale, Shown::Script, SCRIPT)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getDisplayRegion(
         req: &mut Request,
         locale: Path,
@@ -1346,7 +1338,7 @@ impl Locale {
         get_display(req, locale, displayLocale, Shown::Country, REGION)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getDisplayName(
         req: &mut Request,
         locale: Path,
@@ -1355,7 +1347,7 @@ impl Locale {
         get_display(req, locale, displayLocale, Shown::Name, "name")
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getDisplayLanguage(
         req: &mut Request,
         locale: Path,
@@ -1364,7 +1356,7 @@ impl Locale {
         get_display(req, locale, displayLocale, Shown::Language, LANG)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getDisplayVariant(
         req: &mut Request,
         locale: Path,
@@ -1373,7 +1365,7 @@ impl Locale {
         get_display(req, locale, displayLocale, Shown::Variant, VARIANT)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn composeLocale(
         req: &mut Request,
         subtags: PhpArray,
@@ -1381,17 +1373,17 @@ impl Locale {
         compose(req, subtags)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn parseLocale(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
         parse(req, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn getAllVariants(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpArray>>, Thrown> {
         all_variants(req, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn filterMatches(
         req: &mut Request,
         languageTag: Path,
@@ -1401,7 +1393,7 @@ impl Locale {
         filter_matches(req, languageTag, locale, canonicalize)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn lookup(
         req: &mut Request,
         languageTag: PhpArray,
@@ -1412,7 +1404,7 @@ impl Locale {
         lookup(req, languageTag, locale, canonicalize, defaultLocale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn canonicalize(req: &mut Request, locale: Path) -> Result<Option<Owner<PhpString>>, Thrown> {
         get_value(req, locale, None)
     }

@@ -21,14 +21,16 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    Callable, CloneObj, CurrentPlace, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers,
-    PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std, This,
-    True, Union,
+    Callable, CloneObj, CurrentPlace, DimensionRead, ExtensionBuilder, GcTable, Instance,
+    ObjectHandlers, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw,
+    Std, This, True, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{autoload, call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
-use php_ext::raising::{Level, Thrown, deprecated, throw, throw_error, warning};
+use php_ext::raising::{
+    Level, Thrown, deprecated, illegal_container_offset, throw, throw_error, warning,
+};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{
@@ -1690,16 +1692,10 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
     }))
 }
 
-/// `zend_illegal_container_offset` for the class of `object`.
-fn illegal(req: &mut Request, object: PhpObject, offset: &Value, how: &str) -> Thrown {
-    let ty = crate::zval_type_name(req, offset);
-    let class = String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
-    let message = match how {
-        "isset" => format!("Cannot access offset of type {ty} in isset or empty"),
-        "unset" => format!("Cannot unset offset of type {ty} on {class}"),
-        _ => format!("Cannot access offset of type {ty} on {class}"),
-    };
-    throw_error(req, "TypeError", &message)
+/// `zend_illegal_container_offset(object->ce->name, offset, read)`.
+fn illegal(req: &mut Request, object: PhpObject, offset: &Value, read: DimensionRead) -> Thrown {
+    let class = req.class_name(object.class());
+    illegal_container_offset(req, &class, offset, read)
 }
 
 fn sorting_refused(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -1718,10 +1714,12 @@ fn sorting_refused(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 /// read that warns.
 fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Result<Value, Thrown> {
     let Some(key) = hash_key(req, offset)? else {
-        // `zend_illegal_container_offset(.., type)`: `BP_VAR_IS` names
-        // `isset` and `empty`.
-        let how = if warn { "read" } else { "isset" };
-        return Err(illegal(req, object, offset, how));
+        let read = if warn {
+            DimensionRead::Warning
+        } else {
+            DimensionRead::Silent
+        };
+        return Err(illegal(req, object, offset, read));
     };
     let table = table(req, object)?;
     if let Some(value) = table.get(req, &key)? {
@@ -1751,11 +1749,11 @@ fn place(
     }
     let Some(key) = hash_key(req, offset)? else {
         if read != DimensionRead::Unset {
-            return Err(illegal(req, object, offset, "write"));
+            return Err(illegal(req, object, offset, DimensionRead::Write));
         }
         // `BP_VAR_UNSET` names `unset`, and answers
         // `&EG(uninitialized_zval)`, which the fetch notices as no place.
-        let thrown = illegal(req, object, offset, "unset");
+        let thrown = illegal(req, object, offset, DimensionRead::Unset);
         let class = String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
         php_ext::raising::raise_while_pending(
             req,
@@ -1902,7 +1900,7 @@ fn write(
         Ok(Some(key)) => key,
         Ok(None) => {
             value.give_up(req);
-            return Err(illegal(req, object, offset, "write"));
+            return Err(illegal(req, object, offset, DimensionRead::Write));
         }
         Err(thrown) => {
             value.give_up(req);
@@ -1917,7 +1915,7 @@ fn write(
 fn unset(req: &mut Request, object: PhpObject, offset: &Value) -> Result<(), Thrown> {
     sorting_refused(req, object)?;
     let Some(key) = hash_key(req, offset)? else {
-        return Err(illegal(req, object, offset, "unset"));
+        return Err(illegal(req, object, offset, DimensionRead::Unset));
     };
     let table = table(req, object)?;
     table.unset(req, &key)
@@ -1952,7 +1950,7 @@ fn has(
         value
     } else {
         let Some(key) = hash_key(req, offset)? else {
-            return Err(illegal(req, object, offset, "isset"));
+            return Err(illegal(req, object, offset, DimensionRead::Silent));
         };
         let table = table(req, object)?;
         let Some(found) = table.get(req, &key)? else {
@@ -2038,13 +2036,19 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(held) = object
             .native::<SplArrayObject>(req)
             .and_then(|p| p.storage.seen().held())
         {
             visit(held);
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -2260,7 +2264,7 @@ impl ObjectHandlers for Handlers {
         }
         sorting_refused(req, object)?;
         let Some(key) = hash_key(req, offset)? else {
-            return Err(illegal(req, object, offset, "write"));
+            return Err(illegal(req, object, offset, DimensionRead::Write));
         };
         let table = table(req, object)?;
         if table.get(req, &key)?.is_none() {

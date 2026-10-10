@@ -149,11 +149,12 @@ impl Of {
     }
 }
 
-/// `CALENDAR_METHOD_INIT_VARS` and `CALENDAR_METHOD_FETCH_OBJECT`: the
-/// request's error reset, then the object's, and php's `Error` for an
+/// `CALENDAR_METHOD_FETCH_OBJECT`: the object's error reset, the
+/// request's having been reset before the arguments
+/// (`CALENDAR_METHOD_INIT_VARS`, `before_args`), and php's `Error` for an
 /// object no factory made.
 fn fetch(req: &mut Request, o: Of) -> Result<(), Thrown> {
-    error::errors_reset::<CalendarObject>(req, o.object);
+    error::reset_object::<CalendarObject>(req, o.object);
     if held(req, o.object).is_none() {
         return Err(throw_error(
             req,
@@ -502,7 +503,7 @@ impl IntlCalendar {
         ))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn createInstance(
         req: &mut Request,
         #[php(default = null)] timezone: Raw<ZoneArg>,
@@ -513,7 +514,7 @@ impl IntlCalendar {
         })
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn equals(
         req: &mut Request,
         this: This<Self>,
@@ -522,7 +523,7 @@ impl IntlCalendar {
         compare(req, Of::method(this), other, 0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn fieldDifference(
         req: &mut Request,
@@ -533,12 +534,12 @@ impl IntlCalendar {
         field_difference(req, Of::method(this), timestamp, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn add(req: &mut Request, this: This<Self>, field: i64, value: i64) -> Result<bool, Thrown> {
         add(req, Of::method(this), field, value)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn after(
         req: &mut Request,
         this: This<Self>,
@@ -547,7 +548,7 @@ impl IntlCalendar {
         compare(req, Of::method(this), other, 2)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn before(
         req: &mut Request,
         this: This<Self>,
@@ -556,7 +557,7 @@ impl IntlCalendar {
         compare(req, Of::method(this), other, 1)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn clear(
         req: &mut Request,
         this: This<Self>,
@@ -565,7 +566,7 @@ impl IntlCalendar {
         clear(req, Of::method(this), field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn fromDateTime(
         req: &mut Request,
@@ -575,60 +576,60 @@ impl IntlCalendar {
         from_date_time(req, datetime, locale)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn get(req: &mut Request, this: This<Self>, field: i64) -> Answer<i64> {
         field_int(req, Of::method(this), GET, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getActualMaximum(req: &mut Request, this: This<Self>, field: i64) -> Answer<i64> {
         field_int(req, Of::method(this), ACTUAL_MAXIMUM, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getActualMinimum(req: &mut Request, this: This<Self>, field: i64) -> Answer<i64> {
         field_int(req, Of::method(this), ACTUAL_MINIMUM, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getAvailableLocales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         available_locales(req)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getDayOfWeekType(req: &mut Request, this: This<Self>, dayOfWeek: i64) -> Answer<i64> {
         day_of_week_call(req, Of::method(this), 0, dayOfWeek)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getErrorCode(req: &mut Request, this: This<Self>) -> OrFalse<i64> {
         error_code(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         error_message(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getFirstDayOfWeek(req: &mut Request, this: This<Self>) -> Answer<i64> {
         int_call(req, Of::method(this), 0, "Call to ICU method has failed")
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getGreatestMinimum(req: &mut Request, this: This<Self>, field: i64) -> Answer<i64> {
         field_int(req, Of::method(this), GREATEST_MINIMUM, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getKeywordValuesForLocale(
         req: &mut Request,
@@ -639,31 +640,31 @@ impl IntlCalendar {
         keyword_values(req, keyword, locale, onlyCommon)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getLeastMaximum(req: &mut Request, this: This<Self>, field: i64) -> Answer<i64> {
         field_int(req, Of::method(this), LEAST_MAXIMUM, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getLocale(req: &mut Request, this: This<Self>, r#type: i64) -> Answer<Owner<PhpString>> {
         get_locale(req, Of::method(this), r#type)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getMaximum(req: &mut Request, this: This<Self>, field: i64) -> Answer<i64> {
         field_int(req, Of::method(this), MAXIMUM, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getMinimalDaysInFirstWeek(req: &mut Request, this: This<Self>) -> Answer<i64> {
         int_call(req, Of::method(this), 1, "Call to ICU method has failed")
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setMinimalDaysInFirstWeek(
         req: &mut Request,
@@ -673,38 +674,37 @@ impl IntlCalendar {
         set_int(req, Of::method(this), 2, days)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getMinimum(req: &mut Request, this: This<Self>, field: i64) -> Answer<i64> {
         field_int(req, Of::method(this), MINIMUM, field)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
-    fn getNow(req: &mut Request) -> f64 {
-        error::reset(req);
+    fn getNow() -> f64 {
         now()
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getRepeatedWallTimeOption(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         plain_int(req, Of::method(this), 3)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getSkippedWallTimeOption(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
         plain_int(req, Of::method(this), 4)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getTime(req: &mut Request, this: This<Self>) -> Answer<f64> {
         get_time(req, Of::method(this))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getTimeZone(
         req: &mut Request,
@@ -713,25 +713,25 @@ impl IntlCalendar {
         get_time_zone(req, Of::method(this))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getType(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         get_type(req, Of::method(this))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getWeekendTransition(req: &mut Request, this: This<Self>, dayOfWeek: i64) -> Answer<i64> {
         day_of_week_call(req, Of::method(this), 1, dayOfWeek)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn inDaylightTime(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         in_daylight_time(req, Of::method(this))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn isEquivalentTo(
         req: &mut Request,
@@ -741,13 +741,13 @@ impl IntlCalendar {
         compare(req, Of::method(this), other, 3)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn isLenient(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         plain_int(req, Of::method(this), 2).map(|n| n != 0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn isWeekend(
         req: &mut Request,
@@ -757,7 +757,7 @@ impl IntlCalendar {
         is_weekend(req, Of::method(this), timestamp)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     fn roll(
         req: &mut Request,
         this: This<Self>,
@@ -767,7 +767,7 @@ impl IntlCalendar {
         roll(req, Of::method(this), field, &value.0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn isSet(req: &mut Request, this: This<Self>, field: i64) -> Result<bool, Thrown> {
         is_set(req, Of::method(this), field)
@@ -788,7 +788,7 @@ impl IntlCalendar {
     /// bool(true)
     /// int(2001)
     /// ```
-    #[php(tentative, arity = manual)]
+    #[php(tentative, arity = manual, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn set(
         req: &mut Request,
@@ -829,6 +829,7 @@ impl IntlCalendar {
     /// IntlCalendar::setDate(): Argument #1 ($year) must be between -2147483648 and 2147483647
     /// ```
     #[allow(non_snake_case)]
+    #[php(before_args = error::reset)]
     fn setDate(
         req: &mut Request,
         this: This<Self>,
@@ -856,6 +857,7 @@ impl IntlCalendar {
     /// IntlCalendar::setDateTime(): Argument #6 ($second) must be between -2147483648 and 2147483647
     /// ```
     #[allow(non_snake_case)]
+    #[php(before_args = error::reset)]
     fn setDateTime(
         req: &mut Request,
         this: This<Self>,
@@ -885,7 +887,7 @@ impl IntlCalendar {
         with(req, o, |c| cal::php_intl_cal_set_date(c, n, &f))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setFirstDayOfWeek(
         req: &mut Request,
@@ -895,13 +897,13 @@ impl IntlCalendar {
         set_int(req, Of::method(this), 0, dayOfWeek)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setLenient(req: &mut Request, this: This<Self>, lenient: bool) -> Result<True, Thrown> {
         set_int(req, Of::method(this), 1, i64::from(lenient))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setRepeatedWallTimeOption(
         req: &mut Request,
@@ -911,7 +913,7 @@ impl IntlCalendar {
         set_int(req, Of::method(this), 3, option)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setSkippedWallTimeOption(
         req: &mut Request,
@@ -921,7 +923,7 @@ impl IntlCalendar {
         set_int(req, Of::method(this), 4, option)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setTime(req: &mut Request, this: This<Self>, timestamp: f64) -> Result<bool, Thrown> {
         set_time(req, Of::method(this), timestamp)
@@ -947,7 +949,7 @@ impl IntlCalendar {
     /// Error: Object of class stdClass could not be converted to string
     /// intlcal_create_instance(): Argument #1 ($timezone) must be of type object|string|null, array given
     /// ```
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setTimeZone(
         req: &mut Request,
@@ -959,7 +961,7 @@ impl IntlCalendar {
         })
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn toDateTime(req: &mut Request, this: This<Self>) -> Answer<Owner<Instance<DateTime>>> {
         to_date_time(req, Of::method(this))
@@ -973,7 +975,6 @@ fn create_instance(
     zone: ZoneArg,
     locale: Option<PhpString>,
 ) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
-    error::reset(req);
     let Some(zone) = process_timezone_argument(req, zone, &mut Outside::Request)? else {
         return Ok(None);
     };
@@ -995,7 +996,6 @@ fn keyword_values(
     locale: PhpString,
     common: bool,
 ) -> Answer<Owner<Instance<iterator::IntlIterator>>> {
-    error::reset(req);
     let (key, locale) = (c_string(key.as_bytes()), c_string(locale.as_bytes()));
     let mut status = Code::ZERO;
     let values = cal::keyword_values(
@@ -1019,7 +1019,6 @@ fn keyword_values(
 
 /// `intlcal_get_available_locales`.
 fn available_locales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    error::reset(req);
     let mut list = PhpArray::new(req)?;
     for name in cal::available_locales() {
         let name = PhpString::new(req, name.as_bytes())?.into_value();
@@ -1031,7 +1030,6 @@ fn available_locales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 /// `_php_intlcal_field_uec_ret_in32t_method` and
 /// `_php_intlcal_field_ret_in32t_method`: a field's value or bound.
 fn field_int(req: &mut Request, o: Of, which: i32, value: i64) -> Answer<i64> {
-    error::reset(req);
     let f = field(req, value, o.at(2))?;
     let answer = with(req, o, |c| {
         let mut status = Code::ZERO;
@@ -1045,7 +1043,6 @@ fn field_int(req: &mut Request, o: Of, which: i32, value: i64) -> Answer<i64> {
 
 /// `intlcal_field_difference`.
 fn field_difference(req: &mut Request, o: Of, when: f64, value: i64) -> Answer<i64> {
-    error::reset(req);
     let f = field(req, value, o.at(3))?;
     let answer = with(req, o, |c| {
         let mut status = Code::ZERO;
@@ -1066,7 +1063,6 @@ fn field_difference(req: &mut Request, o: Of, when: f64, value: i64) -> Answer<i
 
 /// `intlcal_add`.
 fn add(req: &mut Request, o: Of, value: i64, amount: i64) -> Result<bool, Thrown> {
-    error::reset(req);
     let f = field(req, value, o.at(2))?;
     let amount = int32(req, amount, o.at(3))?;
     let status = with(req, o, |c| {
@@ -1080,7 +1076,6 @@ fn add(req: &mut Request, o: Of, value: i64, amount: i64) -> Result<bool, Thrown
 
 /// `intlcal_roll`: a bool deprecated and read as one step up or down.
 fn roll(req: &mut Request, o: Of, value: i64, amount: &Value) -> Result<bool, Thrown> {
-    error::reset(req);
     fetch(req, o)?;
     let f = field(req, value, o.at(2))?;
     let amount = if let ValueRef::Bool(up) = amount.as_ref() {
@@ -1102,7 +1097,6 @@ fn roll(req: &mut Request, o: Of, value: i64, amount: &Value) -> Result<bool, Th
 
 /// `intlcal_clear`: every field, or one.
 fn clear(req: &mut Request, o: Of, value: Option<i64>) -> Result<True, Thrown> {
-    error::reset(req);
     fetch(req, o)?;
     match value {
         None => with(req, o, |c| cal::php_intl_cal_int(c, 8, 0, &mut Code(0)))?,
@@ -1118,7 +1112,6 @@ fn clear(req: &mut Request, o: Of, value: Option<i64>) -> Result<True, Thrown> {
 
 /// `intlcal_is_set`.
 fn is_set(req: &mut Request, o: Of, value: i64) -> Result<bool, Thrown> {
-    error::reset(req);
     let f = field(req, value, o.at(2))?;
     with(req, o, |c| {
         cal::php_intl_cal_field(c, IS_SET, f, 0, 0.0, &mut Code(0)) != 0
@@ -1133,7 +1126,6 @@ fn set_fields(
     first: [i64; 2],
     rest: [Passed<i64>; 4],
 ) -> Result<True, Thrown> {
-    error::reset(req);
     let mut given = first.to_vec();
     given.extend(rest.iter().filter_map(|p| match p {
         Passed::Given(n) => Some(*n),
@@ -1165,7 +1157,6 @@ fn set_fields(
 
 /// `intlcal_get_day_of_week_type` and `intlcal_get_weekend_transition`.
 fn day_of_week_call(req: &mut Request, o: Of, which: i32, value: i64) -> Answer<i64> {
-    error::reset(req);
     let dow = day_of_week(req, value, o.at(2))?;
     let answer = with(req, o, |c| {
         let mut status = Code::ZERO;
@@ -1185,7 +1176,6 @@ fn day_of_week_call(req: &mut Request, o: Of, which: i32, value: i64) -> Answer<
 /// `intlcal_get_first_day_of_week` and
 /// `intlcal_get_minimal_days_in_first_week`.
 fn int_call(req: &mut Request, o: Of, which: i32, message: &str) -> Answer<i64> {
-    error::reset(req);
     let answer = with(req, o, |c| {
         let mut status = Code::ZERO;
         (
@@ -1198,7 +1188,6 @@ fn int_call(req: &mut Request, o: Of, which: i32, message: &str) -> Answer<i64> 
 
 /// A read php answers whole: `isLenient`, and the two wall time options.
 fn plain_int(req: &mut Request, o: Of, which: i32) -> Result<i64, Thrown> {
-    error::reset(req);
     with(req, o, |c| {
         i64::from(cal::php_intl_cal_int(c, which, 0, &mut Code(0)))
     })
@@ -1212,7 +1201,6 @@ fn in_daylight_time(req: &mut Request, o: Of) -> Result<bool, Thrown> {
 
 /// `intlcal_is_weekend`: now, or at an instant.
 fn is_weekend(req: &mut Request, o: Of, when: Option<f64>) -> Result<bool, Thrown> {
-    error::reset(req);
     let Some(when) = when else {
         return with(req, o, |c| {
             cal::php_intl_cal_int(c, 6, 0, &mut Code(0)) != 0
@@ -1235,7 +1223,6 @@ fn is_weekend(req: &mut Request, o: Of, when: Option<f64>) -> Result<bool, Throw
 /// leniency, the minimal days in the first week and the wall time
 /// options.
 fn set_int(req: &mut Request, o: Of, which: i32, value: i64) -> Result<True, Thrown> {
-    error::reset(req);
     let refused = match which {
         0 => {
             let day = day_of_week(req, value, o.at(2))?;
@@ -1269,7 +1256,6 @@ fn set_checked(req: &mut Request, o: Of, which: i32, value: i32) -> Result<True,
 
 /// `intlcal_get_time`.
 fn get_time(req: &mut Request, o: Of) -> Answer<f64> {
-    error::reset(req);
     let answer = with(req, o, |c| {
         let mut status = Code::ZERO;
         (cal::php_intl_cal_time(c, 0, 0.0, &mut status), status)
@@ -1279,7 +1265,6 @@ fn get_time(req: &mut Request, o: Of) -> Answer<f64> {
 
 /// `intlcal_set_time`.
 fn set_time(req: &mut Request, o: Of, when: f64) -> Result<bool, Thrown> {
-    error::reset(req);
     let answer = with(req, o, |c| {
         let mut status = Code::ZERO;
         cal::php_intl_cal_time(c, 1, when, &mut status);
@@ -1294,7 +1279,6 @@ fn set_time(req: &mut Request, o: Of, when: f64) -> Result<bool, Thrown> {
 /// `intlcal_set_time_zone`: null leaves the zone; one that cannot be
 /// had is `false`, with the error on the object.
 fn set_time_zone(req: &mut Request, o: Of, zone: ZoneArg) -> Result<bool, Thrown> {
-    error::reset(req);
     fetch(req, o)?;
     if zone.is_none() {
         return Ok(true);
@@ -1317,7 +1301,6 @@ fn compare(
     other: Instance<IntlCalendar>,
     which: i32,
 ) -> Result<bool, Thrown> {
-    error::reset(req);
     let uninitialized =
         |req: &mut Request| argument_error(req, "Error", o.at(2), "is uninitialized");
     if which == 3 && held(req, other.object()).is_none() {
@@ -1345,7 +1328,6 @@ fn compare(
 
 /// `intlcal_get_locale`: the actual or the valid locale.
 fn get_locale(req: &mut Request, o: Of, kind: i64) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     if kind != 0 && kind != 1 {
         let message = "be either Locale::ACTUAL_LOCALE or Locale::VALID_LOCALE";
         return Err(arg_value_error(req, o.at(2), message));
@@ -1363,7 +1345,6 @@ fn get_locale(req: &mut Request, o: Of, kind: i64) -> Answer<Owner<PhpString>> {
 
 /// `intlcal_get_time_zone`: a clone of the calendar's zone.
 fn get_time_zone(req: &mut Request, o: Of) -> Answer<Owner<Instance<timezone::IntlTimeZone>>> {
-    error::reset(req);
     if let Some(zone) = with(req, o, |c| cal::php_intl_cal_zone(c))? {
         return timezone::construct(req, zone).map(OrFalse::Value);
     }
@@ -1374,14 +1355,12 @@ fn get_time_zone(req: &mut Request, o: Of) -> Answer<Owner<Instance<timezone::In
 
 /// `intlcal_get_type`.
 fn get_type(req: &mut Request, o: Of) -> Result<Owner<PhpString>, Thrown> {
-    error::reset(req);
     let kind = with(req, o, |c| cal::kind(c))?;
     PhpString::new(req, kind.as_bytes())
 }
 
 /// `intlcal_get_error_code`.
 fn error_code(req: &mut Request, object: PhpObject) -> OrFalse<i64> {
-    error::reset(req);
     OrFalse::Value(i64::from(
         error::object_code::<CalendarObject>(req, object).0,
     ))
@@ -1389,7 +1368,6 @@ fn error_code(req: &mut Request, object: PhpObject) -> OrFalse<i64> {
 
 /// `intlcal_get_error_message`.
 fn error_message(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpString>> {
-    error::reset(req);
     let message = error::object_message::<CalendarObject>(req, object);
     PhpString::new(req, &message).map(OrFalse::Value)
 }
@@ -1402,7 +1380,6 @@ fn from_date_time(
     datetime: php_ext::abi::Union<Instance<DateTime>, PhpString>,
     locale: Option<PhpString>,
 ) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
-    error::reset(req);
     let (object, owned) = match datetime {
         php_ext::abi::Union::A(date) => (date.object(), None),
         php_ext::abi::Union::B(text) => {
@@ -1470,7 +1447,6 @@ fn from_date_object(
 /// zone, through the constructor with `@<seconds>` and then
 /// `setTimeZone()`, as php works around bug #40743.
 fn to_date_time(req: &mut Request, o: Of) -> Answer<Owner<Instance<DateTime>>> {
-    error::reset(req);
     let (millis, status, zone) = with(req, o, |c| {
         let mut status = Code::ZERO;
         let millis = cal::php_intl_cal_time(c, 0, 0.0, &mut status);
@@ -1573,6 +1549,7 @@ pub(crate) struct IntlGregorianCalendar;
 #[php_class]
 impl IntlGregorianCalendar {
     #[allow(non_snake_case)]
+    #[php(before_args = error::reset)]
     fn createFromDate(
         req: &mut Request,
         year: i64,
@@ -1583,6 +1560,7 @@ impl IntlGregorianCalendar {
     }
 
     #[allow(non_snake_case)]
+    #[php(before_args = error::reset)]
     fn createFromDateTime(
         req: &mut Request,
         year: i64,
@@ -1598,7 +1576,7 @@ impl IntlGregorianCalendar {
         }
     }
 
-    #[php(arity = manual)]
+    #[php(arity = manual, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn __construct(
         req: &mut Request,
@@ -1615,7 +1593,7 @@ impl IntlGregorianCalendar {
         error::constructing(req, |req| gregorian_body(req, object, true).map(|_| ()))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn setGregorianChange(
         req: &mut Request,
@@ -1625,13 +1603,13 @@ impl IntlGregorianCalendar {
         set_gregorian_change(req, Of::this_gregorian(this), timestamp)
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn getGregorianChange(req: &mut Request, this: This<Self>) -> Result<f64, Thrown> {
         get_gregorian_change(req, Of::this_gregorian(this))
     }
 
-    #[php(tentative)]
+    #[php(tentative, before_args = error::reset)]
     #[allow(non_snake_case)]
     fn isLeapYear(req: &mut Request, this: This<Self>, year: i64) -> Result<bool, Thrown> {
         is_leap_year(req, Of::this_gregorian(this), year)
@@ -1643,7 +1621,6 @@ impl IntlGregorianCalendar {
 /// six date and time fields in the default zone; `false` where it made
 /// none, with the error set.
 fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Result<bool, Thrown> {
-    error::reset(req);
     let count = req.argument_count();
     if constructor && count > 2 {
         let message = "Calling IntlGregorianCalendar::__construct() with more than 2 arguments is deprecated, use either IntlGregorianCalendar::createFromDate() or IntlGregorianCalendar::createFromDateTime() instead";
@@ -1780,7 +1757,7 @@ fn gregorian_from_fields(req: &mut Request, n: i32, f: &[i32; 6]) -> Result<Opti
     let empty = c_string(b"");
     let made =
         cal::php_intl_cal_greg_create(None, CName::from(empty.as_c_str()), n, f, &mut status);
-    let Some(mut calendar) = made.filter(|_| !status.is_failure()) else {
+    let Some(mut calendar) = made else {
         error::set(
             req,
             status,
@@ -1802,7 +1779,6 @@ fn gregorian_from_fields(req: &mut Request, n: i32, f: &[i32; 6]) -> Result<Opti
 
 /// `IntlGregorianCalendar::createFromDate` and `createFromDateTime`.
 fn create_from(req: &mut Request, fields: &[i64]) -> Result<Owner<Static>, Thrown> {
-    error::reset(req);
     let mut f = [0; 6];
     for (i, v) in fields.iter().enumerate() {
         f[i] = int32(req, *v, u32::try_from(i + 1).unwrap_or(1))?;
@@ -1816,7 +1792,6 @@ fn create_from(req: &mut Request, fields: &[i64]) -> Result<Owner<Static>, Throw
 
 /// `intlgregcal_set_gregorian_change`.
 fn set_gregorian_change(req: &mut Request, o: Of, when: f64) -> Result<bool, Thrown> {
-    error::reset(req);
     let answer = with(req, o, |c| {
         let mut status = Code::ZERO;
         cal::php_intl_cal_time(c, 4, when, &mut status);
@@ -1830,13 +1805,11 @@ fn set_gregorian_change(req: &mut Request, o: Of, when: f64) -> Result<bool, Thr
 
 /// `intlgregcal_get_gregorian_change`.
 fn get_gregorian_change(req: &mut Request, o: Of) -> Result<f64, Thrown> {
-    error::reset(req);
     with(req, o, |c| cal::php_intl_cal_time(c, 3, 0.0, &mut Code(0)))
 }
 
 /// `intlgregcal_is_leap_year`.
 fn is_leap_year(req: &mut Request, o: Of, year: i64) -> Result<bool, Thrown> {
-    error::reset(req);
     let year = int32(req, year, o.at(2))?;
     with(req, o, |c| {
         cal::php_intl_cal_int(c, 7, year, &mut Code(0)) != 0
@@ -1879,7 +1852,7 @@ fn gregorian_create_instance(
 /// string(12) "IntlCalendar"
 /// intlcal_create_instance(): No such time zone: "Nowhere"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_create_instance(
     req: &mut Request,
     #[php(default = null)] timezone: Raw<ZoneArg>,
@@ -1901,7 +1874,7 @@ fn intlcal_create_instance(
 ///   string(9) "gregorian"
 /// }
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intlcal_get_keyword_values_for_locale(
     req: &mut Request,
@@ -1920,9 +1893,8 @@ fn intlcal_get_keyword_values_for_locale(
 /// ```expect
 /// bool(true)
 /// ```
-#[php_function]
-fn intlcal_get_now(req: &mut Request) -> f64 {
-    error::reset(req);
+#[php_function(before_args = error::reset)]
+fn intlcal_get_now() -> f64 {
     now()
 }
 
@@ -1934,7 +1906,7 @@ fn intlcal_get_now(req: &mut Request) -> f64 {
 /// ```expect
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_available_locales(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     available_locales(req)
 }
@@ -1951,7 +1923,7 @@ fn intlcal_get_available_locales(req: &mut Request) -> Result<Owner<PhpArray>, T
 /// int(0)
 /// intlcal_get(): Argument #2 ($field) must be a valid field
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get(req: &mut Request, calendar: Instance<IntlCalendar>, field: i64) -> Answer<i64> {
     field_int(req, Of::function(calendar), GET, field)
 }
@@ -1965,7 +1937,7 @@ fn intlcal_get(req: &mut Request, calendar: Instance<IntlCalendar>, field: i64) 
 /// ```expect
 /// float(1356998400000)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_time(req: &mut Request, calendar: Instance<IntlCalendar>) -> Answer<f64> {
     get_time(req, Of::function(calendar))
 }
@@ -1980,7 +1952,7 @@ fn intlcal_get_time(req: &mut Request, calendar: Instance<IntlCalendar>) -> Answ
 /// bool(true)
 /// int(1970)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_set_time(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2001,7 +1973,7 @@ fn intlcal_set_time(
 /// int(2014)
 /// intlcal_add(): Argument #3 ($value) must be between -2147483648 and 2147483647
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_add(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2023,7 +1995,7 @@ fn intlcal_add(
 /// bool(true)
 /// string(3) "GMT"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_set_time_zone(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2045,7 +2017,7 @@ fn intlcal_set_time_zone(
 /// bool(false)
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_after(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2067,7 +2039,7 @@ fn intlcal_after(
 /// bool(false)
 /// intlcal_before(): Argument #2 ($other) is uninitialized
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_before(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2093,7 +2065,7 @@ fn intlcal_before(
 #[php_function(deprecated(
     since = "8.4",
     message = "use IntlCalendar::set(), IntlCalendar::setDate(), or IntlCalendar::setDateTime() instead"
-))]
+), before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intlcal_set(
     req: &mut Request,
@@ -2127,7 +2099,7 @@ fn intlcal_set(
 /// int(11)
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_roll(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2149,7 +2121,7 @@ fn intlcal_roll(
 /// bool(true)
 /// float(-3600000)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_clear(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2168,7 +2140,7 @@ fn intlcal_clear(
 /// int(1)
 /// int(2014)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_field_difference(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2187,7 +2159,7 @@ fn intlcal_field_difference(
 /// ```expect
 /// int(29)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_actual_maximum(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2205,7 +2177,7 @@ fn intlcal_get_actual_maximum(
 /// ```expect
 /// int(1)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_actual_minimum(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2226,7 +2198,7 @@ fn intlcal_get_actual_minimum(
 /// int(1)
 /// intlcal_get_day_of_week_type(): Argument #2 ($dayOfWeek) must be a valid day of the week
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intlcal_get_day_of_week_type(
     req: &mut Request,
@@ -2246,7 +2218,7 @@ fn intlcal_get_day_of_week_type(
 /// int(1)
 /// int(1)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_first_day_of_week(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2268,7 +2240,7 @@ fn intlcal_get_first_day_of_week(
 /// ```expect
 /// int(28)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_least_maximum(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2286,7 +2258,7 @@ fn intlcal_get_least_maximum(
 /// ```expect
 /// int(1)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_greatest_minimum(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2307,7 +2279,7 @@ fn intlcal_get_greatest_minimum(
 /// string(5) "pt_PT"
 /// intlcal_get_locale(): Argument #2 ($type) must be either Locale::ACTUAL_LOCALE or Locale::VALID_LOCALE
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_locale(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2325,7 +2297,7 @@ fn intlcal_get_locale(
 /// ```expect
 /// int(31)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_maximum(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2343,7 +2315,7 @@ fn intlcal_get_maximum(
 /// ```expect
 /// int(4)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_minimal_days_in_first_week(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2368,7 +2340,7 @@ fn intlcal_get_minimal_days_in_first_week(
 /// int(6)
 /// intlcal_set_minimal_days_in_first_week(): Argument #2 ($days) must be between 1 and 7
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_set_minimal_days_in_first_week(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2386,7 +2358,7 @@ fn intlcal_set_minimal_days_in_first_week(
 /// ```expect
 /// int(1)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_minimum(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2404,7 +2376,7 @@ fn intlcal_get_minimum(
 /// ```expect
 /// string(13) "Europe/Lisbon"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_time_zone(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2421,7 +2393,7 @@ fn intlcal_get_time_zone(
 /// string(9) "gregorian"
 /// string(8) "buddhist"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_type(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2438,7 +2410,7 @@ fn intlcal_get_type(
 /// ```expect
 /// int(86400000)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intlcal_get_weekend_transition(
     req: &mut Request,
@@ -2458,7 +2430,7 @@ fn intlcal_get_weekend_transition(
 /// bool(false)
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_in_daylight_time(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2475,7 +2447,7 @@ fn intlcal_in_daylight_time(
 /// ```expect
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_is_lenient(req: &mut Request, calendar: Instance<IntlCalendar>) -> Result<bool, Thrown> {
     plain_int(req, Of::function(calendar), 2).map(|n| n != 0)
 }
@@ -2489,7 +2461,7 @@ fn intlcal_is_lenient(req: &mut Request, calendar: Instance<IntlCalendar>) -> Re
 /// ```expect
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_is_set(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2508,7 +2480,7 @@ fn intlcal_is_set(
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_is_equivalent_to(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2527,7 +2499,7 @@ fn intlcal_is_equivalent_to(
 /// bool(true)
 /// bool(true)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_is_weekend(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2546,7 +2518,7 @@ fn intlcal_is_weekend(
 /// bool(true)
 /// int(4)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intlcal_set_first_day_of_week(
     req: &mut Request,
@@ -2566,7 +2538,7 @@ fn intlcal_set_first_day_of_week(
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_set_lenient(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2584,7 +2556,7 @@ fn intlcal_set_lenient(
 /// ```expect
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_repeated_wall_time_option(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2603,7 +2575,7 @@ fn intlcal_get_repeated_wall_time_option(
 /// bool(true)
 /// intlcal_equals(): Argument #2 ($other) is uninitialized
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_equals(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2621,7 +2593,7 @@ fn intlcal_equals(
 /// ```expect
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_skipped_wall_time_option(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2641,7 +2613,7 @@ fn intlcal_get_skipped_wall_time_option(
 /// int(0)
 /// intlcal_set_repeated_wall_time_option(): Argument #2 ($option) must be either IntlCalendar::WALLTIME_FIRST or IntlCalendar::WALLTIME_LAST
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_set_repeated_wall_time_option(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2662,7 +2634,7 @@ fn intlcal_set_repeated_wall_time_option(
 /// int(2)
 /// intlcal_set_skipped_wall_time_option(): Argument #2 ($option) must be one of IntlCalendar::WALLTIME_FIRST, IntlCalendar::WALLTIME_LAST, or IntlCalendar::WALLTIME_NEXT_VALID
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_set_skipped_wall_time_option(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2682,7 +2654,7 @@ fn intlcal_set_skipped_wall_time_option(
 /// string(9) "GMT+05:30"
 /// string(13) "Europe/Lisbon"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_from_date_time(
     req: &mut Request,
     datetime: php_ext::abi::Union<Instance<DateTime>, PhpString>,
@@ -2700,7 +2672,7 @@ fn intlcal_from_date_time(
 /// ```expect
 /// string(39) "2013-01-01T00:00:00+00:00 Europe/Lisbon"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_to_date_time(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2717,7 +2689,7 @@ fn intlcal_to_date_time(
 /// ```expect
 /// int(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_error_code(req: &mut Request, calendar: Instance<IntlCalendar>) -> OrFalse<i64> {
     error_code(req, calendar.object())
 }
@@ -2731,7 +2703,7 @@ fn intlcal_get_error_code(req: &mut Request, calendar: Instance<IntlCalendar>) -
 /// ```expect
 /// string(12) "U_ZERO_ERROR"
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlcal_get_error_message(
     req: &mut Request,
     calendar: Instance<IntlCalendar>,
@@ -2748,7 +2720,7 @@ fn intlcal_get_error_message(
 /// string(21) "IntlGregorianCalendar"
 /// int(29)
 /// ```
-#[php_function(deprecated(since = "8.4", message = "use IntlGregorianCalendar::__construct(), IntlGregorianCalendar::createFromDate(), or IntlGregorianCalendar::createFromDateTime() instead"), arity = manual)]
+#[php_function(deprecated(since = "8.4", message = "use IntlGregorianCalendar::__construct(), IntlGregorianCalendar::createFromDate(), or IntlGregorianCalendar::createFromDateTime() instead"), arity = manual, before_args = error::reset)]
 #[allow(non_snake_case)]
 fn intlgregcal_create_instance(
     req: &mut Request,
@@ -2772,7 +2744,7 @@ fn intlgregcal_create_instance(
 /// bool(true)
 /// float(0)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlgregcal_set_gregorian_change(
     req: &mut Request,
     calendar: Instance<IntlGregorianCalendar>,
@@ -2789,7 +2761,7 @@ fn intlgregcal_set_gregorian_change(
 /// ```expect
 /// float(-12219292800000)
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlgregcal_get_gregorian_change(
     req: &mut Request,
     calendar: Instance<IntlGregorianCalendar>,
@@ -2808,7 +2780,7 @@ fn intlgregcal_get_gregorian_change(
 /// bool(false)
 /// intlgregcal_is_leap_year(): Argument #2 ($year) must be between -2147483648 and 2147483647
 /// ```
-#[php_function]
+#[php_function(before_args = error::reset)]
 fn intlgregcal_is_leap_year(
     req: &mut Request,
     calendar: Instance<IntlGregorianCalendar>,

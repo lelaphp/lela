@@ -18,10 +18,10 @@ use inline::Arith;
 
 use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
-use crate::api::abi::{PropertiesFor, PropertyPurpose};
+use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
-    Level, Thrown, deprecated, none_pending, raise, throw, throw_error, warning,
+    Level, Thrown, deprecated, illegal_container_offset, none_pending, throw, throw_error, warning,
 };
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Table};
@@ -539,7 +539,13 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
 /// number is not zero for `BcMath\Number`, and whether the element exists
 /// for `SimpleXMLElement`; php's `E_RECOVERABLE_ERROR` and `false` for a
 /// class whose handler refuses the cast, and a throw from the handler left
-/// pending, as php's `EG(exception)`.
+/// pending, as php's `EG(exception)`. The `E_RECOVERABLE_ERROR` is
+/// `zend_error`'s: where no user error handler takes it, `php_error_cb`
+/// bails out of it as of every fatal level, so the request ends there,
+/// the fatal left standing for the caller to leave by as a throw is
+/// left pending; a handler that takes it lets the request go on with
+/// `false`. `ext/zend_test`'s `LongCastableNoOperations`, whose handler
+/// casts to an int alone, is the witness.
 ///
 /// ```php
 /// var_dump((bool) new stdClass, (bool) new BcMath\Number('0.0'), !new BcMath\Number('-1'));
@@ -571,11 +577,10 @@ fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
         }
         Ok(None) => {
             let class = req.class_name(object.class());
-            raise(
-                req,
-                Level::RecoverableError,
-                &format!("Object of class {class} could not be converted to bool"),
-            );
+            let message = format!("Object of class {class} could not be converted to bool");
+            if req.note_error(Level::RecoverableError, &message) {
+                req.bail_out();
+            }
             false
         }
         Err(thrown) => {
@@ -862,6 +867,27 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 /// }
 /// array(0) {
 /// }
+/// ```
+///
+/// A declared row is keyed by `prop_info->name`, the mangled name the
+/// class's compile interned as it declared the property
+/// ([`php_compile::intern_declared`]), so a cast costs the table it
+/// lays down and makes no string, the first as every later one; a
+/// subclass's private row of the same name is keyed by its own class:
+///
+/// ```php
+/// class A { protected $pp = 1; private $qq = 2; public $rrr = 3; }
+/// $o = new A;
+/// $m = memory_get_usage(); $x = (array) $o; echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $y = (array) $o; echo memory_get_usage() - $m, "\n";
+/// class B extends A { private $qq = 4; }
+/// $b = new B;
+/// $m = memory_get_usage(); $z = get_mangled_object_vars($b); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 376
+/// 376
+/// 752
 /// ```
 ///
 /// php hands the object's own table back where it can
@@ -1375,8 +1401,8 @@ pub(crate) fn typed_ref_holds(
                 req.release(made);
                 let class = req.class_name(first_at);
                 let two = req.class_name(declaring);
-                let one_declared = crate::api::coerce::declared_type_name(&first_ty);
-                let two_declared = crate::api::coerce::declared_type_name(ty);
+                let one_declared = php_unit::type_to_string(&first_ty);
+                let two_declared = php_unit::type_to_string(ty);
                 let given = type_name(req, &held.undef_as_null());
                 return Err(throw_error(
                     req,
@@ -1416,7 +1442,7 @@ pub(crate) fn incdec_prop_error(
     increment: bool,
 ) -> (Thrown, Value) {
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let (word, edge, limit) = if increment {
         ("increment", "maximal", i64::MAX)
     } else {
@@ -1464,7 +1490,7 @@ fn ref_type_error(
     name: &[u8],
 ) -> Thrown {
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
         req,
@@ -1495,8 +1521,8 @@ fn conflicting_coercion(
     };
     let one_class = req.class_name(*one_at);
     let two_class = req.class_name(*two_at);
-    let one_declared = crate::api::coerce::declared_type_name(one_ty);
-    let two_declared = crate::api::coerce::declared_type_name(two_ty);
+    let one_declared = php_unit::type_to_string(one_ty);
+    let two_declared = php_unit::type_to_string(two_ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
         req,
@@ -1561,7 +1587,7 @@ pub(crate) fn verify_class_constant_type(
         return Ok(coerced);
     }
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let given = match held.as_object() {
         Some(object) => req.class_name(object.class()),
         None => held.type_name().to_string(),
@@ -1590,7 +1616,7 @@ fn property_type_error(
         return Thrown::of(Some(standing));
     }
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
         req,
@@ -4238,7 +4264,12 @@ pub(crate) fn string_dim_offset(
             // `if (type == BP_VAR_IS) { ZVAL_NULL(result); return; }`,
             // the one arm that stands before `zend_illegal_string_offset`.
             _ if mode == DimRead::Silent => Ok(None),
-            _ => Err(illegal_offset(req, "access", &dim, "on string")),
+            _ => Err(illegal_container_offset(
+                req,
+                "string",
+                &dim,
+                DimensionRead::Warning,
+            )),
         },
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
             if mode == DimRead::Warning {
@@ -4253,7 +4284,12 @@ pub(crate) fn string_dim_offset(
         ValueRef::Array(_)
         | ValueRef::Object(_)
         | ValueRef::Resource(_)
-        | ValueRef::Reference(_) => Err(illegal_offset(req, "access", &dim, "on string")),
+        | ValueRef::Reference(_) => Err(illegal_container_offset(
+            req,
+            "string",
+            &dim,
+            DimensionRead::Warning,
+        )),
     }
 }
 
@@ -4387,9 +4423,12 @@ pub(crate) fn array_offset(
             Ok(php_heap::Key::Long(id))
         }
         ValueRef::Undef => empty(req),
-        ValueRef::Array(_) | ValueRef::Object(_) => {
-            Err(illegal_offset(req, "access", offset, "on array"))
-        }
+        ValueRef::Array(_) | ValueRef::Object(_) => Err(illegal_container_offset(
+            req,
+            "array",
+            offset,
+            DimensionRead::Warning,
+        )),
     }
 }
 
@@ -4611,9 +4650,12 @@ pub(crate) fn isset_offset(
     // and the type's for everything else.
     let held = offset.deref();
     match held.as_ref() {
-        ValueRef::Array(_) | ValueRef::Object(_) => {
-            Err(illegal_offset(req, "access", &held, "in isset or empty"))
-        }
+        ValueRef::Array(_) | ValueRef::Object(_) => Err(illegal_container_offset(
+            req,
+            "array",
+            &held,
+            DimensionRead::Silent,
+        )),
         _ => array_offset(req, &held, constant),
     }
 }
@@ -4724,7 +4766,12 @@ pub(crate) fn unset_dim(
             return Ok(());
         }
         ValueRef::Array(_) | ValueRef::Object(_) => {
-            return Err(illegal_offset(req, "unset", &offset.deref(), "on array"));
+            return Err(illegal_container_offset(
+                req,
+                "array",
+                offset,
+                DimensionRead::Unset,
+            ));
         }
         // `deref` followed the reference already.
         ValueRef::Reference(_) => return Ok(()),
@@ -4795,24 +4842,11 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
 /// Unsupported operand types: ArrayObject | int
 /// Unsupported operand types: array - bool
 /// ```
-fn zval_type_name(req: &Request, value: &Value) -> String {
+pub(crate) fn zval_type_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
         ValueRef::Object(o) => req.class_name(o.class()),
         _ => String::from(value.type_name()),
     }
-}
-
-/// `zend_illegal_container_offset` (`Z/Zend/zend.c:1846`):
-/// php's `TypeError` over an offset no container takes, an array or an
-/// object, named as `zend_zval_type_name` names it, `verb` the access
-/// and `container` what it was taken against.
-fn illegal_offset(req: &mut Request, verb: &str, offset: &Value, container: &str) -> Thrown {
-    let name = zval_type_name(req, offset);
-    throw_error(
-        req,
-        "TypeError",
-        &format!("Cannot {verb} offset of type {name} {container}"),
-    )
 }
 
 /// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:108`): `SIZE_MAX` less the

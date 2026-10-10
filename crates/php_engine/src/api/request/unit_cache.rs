@@ -34,6 +34,14 @@ pub(crate) enum HandlePath {
     /// The primary file, opened by the host as a `FILE *` and not as a
     /// stream: what [`HandlePath::Opened`] is, with no resource spent.
     Host,
+    /// The path alone, as `zend_stream_init_filename` leaves
+    /// `auto_prepend_file`'s, `auto_append_file`'s and the built-in
+    /// server's router's and program's: what [`HandlePath::Filename`] is,
+    /// but destroyed only once the program has been served, by
+    /// `php_execute_script_ex` (`Z/main/main.c:2650-2656`) and the server
+    /// (`Z/sapi/cli/php_cli_server.c:2138`, `:2282`), so the file its open
+    /// made is held open until then ([`Request::require_kept`]).
+    Kept,
 }
 
 /// The unit cache for one request: [`Request::unit_cache`].
@@ -386,7 +394,7 @@ impl Request {
                 shared.units.note_blacklisted();
                 let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
                 if handle != HandlePath::Host {
-                    self.spend_include_stream();
+                    self.open_include_stream(&full, handle);
                 }
                 return Some(shared.compile_for(self, &source, path, SourceKind::File));
             }
@@ -410,7 +418,7 @@ impl Request {
         };
         let now = self.request_time();
         if memory
-            && handle == HandlePath::Filename
+            && matches!(handle, HandlePath::Filename | HandlePath::Kept)
             && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
             && !held.trusted(validation, now)
         {
@@ -484,7 +492,7 @@ impl Request {
             && cached.is_some()
             && (filed != Filed::Hit || resolved || !by_key)
         {
-            self.spend_include_stream();
+            self.open_include_stream(&full, handle);
         }
         cached
     }

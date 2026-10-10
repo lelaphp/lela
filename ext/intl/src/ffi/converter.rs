@@ -488,14 +488,15 @@ impl<'h> Live<'h> {
 }
 
 impl Converter {
-    /// `ucnv_open`: the converter, kept by the request, or none, and
-    /// ICU's code, a warning (`U_AMBIGUOUS_ALIAS_WARNING`) kept.
+    /// `ucnv_open`: the converter, kept by the request, or none beside a
+    /// failure ([`Code::built`]), and ICU's code, a warning
+    /// (`U_AMBIGUOUS_ALIAS_WARNING`) kept.
     pub(crate) fn open(req: &mut Request, name: &CStr) -> (Option<Converter>, Code) {
         let mut status = Code::ZERO;
         // SAFETY: name is NUL-terminated.
         let raw = unsafe { sys::ucnv_open(name.as_ptr(), &mut status) };
-        let open = NonNull::new(raw).map(|raw| Converter(req.adopt(Open(raw))));
-        (open, status)
+        let open = status.built(NonNull::new(raw).map(Open));
+        (open.map(|open| Converter(req.adopt(open))), status)
     }
 
     /// Its name.

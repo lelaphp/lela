@@ -8,13 +8,15 @@
 //! [`Handlers::iterator_element`].
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, Instance, IteratorElement, ObjectHandlers, PropertiesFor,
+    CloneObj, DimensionRead, GcTable, Instance, IteratorElement, ObjectHandlers, PropertiesFor,
     PropertyPurpose, Std, This, True, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
-use php_ext::raising::{Thrown, arg_value_error, throw, throw_error, warning};
+use php_ext::raising::{
+    Thrown, arg_value_error, illegal_container_offset, throw, throw_error, warning,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, Value, ValueRef};
@@ -621,13 +623,11 @@ fn index(req: &mut Request, offset: &Value) -> Result<Option<usize>, Thrown> {
     Ok(usize::try_from(n).ok())
 }
 
+/// `zend_illegal_container_offset(spl_ce_SplFixedArray->name, offset,
+/// BP_VAR_R)`, which `spl_offset_convert_to_long`'s caller throws for
+/// every fetch.
 fn illegal(req: &mut Request, offset: &Value) -> Thrown {
-    let ty = crate::zval_type_name(req, offset);
-    throw_error(
-        req,
-        "TypeError",
-        &format!("Cannot access offset of type {ty} on SplFixedArray"),
-    )
+    illegal_container_offset(req, "SplFixedArray", offset, DimensionRead::Warning)
 }
 
 fn out_of_range(req: &mut Request) -> Thrown {
@@ -722,12 +722,18 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(a) = object.native::<Row>(req) {
             for value in &a.elements {
                 visit(**value);
             }
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

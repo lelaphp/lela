@@ -4,8 +4,8 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    DimensionRead, Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Refusals,
-    This,
+    DimensionRead, GcTable, Instance, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest,
+    Refusals, This,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
@@ -662,5 +662,7 @@ impl ObjectHandlers for Handlers {
         Ok(None)
     }
 
-    fn get_gc(&self, _: &mut Request, _: PhpObject, _: &mut dyn FnMut(Value)) {}
+    fn get_gc(&self, _: &mut Request, _: PhpObject, _: &mut dyn FnMut(Value)) -> GcTable {
+        GcTable::Properties
+    }
 }
