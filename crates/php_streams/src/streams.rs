@@ -1290,7 +1290,7 @@ impl PhpStream {
     /// unlink($p);
     /// ```
     /// ```expect
-    /// 10816 2080
+    /// 10776 2080
     /// 40000
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]

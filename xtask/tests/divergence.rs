@@ -535,13 +535,13 @@ fn a_row_without_a_cause_is_debt_and_a_row_with_one_reads_it() {
     assert!(err.contains("taste"), "{err}");
 }
 
-/// The kind #2220 gave a row of php's undefined behaviour decodes, during
-/// #2463's move, as a `trace` row of cause `php-ub`, its ids as the file
-/// writes them under `php-ub:`; a `php-ub:` id on another kind, or a
-/// `trace:` id on that kind, is refused as before, and so is a row of that
-/// kind naming another cause.
+/// #2510: the kind #2220 gave a row of php's undefined behaviour, which
+/// #2460 made a cause and #2463's migration moved off the registry, is
+/// refused as any unknown kind is, naming the kind and the row; the same
+/// row as the migration spelt it, `trace:` with the cause written,
+/// decodes.
 #[test]
-fn a_row_of_the_old_php_ub_kind_decodes_as_a_trace_row_of_cause_php_ub() {
+fn a_row_of_the_old_php_ub_kind_is_refused_naming_the_kind() {
     let text = r#"
 [[divergence]]
 id = "php-ub:fixture-freed-table"
@@ -551,42 +551,10 @@ status = "accepted"
 since = "2026-10-07"
 covers = ["php-ub:ext/standard/tests/walks.rs::fixture_walk_ends"]
 "#;
-    let registry = Registry::parse(text).unwrap();
-    let row = &registry.rows()[0];
-    assert_eq!((row.kind, row.cause), (Kind::Trace, Cause::PhpUb));
-    assert_eq!(row.id.as_str(), "php-ub:fixture-freed-table");
-    assert_eq!(
-        registry
-            .accepted("php-ub:ext/standard/tests/walks.rs::fixture_walk_ends")
-            .map(|r| &r.id),
-        Some(&row.id)
-    );
-    let named = Registry::parse(
-        &text.replace("kind = \"php-ub\"", "kind = \"php-ub\"\ncause = \"php-ub\""),
-    )
-    .unwrap();
-    assert_eq!(named.rows()[0].cause, Cause::PhpUb);
-    let err = Registry::parse(&text.replace(
-        "kind = \"php-ub\"",
-        "kind = \"php-ub\"\ncause = \"by-design\"",
-    ))
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("by-design"), "{err}");
-    let err = Registry::parse(&text.replace("php-ub:fixture-freed-table", "trace:freed"))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("php-ub:"),
-        "the id keeps the kind's prefix: {err}"
-    );
-    let err = Registry::parse(&text.replace("kind = \"php-ub\"", "kind = \"trace\""))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("trace:"), "{err}");
+    let err = format!("{:#}", Registry::parse(text).unwrap_err());
+    assert!(err.contains("unknown kind \"php-ub\""), "{err}");
+    assert!(err.contains("php-ub:fixture-freed-table"), "{err}");
 
-    // The same row migrated, `trace:` and the cause written, decodes to
-    // the same kind and cause.
     let migrated = text
         .replace("php-ub:", "trace:")
         .replace("kind = \"php-ub\"", "kind = \"trace\"\ncause = \"php-ub\"");

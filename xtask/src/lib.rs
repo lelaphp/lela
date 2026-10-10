@@ -46,6 +46,7 @@ pub mod key;
 mod layout;
 mod lines;
 mod lock;
+mod makala;
 pub mod manifest;
 pub mod miri;
 pub mod new_ext;
@@ -188,6 +189,9 @@ fn command_line() -> Result<()> {
         Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
+        }
+        ask @ (Command::FpmCompare { .. } | Command::Soak { .. }) => {
+            record(&store, &[makala::run(&root, &manifest, ask)?])
         }
         Command::UnsafeAudit { staged } => record(
             &store,

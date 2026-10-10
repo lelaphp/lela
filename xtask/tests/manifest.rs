@@ -460,34 +460,33 @@ fn a_lock_home_table_names_the_home_of_a_lock_no_row_carries() {
     assert_eq!(bare.lock_home("ops.lock"), None);
 }
 
-/// `generated` is the list of files the manifest renders (#2473), and the
-/// map of each file to one rule decodes to its files while seams.toml
-/// still writes it (#2474); any other shape is refused, saying what the
-/// row takes.
+/// `generated` is the list of files the manifest renders (#2473); any
+/// other shape is refused naming the row and what it takes, the map of
+/// each file to one rule that seams.toml wrote until #2474 among them
+/// (#2513).
 #[test]
-fn generated_decodes_as_a_list_of_files_and_the_map_as_its_files() {
+fn generated_decodes_as_a_list_of_files_and_any_other_shape_is_refused() {
     let row = |generated: &str| {
         format!(
             "{MINIMAL}[[rule]]\nid = \"generated.committed\"\ngenerated = {generated}\ntext = \"t\"\n"
         )
     };
-    let files = |text: &str| -> Vec<String> {
-        Manifest::parse(text)
-            .unwrap()
-            .generated_files()
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    };
-    let list = files(&row(r#"["crates/clippy.toml", "ext/clippy.toml"]"#));
+    let list: Vec<String> = Manifest::parse(&row(r#"["crates/clippy.toml", "ext/clippy.toml"]"#))
+        .unwrap()
+        .generated_files()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     assert_eq!(list, ["crates/clippy.toml", "ext/clippy.toml"]);
-    let map = files(&row(
+    for refused in [
         r#"{ "ext/clippy.toml" = "ext.no-locks", "crates/clippy.toml" = "fork.threads" }"#,
-    ));
-    assert_eq!(map, list, "the map's rules are read no more");
-    let err = format!(
-        "{:#}",
-        Manifest::parse(&row("\"ext/clippy.toml\"")).unwrap_err()
-    );
-    assert!(err.contains("a list of the files"), "{err}");
+        "\"ext/clippy.toml\"",
+    ] {
+        let err = format!("{:#}", Manifest::parse(&row(refused)).unwrap_err());
+        assert!(
+            err.contains("rule \"generated.committed\" spells `generated` as a")
+                && err.contains("the row takes a list of the files"),
+            "{refused}: {err}"
+        );
+    }
 }
