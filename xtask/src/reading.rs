@@ -78,8 +78,8 @@ pub struct Reading {
     /// The subcommands that write one, in the order `cli::Command` has
     /// them: `api-check | permit | done | track-work | ticket | usage |
     /// budget | clippy | test | miri | phpt | port-map | compile-identity |
-    /// crosscheck | unsafe-audit | steer | divergence-reason | witness |
-    /// vocab`; `bench | fuzz | mutants` are named by harness-design.md
+    /// crosscheck | fpm-compare | unsafe-audit | steer | divergence-reason
+    /// | witness | vocab`; `bench | fuzz | mutants` are named by harness-design.md
     /// §4.2 and not built yet.
     pub instrument: String,
     /// A crate, a corpus subset, a bar's id such as `G1`, a ticket's
@@ -132,7 +132,7 @@ pub struct Reading {
 
 /// The instruments whose runs are taken under the oracle's recipe: a
 /// reading of one is fresh only under the pin it records (#1387).
-pub const UNDER_RECIPE: [&str; 3] = ["witness", "phpt", "crosscheck"];
+pub const UNDER_RECIPE: [&str; 4] = ["witness", "phpt", "crosscheck", "fpm-compare"];
 
 impl Reading {
     /// A reading of `instrument` over a crate, stamped over the crate's

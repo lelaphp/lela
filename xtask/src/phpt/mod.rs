@@ -139,7 +139,7 @@
 //!
 //! [`oracle::Streams::Pipes`]: crate::oracle::Streams::Pipes
 
-mod adapter;
+pub(crate) mod adapter;
 pub(crate) mod environment;
 pub(crate) use environment::env_of;
 mod across;

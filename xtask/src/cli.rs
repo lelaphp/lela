@@ -335,6 +335,19 @@ pub(crate) enum Command {
         #[arg(long)]
         staged: bool,
     },
+    /// Hold makala to the pinned php-fpm: each request of the HTTP-served
+    /// subset served by both, the status, header lines and body compared;
+    /// one reading, at makala's crate.
+    ///
+    /// php-fpm is handed each request under the pin's `[fastcgi]` mapping,
+    /// as nginx in front of it would hand it on (#2349); a machine without
+    /// the pinned php-fpm and php-src measures nothing, stated as a skip.
+    FpmCompare {
+        /// One test of the subset by its path in the pinned tree,
+        /// repeatable; default every one.
+        #[arg(long = "test", value_name = "PATH")]
+        tests: Vec<String>,
+    },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit {
         /// For pre-commit: leave out each crate whose reading passes and

@@ -194,6 +194,7 @@ Commands:
   port-map           Join the Mahout census to `api.lock`: each item `same`, `renamed` or `gone`, the rows not yet taken as the number; one reading, at the lock's crate
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
   crosscheck         Hold each default extension's `--re` and `--ri` rendering to the oracle's bytes, kept in the store; one reading per extension per flag
+  fpm-compare        Hold makala to the pinned php-fpm: each request of the HTTP-served subset served by both, the status, header lines and body compared; one reading, at makala's crate
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
@@ -207,7 +208,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=9a8c818174d3c3457476ff860f08199328a8d7c470e259273c13b7a4bc2cd213 out=ce33ea76ed139020f8c59e2ee7be935e843c7b1c2c8741e8f16a8603df120e5a -->
+<!-- /computed in=11b07c4074064bcf591a50906dd87c5deeb923cc1b224f9b4cd3657f262bc006 out=44ee6697babaffcda6fe97463c1b589b4c1de7e236a5e5365d09bf0f37fd879d -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
