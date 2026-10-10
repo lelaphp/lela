@@ -444,6 +444,28 @@ fn declared(root: &Path) -> Result<Vec<Bar>> {
     }])
 }
 
+/// The variable GitHub sets on every runner: `github-hosted` on its own
+/// fleet's, `self-hosted` on a machine of ours.
+pub(crate) const RUNNER_ENVIRONMENT: &str = "RUNNER_ENVIRONMENT";
+
+/// A bench number needs the quiet machine (protocol §7): a GitHub-hosted
+/// runner is a shared VM whose neighbours move every arm, and its reading
+/// would be noise a person could mistake for a measurement. So the command
+/// refuses one before it measures, whatever workflow asked it to, and
+/// writes nothing (#2477, #2259). The library entry is not held to it:
+/// the negative control under `xtask/tests/bench.rs` tests the rig, and
+/// runs wherever `xtask`'s tests run.
+pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>) -> Result<()> {
+    if environment == Some("github-hosted") {
+        bail!(
+            "bench measures on the quiet self-hosted machine and never on a GitHub-hosted runner \
+             ({RUNNER_ENVIRONMENT}=github-hosted): a shared VM's numbers are noise a person could \
+             read as a measurement (#2477)"
+        );
+    }
+    Ok(())
+}
+
 /// `xtask bench`: each bar measured under the protocol, printed with the
 /// load beside the number (§7), and written as one reading scoped by the
 /// bar's name. A measurement, which owes no exit: the reading carries
@@ -601,7 +623,7 @@ fn recorded(
 
 #[cfg(test)]
 mod tests {
-    use super::{RESOLVED, SWAMPED, Stats, sign_of, stats};
+    use super::{RESOLVED, SWAMPED, Stats, refuse_a_hosted_runner, sign_of, stats};
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
@@ -631,5 +653,18 @@ mod tests {
         assert_eq!(sign_of(&stats(&[-3.0, 0.0, 0.0, 0.0])), SWAMPED);
         assert_eq!(sign_of(&stats(&[-1.0, -1.0, 1.0, 1.0])), SWAMPED);
         assert_eq!(sign_of(&stats(&[-4.0, -3.0, -2.0, -1.0])), RESOLVED);
+    }
+
+    /// A GitHub-hosted runner is refused, and a machine of ours or one
+    /// outside CI is not (#2477).
+    #[test]
+    fn a_github_hosted_runner_is_refused_and_no_other_machine_is() {
+        let refused = refuse_a_hosted_runner(Some("github-hosted")).unwrap_err();
+        assert!(
+            format!("{refused}").contains("quiet self-hosted machine"),
+            "{refused}"
+        );
+        assert!(refuse_a_hosted_runner(Some("self-hosted")).is_ok());
+        assert!(refuse_a_hosted_runner(None).is_ok());
     }
 }
