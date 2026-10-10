@@ -21,7 +21,8 @@ use php_unit::decl::{
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, HookBody, Level, LiveKind, LiveRange, MapPtrOffset,
-    MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, TryCatch, Unit, UnitCell,
+    MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, TopLevel, TryCatch, Unit,
+    UnitCell,
 };
 
 /// The unit's bytes; none where a constant of an op array is of a kind
@@ -395,7 +396,7 @@ record! {
     HookBody { class, property, kind, body }
     Diagnostic { level, line, message }
     Unit {
-        main, functions, classes, runtime_keys, constants, methods, hooks, dynamic,
+        main, functions, classes, runtime_keys, top_level, constants, methods, hooks, dynamic,
         diagnostics, arms, halt_offset, cell,
     }
 }
@@ -449,6 +450,22 @@ impl Wire for Type {
             102 => Type::Union(Wire::take(r)?),
             103 => Type::Intersection(Wire::take(r)?),
             _ => return None,
+        })
+    }
+}
+
+impl Wire for TopLevel {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        match self {
+            TopLevel::Function(at) => (false, at).put(out),
+            TopLevel::Class(at) => (true, at).put(out),
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Some(if bool::take(r)? {
+            TopLevel::Class(u32::take(r)?)
+        } else {
+            TopLevel::Function(u32::take(r)?)
         })
     }
 }

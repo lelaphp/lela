@@ -109,7 +109,7 @@ use php_unit::decl::{
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
-    OpArray, Opcode, OperandKind, Opline, OplineIdx, TryCatch, Unit,
+    OpArray, Opcode, OperandKind, Opline, OplineIdx, TopLevel, TryCatch, Unit,
 };
 
 use php_syntax::magic_const_name;
@@ -520,6 +520,9 @@ pub(crate) struct Emit<'a> {
     /// Which of [`Emit::classes`] were bound early, in the order bound:
     /// the file's classes `CG(class_table)` holds while it compiles.
     bound: Vec<usize>,
+    /// [`Unit::top_level`]: each top-level function and class, in the
+    /// order compiled.
+    top_level: Vec<TopLevel>,
     /// The rest of [`Emit::classes`], each under the runtime definition
     /// key its `DECLARE_CLASS` carries, [`Unit::runtime_keys`], in the
     /// order the keys were made.
@@ -1246,6 +1249,7 @@ impl<'a> Emit<'a> {
             diagnostics: Vec::new(),
             classes: Vec::new(),
             bound: Vec::new(),
+            top_level: Vec::new(),
             runtime_keys: Vec::new(),
             attributed_constants: Vec::new(),
             keys_before: options.keys_before,
@@ -1348,6 +1352,7 @@ pub(crate) fn unit(
         classes: emit.classes,
         arms: emit.arms,
         runtime_keys: emit.runtime_keys,
+        top_level: emit.top_level,
         constants: emit.attributed_constants,
         halt_offset: emit.halted,
         cell: emit.cell,
@@ -3205,6 +3210,8 @@ impl Emit<'_> {
             )));
         }
         let declared = self.body(function, &name, None, false, FnFlags::default())?;
+        let at = u32::try_from(self.functions_declared.len()).unwrap_or(u32::MAX);
+        self.top_level.push(TopLevel::Function(at));
         self.functions_declared.push(declared);
         Ok(())
     }
@@ -4953,6 +4960,10 @@ impl Emit<'_> {
         let (at, parent) = self.class_entry(class, &name, false)?;
         if let Some(decl) = self.classes.get_mut(at) {
             decl.flags.is_top_level = toplevel;
+        }
+        if toplevel {
+            let at = u32::try_from(at).unwrap_or(u32::MAX);
+            self.top_level.push(TopLevel::Class(at));
         }
         // `zend_compile_class_decl` decides once the body has compiled,
         // so an interface `add_stringable_interface` gave the class
@@ -19055,6 +19066,7 @@ mod tests {
             diagnostics: Vec::new(),
             classes: Vec::new(),
             bound: Vec::new(),
+            top_level: Vec::new(),
             runtime_keys: Vec::new(),
             attributed_constants: Vec::new(),
             keys_before: 0,

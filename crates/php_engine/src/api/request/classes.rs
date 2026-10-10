@@ -11,14 +11,13 @@ use std::sync::Arc;
 use php_heap::{FrameRef, Intern};
 use php_link::LinkedClass;
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
-use php_unit::{FramelessEntry, Opcode, Unit};
+use php_unit::{FramelessEntry, Opcode, TopLevel, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, adopted};
 use crate::engine::Shared;
 use crate::exec;
-use crate::observer::LinkedAtLoad;
 
 use super::{
     Bound, Declared, Deprecations, FrameShape, Keyed, Member, MemberAt, Named, Request,
@@ -80,6 +79,38 @@ pub(super) struct Classes {
     bound_at_load: Vec<(Arc<Unit>, u32)>,
 }
 
+/// How opcache served a unit, `zend_accel_load_script`'s: from what it
+/// held, or compiled by this request's miss, whose compile binds the
+/// file's functions into the request's own table before the load
+/// copies them (`Z/ext/opcache/ZendAccelerator.c:1855`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccelServed {
+    Hit,
+    Compiled,
+}
+
+/// What a unit's load has declared of its classes, as
+/// [`Request::class_load`] lays it down: how opcache served the unit,
+/// none where php's own compiler declares it, the keys its delayed
+/// early bindings stand under, the classes published with it, the
+/// delayed ones left for after the rest, and how many of the unit's
+/// classes were met so far.
+pub(crate) struct ClassLoad {
+    served: Option<AccelServed>,
+    delayed: Vec<Vec<u8>>,
+    early: Option<crate::unit_cache::EarlyBound>,
+    tried: Vec<usize>,
+    next: usize,
+}
+
+impl ClassLoad {
+    /// Whether opcache serves the unit, so its load tells the observers
+    /// in the order it copies the tables.
+    pub(crate) fn accelerated(&self) -> bool {
+        self.served.is_some()
+    }
+}
+
 impl Request {
     /// `EG(class_table)`'s keys in their order, each row the class and,
     /// for an alias's row, the lowered name it is keyed by: the engine's
@@ -113,8 +144,9 @@ impl Request {
         rows
     }
 
-    /// `do_bind_class` for every class the unit declares that php bound
-    /// while the file compiled, before its main op array runs: a
+    /// The load of a unit's classes, `do_bind_class` for every class the
+    /// unit declares that php bound while the file compiled, before its
+    /// main op array runs: a
     /// top-level class implementing no interface, with no parent or one
     /// the table already held, is early bound and the compiler emitted
     /// no opline for it, so the request's table takes it here. Every
@@ -208,14 +240,15 @@ impl Request {
     /// Fatal error: Cannot redeclare class Foo (previously declared in %s:2) in %s on line 3
     /// ```
     ///
-    /// What the load linked is answered, the classes in the order linked
-    /// and whether opcache served the unit, for the observers' notices
-    /// ([`crate::observer::declared_at_load`]): every class bound early,
-    /// each delayed one the load bound, and an anonymous class linked
-    /// here only where opcache serves the unit, whose load copies the
-    /// class `link_unbound` linked with the rest, where php's own
-    /// compiler tells no observer of it. None where the request ended.
-    pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> Option<LinkedAtLoad> {
+    /// Each class linked is told to the observers as it is linked
+    /// ([`crate::observer::class_linked_at_load`]): every class bound
+    /// early, each delayed one the load binds, and an anonymous class
+    /// linked here only where opcache serves the unit, whose load copies
+    /// the class `link_unbound` linked with the rest, where php's own
+    /// compiler tells no observer of it. This lays down the load's state
+    /// over `unit`'s classes, for [`Request::declare_classes_through`]
+    /// and [`Request::declare_delayed`].
+    pub(crate) fn class_load(&mut self, unit: &Arc<Unit>) -> ClassLoad {
         let delayed: Vec<Vec<u8>> = unit
             .main
             .oplines
@@ -230,64 +263,112 @@ impl Request {
                     .map(|key| key.bytes().to_vec())
             })
             .collect();
-        let accelerated = self.preloading.is_some()
-            || (self.accel_loaded.take()).is_some_and(|loaded| Arc::ptr_eq(&loaded, unit));
+        let loaded = (self.accel_loaded.take())
+            .filter(|(loaded, _)| Arc::ptr_eq(loaded, unit))
+            .map(|(_, served)| served);
+        let served = loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit));
         let early = (self.early_bound.take())
             .filter(|(loaded, _)| Arc::ptr_eq(loaded, unit))
             .map(|(_, early)| early);
-        let mut linked = LinkedAtLoad {
-            accelerated,
-            classes: Vec::new(),
-        };
-        let mut tried = Vec::new();
-        for (at, decl) in unit.classes.iter().enumerate() {
-            // A saved script of the preload, whose classes the preload
-            // holds, declares none of them again (`preload_remove_declares`).
-            if self.preloaded_class(unit, at) {
-                continue;
-            }
-            let key = unit
-                .runtime_keys
-                .iter()
-                .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
-            if let Some((key, _)) = key {
-                self.buckets
-                    .reserve(unit, u32::try_from(at).unwrap_or(u32::MAX));
-                if decl.flags.is_anonymous {
-                    if self.link_unbound(unit, at, decl)? && accelerated {
-                        linked.classes.extend(u32::try_from(at).ok());
-                    }
-                    continue;
-                }
-                if delayed.iter().any(|delayed| **delayed == *key.0) {
-                    if accelerated {
-                        tried.push((at, decl));
-                    } else if self.bind_at_load(unit, at, decl)? {
-                        linked.classes.extend(u32::try_from(at).ok());
-                    }
-                }
-                continue;
-            }
-            if let Some(existing) = self.class_named(&decl.name.0) {
-                let message = self.redeclaration(existing);
-                let file = decl.file.0.to_vec();
-                self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
-                return None;
-            }
-            let published = early.as_ref().and_then(|early| *early.get(at)?);
-            let at = u32::try_from(at).ok()?;
-            match published {
-                Some(class) => self.declare_published(unit, at, class, decl),
-                None => self.bind_declared(unit, at, None, None),
-            }
-            linked.classes.push(at);
+        ClassLoad {
+            served,
+            delayed,
+            early,
+            tried: Vec::new(),
+            next: 0,
         }
-        for (at, decl) in tried {
-            if self.bind_at_load(unit, at, decl)? {
-                linked.classes.extend(u32::try_from(at).ok());
+    }
+
+    /// `unit`'s classes declared in their order up to and including the
+    /// one at `through`, or every one left where `through` is none,
+    /// each linked told as it is: false where the request ended.
+    pub(crate) fn declare_classes_through(
+        &mut self,
+        unit: &Arc<Unit>,
+        load: &mut ClassLoad,
+        through: Option<usize>,
+    ) -> bool {
+        let last = through.map_or(unit.classes.len(), |at| at.saturating_add(1));
+        while load.next < last.min(unit.classes.len()) {
+            let at = load.next;
+            load.next += 1;
+            let Some(decl) = unit.classes.get(at) else {
+                break;
+            };
+            match self.declare_class_at(unit, load, at, decl) {
+                Some(true) => crate::observer::class_linked_at_load(self, unit, at),
+                Some(false) => {}
+                None => return false,
             }
         }
-        Some(linked)
+        true
+    }
+
+    /// The class at `at` of `unit` declared as the load meets it: none
+    /// where the request ended, and whether it was linked and is told
+    /// otherwise. A delayed one opcache serves is left for
+    /// [`Request::declare_delayed`].
+    fn declare_class_at(
+        &mut self,
+        unit: &Arc<Unit>,
+        load: &mut ClassLoad,
+        at: usize,
+        decl: &ClassDecl,
+    ) -> Option<bool> {
+        // A saved script of the preload, whose classes the preload
+        // holds, declares none of them again (`preload_remove_declares`).
+        if self.preloaded_class(unit, at) {
+            return Some(false);
+        }
+        let key = unit
+            .runtime_keys
+            .iter()
+            .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
+        if let Some((key, _)) = key {
+            self.buckets
+                .reserve(unit, u32::try_from(at).unwrap_or(u32::MAX));
+            if decl.flags.is_anonymous {
+                return Some(self.link_unbound(unit, at, decl)? && load.accelerated());
+            }
+            if load.delayed.iter().any(|delayed| **delayed == *key.0) {
+                if load.accelerated() {
+                    load.tried.push(at);
+                    return Some(false);
+                }
+                return self.bind_at_load(unit, at, decl);
+            }
+            return Some(false);
+        }
+        if let Some(existing) = self.class_named(&decl.name.0) {
+            let message = self.redeclaration(existing);
+            let file = decl.file.0.to_vec();
+            self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+            return None;
+        }
+        let published = load.early.as_ref().and_then(|early| *early.get(at)?);
+        let at = u32::try_from(at).ok()?;
+        match published {
+            Some(class) => self.declare_published(unit, at, class, decl),
+            None => self.bind_declared(unit, at, None, None),
+        }
+        Some(true)
+    }
+
+    /// The delayed early bindings opcache's load makes once the unit's
+    /// classes are declared, `zend_accel_do_delayed_early_binding`, each
+    /// bound told: false where the request ended.
+    pub(crate) fn declare_delayed(&mut self, unit: &Arc<Unit>, load: &mut ClassLoad) -> bool {
+        for at in std::mem::take(&mut load.tried) {
+            let Some(decl) = unit.classes.get(at) else {
+                continue;
+            };
+            match self.bind_at_load(unit, at, decl) {
+                Some(true) => crate::observer::class_linked_at_load(self, unit, at),
+                Some(false) => {}
+                None => return false,
+            }
+        }
+        true
     }
 
     /// One entry of `zend_accel_do_delayed_early_binding`: the class at
@@ -1559,51 +1640,128 @@ impl Request {
         }
     }
 
-    /// `zend_hash_add_ptr(CG(function_table), …)` for every function the
-    /// unit declares at its top level, before its main op array runs:
-    /// php binds one at compile time and the compiler emitted no opline
-    /// for it, so the request's table takes it here. The compiler
-    /// refused a name the natives have or the file declares twice; a
-    /// name another file of the request declared is
+    /// A unit's load, the declarations php binds while the file
+    /// compiles made before its main op array runs, each told to the
+    /// observers as it is made, in php's order: where opcache serves the
+    /// unit, as `zend_accel_load_script` copies the cached file's tables
+    /// (`Z/ext/opcache/zend_accelerator_util_funcs.c:392-410`), every
+    /// function, then every class, then the delayed early bindings;
+    /// where it does not, as php's compiler declares each as it finishes
+    /// it (`Z/Zend/zend_compile.c:8627`, `:9386`), in the order the file
+    /// was compiled ([`Unit::top_level`]), the classes no top-level
+    /// statement declares taking their place among the classes. A
+    /// declaration that ends the request ends the load there, so what
+    /// php declared before it was declared and told, and nothing after
+    /// it: false says so.
+    pub(crate) fn declare_unit(&mut self, unit: &Arc<Unit>, load: &mut ClassLoad) -> bool {
+        if load.served == Some(AccelServed::Compiled)
+            && let Some(at) = (0..unit.functions.len()).find(|&at| self.redeclares(unit, at))
+        {
+            // The miss's compile meets the name first, telling nothing.
+            return self.declare_function(unit, at).is_some();
+        }
+        if load.accelerated() {
+            for at in 0..unit.functions.len() {
+                if !self.declare_function_told(unit, at) {
+                    return false;
+                }
+            }
+        } else {
+            for declared in &unit.top_level {
+                let declared = match *declared {
+                    TopLevel::Function(at) => {
+                        self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
+                    }
+                    TopLevel::Class(at) => self.declare_classes_through(
+                        unit,
+                        load,
+                        Some(usize::try_from(at).unwrap_or(usize::MAX)),
+                    ),
+                };
+                if !declared {
+                    return false;
+                }
+            }
+        }
+        self.declare_classes_through(unit, load, None) && self.declare_delayed(unit, load)
+    }
+
+    /// Whether the function at `at` of `unit` names one the request
+    /// declared already, which [`Request::declare_function`] refuses.
+    fn redeclares(&self, unit: &Arc<Unit>, at: usize) -> bool {
+        let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
+        unit.functions.get(at).is_some_and(|(decl, _)| {
+            !self.preloaded_function(unit, body) && self.function_named(&decl.name.0).is_some()
+        })
+    }
+
+    /// [`Request::declare_function`] for the function at `at` of `unit`,
+    /// told to the observers where it was declared: false where the
+    /// request ended.
+    fn declare_function_told(&mut self, unit: &Arc<Unit>, at: usize) -> bool {
+        match self.declare_function(unit, at) {
+            Some(true) => {
+                crate::observer::function_declared_at_load(self, unit, at);
+                true
+            }
+            Some(false) => true,
+            None => false,
+        }
+    }
+
+    /// Every function `unit` declares at its top level, as
+    /// [`Request::declare_function`] declares each, for a test that
+    /// serves a unit's frame by hand: false where the request ended.
+    #[cfg(test)]
+    pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) -> bool {
+        (0..unit.functions.len()).all(|at| self.declare_function(unit, at).is_some())
+    }
+
+    /// `zend_hash_add_ptr(CG(function_table), …)` for the function at
+    /// `at` of those the unit declares at its top level, before its
+    /// main op array runs: php binds one at compile time and the
+    /// compiler emitted no opline for it, so the request's table takes
+    /// it here. The compiler refused a name the natives have or the file
+    /// declares twice; a name another file of the request declared is
     /// `do_bind_function_error` at `E_COMPILE_ERROR`, which names the
     /// earlier declaration's file and line and ends the request before
-    /// the frame is pushed, so nothing of a file that redeclares runs;
-    /// `false` says so.
-    pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) -> bool {
-        for (at, (decl, _)) in unit.functions.iter().enumerate() {
-            let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
-            if self.preloaded_function(unit, body) {
-                continue;
-            }
-            if let Some(earlier) = self.function_named(&decl.name.0) {
-                let site = self
-                    .user_function(earlier)
-                    .and_then(user_function_decl)
-                    .map(|decl| {
-                        format!(
-                            " (previously declared in {}:{})",
-                            String::from_utf8_lossy(&decl.file.0),
-                            decl.line
-                        )
-                    })
-                    .unwrap_or_default();
-                let message = format!(
-                    "Cannot redeclare function {}(){site}",
-                    String::from_utf8_lossy(&decl.name.0)
-                );
-                let file = decl.file.0.to_vec();
-                self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
-                return false;
-            }
-            self.user_functions.push(UserFunction {
-                unit: Arc::clone(unit),
-                body,
-                member: None,
-                flags: crate::attributes::Flags::of(&decl.attributes),
-                shape: FrameShape::of(decl, exec::body_of(unit, body)),
-            });
+    /// the frame is pushed, so nothing of a file that redeclares runs:
+    /// none says so, and otherwise whether the function was declared,
+    /// which one the preload holds is not.
+    fn declare_function(&mut self, unit: &Arc<Unit>, at: usize) -> Option<bool> {
+        let (decl, _) = unit.functions.get(at)?;
+        let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
+        if self.preloaded_function(unit, body) {
+            return Some(false);
         }
-        true
+        if let Some(earlier) = self.function_named(&decl.name.0) {
+            let site = self
+                .user_function(earlier)
+                .and_then(user_function_decl)
+                .map(|decl| {
+                    format!(
+                        " (previously declared in {}:{})",
+                        String::from_utf8_lossy(&decl.file.0),
+                        decl.line
+                    )
+                })
+                .unwrap_or_default();
+            let message = format!(
+                "Cannot redeclare function {}(){site}",
+                String::from_utf8_lossy(&decl.name.0)
+            );
+            let file = decl.file.0.to_vec();
+            self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+            return None;
+        }
+        self.user_functions.push(UserFunction {
+            unit: Arc::clone(unit),
+            body,
+            member: None,
+            flags: crate::attributes::Flags::of(&decl.attributes),
+            shape: FrameShape::of(decl, exec::body_of(unit, body)),
+        });
+        Some(true)
     }
 
     pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {

@@ -82,7 +82,7 @@
 //! the user's handler and `zend_error_cb`; [`function_declared`] and
 //! [`class_linked`], at each declaration a request makes, told for a
 //! unit's load as php with and without opcache tells them
-//! ([`declared_at_load`]).
+//! ([`function_declared_at_load`], [`class_linked_at_load`]).
 //!
 //! A generator's frame is not begun at its call, as php's
 //! `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`: it is begun
@@ -979,7 +979,7 @@ fn notify_error(req: &mut Request, notice: ErrorNotice<'_>) {
 /// declaration order. php tells them where `do_bind_function` binds a
 /// `DECLARE_FUNCTION`'s function (`Z/Zend/zend_compile.c:1300`) and
 /// where a file's top-level function is declared as the file loads
-/// ([`declared_at_load`]).
+/// ([`function_declared_at_load`]).
 pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: &[u8]) {
     if !functions_declared_observed(req) {
         return;
@@ -996,7 +996,7 @@ pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: 
 /// `zend_bind_class_in_slot` binds a `DECLARE_CLASS`'s class
 /// (`Z/Zend/zend_compile.c:1326`, `:1332`), where a user class is given
 /// an alias (`Z/Zend/zend_API.c:3635`), and where a file's classes are
-/// linked as it loads ([`declared_at_load`]); an anonymous class's
+/// linked as it loads ([`class_linked_at_load`]); an anonymous class's
 /// `DECLARE_ANON_CLASS` tells none.
 pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
     if !classes_linked_observed(req) {
@@ -1021,102 +1021,41 @@ pub(crate) fn classes_linked_observed(req: &Request) -> bool {
     !req.shared.supplied.classes_linked.is_empty()
 }
 
-/// One notice of a unit's load, by the lowered name it is told under.
-enum LoadNotice {
-    Declared(Vec<u8>),
-    Linked(Vec<u8>),
-}
-
-/// What a unit's load bound before its main op array runs, for the
-/// notices of [`declared_at_load`]: the indices of the classes of
-/// [`Unit::classes`] linked, in the order linked, and whether opcache
-/// served the unit, which orders the notices.
-#[derive(Debug, Default)]
-pub(crate) struct LinkedAtLoad {
-    pub(crate) accelerated: bool,
-    pub(crate) classes: Vec<u32>,
-}
-
-/// The notices of a unit's load, its top-level functions declared and
-/// the classes linked early, in php's order: where opcache serves the
-/// unit, as `zend_accel_load_script` copies the cached file's tables
-/// (`Z/ext/opcache/zend_accelerator_util_funcs.c:392-410`), every
-/// function, then every class linked, then the delayed early bindings,
-/// which `linked` already holds in that order; on a cache hit and on
-/// the miss that compiled the file alike, since opcache compiles with
-/// `ZEND_COMPILE_IGNORE_OBSERVER` and tells them at the load
-/// (`Z/ext/opcache/ZendAccelerator.c:1816`). Where it does not, php
-/// tells each as its compile finishes it (`Z/Zend/zend_compile.c:8627`,
-/// `:9386`, `Z/Zend/zend_inheritance.c:3937-4039`): in source order,
-/// which is the order the declarations end in, since no top-level
-/// declaration holds another. A function and a class that end on one
-/// line are told the function first; php tells first the one written
-/// first. The engine's units are shared and kept like opcache's, so a
-/// unit served again from the engine's cache is told again, as each
+/// The function at `at` of `unit`'s top-level functions told as its
+/// load declares it ([`Request::declare_unit`]), under its lowered name.
+/// The engine's units are shared and kept like opcache's, so a unit
+/// served again from the engine's cache is told again, as each
 /// request's compile or load tells php's observers again.
-pub(crate) fn declared_at_load(req: &mut Request, unit: &Arc<Unit>, linked: &LinkedAtLoad) {
-    if !functions_declared_observed(req) && !classes_linked_observed(req) {
+///
+/// [`Request::declare_unit`]: crate::api::request::Request::declare_unit
+pub(crate) fn function_declared_at_load(req: &mut Request, unit: &Unit, at: usize) {
+    if !functions_declared_observed(req) {
         return;
     }
-    let functions: Vec<(u32, Vec<u8>)> = unit
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|&(at, _)| {
-            let body = crate::exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
-            !req.preloaded_function(unit, body)
-        })
-        .map(|(_, (decl, _))| (decl.end_line, decl.name.0.to_ascii_lowercase()))
-        .collect();
-    let classes: Vec<(u32, Vec<u8>)> = linked
-        .classes
-        .iter()
-        .filter_map(|&at| unit.classes.get(usize::try_from(at).ok()?))
-        .map(|decl| (decl.end_line, decl.name.0.to_ascii_lowercase()))
-        .collect();
-    let mut told: Vec<LoadNotice> = Vec::with_capacity(functions.len() + classes.len());
-    if linked.accelerated {
-        told.extend(
-            functions
-                .into_iter()
-                .map(|(_, name)| LoadNotice::Declared(name)),
-        );
-        told.extend(
-            classes
-                .into_iter()
-                .map(|(_, name)| LoadNotice::Linked(name)),
-        );
-    } else {
-        let mut functions = functions.into_iter().peekable();
-        let mut classes = classes.into_iter().peekable();
-        loop {
-            let function_first = match (functions.peek(), classes.peek()) {
-                (Some(function), Some(class)) => function.0 <= class.0,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
-            };
-            let next = if function_first {
-                functions.next().map(|(_, name)| LoadNotice::Declared(name))
-            } else {
-                classes.next().map(|(_, name)| LoadNotice::Linked(name))
-            };
-            told.extend(next);
-        }
+    let Some((decl, _)) = unit.functions.get(at) else {
+        return;
+    };
+    let name = decl.name.0.to_ascii_lowercase();
+    if let Some(declared) = req.function_named(&name) {
+        function_declared(req, declared, &name);
     }
-    for notice in told {
-        match notice {
-            LoadNotice::Declared(name) => {
-                if let Some(declared) = req.function_named(&name) {
-                    function_declared(req, declared, &name);
-                }
-            }
-            LoadNotice::Linked(name) => {
-                if let Some(class) = req.class_named(&name) {
-                    class_linked(req, class, &name);
-                }
-            }
-        }
+}
+
+/// The class at `at` of `unit` told as its load links it
+/// ([`Request::declare_unit`]), under its lowered name, as
+/// [`function_declared_at_load`].
+///
+/// [`Request::declare_unit`]: crate::api::request::Request::declare_unit
+pub(crate) fn class_linked_at_load(req: &mut Request, unit: &Unit, at: usize) {
+    if !classes_linked_observed(req) {
+        return;
+    }
+    let Some(decl) = unit.classes.get(at) else {
+        return;
+    };
+    let name = decl.name.0.to_ascii_lowercase();
+    if let Some(class) = req.class_named(&name) {
+        class_linked(req, class, &name);
     }
 }
 

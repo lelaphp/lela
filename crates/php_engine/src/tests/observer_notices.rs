@@ -211,6 +211,120 @@ fn a_cached_unit_replays_declared_and_linked_in_opcache_order() {
     assert_eq!(second, expected, "the hit that served it from the cache");
 }
 
+/// `source` served as `name` in `dir`.
+fn serve_file(engine: &Engine, dir: &Path, name: &str, source: &str) -> Served {
+    let path = dir.join(name);
+    std::fs::write(&path, source).ok();
+    engine.serve_capture_in(
+        dir,
+        path.to_string_lossy().as_bytes(),
+        source,
+        Capture::default(),
+    )
+}
+
+/// A load that ends in a redeclaration tells what php declared before
+/// it (#2012). Without opcache, php's compiler tells each declaration
+/// as it finishes it and meets the redeclared function where it is
+/// written, so the function and the class above it are told and those
+/// below are not, as the oracle's zend-test variant prints with
+/// `zend_test.observer.observe_declaring`. Where opcache serves a held
+/// file, `zend_accel_load_script` copies and tells every function, then
+/// every class, and meets the class the request declared already there
+/// (`Z/ext/opcache/zend_accelerator_util_funcs.c:186-230`), so the
+/// functions and the class before it are told.
+#[test]
+fn a_load_that_ends_in_a_redeclaration_tells_what_was_declared_before_it() {
+    let rec = Recording::start();
+    let kinds = [Declared(String::new()), Linked(String::new())];
+    let dir = scratch("redeclared");
+
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    std::fs::write(
+        dir.join("functions.php"),
+        "<?php\nfunction f1() {}\nclass B {}\nfunction g() {}\nfunction f2() {}\nclass C {}\n",
+    )
+    .ok();
+    rec.mark("function");
+    serve_file(
+        &engine,
+        &dir,
+        "function_main.php",
+        "<?php\nfunction g() {}\ninclude __DIR__ . '/functions.php';\n",
+    );
+    rec.mark("function served");
+    assert_eq!(
+        only(&rec.events().between("function", "function served"), &kinds),
+        [declared("g"), declared("f1"), linked("b")]
+    );
+
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing(), holding()])
+        .build();
+    std::fs::write(
+        dir.join("classes.php"),
+        "<?php\nclass B {}\nfunction f1() {}\nclass A {}\nfunction f2() {}\nclass C {}\n",
+    )
+    .ok();
+    serve_file(
+        &engine,
+        &dir,
+        "held_first.php",
+        "<?php\ninclude __DIR__ . '/classes.php';\n",
+    );
+    rec.mark("class");
+    serve_file(
+        &engine,
+        &dir,
+        "held_second.php",
+        "<?php\nclass A {}\ninclude __DIR__ . '/classes.php';\n",
+    );
+    rec.mark("class served");
+    assert_eq!(
+        only(&rec.events().between("class", "class served"), &kinds),
+        [linked("a"), declared("f1"), declared("f2"), linked("b")]
+    );
+}
+
+/// A function and a class written on one line are told in the order
+/// they were written, as php's compiler finishes them, which no line
+/// tells apart (#2012).
+#[test]
+fn declarations_on_one_line_are_told_in_the_order_written() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("one_line");
+    let kinds = [Declared(String::new()), Linked(String::new())];
+    rec.mark("class first");
+    serve_file(
+        &engine,
+        &dir,
+        "a.php",
+        "<?php\nclass A {} function f() {}\n",
+    );
+    rec.mark("function first");
+    serve_file(
+        &engine,
+        &dir,
+        "b.php",
+        "<?php\nfunction f() {} class A {}\n",
+    );
+    rec.mark("end");
+    let events = rec.events();
+    assert_eq!(
+        only(&events.between("class first", "function first"), &kinds),
+        [linked("a"), declared("f")]
+    );
+    assert_eq!(
+        only(&events.between("function first", "end"), &kinds),
+        [declared("f"), linked("a")]
+    );
+}
+
 /// `class_alias()` links a class of the program again under the alias,
 /// `zend_register_class_alias_ex`; an anonymous class's declaration and
 /// an alias of an extension's class tell nothing.
