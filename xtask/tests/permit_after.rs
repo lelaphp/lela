@@ -288,6 +288,7 @@ fn unmet(root: &Path) -> Vec<String> {
         &Registry::default(),
         &Store::of_workspace(root),
         Some("HEAD"),
+        &[],
     )
     .unwrap()
     .unmet

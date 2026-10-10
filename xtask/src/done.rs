@@ -206,8 +206,12 @@ pub struct Verdict {
     pub ticket: Option<Ticket>,
     /// One sentence per unmet condition, in the order of the conditions.
     pub unmet: Vec<String>,
-    /// What the hook cannot tell: the harness's own files in the diff.
+    /// What the hook cannot tell: the harness's own files in the diff,
+    /// and the readings of an instrument this run did not take.
     pub notes: Vec<String>,
+    /// The instruments the caller said this run did not take (`--not-run`),
+    /// whose missing readings are notes and not unmet (#2477).
+    pub not_run: Vec<String>,
 }
 
 impl Verdict {
@@ -231,8 +235,12 @@ impl Verdict {
                 .map(|ticket| format!(", for {ticket}"))
                 .unwrap_or_default()
         );
-        if self.met() {
+        if self.met() && self.not_run.is_empty() {
             out.push_str("every condition of done is met\n");
+        } else if self.met() {
+            out.push_str("every condition of done is met over what ran; ");
+            out.push_str(&self.did_not_run());
+            out.push('\n');
         } else {
             out.push_str("unmet:\n");
             for line in &self.unmet {
@@ -265,6 +273,7 @@ impl Verdict {
         reading.count("crates", self.crates.len() as u64)?;
         reading.count("unmet", self.unmet.len() as u64)?;
         reading.count("notes", self.notes.len() as u64)?;
+        reading.count("not_run", self.not_run.len() as u64)?;
         reading.message = if self.met() {
             format!("every condition of done is met since {}", self.base)
         } else {
@@ -275,7 +284,16 @@ impl Verdict {
                 self.unmet.join("; ")
             )
         };
+        if !self.not_run.is_empty() {
+            reading.message = format!("{}; {}", reading.message, self.did_not_run());
+        }
         Ok(reading)
+    }
+
+    /// What the head line and the reading say of `--not-run`, so a pass
+    /// beside it never reads as one over those instruments' readings.
+    fn did_not_run(&self) -> String {
+        format!("{} did not run in this run", self.not_run.join(" and "))
     }
 }
 
@@ -328,7 +346,9 @@ pub(crate) enum Condition {
     /// `[[crate]]` row carries `porting = true` has its `crosscheck` and
     /// its `phpt` readings read as the port's meter, [`porting_meter`],
     /// fresh and printed but met whatever they say, while the port is
-    /// partial (#383).
+    /// partial (#383). A caller's `--not-run` moves an instrument's
+    /// missing reading off this list and onto the notes, as CI's does for
+    /// the oracle job's two while that job is skipped (#2477).
     Fresh,
     /// Every kernel or native added in the diff has a witness: the
     /// `witness` reading's `missing` is zero for the crate.
@@ -413,13 +433,18 @@ impl Condition {
 
 /// Judge the changes since the merge base with `base`, `main`
 /// ([`Base::of`]) when none is given, each key held to the one `snapshot`
-/// gives: the tree is read once, before anything is judged.
+/// gives: the tree is read once, before anything is judged. A reading of
+/// an instrument in `not_run` that the store does not hold is a note and
+/// not unmet: the caller says the run that would write it did not run,
+/// as CI's `done` says of the oracle job's while that job is skipped
+/// (#2477). One the store holds is judged as any other.
 pub fn judge(
     snapshot: &Snapshot,
     manifest: &Manifest,
     registry: &Registry,
     store: &Store,
     base: Option<&str>,
+    not_run: &[String],
 ) -> Result<Verdict> {
     let root = snapshot.root();
     let base = Base::of(root, base)?;
@@ -429,6 +454,7 @@ pub fn judge(
     let ticket = track::head_ticket(root)?;
     let mut unmet = Vec::new();
     let mut notes = Vec::new();
+    let mut not_judged = Vec::new();
 
     let lock_home = lock_home(manifest);
     let carried = Carried::binary(root)?;
@@ -443,8 +469,24 @@ pub fn judge(
                         lock_home.as_deref(),
                         &carried,
                         manifest.pin.digest(),
+                        not_run,
+                        &mut not_judged,
                         &mut unmet,
                     )?;
+                }
+                if !not_run.is_empty() {
+                    notes.push(format!(
+                        "{} did not run in this run, so condition 1 judged {}",
+                        not_run.join(" and "),
+                        if not_judged.is_empty() {
+                            "no reading of theirs: no touched crate is asked for one".to_owned()
+                        } else {
+                            format!(
+                                "none of the readings it asks for: {}",
+                                not_judged.join(", ")
+                            )
+                        }
+                    ));
                 }
             }
             Condition::Witnessed | Condition::APersonsFiles => {}
@@ -481,6 +523,7 @@ pub fn judge(
         ticket,
         unmet,
         notes,
+        not_run: not_run.to_vec(),
     })
 }
 
@@ -678,7 +721,9 @@ impl KeyNow {
 }
 
 /// Conditions 1 and 2 for one touched crate, held to its key now, so a
-/// reading taken before a crate it is built from changed is stale.
+/// reading taken before a crate it is built from changed is stale. A
+/// missing reading of an instrument in `not_run` goes to `not_judged`.
+#[allow(clippy::too_many_arguments)]
 fn fresh_readings(
     store: &Store,
     krate: &Crate,
@@ -686,6 +731,8 @@ fn fresh_readings(
     lock_home: Option<&str>,
     carried: &Carried,
     pin: &str,
+    not_run: &[String],
+    not_judged: &mut Vec<String>,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
     let key = &now.key;
@@ -711,7 +758,11 @@ fn fresh_readings(
     for instrument in instruments_of(krate, lock_home, carried) {
         for scope in scopes_of(instrument, name) {
             let Some(reading) = read.remove(&(instrument.to_owned(), scope.clone())) else {
-                unmet.push(format!("{instrument}: no reading for {scope}"));
+                if not_run.iter().any(|n| n == instrument) {
+                    not_judged.push(format!("{instrument} for {scope}"));
+                } else {
+                    unmet.push(format!("{instrument}: no reading for {scope}"));
+                }
                 continue;
             };
             if !reading.fresh_for(key, pin) {
@@ -908,9 +959,10 @@ pub fn run(
     registry: &Registry,
     store: &Store,
     base: Option<&str>,
+    not_run: &[String],
 ) -> Result<()> {
     let snapshot = Snapshot::disk(root)?;
-    let verdict = judge(&snapshot, manifest, registry, store, base)?;
+    let verdict = judge(&snapshot, manifest, registry, store, base, not_run)?;
     let outcome = store.record(&[verdict.reading(manifest, &snapshot)?])?;
     print!("{}", verdict.render());
     match outcome {
@@ -957,9 +1009,12 @@ pub(crate) fn hook(
     if stop.stop_hook_active {
         return None;
     }
-    let verdict = match Snapshot::disk(root)
-        .and_then(|snapshot| Ok((judge(&snapshot, manifest, registry, store, None)?, snapshot)))
-    {
+    let verdict = match Snapshot::disk(root).and_then(|snapshot| {
+        Ok((
+            judge(&snapshot, manifest, registry, store, None, &[])?,
+            snapshot,
+        ))
+    }) {
         Ok(verdict) => verdict,
         Err(err) => return Some(block(&format!("done could not judge the changes: {err:#}"))),
     };

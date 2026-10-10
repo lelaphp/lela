@@ -208,6 +208,7 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
             &registry,
             &store,
             Some("HEAD"),
+            &[],
         )
         .unwrap()
     };
