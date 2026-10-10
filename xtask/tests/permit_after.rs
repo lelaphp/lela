@@ -845,3 +845,55 @@ fn a_record_an_older_build_took_of_the_hook_s_checkout_is_not_compared() {
     assert_eq!(read(&root, "docs/divergence.toml"), merged);
     assert!(!out.contains("divergence.toml"), "{out}");
 }
+
+/// #2607: a call that works in its worktree by a shape other than a plain
+/// leading `cd`, while a person edits the main checkout's registry. The
+/// line's words can name the main checkout's file where they are read
+/// there, so held in the main checkout the person's edit would be put
+/// back or named; held in the worktree the line works in, the main
+/// checkout is neither compared nor touched.
+fn a_call_in_its_worktree_leaves_the_main_checkout_alone(
+    name: &str,
+    shape: impl Fn(&str) -> String,
+) {
+    let root = scratch(name);
+    let (_base, linked) = linked_worktree(&root);
+    let edited = format!(
+        "{}\n# a person's edit\n",
+        read(&root, "docs/divergence.toml")
+    );
+    let command = shape(linked.to_str().unwrap());
+    let (out, _) = through_the_hooks_while(&root, &format!("toolu_{name}"), &command, || {
+        std::fs::write(root.join("docs/divergence.toml"), &edited).unwrap();
+    });
+    assert_eq!(
+        read(&root, "docs/divergence.toml"),
+        edited,
+        "the person's edit stands: {out}"
+    );
+    assert!(
+        !out.contains("divergence.toml"),
+        "the main checkout is not judged: {out}"
+    );
+}
+
+#[test]
+fn a_call_by_git_c_into_its_worktree_leaves_the_main_checkout_alone() {
+    a_call_in_its_worktree_leaves_the_main_checkout_alone("git-c", |wt| {
+        format!("git -C {wt} checkout -- docs/divergence.toml")
+    });
+}
+
+#[test]
+fn a_call_by_a_cd_to_a_variable_it_assigned_leaves_the_main_checkout_alone() {
+    a_call_in_its_worktree_leaves_the_main_checkout_alone("cd-variable", |wt| {
+        format!("W={wt} && cd \"$W\" && git checkout -- docs/divergence.toml")
+    });
+}
+
+#[test]
+fn a_call_by_pushd_into_its_worktree_leaves_the_main_checkout_alone() {
+    a_call_in_its_worktree_leaves_the_main_checkout_alone("pushd", |wt| {
+        format!("pushd {wt} && git checkout -- docs/divergence.toml && popd")
+    });
+}

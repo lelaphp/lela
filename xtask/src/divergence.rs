@@ -41,9 +41,7 @@ pub const FILE: &str = "docs/divergence.toml";
 pub const INSTRUMENT: &str = "divergence-reason";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
-/// `crosscheck:<name>`, `trace:<site>` or `wire:<suite>/<case>`, or
-/// `php-ub:<site>` on a row the file still spells in #2220's shape
-/// ([`LEGACY_PHP_UB`]). Only
+/// `crosscheck:<name>`, `trace:<site>` or `wire:<suite>/<case>`. Only
 /// [`Id::of`] makes one, so an id in hand carries the prefix of the kind it
 /// was decoded under.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -53,33 +51,28 @@ pub struct Id(String);
 impl Id {
     /// `text` as an id of `kind`, refused unless it starts with the kind's
     /// prefix: the one place that rule is held, for a row's own id, for
-    /// each id it covers and for a proposed one.
+    /// each id it covers and for a proposed one. A `wire:` id names a suite
+    /// and a case after it.
     pub fn of(kind: Kind, text: &str) -> Result<Id> {
-        Id::under(kind.as_str(), kind.prefix(), text)
-    }
-
-    /// `text` as an id of the kind the file spells `kind`, whose ids start
-    /// with `prefix`; a `wire:` id names a suite and a case after it.
-    fn under(kind: &str, prefix: &str, text: &str) -> Result<Id> {
+        let (prefix, kind_name) = (kind.prefix(), kind.as_str());
         let Some(rest) = text.strip_prefix(prefix) else {
-            bail!("the id {text:?} is of kind {kind}, whose ids start with {prefix:?}");
+            bail!("the id {text:?} is of kind {kind_name}, whose ids start with {prefix:?}");
         };
         let named = |(suite, case): (&str, &str)| !suite.is_empty() && !case.is_empty();
-        if prefix == Kind::Wire.prefix() && !rest.split_once('/').is_some_and(named) {
-            bail!("the id {text:?} is of kind {kind}, whose ids are {prefix:?}<suite>/<case>");
+        if kind == Kind::Wire && !rest.split_once('/').is_some_and(named) {
+            bail!("the id {text:?} is of kind {kind_name}, whose ids are {prefix:?}<suite>/<case>");
         }
         Ok(Id(text.to_owned()))
     }
 
-    /// `text` as an id a row of `kind` covers, the file spelling the kind
-    /// `spelled` with ids under `prefix`: one of the row's own, as
-    /// [`Id::under`] holds it, or under a `trace:` row a `witness:` id, a
+    /// `text` as an id a row of `kind` covers: one of the row's own, as
+    /// [`Id::of`] holds it, or under a `trace:` row a `witness:` id, a
     /// fence that pins the engine's side of the row (harness §4.3, #1650).
-    fn covered(kind: Kind, spelled: &str, prefix: &str, text: &str) -> Result<Id> {
+    fn covered(kind: Kind, text: &str) -> Result<Id> {
         if kind == Kind::Trace && text.starts_with(Kind::Witness.prefix()) {
             return Ok(Id(text.to_owned()));
         }
-        Id::under(spelled, prefix, text)
+        Id::of(kind, text)
     }
 
     pub fn as_str(&self) -> &str {
@@ -140,9 +133,9 @@ impl Divergence {
     }
 }
 
-/// One row as the file spells it, before its ids are decoded. `kind` is
-/// text, so the one kind the file may still spell and [`Kind`] has not,
-/// [`LEGACY_PHP_UB`], decodes beside the others.
+/// One row as the file spells it, before its kind and ids are decoded: a
+/// kind [`Kind`] does not name is refused with the row's id, `php-ub`
+/// among them since #2460 made it a cause (#2510).
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Row {
@@ -163,25 +156,16 @@ impl TryFrom<Row> for Divergence {
     type Error = anyhow::Error;
 
     fn try_from(row: Row) -> Result<Divergence> {
-        let (kind, cause, prefix) = if row.kind == LEGACY_PHP_UB {
-            if row.cause.is_some_and(|c| c != Cause::PhpUb) {
-                bail!(
-                    "the row {:?} is of kind {LEGACY_PHP_UB}, which is cause {}, and says cause {}",
-                    row.id,
-                    Cause::PhpUb.as_str(),
-                    row.cause.unwrap_or_default().as_str()
-                );
-            }
-            (Kind::Trace, Cause::PhpUb, LEGACY_PHP_UB_PREFIX)
-        } else {
-            let kind: Kind = row.kind.parse()?;
-            (kind, row.cause.unwrap_or_default(), kind.prefix())
-        };
-        let id = Id::under(&row.kind, prefix, &row.id)?;
+        let kind: Kind = row
+            .kind
+            .parse()
+            .map_err(|e| anyhow!("{e}, in the row {:?}", row.id))?;
+        let cause = row.cause.unwrap_or_default();
+        let id = Id::of(kind, &row.id)?;
         let mut covers = BTreeSet::new();
         for text in &row.covers {
-            let covered = Id::covered(kind, &row.kind, prefix, text)
-                .map_err(|e| anyhow!("{e}, in the covers of {id}"))?;
+            let covered =
+                Id::covered(kind, text).map_err(|e| anyhow!("{e}, in the covers of {id}"))?;
             if covered == id || !covers.insert(covered) {
                 bail!("the id {text:?} is named twice in the row {id}");
             }
@@ -213,16 +197,6 @@ impl From<Divergence> for Row {
         }
     }
 }
-
-/// The `kind` #2220 gave a row recording php's undefined behaviour, before
-/// #2460 made that a cause: a row the file still spells so decodes as a
-/// `trace` row of cause `php-ub`, its ids under [`LEGACY_PHP_UB_PREFIX`]
-/// as written, so the registry decodes before and after #2463 moves its
-/// rows to `trace:<site>`. The spelling goes once that migration lands
-/// (#2510).
-const LEGACY_PHP_UB: &str = "php-ub";
-/// The prefix of a [`LEGACY_PHP_UB`] row's ids.
-const LEGACY_PHP_UB_PREFIX: &str = "php-ub:";
 
 /// Which lane reads a row: what its id names and which comparison
 /// consults it.

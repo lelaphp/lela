@@ -735,8 +735,8 @@ text = "The Harness section's _Avoid_ words appear in no public item name or rus
 
 [[rule]]
 id = "generated.committed"
-generated = { "ext/clippy.toml" = "ext.no-locks", "crates/clippy.toml" = "fork.threads", "sapi/clippy.toml" = "fork.threads" } # grammar: generated, design §10
-text = "ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget."
+generated = ["crates/clippy.toml", "ext/clippy.toml", "sapi/clippy.toml"] # grammar: generated, design §10
+text = "Each clippy.toml the row names is generated from the manifest and committed; a stale copy fails budget."
 
 [[rule]]
 id = "git.no-verify"
@@ -857,4 +857,4 @@ text = "A session's transcript is Claude Code's record of what the person said; 
 id = "divergence.reason"
 scope = "docs/divergence.toml"
 check = "divergence-reason"
-text = "A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3)."
+text = "A divergence row with status accepted has a reason a person wrote, a by-design row's citing the design section or ADR that chose it, and an oracle-build row carries what it retires at; done fails while an open row touches the scope (harness §4.3)."
