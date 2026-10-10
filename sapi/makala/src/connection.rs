@@ -12,20 +12,23 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use hyper::body::{Body as _, Bytes, Frame, Incoming, SizeHint};
-use hyper::header::{HeaderName, HeaderValue};
+use hyper::header::{CONNECTION, HeaderName, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use php_sapi::ResponseHead;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
+use crate::framing;
 use crate::options::{Limits, Options};
 use crate::request::{Head, Job, Sink};
+use crate::socket::Socket;
 
 /// How many pieces of a request's body wait for the request to read them.
 const BODY_PIECES: usize = 8;
@@ -71,37 +74,77 @@ async fn accept(
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             continue;
         };
-        let queue = queue.clone();
-        tokio::spawn(async move {
-            let service = service_fn(move |request| respond(queue.clone(), peer, local, request));
-            let mut builder = http1::Builder::new();
-            builder
-                .timer(TokioTimer::new())
-                .header_read_timeout(limits.header_timeout)
-                .max_headers(limits.header_count)
-                .max_buf_size(limits.request_line + limits.header_bytes);
-            // A connection's end, the client's close among them, is
-            // nothing the server acts on until its logs (#2345).
-            builder
-                .serve_connection(TokioIo::new(stream), service)
-                .await
-                .ok();
+        let connection = Arc::new(Connection {
+            peer,
+            local,
+            limits,
+            queue: queue.clone(),
+            cut: Notify::new(),
         });
+        tokio::spawn(drive(connection, stream));
     }
 }
 
-/// One request: handed to the request side with its body following it,
-/// and answered with the head the request sends and the body it writes
-/// after it; a 503 where the server is stopping and takes no request,
-/// and a 500 where the request ended without a head, which only a panic
-/// contained at its edge leaves.
-async fn respond(
-    queue: mpsc::Sender<Job>,
+/// What one connection's requests share.
+struct Connection {
     peer: SocketAddr,
     local: SocketAddr,
+    limits: Limits,
+    queue: mpsc::Sender<Job>,
+    /// Rung where the connection must end while a response is under way,
+    /// its body broken after the response began: the connection is
+    /// dropped, its socket lingers, and the request's next write meets
+    /// [`php_sapi::Aborted`].
+    cut: Notify,
+}
+
+/// One connection, its requests served until it ends or is cut.
+async fn drive(connection: Arc<Connection>, stream: tokio::net::TcpStream) {
+    let limits = connection.limits;
+    let service = {
+        let connection = Arc::clone(&connection);
+        service_fn(move |request| respond(Arc::clone(&connection), request))
+    };
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_timeout)
+        .max_headers(limits.header_count)
+        .max_buf_size(limits.request_line + limits.header_bytes);
+    let served = builder.serve_connection(TokioIo::new(Socket::new(stream)), service);
+    // A connection's end, the client's close among them, is nothing the
+    // server acts on until its logs (#2345).
+    first_of(served, connection.cut.notified()).await;
+}
+
+/// Whichever of two futures ends first, the other dropped unfinished.
+async fn first_of<A: Future, B: Future>(a: A, b: B) {
+    let (mut a, mut b) = (pin!(a), pin!(b));
+    std::future::poll_fn(|cx| {
+        if a.as_mut().poll(cx).is_ready() || b.as_mut().poll(cx).is_ready() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// One request: refused where its framing does not hold ([`framing`]);
+/// else handed to the request side with its body following it, and
+/// answered with the head the request sends and the body it writes after
+/// it. The server answers on its own with a 503 where it is stopping and
+/// takes no request; with the refusal of a body that broke before the
+/// request sent its head; and with a 500 where the request ended without
+/// a head, which only a panic contained at its edge leaves.
+async fn respond(
+    connection: Arc<Connection>,
     request: Request<Incoming>,
 ) -> Result<Response<Reply>, Infallible> {
     let (parts, incoming) = request.into_parts();
+    if let Some(refused) = framing::refusal(&parts) {
+        return Ok(closing(refused));
+    }
     let (feed, body) = mpsc::channel(BODY_PIECES);
     let (head_sent, head) = oneshot::channel();
     let (out, written) = mpsc::channel(RESPONSE_PIECES);
@@ -121,38 +164,120 @@ async fn respond(
             .iter()
             .map(|(name, value)| (name.as_str().as_bytes().to_vec(), value.as_bytes().to_vec()))
             .collect(),
-        peer,
-        local,
+        peer: connection.peer,
+        local: connection.local,
     };
     let job = Job {
         head: head_read,
         body,
         sink: Sink::new(head_sent, out),
     };
-    if queue.send(job).await.is_err() {
+    if connection.queue.send(job).await.is_err() {
         return Ok(plain(StatusCode::SERVICE_UNAVAILABLE));
     }
-    tokio::spawn(pump(incoming, feed));
-    Ok(match head.await {
-        Ok(head) => response(&head, written),
-        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR),
+    let (broke, mut fault) = oneshot::channel();
+    tokio::spawn(pump(incoming, feed, broke, Arc::clone(&connection)));
+    Ok(match answer(head, &mut fault).await {
+        Answer::Head(head) => {
+            // A fault that came with the head is no longer the answer's:
+            // closed, the channel takes no later one, which the pump then
+            // cuts the connection for, and one already sent is cut here.
+            fault.close();
+            if fault.try_recv().is_ok() {
+                connection.cut.notify_one();
+            }
+            response(&head, written)
+        }
+        Answer::Broke(fault) => closing(fault.status()),
+        Answer::Headless => plain(StatusCode::INTERNAL_SERVER_ERROR),
     })
 }
 
-/// The request's body onto its channel as hyper reads it, until it ends,
-/// fails, or the request has gone and reads no more; the channel closed
-/// is the body's end. Trailers are not PHP's to read.
-async fn pump(mut incoming: Incoming, feed: mpsc::Sender<Bytes>) {
-    loop {
-        let frame = std::future::poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)).await;
-        let Some(Ok(frame)) = frame else {
-            return;
-        };
-        if let Ok(piece) = frame.into_data()
-            && feed.send(piece).await.is_err()
-        {
-            return;
+/// How a request is answered.
+enum Answer {
+    /// With the head it sent.
+    Head(ResponseHead),
+    /// With the refusal of its body, which broke first.
+    Broke(BodyFault),
+    /// With none: it ended without sending a head.
+    Headless,
+}
+
+/// The request's head, or its body's fault where that comes first; a body
+/// that ends whole leaves the head to wait for.
+async fn answer(
+    mut head: oneshot::Receiver<ResponseHead>,
+    fault: &mut oneshot::Receiver<BodyFault>,
+) -> Answer {
+    let mut body_whole = false;
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(sent) = Pin::new(&mut head).poll(cx) {
+            return Poll::Ready(sent.map_or(Answer::Headless, Answer::Head));
         }
+        if !body_whole {
+            match Pin::new(&mut *fault).poll(cx) {
+                Poll::Ready(Ok(fault)) => return Poll::Ready(Answer::Broke(fault)),
+                Poll::Ready(Err(_)) => body_whole = true,
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// Why a request's body was not read to its end.
+#[derive(Debug, Clone, Copy)]
+enum BodyFault {
+    /// It broke: a chunk hyper's decoder refused (§7.1), or the client
+    /// failed or closed before the body's end.
+    Broken,
+    /// It ended in a trailer section. hyper ends that section only at
+    /// CRLF CRLF and parses it with a parser that takes a bare LF's blank
+    /// line as its end and drops what follows, so a front end that ends
+    /// it at the bare LF reads a request where this server read
+    /// trailers; and PHP reads no trailer, as no web server hands one to
+    /// php-fpm. The request is refused, and the connection with it.
+    Trailers,
+}
+
+impl BodyFault {
+    /// The answer to a request whose body broke before it sent a head.
+    fn status(self) -> StatusCode {
+        match self {
+            BodyFault::Broken | BodyFault::Trailers => StatusCode::BAD_REQUEST,
+        }
+    }
+}
+
+/// The request's body onto its channel as hyper reads it, until it ends,
+/// the request has gone and reads no more, or it breaks: a fault goes to
+/// the request's answer while that waits, and cuts the connection once
+/// the response is under way. The channel closed is the body's end, which
+/// the request reads as short where the body broke.
+async fn pump(
+    mut incoming: Incoming,
+    feed: mpsc::Sender<Bytes>,
+    broke: oneshot::Sender<BodyFault>,
+    connection: Arc<Connection>,
+) {
+    let fault = loop {
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)).await;
+        match frame {
+            None => return,
+            Some(Err(_)) => break BodyFault::Broken,
+            Some(Ok(frame)) => match frame.into_data() {
+                Ok(piece) => {
+                    if feed.send(piece).await.is_err() {
+                        return;
+                    }
+                }
+                Err(_) => break BodyFault::Trailers,
+            },
+        }
+    };
+    if broke.send(fault).is_err() {
+        connection.cut.notify_one();
     }
 }
 
@@ -186,6 +311,16 @@ fn response(head: &ResponseHead, written: mpsc::Receiver<Bytes>) -> Response<Rep
 fn plain(status: StatusCode) -> Response<Reply> {
     let mut response = Response::new(Reply::Empty);
     *response.status_mut() = status;
+    response
+}
+
+/// A response of the server's own after which the connection closes:
+/// hyper reads its `Connection: close` and keeps nothing alive.
+fn closing(status: StatusCode) -> Response<Reply> {
+    let mut response = plain(status);
+    response
+        .headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("close"));
     response
 }
 

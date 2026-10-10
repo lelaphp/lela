@@ -27,8 +27,10 @@
 )]
 
 mod connection;
+mod framing;
 pub mod options;
 mod request;
+mod socket;
 
 use std::ffi::OsString;
 use std::io::Write;
