@@ -162,13 +162,21 @@ impl Request {
     /// an interned string or an immutable array never is. The request
     /// is the hooks over itself, so the heap a destructor allocates from
     /// is this one, handed back for the duration ([`Hooks`]).
+    /// A value that counts no owner, a scalar, an interned string or an
+    /// immutable array, is tested here, where the caller stands, and
+    /// gives up nothing, as `zval_ptr_dtor`'s `Z_REFCOUNTED_P` test is
+    /// inline in php's handlers; the release of a counted one is a call.
     // Taking the value is the point: the owner is given up here, and a
     // `Value` that is still in hand after this call names what may be
     // freed.
     #[allow(clippy::needless_pass_by_value)]
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline]
     pub fn release(&mut self, value: Value) {
-        Heap::release(&mut Hooks(self), value.to_zval());
+        let z = value.to_zval();
+        if z.is_refcounted() {
+            Heap::release(&mut Hooks(self), z);
+        }
     }
 
     /// `GC_DELREF` and `gc_check_possible_root` over a value the caller
@@ -185,10 +193,16 @@ impl Request {
     /// collector (design §5.12). What `FREE_OP` does to a temporary
     /// operand and `zend_vm_stack_free_args` to an internal call's
     /// arguments.
+    /// A value that counts no owner is tested inline, as for
+    /// [`Request::release`].
     #[allow(clippy::needless_pass_by_value)]
     #[cfg_attr(debug_assertions, track_caller)]
+    #[inline]
     pub(crate) fn release_nogc(&mut self, value: Value) {
-        Heap::release_nogc(&mut Hooks(self), value.to_zval());
+        let z = value.to_zval();
+        if z.is_refcounted() {
+            Heap::release_nogc(&mut Hooks(self), z);
+        }
     }
 
     /// `ZVAL_NEW_REF`, what [`PhpRef::new`] is: a cell of the request's
