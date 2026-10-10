@@ -34,7 +34,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{to_long, with_string};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, leave_pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
@@ -410,7 +410,9 @@ fn readline_completion_function(req: &mut Request, callback: Callable) -> bool {
 /// callable called with the word and its bounds; an array answered is
 /// its members as strings that start with the word, which
 /// `_readline_command_generator` walks, or the empty list for an empty
-/// array; anything else, or a call that failed, is nothing.
+/// array; anything else, or a call that failed, is nothing, what the
+/// call threw left in `EG(exception)` for `readline()` to raise as it
+/// returns, as php's `call_user_function` leaves it.
 pub(crate) fn user_completion(req: &mut Request, text: &[u8], start: i64, end: i64) -> Matches {
     let Some(callable) = req
         .state::<State>()
@@ -425,8 +427,12 @@ pub(crate) fn user_completion(req: &mut Request, text: &[u8], start: i64, end: i
     };
     let called = call(req, &callable, &[*word, Value::int(start), Value::int(end)]);
     word.give_up(req);
-    let Ok(answer) = called else {
-        return Matches::None;
+    let answer = match called {
+        Ok(answer) => answer,
+        Err(thrown) => {
+            leave_pending(req, thrown);
+            return Matches::None;
+        }
     };
     let held = answer.deref();
     let Some(array) = held.as_array() else {
