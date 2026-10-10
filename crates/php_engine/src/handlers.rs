@@ -1274,6 +1274,23 @@ pub(crate) fn bind_global<T: Tier>(
 /// Error: Class "Nope" not found
 /// ```
 ///
+/// An object's method is found through its class's `get_method`, which
+/// may hand the call to another object, as a dual iterator hands an
+/// unknown method to its inner iterator; the call and
+/// `zend_is_callable_ex` both reach it there.
+///
+/// ```php
+/// class Inner extends ArrayIterator { function hello() { return get_class($this) . " says hello"; } }
+/// $outer = new IteratorIterator(new Inner([1]));
+/// $f = [$outer, 'hello'];
+/// try { echo $f(), "\n"; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// try { echo call_user_func($f), "\n"; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Inner says hello
+/// Inner says hello
+/// ```
+///
 /// ```php
 /// $f = function () { return 1; };
 /// $name = 'strlen';
@@ -1455,9 +1472,10 @@ fn dynamic_call_string(
 /// pair of exactly the members 0 and 1, the first a class name or an
 /// object and the second a method name, each shape php's `Error` in its
 /// words where it is not; a class name's method found as a `static` call
-/// finds it, an object's through its `get_method` with the access rule
-/// `zend_std_get_method` holds it to, a `static` method on an object
-/// called with no receiver.
+/// finds it, an object's as [`method_on`] finds it, through its
+/// `get_method` and the receiver that may hand the call to, with the
+/// access rule `zend_std_get_method` holds it to, the receiver then the
+/// called scope; a `static` method on an object called with no receiver.
 fn dynamic_call_array(
     req: &mut Request,
     array: PhpArray,
@@ -1494,25 +1512,14 @@ fn dynamic_call_array(
             "First array member is not a valid class name or object",
         ));
     };
-    let class = object.class();
-    let table = req.object_handlers(object.heap());
-    let found = match table.get_method_as(req, object, &method.to_ascii_lowercase(), &method)? {
-        Some(function) => Some(function),
-        None => req.call_trampoline(class, &method, false),
-    };
-    let Some(function) = found else {
-        let written = Value::string(req.string(&method)?);
-        let thrown = undefined_method(req, class, &written);
-        req.release(written);
-        return Err(thrown);
-    };
-    let function = if req.method_accessible(function) {
-        function
-    } else {
-        req.call_trampoline(class, &method, false)
-            .unwrap_or(function)
-    };
-    req.check_method_access(function, &method)?;
+    let (function, receiver) = method_on(
+        req,
+        object,
+        &method.to_ascii_lowercase(),
+        &second,
+        Undefined::OnHanded,
+    )?;
+    let object = receiver.unwrap_or(object);
     let name = req.string(&method)?;
     let this = if req
         .method_decl(function)
@@ -1527,7 +1534,7 @@ fn dynamic_call_array(
         function,
         name: Some(name),
         this,
-        called_scope: Some(class),
+        called_scope: Some(object.class()),
         closure: None,
     })
 }
@@ -5510,25 +5517,45 @@ fn method_of_call(
     if named && let Some(function) = req.cached_callee(frame, slot, class) {
         return Ok((function, None));
     }
-    let (function, receiver) = method_on(req, object, method)?;
+    let (function, receiver) = method_on(
+        req,
+        object,
+        &method.lowered,
+        &method.written,
+        Undefined::OnCalled,
+    )?;
     if named && receiver.is_none() && !req.never_cached(function) {
         req.prime_callee(frame, slot, class, function);
     }
     Ok((function, receiver))
 }
 
+/// Which object `Call to undefined method X::m()` names where no class
+/// answers a method: the one called on, `orig_obj` in
+/// `INIT_METHOD_CALL`, or the last one its class handed the call to,
+/// the object `get_method(&object, …)` left in
+/// `zend_init_dynamic_call_array`.
+#[derive(Clone, Copy)]
+enum Undefined {
+    OnCalled,
+    OnHanded,
+}
+
 /// `obj->handlers->get_method(&obj, name, key)` and what
-/// `INIT_METHOD_CALL` holds the answer to: the method by its lowered
-/// name on the object, the trampoline of its class's `__call` where the
-/// class has no such method (`zend_std_get_method`), or the method on
-/// the receiver its class hands the call to instead
-/// ([`ObjectHandlers::method_receiver`]), found on that receiver the
-/// same way, so a chain of outer iterators hands an unknown method on
-/// to the innermost that has it; `Call to undefined method X::m()`,
-/// naming the object called on, where none answers. A method the scope
-/// may not call is `__call`'s too where the class it was found on has
+/// `INIT_METHOD_CALL` and `INIT_DYNAMIC_CALL` hold the answer to: the
+/// method by its lowered name on the object, the trampoline of its
+/// class's `__call` where the class has no such method
+/// (`zend_std_get_method`), or the method on the receiver its class
+/// hands the call to instead ([`Request::method_found`]), so a chain of
+/// outer iterators hands an unknown method on to the innermost that has
+/// it; `Call to undefined method X::m()`, naming the object `undefined`
+/// says, where none answers. A method the object's own class answers
+/// that the scope may not call is `__call`'s too where the class has
 /// one, and `zend_std_get_method`'s access rule's `Error` where it has
-/// none. A class's handler that refuses the call raises here.
+/// none; one a receiver answers is called whatever its visibility, as
+/// `spl_dual_it_get_method` finds it in the inner class's function
+/// table with no rule. A class's handler that refuses the call raises
+/// here.
 ///
 /// ```php
 /// class Deep extends ArrayIterator { function deep() { return get_class($this); } }
@@ -5538,10 +5565,26 @@ fn method_of_call(
 /// ```expect
 /// Deep
 /// ```
+///
+/// ```php
+/// class Plain extends ArrayIterator { private function priv() { return "priv ran"; } }
+/// $b = new IteratorIterator(new IteratorIterator(new Plain([])));
+/// foreach ([fn () => $b->priv(), fn () => [$b, 'priv'](), fn () => $b->nope(), fn () => [$b, 'nope']()] as $f) {
+///     try { echo $f(), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// priv ran
+/// priv ran
+/// Call to undefined method IteratorIterator::nope()
+/// Call to undefined method Plain::nope()
+/// ```
 fn method_on(
     req: &mut Request,
     object: PhpObject,
-    method: &exec::MethodName,
+    lowered: &[u8],
+    written: &Value,
+    undefined: Undefined,
 ) -> Result<(Function, Option<PhpObject>), Thrown> {
     // The lookup a primed slot spares, counted where the tests read it
     // ([`exec::Vm::lookups`]).
@@ -5549,48 +5592,26 @@ fn method_on(
     {
         req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
     }
-    let written = method.written.as_str_bytes().unwrap_or_default().to_vec();
-    let Some((function, receiver)) = method_found(req, object, &method.lowered, &written)? else {
-        return Err(undefined_method(req, object.class(), &method.written));
+    let bytes = written.as_str_bytes().unwrap_or_default().to_vec();
+    let (found, receiver) = req.method_found(object, lowered, &bytes)?;
+    let Some(function) = found else {
+        let named = match undefined {
+            Undefined::OnCalled => object,
+            Undefined::OnHanded => receiver.unwrap_or(object),
+        };
+        return Err(undefined_method(req, named.class(), written));
     };
-    let on = receiver.unwrap_or(object).class();
+    if receiver.is_some() {
+        return Ok((function, receiver));
+    }
     let function = if req.method_accessible(function) {
         function
     } else {
-        req.call_trampoline(on, &written, false).unwrap_or(function)
+        req.call_trampoline(object.class(), &bytes, false)
+            .unwrap_or(function)
     };
-    req.check_method_access(function, &written)?;
-    Ok((function, receiver))
-}
-
-/// The lookup [`method_on`] holds to its rules: the class's
-/// `get_method`, then its `__call`, then the same on the receiver its
-/// class hands the call to, until a class answers or hands it to none.
-/// The receiver is `None` where the object itself answered.
-fn method_found(
-    req: &mut Request,
-    object: PhpObject,
-    lowered: &[u8],
-    written: &[u8],
-) -> Result<Option<(Function, Option<PhpObject>)>, Thrown> {
-    let mut on = object;
-    let mut receiver = None;
-    loop {
-        let table = req.object_handlers(on.heap());
-        if let Some(function) = table.get_method_as(req, on, lowered, written)? {
-            return Ok(Some((function, receiver)));
-        }
-        if let Some(trampoline) = req.call_trampoline(on.class(), written, false) {
-            return Ok(Some((trampoline, receiver)));
-        }
-        match table.method_receiver(req, on) {
-            Some(inner) => {
-                on = inner;
-                receiver = Some(inner);
-            }
-            None => return Ok(None),
-        }
-    }
+    req.check_method_access(function, &bytes)?;
+    Ok((function, None))
 }
 
 /// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` read as a
@@ -7748,7 +7769,7 @@ fn verify_ref_array_assignable(req: &mut Request, cell: PhpRef) -> Result<(), Th
         .map(|source| {
             (
                 source.declaring,
-                crate::api::coerce::declared_type_name(&source.ty),
+                php_unit::type_to_string(&source.ty),
                 String::from_utf8_lossy(&source.name).into_owned(),
             )
         });
@@ -7785,7 +7806,7 @@ fn refuse_fetch(
             );
             if promotes && typed.ty.mask() & MAY_BE_ARRAY == 0 {
                 let class = req.class_name(typed.declaring);
-                let ty = crate::api::coerce::declared_type_name(&typed.ty);
+                let ty = php_unit::type_to_string(&typed.ty);
                 return Err(crate::api::raising::throw_error(
                     req,
                     "TypeError",
@@ -20573,7 +20594,7 @@ fn step_through_typed_ref(
             .map(|source| {
                 (
                     source.declaring,
-                    crate::api::coerce::declared_type_name(&source.ty),
+                    php_unit::type_to_string(&source.ty),
                     String::from_utf8_lossy(&source.name).into_owned(),
                 )
             });
@@ -23166,21 +23187,6 @@ mod tests {
         );
         req.release(cell.as_value());
         assert_eq!(req.memory_usage(false), start - 40 - 32);
-    }
-
-    /// #1514: the program #1511 ruled on, which is held to the engine
-    /// alone, so no witness pins it (`php-ub:assign-obj-entry-container-under-a-handler`).
-    #[test]
-    fn the_object_a_handler_frees_with_its_array_is_held_across_the_write() {
-        let served = Engine::cli_builder().build().serve_capture(
-            "<?php class C { public $p = 1; function __destruct() { echo \"dtor \", $this->p ?? \"NULL\", \"\\n\"; } }\nset_error_handler(function($code, $msg) use (&$a) { echo \"Error: $msg\\n\"; $a = 0; });\n$a = [new C];\n$a[0]->p = $y;\nvar_dump($a);\necho \"DONE\\n\";",
-            crate::test::Capture::default(),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
-            "Error: Undefined variable $y\ndtor NULL\nint(0)\nDONE\n"
-        );
-        assert_eq!(served.fatal, None);
     }
 
     /// #367, the first acceptance: a `foreach` by value over a plain

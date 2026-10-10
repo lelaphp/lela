@@ -572,7 +572,7 @@ pub fn strict_types(req: &Request) -> bool {
 /// under `strict_types` converts nothing but an int a float takes; and
 /// the rest is `zend_argument_type_error`'s `must be of type %s, %s
 /// given`, the type as `zend_type_to_string` writes it
-/// ([`declared_type_name`]) and the value as `zend_zval_value_name`
+/// ([`php_unit::type_to_string`]) and the value as `zend_zval_value_name`
 /// names it. A `callable` is `zend_is_callable_ex`'s resolution, and
 /// its refusal `zend_wrong_callback_error`'s sentence
 /// ([`callable_argument`]).
@@ -871,7 +871,7 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<He
     };
     let Some(coerced) = coerced else {
         let given = value_name(req, &value);
-        let declared = declared_type_name(ty);
+        let declared = php_unit::type_to_string(ty);
         return Err(arg_type_error(
             req,
             position,
@@ -881,9 +881,10 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<He
     if null {
         // `zend_null_arg_deprecated` names the type the parameter
         // declares where it declares one, and the macro's where not.
-        let declared = req
-            .active_parameter_type(position)
-            .map_or_else(|| declared_type_name(ty), |ty| declared_type_name(&ty));
+        let declared = req.active_parameter_type(position).map_or_else(
+            || php_unit::type_to_string(ty),
+            |ty| php_unit::type_to_string(&ty),
+        );
         crate::api::raising::arg_null_deprecated(req, position, &declared);
         if req.is_pending() {
             req.release(coerced);
@@ -1182,16 +1183,15 @@ fn null_as_scalar(req: &mut Request, mask: u32) -> Result<Option<Value>, Thrown>
     })
 }
 
-/// The declared type as `zend_type_to_string` writes it
-/// (`Z/Zend/zend_compile.c:1429`): the class names first, an
-/// intersection among them bracketed, then the other types in php's
-/// own order whatever order they were declared in, `static`, `callable`,
-/// `object`, `array`, `string`, `int`, `float`, `bool` or `false` or
-/// `true`, `void`, `never`; `iterable` as the `Traversable|array` php
-/// compiles it to; `mixed` alone; and `null` as `?T` beside one other
-/// type and as `|null` last beside several. What a `TypeError` for a
-/// parameter, a return or a property and the null deprecation name the
-/// type as.
+/// `zend_type_to_string_resolved` with a scope, what an argument's
+/// and a return's `TypeError` name the type as
+/// (`zend_verify_type_error_common`): `self` and `parent` the scope's
+/// class and its parent, each up to a NUL as `resolve_class_name` cuts
+/// an anonymous class's, and `static` the called scope. Without a
+/// scope, an unbound closure's, the type is as written. Either way the
+/// type is written as `zend_type_to_string` writes it
+/// ([`php_unit::type_to_string`]), the class names first and the other
+/// types in php's own order whatever order they were declared in:
 ///
 /// ```php
 /// function f(int|string|array|null $x) {}
@@ -1204,16 +1204,6 @@ fn null_as_scalar(req: &mut Request, mask: u32) -> Result<Option<Value>, Thrown>
 /// f(): Argument #1 ($x) must be of type array|string|int|null, stdClass given
 /// g(): Argument #1 ($x) must be of type int|float, string given
 /// ```
-pub(crate) fn declared_type_name(ty: &Type) -> String {
-    type_name_as(ty, "static")
-}
-
-/// `zend_type_to_string_resolved` with a scope, what an argument's
-/// and a return's `TypeError` name the type as
-/// (`zend_verify_type_error_common`): `self` and `parent` the scope's
-/// class and its parent, each up to a NUL as `resolve_class_name` cuts
-/// an anonymous class's, and `static` the called scope. Without a
-/// scope, an unbound closure's, the type is as written.
 ///
 /// A trait's `self` and `parent` are the using class's, which the
 /// compiler could not write in:
@@ -1237,7 +1227,7 @@ pub(crate) fn declared_type_name(ty: &Type) -> String {
 /// ```
 pub(crate) fn resolved_type_name(req: &Request, scopes: Scopes, ty: &Type) -> String {
     let Some(own) = scopes.own else {
-        return declared_type_name(ty);
+        return php_unit::type_to_string(ty);
     };
     let own_name = req.class_name(own);
     let parent_name = req.class_parent(own).map(|parent| req.class_name(parent));
@@ -1246,7 +1236,7 @@ pub(crate) fn resolved_type_name(req: &Request, scopes: Scopes, ty: &Type) -> St
         || String::from("static"),
         |called| String::from_utf8_lossy(&req.class_name_bytes(called)).into_owned(),
     );
-    type_name_as(&resolved, &called)
+    php_unit::type_to_string_called(&resolved, &called)
 }
 
 /// `resolve_class_name` over each member: `self` the scope's name,
@@ -1271,77 +1261,4 @@ fn resolve_named(ty: &Type, own: &str, parent: Option<&str>) -> Type {
         ),
         other => other.clone(),
     }
-}
-
-/// `zend_type_to_string_resolved` over a type as written, `static`
-/// printed as `called`.
-fn type_name_as(ty: &Type, called: &str) -> String {
-    let members: Vec<&Type> = match ty {
-        Type::Mixed => return String::from("mixed"),
-        Type::Intersection(members) => {
-            return members
-                .iter()
-                .map(|member| type_name_as(member, called))
-                .collect::<Vec<_>>()
-                .join("&");
-        }
-        Type::Union(members) => members.iter().collect(),
-        Type::Nullable(inner) => match inner.as_ref() {
-            Type::Union(members) => members.iter().chain([&Type::Null]).collect(),
-            other => vec![other, &Type::Null],
-        },
-        other => vec![other],
-    };
-    let has = |wanted: &Type| members.contains(&wanted);
-    let mut parts: Vec<String> = Vec::new();
-    for member in &members {
-        match member {
-            Type::Named(name) => parts.push(String::from_utf8_lossy(&name.0).into_owned()),
-            Type::SelfClass => parts.push(String::from("self")),
-            Type::ParentClass => parts.push(String::from("parent")),
-            Type::Iterable => parts.push(String::from("Traversable")),
-            Type::Intersection(_) => parts.push(format!("({})", type_name_as(member, called))),
-            _ => {}
-        }
-    }
-    if has(&Type::CalledClass) {
-        parts.push(String::from(called));
-    }
-    for (member, word) in [(Type::Callable, "callable"), (Type::Object, "object")] {
-        if has(&member) {
-            parts.push(String::from(word));
-        }
-    }
-    if has(&Type::Array) || has(&Type::Iterable) {
-        parts.push(String::from("array"));
-    }
-    for (member, word) in [
-        (Type::String, "string"),
-        (Type::Int, "int"),
-        (Type::Float, "float"),
-    ] {
-        if has(&member) {
-            parts.push(String::from(word));
-        }
-    }
-    if has(&Type::Bool) || (has(&Type::False) && has(&Type::True)) {
-        parts.push(String::from("bool"));
-    } else if has(&Type::False) {
-        parts.push(String::from("false"));
-    } else if has(&Type::True) {
-        parts.push(String::from("true"));
-    }
-    for (member, word) in [(Type::Void, "void"), (Type::Never, "never")] {
-        if has(&member) {
-            parts.push(String::from(word));
-        }
-    }
-    if has(&Type::Null) {
-        let joined = parts.join("|");
-        if !parts.is_empty() && !joined.contains('|') && !joined.contains('&') {
-            return format!("?{joined}");
-        }
-        parts.push(String::from("null"));
-    }
-    parts.join("|")
 }

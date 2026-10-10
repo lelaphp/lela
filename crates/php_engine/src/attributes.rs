@@ -17,7 +17,7 @@ use php_unit::decl::Attribute as AttributeDecl;
 use php_unit::Level;
 
 use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
-use crate::api::call::{Function, eval_declared_made, instantiate_named_made};
+use crate::api::call::{Function, attribute_object_made};
 use crate::api::raising::{Thrown, none_pending, raise, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -77,24 +77,7 @@ fn internal_strings(
     let Some(class) = req.class_named(class) else {
         return Ok(None);
     };
-    let mut positional = Vec::new();
-    let mut named = Vec::new();
-    for argument in &attribute.arguments {
-        let value = eval_declared_made(req, &argument.value, scope)?;
-        match &argument.name {
-            Some(name) => named.push((req.string(&name.0)?, value)),
-            None => positional.push(value),
-        }
-    }
-    let made = instantiate_named_made(req, class, &positional, &named);
-    for value in positional {
-        req.release(value);
-    }
-    for (name, value) in named {
-        req.release(Value::string(name));
-        req.release(value);
-    }
-    let object = made?;
+    let object = attribute_object_made(req, class, attribute, scope, None)?;
     let read = properties
         .iter()
         .map(|name| {

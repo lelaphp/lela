@@ -16,6 +16,15 @@ use crate::decl::Type;
 /// class's name in place of where its scope is known.
 #[must_use]
 pub fn type_to_string(ty: &Type) -> String {
+    type_to_string_called(ty, "static")
+}
+
+/// [`type_to_string`] with `static` printed as `called`, the name of the
+/// called scope, as `zend_type_to_string_resolved` prints it where a
+/// call's scope is known: what an argument's and a return's `TypeError`
+/// name the type as.
+#[must_use]
+pub fn type_to_string_called(ty: &Type, called: &str) -> String {
     if let Type::Intersection(members) = ty {
         let mut names = Vec::new();
         for member in members {
@@ -31,7 +40,7 @@ pub fn type_to_string(ty: &Type) -> String {
         return parts.join("|");
     }
     for (bit, word) in [
-        (1 << 15, "static"),
+        (1 << 15, called),
         (1 << 12, "callable"),
         (1 << 8, "object"),
         (1 << 7, "array"),
@@ -126,6 +135,15 @@ mod tests {
         assert_eq!(type_to_string(&Type::Null), "null");
         assert_eq!(type_to_string(&Type::Mixed), "mixed");
         assert_eq!(type_to_string(&Type::Bool), "bool");
+    }
+
+    #[test]
+    fn static_is_the_called_scope_where_one_is_named() {
+        let ty = Type::Union(vec![Type::CalledClass, Type::Null]);
+        assert_eq!(type_to_string(&ty), "?static");
+        assert_eq!(type_to_string_called(&ty, "B"), "?B");
+        let ty = Type::Union(vec![named("A"), Type::CalledClass, Type::Int]);
+        assert_eq!(type_to_string_called(&ty, "B"), "A|B|int");
     }
 
     #[test]

@@ -362,7 +362,9 @@ impl Request {
     /// ```
     pub(super) fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
         let (at, declaring, p) = self.placed_row(class, name)?;
-        let root = if p.visibility == Visibility::Protected {
+        let root = if p.visibility == Visibility::Protected
+            || p.set_visibility == Some(Visibility::Protected)
+        {
             self.property_root(declaring, name)
         } else {
             declaring
@@ -389,7 +391,7 @@ impl Request {
             let own = self.class_decl(here).and_then(|decl| {
                 decl.properties
                     .iter()
-                    .find(|p| p.is_instance && &*p.name.0 == name)
+                    .find(|p| &*p.name.0 == name)
                     .map(|p| p.visibility)
             });
             match own {
@@ -597,24 +599,63 @@ impl Request {
     }
 
     /// `zend_asymmetric_property_has_set_access`
-    /// (`Z/Zend/zend_object_handlers.c:590`): whether the executed
-    /// scope may write a property of `class` whose set visibility is
-    /// `set`. The declaring class writes its own; a `protected(set)`
-    /// one is a related scope's too. A `public(set)` never reaches
-    /// here, since `zend_declare_typed_property` drops a set
-    /// visibility the read visibility already equals and refuses one
-    /// weaker than it.
-    fn has_set_access(&self, class: ClassId, set: Visibility) -> bool {
+    /// (`Z/Zend/zend_object_handlers.c:590`), the one rule a plain and a
+    /// hooked property's set visibility are held to: whether the
+    /// executed scope may write a property `declaring` declares, whose
+    /// prototype's class is `root` (`prop_info->prototype->ce`), and
+    /// whose set visibility is `set`. The declaring class writes its
+    /// own; a `protected(set)` one is a scope's related to the
+    /// prototype's class too (`is_protected_compatible_scope`), so a
+    /// sibling that redeclares nothing writes a redeclaration of their
+    /// parent's property. A `public(set)` never reaches here, since
+    /// `zend_declare_typed_property` drops a set visibility the read
+    /// visibility already equals and refuses one weaker than it.
+    ///
+    /// ```php
+    /// class P { public protected(set) int $x = 0; }
+    /// class A extends P { public protected(set) int $x = 0; }
+    /// class B extends P { function poke(A $a) { $a->x = 5; return $a->x; } }
+    /// try { var_dump((new B)->poke(new A)); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// class Q { public protected(set) int $y { get => $this->y; set => $this->y = $value; } }
+    /// class R extends Q { public protected(set) int $y { get => $this->y; set => $this->y = $value * 2; } }
+    /// class S extends Q { function poke(R $r) { $r->y = 5; return $r->y; } }
+    /// var_dump((new S)->poke(new R));
+    /// class U { private int $z = 0; }
+    /// class V extends U { public protected(set) int $z = 0; }
+    /// class W extends V {}
+    /// class X extends U { function poke(V $v) { $v->z = 1; } }
+    /// try { (new X)->poke(new W); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// class SP { public protected(set) static int $s = 0; }
+    /// class SA extends SP { public protected(set) static int $s = 0; }
+    /// class SB extends SP { static function poke() { SA::$s = 7; return SA::$s; } }
+    /// var_dump(SB::poke());
+    /// ```
+    /// ```expect
+    /// int(5)
+    /// int(10)
+    /// Cannot modify protected(set) property V::$z from scope X
+    /// int(7)
+    /// ```
+    pub(super) fn has_set_access(
+        &self,
+        declaring: ClassId,
+        root: ClassId,
+        set: Visibility,
+    ) -> bool {
         let scope = self.property_scope();
-        scope == Some(class) || (set == Visibility::Protected && self.check_protected(class, scope))
+        scope == Some(declaring)
+            || (set == Visibility::Protected && self.check_protected(root, scope))
     }
 
     /// Whether the property `info` names has a set visibility the
     /// executed scope lacks.
     pub(crate) fn lacks_set_access(&self, info: PropertyInfo) -> bool {
-        self.property_decl(info)
-            .and_then(|property| property.set_visibility)
-            .is_some_and(|set| !self.has_set_access(info.declaring, set))
+        self.property_decl(info).is_some_and(|property| {
+            property.set_visibility.is_some_and(|set| {
+                let root = self.property_root(info.declaring, &property.name.0);
+                !self.has_set_access(info.declaring, root, set)
+            })
+        })
     }
 
     /// `prop_info->flags & ZEND_ACC_PPP_SET_MASK &&
@@ -1340,7 +1381,7 @@ impl Request {
     ) -> Thrown {
         let given = crate::ops::type_name(self, held);
         let class = self.class_name(declaring);
-        let ty = crate::api::coerce::declared_type_name(ty);
+        let ty = php_unit::type_to_string(ty);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
             self,
@@ -1920,7 +1961,7 @@ impl Request {
             return Some(self.readonly_modification(p.declaring, name, "modify"));
         }
         let set = p.set_visibility?;
-        if self.has_set_access(p.declaring, set) {
+        if self.has_set_access(p.declaring, p.root, set) {
             return None;
         }
         Some(self.set_inaccessible_property(p.declaring, set, p.readonly, name, "modify"))
@@ -1957,7 +1998,7 @@ impl Request {
         placed.readonly
             || placed
                 .set_visibility
-                .is_some_and(|set| !self.has_set_access(placed.declaring, set))
+                .is_some_and(|set| !self.has_set_access(placed.declaring, placed.root, set))
     }
 
     /// `zend_get_property_offset` at a write site, what `FETCH_OBJ_W`
@@ -2080,7 +2121,7 @@ impl Request {
         // `clone with` write it once more only from a scope that may set
         // it (`zend_std_write_property`).
         if let Some(set) = placed.set_visibility
-            && !self.has_set_access(placed.declaring, set)
+            && !self.has_set_access(placed.declaring, placed.root, set)
         {
             return Err(self.set_inaccessible_property(
                 placed.declaring,
@@ -2156,7 +2197,7 @@ impl Request {
         let barred = placed.readonly
             || placed
                 .set_visibility
-                .is_some_and(|set| !self.has_set_access(placed.declaring, set));
+                .is_some_and(|set| !self.has_set_access(placed.declaring, placed.root, set));
         let held = object.heap().slot(placed.slot);
         barred
             && self.reaches(&placed)
@@ -2543,7 +2584,7 @@ impl Request {
         if let Some(placed) = self.declared_slot(class, &bytes)
             && !placed.readonly
             && let Some(set) = placed.set_visibility
-            && !self.has_set_access(placed.declaring, set)
+            && !self.has_set_access(placed.declaring, placed.root, set)
         {
             let thrown =
                 self.set_inaccessible_property(placed.declaring, set, false, &bytes, "modify");
@@ -4073,7 +4114,7 @@ impl Request {
                         ));
                     }
                     if let Some(set) = placed.set_visibility
-                        && !self.has_set_access(placed.declaring, set)
+                        && !self.has_set_access(placed.declaring, placed.root, set)
                     {
                         return Err(self.set_inaccessible_property(
                             placed.declaring,

@@ -11,7 +11,7 @@ use php_unit::decl::{ClassKind, MethodDecl, Visibility};
 
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, none_pending};
-use crate::api::values::{ClassId, PhpString};
+use crate::api::values::{ClassId, PhpObject, PhpString};
 use crate::engine::{MethodAt, NativeMethod};
 
 use super::{Member, MemberAt, Request};
@@ -48,6 +48,43 @@ impl MethodRow {
 }
 
 impl Request {
+    /// `obj->handlers->get_method(&obj, name, key)` as a call and
+    /// `zend_is_callable_ex` ask it: the class's `get_method`, then its
+    /// `__call`, then the same on the object its class hands the call
+    /// to ([`ObjectHandlers::method_receiver`]), until a class answers
+    /// or hands it to none. Beside the method, none where no class
+    /// answered, the last object the call was handed to, which php's
+    /// `get_method` leaves in `*object` whether or not it answered;
+    /// `None` where the object itself was asked last. The access rule
+    /// is the caller's.
+    ///
+    /// [`ObjectHandlers::method_receiver`]: crate::api::abi::ObjectHandlers::method_receiver
+    pub(crate) fn method_found(
+        &mut self,
+        object: PhpObject,
+        lowered: &[u8],
+        written: &[u8],
+    ) -> Result<(Option<Function>, Option<PhpObject>), Thrown> {
+        let mut on = object;
+        let mut receiver = None;
+        loop {
+            let table = self.object_handlers(on.heap());
+            if let Some(function) = table.get_method_as(self, on, lowered, written)? {
+                return Ok((Some(function), receiver));
+            }
+            if let Some(trampoline) = self.call_trampoline(on.class(), written, false) {
+                return Ok((Some(trampoline), receiver));
+            }
+            match table.method_receiver(self, on) {
+                Some(inner) => {
+                    on = inner;
+                    receiver = Some(inner);
+                }
+                None => return Ok((None, receiver)),
+            }
+        }
+    }
+
     /// The class a method belongs to, `func->common.scope`: a native
     /// method's class, or the request's `ClassId` for the class of a
     /// user method; none for a function.

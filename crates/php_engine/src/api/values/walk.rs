@@ -670,7 +670,7 @@ impl ObjectTable {
                             table: self.table.table(),
                             slot,
                         };
-                        let shown = Some(crate::api::coerce::declared_type_name(ty));
+                        let shown = Some(php_unit::type_to_string(ty));
                         return Some((pos, self.slot_key(slot)?, value, at, shown));
                     }
                 }

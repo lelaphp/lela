@@ -267,15 +267,6 @@ impl Request {
         }
     }
 
-    /// `zend_asymmetric_property_has_set_access` over a hooked property:
-    /// the declaring class writes it, and a `protected(set)` one a scope
-    /// related to its prototype's class.
-    fn hooked_settable(&self, hooked: &Hooked, set: Visibility) -> bool {
-        let scope = self.property_scope();
-        scope == Some(hooked.declaring)
-            || (set == Visibility::Protected && self.check_protected(hooked.root, scope))
-    }
-
     /// `EG(current_execute_data)`'s function and `$this`.
     fn current_call(&self) -> Option<(Option<Function>, Option<PhpObject>)> {
         Some(match self.chain().next()? {
@@ -642,7 +633,7 @@ impl Request {
             return self.write_backing(object, name, value, hooked);
         }
         if let Some(set_visibility) = hooked.set_visibility
-            && !self.hooked_settable(&hooked, set_visibility)
+            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
         {
             let thrown = self.set_inaccessible_property(
                 object.class(),
@@ -675,7 +666,7 @@ impl Request {
         hooked: Hooked,
     ) -> Result<(), Thrown> {
         if let Some(set_visibility) = hooked.set_visibility
-            && !self.hooked_settable(&hooked, set_visibility)
+            && !self.has_set_access(hooked.declaring, hooked.root, set_visibility)
         {
             let thrown = self.set_inaccessible_property(
                 object.class(),
