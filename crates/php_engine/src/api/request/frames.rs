@@ -868,9 +868,14 @@ impl Request {
     /// apart where the caller stands and gives up nothing.
     #[inline]
     pub(crate) fn release_named(&mut self, named: exec::ExtraNamed) {
-        if !named.carries_any() {
-            return;
+        if named.carries_any() {
+            self.release_named_rows(named);
         }
+    }
+
+    /// [`Request::release_named`] over what carries a row or a table.
+    #[inline(never)]
+    fn release_named_rows(&mut self, named: exec::ExtraNamed) {
         for (name, value) in named.free(self) {
             self.release(Value::string(name));
             self.release(value);

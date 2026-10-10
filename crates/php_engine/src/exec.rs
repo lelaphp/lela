@@ -2103,23 +2103,33 @@ pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32
 /// float(2.5)
 /// string(1) "7"
 /// ```
+#[inline]
 pub(crate) fn parameter_prologue(
     req: &mut Request,
     callee: FrameRef,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
     // A frame whose push skipped every `RECV*` stands at its entry
-    // already, and its op array is not held for a run of none.
-    let entry = {
-        let state = req.vm().at(callee);
-        let body = state.and_then(|state| body_of(&state.unit, state.body));
-        let entry = body
-            .and_then(|body| body.safepoints.first())
-            .map_or(0, |at| at.0);
-        if state.is_none_or(|state| state.opline >= entry) {
-            return Ok(None);
-        }
-        entry
-    };
+    // already, which is told where the caller stands, and its op array
+    // is not held for a run of none.
+    let state = req.vm().at(callee);
+    let body = state.and_then(|state| body_of(&state.unit, state.body));
+    let entry = body
+        .and_then(|body| body.safepoints.first())
+        .map_or(0, |at| at.0);
+    if state.is_none_or(|state| state.opline >= entry) {
+        return Ok(None);
+    }
+    prologue_from(req, callee, entry)
+}
+
+/// The `RECV*` oplines of [`parameter_prologue`], up to the entry
+/// safepoint at `entry`.
+#[inline(never)]
+fn prologue_from(
+    req: &mut Request,
+    callee: FrameRef,
+    entry: u32,
+) -> Result<Option<FrameRef>, php_heap::Fatal> {
     let serving = standing(req, callee)?;
     let body = serving_code(&serving, callee)?;
     loop {
