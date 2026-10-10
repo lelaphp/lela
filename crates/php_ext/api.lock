@@ -1164,6 +1164,7 @@ values::Emalloc::free
 values::Emalloc::is_empty
 values::Emalloc::len
 values::Emalloc::new
+values::Emalloc::printf_buffer
 values::Emalloc::resize
 values::FreshString
 values::FreshString::bytes
