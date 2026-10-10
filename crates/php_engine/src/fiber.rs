@@ -418,11 +418,11 @@ impl ObjectHandlers for FiberHandlers {
     /// `zend_fiber_object_gc` (`Z/Zend/zend_fibers.c:818`): the callable
     /// and `fiber->result`, and for a suspended fiber every frame it
     /// holds, innermost first, each by [`exec::unfinished_execution_gc`]
-    /// or, for a generator running on it, by
-    /// [`crate::generator::running_frame_gc`]; then the calls its frames
-    /// were building. Each is an owner the fiber's frames hold, so a
-    /// cycle through a suspended fiber's variables is found. A running
-    /// fiber's frames are the running execution's, and are not named.
+    /// with the calls it was building or, for a generator running on it,
+    /// by [`crate::generator::running_frame_gc`]. Each is an owner the
+    /// fiber's frames hold, so a cycle through a suspended fiber's
+    /// variables is found. A running fiber's frames are the running
+    /// execution's, and are not named.
     ///
     /// The outermost symbol table a frame rebuilt is returned as the
     /// fiber's table and walked after everything else, and the rows of
@@ -451,6 +451,29 @@ impl ObjectHandlers for FiberHandlers {
     /// ```expect
     /// int(1)
     /// int(1)
+    /// done
+    /// ```
+    ///
+    /// A call a frame was building is named with that frame, after its
+    /// CVs and before the frames outside it, as php names `ex->call`;
+    /// each `D` survives the fiber's destruction through its own cycle,
+    /// and is served by the collection in the order the walk found it:
+    ///
+    /// ```php
+    /// class D { public $self; function __construct(public $n) { $this->self = $this; } function __destruct() { echo $this->n, "\n"; } }
+    /// function foo($a, $b) {}
+    /// function f() { $c = new D('cv'); $h = Fiber::getCurrent(); foo(new D('argument'), Fiber::suspend()); }
+    /// $fiber = new Fiber(function () { $q = new D('outer'); f(); });
+    /// $fiber->start();
+    /// gc_collect_cycles();
+    /// $fiber = null;
+    /// gc_collect_cycles();
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// outer
+    /// argument
+    /// cv
     /// done
     /// ```
     ///
@@ -513,10 +536,16 @@ impl ObjectHandlers for FiberHandlers {
                 calls.push(state);
                 continue;
             }
+            // The calls standing above a frame are the ones it was
+            // building, its `ex->call`. A running generator's are named
+            // by none: `zend_generator_frame_gc` reads its frozen call
+            // stack, which is empty while it runs.
+            calls.reverse();
             let table = match state.generator() {
                 Some(generator) => crate::generator::running_frame_gc(req, generator, state, visit),
-                None => exec::unfinished_execution_gc(state, &[], visit),
+                None => exec::unfinished_execution_gc(state, &calls, visit),
             };
+            calls.clear();
             if let Some(table) = table {
                 if let Some(inner) = last.filter(|&inner| inner != table) {
                     req.gc_symbol_rows(inner, &cv, visit);
@@ -524,8 +553,6 @@ impl ObjectHandlers for FiberHandlers {
                 last = Some(table);
             }
         }
-        calls.reverse();
-        exec::unfinished_calls_gc(&calls, visit);
         let Some(table) = last else {
             return GcTable::Properties;
         };
