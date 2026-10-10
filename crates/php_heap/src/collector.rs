@@ -390,10 +390,9 @@ impl Collector {
         (buf.first_unused() != buf.size).then(|| buf.fetch_next_unused())
     }
 
-    /// `gc_grow_root_buffer`. php warns `GC buffer overflow (GC
-    /// disabled)` when the buffer is at its largest; a buffer of 2^30
-    /// entries is sixteen gigabytes here, so the flags are set and the
-    /// warning, which no request reaches, is not raised.
+    /// `gc_grow_root_buffer`: at its largest the buffer grows no more and
+    /// the collector turns itself off, marked full, which
+    /// [`Heap::gc_growing`] tells as php's warning.
     fn grow_root_buffer(&mut self) {
         let Some(buf) = &mut self.buf else { return };
         if buf.size >= MAX_BUF_SIZE && !self.full {
@@ -699,6 +698,20 @@ fn walkable(o: Obj) -> bool {
 }
 
 impl Heap {
+    /// `f` over the collector, and php's `GC buffer overflow` warning
+    /// where it is what filled the root buffer: every path that can grow
+    /// the buffer runs through here, so the warning is raised once, as
+    /// `gc_grow_root_buffer` raises it the first time it finds the buffer
+    /// at `GC_MAX_BUF_SIZE` ([`HeapHooks::gc_overflow`]).
+    fn gc_growing<R>(hooks: &mut dyn HeapHooks, f: impl FnOnce(&mut Collector) -> R) -> R {
+        let full = hooks.heap().gc.full;
+        let out = f(&mut hooks.heap().gc);
+        if !full && hooks.heap().gc.full {
+            hooks.gc_overflow();
+        }
+        out
+    }
+
     /// `gc_check_possible_root` (`Z/Zend/zend_gc.h:114`): what a release
     /// that left owners does with the value. A reference is looked
     /// through to the value it holds; an array or an object not in the
@@ -744,7 +757,7 @@ impl Heap {
                 Some(count) => count,
                 None => Heap::gc_collect_cycles(hooks),
             };
-            hooks.heap().gc.adjust_threshold(count);
+            Heap::gc_growing(hooks, |gc| gc.adjust_threshold(count));
             if node.gc().delref() == 0 {
                 match node {
                     Node::Arr(a) => Heap::array_destroy(hooks, a),
@@ -757,10 +770,11 @@ impl Heap {
                 return;
             }
         }
-        let gc = &mut hooks.heap().gc;
-        if let Some(idx) = gc.fetch_any() {
-            gc.place(idx, node, Colour::Purple);
-        }
+        Heap::gc_growing(hooks, |gc| {
+            if let Some(idx) = gc.fetch_any() {
+                gc.place(idx, node, Colour::Purple);
+            }
+        });
     }
 
     /// `gc_mark_grey`'s two weak-map passes over an object: every entry
@@ -826,7 +840,7 @@ impl Heap {
             let map = Node::Obj(map);
             if map.gc().colour() == Colour::Grey {
                 if map.gc().address().is_none() {
-                    hooks.heap().gc.extra_root(map);
+                    Heap::gc_growing(hooks, |gc| gc.extra_root(map));
                 }
             } else if !marks.from_map && blacken(child) {
                 stack.push(child);
@@ -846,7 +860,7 @@ impl Heap {
             let key = Node::Obj(key);
             if key.gc().colour() == Colour::Grey {
                 if key.gc().address().is_none() {
-                    hooks.heap().gc.extra_root(key);
+                    Heap::gc_growing(hooks, |gc| gc.extra_root(key));
                 }
             } else if !marks.from_key && blacken(child) {
                 stack.push(child);
@@ -1038,7 +1052,7 @@ impl Heap {
             let next = match node {
                 Node::Obj(o) if walkable(o) => {
                     if o.gc().is_unplaced() {
-                        hooks.heap().gc.add_garbage(node);
+                        Heap::gc_growing(hooks, |gc| gc.add_garbage(node));
                     }
                     if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) && hooks.has_destructor(o) {
                         *has_destructors = true;
@@ -1065,7 +1079,7 @@ impl Heap {
                 Node::Obj(_) => None,
                 Node::Arr(_) => {
                     if node.gc().is_unplaced() {
-                        hooks.heap().gc.add_garbage(node);
+                        Heap::gc_growing(hooks, |gc| gc.add_garbage(node));
                     }
                     children(hooks, node, kids);
                     walk(kids, &mut stack, collect)
@@ -1493,6 +1507,8 @@ mod tests {
         /// `$GLOBALS['x'] = $this` in `__destruct`.
         keep: Option<u32>,
         kept: Vec<Obj>,
+        /// How many times the overflow warning was raised.
+        overflows: u32,
     }
 
     impl Recorder {
@@ -1502,6 +1518,7 @@ mod tests {
                 served: Vec::new(),
                 keep: None,
                 kept: Vec::new(),
+                overflows: 0,
             }
         }
     }
@@ -1523,6 +1540,35 @@ mod tests {
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
         }
+        fn gc_overflow(&mut self) {
+            self.overflows += 1;
+        }
+    }
+
+    /// `gc_grow_root_buffer` at `GC_MAX_BUF_SIZE`: the collector turns
+    /// itself off, running, protected and full, and php's `GC buffer
+    /// overflow (GC disabled)` warning is raised the first time and not
+    /// again; a buffer under the largest grows without one. 2^30 entries
+    /// are made by no test, so the size is set to the largest directly.
+    #[test]
+    fn a_root_buffer_at_its_largest_warns_once_and_turns_the_collector_off() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        r.heap.gc.enable(true);
+        Heap::gc_growing(&mut r, Collector::grow_root_buffer);
+        assert_eq!(r.heap.gc_status().buffer_size, DEFAULT_BUF_SIZE * 2);
+        assert_eq!(r.overflows, 0);
+        if let Some(buf) = &mut r.heap.gc.buf {
+            buf.size = MAX_BUF_SIZE;
+        }
+        Heap::gc_growing(&mut r, Collector::grow_root_buffer);
+        let status = r.heap.gc_status();
+        assert_eq!(r.overflows, 1);
+        assert!(status.running && status.protected && status.full);
+        assert_eq!(status.buffer_size, MAX_BUF_SIZE);
+        Heap::gc_growing(&mut r, Collector::grow_root_buffer);
+        assert_eq!(r.overflows, 1);
+        assert_eq!(r.heap.gc_status().buffer_size, MAX_BUF_SIZE);
     }
 
     /// Two objects, each in the other's slot: `$a->b = $b; $b->a = $a;`.

@@ -1078,6 +1078,12 @@ impl HeapHooks for Hooks<'_> {
         self.0.lazy_gc(obj, &mut |value| visit(value.to_zval()));
     }
 
+    /// `GC buffer overflow (GC disabled)`, php's warning with its own
+    /// newline, raised where the request stands.
+    fn gc_overflow(&mut self) {
+        crate::api::raising::warning(self.0, "GC buffer overflow (GC disabled)\n");
+    }
+
     /// `list_dtor_ex`: the type's destructor as registered, handed the
     /// resource with the type it had, as php hands it a copy of the
     /// struct; a type with no destructor closes silently. What it throws

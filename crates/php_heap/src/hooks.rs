@@ -73,6 +73,14 @@ pub trait HeapHooks {
     fn free_resource(&mut self, res: Res, kind: ResourceType);
     /// The memory limit was hit asking for `bytes` more.
     fn out_of_memory(&mut self, bytes: usize) -> Fatal;
+    /// `gc_grow_root_buffer`'s `zend_error(E_WARNING, "GC buffer
+    /// overflow (GC disabled)\n")` (`Z/Zend/zend_gc.c:641`): the root
+    /// buffer is at `GC_MAX_BUF_SIZE` and cannot grow, so the collector
+    /// has turned itself off. Told once, after the collector is marked
+    /// full, so a root an error handler adds meanwhile finds it off
+    /// rather than raising the warning again; a heap with nowhere to raise
+    /// a warning has a body of its own to do nothing.
+    fn gc_overflow(&mut self) {}
     /// `zend_free_source_list` (`Z/Zend/zend_types.h:1093`): the
     /// typed-property sources the engine hung on a reference by
     /// [`Ref::set_sources`], given up as the cell is destroyed and
