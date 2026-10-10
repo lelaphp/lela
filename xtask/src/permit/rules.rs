@@ -327,11 +327,11 @@ fn admitted(
         let (before, after) = call.rewrite(root, Some(path))?;
         return approvals.admits(path, Some(&before), Some(&after));
     };
-    let written = super::after::written(root, call, line);
+    let (checkout, written) = super::after::written(root, call, line);
     let pending: Option<Vec<Admission>> = written
         .iter()
         .map(|path| {
-            let before = fs::read_to_string(root.join(path)).ok();
+            let before = fs::read_to_string(checkout.join(path)).ok();
             approvals.pending(Path::new(path), before.as_deref())
         })
         .collect();
@@ -351,11 +351,19 @@ fn command_around(text: &str, hit: std::ops::Range<usize>) -> &str {
 
 /// The directory a call runs in: its workspace, or the directory a shell
 /// line's leading `cd` moves to, which is how a session whose shell stands
-/// in one checkout runs a command in another.
+/// in one checkout runs a command in another. An `export` of assignments
+/// alone before the `cd` moves nothing and is read past, as a bare
+/// assignment is, and `~/` is the home.
 pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> std::path::PathBuf {
-    let first = line.and_then(|line| line.commands().first());
+    let declares = |argv: &&super::argv::Argv| {
+        argv.runs("export") && argv.words().iter().skip(1).all(|w| w.contains('='))
+    };
+    let first = line.and_then(|line| line.commands().iter().find(|argv| !declares(argv)));
     match first.map(super::argv::Argv::words) {
-        Some([cd, dir]) if cd == "cd" => root.join(dir),
+        Some([cd, dir]) if cd == "cd" => match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => Path::new(&home).join(rest),
+            _ => root.join(dir),
+        },
         _ => root.to_path_buf(),
     }
 }

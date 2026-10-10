@@ -277,6 +277,36 @@ fn checkout_of(root: &Path, line: Option<&Line>, argv: &Argv) -> PathBuf {
     dir
 }
 
+/// The checkout a call runs in: its `workspace` moved by a leading `cd`
+/// ([`runs_in`]), at the top of its worktree, a linked one's own; the
+/// workspace where the `cd` names no checkout. What `permit --after`
+/// holds, and the one checkout it puts a file back in (#2597). A `git -C`
+/// moves one command and not the call, so it is not read here.
+pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
+    let top = git::git(
+        &runs_in(workspace, line),
+        &["rev-parse", "--show-toplevel"],
+        None,
+    );
+    let top = top.map_or_else(|_| workspace.to_path_buf(), |top| PathBuf::from(top.trim()));
+    fs::canonicalize(&top).unwrap_or(top)
+}
+
+/// The operation standing in `checkout` that has staged `path`, its index
+/// entry other than `HEAD`'s: the operation's commit carries it, so
+/// `permit --after` never puts it back (#2597). An index git cannot read
+/// is read as staged, the side that puts nothing back. What the index
+/// cannot say is whose hand staged the entry, so a call's own `git add`
+/// while the operation stands is read as the operation's and rides its
+/// commit; another session's staging there is what a `where =
+/// "operating"` rule refuses at the call ([`foreign`]).
+pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
+    let operation = Operation::in_progress(&git_dir(checkout)?)?;
+    let args = ["diff", "--cached", "--name-only", "-z", "--", path];
+    let differs = git::git(checkout, &args, None).map_or(true, |d| !d.is_empty());
+    differs.then_some(operation)
+}
+
 /// The checkout's own git dir, a linked worktree's under the main one's
 /// `worktrees/`, with its links resolved so `/tmp` and `/private/tmp` name
 /// one; `None` outside a repository.
@@ -492,6 +522,38 @@ mod tests {
             panic!("the linked worktree's merge stands");
         };
         assert!(checkout.ends_with("linked"), "{}", checkout.display());
+    }
+
+    /// The checkout a call ran in is its workspace moved by a leading
+    /// `cd`, past the assignments before it, at the top of the worktree
+    /// the `cd` names; a `cd` into no checkout leaves the workspace.
+    #[test]
+    fn a_call_ran_in_the_top_of_the_worktree_its_leading_cd_names() {
+        let dir = repository("operation-ran-in");
+        let base = Tree::new("operation-ran-in-linked").unwrap();
+        let linked = base.join("t1");
+        git(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "t1",
+                linked.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(linked.join("sub")).unwrap();
+        let top = linked.canonicalize().unwrap();
+        let ran_in = |line: &str| super::ran_in(&dir, Some(&Line::read(line)));
+        let at = linked.display();
+        assert_eq!(ran_in(&format!("cd {at}/sub && touch x")), top);
+        assert_eq!(ran_in(&format!("S=/tmp/s && cd {at} && touch x")), top);
+        let exported = format!("export A=1 B=2 && cd {at} && touch x");
+        assert_eq!(ran_in(&exported), top);
+        let workspace = dir.canonicalize().unwrap();
+        assert_eq!(ran_in("touch x"), workspace);
+        assert_eq!(ran_in("cd /var/empty/none && touch x"), workspace);
     }
 
     /// A rebase's base is `orig-head`, which `HEAD` leaves behind as the
