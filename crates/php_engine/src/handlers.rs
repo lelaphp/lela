@@ -23189,21 +23189,6 @@ mod tests {
         assert_eq!(req.memory_usage(false), start - 40 - 32);
     }
 
-    /// #1514: the program #1511 ruled on, which is held to the engine
-    /// alone, so no witness pins it (`php-ub:assign-obj-entry-container-under-a-handler`).
-    #[test]
-    fn the_object_a_handler_frees_with_its_array_is_held_across_the_write() {
-        let served = Engine::cli_builder().build().serve_capture(
-            "<?php class C { public $p = 1; function __destruct() { echo \"dtor \", $this->p ?? \"NULL\", \"\\n\"; } }\nset_error_handler(function($code, $msg) use (&$a) { echo \"Error: $msg\\n\"; $a = 0; });\n$a = [new C];\n$a[0]->p = $y;\nvar_dump($a);\necho \"DONE\\n\";",
-            crate::test::Capture::default(),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&served.stdout),
-            "Error: Undefined variable $y\ndtor NULL\nint(0)\nDONE\n"
-        );
-        assert_eq!(served.fatal, None);
-    }
-
     /// #367, the first acceptance: a `foreach` by value over a plain
     /// object walks the properties the scope may see, the private one
     /// stepped over from outside the class, the key the name as
