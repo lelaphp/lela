@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::cli::{Format, Section};
 use crate::reading::{LOG, Log, Number, Reading, Status, Store};
-use crate::{api_check, budget, phpt, witness};
+use crate::{api_check, bench, budget, phpt, witness};
 
 /// What `--log` takes for the standard input.
 const STDIN: &str = "-";
@@ -73,6 +73,7 @@ const ROWS: &[(Section, Lines)] = &[
     // `--every` each crate's edges beside it.
     (Section::Locks, lines::<api_check::row::Row>),
     (Section::Witness, lines::<witness::row::Row>),
+    (Section::Bench, lines::<bench::row::Row>),
 ];
 
 /// What every row opens with, whatever its section: the version of the
