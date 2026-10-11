@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Claim, Claims, Clock, Ctime, Held, Kind, Namespace, Object, Runner, STARTED, Standing, Swept,
-    abandoned, alive, claimed, left, offset, second_of_day, started, unnamed_left, window,
+    Claim, Claims, Clock, Ctime, ENDED, Held, Journal, Kind, Namespace, Object, Runner, STARTED,
+    Standing, Swept, abandoned, alive, claimed, left, offset, second_of_day, unnamed_left, window,
 };
-use crate::oracle::Ran;
+use crate::oracle::{Group, Process, Ran};
 use crate::scratch::Tree;
 
 /// `ipcs -a` as macOS printed it on 2026-10-01, cut to one object or two
@@ -587,14 +587,117 @@ fn an_ended_claim_another_run_held_beside_stands_until_it_ends() {
     assert!(!path.exists(), "the claim goes once no other run holds one");
 }
 
-/// A claim's journal names the processes of its [`STARTED`] lines alone:
-/// an ended line, a witness run's JSON line and a torn last line name none.
+/// A claim's journal names the processes of its [`STARTED`] lines alone,
+/// and those whose [`ENDED`] line never came apart: a witness run's JSON
+/// line, a torn last line, and an end of a number never started name none.
 #[test]
-fn a_claims_journal_names_the_processes_it_started() {
-    let journal = format!(
-        "{STARTED} 0 4242\nended 0\n{{\"entry\":\"serving\"}}\n{STARTED} 1 4243\n{STARTED} 2"
+fn a_claims_journal_names_the_processes_it_started_and_those_never_seen_to_end() {
+    let journal = Journal::read(&format!(
+        "{STARTED} 0 4242\n{ENDED} 0\n{{\"entry\":\"serving\"}}\n{STARTED} 1 4243\n{ENDED} 7\n{STARTED} 2"
+    ));
+    assert_eq!(journal.pids().collect::<Vec<u32>>(), [4242, 4243]);
+    assert_eq!(journal.unended().collect::<Vec<_>>(), [(1, 4243)]);
+}
+
+/// `ps -o pgid=,etime=` read as the process's group and the second it
+/// started, its age in each of the shapes `ps` prints, and nothing read
+/// where `ps` printed no process.
+#[test]
+fn a_process_is_read_by_its_group_and_its_age() {
+    let at = |printed| Process::read(printed, 1_000_000).map(|p| (p.group, p.started));
+    assert_eq!(at("  4242      00:07\n"), Some((4242, 999_993)));
+    assert_eq!(at("4242 01:02:03"), Some((4242, 1_000_000 - 3723)));
+    assert_eq!(
+        at("1 05-01:47:32"),
+        Some((1, 1_000_000 - 5 * 86_400 - 6452))
     );
-    assert_eq!(started(&journal).collect::<Vec<u32>>(), [4242, 4243]);
+    assert_eq!(at(""), None);
+    assert_eq!(at("4242 no-time"), None);
+}
+
+/// A cut-off run's program is the process under its number that leads a
+/// group of that number and started inside the window its journal was
+/// written in, a second's give either side (#2522); every counterexample
+/// is a process that is not the program and is never signalled: one that
+/// took the number after the window, one started before it, and one in
+/// another process's group, as a reused number most often is.
+#[test]
+fn a_process_is_a_cut_off_runs_program_only_by_its_number_its_group_and_its_window() {
+    let window = (1_000, 1_060);
+    let process = |group, started| Process { group, started };
+    assert!(process(4242, 1_000).spawned_as(4242, window));
+    assert!(process(4242, 999).spawned_as(4242, window));
+    assert!(process(4242, 1_061).spawned_as(4242, window));
+    assert!(
+        !process(4242, 1_062).spawned_as(4242, window),
+        "reused since"
+    );
+    assert!(
+        !process(4242, 998).spawned_as(4242, window),
+        "before the run"
+    );
+    assert!(
+        !process(77, 1_030).spawned_as(4242, window),
+        "another's group"
+    );
+}
+
+/// A claim a System V subset's run never settled, its journal naming three
+/// programs, kills the one that still stands and never ended, with its
+/// group, and writes its end (#2522); a process standing under a number
+/// whose program ended, as another run's may, and one standing under a
+/// started number that leads no group of its own, as a process that took
+/// the number would, are never signalled. Every process is a `sleep` this
+/// test started and ends.
+#[test]
+fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+    let sleep = |leads: bool| {
+        let mut command = Command::new("sleep");
+        command.arg("60");
+        if leads {
+            command.process_group(0);
+        }
+        command.spawn().unwrap()
+    };
+    let dir = Tree::new("sysv-standing").unwrap();
+    let claim = Claim::within(&dir, "sysv-test").unwrap();
+    let path = claim.path().to_path_buf();
+    let mut program = sleep(true);
+    let mut others = [sleep(true), sleep(false)];
+    let pids = [program.id(), others[0].id(), others[1].id()];
+    std::fs::write(
+        &path,
+        format!(
+            "{STARTED} 0 {}\n{STARTED} 1 {}\n{ENDED} 1\n{STARTED} 2 {}\n",
+            pids[0], pids[1], pids[2]
+        ),
+    )
+    .unwrap();
+    drop(claim);
+    let mut claims = ended(&dir, 1);
+    // The test is the programs' parent, as the killed run was, so it reaps
+    // the one killed, as the process orphans pass to would.
+    let reaper = std::thread::spawn(move || program.wait().unwrap());
+    claims.stop();
+    let still: Vec<bool> = others
+        .iter_mut()
+        .map(|child| child.try_wait().unwrap().is_none())
+        .collect();
+    let journal = std::fs::read_to_string(&path).unwrap();
+    for child in &mut others {
+        child.kill().ok();
+        child.wait().ok();
+    }
+    let killed = reaper.join().unwrap();
+    assert!(
+        !killed.success(),
+        "the standing program was killed: {killed:?}"
+    );
+    assert_eq!(still, [true, true], "neither other process was signalled");
+    assert!(journal.ends_with(&format!("{ENDED} 0\n")), "{journal}");
+    assert!(Group::standing(pids[0], (0, 1 << 40)).is_none(), "gone");
 }
 
 /// A claim a phpt subset's run never settled, its journal naming the

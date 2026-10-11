@@ -1193,13 +1193,46 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     );
 }
 
+/// A test of `ext/sysvmsg` that makes a private queue of mode 0600 and
+/// sends nothing to it, so it names no process, as php's
+/// `msg_get_queue(0)` leaves one, writes its pid and the new private
+/// queues `ipcs -q` lists to `started`, and goes on with `then`, its
+/// expectation after it.
+fn leaves_a_private_queue(started: &Path, then: &str) -> String {
+    format!(
+        "--TEST--\nleaves a private queue\n--FILE--\n<?php\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$q = msg_get_queue(0, 0600);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\n{then}",
+        started.display()
+    )
+}
+
+/// What a test wrote to `at`, waited for as long as the recipe's limit.
+fn printed(at: &Path) -> String {
+    for _ in 0..6000 {
+        let printed = fs::read_to_string(at).unwrap_or_default();
+        if !printed.is_empty() {
+            return printed;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    String::new()
+}
+
+/// Whether a process runs under `pid`, as `kill -0` answers.
+fn running(pid: &str) -> bool {
+    let mut probe = Command::new("kill");
+    probe.args(["-0", pid]).stderr(std::process::Stdio::null());
+    probe.status().unwrap().success()
+}
+
 /// A System V subset's run killed before its sweep leaves its claim, and
 /// the next System V subset's run removes what the killed one's tests
 /// left and names it in its reading (#2448): here a private queue of
 /// mode 0600 nobody sends to, naming no process, as php's
 /// `msg_get_queue(0)` leaves one, made by a test of `ext/sysvmsg` that
-/// then hangs; the run is killed, and the test's php with it, both
-/// processes this test started. The runs take their temporary directory
+/// then sleeps past the recipe's limit. The run is killed outright, which
+/// leaves the test's php running, and the next run kills it before it
+/// sweeps (#2522); a php still running then is killed by this test, which
+/// fails. The runs take their temporary directory
 /// apart, so the claims directory is theirs alone and no other run's
 /// reclaim takes the claim first; another run's sweep on the machine may
 /// still take the queue itself, which this test then cannot name.
@@ -1219,10 +1252,7 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     let started = marks.join("started");
     fs::write(
         dir.join("leaves.phpt"),
-        format!(
-            "--TEST--\nleaves a private queue and hangs\n--FILE--\n<?php\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$q = msg_get_queue(0, 0600);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\nsleep(50);\n--EXPECT--\n",
-            started.display()
-        ),
+        leaves_a_private_queue(&started, "sleep(120);\n--EXPECT--\n"),
     )
     .unwrap();
     let tmp = Tree::new("phpt-sysv-killed-tmp").unwrap();
@@ -1234,19 +1264,12 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
         command
     };
     let mut killed = run().spawn().unwrap();
-    let mut printed = String::new();
-    for _ in 0..6000 {
-        printed = fs::read_to_string(&started).unwrap_or_default();
-        if !printed.is_empty() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let printed = printed(&started);
     killed.kill().unwrap();
     killed.wait().unwrap();
     let mut words = printed.split_whitespace();
     let pid = words.next().expect("the test printed its pid");
-    Command::new("kill").args(["-9", pid]).status().unwrap();
+    assert!(running(pid), "the killed run's php runs on");
     let appeared: Vec<&str> = words.collect();
     let left: Vec<PathBuf> = fs::read_dir(&claims)
         .unwrap()
@@ -1268,6 +1291,14 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     )
     .unwrap();
     let out = run().output().unwrap();
+    let orphan = running(pid);
+    if orphan {
+        Command::new("kill").args(["-9", pid]).status().unwrap();
+    }
+    assert!(
+        !orphan,
+        "the next run left the killed run's php {pid} running"
+    );
     assert!(out.status.success(), "{out:?}");
     let reading = xtask::reading::Store::of_workspace(checkout.path())
         .read("phpt", "ext/sysvmsg")

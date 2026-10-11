@@ -1227,12 +1227,71 @@ impl Drained {
 /// error between, so nothing a program started outlives its run, as
 /// `proc_terminate` ends upstream's on its timeout (run-tests.php
 /// `system_with_timeout`). A kill that finds the group empty is no error.
-struct Group(nix::unistd::Pid);
+///
+/// A run killed outright drops nothing, so its programs stand past the
+/// limit; the next run that reads its journal takes their groups as
+/// [`Group::standing`] finds them, and drops them (#2522).
+pub(crate) struct Group(nix::unistd::Pid);
 
 impl Group {
     fn of(child: &std::process::Child) -> Result<Group> {
         let pid = i32::try_from(child.id()).context("a process id past pid_t")?;
         Ok(Group(nix::unistd::Pid::from_raw(pid)))
+    }
+
+    /// The group a program spawned as `pid` inside `window` leads, where
+    /// the process running under that number now is that program as
+    /// [`Process::spawned_as`] tells it: one of a cut-off run's that still
+    /// stands, and never a process that took the number since.
+    pub(crate) fn standing(pid: u32, window: (i64, i64)) -> Option<Group> {
+        Process::of(pid).filter(|found| found.spawned_as(pid, window))?;
+        Some(Group(nix::unistd::Pid::from_raw(i32::try_from(pid).ok()?)))
+    }
+}
+
+/// A process as `ps` reads it: the group it is in, and the second since
+/// the epoch it started at, to the whole second `ps` prints its age in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Process {
+    pub group: u32,
+    pub started: i64,
+}
+
+impl Process {
+    /// The process running under `pid` now, none where none runs.
+    fn of(pid: u32) -> Option<Process> {
+        let ps = Command::new("ps")
+            .args(["-o", "pgid=,etime=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        Process::read(&String::from_utf8_lossy(&ps.stdout), now.ok()?.as_secs())
+    }
+
+    /// The process `ps -o pgid=,etime=` printed `now`, a second since the
+    /// epoch: its age is `[[dd-]hh:]mm:ss` on macOS and under procps alike.
+    pub(crate) fn read(printed: &str, now: u64) -> Option<Process> {
+        let (group, etime) = printed.trim().split_once(char::is_whitespace)?;
+        let (days, clock) = etime.trim().split_once('-').unwrap_or(("0", etime.trim()));
+        let age = clock
+            .split(':')
+            .try_fold(0, |age, part| Some(age * 60 + part.parse::<i64>().ok()?))?
+            + days.parse::<i64>().ok()? * 86_400;
+        Some(Process {
+            group: group.parse().ok()?,
+            started: i64::try_from(now).ok()? - age,
+        })
+    }
+
+    /// Whether this is the program spawned as `pid` while a run's journal
+    /// was written, from `window`'s first second to its last: a process
+    /// that leads its own group under that number, as every program is
+    /// spawned (`process_group(0)`), and started inside the window, a
+    /// second's give either side for the whole seconds `ps` prints. A
+    /// process that took the number once the program ended started past
+    /// the window, and one in another group is not a program's.
+    pub(crate) fn spawned_as(self, pid: u32, (from, to): (i64, i64)) -> bool {
+        self.group == pid && from - 1 <= self.started && self.started <= to + 1
     }
 }
 
