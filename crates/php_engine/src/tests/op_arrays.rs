@@ -29,26 +29,26 @@ fn keyed(observed: &Observed<'_>) -> Option<String> {
 /// `phpdbg_is_ignored_opcode` (`Z/sapi/phpdbg/phpdbg.c:423-433`).
 fn ignored(opcode: Opcode) -> bool {
     matches!(
-        opcode,
-        Opcode::Nop
-            | Opcode::OpData
-            | Opcode::FeFree
-            | Opcode::Free
-            | Opcode::AssertCheck
-            | Opcode::VerifyReturnType
-            | Opcode::DeclareConst
-            | Opcode::DeclareAttributedConst
-            | Opcode::DeclareClass
-            | Opcode::DeclareFunction
-            | Opcode::DeclareClassDelayed
-            | Opcode::DeclareAnonClass
-            | Opcode::FastRet
-            | Opcode::Ticks
-            | Opcode::ExtStmt
-            | Opcode::ExtFcallBegin
-            | Opcode::ExtFcallEnd
-            | Opcode::BindGlobal
-            | Opcode::BindInitStaticOrJmp
+        opcode.name(),
+        "ZEND_NOP"
+            | "ZEND_OP_DATA"
+            | "ZEND_FE_FREE"
+            | "ZEND_FREE"
+            | "ZEND_ASSERT_CHECK"
+            | "ZEND_VERIFY_RETURN_TYPE"
+            | "ZEND_DECLARE_CONST"
+            | "ZEND_DECLARE_ATTRIBUTED_CONST"
+            | "ZEND_DECLARE_CLASS"
+            | "ZEND_DECLARE_FUNCTION"
+            | "ZEND_DECLARE_CLASS_DELAYED"
+            | "ZEND_DECLARE_ANON_CLASS"
+            | "ZEND_FAST_RET"
+            | "ZEND_TICKS"
+            | "ZEND_EXT_STMT"
+            | "ZEND_EXT_FCALL_BEGIN"
+            | "ZEND_EXT_FCALL_END"
+            | "ZEND_BIND_GLOBAL"
+            | "ZEND_BIND_INIT_STATIC_OR_JMP"
     )
 }
 
@@ -63,8 +63,8 @@ fn executable(code: OpArrayView<'_>) -> Vec<u32> {
     let ops: Vec<OplineView<'_>> = code.oplines().collect();
     let returns = |op: &OplineView<'_>| {
         matches!(
-            op.opcode(),
-            Opcode::Return | Opcode::ReturnByRef | Opcode::GeneratorReturn
+            op.opcode().name(),
+            "ZEND_RETURN" | "ZEND_RETURN_BY_REF" | "ZEND_GENERATOR_RETURN"
         )
     };
     let end = ops.len() - usize::from(ops.last().is_some_and(returns));
@@ -72,8 +72,8 @@ fn executable(code: OpArrayView<'_>) -> Vec<u32> {
         .iter()
         .take_while(|op| {
             matches!(
-                op.opcode(),
-                Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
+                op.opcode().name(),
+                "ZEND_RECV" | "ZEND_RECV_INIT" | "ZEND_RECV_VARIADIC"
             )
         })
         .count();
@@ -81,10 +81,10 @@ fn executable(code: OpArrayView<'_>) -> Vec<u32> {
     while at < end {
         let op = &ops[at];
         if !ignored(op.opcode()) {
-            if op.opcode() == Opcode::New
+            if op.opcode().name() == "ZEND_NEW"
                 && ops
                     .get(at + 1)
-                    .is_some_and(|next| next.opcode() == Opcode::DoFcall)
+                    .is_some_and(|next| next.opcode().name() == "ZEND_DO_FCALL")
             {
                 at += 1;
             }

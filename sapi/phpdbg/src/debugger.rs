@@ -696,12 +696,12 @@ fn vm_return(req: &Request, before: FrameRef, edge: Stepped) -> i32 {
 /// serving entered is the loop's to run.
 fn leaves(opcode: Opcode) -> bool {
     matches!(
-        opcode,
-        Opcode::Return
-            | Opcode::ReturnByRef
-            | Opcode::GeneratorReturn
-            | Opcode::Yield
-            | Opcode::YieldFrom
+        opcode.name(),
+        "ZEND_RETURN"
+            | "ZEND_RETURN_BY_REF"
+            | "ZEND_GENERATOR_RETURN"
+            | "ZEND_YIELD"
+            | "ZEND_YIELD_FROM"
     )
 }
 

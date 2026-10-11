@@ -1328,12 +1328,12 @@ fn seek_over(here: &mut Here<'_>, keep: impl Fn(Opcode, u32, u32) -> bool) -> Op
 /// and `ZEND_YIELD_FROM`, where a seek to a function's end stops.
 fn ends(opcode: Opcode) -> bool {
     matches!(
-        opcode,
-        Opcode::Return
-            | Opcode::FastRet
-            | Opcode::GeneratorReturn
-            | Opcode::Yield
-            | Opcode::YieldFrom
+        opcode.name(),
+        "ZEND_RETURN"
+            | "ZEND_FAST_RET"
+            | "ZEND_GENERATOR_RETURN"
+            | "ZEND_YIELD"
+            | "ZEND_YIELD_FROM"
     )
 }
 

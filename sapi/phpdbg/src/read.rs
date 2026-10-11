@@ -123,8 +123,8 @@ fn received(code: &OpArrayView<'_>) -> u32 {
         .oplines()
         .take_while(|op| {
             matches!(
-                op.opcode(),
-                Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
+                op.opcode().name(),
+                "ZEND_RECV" | "ZEND_RECV_INIT" | "ZEND_RECV_VARIADIC"
             )
         })
         .count();
@@ -182,7 +182,7 @@ pub fn parameter_names(req: &Request, frame: FrameRef) -> Vec<Vec<u8>> {
     };
     let declared = code
         .oplines()
-        .take_while(|op| matches!(op.opcode(), Opcode::Recv | Opcode::RecvInit))
+        .take_while(|op| matches!(op.opcode().name(), "ZEND_RECV" | "ZEND_RECV_INIT"))
         .count();
     (0..declared)
         .map_while(|cv| code.variable(u32::try_from(cv).ok()?))

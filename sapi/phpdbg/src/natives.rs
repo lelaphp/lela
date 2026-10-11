@@ -645,8 +645,8 @@ fn ignored(opcode: Opcode) -> bool {
 /// Whether an opline returns from its op array.
 fn returns(opcode: Opcode) -> bool {
     matches!(
-        opcode,
-        Opcode::Return | Opcode::ReturnByRef | Opcode::GeneratorReturn
+        opcode.name(),
+        "ZEND_RETURN" | "ZEND_RETURN_BY_REF" | "ZEND_GENERATOR_RETURN"
     )
 }
 
@@ -670,10 +670,10 @@ fn executable(rows: &mut Rows, at: Place, ops: &[(Opcode, u32)], params: u32, by
             } else {
                 i64::from(line)
             };
-            if opcode == Opcode::New
+            if opcode.name() == "ZEND_NEW"
                 && ops
                     .get(index + 1)
-                    .is_some_and(|(o, _)| *o == Opcode::DoFcall)
+                    .is_some_and(|(o, _)| o.name() == "ZEND_DO_FCALL")
             {
                 index += 1;
             }
