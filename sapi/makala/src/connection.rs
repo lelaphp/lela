@@ -240,7 +240,7 @@ async fn accept(
             begun: AtomicU32::new(0),
             cut: Notify::new(),
         });
-        let socket = Socket::new(stream, Arc::clone(&connection.watch), limits, slot);
+        let socket = Socket::new(stream, peer, Arc::clone(&connection.watch), limits, slot);
         tokio::spawn(drive(connection, socket, draining.clone(), open.clone()));
     }
 }

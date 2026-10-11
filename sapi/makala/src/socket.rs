@@ -34,8 +34,14 @@
 //! let go outside the runtime, or as the runtime is dropped at the
 //! drain's deadline (#2344), closes at once. A lingering socket holds its descriptor, and its connection's
 //! slot under the cap, for that second beyond its connection.
+//!
+//! A connection whose first byte is a TLS record's, `0x16`, a handshake
+//! sent to the port that serves HTTP without TLS, is refused: its read
+//! fails, so hyper drops it unanswered, as Bandit and Kestrel close one,
+//! and the error log says why (research/production-server.r2.md M19).
 
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
@@ -157,11 +163,19 @@ impl Watch {
     }
 }
 
+/// The first byte of a TLS record of a handshake, which no HTTP request
+/// begins with (RFC 8446 §5.1, `handshake(22)`).
+const TLS_HANDSHAKE: u8 = 0x16;
+
 /// The socket of one connection, with its clocks, which lingers when it
 /// is let go.
 pub(crate) struct Socket {
     /// Taken only when the socket is let go.
     stream: Option<TcpStream>,
+    /// The peer of a connection whose first read has not come, which a
+    /// TLS handshake must not begin: one that does is refused and logged
+    /// under it.
+    clear_peer: Option<SocketAddr>,
     watch: Arc<Watch>,
     limits: Limits,
     /// The keep-alive idle or header timeout's wake-up, while a read waits.
@@ -193,11 +207,13 @@ impl Socket {
     /// `watch` and `limits`.
     pub(crate) fn new(
         stream: TcpStream,
+        peer: SocketAddr,
         watch: Arc<Watch>,
         limits: Limits,
         slot: OwnedSemaphorePermit,
     ) -> Socket {
         Socket {
+            clear_peer: Some(peer),
             stream: Some(stream),
             watch,
             limits,
@@ -361,9 +377,25 @@ impl AsyncRead for Socket {
         let filled = buf.filled().len();
         match this.stream()?.poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
-                if buf.filled().len() > filled {
-                    this.watch.arrived(&buf.filled()[filled..], now);
+                let read = &buf.filled()[filled..];
+                if read.is_empty() {
+                    return Poll::Ready(Ok(()));
                 }
+                if let Some(peer) = this.clear_peer.take()
+                    && read.first() == Some(&TLS_HANDSHAKE)
+                {
+                    // hyper reads a failed first read as the client gone,
+                    // so the refusal is logged here.
+                    crate::log::error(
+                        format!(
+                            "makala: {peer}: a TLS handshake came to the clear port, which \
+                             serves HTTP without TLS; the connection is closed unanswered"
+                        )
+                        .as_bytes(),
+                    );
+                    return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+                }
+                this.watch.arrived(read, now);
                 Poll::Ready(Ok(()))
             }
             Poll::Pending => {
