@@ -839,9 +839,7 @@ impl Request {
     /// memory limit refuses is the fatal php raises there.
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
         let Some(function) = header.function else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a call pushed with no callee",
-            )));
+            return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
         let room = self.call_room(function, header.num_args);
         self.push_room(room, header)

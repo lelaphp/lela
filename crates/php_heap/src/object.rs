@@ -177,7 +177,7 @@ impl Obj {
             return Ok(members + custom);
         };
         if payload.layout.align() > 8 {
-            return Err(Fatal::Error(format!(
+            return Err(Fatal::error(format!(
                 "InternalError: a native payload aligned to {} cannot sit on the request heap",
                 payload.layout.align()
             )));
@@ -1245,7 +1245,7 @@ mod tests {
         }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-            Fatal::OutOfMemory(bytes)
+            Fatal::out_of_memory(bytes)
         }
     }
 
@@ -1496,7 +1496,7 @@ mod tests {
         }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-            Fatal::OutOfMemory(bytes)
+            Fatal::out_of_memory(bytes)
         }
     }
 

@@ -451,9 +451,9 @@ impl Request {
             Vec::new()
         };
         if names.len() < usize::try_from(table.declared()).unwrap_or(usize::MAX) {
-            return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
+            return self.fatal_of(Err(php_heap::Fatal::error(
                 "InternalError: a declared slot of an object's table with no name",
-            ))));
+            )));
         }
         Ok(ObjectTable::of(owner, table, names.into_boxed_slice()))
     }
@@ -508,9 +508,9 @@ impl Request {
             TableRow::Slot(i) => {
                 let names = self.slot_names(owner.class())?;
                 let Some(name) = usize::try_from(i).ok().and_then(|i| names.get(i)) else {
-                    return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
+                    return self.fatal_of(Err(php_heap::Fatal::error(
                         "InternalError: a declared slot of an object's table with no name",
-                    ))));
+                    )));
                 };
                 Key::Str(PhpString::of(*name))
             }

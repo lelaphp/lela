@@ -68,7 +68,7 @@ pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
 /// ```
 pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
     if let Some(seconds) = req.interrupt().taken() {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "Maximum execution time of {seconds} second{} exceeded",
             if seconds == 1 { "" } else { "s" }
         )));
@@ -970,7 +970,7 @@ mod tests {
 
         assert_eq!(
             execute::<Probe, Untold>(&mut req, frame),
-            Err(Fatal::Error(String::from(TIMED_OUT)))
+            Err(Fatal::error(TIMED_OUT))
         );
         assert_eq!(
             req.state::<Asked>().sites,
@@ -993,7 +993,7 @@ mod tests {
 
         assert_eq!(
             execute::<Probe, Untold>(&mut req, frame),
-            Err(Fatal::Error(String::from(TIMED_OUT)))
+            Err(Fatal::error(TIMED_OUT))
         );
         assert_eq!(req.state::<Asked>().sites, vec![(Site::Entry, frame)]);
     }
@@ -1015,7 +1015,7 @@ mod tests {
 
         assert_eq!(
             execute::<Nop, Untold>(&mut req, frame),
-            Err(Fatal::Error(String::from(TIMED_OUT)))
+            Err(Fatal::error(TIMED_OUT))
         );
         assert!(
             armed.elapsed() >= Duration::from_secs(1),
@@ -1224,10 +1224,7 @@ mod tests {
             })
             .collect();
         for thread in threads {
-            assert_eq!(
-                thread.join().ok(),
-                Some(Err(Fatal::Error(String::from(TIMED_OUT))))
-            );
+            assert_eq!(thread.join().ok(), Some(Err(Fatal::error(TIMED_OUT))));
         }
         assert!(began.elapsed() >= Duration::from_secs(1));
         assert_eq!(started(&engine.shared.timer) - before, 1);
@@ -1467,9 +1464,9 @@ mod tests {
         req.interrupt().elapsed(30);
         assert_eq!(
             check(&mut req),
-            Err(Fatal::Error(String::from(
+            Err(Fatal::error(
                 "Maximum execution time of 30 seconds exceeded"
-            )))
+            ))
         );
         assert!(!req.interrupt().raised().load(Ordering::Relaxed));
         // The second check finds nothing: php's helper clears both words.

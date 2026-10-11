@@ -1576,7 +1576,7 @@ impl Request {
         let cloned = self.heap.object_clone(object.heap(), custom);
         let Some(new) = self.fatal_of(cloned)? else {
             let class = self.class_name(object.class());
-            return self.fatal_of(Err(Fatal::Error(format!(
+            return self.fatal_of(Err(Fatal::error(format!(
                 "InternalError: Std::clone_obj over an object of class {class}, whose native payload its own table must copy"
             ))));
         };

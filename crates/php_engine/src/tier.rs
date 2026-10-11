@@ -230,9 +230,9 @@ pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
     match flow {
         Flow::Continue => Ok(()),
         Flow::Bail(fatal) => Err(fatal),
-        Flow::Resume(_) | Flow::Returned => Err(Fatal::Error(String::from(
+        Flow::Resume(_) | Flow::Returned => Err(Fatal::error(
             "InternalError: a tier served code and this loop has no resumption for it yet",
-        ))),
+        )),
     }
 }
 
@@ -539,7 +539,7 @@ const HELD: usize = 4;
 /// op array, which no unit the compiler wrote reaches.
 #[cold]
 fn no_frame(frame: FrameRef) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "InternalError: frame {} is serving no op array",
         frame.0
     ))
@@ -621,7 +621,7 @@ pub fn unwind(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// its op array, which no unit the compiler wrote reaches.
 #[cold]
 fn past_the_end(frame: FrameRef, at: u32) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "InternalError: frame {} stands at opline {at}, past the end of its op array",
         frame.0
     ))

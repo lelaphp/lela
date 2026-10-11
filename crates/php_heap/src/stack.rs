@@ -416,9 +416,9 @@ impl<H> VmStack<H> {
             Placed::Opened
         };
         let Some(page) = self.pages.last_mut() else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a VM stack with no page after its push laid one down",
-            )));
+            ));
         };
         let from = page.top;
         page.top += used;
@@ -468,17 +468,17 @@ impl<H> VmStack<H> {
             .filter(|_| top == Some(f.0 as usize))
             .map(|frame| (frame.placed, frame.len, frame.at))
         else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a VM stack frame grown that is not the top one",
-            )));
+            ));
         };
         let from = match placed {
             Placed::On { from } => from,
             Placed::Opened => PAGE_HEADER_SLOTS,
             Placed::Heap { .. } => {
-                return Err(Fatal::Error(String::from(
+                return Err(Fatal::error(
                     "InternalError: a frame in an allocation of its own grown on the VM stack",
-                )));
+                ));
             }
         };
         let fits = self
@@ -586,9 +586,9 @@ impl<H> VmStack<H> {
             Placed::Opened => PAGE_HEADER_SLOTS,
         };
         let Some(page) = self.pages.last() else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a frame moved off a VM stack with no page",
-            )));
+            ));
         };
         let used = page.top.saturating_sub(start);
         let block = match heap.mm.alloc(used * SLOT) {
@@ -919,9 +919,9 @@ mod tests {
             .find_map(Result::err);
         assert_eq!(
             refused,
-            Some(Fatal::Error(String::from(
+            Some(Fatal::error(
                 "Allowed memory size of 4194304 bytes exhausted (tried to allocate 262144 bytes)"
-            )))
+            ))
         );
         drop(stack.close(&mut heap));
     }

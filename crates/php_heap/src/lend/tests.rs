@@ -5,7 +5,7 @@ use std::ffi::{CStr, c_void};
 
 use super::{ecalloc, efree, emalloc, erealloc, estrdup, estrndup};
 use crate::Heap;
-use crate::hooks::Fatal;
+use crate::hooks::{Fatal, FatalReason};
 use crate::serial::alone;
 
 /// Under a lend a block is the heap's, counted at its bin and in the
@@ -135,7 +135,7 @@ fn a_refusal_of_the_limit_is_served_by_the_system_and_answered_after_the_call() 
         !kept.is_null()
     });
     assert!(
-        matches!(&lent, Err(Fatal::Error(text)) if text.starts_with("Allowed memory size of 2097152 bytes exhausted")),
+        matches!(lent.as_ref().map_err(Fatal::reason), Err(FatalReason::Error(text)) if text.starts_with("Allowed memory size of 2097152 bytes exhausted")),
         "{lent:?}"
     );
     assert!(!kept.is_null());

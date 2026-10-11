@@ -1680,7 +1680,7 @@ impl Vm {
 /// oplines can be read while the request is borrowed.
 pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal> {
     req.serving(frame).ok_or_else(|| {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: frame {} is serving no op array",
             frame.0
         ))
@@ -1690,7 +1690,7 @@ pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal>
 /// The op array `frame` is serving, out of its unit.
 pub(crate) fn serving_code(serving: &Serving, frame: FrameRef) -> Result<&OpArray, Fatal> {
     serving.code().ok_or_else(|| {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: frame {} names a body its unit has not",
             frame.0
         ))
@@ -1835,13 +1835,13 @@ pub(crate) fn container(
         }
         OperandKind::Unused => req.vm().this(frame).map_or_else(
             || {
-                Err(php_heap::Fatal::Error(format!(
+                Err(php_heap::Fatal::error(format!(
                     "InternalError: {opcode} over $this on a frame with no receiver"
                 )))
             },
             |this| Ok(this.as_value()),
         ),
-        OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::Error(format!(
+        OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::error(format!(
             "InternalError: {opcode} over a constant or a temporary, which php compiles no write over"
         ))),
     }
@@ -2368,7 +2368,7 @@ fn prologue_from(
                 crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, body, prologue)?
             }
             other => {
-                return Err(php_heap::Fatal::Error(format!(
+                return Err(php_heap::Fatal::error(format!(
                     "InternalError: {} stands before the entry safepoint, and this engine serves no handler for it yet",
                     other.name()
                 )));

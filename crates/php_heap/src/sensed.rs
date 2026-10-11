@@ -125,14 +125,14 @@ impl Sensed {
                     Use::Release => "a release",
                     Use::Read => "a read",
                 };
-                Fatal::Error(format!(
+                Fatal::error(format!(
                     "InternalError: {op} of the block at {at:#x}, which the heap has freed, at {site}"
                 ))
             }
-            Sensed::FreedWrite { at, size } => Fatal::Error(format!(
+            Sensed::FreedWrite { at, size } => Fatal::error(format!(
                 "InternalError: a write into the {size}-byte block at {at:#x} after the heap freed it, found as it left the quarantine"
             )),
-            Sensed::FreedTwice { at, size } => Fatal::Error(format!(
+            Sensed::FreedTwice { at, size } => Fatal::error(format!(
                 "InternalError: a free of the {size}-byte block at {at:#x}, which the heap has freed"
             )),
             Sensed::Unconsumed { at, site, others } => {
@@ -149,7 +149,7 @@ impl Sensed {
                         lines.join(", ")
                     )
                 };
-                Fatal::Error(format!(
+                Fatal::error(format!(
                     "InternalError: {made} was dropped without being handed to a sink or given up{others}"
                 ))
             }
@@ -159,7 +159,7 @@ impl Sensed {
                 first,
                 named,
                 trace,
-            } => Fatal::Error(format!(
+            } => Fatal::error(format!(
                 "InternalError: the request ended with {blocks} {} of its heap never freed, {bytes} bytes, the first of {} bytes at {:#x}, allocated by {named}{}",
                 if blocks == 1 { "block" } else { "blocks" },
                 first.size,

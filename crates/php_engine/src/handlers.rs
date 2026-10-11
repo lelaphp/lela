@@ -328,7 +328,7 @@ fn constant_bytes(code: &OpArray, op: &Opline, at: u32) -> Result<Vec<u8>, Fatal
         .as_str_bytes()
         .map(<[u8]>::to_vec)
         .ok_or_else(|| {
-            Fatal::Error(format!(
+            Fatal::error(format!(
                 "InternalError: a {} with no string in its constant {at}",
                 op.opcode.name().trim_start_matches("ZEND_")
             ))
@@ -491,9 +491,9 @@ pub(crate) fn declare_function<T: Tier>(
 ) -> Edge {
     let serving = exec::standing(req, frame)?;
     let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a DECLARE_FUNCTION whose op2 names no dynamic function definition",
-        )));
+        ));
     };
     let lowered = constant_bytes(code, op, op.op1)?;
     match req.bind_function(&serving.unit, at, &lowered) {
@@ -640,9 +640,9 @@ pub(crate) fn declare_attributed_const<T: Tier>(
             .map(<[u8]>::to_vec),
         data,
     ) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a DECLARE_ATTRIBUTED_CONST with no name or no OP_DATA after it",
-        )));
+        ));
     };
     let serving = exec::standing(req, frame)?;
     let Some(decl) = code
@@ -651,9 +651,9 @@ pub(crate) fn declare_attributed_const<T: Tier>(
         .and_then(|literal| literal.as_ptr())
         .and_then(|index| serving.unit.constants.get(index as usize))
     else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a DECLARE_ATTRIBUTED_CONST whose OP_DATA names no declaration",
-        )));
+        ));
     };
     let attributes = decl.attributes.clone();
     // A value the compiler could not fold is its constant expression,
@@ -744,14 +744,14 @@ pub(crate) fn declare_lambda_function<T: Tier>(
 ) -> Edge {
     let serving = exec::standing(req, frame)?;
     let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a DECLARE_LAMBDA_FUNCTION whose op2 names no dynamic function definition",
-        )));
+        ));
     };
     let Some((_, body)) = serving.unit.dynamic.get(at as usize) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
-        )));
+        ));
     };
     let no_receiver = body.no_receiver;
     let bound = match exec::starting_statics(req, body) {
@@ -759,9 +759,9 @@ pub(crate) fn declare_lambda_function<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let Some(function) = req.closure_function(&serving.unit, at) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
-        )));
+        ));
     };
     let scope = req.frame_scope(frame);
     let receiver = req.vm().this(frame);
@@ -780,9 +780,9 @@ pub(crate) fn declare_lambda_function<T: Tier>(
         fake: false,
     };
     let Some(class) = req.class_named(b"closure") else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a DECLARE_LAMBDA_FUNCTION with no Closure class declared",
-        )));
+        ));
     };
     // `ZVAL_OBJ_COPY(&closure->this_ptr, ...)`: the receiver the
     // closure holds is one more owner, given back by
@@ -882,9 +882,9 @@ pub(crate) fn bind_lexical<T: Tier>(
 ) -> Edge {
     let closure = exec::operand(req, frame, code, op.op1_type, op.op1);
     let Some(object) = closure.as_object().copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a BIND_LEXICAL over what is no Closure",
-        )));
+        ));
     };
     let slot = (op.extended_value >> 3) as usize;
     let by_ref = op.extended_value & BIND_REF != 0;
@@ -918,9 +918,9 @@ pub(crate) fn bind_lexical<T: Tier>(
         .and_then(|(table, slot)| table.at_position(slot));
     let Some((previous, place)) = place else {
         req.release(bound);
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a BIND_LEXICAL naming a slot the closure has not",
-        )));
+        ));
     };
     place.heap().write(bound.to_zval());
     req.release(previous);
@@ -1075,9 +1075,9 @@ pub(crate) fn bind_static<T: Tier>(
     let held = match req.static_at(at, code, slot) {
         Ok(Some(held)) => held,
         Ok(None) => {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a BIND_STATIC naming a slot the static table has not",
-            )));
+            ));
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -1213,9 +1213,9 @@ pub(crate) fn bind_global<T: Tier>(
 ) -> Edge {
     let name = exec::constant(code, ConstIdx(op.op2));
     let Some(name) = name.as_php_string().copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_BIND_GLOBAL over a name that is no string",
-        )));
+        ));
     };
     let cell = match req.global_cell(name) {
         Ok(cell) => cell,
@@ -2007,9 +2007,9 @@ fn send_by_ref(
     slot: ArgSlot,
 ) -> Edge {
     let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_SEND_REF over an operand php compiles no write over",
-        )));
+        ));
     };
     let bound = bound_at(req, at);
     // `FREE_OP1_VAR_PTR()`: a `VAR` holding the `IS_INDIRECT` a fetch
@@ -2404,9 +2404,9 @@ pub(crate) fn check_func_arg<T: Tier>(
         .building_call()
         .and_then(|call| req.vm_mut().at_mut(call))
     else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_CHECK_FUNC_ARG with no call frame under it",
-        )));
+        ));
     };
     call.info.set_send_by_ref(by_ref);
     Ok(advance(req, frame))
@@ -3071,9 +3071,9 @@ fn reserve_arg(
     op: &Opline,
 ) -> Result<Reserved, Edge> {
     let no_call = || -> Result<Reserved, Edge> {
-        Err(Err(Fatal::Error(String::from(
+        Err(Err(Fatal::error(
             "InternalError: a SEND_* opline with no call frame under it",
-        ))))
+        )))
     };
     match ArgAt::of(op) {
         ArgAt::Number(number) => {
@@ -3089,7 +3089,7 @@ fn reserve_arg(
             // order, so a number past that is a compiler bug and not an
             // allocation.
             if at >= passed {
-                return Err(Err(Fatal::Error(format!(
+                return Err(Err(Fatal::error(format!(
                     "InternalError: a SEND_* opline places argument {number} of a call of {passed}"
                 ))));
             }
@@ -3103,9 +3103,9 @@ fn reserve_arg(
         }
         ArgAt::Name(at) => {
             let Some(name) = exec::constant(code, at).as_php_string().copied() else {
-                return Err(Err(Fatal::Error(String::from(
+                return Err(Err(Fatal::error(
                     "InternalError: a SEND_* opline names its argument by what is no string",
-                ))));
+                )));
             };
             match reserve_named(req, name) {
                 Ok(Ok(reserved)) => Ok(reserved),
@@ -3125,11 +3125,7 @@ fn reserve_arg(
 /// its own; what it refuses is php's `Error`, the inner `Err`. A `SEND_*`
 /// by name and a string key `SEND_UNPACK` spreads both reach it.
 fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, Thrown>, Fatal> {
-    let no_call = || {
-        Fatal::Error(String::from(
-            "InternalError: a SEND_* opline with no call frame under it",
-        ))
-    };
+    let no_call = || Fatal::error("InternalError: a SEND_* opline with no call frame under it");
     let Some(function) = req.building_call_function() else {
         return Err(no_call());
     };
@@ -3216,9 +3212,9 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
 /// frame.
 fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
     let Some(call) = req.building_call() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: SEND_UNPACK with no call frame under it",
-        )));
+        ));
     };
     let at = req
         .vm()
@@ -3462,9 +3458,9 @@ pub(crate) fn include_or_eval<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(kind) = exec::IncludeKind::of(op.extended_value) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: an INCLUDE_OR_EVAL whose extended_value names no construct",
-        )));
+        ));
     };
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
     let returns_to =
@@ -4466,9 +4462,9 @@ pub(crate) fn callable_convert<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(call) = req.building_call().and_then(|call| req.frame_at(call)) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
-        )));
+        ));
     };
     let callee = match call.closure() {
         Some(closure) => crate::classes::CallFrame::Closure(closure),
@@ -6416,7 +6412,7 @@ fn fetch_named(
                     Err(thrown) => return threw(req, frame, &thrown),
                 };
                 let Some(place) = place else {
-                    return Err(Fatal::Error(format!(
+                    return Err(Fatal::error(format!(
                         "InternalError: a fetch by name laid ${shown} down and the table does not hold it"
                     )));
                 };
@@ -6874,9 +6870,9 @@ pub(crate) fn fetch_constant<T: Tier>(
     op: &Opline,
 ) -> Edge {
     if op.op2_type != OperandKind::Const {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_FETCH_CONSTANT over a name no literal carries",
-        )));
+        ));
     }
     let mut key = named(code, op.op2.saturating_add(1));
     let mut found = req.constant_named(&key);
@@ -7171,7 +7167,7 @@ fn static_prop_place(
     let info = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
         Ok(Some(info)) => info,
         Ok(None) => {
-            return Err(Fatal::Error(format!(
+            return Err(Fatal::error(format!(
                 "InternalError: ZEND_FETCH_STATIC_PROP_W placed ${} and the table holds no slot for it",
                 String::from_utf8_lossy(&name)
             )));
@@ -7229,9 +7225,9 @@ fn static_prop_place(
         return Ok(advance(req, frame));
     }
     let Some(var) = req.slot_ptr(frame, out) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_FETCH_STATIC_PROP_W writes a VAR the frame does not have",
-        )));
+        ));
     };
     var.write(php_heap::Zval::indirect(place));
     Ok(advance(req, frame))
@@ -7990,9 +7986,9 @@ fn fetch_obj_place(
     let previous = req.take_slot(frame, out);
     req.release(previous);
     let Some(var) = req.slot_ptr(frame, out) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_FETCH_OBJ_W writes a VAR the frame does not have",
-        )));
+        ));
     };
     var.write(php_heap::Zval::indirect(at));
     exec::free_container_var(req, frame, code, op);
@@ -8363,7 +8359,7 @@ fn property_place_on(
     let at = match placed {
         Ok(Some((slot, _))) => {
             let Some(at) = object.heap().slot_ref(slot) else {
-                return Err(Fatal::Error(format!(
+                return Err(Fatal::error(format!(
                     "InternalError: ZEND_FETCH_OBJ_W placed ${} in slot {slot}, which the object does not have",
                     String::from_utf8_lossy(&name)
                 )));
@@ -8372,9 +8368,9 @@ fn property_place_on(
         }
         Ok(None) => {
             let Some(key) = name_value.as_php_string().copied() else {
-                return Err(Fatal::Error(String::from(
+                return Err(Fatal::error(
                     "InternalError: ZEND_FETCH_OBJ_W over a property whose name is no string",
-                )));
+                ));
             };
             req.addref(name_value);
             // `zend_std_get_property_ptr_ptr`: under `BP_VAR_W` the
@@ -8384,7 +8380,7 @@ fn property_place_on(
             match req.dynamic_property_ref(object, key, read) {
                 Ok(Some(at)) => at,
                 Ok(None) => {
-                    return Err(Fatal::Error(format!(
+                    return Err(Fatal::error(format!(
                         "InternalError: ZEND_FETCH_OBJ_W laid the dynamic property ${} down and the table does not hold it",
                         String::from_utf8_lossy(&name)
                     )));
@@ -10237,9 +10233,9 @@ fn fetch_dim_place(
     keep: Keep,
 ) -> Edge {
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_FETCH_DIM_W over a constant or a temporary, which php compiles no write over",
-        )));
+        ));
     };
     let container = write_container(req, (frame, code, op), place, Walk::Fetch(read));
     let ran_on = req.pending();
@@ -10384,9 +10380,9 @@ fn lay_dim_place(
         }
     };
     let Some(var) = req.slot_ptr(frame, out) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_FETCH_DIM_W writes a VAR the frame does not have",
-        )));
+        ));
     };
     var.write(written);
     if keep == Keep::Nothing {
@@ -10540,9 +10536,9 @@ pub(crate) fn clone<T: Tier>(
     op: &Opline,
 ) -> Edge {
     if op.op1_type == OperandKind::Unused {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_CLONE over $this, which no frame here carries",
-        )));
+        ));
     }
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let cloned = match operand.as_object().copied() {
@@ -10961,7 +10957,7 @@ fn data_after(
         .filter(|next| next.opcode == Opcode::OpData)
         .map(|data| (at, *data))
         .ok_or_else(|| {
-            Fatal::Error(format!(
+            Fatal::error(format!(
                 "InternalError: {} with no OP_DATA after it",
                 op.opcode.name()
             ))
@@ -10986,7 +10982,7 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
         return threw(req, frame, &thrown);
     }
     let Some((call, function)) = req.activate_call(op.out_type != OperandKind::Unused) else {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
     };
@@ -11361,7 +11357,7 @@ fn frameless_call(
     arguments: &[(OperandKind, u32)],
 ) -> Edge {
     let Some(entry) = req.frameless_entry(op.extended_value) else {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: {} indexes frameless entry {} and the engine's table has {} entries",
             op.opcode.name(),
             op.extended_value,
@@ -11506,9 +11502,9 @@ fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
     // `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`: a CV, or the place a fetch
     // by name left in its `VAR` as an `IS_INDIRECT`.
     let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN over a variable the frame does not have",
-        )));
+        ));
     };
     let strict = req.frame_strict_types(frame);
     // php copies into `result` what the write landed, which a typed
@@ -11604,7 +11600,7 @@ pub(crate) fn assign_op<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(kernel) = binary_op_of(op.extended_value) else {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_OP over the operator {}, which is no binary operation",
             op.extended_value
         )));
@@ -11636,9 +11632,9 @@ pub(crate) fn assign_op<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_OP over a variable the frame does not have",
-        )));
+        ));
     };
     // php's `ZEND_REF_HAS_TYPE_SOURCES` arm,
     // `zend_binary_assign_op_typed_ref`: the operation is over what the
@@ -11766,9 +11762,9 @@ pub(crate) fn assign_ref<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(source) = write_place(req, frame, code, op.op2_type, op.op2) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_REF over a source php compiles no write over",
-        )));
+        ));
     };
     let target = match op.op1_type {
         OperandKind::Cv => req.slot_ptr(frame, op.op1),
@@ -11788,9 +11784,9 @@ pub(crate) fn assign_ref<T: Tier>(
         OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => None,
     };
     let Some(target) = target else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_REF over a target php compiles no write over",
-        )));
+        ));
     };
     let held = exec::value_of(source.read());
     // `ZEND_RETURNS_FUNCTION`: the source is a call, and a call that
@@ -11978,9 +11974,9 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         }
     };
     let Some(source) = write_place(req, frame, code, data_type, data_at) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_OBJ_REF over a source php compiles no write over",
-        )));
+        ));
     };
     let held = exec::value_of(source.read());
     let strict = req.frame_strict_types(frame);
@@ -12550,7 +12546,7 @@ fn assign_property(
         Some((slot, true)) => {
             let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
                 req.release(value);
-                return Err(Fatal::Error(format!(
+                return Err(Fatal::error(format!(
                     "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${shown_name}, whose declared type the class does not carry"
                 )));
             };
@@ -12596,9 +12592,9 @@ fn assign_property(
         }
         None => {
             let Some(key) = name.as_php_string().copied() else {
-                return Err(Fatal::Error(String::from(
+                return Err(Fatal::error(
                     "InternalError: ZEND_ASSIGN_OBJ over a property whose name is no string",
-                )));
+                ));
             };
             write_out(req, frame, code, op, &value);
             let key = Owner::take(req, key);
@@ -13033,7 +13029,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(kernel) = binary_op_of(op.extended_value) else {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_STATIC_PROP_OP over the operator {} , which is no binary operation",
             op.extended_value
         )));
@@ -13485,9 +13481,9 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
         return Ok(advance_over_data(req, frame, at));
     };
     let Some(source) = write_place(req, frame, code, data_type, data_at) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over a source php compiles no write over",
-        )));
+        ));
     };
     let held = exec::value_of(source.read());
     let returns_function = op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none();
@@ -13925,9 +13921,9 @@ fn inline_assign_dim(
 fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let (at, data) = data_after(req, frame, code, op)?;
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_DIM over a constant or a temporary, which php compiles no write over",
-        )));
+        ));
     };
     let container = write_container(req, (frame, code, op), place, Walk::Assign);
     let ran_on = req.pending();
@@ -14383,7 +14379,7 @@ pub(crate) fn assign_dim_op<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(kernel) = binary_op_of(op.extended_value) else {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_DIM_OP over the operator {}, which is no binary operation",
             op.extended_value
         )));
@@ -14396,9 +14392,9 @@ pub(crate) fn assign_dim_op<T: Tier>(
         read: false,
     };
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_DIM_OP over a constant or a temporary, which php compiles no write over",
-        )));
+        ));
     };
     let container = write_container(req, (frame, code, op), place, Walk::AssignOp);
     let ran_on = req.pending();
@@ -14766,7 +14762,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(kernel) = binary_op_of(op.extended_value) else {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_OBJ_OP over the operator {}, which is no binary operation",
             op.extended_value
         )));
@@ -14907,9 +14903,9 @@ fn step_property(
     let Compound { op, data, .. } = step;
     let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
     let Some(key) = name.as_php_string().copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
-        )));
+        ));
     };
     // The guard a proxy's `__get` lent the instance is held while the
     // place is resolved there, and given back before the operation over
@@ -14958,9 +14954,9 @@ fn step_property(
                 ),
                 Ok(None) => {
                     req.release(precomputed);
-                    Err(Fatal::Error(String::from(
+                    Err(Fatal::error(
                         "InternalError: ZEND_ASSIGN_OBJ_OP withheld the place of a property no class declared",
-                    )))
+                    ))
                 }
                 Err(thrown) => {
                     req.release(precomputed);
@@ -15211,7 +15207,7 @@ fn land_step(
     let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
         req.release(stepped);
         let shown = String::from_utf8_lossy(bytes);
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_OBJ_OP placed the typed property ${shown}, whose declared type the class does not carry"
         )));
     };
@@ -15688,9 +15684,9 @@ fn incdec_property(
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
     let Some(key) = name.as_php_string().copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: an increment of a property whose name is no string",
-        )));
+        ));
     };
     // The guard a proxy's `__get` lent the instance is held while the
     // place is resolved there, and given back before the step over it.
@@ -15831,7 +15827,7 @@ fn typed_step(
     let Some(declared) = req.declared_typed_property(object.class(), bytes) else {
         req.release(stepped);
         let shown = String::from_utf8_lossy(bytes);
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: an increment placed the typed property ${shown}, whose declared type the class does not carry"
         )));
     };
@@ -16098,9 +16094,9 @@ pub(crate) fn fetch_dim_unset<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_FETCH_DIM_UNSET over a constant or a temporary, which php compiles no unset over",
-        )));
+        ));
     };
     let written = match separated_array(req, place) {
         Ok((_, Some(array))) => unset_entry(req, frame, code, op, array),
@@ -16354,9 +16350,9 @@ pub(crate) fn unset_dim<T: Tier>(
 ) -> Edge {
     let offset = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ZEND_UNSET_DIM over a constant or a temporary, which php compiles no write over",
-        )));
+        ));
     };
     // The reference followed once and the array separated are
     // [`separated_array`], the walk every dimension site shares; the
@@ -16610,9 +16606,9 @@ pub(crate) fn add_array_element<T: Tier>(
 ) -> Edge {
     let held = req.slot(frame, exec::temporary_slot(code, op.out));
     let Some(array) = held.as_array().copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ADD_ARRAY_ELEMENT over a temporary holding no array",
-        )));
+        ));
     };
     add_element(req, frame, code, op, array)
 }
@@ -16650,9 +16646,9 @@ fn add_element(
 ) -> Edge {
     let value = if op.extended_value & ARRAY_ELEMENT_REF != 0 {
         let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
-            )));
+            ));
         };
         let bound = bound_at(req, at);
         // `FREE_OP1_VAR_PTR()`: a `VAR` holding a value of its own, what
@@ -16741,9 +16737,9 @@ pub(crate) fn add_array_unpack<T: Tier>(
 ) -> Edge {
     let held = req.slot(frame, exec::temporary_slot(code, op.out));
     let Some(array) = held.as_array().copied() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: ADD_ARRAY_UNPACK over a temporary holding no array",
-        )));
+        ));
     };
     let spread = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let added = unpack_into(req, array, &spread);
@@ -17027,9 +17023,9 @@ fn send_unpacked_array(
     let mut array = array;
     if variable && unpack_binds(req, array) {
         let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: SEND_UNPACK over a variable with no place",
-            )));
+            ));
         };
         match separated_array(req, place) {
             Ok((_, Some(separated))) => array = separated,
@@ -17072,9 +17068,9 @@ fn send_unpacked_array(
             element
         } else if variable {
             let Some(entry) = req.array_lookup(array.heap(), key.heap())? else {
-                return fatal(Fatal::Error(String::from(
+                return fatal(Fatal::error(
                     "InternalError: SEND_UNPACK lost an element of the array it spreads",
-                )));
+                ));
             };
             bound_at(req, entry)?
         } else {
@@ -17851,9 +17847,9 @@ fn inline_fe_fetch_r(
 fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let slot = exec::temporary_slot(code, op.op1);
     let Some(at) = req.slot_ptr(frame, slot) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: FE_FETCH_R over a VAR the frame does not have",
-        )));
+        ));
     };
     // A hooked property's value is the walk's own owner, given up once
     // the loop's variable holds its own.
@@ -17888,9 +17884,9 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
         },
         ForeachVar::Iterator(iterator) => return fe_fetch_iterator(req, frame, code, op, iterator),
         ForeachVar::Reference { .. } | ForeachVar::Skipped => {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: FE_FETCH_R over a VAR no by-value reset filled",
-            )));
+            ));
         }
     };
     if op.out_type != OperandKind::Unused {
@@ -18325,9 +18321,9 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
 ) -> Edge {
     let slot = exec::temporary_slot(code, op.op1);
     let Some(at) = req.slot_ptr(frame, slot) else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: FE_FETCH_RW over a VAR the frame does not have",
-        )));
+        ));
     };
     let found = match foreach_var(req, at.read()) {
         ForeachVar::Reference { cell, walk } => {
@@ -18358,9 +18354,9 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
         ForeachVar::Properties { object, walk } => fe_walk_object_rw(req, op, object, walk),
         ForeachVar::Iterator(iterator) => fe_iterator_rw(req, iterator, op),
         ForeachVar::Array { .. } | ForeachVar::Skipped => {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: FE_FETCH_RW over a VAR no by-reference reset filled",
-            )));
+            ));
         }
     };
     let BoundRw { key, cell, owned } = match found? {
@@ -19146,7 +19142,7 @@ fn rope_of(
 ) -> Result<crate::api::values::PhpArray, Fatal> {
     let slot = exec::temporary_slot(code, op.op1);
     req.slot(frame, slot).as_array().copied().ok_or_else(|| {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: {} over a temporary holding no rope",
             op.opcode.name()
         ))
@@ -19551,7 +19547,7 @@ pub(crate) fn cast<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let Some(to) = crate::ops::CastTo::of(op.extended_value) else {
-        return Err(Fatal::Error(format!(
+        return Err(Fatal::error(format!(
             "InternalError: CAST to type {} has no conversion in this engine yet",
             op.extended_value
         )));
@@ -22040,7 +22036,7 @@ fn switched(req: &Request, frame: FrameRef, switched: Switched, op: &Opline) -> 
 /// `IN_ARRAY`'s, whose `op2` is no array, which no unit the compiler
 /// wrote has (design §10).
 fn no_table(opcode: &str) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "InternalError: {opcode} names a constant that is no table"
     ))
 }
@@ -22129,9 +22125,9 @@ fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fa
     };
     let Some(previous) = previous else {
         req.release(value);
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a SEND_* opline places an argument in a slot the call has not",
-        )));
+        ));
     };
     req.release(previous);
     Ok(())
@@ -22562,9 +22558,9 @@ fn unwind_from<T: Tier>(
                 continue;
             }
             let Some(var) = fast_call_var(code, element) else {
-                return Err(Fatal::Error(String::from(
+                return Err(Fatal::error(
                     "InternalError: a try element whose finally_end names no FAST_RET",
-                )));
+                ));
             };
             cleanup_live_vars(req, frame, code, op_num, element.finally_op.0);
             let delayed = req.take_raised();
@@ -22577,9 +22573,9 @@ fn unwind_from<T: Tier>(
         }
         if op_num < element.finally_end.0 {
             let Some(var) = fast_call_var(code, element) else {
-                return Err(Fatal::Error(String::from(
+                return Err(Fatal::error(
                     "InternalError: a try element whose finally_end names no FAST_RET",
-                )));
+                ));
             };
             let carried = req.fast_call(frame, var).and_then(|cell| cell.from);
             if let Some(from) = carried {
@@ -22786,9 +22782,9 @@ pub(crate) fn return_by_ref<T: Tier>(
             }
         }
     } else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: RETURN_BY_REF over an operand that is no place",
-        )));
+        ));
     };
     returned_to_caller::<T>(req, frame, op, returned)
 }
@@ -23231,9 +23227,7 @@ mod tests {
 
         assert_eq!(
             served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back)),
-            Err(Fatal::Error(String::from(
-                "Maximum execution time of 1 second exceeded"
-            )))
+            Err(Fatal::error("Maximum execution time of 1 second exceeded"))
         );
         assert_eq!(req.state::<Asked>().sites, vec![]);
     }
@@ -24402,7 +24396,7 @@ mod tests {
         let call = code.oplines.first().copied().unwrap_or_default();
         assert!(matches!(
             served!(req, frame, at => frameless_icall_0::<Nop>(&mut req, frame, code, &call)),
-            Err(Fatal::Error(message)) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000")
+            Err(fatal) if matches!(fatal.reason(), php_heap::FatalReason::Error(message) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000"))
         ));
     }
 
@@ -24658,9 +24652,9 @@ mod tests {
 
         assert_eq!(
             crate::tier::step(&mut req, frame),
-            Err(Fatal::Error(String::from(
+            Err(Fatal::error(
                 "InternalError: ZEND_QM_ASSIGN at opline 0 writes its TMP #0 over an owner it still holds (String): the handler that last read the slot moved it out and did not empty it"
-            )))
+            ))
         );
         assert_eq!(
             req.slot(frame, 0).as_int(),

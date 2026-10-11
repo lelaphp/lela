@@ -2452,7 +2452,7 @@ impl Request {
             self.release(value);
             let class = self.class_name(ClassId(o.class()));
             let slots = o.slots();
-            return self.fatal_of(Err(Fatal::Error(format!(
+            return self.fatal_of(Err(Fatal::error(format!(
                 "InternalError: slot {i} written on an object of class {class}, which declares {slots}"
             ))));
         }
@@ -2762,9 +2762,9 @@ impl Request {
                 else {
                     value.give_up(self);
                     name.give_up(self);
-                    return self.fatal_of(Err(Fatal::Error(String::from(
+                    return self.fatal_of(Err(Fatal::error(
                         "InternalError: write_property placed a typed property whose declared type the class does not carry",
-                    ))));
+                    )));
                 };
                 let strict = self.property_strict_types();
                 let value = value.hand_on();
@@ -3520,7 +3520,7 @@ impl Request {
                             (declaring, p.is_readonly, p.name.0.to_vec(), p.ty.clone())
                         });
                 let Some((declaring, readonly, name, ty)) = declared else {
-                    return self.fatal_of(Err(Fatal::Error(format!(
+                    return self.fatal_of(Err(Fatal::error(format!(
                         "InternalError: a walk over slot {slot}, which the class does not declare"
                     ))));
                 };
@@ -3567,9 +3567,9 @@ impl Request {
             Walked::Answered(value) => self.reference(value),
             Walked::Hooked(value) => {
                 self.release(value);
-                self.fatal_of(Err(Fatal::Error(String::from(
+                self.fatal_of(Err(Fatal::error(
                     "InternalError: a hooked property's value bound by reference that its hook did not return by reference",
-                ))))
+                )))
             }
         }
     }

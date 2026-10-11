@@ -42,7 +42,7 @@ pub(super) struct DirtyTemporary {
 
 impl DirtyTemporary {
     fn into_fatal(self) -> Fatal {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: {} at opline {} writes its TMP #{} over an owner it still holds ({:?}): the handler that last read the slot moved it out and did not empty it",
             self.opcode.name(),
             self.opline,
@@ -131,9 +131,11 @@ impl Request {
         let Some(sensed) = self.take_sensed() else {
             return Ok(());
         };
-        match &sensed {
-            Fatal::Error(message) => self.end_in_fatal_at(message, &code.filename.0, op.lineno),
-            Fatal::OutOfMemory(_) => self.end_in(&sensed),
+        match sensed.reason() {
+            php_heap::FatalReason::Error(message) => {
+                self.end_in_fatal_at(message, &code.filename.0, op.lineno);
+            }
+            php_heap::FatalReason::OutOfMemory(_) => self.end_in(&sensed),
         }
         Err(sensed)
     }

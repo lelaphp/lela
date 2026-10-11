@@ -350,7 +350,7 @@ impl RegularList {
             return Ok(1);
         }
         if index == i64::MAX {
-            return Err(Fatal::Error(String::from("Resource ID space overflow")));
+            return Err(Fatal::error("Resource ID space overflow"));
         }
         Ok(index)
     }
@@ -533,13 +533,13 @@ impl Heap {
     ) -> Result<Res, Fatal> {
         let table = payload_of::<T>();
         if table.layout.align() > 8 {
-            return Err(Fatal::Error(format!(
+            return Err(Fatal::error(format!(
                 "InternalError: a native payload aligned to {} cannot sit on the request heap",
                 table.layout.align()
             )));
         }
         if payload_offset(table) + table.layout.size() > size {
-            return Err(Fatal::Error(format!(
+            return Err(Fatal::error(format!(
                 "InternalError: a native payload of {} bytes does not fit the {size} php allocates",
                 table.layout.size()
             )));
@@ -795,7 +795,7 @@ mod tests {
             self.freed.push((res.id(), kind.0, res.is_closed()));
         }
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-            Fatal::OutOfMemory(bytes)
+            Fatal::out_of_memory(bytes)
         }
     }
 

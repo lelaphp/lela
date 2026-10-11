@@ -1723,7 +1723,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
                 gc.fiber = None;
             }
             if !req.release_held(fiber.as_value()) {
-                let fatal = php_heap::Fatal::Error(format!(
+                let fatal = php_heap::Fatal::error(format!(
                     "InternalError: the collector's fiber #{} destroyed with the collector's owner its last",
                     fiber.index()
                 ));

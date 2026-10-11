@@ -98,7 +98,7 @@ impl Mm {
 #[cfg(test)]
 mod tests {
     use crate::serial::alone;
-    use crate::{Fatal, Heap, Origin};
+    use crate::{Fatal, FatalReason, Heap, Origin};
 
     /// The name the walk is handed for each origin, as the engine names an
     /// extension by its number.
@@ -108,8 +108,8 @@ mod tests {
 
     /// What the heap sensed, as the message of the fatal it ends in.
     fn sensed(heap: &mut Heap) -> String {
-        match heap.take_sensed() {
-            Some(Fatal::Error(message)) => message,
+        match heap.take_sensed().map(Fatal::into_reason) {
+            Some(FatalReason::Error(message)) => message,
             other => format!("{other:?}"),
         }
     }

@@ -1252,7 +1252,7 @@ impl HeapHooks for Hooks<'_> {
     }
 
     fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-        Fatal::OutOfMemory(bytes)
+        Fatal::out_of_memory(bytes)
     }
 
     /// `zend_free_source_list`: the row the cell's word names, dropped
