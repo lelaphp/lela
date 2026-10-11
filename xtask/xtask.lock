@@ -203,6 +203,8 @@ oracle::Source
 oracle::Source::named
 oracle::Source::path
 oracle::Source::tree
+oracle::Split
+oracle::Split::as_str
 oracle::Stdin
 oracle::Streams
 oracle::TREE_VARIABLE

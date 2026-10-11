@@ -29,16 +29,16 @@ use serde::Deserialize;
 /// header as `HTTP_<NAME>`, by its `fastcgi_pass_request_headers on`
 /// default, as the documentation of `ngx_http_fastcgi_module` says of
 /// the parameters it passes; that is nginx's and no line of the file.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "File")]
 pub struct Mapping {
     /// The nginx release, `1.30.5`.
     pub nginx: String,
     /// Where the file was copied from, at that release's tag.
     pub source: String,
-    /// `fastcgi_split_path_info`'s pattern, of two captures (#2637); none
-    /// in a pin from before it, whose mapping splits nothing.
-    pub split_path_info: Option<String>,
+    /// `fastcgi_split_path_info` (#2637); none in a pin from before it,
+    /// whose mapping splits nothing.
+    pub split_path_info: Option<Split>,
     pub params: Vec<Param>,
 }
 
@@ -48,11 +48,22 @@ impl Mapping {
     /// captures where it matches, and the whole `uri` with no path info
     /// where it does not.
     pub fn split<'a>(&self, uri: &'a str) -> (&'a str, &'a str) {
-        let pattern = self.split_path_info.as_deref();
-        let parts = (pattern.and_then(|pattern| Regex::new(pattern).ok()))
-            .and_then(|pattern| pattern.captures(uri))
-            .and_then(|found| Some((found.get(1)?.as_str(), found.get(2)?.as_str())));
-        parts.unwrap_or((uri, ""))
+        (self.split_path_info.as_ref())
+            .and_then(|split| split.0.captures(uri))
+            .and_then(|found| Some((found.get(1)?.as_str(), found.get(2)?.as_str())))
+            .unwrap_or((uri, ""))
+    }
+}
+
+/// `fastcgi_split_path_info`'s pattern, compiled once as the pin is read,
+/// and of two captures, the program's name and the path past it.
+#[derive(Debug, Clone)]
+pub struct Split(Regex);
+
+impl Split {
+    /// The pattern as the pin spells it.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
     }
 }
 
@@ -184,12 +195,14 @@ impl TryFrom<File> for Mapping {
                 file.source
             );
         }
-        let path_info = match (&file.split_path_info, &file.path_info) {
+        let (split_path_info, path_info) = match (&file.split_path_info, &file.path_info) {
             (Some(split), Some(path_info)) => match Regex::new(split) {
-                Ok(pattern) if pattern.captures_len() == 3 => Some(("PATH_INFO", path_info)),
+                Ok(pattern) if pattern.captures_len() == 3 => {
+                    (Some(Split(pattern)), Some(("PATH_INFO", path_info)))
+                }
                 _ => bail!("[fastcgi] split_path_info is not a pattern of two captures"),
             },
-            (None, None) => None,
+            (None, None) => (None, None),
             _ => bail!("[fastcgi] split_path_info and path_info are both set or neither"),
         };
         let mut params = Vec::new();
@@ -222,7 +235,7 @@ impl TryFrom<File> for Mapping {
         Ok(Mapping {
             nginx: file.nginx,
             source: file.source,
-            split_path_info: file.split_path_info,
+            split_path_info,
             params,
         })
     }

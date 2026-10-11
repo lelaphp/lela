@@ -7,29 +7,94 @@
 //! [`Hidden`] refuses is refused here and nowhere else: `php -S` keeps its
 //! rules.
 
+use std::sync::Arc;
+
 use php_proto::vpath::{self, Translated};
+use php_sapi::ResponseHead;
 use php_sapi::cgi::Disk;
 
-use crate::options::Hidden;
+use crate::options::{Hidden, Options};
+use crate::static_file::StaticFile;
 
 /// The extensions of PHP's source under another name than `php` (#2586):
 /// a file with one is never sent as a static file unless the operator
 /// serves hidden paths, matched without regard to case.
-const SOURCE_EXTENSIONS: [&[u8]; 8] = [
-    b"phps", b"phtml", b"inc", b"php3", b"php4", b"php5", b"php7", b"php8",
+const SOURCE_EXTENSIONS: [&[u8]; 9] = [
+    b"phps", b"phtml", b"inc", b"php3", b"php4", b"php5", b"php6", b"php7", b"php8",
 ];
 
 /// The one dot segment a path may begin with (RFC 8615): ACME's
 /// challenges and `security.txt` stand under it.
 const WELL_KNOWN: &[u8] = b".well-known";
 
+/// Where requests go: the document root, and what of it [`Hidden`]
+/// refuses. Its one question asks the disk, so the connection side asks
+/// it on tokio's blocking pool, never on its one thread (M4).
+pub(crate) struct Router {
+    root: Arc<[u8]>,
+    hidden: Hidden,
+}
+
+impl Router {
+    /// The router of `options`' document root and [`Hidden`].
+    pub(crate) fn new(options: &Options) -> Router {
+        Router {
+            root: options.document_root.as_os_str().as_encoded_bytes().into(),
+            hidden: options.hidden,
+        }
+    }
+
+    /// The document root, as the CGI environment names it.
+    pub(crate) fn root(&self) -> &Arc<[u8]> {
+        &self.root
+    }
+
+    /// Where `method path` goes: a path [`Hidden`] refuses is not found,
+    /// before the disk is asked; else the path translated as `php -S`
+    /// translates it, a program's where `php_cli_server_dispatch` says so,
+    /// the path past it its path's info (#2637), and a static file's
+    /// otherwise, in `php_cli_server_begin_send_static`'s order: a method
+    /// that writes refused, then a path that translated to nothing, then,
+    /// under [`Hidden::Refused`], a path past the file it found or a file
+    /// of PHP's source, then a file that does not open. The walk that
+    /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
+    /// program (`cgi.fix_pathinfo`'s class of exploit needs a front end
+    /// that routes on the suffix while PHP finds a shorter path); `php -S`
+    /// sends `x.jpg` for it, and so does [`Hidden::Served`], where
+    /// [`Hidden::Refused`] serves a static file only as named (#2642).
+    pub(crate) fn route(&self, method: &[u8], path: &[u8]) -> Route {
+        let hidden = self.hidden;
+        let mut uri = php_proto::http::normalize_vpath(path);
+        if !uri.starts_with(b"/") {
+            uri.insert(0, b'/');
+        }
+        if hidden == Hidden::Refused && has_dot_segment(&uri) {
+            return Route::Refused(Refusal::NotFound);
+        }
+        match vpath::translate(&uri, &self.root, &Disk) {
+            Some(found) if found.is_program() => Route::Program(found),
+            _ if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method) => {
+                Route::Refused(Refusal::MethodNotAllowed)
+            }
+            Some(found)
+                if hidden == Hidden::Served
+                    || (found.path_info.is_none()
+                        && !is_source(vpath::extension(&found.vpath))) =>
+            {
+                StaticFile::open(&found).map_or(Route::Refused(Refusal::NotFound), Route::Static)
+            }
+            _ => Route::Refused(Refusal::NotFound),
+        }
+    }
+}
+
 /// Where one request goes.
-#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Route {
-    /// A program's, run through the engine.
+    /// A program's, served through its own `Engine::serve` on a request
+    /// thread.
     Program(Translated),
-    /// A static file's, sent from the disk.
-    Static(Translated),
+    /// A static file's, opened, sent from the connection side.
+    Static(StaticFile),
     /// Answered by the server, with no body.
     Refused(Refusal),
 }
@@ -37,8 +102,6 @@ pub(crate) enum Route {
 /// A request the server answers on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
-    /// 400: a program whose path holds a NUL, which `php -S` refuses.
-    BadRequest,
     /// 404: nothing under the root, or a path [`Hidden`] refuses, which is
     /// answered as nothing, so the server never says whether it exists.
     NotFound,
@@ -48,62 +111,18 @@ pub(crate) enum Refusal {
 }
 
 impl Refusal {
-    /// The status code.
-    pub(crate) fn code(self) -> u16 {
-        match self {
-            Refusal::BadRequest => 400,
-            Refusal::NotFound => 404,
-            Refusal::MethodNotAllowed => 405,
+    /// The response's head: the refusal's code, and the methods `php -S`
+    /// allows with a 405.
+    pub(crate) fn head(self) -> ResponseHead {
+        let (code, lines) = match self {
+            Refusal::NotFound => (404, Vec::new()),
+            Refusal::MethodNotAllowed => (405, vec![b"Allow: GET, HEAD, POST".to_vec()]),
+        };
+        ResponseHead {
+            code,
+            lines,
+            ..ResponseHead::default()
         }
-    }
-
-    /// The header lines the refusal carries.
-    pub(crate) fn lines(self) -> Vec<Vec<u8>> {
-        match self {
-            Refusal::MethodNotAllowed => vec![b"Allow: GET, HEAD, POST".to_vec()],
-            Refusal::BadRequest | Refusal::NotFound => Vec::new(),
-        }
-    }
-}
-
-/// Where `method path` goes under `root`: a path [`Hidden`] refuses is
-/// not found, before the disk is asked; else the path translated as
-/// `php -S` translates it, a program's where `php_cli_server_dispatch`
-/// says so, the path past it its path's info (#2637), and a static
-/// file's otherwise, in `php_cli_server_begin_send_static`'s order: a
-/// method that writes refused, then a path that translated to nothing
-/// or past the file it found, then, under [`Hidden::Refused`], a file of
-/// PHP's source. A static file is served only as named, so a request for
-/// `/upload/x.jpg/y.php` runs nothing and sends nothing: the walk that
-/// routes is the walk that splits, and it found no program
-/// (`cgi.fix_pathinfo`'s class of exploit needs a front end that routes
-/// on the suffix while PHP finds a shorter path).
-pub(crate) fn route(method: &[u8], path: &[u8], root: &[u8], hidden: Hidden) -> Route {
-    let mut uri = php_proto::http::normalize_vpath(path);
-    if !uri.starts_with(b"/") {
-        uri.insert(0, b'/');
-    }
-    if hidden == Hidden::Refused && has_dot_segment(&uri) {
-        return Route::Refused(Refusal::NotFound);
-    }
-    let found = vpath::translate(&uri, root, &Disk);
-    match found {
-        Some(found) if found.is_program() => {
-            if found.path_translated.contains(&0) {
-                return Route::Refused(Refusal::BadRequest);
-            }
-            Route::Program(found)
-        }
-        _ if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method) => {
-            Route::Refused(Refusal::MethodNotAllowed)
-        }
-        Some(found)
-            if found.path_info.is_none()
-                && !(hidden == Hidden::Refused && is_source(vpath::extension(&found.vpath))) =>
-        {
-            Route::Static(found)
-        }
-        _ => Route::Refused(Refusal::NotFound),
     }
 }
 
@@ -144,7 +163,7 @@ mod tests {
 
     #[test]
     fn php_s_source_extensions_match_in_any_case() {
-        for source in ["inc", "phtml", "phps", "PHP5", "Php8"] {
+        for source in ["inc", "phtml", "phps", "PHP5", "php6", "Php8"] {
             assert!(is_source(source.as_bytes()), "{source}");
         }
         for other in ["php", "php9", "html", "inc/x", ""] {

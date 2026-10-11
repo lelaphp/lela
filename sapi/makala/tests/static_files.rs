@@ -149,7 +149,7 @@ fn dot_dot_and_encoded_traversal_never_leave_the_document_root() {
 /// The paths a server facing the internet does not serve (#2586), each
 /// with the file it names in the root: a dot segment anywhere, and a file
 /// of PHP's source under another extension than `php`.
-const HIDDEN: [&str; 8] = [
+const HIDDEN: [&str; 9] = [
     "/.env",
     "/.git/config",
     "/.user.ini",
@@ -158,6 +158,7 @@ const HIDDEN: [&str; 8] = [
     "/x.phtml",
     "/x.phps",
     "/x.PHP5",
+    "/x.php6",
 ];
 
 /// A root holding a file at each of [`HIDDEN`] and one under
@@ -205,15 +206,29 @@ fn dot_segments_and_php_sources_are_not_found() {
 }
 
 /// `--serve-hidden` serves each of [`HIDDEN`] by `php -S`'s rules: its
-/// bytes.
+/// bytes; and a static file with a path past it, which `php -S` sends
+/// (`php_cli_server_begin_send_static`) and the default refuses (#2642),
+/// as the file.
 #[test]
 fn serve_hidden_serves_them_as_php_s_does() {
     let root = hidden_root("hidden-served");
+    std::fs::create_dir_all(root.join("upload")).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(root.join("upload/x.jpg"), "jpeg").unwrap_or_else(|e| panic!("{e}"));
     let server = Server::with_args(&root, &["--threads", "2", "--serve-hidden"]);
     for target in HIDDEN {
         let response = ask(&server, "GET", target);
         assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
         assert_eq!(String::from_utf8_lossy(&response.body), target);
+    }
+    for target in ["/upload/x.jpg/y.php", "/upload/x.jpg/"] {
+        let response = ask(&server, "GET", target);
+        assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
+        assert_eq!(
+            response.header("Content-Type"),
+            Some("image/jpeg"),
+            "{target}"
+        );
+        assert_eq!(response.body, b"jpeg", "{target}");
     }
 }
 
@@ -233,4 +248,68 @@ fn a_symlink_under_the_root_to_a_file_outside_it_is_served() {
         assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
         assert_eq!(response.body, b"shared", "{target}");
     }
+}
+
+/// A static file is sent from the connection side and holds no request
+/// thread while it goes (#2587): with one request thread, a client that
+/// starts a large file and stops reading it leaves the thread free, and
+/// a program is answered at once, well inside the 5 s grace of the
+/// minimum response rate that would otherwise free it.
+#[test]
+fn a_slow_static_download_holds_no_request_thread() {
+    let root = common::root("slow-static", &[("run.php", "<?php echo 'ran';")]);
+    std::fs::write(root.join("large.bin"), vec![b'x'; 32 << 20]).unwrap_or_else(|e| panic!("{e}"));
+    let server = Server::with_args(&root, &["--threads", "1"]);
+    let mut slow = server.connect();
+    slow.write_all(b"GET /large.bin HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let mut first = [0u8; 1024];
+    let read = std::io::Read::read(&mut slow, &mut first).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        first[..read].starts_with(b"HTTP/1.1 200 OK\r\n"),
+        "{}",
+        String::from_utf8_lossy(&first[..read])
+    );
+    let started = std::time::Instant::now();
+    let mut program = server.connect();
+    program
+        .write_all(b"GET /run.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let answer = read_until_closed(&mut program, Duration::from_secs(3));
+    assert_eq!(answer.codes(), [200], "{}", answer.text());
+    assert_eq!(answer.response().body, b"ran");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "answered after {:?}",
+        started.elapsed()
+    );
+    // The download was under way all along, and goes on to its end.
+    let rest = read_until_closed(&mut slow, Duration::from_secs(30));
+    let head_length = first[..read]
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(0, |at| at + 4);
+    assert_eq!(read - head_length + rest.bytes.len(), 32 << 20);
+}
+
+/// A static file that shrinks while it is sent cuts its connection, so
+/// the client never takes the response cut short for a whole one: its
+/// head said the length the file had when it opened.
+#[test]
+fn a_static_file_that_shrinks_while_it_goes_cuts_its_connection() {
+    let root = common::root("shrinking", &[]);
+    let file = root.join("large.bin");
+    std::fs::write(&file, vec![b'x'; 32 << 20]).unwrap_or_else(|e| panic!("{e}"));
+    let server = Server::start(&root);
+    let mut stream = server.connect();
+    stream
+        .write_all(b"GET /large.bin HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let mut first = [0u8; 1024];
+    let read = std::io::Read::read(&mut stream, &mut first).unwrap_or_else(|e| panic!("{e}"));
+    assert!(first[..read].starts_with(b"HTTP/1.1 200 OK\r\n"));
+    std::fs::File::create(&file).unwrap_or_else(|e| panic!("{e}"));
+    let rest = read_until_closed(&mut stream, Duration::from_secs(30));
+    assert_ne!(rest.ending, common::Ending::Open);
+    assert!(read + rest.bytes.len() < 32 << 20, "{}", rest.bytes.len());
 }

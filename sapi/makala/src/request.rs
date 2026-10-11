@@ -1,6 +1,7 @@
 //! The request side (#2337): a bounded pool of request threads, each
-//! taking whole requests off one bounded queue and serving each through
-//! its own `Engine::serve` on the one engine they share (design §5.14).
+//! taking programs' whole requests off one bounded queue, as the
+//! connection side routed them, and serving each through its own
+//! `Engine::serve` on the one engine they share (design §5.14).
 //! A request is described from its HTTP request as a web server describes
 //! one to php-fpm, in the CGI environment, and read through what php-cgi
 //! and php-fpm share (`php_sapi::cgi`); its body is a reader over the
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use hyper::body::Bytes;
 use php_proto::cgi::{Environment, RequestInfo, Settings};
-use php_proto::vpath::{self, Translated};
+use php_proto::vpath::Translated;
 use php_sapi::cgi::Disk;
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
@@ -33,13 +34,15 @@ use php_sapi::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::options::{Hidden, Options};
-use crate::route::{Refusal, Route};
+use crate::options::Options;
 
-/// One request as its connection hands it over: the head as hyper read
-/// it, the body still arriving, and where the response goes.
+/// One program's request as its connection hands it over: the head as
+/// hyper read it, the program its route found, the body still arriving,
+/// and where the response goes.
 pub(crate) struct Job {
     pub(crate) head: Head,
+    /// The program under the root, and the path past it.
+    pub(crate) program: Translated,
     /// The body's pieces as the connection reads them; closed at its end.
     pub(crate) body: mpsc::Receiver<Bytes>,
     pub(crate) sink: Sink,
@@ -56,6 +59,25 @@ pub(crate) struct Head {
     pub(crate) fields: Vec<(Vec<u8>, Vec<u8>)>,
     pub(crate) peer: SocketAddr,
     pub(crate) local: SocketAddr,
+}
+
+impl Head {
+    /// The target's path, before a `?`.
+    pub(crate) fn path(&self) -> &[u8] {
+        self.target_parts().0
+    }
+
+    /// The target's query, after a `?`; empty where it has none.
+    fn query(&self) -> &[u8] {
+        self.target_parts().1
+    }
+
+    fn target_parts(&self) -> (&[u8], &[u8]) {
+        match self.target.iter().position(|b| *b == b'?') {
+            Some(at) => (&self.target[..at], &self.target[at + 1..]),
+            None => (&self.target[..], &[][..]),
+        }
+    }
 }
 
 /// The request threads.
@@ -151,33 +173,22 @@ fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
 }
 
 /// How the pool serves each request: through its own `Engine::serve` on
-/// `engine`, under the document root.
-pub(crate) fn serving(engine: &Engine, options: &Options) -> impl Fn(Job) + Clone + Send + 'static {
+/// `engine`, under the document root `root`.
+pub(crate) fn serving(engine: &Engine, root: &Arc<[u8]>) -> impl Fn(Job) + Clone + Send + 'static {
     let engine = engine.clone();
-    let root: Arc<[u8]> = options.document_root.as_os_str().as_encoded_bytes().into();
-    let hidden = options.hidden;
-    move |job| serve(&engine, &root, hidden, job)
+    let root = Arc::clone(root);
+    move |job| serve(&engine, &root, job)
 }
 
-/// One request, where its route goes ([`crate::route`]): a program's
-/// through its own `Engine::serve`, a static file's from the disk, and a
-/// refusal answered by the server.
-fn serve(engine: &Engine, root: &[u8], hidden: Hidden, job: Job) {
+/// One program's request, through its own `Engine::serve`.
+fn serve(engine: &Engine, root: &[u8], job: Job) {
     let Job {
         head,
+        program,
         body,
         mut sink,
     } = job;
-    let (path, query) = match head.target.iter().position(|b| *b == b'?') {
-        Some(at) => (&head.target[..at], &head.target[at + 1..]),
-        None => (&head.target[..], &[][..]),
-    };
-    let program = match crate::route::route(&head.method, path, root, hidden) {
-        Route::Program(program) => program,
-        Route::Static(found) => return serve_static(&head, &found, &mut sink),
-        Route::Refused(refusal) => return refuse(&mut sink, refusal),
-    };
-    let mut env = environment(&head, root, &program, query);
+    let mut env = environment(&head, root, &program, head.query());
     // php-fpm's defaults of the entries `init_request_info` reads, which
     // this host declares none of: `cgi.fix_pathinfo` on, which finds the
     // program as named and leaves the split as it came.
@@ -436,57 +447,6 @@ fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> 
     Environment(env)
 }
 
-/// How many bytes of a static file go in one write to the connection.
-const STATIC_PIECE: usize = 64 << 10;
-
-/// A static file, served as `php -S` serves one
-/// (`php_cli_server_begin_send_static`,
-/// `Z/sapi/cli/php_cli_server.c:2144`) on this request thread, which may
-/// wait on the disk where the connection side may not (M4): a file that
-/// does not open is a 404; else the type its extension has in php's
-/// table and the length of the file opened, and that many of its bytes
-/// after them but for `HEAD`, so a file that grows while it goes is sent
-/// as it was and one that shrinks cuts its connection. A static file
-/// holds its request thread while it goes, bounded by the minimum
-/// response data rate as a program's response is.
-fn serve_static(head: &Head, found: &Translated, sink: &mut Sink) {
-    let opened = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated))
-        .and_then(|file| Ok((file.metadata()?.len(), file)));
-    let Ok((length, file)) = opened else {
-        return refuse(sink, Refusal::NotFound);
-    };
-    let mut lines = Vec::new();
-    if let Some(content_type) = php_proto::mime::content_type(vpath::extension(&found.vpath)) {
-        lines.push(format!("Content-Type: {content_type}").into_bytes());
-    }
-    lines.push(format!("Content-Length: {length}").into_bytes());
-    sink.send_headers(&ResponseHead {
-        code: 200,
-        lines,
-        ..ResponseHead::default()
-    });
-    if head.method == b"HEAD" {
-        return;
-    }
-    let mut file = file.take(length);
-    let mut piece = vec![0; STATIC_PIECE];
-    while let Ok(read @ 1..) = file.read(&mut piece) {
-        if sink.write(&piece[..read]).is_err() {
-            return;
-        }
-    }
-}
-
-/// A response of the server's own, with no body: the refusal's code and
-/// header lines.
-fn refuse(sink: &mut Sink, refusal: Refusal) {
-    sink.send_headers(&ResponseHead {
-        code: i64::from(refusal.code()),
-        lines: refusal.lines(),
-        ..ResponseHead::default()
-    });
-}
-
 /// The body as the connection reads it: each read hands out what is left
 /// of the piece it holds, and waits for the next where it holds none; the
 /// channel closed, at the body's end or with its connection gone, is the
@@ -662,12 +622,27 @@ mod tests {
     /// response under way on the wire and not only in hyper's buffer.
     static READ: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
+    /// A document root of this test binary's, holding the programs the
+    /// tests ask for, so the connection side routes each to the request
+    /// side.
+    fn root() -> &'static std::path::Path {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let root = std::env::temp_dir().join(format!("makala-requests-{}", std::process::id()));
+            std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("{e}"));
+            for program in ["panic.php", "cut.php", "next.php"] {
+                std::fs::write(root.join(program), "").unwrap_or_else(|e| panic!("{e}"));
+            }
+            root
+        })
+    }
+
     /// The connection side on a thread of its own, its requests served by
-    /// one request thread: `/panic` panics before a head, `/cut` after a
-    /// head and a write, and any other target is answered with the
-    /// serving thread's name.
+    /// one request thread: `/panic.php` panics before a head, `/cut.php`
+    /// after a head and a write, and any other program is answered with
+    /// the serving thread's name.
     fn start() -> SocketAddr {
-        let root = std::env::temp_dir();
+        let root = root();
         let argv: Vec<std::ffi::OsString> = [
             "--listen",
             "127.0.0.1:0",
@@ -688,8 +663,8 @@ mod tests {
             // so a panic unwinds through the sink the request held.
             let mut sink = sink.held().unwrap_or_else(|| panic!("a sink to hold"));
             match &head.target[..] {
-                b"/panic" => panic!("a request panicked before its head, on cue"),
-                b"/cut" => {
+                b"/panic.php" => panic!("a request panicked before its head, on cue"),
+                b"/cut.php" => {
                     sink.send_headers(&ResponseHead::default());
                     sink.write(b"partial").ok();
                     let (read, seen) = &READ;
@@ -708,10 +683,11 @@ mod tests {
             }
         })
         .unwrap_or_else(|e| panic!("{e}"));
+        let router = Arc::new(crate::route::Router::new(&options));
         std::thread::spawn(move || {
             let _pool = pool;
             if let Ok(side) = crate::connection::ConnectionSide::new() {
-                side.run(options.limits, listener, queue).ok();
+                side.run(options.limits, router, listener, queue).ok();
             }
         });
         addr
@@ -761,7 +737,7 @@ mod tests {
     fn a_request_that_panics_is_answered_500_and_its_thread_serves_the_next() {
         let log = error_log();
         let addr = start();
-        let panicked = exchange(addr, "/panic");
+        let panicked = exchange(addr, "/panic.php");
         assert!(
             panicked.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
             "{panicked}"
@@ -770,10 +746,10 @@ mod tests {
         let logged = std::fs::read_to_string(log).unwrap_or_default();
         assert!(
             logged.lines().any(|line| line.contains("makala: 127.0.0.1:")
-                && line.contains(" \"GET /panic\" panicked: a request panicked before its head, on cue; its connection is answered 500")),
+                && line.contains(" \"GET /panic.php\" panicked: a request panicked before its head, on cue; its connection is answered 500")),
             "{logged}"
         );
-        let next = exchange(addr, "/next");
+        let next = exchange(addr, "/next.php");
         assert!(next.starts_with("HTTP/1.1 200 OK\r\n"), "{next}");
         assert!(next.contains("makala-request-0"), "{next}");
     }
@@ -784,7 +760,7 @@ mod tests {
     #[test]
     fn a_request_that_panics_mid_response_is_cut_and_its_thread_serves_the_next() {
         let addr = start();
-        let mut stream = send(addr, "/cut");
+        let mut stream = send(addr, "/cut.php");
         let mut read = Vec::new();
         let mut buf = [0u8; 1024];
         while !read.windows(7).any(|w| w == b"partial") {
@@ -800,7 +776,7 @@ mod tests {
         assert!(cut.starts_with("HTTP/1.1 200 OK\r\n"), "{cut}");
         assert!(cut.contains("partial"), "{cut}");
         assert!(!cut.ends_with("0\r\n\r\n"), "{cut:?}");
-        let next = exchange(addr, "/next");
+        let next = exchange(addr, "/next.php");
         assert!(next.ends_with("0\r\n\r\n"), "{next:?}");
         assert!(next.contains("makala-request-0"), "{next}");
     }

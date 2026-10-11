@@ -2,9 +2,13 @@
 //! runtime of one thread, which owns every socket, reads each request's
 //! framing as RFC 9112 has it and never runs PHP, as the BEAM keeps
 //! anything that blocks off the schedulers that own sockets
-//! (research/production-server.r2.md §4.10, M2 and M4). A request goes to
-//! the request side whole, on the bounded queue: while the queue is full
-//! its connection waits for room. That and the connection cap are the
+//! (research/production-server.r2.md §4.10, M2 and M4). Each request is
+//! routed on tokio's blocking pool, which may wait on the disk where this
+//! thread may not, and a static file is sent from here
+//! ([`crate::static_file`], #2587), so no request thread waits on a
+//! client taking one. A program's request goes to the request side
+//! whole, on the bounded queue: while the queue is full its connection
+//! waits for room. That and the connection cap are the
 //! backpressure (#2342), Ranch's (research/production-server.r2.md M7):
 //! at the cap the accept loop stops accepting, so new clients wait in
 //! the kernel's listen queue and none is refused. The body follows on a
@@ -43,7 +47,7 @@ use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode, Version};
+use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use php_sapi::ResponseHead;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -53,7 +57,9 @@ use crate::framing;
 use crate::log::Access;
 use crate::options::Limits;
 use crate::request::{Head, Job, Sink, Written};
+use crate::route::{Route, Router};
 use crate::socket::{Socket, Watch};
+use crate::static_file::Sending;
 
 /// How many pieces of a request's body wait for the request to read them.
 const BODY_PIECES: usize = 8;
@@ -114,6 +120,7 @@ impl ConnectionSide {
     pub(crate) fn run(
         self,
         limits: Limits,
+        router: Arc<Router>,
         listener: std::net::TcpListener,
         queue: mpsc::Sender<Job>,
     ) -> std::io::Result<Drained> {
@@ -121,7 +128,13 @@ impl ConnectionSide {
             runtime,
             mut terminate,
         } = self;
-        runtime.block_on(serve_until_drained(limits, listener, queue, &mut terminate))
+        runtime.block_on(serve_until_drained(
+            limits,
+            router,
+            listener,
+            queue,
+            &mut terminate,
+        ))
     }
 }
 
@@ -141,6 +154,7 @@ impl ConnectionSide {
 /// request has ([`crate::request::Pool::join_by`]).
 async fn serve_until_drained(
     limits: Limits,
+    router: Arc<Router>,
     listener: std::net::TcpListener,
     queue: mpsc::Sender<Job>,
     terminate: &mut Signal,
@@ -153,7 +167,7 @@ async fn serve_until_drained(
     ));
     let (drain, draining) = watch::channel(false);
     let (open, mut all_ended) = mpsc::channel::<Infallible>(1);
-    let accepting = accept(&listener, limits, &slots, queue, draining, open);
+    let accepting = accept(&listener, limits, &router, &slots, queue, draining, open);
     if let Some(failed) = first_of(accepting, terminate.recv()).await {
         return Err(failed);
     }
@@ -193,6 +207,7 @@ async fn serve_until_drained(
 async fn accept(
     listener: &tokio::net::TcpListener,
     limits: Limits,
+    router: &Arc<Router>,
     slots: &Arc<Semaphore>,
     queue: mpsc::Sender<Job>,
     draining: watch::Receiver<bool>,
@@ -218,6 +233,7 @@ async fn accept(
             peer,
             local,
             limits,
+            router: Arc::clone(router),
             queue: queue.clone(),
             watch: Arc::new(Watch::new()),
             begun: AtomicU32::new(0),
@@ -233,6 +249,7 @@ struct Connection {
     peer: SocketAddr,
     local: SocketAddr,
     limits: Limits,
+    router: Arc<Router>,
     queue: mpsc::Sender<Job>,
     /// What the connection waits on, which its socket's clocks read.
     watch: Arc<Watch>,
@@ -349,13 +366,17 @@ async fn respond(
 }
 
 /// One request: refused where it is past a limit ([`over_limit`]) or its
-/// framing does not hold ([`framing`]); else handed to the request side
-/// with its body following it, and answered with the head the request
-/// sends and the body it writes after it. The server answers on its own
-/// with a 503 where it is stopping and takes no request; with the refusal
-/// of a body that faulted before the request sent its head; and with a
-/// 500 where the request ended without a head, which only a panic
-/// contained at its edge leaves.
+/// framing does not hold ([`framing`]); else routed on tokio's blocking
+/// pool, which asks the disk ([`Router::route`]): a static file is sent
+/// from here and a refusal answered, neither holding a request thread
+/// (#2587), and a program's request is handed to the request side with
+/// its body following it, and answered with the head the request sends
+/// and the body it writes after it. The server answers on its own with a
+/// 503 where the request side has stopped and takes no program; with the
+/// refusal of a body that faulted before the request sent its head; and
+/// with a 500 where the request ended without a head, which only a panic
+/// contained at its edge leaves, or where routing panicked, which
+/// nothing that routes does.
 async fn hand_over(
     connection: &Arc<Connection>,
     request: Request<Incoming>,
@@ -367,11 +388,7 @@ async fn hand_over(
     {
         return closing(connection, refused);
     }
-    let (feed, body) = mpsc::channel(BODY_PIECES);
-    let (head_sent, head) = oneshot::channel();
-    let (out, pieces) = mpsc::channel(RESPONSE_PIECES);
-    let (whole_sent, whole) = oneshot::channel();
-    let head_read = Head {
+    let head = Head {
         method: parts.method.as_str().as_bytes().to_vec(),
         target: parts.uri.path_and_query().map_or_else(
             || b"/".to_vec(),
@@ -390,8 +407,45 @@ async fn hand_over(
         peer: connection.peer,
         local: connection.local,
     };
+    let router = Arc::clone(&connection.router);
+    let asked = tokio::task::spawn_blocking(move || {
+        let route = router.route(&head.method, head.path());
+        (head, route)
+    })
+    .await;
+    let (head, route) = match asked {
+        Ok(asked) => asked,
+        Err(failed) => {
+            crate::log::error(
+                format!(
+                    "makala: {}: routing a request failed: {failed}",
+                    connection.peer
+                )
+                .as_bytes(),
+            );
+            return plain(connection, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let program = match route {
+        Route::Program(program) => program,
+        Route::Static(file) => {
+            let head = file.head();
+            let content = if parts.method == Method::HEAD {
+                Content::Empty
+            } else {
+                Content::File(file.body())
+            };
+            return response(connection, &head, content);
+        }
+        Route::Refused(refusal) => return response(connection, &refusal.head(), Content::Empty),
+    };
+    let (feed, body) = mpsc::channel(BODY_PIECES);
+    let (head_sent, answered) = oneshot::channel();
+    let (out, pieces) = mpsc::channel(RESPONSE_PIECES);
+    let (whole_sent, whole) = oneshot::channel();
     let job = Job {
-        head: head_read,
+        head,
+        program,
         body,
         sink: Sink::new(head_sent, out, whole_sent),
     };
@@ -400,7 +454,7 @@ async fn hand_over(
     }
     let (broke, mut fault) = oneshot::channel();
     tokio::spawn(pump(incoming, feed, broke, Arc::clone(connection), body_in));
-    match answer(head, &mut fault).await {
+    match answer(answered, &mut fault).await {
         Answer::Head(head) => {
             // A fault that came with the head is no longer the answer's:
             // closed, the channel takes no later one, which the pump then
@@ -409,7 +463,11 @@ async fn hand_over(
             if let Ok(fault) = fault.try_recv() {
                 cut(connection, fault);
             }
-            response(connection, &head, Written { pieces, whole })
+            response(
+                connection,
+                &head,
+                Content::Written(Written { pieces, whole }),
+            )
         }
         Answer::Broke(fault) => closing(connection, fault.status()),
         Answer::Headless => plain(connection, StatusCode::INTERNAL_SERVER_ERROR),
@@ -597,12 +655,12 @@ fn cut(connection: &Connection, fault: BodyFault) {
     connection.cut.notify_one();
 }
 
-/// The response for the head a request sent: its code, 200 where it set
-/// none, and its header lines in order, each one hyper cannot carry left
-/// out; the body what the request writes after it.
-fn response(connection: &Connection, head: &ResponseHead, written: Written) -> Response<Reply> {
+/// The response for `head`: its code, 200 where it set none, and its
+/// header lines in order, each one hyper cannot carry left out; the body
+/// `content`.
+fn response(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
     let mut response = Response::new(Reply {
-        written: Some(written),
+        content,
         watch: Arc::clone(&connection.watch),
         access: None,
     });
@@ -630,7 +688,7 @@ fn response(connection: &Connection, head: &ResponseHead, written: Written) -> R
 /// A response of the server's own, with no body.
 fn plain(connection: &Connection, status: StatusCode) -> Response<Reply> {
     let mut response = Response::new(Reply {
-        written: None,
+        content: Content::Empty,
         watch: Arc::clone(&connection.watch),
         access: None,
     });
@@ -648,27 +706,50 @@ fn closing(connection: &Connection, status: StatusCode) -> Response<Reply> {
     response
 }
 
-/// A response's body: what a request writes, piece by piece as it writes
-/// it, ending when its sink is dropped with the request, and failing
-/// where the request ended in a panic, so hyper drops the connection
-/// rather than end a chunked body cut short as a whole one (on HTTP/1.0
-/// with no length the close ends the body either way); or none, the
-/// server's own answer. hyper lets go of it when the response has ended, and the
-/// connection waits for its next request from then.
+/// A response's body. hyper lets go of it when the response has ended,
+/// and the connection waits for its next request from then.
 pub(crate) struct Reply {
-    written: Option<Written>,
+    content: Content,
     watch: Arc<Watch>,
     /// What the access log says of it, where one is kept.
     access: Option<Access>,
 }
 
-/// A response body that a request's panic left unfinished.
+/// Where a response's body comes from. A body that fails ends its
+/// connection, so hyper never ends one cut short as a whole one (on
+/// HTTP/1.0 with no length the close ends the body either way).
+enum Content {
+    /// None: the server's own answer, or a static file's to `HEAD`.
+    Empty,
+    /// What a request writes, piece by piece as it writes it, ending when
+    /// its sink is dropped with the request, and failing where the
+    /// request ended in a panic.
+    Written(Written),
+    /// A static file, read as the client takes it, failing where it ends
+    /// short of its length.
+    File(Sending),
+}
+
+/// A response body left unfinished.
 #[derive(Debug)]
-pub(crate) struct Unfinished;
+pub(crate) enum Unfinished {
+    /// The request panicked while its response was under way.
+    Panicked,
+    /// A static file ended short of the length its head said.
+    Shrank,
+    /// A static file's read failed.
+    ReadFailed(std::io::Error),
+}
 
 impl std::fmt::Display for Unfinished {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the request panicked while its response was under way")
+        match self {
+            Unfinished::Panicked => {
+                f.write_str("the request panicked while its response was under way")
+            }
+            Unfinished::Shrank => f.write_str("the static file shrank while it was sent"),
+            Unfinished::ReadFailed(failed) => write!(f, "the static file's read failed: {failed}"),
+        }
     }
 }
 
@@ -683,28 +764,37 @@ impl hyper::body::Body for Reply {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Unfinished>>> {
         let reply = self.get_mut();
-        let Some(written) = &mut reply.written else {
-            return Poll::Ready(None);
+        let next = match &mut reply.content {
+            Content::Empty => return Poll::Ready(None),
+            Content::Written(written) => match std::task::ready!(written.pieces.poll_recv(cx)) {
+                Some(piece) => Some(Ok(piece)),
+                None => {
+                    return Pin::new(&mut written.whole)
+                        .poll(cx)
+                        .map(|whole| whole.err().map(|_| Err(Unfinished::Panicked)));
+                }
+            },
+            Content::File(file) => std::task::ready!(file.poll_piece(cx)),
         };
-        if let Some(piece) = std::task::ready!(written.pieces.poll_recv(cx)) {
-            if let Some(access) = &mut reply.access {
-                access.body_out += u64::try_from(piece.len()).unwrap_or(u64::MAX);
-            }
-            return Poll::Ready(Some(Ok(Frame::data(piece))));
+        if let (Some(Ok(piece)), Some(access)) = (&next, &mut reply.access) {
+            access.body_out += u64::try_from(piece.len()).unwrap_or(u64::MAX);
         }
-        Pin::new(&mut written.whole)
-            .poll(cx)
-            .map(|whole| whole.err().map(|_| Err(Unfinished)))
+        Poll::Ready(next.map(|piece| piece.map(Frame::data)))
     }
 
     fn is_end_stream(&self) -> bool {
-        self.written.is_none()
+        match &self.content {
+            Content::Empty => true,
+            Content::Written(_) => false,
+            Content::File(file) => file.left() == 0,
+        }
     }
 
     fn size_hint(&self) -> SizeHint {
-        match self.written {
-            Some(_) => SizeHint::default(),
-            None => SizeHint::with_exact(0),
+        match &self.content {
+            Content::Empty => SizeHint::with_exact(0),
+            Content::Written(_) => SizeHint::default(),
+            Content::File(file) => SizeHint::with_exact(file.left()),
         }
     }
 }
