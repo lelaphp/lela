@@ -22,12 +22,14 @@
 //! one, which is why `php -S` serves in php's one-threaded event loop
 //! (#1884).
 //!
-//! Two ways in, as the ruling has them. pcntl asks through the request,
-//! [`Request::fork`](crate::api::request::Request::fork): the engine's
-//! timer thread joined first and started again in the parent over the
-//! deadlines it had, and in the child what php's `php_child_init`
-//! restores. A host asks through the host face, [`fork`], with no request
-//! in flight, as php-fpm's master makes a child or daemonizes.
+//! Two ways in, as the ruling has them, and one way through. pcntl asks
+//! through the request,
+//! [`Request::fork`](crate::api::request::Request::fork), and in the child
+//! what php's `php_child_init` restores is restored. A host asks through
+//! the host face, [`fork`], with no request in flight, as php-fpm's master
+//! makes a child or daemonizes. Both fork through `fork_as`, which joins
+//! every engine's timer thread first, parked between requests as it is,
+//! and starts each again in the parent over the deadlines it had.
 //!
 //! What php's `php_child_init` (`Z/main/main.c:1865`) restores in the
 //! child is two things: `zend_max_execution_timer_init`, a timer of the
@@ -42,6 +44,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 
 pub use php_process::{Forked, Pid};
+
+use crate::interrupt::Timers;
 
 /// How many things stand inside the engine in this process, each an
 /// [`Inside`], with [`FORKING`] set while an [`Alone`] is held.
@@ -183,9 +187,8 @@ impl Thread {
 pub(crate) struct Alone(());
 
 /// Who asks for a fork, and so what may stand inside the engine beside
-/// it: the request it is, once the engine's threads are joined, or
-/// nothing at all for a host, whose fork finds no timer thread, since
-/// with no request in flight no deadline is set.
+/// it once the engine's timer threads are joined: the request it is, or
+/// nothing at all for a host, which forks with no request in flight.
 #[derive(Debug, Clone, Copy)]
 enum Asker {
     Host = 0,
@@ -193,6 +196,19 @@ enum Asker {
 }
 
 impl Alone {
+    /// Refused with `EBUSY`, before any thread is joined, where more
+    /// stands inside the engine than the asker and the `parked` timer
+    /// threads the fork would join: so a fork refused leaves every
+    /// engine's timer serving as it was. [`Alone::hold`] reads the number
+    /// again once they are joined, which is what decides.
+    fn refused_beside(asker: Asker, parked: usize) -> io::Result<()> {
+        let inside = INSIDE.load(Ordering::Acquire);
+        if inside & FORKING == 0 && inside > asker as usize + parked {
+            return Err(io::Error::from_raw_os_error(EBUSY));
+        }
+        Ok(())
+    }
+
     /// Held, where what stands inside the engine is the asker alone.
     /// Refused with `EBUSY` where anything else does, a request another
     /// thread serves or a thread the engine started; a second fork under
@@ -232,11 +248,28 @@ impl Drop for Alone {
     }
 }
 
-/// [`Alone`] held for a request and forked: what `Request::fork` calls
-/// once the engine's threads are joined, so what runs inside the engine
-/// is that request alone.
+/// Every fork, a request's and a host's: the timer thread of every engine
+/// in the process joined (ADR-0010, Threads), each of which stays parked
+/// between requests while its engine lives (#2541), [`Alone`] held for
+/// `asker` and forked, and each timer started again after where it has
+/// a deadline, in the process that asked, or where the fork was refused
+/// or failed. A child drops its copies unstarted, which it forgets as it
+/// reaches them (see [`Timer`](crate::interrupt::Timer)).
+fn fork_as(asker: Asker) -> io::Result<Forked> {
+    let timers = Timers::live();
+    Alone::refused_beside(asker, timers.threads())?;
+    let stopped = timers.stop();
+    let forked = Alone::hold(asker).and_then(Alone::fork);
+    if !matches!(forked, Ok(Forked::Child)) {
+        stopped.resume();
+    }
+    forked
+}
+
+/// The fork `Request::fork` asks for, with that request alone inside
+/// the engine beside the timers' threads it joins.
 pub(crate) fn fork_request() -> io::Result<Forked> {
-    Alone::hold(Asker::Request)?.fork()
+    fork_as(Asker::Request)
 }
 
 /// `fork(2)` for a host (#1807): the process copied with no request in
@@ -246,14 +279,19 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
 /// php's `php_child_init` restores in the child is the request's, and no
 /// request is in flight, so the child goes on as the parent would.
 ///
+/// The engine's timer thread, which stays parked between requests once a
+/// request has set a deadline, startup's and engine end's among them, is
+/// joined first and started again in the parent where it has a deadline,
+/// so a host's fork after a timed request is not refused (#2541).
+///
 /// # Errors
 ///
 /// `EBUSY` where a request is in flight or a thread the engine started
-/// stands, as on a host that serves on threads, which no host that
-/// forks does; otherwise the OS error `fork(2)` failed with, and no
-/// process was made.
+/// other than its timer's stands, as on a host that serves on threads,
+/// which no host that forks does; otherwise the OS error `fork(2)` failed
+/// with, and no process was made.
 pub fn fork() -> io::Result<Forked> {
-    Alone::hold(Asker::Host)?.fork()
+    fork_as(Asker::Host)
 }
 
 #[cfg(test)]

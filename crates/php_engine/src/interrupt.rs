@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use php_heap::Fatal;
@@ -92,10 +92,11 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// under the timer's mutex and, where it comes sooner, a wake, with no
 /// thread spawned (#1924). The thread is started by the change that sets
 /// the engine's first deadline, so an engine that never arms one runs
-/// none, and joined by the change that leaves none, around a fork
-/// ([`Deadlines::forked`]) and at the engine's end, the drop of the last
-/// clone; with no request in flight the engine has no deadline, so a
-/// host's fork finds no thread. A request takes its deadlines out under
+/// none, and stays parked in its wait between requests, so a host that
+/// serves them one after another, a php-fpm child or php-cgi, spawns it
+/// once rather than at every request (#2541). It is joined before every
+/// fork, a host's and a request's alike ([`Timers`]), and at the engine's
+/// end, the drop of the last clone. A request takes its deadlines out under
 /// the mutex as it ends, so nothing the thread raises after reaches it,
 /// nor the next request on its thread, which has an interrupt of its
 /// own. A deadline the thread itself retires, a timeout with no hard
@@ -138,7 +139,7 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// returns once it waits, and ending it returns once it has ended
 /// (`JoinHandle::join`, `pthread_join`): so while PHP code runs, the
 /// timer's thread is parked in its wait or raising an interrupt, and a
-/// change that leaves no deadline leaves no thread. A fork needs both
+/// fork or the engine's end leaves no thread. A fork needs both
 /// halves (#1783). The standard library takes one process-wide mutex as
 /// a thread starts and again as it ends, its stack overflow handler's
 /// thread table (`std/src/sys/pal/unix/stack_overflow/thread_info.rs`),
@@ -148,19 +149,19 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// its deadline, so a join costs a wake and an exit, never the seconds
 /// left. That is what a fork stands on (ADR-0010, Threads): the thread
 /// is one [`crate::fork::spawn`] started, which no fork happens beside,
-/// and the engine's one home for fork (#1807) forks through
-/// [`Deadlines::forked`], which joins the thread first and starts it
-/// again after in the parent over the same schedule, whose deadlines are
-/// instants, so a periodic interrupt keeps its grid and the execution
-/// timer its stage.
+/// and the engine's one home for fork (#1807) joins every engine's timer
+/// thread first ([`Timers::stop`]) and starts each again after in the
+/// parent over the same schedule ([`Stopped::resume`]), whose deadlines
+/// are instants, so a periodic interrupt keeps its grid and the
+/// execution timer its stage.
 ///
-/// A timer in a process forked from the one its schedule is for other
-/// than through [`Deadlines::forked`] has no thread there, since a
-/// child copies its calling thread alone, as a child does not inherit
-/// php's interval timer either. Its thread and
-/// its schedule are forgotten, neither woken nor joined: the mutex may
-/// have been copied held, and there is nothing to join. So the child
-/// runs untimed, as php's does, until it sets a limit of its own.
+/// A timer in a process forked from the one its schedule is for has no
+/// thread there, as a child does not inherit php's interval timer
+/// either, and its schedule is forgotten as the child first reaches it;
+/// a thread a fork outside the home left standing in the parent is
+/// forgotten with it, neither woken nor joined: the mutex may have been
+/// copied held, and there is nothing to join. So the child runs untimed,
+/// as php's does, until it sets a limit of its own.
 ///
 /// ```php
 /// set_time_limit(1);
@@ -243,15 +244,32 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// 0 of 15000 children hung, 0 did not fork or end with status 0
 /// 0 of 8 workers did not end with status 0
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct Timer(Arc<Mutex<Control>>);
 
+/// Every engine's timer in the process, by a reference that does not keep
+/// the engine alive: what a fork stops first, whoever asks for it.
+static TIMERS: Mutex<Vec<Weak<Mutex<Control>>>> = Mutex::new(Vec::new());
+
+impl Default for Timer {
+    /// A timer with no deadline and no thread, counted among the
+    /// process's timers, so a fork finds it.
+    fn default() -> Timer {
+        let timer = Timer(Arc::default());
+        let mut timers = TIMERS.lock().unwrap_or_else(PoisonError::into_inner);
+        timers.retain(|timer| timer.strong_count() > 0);
+        timers.push(Arc::downgrade(&timer.0));
+        timer
+    }
+}
+
 impl Timer {
-    /// Whether the timer's thread runs, for the tests that hold it to
-    /// the requests in flight.
+    /// Whether the timer's thread waits parked with nothing scheduled,
+    /// for the tests that hold it to the requests in flight.
     #[cfg(test)]
-    pub(crate) fn runs_thread(&self) -> bool {
-        self.control().thread.is_some()
+    pub(crate) fn is_idle(&self) -> bool {
+        let control = self.control();
+        control.thread.is_some() && control.shared.held().requests.is_empty()
     }
 
     /// The thread and the schedule, held: in a process forked from the
@@ -263,6 +281,58 @@ impl Timer {
     }
 }
 
+/// Every engine's timer in the process, as a fork finds them
+/// ([`crate::fork`], ADR-0010's Threads): each one's thread joined before
+/// the fork and started again after it where it has a deadline.
+#[derive(Debug)]
+pub(crate) struct Timers(Vec<Timer>);
+
+impl Timers {
+    /// The timers of every engine that stands in the process.
+    pub(crate) fn live() -> Timers {
+        let mut timers = TIMERS.lock().unwrap_or_else(PoisonError::into_inner);
+        timers.retain(|timer| timer.strong_count() > 0);
+        Timers(timers.iter().filter_map(Weak::upgrade).map(Timer).collect())
+    }
+
+    /// How many of them have a thread: what stands inside the engine for
+    /// them, which a fork joins rather than refuses.
+    pub(crate) fn threads(&self) -> usize {
+        self.0
+            .iter()
+            .filter(|timer| timer.control().thread.is_some())
+            .count()
+    }
+
+    /// Each one's thread told to end and joined, its schedule kept whole.
+    pub(crate) fn stop(self) -> Stopped {
+        for timer in &self.0 {
+            timer.control().end();
+        }
+        Stopped(self)
+    }
+}
+
+/// The process's timers with their threads joined, for the length of a
+/// fork: the caller's process resumes them, and a child forked meanwhile
+/// drops them, since its copy of each schedule is for another process
+/// and is forgotten as it is reached.
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct Stopped(Timers);
+
+impl Stopped {
+    /// Each one's thread started again where its schedule has a deadline,
+    /// over the same deadlines, which are instants, so a periodic
+    /// interrupt keeps its grid and the execution timer its stage; a
+    /// timer with none is left with no thread until a request sets one.
+    pub(crate) fn resume(self) {
+        for timer in &(self.0).0 {
+            timer.control().resume();
+        }
+    }
+}
+
 /// What the engine's timer holds under its first mutex, which every
 /// change a request makes takes and the thread never does: the thread,
 /// started and joined only under it, and the schedule the thread reads
@@ -271,7 +341,8 @@ impl Timer {
 struct Control {
     shared: Arc<Shared>,
     /// The thread, from the change that set the engine's first deadline
-    /// to the one that leaves none, a fork or the engine's end.
+    /// to a fork or the engine's end, parked in between whenever no
+    /// request has a deadline.
     thread: Option<crate::fork::Thread>,
     /// The process the schedule is for, the only one the thread is in.
     process: Process,
@@ -298,10 +369,12 @@ impl Default for Control {
 
 impl Control {
     /// `f` over the schedule, under its mutex, and the thread woken where
-    /// the earliest deadline came sooner: started where it had no thread
-    /// and now has a deadline, joined where it now has none.
+    /// the earliest deadline came sooner, or started where it had none
+    /// and now has a deadline. A change that leaves no deadline leaves the
+    /// thread parked in its wait, so the next request's costs a write and
+    /// a wake rather than a spawn (#2541).
     fn change(&mut self, f: impl FnOnce(&mut Schedule)) {
-        let idle = {
+        let due = {
             let mut schedule = self.shared.held();
             let before = schedule.next();
             f(&mut schedule);
@@ -309,11 +382,17 @@ impl Control {
             if next.is_some_and(|next| before.is_none_or(|before| next < before)) {
                 self.shared.woken.notify_all();
             }
-            next.is_none()
+            next.is_some()
         };
-        if idle {
-            self.end();
-        } else if self.thread.is_none() {
+        if due && self.thread.is_none() {
+            self.start();
+        }
+    }
+
+    /// After a fork, in the process that asked: the thread started again
+    /// where the schedule has a deadline and no thread serves it.
+    fn resume(&mut self) {
+        if self.thread.is_none() && self.shared.held().next().is_some() {
             self.start();
         }
     }
@@ -344,8 +423,8 @@ impl Control {
         }
     }
 
-    /// In a process forked from the one the schedule is for, other than
-    /// through [`Deadlines::forked`], the thread and the schedule
+    /// In a process forked from the one the schedule is for, the thread
+    /// and the schedule
     /// forgotten (see [`Timer`]), so what follows starts afresh: a
     /// suspended time limit with them, so the child is untimed after the
     /// resume as it is with none suspended. With no thread, nothing could
@@ -460,8 +539,9 @@ impl Deadlines {
 
     /// [`Request::suspend_time_limit`]: the execution timer's deadline
     /// taken out of the schedule and the time it had left kept, by the
-    /// first of the guards that stand; the thread is joined where nothing
-    /// else is scheduled, and serves the rest on where something is. A
+    /// first of the guards that stand; the thread waits parked where
+    /// nothing else is scheduled, and serves the rest on where something
+    /// is. A
     /// timeout already raised stays raised.
     pub(crate) fn suspend(&mut self) {
         self.suspended = self.suspended.saturating_add(1);
@@ -539,25 +619,6 @@ impl Deadlines {
         self.change(|scheduled| scheduled.periodic.retain(|period| period.id != id));
     }
 
-    /// [`Request::fork`]: the engine's thread joined, `fork` called, and
-    /// the thread started again over the same deadlines in the process
-    /// that called it, or every deadline dropped in a child, which
-    /// inherits none, as a child inherits no interval timer. A fork that
-    /// succeeds had nothing else inside the engine, so the child's
-    /// deadlines were this request's alone.
-    pub(crate) fn forked<R>(&mut self, fork: impl FnOnce() -> R) -> R {
-        self.timer.control().end();
-        let forked = fork();
-        // In the child the schedule is for another process, and the
-        // timer forgets it as it is reached; in the parent the thread
-        // serves it again, unless another request started it already.
-        let mut control = self.timer.control();
-        if control.thread.is_none() && control.shared.held().next().is_some() {
-            control.start();
-        }
-        forked
-    }
-
     /// `f` over this request's deadlines, through [`Control::change`].
     fn change(&self, f: impl FnOnce(&mut Scheduled)) {
         self.timer
@@ -568,7 +629,7 @@ impl Deadlines {
 
 impl Drop for Deadlines {
     /// The request's end: its deadlines and its periods taken out of the
-    /// schedule, and the thread joined where no other request has one.
+    /// schedule; the thread stays parked for the engine's next request.
     fn drop(&mut self) {
         self.timer
             .control()
@@ -1067,46 +1128,45 @@ mod tests {
         Arc::clone(&timer.control().shared)
     }
 
-    /// #1783: a deadline set returns with the thread waiting, and the
-    /// last one unset, or the request's deadlines dropped, returns with
-    /// the thread's body done and its share of the schedule released;
-    /// the unset wakes it rather than waiting out the thirty seconds it
-    /// was armed for. That the thread has then ended, the standard
-    /// library's exit behind it too, is the join's, which nothing in the
-    /// process can observe short of counting its threads: the fork stress
-    /// on [`Timer`] is what holds it.
+    /// #1783: a deadline set returns with the thread waiting; the last
+    /// one unset, or the request's deadlines dropped, leaves it parked in
+    /// its wait (#2541); and the engine's end, the drop of the timer's last
+    /// clone, returns with the thread's body done and its share of the
+    /// schedule released. The end wakes it rather than waiting out the
+    /// thirty seconds it was armed for. That the thread has then ended,
+    /// the standard library's exit behind it too, is the join's, which
+    /// nothing in the process can observe short of counting its threads:
+    /// the fork stress on [`Timer`] is what holds it.
     #[test]
-    fn a_timers_thread_waits_once_armed_and_is_done_once_unset() {
+    fn a_timers_thread_waits_once_armed_and_is_done_at_the_engines_end() {
         let interrupt = Interrupt::default();
-        let timer = Timer::default();
         let began = Instant::now();
         for _ in 0..100 {
+            let timer = Timer::default();
             let mut deadlines = Deadlines::new(&timer, &interrupt);
             deadlines.arm(30, 2);
+            let thread = serving(&timer);
             assert_eq!(
                 shared(&timer).held().phase,
                 Phase::Waiting,
                 "armed and waiting"
             );
             deadlines.arm(0, 2);
-            assert_eq!(serving(&timer), None, "unset, and no thread");
-            assert_eq!(
-                Arc::strong_count(&shared(&timer)),
-                2,
-                "the thread let go of the schedule before the unset returned"
-            );
+            assert_eq!(serving(&timer), thread, "unset, and parked");
             deadlines.arm(30, 2);
             drop(deadlines);
-            assert_eq!(serving(&timer), None, "dropped, and no thread");
+            assert_eq!(serving(&timer), thread, "dropped, and parked");
+            let schedule = shared(&timer);
+            drop(timer);
             assert_eq!(
-                Arc::strong_count(&shared(&timer)),
-                2,
-                "the thread let go of the schedule before the drop returned"
+                Arc::strong_count(&schedule),
+                1,
+                "the thread let go of the schedule before the engine's end returned"
             );
         }
         assert!(
             began.elapsed() < Duration::from_secs(10),
-            "each unset woke its thread rather than waiting out the deadline"
+            "each end woke its thread rather than waiting out the deadline"
         );
     }
 
@@ -1150,18 +1210,14 @@ mod tests {
 
     /// #2252: requests served on threads of their own over one engine,
     /// each with `max_execution_time` armed, are served by one thread,
-    /// which the engine started once and joined once the last of them
-    /// ended.
+    /// which the engine started once and which stays parked once the last
+    /// of them ended (#2541).
     #[test]
     fn one_thread_serves_every_request_of_an_engine() {
         const REQUESTS: usize = 8;
         let engine = Engine::cli_builder()
             .ini("max_execution_time", "30")
             .build();
-        // The engine's start served a request of its own, whose thread
-        // was joined as it ended.
-        assert_eq!(serving(&engine.shared.timer), None);
-        let before = started(&engine.shared.timer);
         let armed = Arc::new(std::sync::Barrier::new(REQUESTS + 1));
         let counted = Arc::new(std::sync::Barrier::new(REQUESTS + 1));
         let threads: Vec<_> = (0..REQUESTS)
@@ -1190,12 +1246,37 @@ mod tests {
         );
         assert!(serving_then.is_some());
         assert_eq!(
-            started_then - before,
-            1,
-            "one thread for {REQUESTS} requests"
+            started_then, 1,
+            "one thread for the engine's start and {REQUESTS} requests"
         );
-        assert_eq!(serving(timer), None, "joined once the last request ended");
+        assert_eq!(serving(timer), serving_then, "parked once the last ended");
         assert!(shared(timer).held().requests.is_empty());
+    }
+
+    /// #2541: requests served one after another over one engine, each with
+    /// `max_execution_time` armed, as a php-fpm child or php-cgi serves
+    /// them, are served by one thread, which stays parked between them
+    /// rather than being joined at each request's end and spawned again
+    /// at the next one's start.
+    #[test]
+    fn requests_served_one_after_another_start_one_thread() {
+        let engine = Engine::cli_builder()
+            .ini("max_execution_time", "30")
+            .build();
+        let timer = &engine.shared.timer;
+        let first = Request::new(Arc::clone(&engine.shared), description());
+        let thread = serving(timer);
+        assert!(thread.is_some(), "armed, and served");
+        drop(first);
+        assert_eq!(serving(timer), thread, "parked between the requests");
+        let second = Request::new(Arc::clone(&engine.shared), description());
+        assert_eq!(serving(timer), thread, "the same thread serves the next");
+        drop(second);
+        assert_eq!(
+            started(timer),
+            1,
+            "one thread for the engine's start and two requests"
+        );
     }
 
     /// #2252: each of the requests one engine's thread serves meets its
@@ -1208,7 +1289,6 @@ mod tests {
             .ini("hard_timeout", "0")
             .tier::<Nop>()
             .build();
-        let before = started(&engine.shared.timer);
         let armed = Arc::new(std::sync::Barrier::new(REQUESTS));
         let began = Instant::now();
         let threads: Vec<_> = (0..REQUESTS)
@@ -1230,7 +1310,7 @@ mod tests {
             );
         }
         assert!(began.elapsed() >= Duration::from_secs(1));
-        assert_eq!(started(&engine.shared.timer) - before, 1);
+        assert_eq!(started(&engine.shared.timer), 1);
     }
 
     /// A request that ends takes its deadlines out of the schedule, so
@@ -1288,10 +1368,10 @@ mod tests {
 
     /// A periodic interrupt with no period raises the interrupt once, `first` from now, as
     /// Excimer's one-shot timer does; stopping the last periodic
-    /// interrupt ends the thread, and dropping deadlines that still have
-    /// one joins it.
+    /// interrupt, or dropping deadlines that still have one, leaves the
+    /// thread parked with nothing of the request in the schedule.
     #[test]
-    fn a_periodic_interrupt_of_no_period_raises_once_and_its_thread_ends() {
+    fn a_periodic_interrupt_of_no_period_raises_once_and_its_thread_parks() {
         let interrupt = Interrupt::default();
         let timer = Timer::default();
         let mut deadlines = Deadlines::new(&timer, &interrupt);
@@ -1302,20 +1382,25 @@ mod tests {
         if let Some(once) = once {
             deadlines.stop_periodic(once);
         }
-        assert_eq!(serving(&timer), None, "stopped, and no thread");
-        assert_eq!(Arc::strong_count(&shared(&timer)), 2);
+        let thread = serving(&timer);
+        assert!(thread.is_some(), "stopped, and parked");
+        assert_eq!(shared(&timer).held().next(), None);
 
         let every = deadlines.start_periodic(Duration::ZERO, Some(Duration::from_secs(30)));
-        assert!(every.is_some() && serving(&timer).is_some());
+        assert!(every.is_some());
+        assert_eq!(serving(&timer), thread, "the parked thread serves it");
         drop(deadlines);
-        assert_eq!(serving(&timer), None, "the drop joined the thread");
-        assert_eq!(Arc::strong_count(&shared(&timer)), 2);
+        assert_eq!(serving(&timer), thread, "dropped, and parked");
+        assert!(shared(&timer).held().requests.is_empty());
+        assert_eq!(started(&timer), 1);
     }
 
     /// ADR-0010, Threads: a fork is called with the timer's thread joined,
-    /// and after it the parent's thread serves the same deadlines, the
-    /// execution timer's and a periodic interrupt's, counted from where
-    /// they stood rather than from the fork.
+    /// parked as it was, and after it the parent's thread serves the same
+    /// deadlines, the execution timer's and a periodic interrupt's,
+    /// counted from where they stood rather than from the fork. The
+    /// timers are this test's own, since stopping every one in the
+    /// process would stop the other tests' too.
     #[test]
     fn a_fork_finds_no_thread_and_the_parent_keeps_its_deadlines() {
         let interrupt = Interrupt::default();
@@ -1325,14 +1410,59 @@ mod tests {
         let periodic =
             deadlines.start_periodic(Duration::from_secs(20), Some(Duration::from_secs(20)));
         let before = shared(&timer).held().next();
-        let found = deadlines.forked(|| serving(&timer));
-        assert_eq!(found, None, "no thread at the fork");
+        let timers = Timers(vec![timer.clone()]);
+        assert_eq!(timers.threads(), 1);
+        let stopped = timers.stop();
+        assert_eq!(serving(&timer), None, "no thread at the fork");
+        assert_eq!(Arc::strong_count(&shared(&timer)), 2, "and its body done");
+        stopped.resume();
         assert!(serving(&timer).is_some(), "started again after the fork");
         assert_eq!(shared(&timer).held().next(), before, "the same deadlines");
         if let Some(periodic) = periodic {
             deadlines.stop_periodic(periodic);
         }
         assert!(serving(&timer).is_some(), "the execution timer is left");
+    }
+
+    /// #2541: a host's fork after a timed request finds the engine's timer
+    /// parked, joins it, and in the parent leaves it unstarted, since no
+    /// request has a deadline: php-fpm's master forks each child after
+    /// the startup request armed `max_execution_time`, and serves none.
+    #[test]
+    fn a_fork_after_a_timed_request_joins_the_parked_thread() {
+        let engine = Engine::cli_builder()
+            .ini("max_execution_time", "30")
+            .build();
+        drop(Request::new(Arc::clone(&engine.shared), description()));
+        let timer = &engine.shared.timer;
+        assert!(serving(timer).is_some(), "parked after the request");
+        let live = Timers::live();
+        assert!(
+            live.0.iter().any(|live| Arc::ptr_eq(&live.0, &timer.0)),
+            "the fork finds the engine's timer"
+        );
+        let timers = Timers(vec![timer.clone()]);
+        assert_eq!(timers.threads(), 1, "what the fork joins, not refuses");
+        timers.stop().resume();
+        assert_eq!(serving(timer), None, "no deadline, so not started again");
+        drop(Request::new(Arc::clone(&engine.shared), description()));
+        assert!(serving(timer).is_some(), "the next request starts it");
+    }
+
+    /// A timer whose engine has ended is not one a fork finds.
+    #[test]
+    fn a_fork_does_not_find_an_ended_engines_timer() {
+        let timer = Timer::default();
+        let gone = Arc::downgrade(&timer.0);
+        drop(timer);
+        let live = Timers::live();
+        assert!(gone.upgrade().is_none());
+        assert!(
+            !live
+                .0
+                .iter()
+                .any(|live| std::ptr::eq(Arc::as_ptr(&live.0), gone.as_ptr()))
+        );
     }
 
     /// The execution timer's due time, as the schedule holds it.
@@ -1365,10 +1495,9 @@ mod tests {
             "suspended with the time left, not {:?}",
             due(&deadlines)
         );
-        assert_eq!(
-            serving(&timer),
-            None,
-            "nothing else scheduled, so no thread"
+        assert!(
+            serving(&timer).is_some(),
+            "nothing else scheduled, and the thread parked"
         );
         deadlines.suspend();
         deadlines.resume();
