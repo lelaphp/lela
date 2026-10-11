@@ -186,9 +186,8 @@ pub(crate) fn raise(req: &mut Request, reported: Reported) -> Result<(), Thrown>
     for (gd, text) in reported {
         match level(gd) {
             Level::Error => {
-                let mut message = req.active_function_name().into_bytes();
-                message.extend_from_slice(b"(): ");
-                message.extend_from_slice(&text);
+                let function = req.active_function_name();
+                let message = [function.as_bytes(), b"(): ", &text].concat();
                 return Err(fatal(req, &message));
             }
             level => docref(req, level, &text),

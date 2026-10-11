@@ -297,9 +297,11 @@ fn report_errors(req: &mut Request, app: &mut App<'_>, doc: &HtmlDocument, chunk
 ///
 /// ```php
 /// set_error_handler(function ($n, $s) { echo $n, " ", bin2hex(strstr($s, " in ")), "\n"; return true; });
+/// Dom\HTMLDocument::createFromFile("data:text/html,<!DOCTYPE html><p a=>\xff");
 /// Dom\HTMLDocument::createFromFile("data:text/html,<p>x</b>\xff");
 /// ```
 /// ```expect
+/// 2 20696e20646174613a746578742f68746d6c2c3c21444f43545950452068746d6c3e3c7020613d3eff2c206c696e653a20312c20636f6c756d6e3a203231
 /// 2 20696e20646174613a746578742f68746d6c2c3c703e783c2f623eff2c206c696e653a20312c20636f6c756d6e3a2032
 /// ```
 fn pretend(
@@ -311,13 +313,10 @@ fn pretend(
     column: usize,
     last: Option<usize>,
 ) {
-    let mut message = format!("{kind} error {what} in ").into_bytes();
-    message.extend_from_slice(file);
-    message.extend_from_slice(format!(", line: {line}, column: {column}").as_bytes());
-    if let Some(last) = last {
-        message.extend_from_slice(format!("-{last}").as_bytes());
-    }
-    message.push(b'\n');
+    let columns = last.map_or_else(|| column.to_string(), |last| format!("{column}-{last}"));
+    let head = format!("{kind} error {what} in ");
+    let tail = format!(", line: {line}, column: {columns}\n");
+    let message = [head.as_bytes(), file, tail.as_bytes()].concat();
     let line = i32::try_from(line).unwrap_or(i32::MAX);
     let column = i32::try_from(column).unwrap_or(i32::MAX);
     Errors::pretend(req, file, line, column, &message);

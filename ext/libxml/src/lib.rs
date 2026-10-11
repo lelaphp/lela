@@ -271,7 +271,7 @@ impl Errors {
     /// `php_libxml_pretend_ctx_error_ex`: an error raised as if a parser
     /// of `file` had raised it at `line` and `column`, which lexbor's
     /// parse errors are: onto the list with the position and the file,
-    /// or a warning with the text alone.
+    /// or a warning with the text alone, its bytes as they are.
     pub fn pretend(req: &mut Request, file: &[u8], line: i32, column: i32, message: &[u8]) {
         let state = req.state::<State>();
         state.buffer.extend_from_slice(message);
@@ -467,12 +467,8 @@ impl Errors {
 /// throughout, as php's `%s` prints a document's file name and libxml's
 /// text, so a name that is not UTF-8 is raised as it is.
 fn in_input(message: &[u8], file: Option<&[u8]>, line: i32) -> Vec<u8> {
-    let mut text = Vec::with_capacity(message.len() + 32);
-    text.extend_from_slice(message);
-    text.extend_from_slice(b" in ");
-    text.extend_from_slice(file.unwrap_or(b"Entity"));
-    text.extend_from_slice(format!(", line: {line}").as_bytes());
-    text
+    let line = format!(", line: {line}");
+    [message, b" in ", file.unwrap_or(b"Entity"), line.as_bytes()].concat()
 }
 
 // ---- the face php_libxml.h declares: the document handlers
