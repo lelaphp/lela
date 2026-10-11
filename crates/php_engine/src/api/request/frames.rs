@@ -838,28 +838,34 @@ impl Request {
     /// write its arguments into, `header` laid down whole; a page the
     /// memory limit refuses is the fatal php raises there.
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
+        let (_, room) = self.callee_room(&header)?;
+        self.push_room(room, header)
+    }
+
+    /// The call of a frameless native, `FRAMELESS_ICALL_*`'s: php's full
+    /// call where the native is observed
+    /// ([`crate::observer::frameless_observed`]), on the VM stack as
+    /// [`Request::push_call`] pushes it, and any other off the stack's
+    /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
+    /// over no frame and it takes no room php's call does not.
+    pub(crate) fn push_frameless(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
+        let (function, room) = self.callee_room(&header)?;
+        if crate::observer::frameless_observed(self, function) {
+            return self.push_room(room, header);
+        }
+        Ok(self.vm.push_frameless(room, header))
+    }
+
+    /// The callee `header` names and the room its call takes
+    /// ([`Request::call_room`]); a header with no callee is the engine's
+    /// error.
+    fn callee_room(&self, header: &exec::Header) -> Result<(Function, usize), Fatal> {
         let Some(function) = header.function else {
             return Err(Fatal::Error(String::from(
                 "InternalError: a call pushed with no callee",
             )));
         };
-        let room = self.call_room(function, header.num_args);
-        self.push_room(room, header)
-    }
-
-    /// The call of a frameless native, which php serves over no frame
-    /// unless the native is observed ([`crate::observer::frameless_observed`]):
-    /// its record off the VM stack's pages
-    /// ([`php_heap::VmStack::push_frameless`]), so it takes no room php's
-    /// call does not.
-    pub(crate) fn push_frameless(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let Some(function) = header.function else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a frameless call pushed with no callee",
-            )));
-        };
-        let room = self.call_room(function, header.num_args);
-        Ok(self.vm.stack.push_frameless(room, header))
+        Ok((function, self.call_room(function, header.num_args)))
     }
 
     /// A call pushed with `room` slots past its header, which the caller

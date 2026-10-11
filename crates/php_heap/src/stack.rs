@@ -42,7 +42,7 @@
 //! so it takes no room php's call does not.
 
 use std::marker::PhantomData;
-use std::mem::{align_of, needs_drop, size_of};
+use std::mem::{MaybeUninit, align_of, needs_drop, size_of};
 use std::ptr::NonNull;
 
 use crate::hooks::Fatal;
@@ -150,18 +150,17 @@ impl Placed {
 /// its frames gave back for the next ([`VmStack::push_frameless`]), and
 /// a room is freed when it is dropped.
 #[derive(Debug)]
-struct Loose(NonNull<[Zval]>);
+struct Loose(NonNull<[MaybeUninit<Zval>]>);
 
 // SAFETY: a room is the request's, as a page is, and read on its
 // thread alone.
 unsafe impl Send for Loose {}
 
 impl Loose {
-    /// A room of `slots` slots, each `UNDEF`.
+    /// A room of `slots` slots, untyped as a page's are until a push
+    /// writes the header and the slots.
     fn new(slots: usize) -> Loose {
-        Loose(NonNull::from(Box::leak(
-            vec![Zval::UNDEF; slots].into_boxed_slice(),
-        )))
+        Loose(NonNull::from(Box::leak(Box::new_uninit_slice(slots))))
     }
 
     /// How many slots the room holds.
@@ -221,7 +220,8 @@ impl<H> Frame<H> {
     /// The header's place, the room before the first CV.
     fn header_at(&self) -> NonNull<H> {
         // SAFETY: every frame's `at` is `FRAME_HEADER_SLOTS` slots past
-        // the start of its room, inside the page or block it was laid in.
+        // the start of its room, inside the page, the block or the room
+        // off the pages it was laid in.
         unsafe { self.at.sub(FRAME_HEADER_SLOTS) }.cast::<H>()
     }
 
@@ -321,10 +321,10 @@ impl<H> Frame<H> {
     }
 
     fn cells(&self) -> &[Zval] {
-        // SAFETY: the frame's `len` slots at `at` are inside a page of
-        // the heap, written `UNDEF` by the push and live until the frame
-        // pops, and the borrow of the frame is a borrow of the stack
-        // that alone names them.
+        // SAFETY: the frame's `len` slots at `at` are inside the page, the
+        // block or the room off the pages it was laid in, written `UNDEF`
+        // by the push and live until the frame pops, and the borrow of
+        // the frame is a borrow of the stack that alone names them.
         unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.len) }
     }
 
@@ -393,7 +393,8 @@ impl<H> VmStack<H> {
     }
 
     /// `zend_vm_stack_destroy`: every page given back to `heap`, the
-    /// newest first, and every frame with them. The headers of the
+    /// newest first, and every frame with them, the rooms off the pages
+    /// with those. The headers of the
     /// frames still standing are handed back, the newest first, so what
     /// each names beyond its words is given up where the engine keeps
     /// it; a stack every frame was popped off hands back none.
@@ -408,6 +409,7 @@ impl<H> VmStack<H> {
         for page in self.pages.drain(..).rev() {
             page.give_back(heap);
         }
+        self.rooms.clear();
         dropped
     }
 
@@ -459,7 +461,6 @@ impl<H> VmStack<H> {
         extra_args: usize,
         header: H,
     ) -> Result<FrameRef, Fatal> {
-        let () = Frame::<H>::FITS;
         self.open(heap)?;
         let used = FRAME_HEADER_SLOTS + slots + extra_args;
         let fits = self
@@ -490,20 +491,28 @@ impl<H> VmStack<H> {
         let from = page.top;
         page.top += used;
         let at = page.slot(from + FRAME_HEADER_SLOTS);
+        Ok(self.lay(at, slots, placed, header))
+    }
+
+    /// A frame of `len` slots from `at` laid on top of the stack where
+    /// `placed` says it stands, its header written in the room before
+    /// `at` and every slot `UNDEF`, as `i_init_func_execute_data` finds
+    /// them; the room is the push's, `FRAME_HEADER_SLOTS` and `len` slots
+    /// long, which nothing else names.
+    fn lay(&mut self, at: NonNull<Zval>, len: usize, placed: Placed, header: H) -> FrameRef {
+        let () = Frame::<H>::FITS;
         let mut frame = Frame {
             at,
-            len: slots,
+            len,
             placed,
             header: PhantomData,
         };
         // SAFETY: the header's room is the `FRAME_HEADER_SLOTS` slots the
-        // page just gave the frame before its first CV, which `FITS`
-        // holds an `H` to fit, aligned, and nothing else names.
+        // push gave the frame before its first CV, which `FITS` holds an
+        // `H` to fit, aligned, and nothing else names.
         unsafe { frame.header_at().write(header) };
         frame.cells_mut().fill(Zval::UNDEF);
-        let position = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
-        self.frames.push(frame);
-        Ok(FrameRef(position))
+        self.resume_frame(frame)
     }
 
     /// Push the frame of a call php lays down nowhere, an unobserved
@@ -516,29 +525,15 @@ impl<H> VmStack<H> {
     /// neither `memory_get_usage()` nor its peak, and leaves the pages
     /// as they stood for what the native pushes while it is served.
     pub fn push_frameless(&mut self, slots: usize, header: H) -> FrameRef {
-        let () = Frame::<H>::FITS;
         let used = FRAME_HEADER_SLOTS + slots;
         let room = match self.rooms.pop() {
             Some(room) if room.slots() >= used => room,
             _ => Loose::new(used.max(LOOSE_SLOTS)),
         };
-        // SAFETY: the room holds at least `FRAME_HEADER_SLOTS` slots, so
-        // the first CV's place is inside it.
+        // SAFETY: the room holds `used` slots, so the first CV's place,
+        // `FRAME_HEADER_SLOTS` slots in, is inside it.
         let at = unsafe { room.at().add(FRAME_HEADER_SLOTS) };
-        let mut frame = Frame {
-            at,
-            len: slots,
-            placed: Placed::Loose(room),
-            header: PhantomData,
-        };
-        // SAFETY: the header's room is the `FRAME_HEADER_SLOTS` slots of
-        // the room before the first CV, which `FITS` holds an `H` to fit,
-        // aligned, and nothing else names.
-        unsafe { frame.header_at().write(header) };
-        frame.cells_mut().fill(Zval::UNDEF);
-        let position = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
-        self.frames.push(frame);
-        FrameRef(position)
+        self.lay(at, slots, Placed::Loose(room), header)
     }
 
     /// Pop the frame the loop is executing,

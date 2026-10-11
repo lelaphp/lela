@@ -11401,11 +11401,7 @@ fn frameless_call(
     );
     header.info.set_serving();
     header.info.set_frameless(true);
-    let call = if crate::observer::frameless_observed(req, Function(entry.function)) {
-        req.push_call(header)?
-    } else {
-        req.push_frameless(header)?
-    };
+    let call = req.push_frameless(header)?;
     for (at, &(kind, field)) in arguments.iter().enumerate() {
         let value = exec::take_operand(req, frame, code, kind, field);
         let placed = req
