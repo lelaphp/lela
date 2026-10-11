@@ -155,6 +155,32 @@ pub(crate) fn poll(fds: &mut [Polled], millis: i32) -> std::io::Result<usize> {
     Ok(ready)
 }
 
+/// Every descriptor above 2 the process was started holding, closed, as
+/// a server that outlives its caller's other children does before it
+/// serves (#2550). On macOS the standard library opens a pipe with
+/// `pipe(2)` and marks it close-on-exec after, so a process another
+/// thread spawns in between inherits that pipe, and holding it keeps the
+/// pipe from reaching its end for whoever reads it. `/dev/fd` lists what
+/// is open; called first in `main`, with no thread started and nothing
+/// of this process's own open beyond the three, so each one closed is
+/// one nothing here owns.
+pub fn close_inherited_fds() {
+    let Ok(open) = std::fs::read_dir("/dev/fd") else {
+        return;
+    };
+    let inherited: Vec<RawFd> = open
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > 2)
+        .collect();
+    // The listing's own descriptor is among them and closed with the
+    // listing already; its close here answers `EBADF`, which is no error.
+    for fd in inherited {
+        // SAFETY: `close(2)` reads its one integer argument; the fd is
+        // owned by no value of this process (see above).
+        unsafe { libc::close(fd) };
+    }
+}
+
 /// `php_cli_server_worker_install_pdeathsig`
 /// (`Z/sapi/cli/php_cli_server.c:2486`) in a worker the server forked
 /// from `parent`: `SIGTERM` asked for once the parent dies, where the

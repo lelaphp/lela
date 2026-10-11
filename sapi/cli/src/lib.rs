@@ -69,6 +69,9 @@ use php_sapi::{Engine, EngineBuilder, OutputSink};
 
 use crate::natives::ProcessTitle;
 
+/// What `php-linked --serve` does first, so a pool's server holds only
+/// its own pipes (#2550).
+pub use ffi::close_inherited_fds;
 pub use options::{
     Ask, Each, Lines, Options, Program, Refused, Report, Server, Startup, usage_text,
 };
