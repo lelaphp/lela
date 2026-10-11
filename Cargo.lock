@@ -958,6 +958,7 @@ dependencies = [
  "libc",
  "php_ext",
  "php_ext_lexbor",
+ "php_ext_sockets",
  "php_ext_standard",
  "php_ext_uri",
  "pkg-config",

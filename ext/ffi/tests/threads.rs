@@ -53,6 +53,10 @@ extern "C" fn later_closing(callback: Callback) {
     call_later(callback, Duration::from_millis(100), "closing");
 }
 
+extern "C" fn later_reading(callback: Callback) {
+    call_later(callback, Duration::from_millis(100), "reading");
+}
+
 /// `hold_unlent(float $seconds): void`: the request held for that long in
 /// a native that never lends it, as no engine native that blocks is.
 #[php_function]
@@ -83,6 +87,7 @@ fn served(later: extern "C" fn(Callback), name: &str, source: &str) -> (String, 
             php_ext_lexbor::extension(),
             php_ext_uri::extension(),
             php_ext_standard::extension(),
+            php_ext_sockets::extension(),
             php_ext_ffi::extension(),
             holding(),
         ])
@@ -141,6 +146,38 @@ echo "closed $code\n";
 "#,
     );
     assert_eq!(stdout, "called 21 inside the wait\nclosed 0\n");
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// The thread calls back while the request reads a socket in
+/// `socket_read`, and the callback closes that socket (#2601): the fd the
+/// read waits on stays the socket's until the read returns, which the
+/// write after the close wakes, and the read then answers as php's
+/// closed-socket path does. The socket's receive timeout bounds the read
+/// where nothing wakes it.
+#[test]
+fn a_socket_closed_by_a_callback_in_its_own_read_is_closed_when_the_read_returns() {
+    let (stdout, returned) = served(
+        later_reading,
+        "reading",
+        r#"socket_create_pair(AF_UNIX, SOCK_STREAM, 0, $p);
+socket_set_option($p[1], SOL_SOCKET, SO_RCVTIMEO, ['sec' => 3, 'usec' => 0]);
+$later(function ($x) use ($p) {
+    socket_close($p[1]);
+    try { socket_close($p[1]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    socket_write($p[0], "x");
+    return $x * 2;
+});
+try { var_dump(socket_read($p[1], 10)); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+try { socket_write($p[1], "y"); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "socket_close(): Argument #1 ($socket) has already been closed\n\
+         socket_read(): Argument #1 ($socket) has already been closed\n\
+         socket_write(): Argument #1 ($socket) has already been closed\n"
+    );
     assert_eq!(returned.as_deref(), Some("42"));
 }
 
