@@ -202,8 +202,9 @@ impl Request {
     }
 
     /// `zend_throw_exception_internal` (`Z/Zend/zend_exceptions.c:180`)
-    /// over a throwable a native raised where no handler hands it back
-    /// to the loop, a resource's destructor: chained over what is
+    /// over a throwable raised where no handler hands it back to the
+    /// loop, a step a release serves (a resource's destructor, or what a
+    /// stream an object's free closed parked): chained over what is
     /// pending, as `zend_exception_set_previous` chains it; where nothing
     /// is pending and no frame stands, as when `zend_close_rsrc_list`
     /// serves the destructor at the request's end, handed to the handler
