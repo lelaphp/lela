@@ -10,7 +10,6 @@
 
 use php_ext::call::{self, Function};
 use php_ext::decl::ClassKind;
-use std::fmt::Write as _;
 
 use php_ext::request::{FrameView, MethodRow, OpArrayView, Opcode, Raised, Request};
 use php_ext::values::{ClassId, Value};
@@ -245,12 +244,8 @@ fn code_of(req: &Request, function: Function, class: Option<ClassId>) -> Option<
         });
     };
     let shown = match &class {
-        Some(class) => format!(
-            "{}::{}",
-            String::from_utf8_lossy(class),
-            String::from_utf8_lossy(&name)
-        ),
-        None => String::from_utf8_lossy(&name).into_owned(),
+        Some(class) => [&class[..], b"::", &name].concat(),
+        None => name.clone(),
     };
     Some(Code {
         dump: dump_with_dynamic(req, code, &shown, args),
@@ -267,15 +262,16 @@ fn code_of(req: &Request, function: Function, class: Option<ClassId>) -> Option<
 
 /// `phpdbg_print_function_helper`: the op array, then each function its
 /// body declares, under `dynamic def: n, function name: name`.
-fn dump_with_dynamic(req: &Request, code: OpArrayView<'_>, name: &str, args: usize) -> Vec<u8> {
+fn dump_with_dynamic(req: &Request, code: OpArrayView<'_>, name: &[u8], args: usize) -> Vec<u8> {
     let mut dump = req.dump_op_array(code, name, args);
     for (at, (decl, nested)) in code.dynamic_functions().enumerate() {
-        let nested_name = String::from_utf8_lossy(&decl.name.0).into_owned();
-        write!(dump, "\ndynamic def: {at}, function name: {nested_name}\n").ok();
+        dump.extend_from_slice(format!("\ndynamic def: {at}, function name: ").as_bytes());
+        dump.extend_from_slice(&decl.name.0);
+        dump.push(b'\n');
         let nested_args = decl.parameters.iter().filter(|p| !p.variadic).count();
-        dump.push_str(&req.dump_op_array(nested, &nested_name, nested_args));
+        dump.extend(req.dump_op_array(nested, &decl.name.0, nested_args));
     }
-    dump.into_bytes()
+    dump
 }
 
 /// The op array `frame` serves; for a file's code, `name` is empty.
@@ -287,7 +283,7 @@ pub fn frame_code(req: &Request, frame: FrameRef) -> Option<Code> {
     }
     let code = view.op_array()?;
     Some(Code {
-        dump: dump_with_dynamic(req, code, "$_main", 0),
+        dump: dump_with_dynamic(req, code, b"$_main", 0),
         name: Vec::new(),
         class: None,
         user: true,
