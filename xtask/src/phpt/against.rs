@@ -5,14 +5,16 @@
 //!
 //! **What a run is, and what keys it.** Every run in which the engine
 //! judged every test a subset holds is kept as its verdicts, one per
-//! test, at `target/phpt-runs/<tree>/<scope>.json`, beside the reading
-//! store and not in it. The key is the tree the engine's binary is built
-//! from, [`built_from`], and not the tree the subset's reading is stamped
-//! with: that one is the crate's own, which does not move when
-//! `php_engine` does, while the verdicts do. The same key is taken from a
-//! commit's objects, so the run a worktree at the merge base took is found
-//! by the commit alone from any worktree of the repository ([`roots`]),
-//! and a run over sources that are no commit's is found by none.
+//! test, at `target/harness/phpt-runs/<tree>/<scope>.json`, in the
+//! reading store, so CI's upload of the store carries them and a run CI
+//! took can serve as a base (harness §4.2, #725). The key is the tree the
+//! engine's binary is built from, [`built_from`], and not the tree the
+//! subset's reading is stamped with: that one is the crate's own, which
+//! does not move when `php_engine` does, while the verdicts do. The same
+//! key is taken from a commit's objects, so the run a worktree at the
+//! merge base took is found by the commit alone from any worktree of the
+//! repository ([`roots`]), and a run over sources that are no commit's is
+//! found by none.
 //!
 //! **What a miss keeps.** Beside its verdict, each test that missed keeps
 //! its first differing lines and its signature under `misses`, by the same
@@ -49,6 +51,12 @@
 //! measures the head, and `done` finds every touched subset's reading
 //! fresh (#1435). The skip names how to fetch the runs CI's dashboard
 //! keeps on `main` ([`fetch`], #2362) before how to take one.
+//!
+//! **What `done` reads of it.** The kept runs and nothing else: condition 1
+//! holds a touched crate's subset to no regression against the merge base
+//! by diffing the run kept at the base's engine tree with the one kept at
+//! this tree's itself ([`regressed`]), and never reads the `@against`
+//! reading (harness §4.5, #725).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -76,8 +84,9 @@ fn built_from() -> Vec<PathBuf> {
     let dirs = crate::layout::CRATE_DIRS.iter().map(|d| d.dir);
     files.into_iter().chain(dirs).map(PathBuf::from).collect()
 }
-/// Where a workspace keeps its runs, relative to its root.
-pub(crate) const RUNS: &str = "target/phpt-runs";
+/// Where a workspace keeps its runs, relative to its root: in the reading
+/// store, [`crate::reading::DIR`] (harness §4.2, #725).
+pub(crate) const RUNS: &str = "target/harness/phpt-runs";
 
 /// One subset's run as it is kept: every test's verdict by its divergence
 /// key, and what names the run without keying it.
@@ -302,15 +311,8 @@ impl Base {
     /// The run of `scope` stored at the commit, from the first of `roots`
     /// that keeps one, or why there is none, naming each root looked in.
     fn run(&self, roots: &[PathBuf], scope: &str) -> Result<Result<Run, String>> {
-        for root in roots {
-            let file = path(root, &self.tree, scope);
-            if file.is_file() {
-                let text = fs::read_to_string(&file)
-                    .with_context(|| format!("reading {}", file.display()))?;
-                let run = serde_json::from_str(&text)
-                    .with_context(|| format!("{} is not a run", file.display()))?;
-                return Ok(Ok(run));
-            }
+        if let Some(run) = read(roots, &self.tree, scope)? {
+            return Ok(Ok(run));
         }
         let looked: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
         let looked = looked.join(", ");
@@ -379,10 +381,98 @@ fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
     root.join(RUNS).join(tree).join(format!("{scope}.json"))
 }
 
+/// The run of `scope` kept at the engine tree `tree`, from the first of
+/// `roots` that keeps one.
+fn read(roots: &[PathBuf], tree: &str, scope: &str) -> Result<Option<Run>> {
+    for root in roots {
+        let file = path(root, tree, scope);
+        if file.is_file() {
+            let text =
+                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let run = serde_json::from_str(&text)
+                .with_context(|| format!("{} is not a run", file.display()))?;
+            return Ok(Some(run));
+        }
+    }
+    Ok(None)
+}
+
+/// Where the workspace `snapshot` stands in keeps the run of `scope` taken
+/// at its engine tree, the file [`regressed`] reads as this tree's run.
+pub fn kept_run(snapshot: &Snapshot, scope: &str) -> Result<PathBuf> {
+    let tree = snapshot.tracked_over(&built_from())?;
+    Ok(path(snapshot.root(), &tree, scope))
+}
+
+/// What [`regressed`] finds of one subset against the base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Against {
+    /// Every test met at the base is met here, or none was met there.
+    Held,
+    /// No run is kept at this tree's engine: the subset is unrun here.
+    Unrun(String),
+    /// What is unmet with a run here: no run at the base, two runs that do
+    /// not compare, or the tests that regressed.
+    Unmet(String),
+}
+
+/// Condition 1's `phpt` (harness §4.5, #725): every test met in the run of
+/// `scope` kept at `base`'s engine tree is met in the one kept at
+/// `snapshot`'s, a skip meeting none ([`diff`]), over the target kept under
+/// `pin` where there is one.
+pub(crate) fn regressed(
+    snapshot: &Snapshot,
+    base: &str,
+    pin: Option<&Pin>,
+    scope: &str,
+) -> Result<Against> {
+    let roots = roots(snapshot.root());
+    let tree = snapshot.tracked_over(&built_from())?;
+    let Some(run) = read(&roots, &tree, scope)? else {
+        return Ok(Against::Unrun(format!(
+            "no run of {scope} is kept at this tree's engine ({tree}); take one with `cargo xtask phpt --subset {scope}`"
+        )));
+    };
+    let base = Base::at(snapshot.root(), base)?;
+    let was = match base.run(&roots, scope)? {
+        Ok(was) => was,
+        Err(_) if run.verdicts.is_empty() => return Ok(Against::Held),
+        Err(why) => return Ok(Against::Unmet(why)),
+    };
+    let target = pin
+        .map(|pin| Target::kept(&roots, pin, scope))
+        .transpose()?;
+    let diff = match diff(&was, &run, target.flatten().as_ref()) {
+        Ok(diff) if diff.regressed.is_empty() => return Ok(Against::Held),
+        Ok(diff) => diff,
+        Err(why) => {
+            return Ok(Against::Unmet(format!(
+                "{scope}: no verdict against {}; {why}",
+                base.commit
+            )));
+        }
+    };
+    let prefix = format!("phpt:{CORPUS}/");
+    let names: Vec<&str> = diff
+        .regressed
+        .iter()
+        .map(|(id, _)| id.strip_prefix(&prefix).unwrap_or(id))
+        .collect();
+    Ok(Against::Unmet(format!(
+        "{scope}: {} of {} tests met at {} are not met here: {}",
+        names.len(),
+        diff.held,
+        base.commit,
+        listed(&names)
+    )))
+}
+
 /// Whether a tally judged every test its subset holds, which a run must
-/// to be kept.
+/// to be kept. A subset that holds none in the pinned tree, as an
+/// extension with no tests of its own does (`ext/lexbor`), is kept as a
+/// run of none, which holds nothing against any base (#725).
 fn whole(tally: &Tally) -> bool {
-    tally.found > 0 && tally.judged.len() == tally.found
+    tally.judged.len() == tally.found
 }
 
 /// What [`carry`] did with one worktree's kept runs.
@@ -453,8 +543,8 @@ pub(crate) fn diff(was: &Run, run: &Run, target: Option<&Target>) -> Result<Diff
         if then.met() {
             diff.held += 1;
             // The compiler refusing a test it read there is a loss as a
-            // failure is: its skip excuses only what it never read.
-            if now.counts_against() || *now == Judgement::Unread {
+            // failure is, and so is a skip: neither meets a test (#725).
+            if now.counts_against() || matches!(now, Judgement::Unread | Judgement::Skip) {
                 diff.regressed.push((id.clone(), *now));
             }
         } else if then.counts_against() && now.met() {

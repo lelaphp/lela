@@ -827,7 +827,10 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
     let pin = Manifest::load(workspace()).unwrap().pin;
     assert_eq!(
         corpus["targets"],
-        format!("target/phpt-runs/pin-{}-{}", pin.source.tag, pin.oracle.md5),
+        format!(
+            "target/harness/phpt-runs/pin-{}-{}",
+            pin.source.tag, pin.oracle.md5
+        ),
         "the targets are kept under the pin's tag and the oracle's digest"
     );
     // The hosts the lane hands a test to (#1908), the binary under test

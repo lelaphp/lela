@@ -798,7 +798,7 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
             "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"{engine}\", \"verdicts\": {{}}}}\n"
         )
     };
-    let runs = format!("target/phpt-runs/{tree}");
+    let runs = format!("target/harness/phpt-runs/{tree}");
     write(
         &dir,
         &format!("{runs}/ext/pcre.json"),
@@ -1005,7 +1005,7 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
         "the base's worktree is gone: {out}"
     );
     let mut kept = Vec::new();
-    for tree in fs::read_dir(root.join("target/phpt-runs")).unwrap() {
+    for tree in fs::read_dir(root.join("target/harness/phpt-runs")).unwrap() {
         kept.push(tree.unwrap().path().join("ext/ctype.json"));
     }
     assert!(kept.iter().all(|run| run.is_file()), "{kept:?}: {out}");

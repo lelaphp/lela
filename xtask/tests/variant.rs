@@ -628,7 +628,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
     );
     let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
     let kept = root.join(format!(
-        "target/phpt-runs/pin-{}-{md5}/ext/fixture.json",
+        "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
         manifest.pin.source.tag
     ));
     assert!(
@@ -677,7 +677,7 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
     assert_eq!(count(reading, "passed"), 1, "{reading:#?}");
     let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
     let kept = root.join(format!(
-        "target/phpt-runs/pin-{}-{md5}/ext/fixture.json",
+        "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
         manifest.pin.source.tag
     ));
     assert!(kept.is_file(), "{}", kept.display());

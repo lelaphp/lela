@@ -62,6 +62,7 @@ use crate::key::{self, Snapshot};
 use crate::manifest::{Crate, Manifest};
 use crate::miri;
 use crate::permit;
+use crate::phpt::against::{self, Against};
 use crate::port_map;
 use crate::reading::{Number, Outcome, Reading, Status, Store, plural};
 use crate::reply;
@@ -151,7 +152,7 @@ pub(crate) fn instruments_of(
 /// the binary under test carries it or its row names an oracle variant,
 /// whose subset the lane runs on the engine built with the row's feature
 /// (#2029). The one rule the lane is composed by and `phpt --base` takes
-/// the touched crates' runs by, as condition 1 asks them for a reading.
+/// the touched crates' runs by, as condition 1 holds them to those runs.
 pub(crate) fn measured_by_the_lane(krate: &Crate, carried: &Carried) -> bool {
     !krate.subsets().is_empty() && (carried.carries(krate) || krate.oracle.is_some())
 }
@@ -327,14 +328,22 @@ fn names(id: &str, part: &str) -> bool {
 pub(crate) enum Condition {
     /// For every crate with a changed file, a fresh passing reading exists
     /// for `clippy`, `test`, `witness`, `api-check`, `budget` and
-    /// `unsafe-audit`, for `phpt` on that crate's subset where the crate is
-    /// one the binary under test carries, or one whose row names an oracle
-    /// variant, whose subsets the per-commit lane runs (revision 63,
-    /// #2029), for `port-map` where the crate is the one `api.lock` lives
-    /// with, and for `crosscheck` in both of its columns where the crate is
-    /// an extension the binary carries; `witness` is not asked of the
-    /// harness, and fresh means the reading's `key` is the crate's key now
-    /// and, under the oracle's recipe, its `recipe` the pin's digest now.
+    /// `unsafe-audit`, for `port-map` where the crate is the one `api.lock`
+    /// lives with, and for `crosscheck` in both of its columns where the
+    /// crate is an extension the binary carries; `witness` is not asked of
+    /// the harness, and fresh means the reading's `key` is the crate's key
+    /// now and, under the oracle's recipe, its `recipe` the pin's digest
+    /// now. For `phpt`, a touched crate's subset is held to no regression
+    /// against the base `done` measures since: every test met at the merge
+    /// base is met here, read from the run kept at the merge base's engine
+    /// tree and the run kept at this tree's, a comparison a skip does not
+    /// meet. The absolute reading is still written and rendered, the port's
+    /// meter as the crosscheck is, and the `porting` key's `phpt` half goes
+    /// with it, since a partial port no longer fails for the tests it has
+    /// not reached. The missing engine binary stays the one excused skip
+    /// (#132). The subsets held are those of a crate the binary under test
+    /// carries, or one whose row names an oracle variant, which the
+    /// per-commit lane runs (revision 63, #2029).
     /// A crate whose library or binary sources name `debug_assertions` is
     /// asked for `clippy` twice, at its name and at `<crate>/release`, the
     /// release profile's lint on its library and binaries (#2392).
@@ -352,18 +361,19 @@ pub(crate) enum Condition {
     /// over the crate's sources and its declared dependency closure's (§4.2,
     /// §13 D.18), the one every instrument stamps; an instrument that does
     /// not exist yet has written no reading, so its condition is unmet and
-    /// the list is honest from day one. Two `phpt` skips are met without
-    /// passing, each held to its cause and nothing else: the one the
-    /// missing engine binary causes, [`no_binary_yet`] (#132), and the one
-    /// the compiler causes when it refuses every test of the subset with
-    /// its own parse error, [`compiler_unread`] (#319); a `witness` reading
-    /// is held to its status, the linked engine having served it (#119). A
-    /// third rung is the manifest's, not a lane's: a crate whose
-    /// `[[crate]]` row carries `porting = true` has its `crosscheck` and
-    /// its `phpt` readings read as the port's meter, [`porting_meter`],
-    /// fresh and printed but met whatever they say, while the port is
-    /// partial (#383). `miri` is asked of the crates [`miri::CRATES`]
-    /// names, `php_heap`, when a change touches it, `php_heap` depending
+    /// the list is honest from day one. `phpt` is [`no_regression`], the
+    /// two kept runs diffed by [`against::regressed`], where a test the
+    /// compiler no longer reads is a regression and one it never read is
+    /// held to nothing, which retires the `unread` rung of #319; where no
+    /// run is kept here, a fresh skip the missing engine binary causes is
+    /// met, [`no_binary_yet`] (#132). A `witness` reading is held to its
+    /// status, the linked engine having served it (#119). A rung is the
+    /// manifest's, not a lane's: a crate whose `[[crate]]` row carries
+    /// `porting = true` has its `crosscheck` readings read as the port's
+    /// meter, [`porting_meter`], fresh and printed but met whatever they
+    /// say, while the port is partial (#383). `miri` is asked of the
+    /// crates [`miri::CRATES`] names, `php_heap`, when a change touches
+    /// it, `php_heap` depending
     /// on no workspace crate; a fail made only of unsupported operations is
     /// met, [`miri_unsupported`], and every other is held (#2416). A crate
     /// whose library or binary sources name `debug_assertions` is asked
@@ -481,22 +491,21 @@ pub fn judge(
 
     let lock_home = lock_home(manifest);
     let carried = Carried::binary(root)?;
+    let asking = Asking {
+        snapshot,
+        manifest,
+        store,
+        base: &base.commit,
+        lock_home: lock_home.as_deref(),
+        carried: &carried,
+        not_run,
+    };
     for condition in Condition::ALL {
         match condition {
             Condition::Fresh => {
                 for krate in &crates {
-                    fresh_readings(
-                        root,
-                        store,
-                        krate,
-                        &KeyNow::of(snapshot, krate, &crates)?,
-                        lock_home.as_deref(),
-                        &carried,
-                        manifest.pin.digest(),
-                        not_run,
-                        &mut not_judged,
-                        &mut unmet,
-                    )?;
+                    let now = KeyNow::of(snapshot, krate, &crates)?;
+                    fresh_readings(&asking, krate, &now, &mut not_judged, &mut unmet)?;
                 }
                 if !not_run.is_empty() {
                     notes.push(format!(
@@ -600,8 +609,8 @@ fn boxes(
     Ok(())
 }
 
-/// Whether a reading that is not a pass is met all the same because the
-/// engine has no binary yet (#132).
+/// Whether a `phpt` reading is the skip the missing engine binary causes,
+/// the one a subset with no run kept here is excused by (#132, #725).
 ///
 /// `xtask phpt` runs the corpus it measures through the engine's own
 /// binary. There is none until `crates/php` reaches `serve`, so the lane
@@ -620,58 +629,13 @@ fn boxes(
 /// what it did read. The rung goes away by itself when the binary exists.
 /// harness-design.md §4.5 condition 1 is where that decision is written
 /// down, with the two ways it was taken over.
-///
-/// A **witness** had a rung of its own here while the missing binary was
-/// why its reading was a skip (#106). It is not any more: the linked
-/// engine serves every snippet in this process, so the reading is a pass
-/// or a fail on its own merits and the crate is held to it (#119).
-fn no_binary_yet(instrument: &str, reading: &Reading) -> bool {
-    if reading.status != Status::Skip {
-        return false;
-    }
+fn no_binary_yet(reading: &Reading) -> bool {
     let count = |key: &str| match reading.numbers.get(key) {
         Some(Number::Int(n)) => Some(*n),
         _ => None,
     };
-    match instrument {
-        "phpt" => {
-            count("engine_absent") == Some(1)
-                && count("failed") == Some(0)
-                && count("diverged") == Some(0)
-                && count("borked") == Some(0)
-        }
-        _ => false,
-    }
-}
-
-/// Whether a `phpt` skip is met all the same because the compiler, not
-/// the crate, is what stopped every test of the subset (#319).
-///
-/// A `.phpt` the compiler refuses with its own parse error, the `cannot
-/// read yet` refusal `php_compile` raises for a construct it does not
-/// read, is tallied `unread` by the lane: a skip of the compiler's, held
-/// to that cause, a parse error the compiler itself raised before any
-/// test code ran, and to nothing else. A test that parsed and then failed
-/// still counts against the crate, so `failed`, `diverged` and `borked`
-/// are held at zero beside it as they are for `engine_absent`. The
-/// subset's status is over the tests the compiler read, and a subset
-/// whose every test is unread reads skip with `unread` equal to its
-/// count, `tests`, which is what is met here; one with a test the
-/// compiler read and did not fail is a pass on its own merits, and one
-/// with a test skipped for another reason beside the unread ones is not
-/// this rung. harness-design.md §4.5 condition 1 carries the sentence,
-/// and the rung goes away by itself as the compiler reaches the corpus.
-fn compiler_unread(instrument: &str, reading: &Reading) -> bool {
-    if instrument != "phpt" || reading.status != Status::Skip {
-        return false;
-    }
-    let count = |key: &str| match reading.numbers.get(key) {
-        Some(Number::Int(n)) => Some(*n),
-        _ => None,
-    };
-    let unread = count("unread");
-    unread.is_some_and(|n| n > 0)
-        && unread == count("tests")
+    reading.status == Status::Skip
+        && count("engine_absent") == Some(1)
         && count("failed") == Some(0)
         && count("diverged") == Some(0)
         && count("borked") == Some(0)
@@ -681,28 +645,28 @@ fn compiler_unread(instrument: &str, reading: &Reading) -> bool {
 /// crate's port is not finished and the manifest says so: `porting = true`
 /// on its `[[crate]]` row (#383).
 ///
-/// `crosscheck` and `phpt` measure one extension against the oracle's
-/// whole rendering and the oracle's whole corpus, and an extension whose
-/// port has forty natives of six hundred fails both from its first commit
-/// to its last. Held to their status, they stop every commit that touches
-/// such a crate however green its own work is, which is what #325, #340
-/// and #337 measured. A person decided (#383) that while the row carries
-/// the key those two readings are the port's meter and not a condition of
-/// done: the numbers are printed and the row is met, the way the skip the
-/// missing engine binary causes is met.
+/// `crosscheck` measures one extension against the oracle's whole
+/// rendering, and an extension whose port has forty natives of six hundred
+/// fails it from its first commit to its last. Held to its status, it
+/// stops every commit that touches such a crate however green its own
+/// work is, which is what #325, #340 and #337 measured. A person decided
+/// (#383) that while the row carries the key the reading is the port's
+/// meter and not a condition of done: the numbers are printed and the row
+/// is met. The key's `phpt` half went when `done` came to hold a subset to
+/// no regression against the base rather than to its absolute reading
+/// (#725), since a partial port no longer fails for the tests it has not
+/// reached.
 ///
-/// The rung is held to the key and to the two instruments, and to nothing
+/// The rung is held to the key and to the instrument, and to nothing
 /// else. The reading must still be there and fresh, so a session that
-/// touches the crate still runs both lanes and both renderings stand in
-/// `xtask status`; a port that goes backwards is visible in the console
-/// and in CI's log. Every other instrument holds the crate as it holds
-/// any other: clippy, test, witness, api-check, budget, unsafe-audit and
-/// vocab, and the witness on every native it declares. A crate the
-/// manifest does not mark is held to both readings the day it is created,
-/// and the key's deletion, a person's act, is the port's completion
-/// certificate. harness-design.md §4.5 condition 1 carries the sentence.
+/// touches the crate still runs the lane and the rendering stands in
+/// `xtask status`. Every other instrument holds the crate as it holds any
+/// other. A crate the manifest does not mark is held to the reading the
+/// day it is created, and the key's deletion, a person's act, is the
+/// port's completion certificate. harness-design.md §4.5 condition 1
+/// carries the sentence.
 fn porting_meter(krate: &Crate, instrument: &str) -> bool {
-    krate.porting && matches!(instrument, "crosscheck" | "phpt")
+    krate.porting && instrument == "crosscheck"
 }
 
 /// Whether a `miri` fail is met all the same because every test that
@@ -731,13 +695,64 @@ fn miri_unsupported(instrument: &str, reading: &Reading) -> bool {
     failed.is_some_and(|n| n > 0) && failed == count("unsupported") && count("undefined") == Some(0)
 }
 
-/// Condition 1's four rungs for a reading that is not a pass: the causes a
+/// Condition 1's rungs for a reading that is not a pass: the causes a
 /// person excused, and no other.
 fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bool {
-    no_binary_yet(instrument, reading)
-        || compiler_unread(instrument, reading)
-        || porting_meter(krate, instrument)
-        || miri_unsupported(instrument, reading)
+    porting_meter(krate, instrument) || miri_unsupported(instrument, reading)
+}
+
+/// What condition 1 reads every touched crate against: the tree, the
+/// manifest and the store, the base's commit, and what narrows the ask.
+struct Asking<'a> {
+    snapshot: &'a Snapshot,
+    manifest: &'a Manifest,
+    store: &'a Store,
+    base: &'a str,
+    lock_home: Option<&'a str>,
+    carried: &'a Carried,
+    /// The instruments the caller's run did not take (#2477).
+    not_run: &'a [String],
+}
+
+/// Condition 1's `phpt` for one touched crate (harness §4.5, #725): its
+/// subset held to no regression against the base, from the two kept runs
+/// [`against::regressed`] diffs, and never from a `phpt` reading but the
+/// one excused skip: where no run is kept here, a fresh skip the missing
+/// engine binary causes is met ([`no_binary_yet`], #132), and a caller
+/// that names `phpt` not run has it noted. An oracle variant the pin does
+/// not carry is unmet, naming it, as `Oracles::of` refuses one.
+fn no_regression(
+    asking: &Asking,
+    krate: &Crate,
+    key: &str,
+    not_judged: &mut Vec<String>,
+    unmet: &mut Vec<String>,
+) -> Result<()> {
+    let (scope, pin) = (&krate.name, &asking.manifest.pin);
+    let pin = match krate.oracle.as_deref().map(|v| pin.variant(v)) {
+        Some(Err(err)) => {
+            unmet.push(format!("phpt: {scope}: {err:#}"));
+            return Ok(());
+        }
+        Some(Ok(variant)) => variant,
+        None => pin.clone(),
+    };
+    match against::regressed(asking.snapshot, asking.base, Some(&pin), scope)? {
+        Against::Held => {}
+        Against::Unrun(why) => {
+            let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];
+            let digest = asking.manifest.pin.digest();
+            let read = asking.store.latest_over_each(&sought, digest)?;
+            let excused = read.values().any(no_binary_yet);
+            if asking.not_run.iter().any(|n| n == "phpt") {
+                not_judged.push(format!("phpt for {scope}"));
+            } else if !excused {
+                unmet.push(format!("phpt: {why}"));
+            }
+        }
+        Against::Unmet(why) => unmet.push(format!("phpt: {why}")),
+    }
+    Ok(())
 }
 
 /// A touched crate's key now ([`Snapshot::key`], its tree and its dependency
@@ -774,19 +789,15 @@ impl KeyNow {
 /// Conditions 1 and 2 for one touched crate, held to its key now, so a
 /// reading taken before a crate it is built from changed is stale. A
 /// missing reading of an instrument in `not_run` goes to `not_judged`.
-#[allow(clippy::too_many_arguments)]
 fn fresh_readings(
-    root: &Path,
-    store: &Store,
+    asking: &Asking,
     krate: &Crate,
     now: &KeyNow,
-    lock_home: Option<&str>,
-    carried: &Carried,
-    pin: &str,
-    not_run: &[String],
     not_judged: &mut Vec<String>,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
+    let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
+    let pin = asking.manifest.pin.digest();
     let key = &now.key;
     let name = &krate.name;
     // The scope's file holds the last reading written, which a refused
@@ -794,7 +805,13 @@ fn fresh_readings(
     // one over the key now stands before it, found in the index (#1312).
     // A scope with no file has no reading, whatever the log holds.
     let mut asked = Vec::new();
-    for instrument in instruments_of(krate, lock_home, carried) {
+    let mut phpt = false;
+    for instrument in instruments_of(krate, asking.lock_home, asking.carried) {
+        // `phpt` is held by its kept runs, not by a reading, after them.
+        if instrument == "phpt" {
+            phpt = true;
+            continue;
+        }
         for scope in scopes_of(root, instrument, krate)? {
             asked.push((instrument, scope));
         }
@@ -848,6 +865,9 @@ fn fresh_readings(
                 "witness: {missing} kernel{s} or native{s} in {name} without a witness"
             ));
         }
+    }
+    if phpt {
+        no_regression(asking, krate, key, not_judged, unmet)?;
     }
     Ok(())
 }
@@ -1126,8 +1146,7 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        FRESH, compiler_unread, instruments_of, met_without_passing, miri_unsupported,
-        no_binary_yet, porting_meter,
+        FRESH, instruments_of, met_without_passing, miri_unsupported, no_binary_yet, porting_meter,
     };
     use crate::carried::Carried;
     use crate::manifest::Crate;
@@ -1370,79 +1389,26 @@ mod tests {
             reading
         };
         // No binary, and nothing counted against the subset.
-        assert!(no_binary_yet("phpt", &skip(1, 0, 0, 0)));
+        assert!(no_binary_yet(&skip(1, 0, 0, 0)));
         // The crate is not yet created, or every test skipped: not this.
-        assert!(!no_binary_yet("phpt", &skip(0, 0, 0, 0)));
+        assert!(!no_binary_yet(&skip(0, 0, 0, 0)));
         // Something counted against it, so the skip is not a clean one.
-        assert!(!no_binary_yet("phpt", &skip(1, 1, 0, 0)));
-        assert!(!no_binary_yet("phpt", &skip(1, 0, 1, 0)));
-        assert!(!no_binary_yet("phpt", &skip(1, 0, 0, 1)));
+        assert!(!no_binary_yet(&skip(1, 1, 0, 0)));
+        assert!(!no_binary_yet(&skip(1, 0, 1, 0)));
+        assert!(!no_binary_yet(&skip(1, 0, 0, 1)));
         // A phpt reading with no such number is held to its status.
         let mut bare = Reading::new("phpt", "ext/standard");
         bare.status = Status::Skip;
-        assert!(!no_binary_yet("phpt", &bare));
-    }
-
-    /// A phpt skip is met where the compiler refused every test of the
-    /// subset with its own parse error (#319), `unread` equal to `tests`
-    /// and nothing counted against the crate. A subset with one test the
-    /// compiler read is not this rung: read and failed, it counts against
-    /// the crate; read and skipped for another cause, the skip is not the
-    /// compiler's; and a reading with no `unread` at all is held to its
-    /// status. The two rungs are read as one by `met_without_passing`,
-    /// and a pass is neither.
-    #[test]
-    fn a_phpt_skip_is_met_where_the_compiler_read_none_of_the_subset() {
-        let skip = |tests: u64, unread: u64, failed: u64, skipped: u64| {
-            let mut reading = Reading::new("phpt", "ext/ctype");
-            reading.status = Status::Skip;
-            reading.count("tests", tests).unwrap();
-            reading.count("unread", unread).unwrap();
-            reading.count("skipped", skipped).unwrap();
-            reading.count("failed", failed).unwrap();
-            reading.count("diverged", 0).unwrap();
-            reading.count("borked", 0).unwrap();
-            reading.count("engine_absent", 0).unwrap();
-            reading
-        };
-        // Every test unread: the compiler's skip, and it is met.
-        assert!(compiler_unread("phpt", &skip(49, 49, 0, 0)));
-        let held = Crate::named("ext/ctype");
-        assert!(met_without_passing(&held, "phpt", &skip(49, 49, 0, 0)));
-        // Two tests parsed and failed: the crate's, and the reading is a
-        // fail anyway, but the rung is held to the numbers too.
-        assert!(!compiler_unread("phpt", &skip(49, 47, 2, 0)));
-        // One test skipped for another cause beside the unread ones.
-        assert!(!compiler_unread("phpt", &skip(49, 48, 0, 1)));
-        // Nothing unread: every test skipped, which is not this rung.
-        assert!(!compiler_unread("phpt", &skip(3, 0, 0, 3)));
-        assert!(!met_without_passing(&held, "phpt", &skip(3, 0, 0, 3)));
-        // A reading without the number is held to its status.
-        let mut bare = Reading::new("phpt", "ext/ctype");
-        bare.status = Status::Skip;
-        bare.count("tests", 5).unwrap();
-        assert!(!compiler_unread("phpt", &bare));
-        // The number is the phpt lane's, read for no other instrument.
-        let mut witness = skip(4, 4, 0, 0);
-        witness.instrument = "witness".to_owned();
-        assert!(!compiler_unread("witness", &witness));
-        // A pass has no need of a rung.
-        let mut pass = skip(49, 49, 0, 0);
-        pass.status = Status::Pass;
-        assert!(!compiler_unread("phpt", &pass));
+        assert!(!no_binary_yet(&bare));
     }
 
     /// A crate the manifest marks `porting = true` has its `crosscheck`
-    /// and its `phpt` readings read as the port's meter and not as a
-    /// condition of done (#383): whatever either says, the row is met.
-    /// The rung is the key's and the two instruments', and nothing else:
-    /// the same crate's clippy, test, witness, api-check, budget,
-    /// unsafe-audit and port-map readings are held to their status, and
-    /// the same two readings of a crate the manifest does not mark are
-    /// held to theirs. It says nothing about freshness, which condition 1
-    /// asks before it, so a stale meter is stale still.
+    /// readings read as the port's meter and not as a condition of done
+    /// (#383): whatever they say, the row is met. Every other instrument
+    /// of the marked crate, `phpt` among them since #725, and the same
+    /// reading of a crate the manifest does not mark, are held.
     #[test]
-    fn a_porting_crates_crosscheck_and_phpt_readings_are_the_ports_meter() {
+    fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
         let mut porting = Crate::named("ext/standard");
         porting.porting = true;
         let held = Crate::named("ext/standard");
@@ -1451,62 +1417,17 @@ mod tests {
             reading.status = status;
             reading
         };
-        for instrument in ["crosscheck", "phpt"] {
-            assert!(porting_meter(&porting, instrument), "{instrument}");
-            assert!(!porting_meter(&held, instrument), "{instrument}");
-            for status in [Status::Fail, Status::Skip] {
-                let reading = red(instrument, status);
-                assert!(
-                    met_without_passing(&porting, instrument, &reading),
-                    "{instrument} {status:?}"
-                );
-                assert!(
-                    !met_without_passing(&held, instrument, &reading),
-                    "{instrument} {status:?}"
-                );
-            }
+        for status in [Status::Fail, Status::Skip] {
+            let reading = red("crosscheck", status);
+            assert!(met_without_passing(&porting, "crosscheck", &reading));
+            assert!(!met_without_passing(&held, "crosscheck", &reading));
         }
-        // Every other instrument of the marked crate is held to its status.
-        for instrument in FRESH
-            .into_iter()
-            .filter(|i| !matches!(*i, "crosscheck" | "phpt"))
-        {
+        for instrument in FRESH.into_iter().filter(|i| *i != "crosscheck") {
             assert!(!porting_meter(&porting, instrument), "{instrument}");
             assert!(
                 !met_without_passing(&porting, instrument, &red(instrument, Status::Fail)),
                 "{instrument}"
             );
         }
-        // The two rungs the lanes own still read their numbers for a
-        // marked crate, and the key does not stand in for them.
-        let mut engine_absent = red("phpt", Status::Skip);
-        engine_absent.count("engine_absent", 1).unwrap();
-        engine_absent.count("failed", 0).unwrap();
-        engine_absent.count("diverged", 0).unwrap();
-        engine_absent.count("borked", 0).unwrap();
-        assert!(no_binary_yet("phpt", &engine_absent));
-    }
-
-    /// A witness skip is held to its status, whatever its numbers say
-    /// (#119). The rung #106 gave it was the missing engine binary, and
-    /// the binary is no longer why a witness reading is a skip: the linked
-    /// engine serves every snippet in this process, so a skip that is left
-    /// is the pinned oracle's absence or a control, and neither is met.
-    #[test]
-    fn a_witness_skip_is_held_to_its_status() {
-        let skip = |run: u64, failed: u64, missing: u64| {
-            let mut reading = Reading::new("witness", "php_engine");
-            reading.status = Status::Skip;
-            reading.count("run", run).unwrap();
-            reading.count("failed", failed).unwrap();
-            reading.count("missing", missing).unwrap();
-            reading
-        };
-        // The numbers a clean run has, and the skip is unmet all the same.
-        assert!(!no_binary_yet("witness", &skip(5, 0, 0)));
-        assert!(!no_binary_yet("witness", &skip(0, 0, 0)));
-        assert!(!no_binary_yet("witness", &skip(5, 1, 0)));
-        // The numbers are the phpt rung's own and are not read here.
-        assert!(!no_binary_yet("phpt", &skip(5, 0, 0)));
     }
 }

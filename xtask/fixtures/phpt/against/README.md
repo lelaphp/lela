@@ -1,5 +1,5 @@
 Two runs of one subset as `xtask phpt` keeps them, at
-`target/phpt-runs/<tree>/<scope>.json`: `base.json` at the merge base and
+`target/harness/phpt-runs/<tree>/<scope>.json`: `base.json` at the merge base and
 `head.json` at the head. One regression is planted: `planted.phpt` passed at
 the base and fails at the head, so `phpt --against` fails its reading and
 names it. The other tests are the controls: `fixed.phpt` newly passes,

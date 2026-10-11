@@ -254,11 +254,51 @@ fn asked_of(root: &Path, name: &str) -> Vec<(&'static str, String)> {
         .collect()
 }
 
-/// A fresh passing reading of everything `name` is asked.
+/// What meets everything `name` is asked ([`met`]).
 fn record_asked(store: &Store, root: &Path, name: &str) {
     for (instrument, scope) in asked_of(root, name) {
-        store.record(&[fresh(root, instrument, &scope)]).unwrap();
+        met(store, root, instrument, &scope);
     }
+}
+
+/// What meets one row of [`asked_of`]: a fresh passing reading, or for
+/// `phpt` a passing run kept at the base, `HEAD`, and one at the tree now,
+/// which condition 1 diffs in place of a reading (#725).
+fn met(store: &Store, root: &Path, instrument: &str, scope: &str) {
+    if instrument == "phpt" {
+        keep_run(root, Some("HEAD"), scope, "pass");
+        keep_run(root, None, scope, "pass");
+    } else {
+        store.record(&[fresh(root, instrument, scope)]).unwrap();
+    }
+}
+
+/// The line condition 1 gives a subset with no run kept at the tree now.
+fn unrun(scope: &str) -> impl Fn(&String) -> bool {
+    let head = format!("phpt: no run of {scope} is kept at this tree's engine (");
+    move |line| line.starts_with(&head)
+}
+
+/// A run of `scope` holding one test at `verdict`, or none where it is
+/// empty, kept at `at`'s engine tree, the tree now where `at` is `None`,
+/// as `xtask phpt` keeps one.
+fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
+    let snapshot = match at {
+        Some(rev) => {
+            let commit = sh(root, &["git", "rev-parse", rev]);
+            xtask::key::Snapshot::commit(root, commit.trim()).unwrap()
+        }
+        None => std::sync::Arc::new(xtask::key::Snapshot::disk(root).unwrap()),
+    };
+    let file = xtask::phpt::kept_run(&snapshot, scope).unwrap();
+    let mut verdicts = serde_json::Map::new();
+    if !verdict.is_empty() {
+        verdicts.insert(format!("phpt:php-src/{scope}/tests/a.phpt"), verdict.into());
+    }
+    let run =
+        serde_json::json!({"commit": "0", "corpus": "c", "engine": "e", "verdicts": verdicts});
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, run.to_string()).unwrap();
 }
 
 fn xtask(root: &Path, args: &[&str], stdin: Option<&str>) -> (i32, String, String) {
@@ -327,7 +367,12 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     assert_eq!(verdict.changed.len(), 1, "{verdict:#?}");
     for (instrument, scope) in asked_of(&root, "ext/pcre") {
         let line = format!("{instrument}: no reading for {scope}");
-        assert!(verdict.unmet.contains(&line), "{line}\n{verdict:#?}");
+        let unmet = if instrument == "phpt" {
+            verdict.unmet.iter().any(unrun(&scope))
+        } else {
+            verdict.unmet.contains(&line)
+        };
+        assert!(unmet, "{line}\n{verdict:#?}");
     }
     assert_eq!(
         verdict.unmet.len(),
@@ -339,7 +384,7 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains("unmet:"), "{out}");
-    assert!(out.contains("- phpt: no reading for ext/pcre"), "{out}");
+    assert!(out.contains("- phpt: no run of ext/pcre is kept"), "{out}");
     assert!(
         out.contains("- crosscheck: no reading for ext/pcre\n"),
         "{out}"
@@ -395,7 +440,7 @@ fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_cr
             .record(&[fresh(&root, instrument, "php_ext")])
             .unwrap();
         for scope in done::scopes_of(&root, instrument, pcre).unwrap() {
-            store.record(&[fresh(&root, instrument, &scope)]).unwrap();
+            met(&store, &root, instrument, &scope);
         }
     }
     let verdict = judge(&root);
@@ -619,7 +664,7 @@ fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
     let store = Store::of_workspace(&root);
     for (instrument, scope) in asked_of(&root, "ext/pcre") {
         if instrument != "witness" && instrument != "crosscheck" {
-            store.record(&[fresh(&root, instrument, &scope)]).unwrap();
+            met(&store, &root, instrument, &scope);
         }
     }
     let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
@@ -694,9 +739,11 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
         asked_of(&root, "ext/pcre").len(),
         "{verdict:#?}"
     );
+    // The subset's run here is keyed by the engine's tree, which moved.
     for line in &verdict.unmet {
         assert!(
-            line.contains("is stale; ext/pcre changed since it was taken"),
+            line.contains("is stale; ext/pcre changed since it was taken")
+                || unrun("ext/pcre")(line),
             "{line}\n{verdict:#?}"
         );
     }
@@ -732,8 +779,9 @@ fn a_refused_commits_readings_over_another_tree_do_not_shadow_the_pass_over_the_
 /// over: a reading written through it is fresh for its scope, and one
 /// byte under that scope makes every one of them stale (harness-design.md
 /// §4.5 condition 1, §13 D.18). The crate's readings go through
-/// `for_crate`; the subset's, whose scope is the crate's name, through
-/// `for_scope`, the two arms of the mapping a touched crate meets.
+/// `for_crate`; the `--ri` column's and the release lint's through
+/// `stamped_over`. The subset is held by its kept runs and not a reading
+/// (#725), and the byte moves the engine's tree they are kept at.
 #[test]
 fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_byte() {
     let root = scratch("one-byte");
@@ -742,27 +790,23 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
     let krate = manifest.crate_named("ext/pcre").unwrap();
     let store = Store::of_workspace(&root);
     for (instrument, scope) in asked_of(&root, "ext/pcre") {
-        let mut reading = if instrument == "phpt" {
-            Reading::for_scope(
+        if instrument == "phpt" {
+            met(&store, &root, instrument, &scope);
+            continue;
+        }
+        let mut reading = if scope == "ext/pcre" {
+            Reading::for_crate(
                 instrument,
-                "ext/pcre",
-                &manifest,
+                krate,
                 &xtask::key::Snapshot::disk(&root).unwrap(),
             )
             .unwrap()
-        } else if scope != "ext/pcre" {
+        } else {
             Reading::stamped_over(
                 instrument,
                 &scope,
                 &xtask::key::Snapshot::disk(&root).unwrap(),
                 &krate.path(),
-            )
-            .unwrap()
-        } else {
-            Reading::for_crate(
-                instrument,
-                krate,
-                &xtask::key::Snapshot::disk(&root).unwrap(),
             )
             .unwrap()
         };
@@ -790,15 +834,18 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
     let asked: Vec<&str> = asked_of(&root, "ext/pcre")
         .iter()
         .map(|(i, _)| *i)
+        .filter(|i| *i != "phpt")
         .collect();
     assert_eq!(stale, asked, "{verdict:#?}");
+    assert!(verdict.unmet.iter().any(unrun("ext/pcre")), "{verdict:#?}");
 }
 
 /// A reading taken under the oracle's recipe is stale once the pin's values
 /// move, as one taken over a crate is once its tree does (#1387): an entry
 /// laid under `oracle.toml`'s `[recipe.env]` stales the touched crate's
-/// `witness`, `phpt` and `crosscheck` readings and nothing else, each
-/// naming the pin as what changed.
+/// `witness` and `crosscheck` readings and nothing else, each naming the
+/// pin as what changed; the subset's runs are kept by the engine's tree,
+/// which the pin is not part of (#725).
 #[test]
 fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
     let root = scratch("recipe");
@@ -823,7 +870,7 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
     let mut under: Vec<&str> = asked_of(&root, "ext/pcre")
         .iter()
         .map(|(i, _)| *i)
-        .filter(|i| UNDER_RECIPE.contains(i))
+        .filter(|i| UNDER_RECIPE.contains(i) && *i != "phpt")
         .collect();
     under.dedup();
     assert_eq!(stale, under, "{verdict:#?}");
@@ -835,30 +882,70 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
     let root = scratch("failing");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for (instrument, scope) in asked_of(&root, "ext/pcre") {
-        let mut reading = fresh(&root, instrument, &scope);
-        match instrument {
-            "budget" => {
-                reading.status = Status::Fail;
-                reading.message = "ext/pcre: 7000 lines over the ceiling of 6000".into();
-            }
-            "phpt" => {
-                reading.status = Status::Skip;
-                reading.message = "ext/pcre: no subset run".into();
-            }
-            _ => {}
-        }
-        store.record(std::slice::from_ref(&reading)).unwrap();
-    }
+    record_asked(&store, &root, "ext/pcre");
+    let mut reading = fresh(&root, "budget", "ext/pcre");
+    reading.status = Status::Fail;
+    reading.message = "ext/pcre: 7000 lines over the ceiling of 6000".into();
+    store.record(std::slice::from_ref(&reading)).unwrap();
+    // The subset's own reading is the port's meter, never read (#725).
+    let mut reading = fresh(&root, "phpt", "ext/pcre");
+    reading.status = Status::Fail;
+    store.record(std::slice::from_ref(&reading)).unwrap();
     let verdict = judge(&root);
     assert_eq!(
         verdict.unmet,
-        [
-            "budget: ext/pcre fail: ext/pcre: 7000 lines over the ceiling of 6000",
-            "phpt: ext/pcre skip: ext/pcre: no subset run",
-        ],
+        ["budget: ext/pcre fail: ext/pcre: 7000 lines over the ceiling of 6000"],
         "{verdict:#?}"
     );
+}
+
+/// A touched crate's subset is held to no regression against the base
+/// (harness §4.5 condition 1, #725), from the run kept at the base's
+/// engine tree and the one kept at this tree's, which `done` diffs itself:
+/// a test met at the base and failed or skipped here is unmet, one met
+/// nowhere at the base is held to nothing, and a base with no run kept
+/// is unmet naming how to take one.
+#[test]
+fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
+    let root = scratch("regressed");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let store = Store::of_workspace(&root);
+    record_asked(&store, &root, "ext/pcre");
+    assert!(judge(&root).met(), "{:#?}", judge(&root));
+    let base = sh(&root, &["git", "rev-parse", "--short", "HEAD"]);
+    for (then, now, held) in [
+        ("pass", "fail", true),
+        ("diverged", "skip", true),
+        ("pass", "diverged", false),
+        ("skip", "fail", false),
+        ("fail", "bork", false),
+    ] {
+        keep_run(&root, Some("HEAD"), "ext/pcre", then);
+        keep_run(&root, None, "ext/pcre", now);
+        let regressed = format!(
+            "phpt: ext/pcre: 1 of 1 tests met at {} are not met here: ext/pcre/tests/a.phpt",
+            base.trim()
+        );
+        let unmet = if held { vec![regressed] } else { vec![] };
+        assert_eq!(judge(&root).unmet, unmet, "{then} then, {now} now");
+    }
+    let kept = xtask::phpt::kept_run(
+        &xtask::key::Snapshot::commit(&root, sh(&root, &["git", "rev-parse", "HEAD"]).trim())
+            .unwrap(),
+        "ext/pcre",
+    )
+    .unwrap();
+    std::fs::remove_file(kept).unwrap();
+    let verdict = judge(&root);
+    assert!(
+        verdict.unmet.len() == 1
+            && verdict.unmet[0].starts_with("phpt: no run of ext/pcre is kept at ")
+            && verdict.unmet[0].contains("cargo xtask phpt --base "),
+        "{verdict:#?}"
+    );
+    // A subset that holds no test here holds nothing a base met.
+    keep_run(&root, None, "ext/pcre", "");
+    assert!(judge(&root).met(), "{:#?}", judge(&root));
 }
 
 /// The `--ri` column is a condition of done as the `--re` one is (harness
@@ -942,16 +1029,15 @@ fn a_crate_whose_sources_name_debug_assertions_is_asked_for_a_release_clippy_rea
     );
 }
 
-/// A crate the manifest marks `porting = true` has its `crosscheck` and
-/// its `phpt` readings read as the port's meter and not as a condition of
-/// done (harness §4.5 condition 1, ledger 47; #383): a touched extension
-/// with both red is met, the same extension without the key is unmet at
-/// all three scopes, and the key excuses those two readings alone — a red
-/// `budget` of the marked crate is unmet as it is for any other. The
-/// readings are still asked for: one missing is unmet whatever the key
-/// says, so the meter is taken every time and `xtask status` renders it.
+/// A crate the manifest marks `porting = true` has its `crosscheck`
+/// readings read as the port's meter and not as a condition of done
+/// (harness §4.5 condition 1, ledger 47; #383): a touched extension with
+/// both columns red is met, and the key excuses those readings alone — a
+/// red `budget` of the marked crate is unmet, and so is a regression of
+/// its subset, the key's `phpt` half having gone with #725. The readings
+/// are still asked for: one missing is unmet whatever the key says.
 #[test]
-fn a_porting_crates_crosscheck_and_phpt_readings_are_the_ports_meter() {
+fn a_porting_crates_crosscheck_readings_are_the_ports_meter() {
     let root = scratch("porting");
     write(
         &root,
@@ -961,16 +1047,6 @@ fn a_porting_crates_crosscheck_and_phpt_readings_are_the_ports_meter() {
     write(&root, "ext/standard/src/lib.rs", "pub fn str_repeat() {}\n");
     mark_porting(&root, "ext/standard");
     commit(&root, "ext/standard, its port partial");
-    assert!(
-        Manifest::load(&root)
-            .unwrap()
-            .crate_named("ext/standard")
-            .unwrap()
-            .porting
-    );
-
-    // The diff: one line of the marked crate, with every reading it is
-    // asked for fresh and passing.
     write(
         &root,
         "ext/standard/src/lib.rs",
@@ -980,76 +1056,32 @@ fn a_porting_crates_crosscheck_and_phpt_readings_are_the_ports_meter() {
     record_asked(&store, &root, "ext/standard");
     assert!(judge(&root).met(), "{:#?}", judge(&root));
 
-    // The port's two lanes, red: the rendering is not the oracle's and
-    // 753 of the subset fail. Both are met, and the numbers stand.
     let red = |instrument: &str, scope: &str, message: &str| {
         let mut reading = fresh(&root, instrument, scope);
         reading.status = Status::Fail;
         reading.message = message.to_owned();
         store.record(std::slice::from_ref(&reading)).unwrap();
     };
-    red(
-        "crosscheck",
-        "ext/standard",
-        "ext/standard: 4758 lines against 312",
-    );
-    red(
-        "crosscheck",
-        "ext/standard/ri",
-        "ext/standard/ri: the oracle rendered 40 bytes",
-    );
+    red("crosscheck", "ext/standard", "ext/standard: 4758 lines");
+    red("crosscheck", "ext/standard/ri", "ext/standard/ri: 40 bytes");
     red("phpt", "ext/standard", "ext/standard: 753 of 3821 failed");
-    let verdict = judge(&root);
-    assert!(verdict.met(), "{verdict:#?}");
+    assert!(judge(&root).met(), "{:#?}", judge(&root));
 
-    // A reading the key does not excuse is unmet as it is for any crate.
-    red(
-        "budget",
-        "ext/standard",
-        "ext/standard: 31000 lines over the ceiling of 30000",
-    );
+    red("budget", "ext/standard", "ext/standard: 31000 lines");
+    keep_run(&root, None, "ext/standard", "fail");
+    let unmet = judge(&root).unmet;
+    assert_eq!(unmet.len(), 2, "{unmet:#?}");
     assert_eq!(
-        judge(&root).unmet,
-        ["budget: ext/standard fail: ext/standard: 31000 lines over the ceiling of 30000"],
-        "{:#?}",
-        judge(&root)
+        unmet[0],
+        "budget: ext/standard fail: ext/standard: 31000 lines"
     );
-    store
-        .record(&[fresh(&root, "budget", "ext/standard")])
-        .unwrap();
+    assert!(unmet[1].starts_with("phpt: ext/standard: 1 of 1 tests met at "));
 
-    // The meter is asked for: a missing one is unmet whatever the key says.
-    std::fs::remove_file(store.path("phpt", "ext/standard").unwrap()).unwrap();
-    assert_eq!(
-        judge(&root).unmet,
-        ["phpt: no reading for ext/standard"],
-        "{:#?}",
+    std::fs::remove_file(store.path("crosscheck", "ext/standard").unwrap()).unwrap();
+    assert!(
         judge(&root)
-    );
-    store
-        .record(&[fresh(&root, "phpt", "ext/standard")])
-        .unwrap();
-
-    // The same three readings of a crate the manifest does not mark are
-    // unmet, which is where every extension stood before the key.
-    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
-    record_asked(&store, &root, "ext/pcre");
-    red("crosscheck", "ext/pcre", "ext/pcre: 200 lines against 12");
-    red(
-        "crosscheck",
-        "ext/pcre/ri",
-        "ext/pcre/ri: the oracle rendered 40 bytes",
-    );
-    red("phpt", "ext/pcre", "ext/pcre: 7 of 900 failed");
-    assert_eq!(
-        judge(&root).unmet,
-        [
-            "phpt: ext/pcre fail: ext/pcre: 7 of 900 failed",
-            "crosscheck: ext/pcre fail: ext/pcre: 200 lines against 12",
-            "crosscheck: ext/pcre/ri fail: ext/pcre/ri: the oracle rendered 40 bytes",
-        ],
-        "{:#?}",
-        judge(&root)
+            .unmet
+            .contains(&"crosscheck: no reading for ext/standard".to_owned())
     );
 }
 
@@ -1058,13 +1090,10 @@ fn a_kernel_or_native_without_a_witness_is_unmet_from_the_witness_reading() {
     let root = scratch("missing");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for (instrument, scope) in asked_of(&root, "ext/pcre") {
-        let mut reading = fresh(&root, instrument, &scope);
-        if instrument == "witness" {
-            reading.count("missing", 2).unwrap();
-        }
-        store.record(std::slice::from_ref(&reading)).unwrap();
-    }
+    record_asked(&store, &root, "ext/pcre");
+    let mut reading = fresh(&root, "witness", "ext/pcre");
+    reading.count("missing", 2).unwrap();
+    store.record(std::slice::from_ref(&reading)).unwrap();
     let verdict = judge(&root);
     assert_eq!(
         verdict.unmet,
@@ -1570,12 +1599,7 @@ fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
     );
     let verdict = judge(&root);
     assert_eq!(verdict.crates, ["php_heap"], "{verdict:#?}");
-    assert!(
-        verdict
-            .unmet
-            .contains(&"phpt: no reading for php_heap".to_owned()),
-        "{verdict:#?}"
-    );
+    assert!(verdict.unmet.iter().any(unrun("php_heap")), "{verdict:#?}");
 }
 
 // ---------------------------------------------------------------- the reply (#32)
@@ -2127,87 +2151,10 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     assert!(!verdict.met(), "{verdict:#?}");
 }
 
-/// The phpt skip the compiler causes is met, and `done` reaches green
-/// for an extension whose every test the compiler refused with its own
-/// parse error, the reading's `unread` equal to its `tests` and nothing
-/// counted against the crate (#319, harness §4.5 condition 1). It would
-/// be unmet under condition 1 as it stood, which met one skip alone, the
-/// missing binary's: the assertion that the verdict is met is what fails
-/// on that behaviour. The rung is held to its cause: a subset the compiler
-/// read two tests of that then failed is a fail, and a skip with a test
-/// skipped for another cause beside the unread ones is held to its status.
-#[test]
-fn the_phpt_skip_the_compiler_causes_is_met_and_a_test_it_read_still_counts() {
-    let root = scratch("unread");
-    write(&root, "ext/ctype/src/lib.rs", "pub fn ctype_alpha() {}\n");
-    let store = Store::of_workspace(&root);
-    record_asked(&store, &root, "ext/ctype");
-    let phpt = |status: Status, numbers: &[(&str, u64)]| {
-        let mut reading = fresh(&root, "phpt", "ext/ctype");
-        reading.status = status;
-        reading.message =
-            "ext/ctype: no test of the subset ran; 49 found, 0 skipped, 49 unread by the compiler"
-                .to_owned();
-        for (key, n) in numbers {
-            reading.count(key, *n).unwrap();
-        }
-        reading
-    };
-    let clean = [
-        ("engine_absent", 0),
-        ("failed", 0),
-        ("diverged", 0),
-        ("borked", 0),
-    ];
-
-    // Every test unread: the compiler's skip, and the crate is done.
-    let mut numbers = vec![("tests", 49), ("unread", 49), ("skipped", 0)];
-    numbers.extend(clean);
-    store.record(&[phpt(Status::Skip, &numbers)]).unwrap();
-    let verdict = judge(&root);
-    assert!(verdict.met(), "{verdict:#?}");
-
-    // Two tests the compiler read failed on a native another extension
-    // does not declare: the lane's reading is a fail, and it is held.
-    store
-        .record(&[phpt(
-            Status::Fail,
-            &[
-                ("tests", 49),
-                ("unread", 47),
-                ("skipped", 0),
-                ("engine_absent", 0),
-                ("failed", 2),
-                ("diverged", 0),
-                ("borked", 0),
-            ],
-        )])
-        .unwrap();
-    let verdict = judge(&root);
-    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
-    assert!(
-        verdict.unmet[0].starts_with("phpt: ext/ctype fail:"),
-        "{verdict:#?}"
-    );
-
-    // One test skipped for a cause of its own beside the unread ones: not
-    // every test is unread, so the skip is not the compiler's alone.
-    let mut numbers = vec![("tests", 49), ("unread", 48), ("skipped", 1)];
-    numbers.extend(clean);
-    store.record(&[phpt(Status::Skip, &numbers)]).unwrap();
-    let verdict = judge(&root);
-    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
-    assert!(
-        verdict.unmet[0].starts_with("phpt: ext/ctype skip:"),
-        "{verdict:#?}"
-    );
-}
-
 /// The phpt skip the missing engine binary causes is met, and `done`
 /// reaches green for a crate that owns a subset on a checkout with no
-/// engine built (#132). It would be unmet under the rule it replaces,
-/// which held every reading to its status: the assertion that the verdict
-/// is empty is what fails on that behaviour.
+/// engine built (#132): with no run kept here, a fresh such skip is the
+/// one excuse the comparison takes (#725).
 ///
 /// The causes the decision did not excuse are held as before, so the
 /// excuse does not spread: a phpt skip of a crate not yet created or one
@@ -2229,6 +2176,8 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         reading
     };
     record_asked(&store, &root, "ext/pcre");
+    let here = xtask::phpt::kept_run(&xtask::key::Snapshot::disk(&root).unwrap(), "ext/pcre");
+    std::fs::remove_file(here.unwrap()).unwrap();
 
     // The corpus could not run at all, and nothing else is unmet: the
     // crate is done.
@@ -2261,10 +2210,7 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         .unwrap();
     let verdict = judge(&root);
     assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
-    assert!(
-        verdict.unmet[0].starts_with("phpt: ext/pcre skip:"),
-        "{verdict:#?}"
-    );
+    assert!(unrun("ext/pcre")(&verdict.unmet[0]), "{verdict:#?}");
 
     // A witness skip is unmet on the numbers that once excused it: the
     // binary is no longer why a witness reading is a skip, so what is left

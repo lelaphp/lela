@@ -229,7 +229,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
     let run = || phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask(&php));
     let pin = &scratch.manifest.pin;
     let kept = scratch.root.join(format!(
-        "target/phpt-runs/pin-{}-{}/ext/fixture.json",
+        "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag, pin.oracle.md5
     ));
     let verdicts = || -> Vec<String> {
@@ -1736,7 +1736,7 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
 
     // No run kept at the commit: no verdict, and the subset runs anyway,
     // its own reading kept beside the skip, which carries its counts.
-    fs::remove_dir_all(scratch.root.join("target/phpt-runs")).unwrap();
+    fs::remove_dir_all(scratch.root.join("target/harness/phpt-runs")).unwrap();
     written_at(&scratch.engine, SystemTime::now() + Duration::from_mins(1));
     let readings = run(&scratch.engine, Some(&base));
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
@@ -1797,7 +1797,7 @@ fn a_pooled_run_writes_the_reading_and_keeps_the_run_a_run_of_one_does() {
         };
         let readings = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap();
         let mut runs = Vec::new();
-        files_under(&scratch.root.join("target/phpt-runs"), &mut runs);
+        files_under(&scratch.root.join("target/harness/phpt-runs"), &mut runs);
         assert_eq!(runs.len(), 1, "{runs:?}");
         let run = fs::read(&runs[0]).unwrap();
         let reading = readings.into_iter().next().unwrap();
@@ -1892,7 +1892,7 @@ fn kept(root: &Tree, child: std::process::Child) -> serde_json::Value {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "{out:?}");
     let mut runs = Vec::new();
-    files_under(&root.join("target/phpt-runs"), &mut runs);
+    files_under(&root.join("target/harness/phpt-runs"), &mut runs);
     assert_eq!(runs.len(), 1, "{runs:?}");
     let mut run: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&runs[0]).unwrap()).unwrap();
@@ -2293,7 +2293,7 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
     );
     let pin = &scratch.manifest.pin;
     let kept = scratch.root.join(format!(
-        "target/phpt-runs/pin-{}-{}/ext/fixture.json",
+        "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag, pin.oracle.md5
     ));
     let kept: serde_json::Value =

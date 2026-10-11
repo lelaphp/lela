@@ -69,6 +69,7 @@ done::run_hook
 done::scopes_of
 generated::write_all
 key::Snapshot
+key::Snapshot::commit
 key::Snapshot::disk
 key::Snapshot::key
 manifest::AvoidFrom
@@ -241,6 +242,7 @@ permit::run
 phpt::Ask
 phpt::Engine
 phpt::Lane
+phpt::kept_run
 phpt::run
 port_map::CENSUS
 port_map::INSTRUMENT

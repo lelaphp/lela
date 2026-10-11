@@ -74,17 +74,19 @@ fn the_same_run_against_itself_passes() {
     assert_eq!(count(&reading, "regressed"), 0);
 }
 
+/// Neither a test the compiler no longer reads nor one that skips here
+/// meets a test met at the base (#725).
 #[test]
-fn a_test_the_compiler_no_longer_reads_is_a_regression() {
+fn a_test_the_compiler_no_longer_reads_or_that_skips_is_a_regression() {
     let base = fixture("base.json");
-    let mut head = base.clone();
-    head.verdicts.insert(
-        "phpt:php-src/ext/fixture/tests/kept.phpt".to_owned(),
-        Judgement::Unread,
-    );
-    let diff = diff(&base, &head, None).unwrap();
-    assert_eq!(diff.regressed.len(), 1, "{diff:?}");
-    assert_eq!(diff.regressed[0].1, Judgement::Unread);
+    for now in [Judgement::Unread, Judgement::Skip] {
+        let mut head = base.clone();
+        head.verdicts
+            .insert("phpt:php-src/ext/fixture/tests/kept.phpt".to_owned(), now);
+        let diff = diff(&base, &head, None).unwrap();
+        assert_eq!(diff.regressed.len(), 1, "{diff:?}");
+        assert_eq!(diff.regressed[0].1, now);
+    }
 }
 
 /// Every way two runs fail to compare is a skip that says why, and never
