@@ -3303,6 +3303,58 @@ mod tests {
         );
     }
 
+    /// `zend_delayed_compile_dim` over `$this` as the oracle at 8.5.9
+    /// dumps it (#2574): the container is `zend_compile_simple_var`'s
+    /// `FETCH_THIS` into a temporary, in a method and in the main op
+    /// array alike, and never the `UNUSED` receiver a property fetch
+    /// takes, which `ISSET_ISEMPTY_DIM_OBJ` and `FETCH_DIM_IS` do not
+    /// list.
+    #[test]
+    fn this_under_a_silent_dimension_is_fetched_into_a_temporary() {
+        assert_eq!(
+            dump_of(
+                b"<?php class A { function f() { return [isset($this[0]), empty($this[0]), isset($this[0][1]), $this[0] ?? 2]; } } var_dump(isset($this[0]));"
+            ),
+            "\n\
+             $_main:\n\
+             \x20    ; (lines=6, args=0, vars=0, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 INIT_FCALL 1 96 string(\"var_dump\")\n\
+             0001 T0 = FETCH_THIS\n\
+             0002 T1 = ISSET_ISEMPTY_DIM_OBJ (isset) T0 int(0)\n\
+             0003 SEND_VAL T1 1\n\
+             0004 DO_ICALL\n\
+             0005 RETURN int(1)\n\
+             \n\
+             A::f:\n\
+             \x20    ; (lines=17, args=0, vars=0, tmps=11)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T0 = FETCH_THIS\n\
+             0001 T1 = ISSET_ISEMPTY_DIM_OBJ (isset) T0 int(0)\n\
+             0002 T2 = INIT_ARRAY 4 (packed) T1 NEXT\n\
+             0003 T3 = FETCH_THIS\n\
+             0004 T4 = ISSET_ISEMPTY_DIM_OBJ (empty) T3 int(0)\n\
+             0005 T2 = ADD_ARRAY_ELEMENT T4 NEXT\n\
+             0006 T5 = FETCH_THIS\n\
+             0007 T6 = FETCH_DIM_IS T5 int(0)\n\
+             0008 T7 = ISSET_ISEMPTY_DIM_OBJ (isset) T6 int(1)\n\
+             0009 T2 = ADD_ARRAY_ELEMENT T7 NEXT\n\
+             0010 T8 = FETCH_THIS\n\
+             0011 T9 = FETCH_DIM_IS T8 int(0)\n\
+             0012 T10 = COALESCE T9 0014\n\
+             0013 T10 = QM_ASSIGN int(2)\n\
+             0014 T2 = ADD_ARRAY_ELEMENT T10 NEXT\n\
+             0015 RETURN T2\n\
+             0016 RETURN null\n\
+             LIVE RANGES:\n\
+             \x20    2: 0003 - 0015 (tmp/var)\n"
+        );
+    }
+
     /// `zend_compile_func_num_args` and `zend_compile_func_array_slice`
     /// as the oracle at 8.5.9 dumps them (#1251): in a function,
     /// `FUNC_NUM_ARGS`, and `FUNC_GET_ARGS` with the offset as a constant
