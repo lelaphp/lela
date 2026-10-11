@@ -32,9 +32,9 @@
 //! checkout, an operation another hand starts outside permit on the same
 //! `HEAD` would read as the recorded session's. A rebase whose `orig-head`
 //! is not the `HEAD` it was started on (`git rebase <upstream> <branch>`)
-//! is refused to its own starter, the safe side. The recording runs only
-//! where the manifest carries such a rule, so the mechanism is inert until
-//! a person lands the row.
+//! is refused to its own starter, the safe side. The recording runs
+//! whatever the manifest holds, since an operation can bring the first such
+//! rule into its own working tree (#2694).
 
 use std::fmt;
 use std::fs;
