@@ -1018,10 +1018,11 @@ mod tests {
                     .find(|(_, name)| name == "Q0")
                     .map(|(class, _)| *class);
                 let inherited = child.and_then(|child| req.method_named(child, b"m"));
-                assert!(
-                    inherited.is_some_and(crate::api::call::Function::is_published),
-                    "Q0 inherits P0's m"
-                );
+                // Shared by every request: not one of this request's own rows.
+                let shared = |function: crate::api::call::Function| {
+                    function.0 & crate::api::call::Function::LOCAL == 0
+                };
+                assert!(inherited.is_some_and(shared), "Q0 inherits P0's m");
                 Ok(seen.len())
             });
             let numbers = publisher

@@ -67,6 +67,14 @@
 //! under a key or not, as the subset's own sweep would have. A subset not
 //! cut off settles its claim by that sweep, so its rule is unchanged.
 //!
+//! A run killed outright drops nothing, so its programs run on past the
+//! recipe's limit, and what they make past the window would stand. So the
+//! next run first kills each program the claim started and never saw end
+//! that still stands, as [`Process::spawned_as`] tells it, so a process
+//! that took the number since is never signalled. Its end is
+//! written to the claim as the run would have written it, and the window
+//! reaches the kill (#2522).
+//!
 //! **Two runs at once.** The kernel keeps no maker for an object that
 //! names no process, so a window tells a run's from another's only while
 //! no other run is making them: a private queue a concurrent run made in
@@ -100,10 +108,12 @@
 //! rather than failing the run.
 //!
 //! [`Oracle`]: crate::oracle::Oracle
+//! [`Process::spawned_as`]: crate::oracle::Process::spawned_as
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,7 +121,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::oracle::{Programs, Ran};
+use crate::oracle::{Group, Programs, Ran};
 
 /// One kind of System V object, as `ipcs` letters it and `ipcrm` takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -809,13 +819,13 @@ struct Claims {
 }
 
 /// One claim of a run that ended without settling it: its window from its
-/// making to its last write, and the processes its journal started.
+/// making to its last write, and the programs its journal started.
 #[derive(Debug)]
 struct Ended {
     path: PathBuf,
     from: SystemTime,
     last: SystemTime,
-    started: BTreeSet<u32>,
+    journal: Journal,
     _lock: File,
 }
 
@@ -850,7 +860,7 @@ impl Claims {
                 continue;
             };
             claims.ended.push(Ended {
-                started: started(&fs::read_to_string(&path).unwrap_or_default()).collect(),
+                journal: Journal::read(&fs::read_to_string(&path).unwrap_or_default()),
                 from: made.unwrap_or(last),
                 last,
                 path,
@@ -881,13 +891,44 @@ impl Claims {
         alive: impl Fn(u32) -> bool,
     ) -> Vec<&'a Object> {
         let windows = self.windows(grace, clock);
-        let spawned: BTreeSet<u32> = self.ended.iter().flat_map(|e| e.started.clone()).collect();
+        let spawned: BTreeSet<u32> = self.ended.iter().flat_map(|e| e.journal.pids()).collect();
         let mut gone = claimed(standing, &windows, (runner, clock), &alive);
         gone.extend(journaled(standing, &spawned, (&windows, clock), &alive));
         gone.extend(abandoned(standing, runner, &alive));
         let mut seen = BTreeSet::new();
         gone.retain(|o| seen.insert((o.kind, o.id)) && !self.held.covers(o, clock));
         gone
+    }
+
+    /// Each program an ended claim's journal started and never saw end
+    /// that still stands as [`Group::standing`] finds it, killed with its
+    /// group, as the run's limit would have killed it had the run not been
+    /// cut off (#2522). Its end is written to the journal as the run would
+    /// have written it, so the claim's window reaches the kill and takes
+    /// what the program made until then.
+    fn stop(&mut self) {
+        for ended in &mut self.ended {
+            let last = seconds(ended.last, true);
+            let mut journal = File::options().append(true).open(&ended.path).ok();
+            for (number, pid) in ended.journal.unended() {
+                // Dropped, the group is killed (`oracle::Group`); its
+                // leader is waited for, as long as a second, to be gone.
+                let Some(group) = Group::standing(pid, last) else {
+                    continue;
+                };
+                drop(group);
+                for _ in 0..100 {
+                    if !alive(pid) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if let Some(journal) = journal.as_mut() {
+                    writeln!(journal, "{ENDED} {number}").ok();
+                }
+                ended.last = SystemTime::now();
+            }
+        }
     }
 
     /// The ended claims whose windows, over `grace`, reach no second
@@ -909,20 +950,62 @@ const TAKING: &str = "taking";
 
 /// The first word of a claim's line for a program started, its number and
 /// its process after it, as a phpt subset's oracle writes one (#2448):
-/// the processes [`reclaim`] holds a cut-off run's objects by.
+/// the processes [`reclaim`] holds a cut-off run's objects by, and kills
+/// where they still stand (#2522).
 pub(crate) const STARTED: &str = "started";
 
 /// The first word of a claim's line for a program ended, its number after.
 pub(crate) const ENDED: &str = "ended";
 
-/// The processes a claim's `journal` names started, by its [`STARTED`]
-/// lines; a witness run's lines name none.
-fn started(journal: &str) -> impl Iterator<Item = u32> + '_ {
-    journal.lines().filter_map(|line| {
-        let mut words = line.split(' ');
-        (words.next()? == STARTED).then_some(())?;
-        words.nth(1)?.parse().ok()
-    })
+/// The programs a claim's journal names, by their numbers: each one's
+/// process, by its [`STARTED`] line, and whether its [`ENDED`] line came.
+/// A witness run's lines name none.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Journal(BTreeMap<u64, Program>);
+
+/// One program a journal names started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Program {
+    pid: u32,
+    ended: bool,
+}
+
+impl Journal {
+    fn read(text: &str) -> Journal {
+        let mut journal = Journal::default();
+        for line in text.lines() {
+            let mut words = line.split(' ');
+            let (Some(word), Some(Ok(number))) = (words.next(), words.next().map(str::parse))
+            else {
+                continue;
+            };
+            match (word, words.next().map(str::parse)) {
+                (STARTED, Some(Ok(pid))) => {
+                    journal.0.insert(number, Program { pid, ended: false });
+                }
+                (ENDED, _) => {
+                    if let Some(program) = journal.0.get_mut(&number) {
+                        program.ended = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        journal
+    }
+
+    /// The processes the programs were started as.
+    fn pids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.0.values().map(|program| program.pid)
+    }
+
+    /// The programs no end was written for, each number with its process.
+    fn unended(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.0
+            .iter()
+            .filter(|(_, program)| !program.ended)
+            .map(|(number, program)| (*number, program.pid))
+    }
 }
 
 /// A run's claim on the System V objects made while it runs, a witness
@@ -1093,11 +1176,14 @@ impl Removed {
 
 /// What runs that ended without settling their claims left, removed
 /// before a run starts (#2115): what [`Claims::taken`] takes of the user's
-/// claims, each window ending `grace` past its claim's last write. The
+/// claims, each window ending `grace` past its claim's last write, once
+/// the programs they started that still stand are killed
+/// ([`Claims::stop`], #2522). The
 /// claims go with it but those whose windows reach a second another run's
 /// claim covers; a claim whose lock will not come is a run still going.
 pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
-    let claims = Claims::read(&claims(), None);
+    let mut claims = Claims::read(&claims(), None);
+    claims.stop();
     let clock = Clock::now()?;
     let standing = Standing::now()?;
     let mut swept = Swept::default();

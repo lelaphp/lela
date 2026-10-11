@@ -258,7 +258,7 @@ impl Request {
     /// 1016 0
     /// 752 0
     /// ```
-    pub fn variadic_arguments(&mut self, position: u32) -> Result<Vec<Value>, Thrown> {
+    pub(crate) fn variadic_arguments(&mut self, position: u32) -> Result<Vec<Value>, Thrown> {
         let Some(call) = self.serving_call() else {
             return Ok(Vec::new());
         };
@@ -284,7 +284,7 @@ impl Request {
     /// What `call_user_func` hands on as its own call's named
     /// arguments; empty for a call that carries none.
     #[must_use]
-    pub fn named_arguments(&self) -> Vec<(PhpString, Value)> {
+    pub(crate) fn named_arguments(&self) -> Vec<(PhpString, Value)> {
         self.serving_call()
             .map(|call| call.extra_named().to_vec())
             .unwrap_or_default()
@@ -509,14 +509,6 @@ impl Request {
             "Error",
             &format!("Cannot call {name}() dynamically"),
         )
-    }
-
-    /// The arguments of the frame `depth` levels up, `func_get_args` from
-    /// outside.
-    #[must_use]
-    pub fn frame_args(&self, depth: u32) -> Option<Vec<Value>> {
-        let _ = depth;
-        None
     }
 
     /// `zend_get_executed_scope`, the class scope where the native being

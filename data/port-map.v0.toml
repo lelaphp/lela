@@ -1098,8 +1098,8 @@ api = "request::Request::output_started_at"
 mahout = "RequestCtx::set_gc_enabled"
 sites = 3
 crates = 1
-status = "renamed"
-api = "request::Request::gc_enable"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::set_in_tick_dispatch"
@@ -1126,8 +1126,8 @@ api = "request::Request::temp_dir"
 mahout = "RequestCtx::arm_time_limit"
 sites = 2
 crates = 1
-status = "renamed"
-api = "request::Request::set_time_limit"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::assert_callback"
@@ -1210,22 +1210,22 @@ rule = "a native never builds a request; the host does"
 mahout = "RequestCtx::push_exception_handler"
 sites = 2
 crates = 1
-status = "renamed"
-api = "request::Request::set_exception_handler"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::restore_error_handler"
 sites = 2
 crates = 1
-status = "same"
-api = "request::Request::restore_error_handler"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::restore_exception_handler"
 sites = 2
 crates = 1
-status = "same"
-api = "request::Request::restore_exception_handler"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::script_name"
@@ -1378,8 +1378,8 @@ api = "request::Request::backtrace"
 mahout = "RequestCtx::define_runtime_const"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::define_constant"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::env_lookup"
@@ -1406,57 +1406,57 @@ api = "request::Request::flush"
 mahout = "RequestCtx::frame_args"
 sites = 1
 crates = 1
-status = "same"
-api = "request::Request::frame_args"
+status = "gone"
+rule = "nothing calls it; a native reads its own call through its parameters (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gc_active"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::gc_status"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gc_buffer_size"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::gc_status"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gc_collected"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::gc_status"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gc_enabled"
 sites = 1
 crates = 1
-status = "same"
-api = "request::Request::gc_enabled"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gc_roots"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::gc_status"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gc_runs"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::gc_status"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gc_threshold"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::gc_status"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::gen_func_name"
@@ -1581,8 +1581,8 @@ api = "request::Request::request_headers"
 mahout = "RequestCtx::reset_memory_peak"
 sites = 1
 crates = 1
-status = "same"
-api = "request::Request::reset_memory_peak"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::response_code"
@@ -1834,8 +1834,8 @@ api = "request::Request::output_buffer_op"
 mahout = "RequestCtx::settings.enable_gc"
 sites = 4
 crates = 1
-status = "renamed"
-api = "request::Request::gc_enable"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::settings.error_reporting"
@@ -1869,8 +1869,8 @@ api = "call::read_static_prop"
 mahout = "RequestCtx::consts.define"
 sites = 3
 crates = 1
-status = "renamed"
-api = "request::Request::define_constant"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "RequestCtx::errors.restore_pending"
@@ -2311,8 +2311,8 @@ api = "coerce::to_long"
 mahout = "semantics::too_few_arguments"
 sites = 9
 crates = 2
-status = "same"
-api = "raising::too_few_arguments"
+status = "gone"
+rule = "raising::arity raises the ArgumentCountError (#1326)"
 
 [[item]]
 mahout = "semantics::LazyDumpView"
@@ -3890,8 +3890,8 @@ rule = "self/parent/static are resolved by lookup_class against the scope"
 mahout = "mahout_code_meta::msgs::CONST_ALREADY_DEFINED"
 sites = 2
 crates = 1
-status = "renamed"
-api = "request::Request::define_constant"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "mahout_code_meta::msgs::NAN_COERCED"
@@ -4137,8 +4137,8 @@ rule = "define_constant takes the name's bytes"
 mahout = "mahout_runtime::IniVerdict"
 sites = 5
 crates = 2
-status = "same"
-api = "abi::IniVerdict"
+status = "gone"
+rule = "Core's own ini checks are the engine's; an extension's OnModify answers its bool (#1326)"
 
 [[item]]
 mahout = "mahout_runtime::Reentrant::drive_generator"
@@ -4396,8 +4396,8 @@ api = "values::PhpObject::set_prop"
 mahout = "mahout_runtime::gc_collect_cycles_protocol"
 sites = 1
 crates = 1
-status = "renamed"
-api = "request::Request::gc_collect"
+status = "gone"
+rule = "a Core native in php_engine serves it, off the native face (#1326)"
 
 [[item]]
 mahout = "mahout_runtime::gpc::GpcOptions"

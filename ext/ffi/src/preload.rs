@@ -6,6 +6,9 @@
 //! first time it names the scope. This is `zend_ffi_load` with its
 //! `preload` argument, `zend_ffi_preload` and `zend_ffi_parse_directives`.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use php_ext::abi::{Cache, Refusal, Start};
@@ -40,18 +43,25 @@ pub(crate) enum Fail {
     Redefined(String),
 }
 
+/// The file a header's path names while a request runs: a relative path
+/// against the request's working directory, where php's `stat` and
+/// `open` find it against its process's, which `chdir()` moved there
+/// (#2618). At startup no request stands, and the path is the process's
+/// to resolve.
+pub(crate) fn header_file(req: &Request, path: &[u8]) -> PathBuf {
+    req.cwd().join(OsStr::from_bytes(path))
+}
+
 /// `zend_ffi_load` up to its scope: the file read, its directives, its
 /// declarations parsed into `types`, the library opened and every
 /// variable and function resolved; at startup, each held against the
 /// scope of `scopes` it adds to.
 pub(crate) fn load_header(
-    path: &[u8],
+    file: &Path,
     types: &mut Types,
     default_attr: u32,
     scopes: Option<&[(Vec<u8>, Scope)]>,
 ) -> Result<Loaded, Fail> {
-    let shown = String::from_utf8_lossy(path).into_owned();
-    let file = std::path::Path::new(&shown);
     let meta = std::fs::metadata(file).map_err(|_| Fail::Missing)?;
     if !meta.is_file() {
         return Err(Fail::NotFile);
@@ -309,7 +319,8 @@ pub(crate) fn engine_state(start: &Start) -> Result<Preloads, Refusal> {
         };
         for path in paths {
             let preload = attr::STORED | attr::PERSISTENT;
-            let loaded = match load_header(&path, &mut types, preload, Some(&scopes)) {
+            let file = Path::new(OsStr::from_bytes(&path));
+            let loaded = match load_header(file, &mut types, preload, Some(&scopes)) {
                 Ok(loaded) => loaded,
                 Err(fail) => {
                     let warnings = preload_warnings(&path, &fail).into_iter();
@@ -498,7 +509,8 @@ fn moved_scope(mut scope: Scope, moved: &impl Fn(TypeId) -> TypeId) -> Scope {
 /// A failure is php's warning and no scope.
 pub(crate) fn register(req: &mut Request, path: &[u8]) -> Option<Scope> {
     let preload = attr::STORED | attr::PERSISTENT;
-    let loaded = match load_header(path, crate::types(req), preload, None) {
+    let file = header_file(req, path);
+    let loaded = match load_header(&file, crate::types(req), preload, None) {
         Ok(loaded) => loaded,
         Err(fail) => {
             for text in preload_warnings(path, &fail) {

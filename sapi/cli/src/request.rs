@@ -254,7 +254,7 @@ pub fn process_stdin(engine: &Engine, lines: &Lines, arguments: &[OsString]) -> 
 /// file and what the host read from stdin are dumped alike.
 fn dump(engine: &Engine, description: &RequestDescription, sink: &mut dyn OutputSink) {
     if let Some(arrays) = engine.dump_before_optimizer(description) {
-        sink.write_stderr(arrays.as_bytes());
+        sink.write_stderr(&arrays);
     }
 }
 

@@ -11,13 +11,15 @@
 //! (#1990) and request leak sensor (#1992) as a program meets them,
 //! the leaks that sensor found in the engine (#2057), the owner type
 //! as one meets it (#1995), a table copied as php copies it (#2005),
-//! the callback walks as a native meets them (#1980), and the owners
-//! the face takes for a native and gives up (#2059, #2080).
+//! the callback walks as a native meets them (#1980), the owners the
+//! face takes for a native and gives up (#2059, #2080), and the frames
+//! a fatal leaves, whose annexes leave with them (#2554).
 
 use crate::api;
 
 mod allocations;
 mod body;
+mod dropped_frames;
 mod frame_writes;
 mod frames;
 #[cfg(debug_assertions)]

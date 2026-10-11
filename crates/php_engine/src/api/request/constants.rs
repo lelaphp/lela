@@ -218,7 +218,7 @@ impl Request {
     /// dtor 1
     /// dtor 3
     /// ```
-    pub fn define_constant(&mut self, name: &[u8], value: Owner<Value>) -> bool {
+    pub(crate) fn define_constant(&mut self, name: &[u8], value: Owner<Value>) -> bool {
         self.define_attributed_constant(name, value, Vec::new())
     }
 

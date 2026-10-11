@@ -1294,7 +1294,7 @@ impl Request {
     /// released and the top of the stack standing in its place with its
     /// mask; with the stack empty, no handler and the mask where it was.
     /// php answers `true` whatever it found.
-    pub fn restore_error_handler(&mut self) -> bool {
+    pub(crate) fn restore_error_handler(&mut self) -> bool {
         if let Some(handler) = self.diagnostics.error_handler.take() {
             self.release(handler.into_value());
         }
@@ -1315,7 +1315,7 @@ impl Request {
     /// `ZEND_FUNCTION(set_exception_handler)`
     /// (`Z/Zend/zend_builtin_functions.c:1367`): the error handler's
     /// shape without a mask.
-    pub fn set_exception_handler(&mut self, handler: Option<Callable>) -> Option<Value> {
+    pub(crate) fn set_exception_handler(&mut self, handler: Option<Callable>) -> Option<Value> {
         let previous = self.diagnostics.exception_handler.take();
         let answer = previous.as_ref().map(Callable::value);
         self.diagnostics.exception_handlers.push(previous);
@@ -1328,7 +1328,7 @@ impl Request {
 
     /// `ZEND_FUNCTION(restore_exception_handler)`
     /// (`Z/Zend/zend_builtin_functions.c:1399`).
-    pub fn restore_exception_handler(&mut self) -> bool {
+    pub(crate) fn restore_exception_handler(&mut self) -> bool {
         if let Some(handler) = self.diagnostics.exception_handler.take() {
             self.release(handler.into_value());
         }

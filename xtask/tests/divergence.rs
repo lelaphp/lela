@@ -426,7 +426,7 @@ since = "2026-09-18"
     assert_eq!(Kind::Crosscheck.prefix(), "crosscheck:");
     assert_eq!(Kind::Crosscheck.as_str(), "crosscheck");
     assert!(parsed.accepted("crosscheck:ctype").is_some());
-    assert_eq!(Kind::ALL.len(), 7);
+    assert_eq!(Kind::ALL.len(), 8);
     assert_eq!(
         Kind::ALL.iter().position(|k| *k == Kind::Crosscheck),
         Kind::ALL
@@ -487,7 +487,7 @@ since = "2026-10-10"
     let parsed = Registry::parse(row).unwrap();
     assert_eq!(parsed.rows()[0].kind, Kind::Wire);
     assert_eq!(Kind::Wire.prefix(), "wire:");
-    assert_eq!(Kind::ALL.last(), Some(&Kind::Wire));
+    assert_eq!(Kind::ALL[6], Kind::Wire);
     assert!(parsed.accepted("wire:h2spec/http2/6.5.3/1").is_some());
     for bad in ["wire:h2spec", "wire:/6.5.3", "wire:h2spec/", "h2spec/6.5.3"] {
         let err = Registry::parse(&row.replace("wire:h2spec/http2/6.5.3/1", bad))
@@ -507,6 +507,50 @@ since = "2026-10-10"
         "{md}"
     );
     assert!(md.contains("| wire | 0 | 1 | 0 | 1 |"), "{md}");
+}
+
+/// The `makala` kind (#2629, #2639): one test where the production server
+/// differs from php's SAPIs by design, keyed by its path in php-src, which
+/// the php-fpm comparison and the served phpt lane both consult through
+/// [`Registry::makala`]; a row of a kind the registry does not name is
+/// refused by that kind.
+#[test]
+fn a_makala_row_is_keyed_by_its_test_and_an_unknown_kind_is_refused() {
+    let row = r#"
+[[divergence]]
+id = "makala:ext/filter/tests/004.phpt"
+kind = "makala"
+cause = "by-design"
+reason = "The fixture's refusal (third-engine-design.md §4.8)."
+status = "accepted"
+since = "2026-10-11"
+covers = ["makala:ext/filter/tests/007.phpt"]
+"#;
+    let parsed = Registry::parse(row).unwrap();
+    assert_eq!(parsed.rows()[0].kind, Kind::Makala);
+    assert_eq!(
+        (Kind::Makala.as_str(), Kind::Makala.prefix()),
+        ("makala", "makala:")
+    );
+    assert_eq!(Kind::ALL.len(), 8);
+    assert_eq!(Kind::ALL.last(), Some(&Kind::Makala));
+    for test in ["ext/filter/tests/004.phpt", "ext/filter/tests/007.phpt"] {
+        let found = parsed.makala(test).map(|r| r.id.as_str());
+        assert_eq!(found, Some("makala:ext/filter/tests/004.phpt"), "{test}");
+    }
+    assert!(parsed.makala("ext/filter/tests/011.phpt").is_none());
+    let open = Registry::parse(&row.replace("accepted", "open")).unwrap();
+    assert!(
+        open.makala("ext/filter/tests/004.phpt").is_none(),
+        "an open row accepts nothing"
+    );
+    let err = Registry::parse(&row.replace("kind = \"makala\"", "kind = \"fpm\""))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown kind \"fpm\"") && err.contains("makala"),
+        "{err}"
+    );
 }
 
 /// A row's `cause` (#2460, #2462): `debt` where the file writes none, and

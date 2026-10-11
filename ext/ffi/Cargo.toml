@@ -33,6 +33,8 @@ php_ext = { path = "../../crates/php_ext", features = ["test"] }
 # around: `usleep`, `proc_open` and `proc_close`, `set_time_limit` and
 # `hrtime`.
 php_ext_standard = { path = "../standard" }
+# ext/sockets for `socket_read`, a wait a callback closes its socket in.
+php_ext_sockets = { path = "../sockets" }
 # ext/uri and ext/lexbor, which ext/standard declares required (`standard_deps`).
 php_ext_lexbor = { path = "../lexbor" }
 php_ext_uri = { path = "../uri" }

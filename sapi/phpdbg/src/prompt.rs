@@ -14,6 +14,7 @@ use php_sapi::tier::{self, Argument, FrameRef, Request};
 use crate::bp::{Kind, OpArray, Resolution};
 use crate::cmd::{self, Command, Param};
 use crate::input::{self, Line};
+use crate::opcodes;
 use crate::out;
 use crate::read;
 use crate::session::{Context, Execution, Origin, Seek, SeekKind, Session, Stop};
@@ -1324,23 +1325,10 @@ fn seek_over(here: &mut Here<'_>, keep: impl Fn(Opcode, u32, u32) -> bool) -> Op
     })
 }
 
-/// `ZEND_RETURN`, `ZEND_FAST_RET`, `ZEND_GENERATOR_RETURN`, `ZEND_YIELD`
-/// and `ZEND_YIELD_FROM`, where a seek to a function's end stops.
-fn ends(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::Return
-            | Opcode::FastRet
-            | Opcode::GeneratorReturn
-            | Opcode::Yield
-            | Opcode::YieldFrom
-    )
-}
-
 /// `phpdbg_skip_line_helper`.
 fn skip_line(s: &mut Session, here: &mut Here<'_>) -> Ret {
     s.seek = seek_over(here, |opcode, line, current| {
-        line != current || ends(opcode)
+        line != current || opcodes::is(opcode, opcodes::ENDS)
     });
     Ret::Resume
 }
@@ -1367,7 +1355,7 @@ fn next(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// Whether the frame stands at an opline where its function ends, the
 /// seek to it set where it does not.
 fn seek_to_end(s: &mut Session, here: &mut Here<'_>, kind: SeekKind) -> bool {
-    let Some(mut seek) = seek_over(here, |opcode, _, _| ends(opcode)) else {
+    let Some(mut seek) = seek_over(here, |opcode, _, _| opcodes::is(opcode, opcodes::ENDS)) else {
         return true;
     };
     let at = here

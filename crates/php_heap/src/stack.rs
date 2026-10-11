@@ -171,6 +171,15 @@ impl<H> Frame<H> {
         unsafe { self.header_at().as_ref() }
     }
 
+    /// The header copied out, the frame's own left where it stands:
+    /// what a stack that lets the frame go hands back.
+    fn header_copied(&self) -> H {
+        // SAFETY: the header owns nothing (`FITS`), so the bytes copied
+        // are the whole of it and leave no second owner behind; the push
+        // or the move wrote the room.
+        unsafe { self.header_at().read() }
+    }
+
     /// The frame's header, to write.
     pub fn header_mut(&mut self) -> &mut H {
         // SAFETY: as `header`, and the mutable borrow of the frame is the
@@ -317,12 +326,22 @@ impl<H> VmStack<H> {
     }
 
     /// `zend_vm_stack_destroy`: every page given back to `heap`, the
-    /// newest first, and every frame with them.
-    pub fn close(&mut self, heap: &mut Heap) {
-        self.frames.clear();
+    /// newest first, and every frame with them. The headers of the
+    /// frames still standing are handed back, the newest first, so what
+    /// each names beyond its words is given up where the engine keeps
+    /// it; a stack every frame was popped off hands back none.
+    #[must_use = "a frame's header names what the engine keeps for it beyond the stack"]
+    pub fn close(&mut self, heap: &mut Heap) -> Vec<H> {
+        let dropped = self
+            .frames
+            .drain(..)
+            .rev()
+            .map(|frame| frame.header_copied())
+            .collect();
         for page in self.pages.drain(..).rev() {
             page.give_back(heap);
         }
+        dropped
     }
 
     /// Push a frame of `slots` addressable slots, with the room of
@@ -615,10 +634,7 @@ impl<H> VmStack<H> {
             return Ok(self.resume_frame(frame));
         }
         let len = frame.len;
-        // SAFETY: the frame's header owns nothing (`FITS`), so the bytes
-        // copied below are the whole of it and the read leaves no second
-        // owner behind; the room was written by the push or the move.
-        let header = unsafe { frame.header_at().read() };
+        let header = frame.header_copied();
         let at = self.push_frame(heap, len, 0, header)?;
         if let (Some(cells), Some(to)) = (frame.cells().get(..len), self.frames.last_mut()) {
             to.cells_mut().copy_from_slice(cells);
@@ -753,16 +769,21 @@ impl<H> VmStack<H> {
 
     /// What [`VmStack::set_aside`] took put back, over every frame
     /// pushed since popped; a frame still standing is let go first,
-    /// newest first, so the room is the set-aside frames' again.
+    /// newest first, so the room is the set-aside frames' again, and its
+    /// header handed back as [`VmStack::close`] hands one back.
     // Taking the receipt by value is the point: what was set aside is
     // put back once.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn put_back(&mut self, heap: &mut Heap, aside: FramesAside<H>) {
-        while !self.frames.is_empty() {
-            self.pop_frame(heap);
+    #[must_use = "a frame's header names what the engine keeps for it beyond the stack"]
+    pub fn put_back(&mut self, heap: &mut Heap, aside: FramesAside<H>) -> Vec<H> {
+        let mut dropped = Vec::new();
+        while let Some(frame) = self.frames.pop() {
+            dropped.push(frame.header_copied());
+            self.leave(heap, frame);
         }
         self.frames = aside.frames;
         self.entries = aside.entries;
+        dropped
     }
 }
 
@@ -818,7 +839,35 @@ mod tests {
             stack.frame(outer).map(|f| f.slot(Slot(5))),
             Some(Zval::UNDEF)
         );
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
+    }
+
+    /// A stack that lets frames go without their pops hands their
+    /// headers back, the newest first: the frames standing when it is
+    /// closed, and those pushed over frames set aside and standing when
+    /// they are put back, which are then the set-aside frames again.
+    #[test]
+    fn frames_let_go_without_their_pops_hand_their_headers_back() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let mut stack = VmStack::<Head>::new();
+        let made = |function| Head {
+            function,
+            ..Head::default()
+        };
+        assert!(stack.push_frame(&mut heap, 2, 0, made(1)).is_ok());
+        let aside = stack.set_aside();
+        assert!(stack.push_frame(&mut heap, 2, 0, made(2)).is_ok());
+        assert!(stack.push_frame(&mut heap, 2, 0, made(3)).is_ok());
+        let dropped = stack.put_back(&mut heap, aside);
+        assert_eq!(dropped, [made(3), made(2)]);
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.header(FrameRef(0)), Some(&made(1)));
+        let aside = stack.set_aside();
+        assert_eq!(stack.put_back(&mut heap, aside), []);
+        assert!(stack.push_frame(&mut heap, 2, 0, made(4)).is_ok());
+        assert_eq!(stack.close(&mut heap), [made(4), made(1)]);
+        assert_eq!(stack.close(&mut heap), []);
     }
 
     /// php's page arithmetic, to the byte `memory_get_usage()` reads:
@@ -852,7 +901,7 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(heap.memory_usage(false) - start, 3 * PAGE_SIZE);
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }
 
@@ -874,7 +923,7 @@ mod tests {
                 "Allowed memory size of 4194304 bytes exhausted (tried to allocate 262144 bytes)"
             )))
         );
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
     }
 
     /// A fiber's pages are 16 KiB, and its first holds the fiber
@@ -895,7 +944,7 @@ mod tests {
         assert_eq!(heap.memory_usage(false) - start, FIBER_PAGE_SIZE);
         assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
         assert_eq!(heap.memory_usage(false) - start, 2 * FIBER_PAGE_SIZE);
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }
 
@@ -949,7 +998,7 @@ mod tests {
         );
         assert_eq!(stack.header(back).map(|h| h.opline), Some(4));
         stack.pop_frame(&mut heap);
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }
 
@@ -1000,7 +1049,7 @@ mod tests {
         stack.pop_frame(&mut heap);
         assert_ne!(g, f);
         stack.pop_frame(&mut heap);
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }
 
@@ -1046,7 +1095,7 @@ mod tests {
         );
         assert_eq!(stack.grow_top(&mut heap, back, 2), Ok(()));
         stack.pop_frame(&mut heap);
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }
 }

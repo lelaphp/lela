@@ -30,7 +30,7 @@
 use php_unit::decl::FunctionDecl;
 use php_unit::{OpArray, OperandKind, Opline, Unit};
 
-pub use php_unit::{ConstIdx, Opcode, OplineIdx};
+pub use php_unit::{ConstIdx, OplineIdx};
 
 use crate::api::call::Function;
 use crate::api::values::Value;
@@ -152,6 +152,43 @@ impl<'a> OpArrayView<'a> {
     }
 }
 
+/// One opline's opcode as an observer reads it (#2357): php's
+/// `zend_op.opcode` byte and `zend_get_opcode_name`'s name for it, and
+/// nothing of what the compiled tier reads off the unit format's opcode.
+/// An extension tells one opcode from another by its name, `ZEND_RETURN`,
+/// as php's dumps and phpdbg's opcode breakpoints do.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Opcode(php_unit::Opcode);
+
+impl Opcode {
+    /// `zend_get_opcode_name`: php's name, `ZEND_ADD`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        self.0.name()
+    }
+
+    /// php's number, the byte `zend_op.opcode` holds.
+    #[must_use]
+    pub fn num(self) -> u8 {
+        self.0.num()
+    }
+}
+
+impl std::fmt::Debug for Opcode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The opcode php numbers `n`; the byte back where no opcode has it.
+impl TryFrom<u8> for Opcode {
+    type Error = u8;
+
+    fn try_from(n: u8) -> Result<Opcode, u8> {
+        php_unit::Opcode::from_u8(n).map(Opcode).ok_or(n)
+    }
+}
+
 /// One opline of an [`OpArrayView`], php's `zend_op`.
 #[derive(Clone, Copy)]
 pub struct OplineView<'a> {
@@ -201,7 +238,7 @@ impl<'a> OplineView<'a> {
     /// `opline->opcode`.
     #[must_use]
     pub fn opcode(&self) -> Opcode {
-        self.op.opcode
+        Opcode(self.op.opcode)
     }
 
     /// `opline->lineno`: the line it was compiled from.
@@ -253,7 +290,7 @@ impl<'a> OplineView<'a> {
     pub fn jump_targets(&self) -> impl Iterator<Item = OplineIdx> + use<'a> {
         let table = matches!(
             self.op.opcode,
-            Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
+            php_unit::Opcode::SwitchLong | php_unit::Opcode::SwitchString | php_unit::Opcode::Match
         )
         .then_some(self.op)
         .filter(|op| op.op2_type == OperandKind::Const)
@@ -289,7 +326,7 @@ impl Request {
     /// `extended_value` indexes in `zend_flf_functions`, which is the
     /// engine's, so the dump is the request's to write.
     #[must_use]
-    pub fn dump_op_array(&self, code: OpArrayView<'_>, name: &str, parameters: usize) -> String {
+    pub fn dump_op_array(&self, code: OpArrayView<'_>, name: &[u8], parameters: usize) -> Vec<u8> {
         let frameless = self.shared.frameless_names();
         code.code.dump_lines(name, parameters, &frameless)
     }

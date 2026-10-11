@@ -1067,23 +1067,45 @@ impl Request {
         if !self.bailout {
             self.release_frame(frame, function, annex, num_args, receiver, closure);
         }
-        // `destroy_op_array`, which frees the heap runtime cache, then
-        // `efree_size(EX(func))`.
         let annex = annex.and_then(|id| self.annexes.take(id));
         self.vm.stack.pop_frame(&mut self.heap);
-        let Some(mut annex) = annex else {
-            return;
-        };
+        if let Some(annex) = annex {
+            // An `eval`'s main op array is destroyed when its execution
+            // ends, and the names its compile made with it.
+            self.give_up_annex(annex, function.is_none() && !self.bailout);
+        }
+    }
+
+    /// What a frame's [`exec::Annex`] holds given up as the frame leaves
+    /// the stack: `destroy_op_array`, which frees the heap runtime cache,
+    /// then `efree_size(EX(func))`, and, where `names`, the names the
+    /// compile of the unit it served made.
+    fn give_up_annex(&mut self, mut annex: exec::Annex, names: bool) {
         if let Some(held) = annex.op_array.take() {
             if let Some(cache) = held.run_time_cache {
                 cache.free(self);
             }
             held.copy.free(self);
         }
-        // An `eval`'s main op array is destroyed when its execution ends,
-        // and the names its compile made with it.
-        if function.is_none() && !self.bailout {
+        if names {
             self.release_unit_names(annex.unit.as_ref());
+        }
+    }
+
+    /// The frames a stack let go of without the engine's pop, the newest
+    /// first ([`php_heap::VmStack::close`], [`php_heap::VmStack::put_back`]):
+    /// a fiber's that ended, the request's at its end, and what a serving
+    /// with nothing executing left over the frames it set aside. What
+    /// each frame's annex holds is given up as a pop under a fatal gives
+    /// it up, its slab entry with it; nothing its slots held is, as
+    /// php's `zend_vm_stack_destroy` releases nothing a frame held. Every
+    /// serving pops what it pushed, a fatal's way out included, so these
+    /// are none unless a serving left its frames.
+    pub(crate) fn drop_frames(&mut self, dropped: Vec<exec::Header>) {
+        for header in dropped {
+            if let Some(annex) = header.annex.and_then(|id| self.annexes.take(id)) {
+                self.give_up_annex(annex, false);
+            }
         }
     }
 

@@ -29,11 +29,10 @@ use php_heap::FrameRef;
 
 use super::observer::{observed, scratch, serve_main};
 use super::test_ext::{Event, Phase, Recording, TestExt};
-use crate::api::request::{Raised, Request};
+use crate::api::request::{Opcode, Raised, Request};
 use crate::engine::{Engine, EngineBuilder};
 use crate::probe::Probe;
 use crate::tier::{self, Flow, Site, Stepped, Tier};
-use php_unit::Opcode;
 
 thread_local! {
     /// How many handlers a stepping tier dispatched through `step` or
@@ -116,12 +115,12 @@ fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool) -> Flow {
 /// The oplines that pop the frame they stand in, as phpdbg's `leaves`.
 fn leaves(opcode: Opcode) -> bool {
     matches!(
-        opcode,
-        Opcode::Return
-            | Opcode::ReturnByRef
-            | Opcode::GeneratorReturn
-            | Opcode::Yield
-            | Opcode::YieldFrom
+        opcode.name(),
+        "ZEND_RETURN"
+            | "ZEND_RETURN_BY_REF"
+            | "ZEND_GENERATOR_RETURN"
+            | "ZEND_YIELD"
+            | "ZEND_YIELD_FROM"
     )
 }
 

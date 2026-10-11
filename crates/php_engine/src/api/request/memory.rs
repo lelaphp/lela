@@ -508,7 +508,7 @@ impl Request {
     }
 
     /// `memory_reset_peak_usage()`.
-    pub fn reset_memory_peak(&mut self) {
+    pub(crate) fn reset_memory_peak(&mut self) {
         self.heap.reset_peak();
     }
 
@@ -589,7 +589,7 @@ impl Request {
     /// values the collection freed, as php 8.5 counts them.
     ///
     /// [`ExtensionBuilder::gc_collect`]: crate::api::abi::ExtensionBuilder::gc_collect
-    pub fn gc_collect(&mut self) -> i64 {
+    pub(crate) fn gc_collect(&mut self) -> i64 {
         let shared = Arc::clone(&self.shared);
         Beneath::<chain::GcCollect>::top(shared.supplied.gc_collect.links(), ()).serve(self)
     }
@@ -636,7 +636,7 @@ impl Request {
     /// 32
     /// 0
     /// ```
-    pub fn gc_enable(&mut self, enabled: bool) {
+    pub(crate) fn gc_enable(&mut self, enabled: bool) {
         let value: &[u8] = if enabled { b"1" } else { b"0" };
         // The memory limit's fatal is recorded and ends the request.
         let string = self
@@ -648,7 +648,7 @@ impl Request {
 
     /// `gc_enabled()`.
     #[must_use]
-    pub fn gc_enabled(&self) -> bool {
+    pub(crate) fn gc_enabled(&self) -> bool {
         self.heap.gc_enabled()
     }
 
@@ -656,7 +656,7 @@ impl Request {
     /// times in seconds as php divides its nanoseconds, the keys strings
     /// of the request's.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn gc_status(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+    pub(crate) fn gc_status(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.gc_status_made();
         adopted(made)
     }

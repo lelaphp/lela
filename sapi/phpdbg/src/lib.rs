@@ -25,6 +25,7 @@ mod init;
 mod input;
 mod list;
 mod natives;
+mod opcodes;
 mod out;
 mod prompt;
 mod read;

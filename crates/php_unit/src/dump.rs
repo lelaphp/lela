@@ -92,6 +92,37 @@ const FREE_ON_RETURN: u32 = 1;
 /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`, on a `FETCH_CONSTANT`'s `op1`.
 const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 
+/// The dump as it is written: bytes and not text, since php's
+/// `fprintf` prints a name, a jump table's key and the file name as the
+/// bytes they are (`%s`, up to a NUL), whatever encoding they are in; only the words
+/// around them are php's ASCII.
+#[derive(Default)]
+struct Out(Vec<u8>);
+
+impl Out {
+    fn push(&mut self, c: char) {
+        self.push_str(c.encode_utf8(&mut [0; 4]));
+    }
+
+    fn push_str(&mut self, words: &str) {
+        self.0.extend_from_slice(words.as_bytes());
+    }
+
+    /// A name, a key or a file name as `%s` prints a C string: byte for
+    /// byte, up to its first NUL.
+    fn c_string(&mut self, bytes: &[u8]) {
+        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+        self.0.extend_from_slice(&bytes[..end]);
+    }
+}
+
+impl std::fmt::Write for Out {
+    fn write_str(&mut self, words: &str) -> std::fmt::Result {
+        self.push_str(words);
+        Ok(())
+    }
+}
+
 /// Every op array of the unit, one block each, in php's order
 /// (`zend_foreach_op_array`): the main op array, then the functions as
 /// declared, then each class's methods as declared, named
@@ -101,18 +132,12 @@ const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 /// `dynamic_func_defs` in order, each followed by its own. `frameless`
 /// is `zend_flf_functions` by name, what a `FRAMELESS_ICALL_*`'s
 /// `extended_value` indexes.
-pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
-    let mut out = String::new();
-    op_array(&mut out, "$_main", 0, &unit.main, frameless);
+pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> Vec<u8> {
+    let mut out = Out::default();
+    op_array(&mut out, b"$_main", 0, &unit.main, frameless);
     dynamic_defs(&mut out, unit, &unit.main, frameless, 0);
     for (decl, body) in &unit.functions {
-        op_array(
-            &mut out,
-            &String::from_utf8_lossy(&decl.name.0),
-            num_args(decl),
-            body,
-            frameless,
-        );
+        op_array(&mut out, &decl.name.0, num_args(decl), body, frameless);
         dynamic_defs(&mut out, unit, body, frameless, 0);
     }
     // The class table's order: a class completes after the classes
@@ -160,16 +185,17 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
         // method's body, its `RECV` prologue alone, is no op array
         // `zend_foreach_op_array` walks.
         for (decl, body) in bodies.filter(|(decl, _)| !decl.is_abstract) {
-            let name = format!(
-                "{}::{}",
-                crate::decl::shown(&class.name.0),
-                String::from_utf8_lossy(&decl.function.name.0)
-            );
+            let name = [
+                crate::decl::shown_bytes(&class.name.0),
+                b"::",
+                &decl.function.name.0,
+            ]
+            .concat();
             op_array(&mut out, &name, num_args(&decl.function), body, frameless);
             dynamic_defs(&mut out, unit, body, frameless, 0);
         }
     }
-    out
+    out.0
 }
 
 /// `zend_foreach_op_array_helper`'s recursion: the op arrays of
@@ -177,7 +203,7 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
 /// own. `depth` cuts a table that names an op array already on the way
 /// down, which no compiler here writes and which would otherwise never
 /// end.
-fn dynamic_defs(out: &mut String, unit: &Unit, body: &OpArray, frameless: &[Name], depth: u32) {
+fn dynamic_defs(out: &mut Out, unit: &Unit, body: &OpArray, frameless: &[Name], depth: u32) {
     if depth > 64 {
         return;
     }
@@ -185,13 +211,7 @@ fn dynamic_defs(out: &mut String, unit: &Unit, body: &OpArray, frameless: &[Name
         let Some((decl, nested)) = unit.dynamic.get(*at as usize) else {
             continue;
         };
-        op_array(
-            out,
-            &String::from_utf8_lossy(&decl.name.0),
-            num_args(decl),
-            nested,
-            frameless,
-        );
+        op_array(out, &decl.name.0, num_args(decl), nested, frameless);
         dynamic_defs(out, unit, nested, frameless, depth.saturating_add(1));
     }
 }
@@ -218,29 +238,31 @@ enum Shape {
 /// `zend_func_info` of every op array prints before the optimizer has
 /// inferred anything; then the oplines, the live-range table and the
 /// `try`/`catch` table.
-fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray, frameless: &[Name]) {
+fn op_array(out: &mut Out, name: &[u8], args: usize, body: &OpArray, frameless: &[Name]) {
     shaped(out, Shape::BeforeOptimizer, (name, args), body, frameless);
 }
 
 /// `zend_dump_op_array(op_array, ZEND_DUMP_LINE_NUMBERS, NULL, NULL)`,
 /// what phpdbg's `print` writes for a user function.
-pub(crate) fn lines(name: &str, args: usize, body: &OpArray, frameless: &[Name]) -> String {
-    let mut out = String::new();
+pub(crate) fn lines(name: &[u8], args: usize, body: &OpArray, frameless: &[Name]) -> Vec<u8> {
+    let mut out = Out::default();
     shaped(&mut out, Shape::LineNumbers, (name, args), body, frameless);
-    out
+    out.0
 }
 
 /// One op array in `shape`.
 fn shaped(
-    out: &mut String,
+    out: &mut Out,
     shape: Shape,
-    (name, args): (&str, usize),
+    (name, args): (&[u8], usize),
     body: &OpArray,
     frameless: &[Name],
 ) {
+    out.push('\n');
+    out.c_string(name);
     writeln!(
         out,
-        "\n{name}:\n     ; (lines={}, args={args}, vars={}, tmps={})",
+        ":\n     ; (lines={}, args={args}, vars={}, tmps={})",
         body.oplines.len(),
         body.num_cvs,
         body.num_tmps
@@ -249,14 +271,9 @@ fn shaped(
     if shape == Shape::BeforeOptimizer {
         writeln!(out, "     ; (before optimizer)").ok();
     }
-    writeln!(
-        out,
-        "     ; {}:{}-{}",
-        String::from_utf8_lossy(&body.filename.0),
-        body.line_start,
-        body.line_end
-    )
-    .ok();
+    out.push_str("     ; ");
+    out.c_string(&body.filename.0);
+    writeln!(out, ":{}-{}", body.line_start, body.line_end).ok();
     if shape == Shape::BeforeOptimizer {
         writeln!(out, "     ; return  [] RANGE[0..0]").ok();
     }
@@ -305,7 +322,7 @@ fn shaped(
 /// `JMP_ADDR` shape holds. A `result` of kind `UNUSED` opens nothing,
 /// whatever the number the field holds: a site's safepoint number, or
 /// the temporary php still numbered where `zend_do_free` set the mark.
-fn opline(out: &mut String, body: &OpArray, op: &Opline, frameless: &[Name]) {
+fn opline(out: &mut Out, body: &OpArray, op: &Opline, frameless: &[Name]) {
     let flags = op.opcode.flags();
     let name = op.opcode.name();
     if op.out_type != OperandKind::Unused && op.out_type != OperandKind::Const {
@@ -345,10 +362,10 @@ fn opline(out: &mut String, body: &OpArray, op: &Opline, frameless: &[Name]) {
 /// `zend_dump_op` prints it right after the opcode, `(str_contains)`.
 /// An index the table has no name for prints `(?)`, where php would read
 /// past its table.
-fn frameless_name(out: &mut String, op: &Opline, frameless: &[Name]) {
+fn frameless_name(out: &mut Out, op: &Opline, frameless: &[Name]) {
     out.push('(');
     match frameless.get(op.extended_value as usize) {
-        Some(name) => out.push_str(&String::from_utf8_lossy(&name.0)),
+        Some(name) => out.c_string(&name.0),
         None => out.push('?'),
     }
     out.push(')');
@@ -367,7 +384,7 @@ fn live_kind(kind: LiveKind) -> &'static str {
 
 /// One operand: the constant, the variable, or what an unused field says.
 fn operand(
-    out: &mut String,
+    out: &mut Out,
     body: &OpArray,
     op: &Opline,
     kind: OperandKind,
@@ -412,7 +429,7 @@ fn operand(
 /// the table's order, a string key in `"` up to its first NUL as `%s`
 /// reads it, then ` default:`, whose target is the `extended_value`
 /// printed after it. A constant that is no array prints as one.
-fn jump_table(out: &mut String, value: Option<Zval>) {
+fn jump_table(out: &mut Out, value: Option<Zval>) {
     let Some(table) = value.and_then(php_heap::Zval::as_arr) else {
         constant(out, value);
         return;
@@ -423,9 +440,9 @@ fn jump_table(out: &mut String, value: Option<Zval>) {
                 write!(out, " {n}:").ok();
             }
             php_heap::Key::Str(s) => {
-                let bytes = s.bytes();
-                let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-                write!(out, " \"{}\":", String::from_utf8_lossy(&bytes[..end])).ok();
+                out.push_str(" \"");
+                out.c_string(s.bytes());
+                out.push_str("\":");
             }
         }
         write!(out, " {:04},", target.as_long().unwrap_or(0)).ok();
@@ -436,7 +453,7 @@ fn jump_table(out: &mut String, value: Option<Zval>) {
 /// `zend_dump_const`: the constant by type, a string escaped as
 /// `smart_str_append_escaped` escapes it with `"` escaped besides, a
 /// double as C's `%g` prints it.
-fn constant(out: &mut String, value: Option<Zval>) {
+fn constant(out: &mut Out, value: Option<Zval>) {
     let Some(value) = value else {
         out.push_str(" zval(type=?)");
         return;
@@ -473,7 +490,7 @@ fn constant(out: &mut String, value: Option<Zval>) {
 /// `zend_dump_var`: a CV by its number and name, a `VAR` or `TMP` by
 /// its slot past the CVs, and `X` for a CV number the op array has no
 /// name for.
-fn var(out: &mut String, body: &OpArray, kind: OperandKind, number: u32) {
+fn var(out: &mut Out, body: &OpArray, kind: OperandKind, number: u32) {
     match kind {
         OperandKind::Cv if number < body.num_cvs => {
             let name = body
@@ -481,7 +498,9 @@ fn var(out: &mut String, body: &OpArray, kind: OperandKind, number: u32) {
                 .get(number as usize)
                 .map(|n| &*n.0)
                 .unwrap_or_default();
-            write!(out, "CV{number}(${})", String::from_utf8_lossy(name)).ok();
+            write!(out, "CV{number}($").ok();
+            out.c_string(name);
+            out.push(')');
         }
         OperandKind::Var => {
             write!(out, "V{}", body.num_cvs.saturating_add(number)).ok();
@@ -497,7 +516,7 @@ fn var(out: &mut String, body: &OpArray, kind: OperandKind, number: u32) {
 
 /// `zend_dump_unused_op`: what a field that holds no zval says, by the
 /// shape its opcode gives it.
-fn unused(out: &mut String, op: &Opline, field: u32, flags: u32) {
+fn unused(out: &mut Out, op: &Opline, field: u32, flags: u32) {
     match flags & op::MASK {
         op::NUM => {
             write!(out, " {field}").ok();
@@ -521,7 +540,7 @@ fn unused(out: &mut String, op: &Opline, field: u32, flags: u32) {
 
 /// `zend_dump_class_fetch_type`: which `ZEND_FETCH_CLASS_*` the fetch
 /// is, and the three bits beside it.
-fn class_fetch_type(out: &mut String, fetch_type: u32) {
+fn class_fetch_type(out: &mut Out, fetch_type: u32) {
     out.push_str(match fetch_type & 0x0f {
         1 => " (self)",
         2 => " (parent)",
@@ -544,7 +563,7 @@ fn class_fetch_type(out: &mut String, fetch_type: u32) {
 
 /// The `extended_value` arm of `zend_dump_op`: one shape under
 /// `ZEND_VM_EXT_MASK`, or the bits beside the mask read one by one.
-fn extended_value(out: &mut String, op: &Opline, flags: u32) {
+fn extended_value(out: &mut Out, op: &Opline, flags: u32) {
     let value = op.extended_value;
     match flags & ext::MASK {
         ext::NUM => {
@@ -645,7 +664,7 @@ fn extended_value(out: &mut String, op: &Opline, flags: u32) {
 /// `MAY_BE_*` of the nine value types: `[bool, long, double, string]` for
 /// `is_scalar`. The array, class and reference detail of an inferred
 /// type never reaches an `extended_value`.
-fn type_info(out: &mut String, info: u32) {
+fn type_info(out: &mut Out, info: u32) {
     const ANY: u32 = 0x3fe;
     let mut words: Vec<&str> = Vec::new();
     if info & ANY == ANY {
@@ -680,7 +699,7 @@ fn type_info(out: &mut String, info: u32) {
 /// `zend_dump_const` prints a string: the seven C escapes by letter, and
 /// every other byte outside printable ASCII as `\x` and two upper-case
 /// hex digits.
-fn escaped(out: &mut String, bytes: &[u8]) {
+fn escaped(out: &mut Out, bytes: &[u8]) {
     for &c in bytes {
         match c {
             b'"' => out.push_str("\\\""),
@@ -781,11 +800,17 @@ mod tests {
     /// One opline printed on its own, without the header, with no
     /// frameless table.
     fn line(body: &OpArray, at: usize) -> String {
-        let mut out = String::new();
+        let mut out = Out::default();
         if let Some(op) = body.oplines.get(at) {
             opline(&mut out, body, op, &[]);
         }
-        out
+        utf8(out.0)
+    }
+
+    /// A dump the tests below hold to text, every byte of it ASCII; one
+    /// that is not reads empty.
+    fn utf8(dump: Vec<u8>) -> String {
+        String::from_utf8(dump).unwrap_or_default()
     }
 
     #[test]
@@ -804,7 +829,7 @@ mod tests {
             ..Unit::default()
         };
         assert_eq!(
-            unit.dump(&[]),
+            utf8(unit.dump(&[])),
             "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:1-1\n     ; return  [] RANGE[0..0]\n0000 RETURN int(1)\n"
         );
     }
@@ -844,7 +869,7 @@ mod tests {
             functions: vec![(decl, function)],
             ..Unit::default()
         };
-        assert!(unit.dump(&[]).ends_with(
+        assert!(utf8(unit.dump(&[])).ends_with(
             "\nf:\n     ; (lines=0, args=2, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:4-6\n     ; return  [] RANGE[0..0]\n"
         ));
     }
@@ -937,7 +962,7 @@ mod tests {
             ],
             ..Unit::default()
         };
-        let dump = unit.dump(&[]);
+        let dump = utf8(unit.dump(&[]));
         let header = |name: &str, args: usize, line: u32| {
             format!(
                 "\n{name}:\n     ; (lines=0, args={args}, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:{line}-{line}\n     ; return  [] RANGE[0..0]\n"
@@ -1151,6 +1176,62 @@ mod tests {
             line(&body, 0),
             "MATCH CV0($a) 1: 0012, \"s\": 0014, default: 0016"
         );
+        drop(strings);
+    }
+
+    /// The oracle over `ext/intl/tests/uconverter_oop_callback_return.phpt`
+    /// prints `SWITCH_STRING CV2($codeUnits) "\x80": 0015, ...` with the
+    /// key's own byte where UTF-8 has no character, as `%s` prints it;
+    /// a function's name, a CV's and the file's are bytes alike, each up
+    /// to its first NUL, as `zend_dump_var` prints the CV of
+    /// `Zend/tests/heredoc_nowdoc/warning_during_heredoc_scan_ahead.phpt`.
+    #[test]
+    fn a_name_a_key_and_the_file_print_as_their_bytes() {
+        use php_heap::{Intern, Key, Strings};
+        let mut strings = Strings::new();
+        let Ok(key) = strings.intern(b"\x80") else {
+            return;
+        };
+        let Ok(table) = strings.constant_array(&[(Key::Str(key), Zval::long(1))]) else {
+            return;
+        };
+        let decl = FunctionDecl {
+            name: Name(b"f\xff"[..].into()),
+            parameters: Vec::new(),
+            return_type: None,
+            returns_by_ref: false,
+            is_generator: false,
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name(b"\xfe.php"[..].into()),
+            line: 1,
+            end_line: 1,
+            frameless: Vec::new(),
+        };
+        let mut function = body(
+            vec![Opline {
+                extended_value: 1,
+                ..with(
+                    op(Opcode::SwitchString),
+                    OperandKind::Cv,
+                    0,
+                    OperandKind::Const,
+                    0,
+                )
+            }],
+            vec![Zval::array(table)],
+        );
+        function.filename = Name(b"\xfe.php"[..].into());
+        function.vars = vec![Name(b"\xe9\0after"[..].into())].into_boxed_slice();
+        function.num_cvs = 1;
+        let unit = Unit {
+            main: body(vec![], vec![]),
+            functions: vec![(decl, function)],
+            ..Unit::default()
+        };
+        let dump = unit.dump(&[]);
+        let expected: &[u8] = b"\nf\xff:\n     ; (lines=1, args=0, vars=1, tmps=0)\n     ; (before optimizer)\n     ; \xfe.php:1-1\n     ; return  [] RANGE[0..0]\n0000 SWITCH_STRING CV0($\xe9) \"\x80\": 0001, default: 0001\n";
+        assert!(dump.ends_with(expected), "{}", dump.escape_ascii());
         drop(strings);
     }
 
@@ -1460,11 +1541,11 @@ mod tests {
         };
         let table = [Name::from("trim"), Name::from("str_contains")];
         let line = |at: usize| {
-            let mut out = String::new();
+            let mut out = Out::default();
             if let Some(op) = body.oplines.get(at) {
                 opline(&mut out, &body, op, &table);
             }
-            out
+            utf8(out.0)
         };
         assert_eq!(
             line(0),
@@ -1530,7 +1611,7 @@ mod tests {
             },
             ..Unit::default()
         };
-        assert!(unit.dump(&[]).ends_with(
+        assert!(utf8(unit.dump(&[])).ends_with(
             "     ; return  [] RANGE[0..0]\nLIVE RANGES:\n     11: 0004 - 0011 (loop)\n     12: 0006 - 0009 (silence)\n     15: 0012 - 0014 (rope)\n     18: 0017 - 0022 (new)\n     22: 0024 - 0025 (tmp/var)\nEXCEPTION TABLE:\n     0026, 0030, -, -\n"
         ));
     }
@@ -1561,7 +1642,7 @@ mod tests {
             ..Unit::default()
         };
         assert!(
-            unit.dump(&[])
+            utf8(unit.dump(&[]))
                 .ends_with("EXCEPTION TABLE:\n     0033, 0037, 0040, 0041\n     0002, -, -, -\n")
         );
     }
