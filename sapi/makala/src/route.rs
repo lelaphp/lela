@@ -69,9 +69,15 @@ impl Refusal {
 /// Where `method path` goes under `root`: a path [`Hidden`] refuses is
 /// not found, before the disk is asked; else the path translated as
 /// `php -S` translates it, a program's where `php_cli_server_dispatch`
-/// says so and a static file's otherwise, in `php_cli_server_begin_send_static`'s
-/// order: a method that writes refused, then a path that translated to
-/// nothing, then, under [`Hidden::Refused`], a file of PHP's source.
+/// says so, the path past it its path's info (#2637), and a static
+/// file's otherwise, in `php_cli_server_begin_send_static`'s order: a
+/// method that writes refused, then a path that translated to nothing
+/// or past the file it found, then, under [`Hidden::Refused`], a file of
+/// PHP's source. A static file is served only as named, so a request for
+/// `/upload/x.jpg/y.php` runs nothing and sends nothing: the walk that
+/// routes is the walk that splits, and it found no program
+/// (`cgi.fix_pathinfo`'s class of exploit needs a front end that routes
+/// on the suffix while PHP finds a shorter path).
 pub(crate) fn route(method: &[u8], path: &[u8], root: &[u8], hidden: Hidden) -> Route {
     let mut uri = php_proto::http::normalize_vpath(path);
     if !uri.starts_with(b"/") {
@@ -92,7 +98,8 @@ pub(crate) fn route(method: &[u8], path: &[u8], root: &[u8], hidden: Hidden) -> 
             Route::Refused(Refusal::MethodNotAllowed)
         }
         Some(found)
-            if !(hidden == Hidden::Refused && is_source(vpath::extension(&found.vpath))) =>
+            if found.path_info.is_none()
+                && !(hidden == Hidden::Refused && is_source(vpath::extension(&found.vpath))) =>
         {
             Route::Static(found)
         }

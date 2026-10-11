@@ -154,6 +154,7 @@ oracle::Invocation
 oracle::Invocation::new
 oracle::Limits
 oracle::Mapping
+oracle::Mapping::split
 oracle::Normalise
 oracle::Observation
 oracle::Oracle

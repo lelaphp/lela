@@ -177,12 +177,10 @@ fn serve(engine: &Engine, root: &[u8], hidden: Hidden, job: Job) {
         Route::Static(found) => return serve_static(&head, &found, &mut sink),
         Route::Refused(refusal) => return refuse(&mut sink, refusal),
     };
-    let mut script = program.vpath;
-    script.extend_from_slice(&program.path_info.unwrap_or_default());
-    let mut env = environment(&head, root, &script, query);
+    let mut env = environment(&head, root, &program, query);
     // php-fpm's defaults of the entries `init_request_info` reads, which
-    // this host declares none of: `cgi.fix_pathinfo` on, so a path's info
-    // after the script is taken apart as php-fpm takes it.
+    // this host declares none of: `cgi.fix_pathinfo` on, which finds the
+    // program as named and leaves the split as it came.
     let settings = Settings::default();
     let info = php_proto::cgi::request_info(&mut env, settings, None, &Disk);
     let cwd = info
@@ -205,6 +203,13 @@ fn serve(engine: &Engine, root: &[u8], hidden: Hidden, job: Job) {
         })),
         head_ini: &[],
         headers: php_proto::cgi::request_headers(&newest),
+        // `SG(request_info).request_uri`, which a host outside CGI fills
+        // with the path the request asked for, as `php -S` does, and
+        // where phar's front controller finds its entry outside CGI
+        // (`Phar::webPhar`): the path as far as the program and past it,
+        // so the entry is the one php-fpm's `SCRIPT_NAME` and `PATH_INFO`
+        // give it, where php-fpm's `request_uri` is `SCRIPT_NAME` alone.
+        request_uri: env.get(b"DOCUMENT_URI").map(<[u8]>::to_vec),
         ..php_sapi::cgi::web(&env, &info)
     };
     let description = RequestDescription {
@@ -251,13 +256,18 @@ fn look(info: &RequestInfo) -> HostServes {
 }
 
 /// The CGI environment a web server hands php-fpm for `head`, after
-/// nginx's stock `fastcgi_params`: the script the request found under
-/// the root, the request's own variables, and each header field as an
-/// `HTTP_` variable. `script` is both nginx's `$uri`, after the internal
-/// redirect its `index` makes of a directory, and its
-/// `$fastcgi_script_name`: the path `php -S`'s rules translated to, with
-/// the index file where it named a directory and the path's info after
-/// it, which php-fpm's `cgi.fix_pathinfo` takes apart again.
+/// nginx's stock `fastcgi_params` with its documented split of the path
+/// past the program (`oracle.toml`'s `[fastcgi]`, #2637): the path's info
+/// first, the program the request found under the root, the request's
+/// own variables, and each header field as an `HTTP_` variable. The
+/// split is `php -S`'s walk ([`Translated`]), which routed the request:
+/// `SCRIPT_NAME` is the path as far as the program, with the index file
+/// where it named a directory, nginx's `$fastcgi_script_name`;
+/// `PATH_INFO` the rest, empty where there is none, as nginx sends
+/// `$fastcgi_path_info`; and `DOCUMENT_URI` the two, nginx's `$uri`
+/// after the internal redirect its `index` makes of a directory. No
+/// `PATH_TRANSLATED` is set: `php -S` sets none, nor does php-fpm for a
+/// program found as named.
 ///
 /// `$_SERVER` in php-fpm's order, held to the pinned php-fpm handed the
 /// same request under the recipe with its default `clear_env`: every row
@@ -309,9 +319,36 @@ fn look(info: &RequestInfo) -> HostServes {
 /// REQUEST_METHOD=POST
 /// QUERY_STRING=a=1
 /// SCRIPT_FILENAME=%SCRATCH%/witness.php
+/// PATH_INFO=
 /// PHP_SELF=/witness.php
 /// ```
-fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environment {
+///
+/// The path past the program is its `PATH_INFO` under both, and php-fpm,
+/// finding the program as named, sets no `PATH_TRANSLATED`:
+///
+/// ```php
+/// foreach (['SCRIPT_NAME', 'PATH_INFO', 'PHP_SELF', 'DOCUMENT_URI', 'PATH_TRANSLATED'] as $name) {
+///     echo $name, '=', $_SERVER[$name] ?? '(none)', "\n";
+/// }
+/// ```
+/// ```request makala
+/// --ENV--
+/// REQUEST_URI=/witness.php/index.php
+/// --GET--
+/// x=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// SCRIPT_NAME=/witness.php
+/// PATH_INFO=/index.php
+/// PHP_SELF=/witness.php/index.php
+/// DOCUMENT_URI=/witness.php/index.php
+/// PATH_TRANSLATED=(none)
+/// ```
+fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> Environment {
     let field = |name: &[u8]| {
         head.fields
             .iter()
@@ -325,9 +362,11 @@ fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environ
             _ => host,
         },
     );
+    let path_info = program.path_info.clone().unwrap_or_default();
     let mut filename = root.to_vec();
-    filename.extend_from_slice(script);
+    filename.extend_from_slice(&program.vpath);
     let mut env = vec![
+        (b"PATH_INFO".to_vec(), path_info.clone()),
         (b"SCRIPT_FILENAME".to_vec(), filename),
         (b"QUERY_STRING".to_vec(), query.to_vec()),
         (b"REQUEST_METHOD".to_vec(), head.method.clone()),
@@ -339,9 +378,12 @@ fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environ
             b"CONTENT_LENGTH".to_vec(),
             field(b"content-length").unwrap_or_default(),
         ),
-        (b"SCRIPT_NAME".to_vec(), script.to_vec()),
+        (b"SCRIPT_NAME".to_vec(), program.vpath.clone()),
         (b"REQUEST_URI".to_vec(), head.target.clone()),
-        (b"DOCUMENT_URI".to_vec(), script.to_vec()),
+        (
+            b"DOCUMENT_URI".to_vec(),
+            [&program.vpath[..], &path_info].concat(),
+        ),
         (b"DOCUMENT_ROOT".to_vec(), root.to_vec()),
         (
             b"SERVER_PROTOCOL".to_vec(),

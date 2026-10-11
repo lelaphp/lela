@@ -433,7 +433,8 @@ impl Fpm {
 }
 
 /// The mapping's parameters filled for `http` to the program's file `script`
-/// under `root`, in the order nginx sends them, and then each header
+/// under `root`, the request's path split by the mapping's pattern
+/// ([`Mapping::split`]), in the order nginx sends them, and then each header
 /// field as `HTTP_<NAME>`, as nginx's `fastcgi_pass_request_headers`
 /// passes it. The ports are `ports`, a fence's 0 and no part of what it
 /// pins, and a comparison's those makala's connection had.
@@ -444,6 +445,9 @@ fn mapped(
     script: &str,
     ports: Ports,
 ) -> Vec<(String, Vec<u8>)> {
+    let target = http.target(script);
+    let uri = String::from_utf8_lossy(target.split(|b| *b == b'?').next().unwrap_or(&[]));
+    let (name, info) = mapping.split(&uri);
     let fill = |variable: Variable| -> Vec<u8> {
         match variable {
             Variable::QueryString => http.query.clone(),
@@ -451,7 +455,9 @@ fn mapped(
             Variable::ContentLength => http.field("Content-Length"),
             Variable::RequestUri => http.target(script),
             Variable::DocumentRoot => root.as_bytes().to_vec(),
-            Variable::FastcgiUri | Variable::DocumentUri => format!("/{script}").into_bytes(),
+            Variable::FastcgiUri => name.as_bytes().to_vec(),
+            Variable::PathInfo => info.as_bytes().to_vec(),
+            Variable::DocumentUri => uri.as_bytes().to_vec(),
             Variable::RequestMethod => http.method.clone().into_bytes(),
             Variable::ServerProtocol => b"HTTP/1.0".to_vec(),
             Variable::Scheme => b"http".to_vec(),
@@ -549,7 +555,8 @@ mod tests {
 
     /// Every parameter of the pinned mapping is filled for a request, in
     /// the order nginx sends them, `HTTPS` left out on a plain connection,
-    /// and the header fields after them as `HTTP_` ones.
+    /// and the header fields after them as `HTTP_` ones; the path past the
+    /// program is `PATH_INFO`, empty where there is none (#2637).
     #[test]
     fn the_pinned_mapping_is_filled_in_nginx_s_order_with_the_fields_after() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -573,7 +580,7 @@ mod tests {
             Ports::default(),
         );
         let names: Vec<&str> = params.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names.first(), Some(&"SCRIPT_FILENAME"));
+        assert_eq!(names[..2], ["PATH_INFO", "SCRIPT_FILENAME"]);
         assert!(!names.contains(&"HTTPS"));
         assert_eq!(
             names[names.len() - 2..],
@@ -590,6 +597,26 @@ mod tests {
         assert_eq!(value("SERVER_SOFTWARE"), Some("nginx/1.30.5"));
         assert_eq!(value("CONTENT_LENGTH"), Some("2"));
         assert_eq!(value("CONTENT_TYPE"), Some(""));
+        assert_eq!(value("PATH_INFO"), Some(""));
+        let past = Http {
+            uri: b"/t.php/x/y".to_vec(),
+            ..http
+        };
+        let params = mapped(
+            pin.fastcgi().unwrap(),
+            &past,
+            "/root",
+            "t.php",
+            Ports::default(),
+        );
+        let value = |name: &str| {
+            let found = params.iter().find(|(had, _)| had == name);
+            found.and_then(|(_, v)| std::str::from_utf8(v).ok())
+        };
+        assert_eq!(value("SCRIPT_NAME"), Some("/t.php"));
+        assert_eq!(value("SCRIPT_FILENAME"), Some("/root/t.php"));
+        assert_eq!(value("PATH_INFO"), Some("/x/y"));
+        assert_eq!(value("DOCUMENT_URI"), Some("/t.php/x/y"));
     }
 
     /// A test's `REQUEST_URI` is the target, its query after it where the

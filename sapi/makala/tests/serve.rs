@@ -82,6 +82,65 @@ fn a_path_with_no_php_file_is_not_served_as_a_program() {
     }
 }
 
+/// The path past the program is its `PATH_INFO`, split by `php -S`'s
+/// walk (#2637): `SCRIPT_NAME` and `SCRIPT_FILENAME` the program's,
+/// `PHP_SELF` the two, an empty `PATH_INFO` where nothing is past it, and
+/// no `PATH_TRANSLATED`, which `php -S` sets none of. A program named
+/// past a file that is not one is not found, and nothing runs: the walk
+/// that routes is the walk that splits.
+#[test]
+fn the_path_past_the_program_is_its_path_info() {
+    let root = root(
+        "path-info",
+        &[(
+            "front.php",
+            "<?php foreach (['SCRIPT_NAME', 'PATH_INFO', 'PHP_SELF', 'SCRIPT_FILENAME', 'PATH_TRANSLATED'] as $n) \
+             echo $n, '=', $_SERVER[$n] ?? '(none)', \"\\n\";",
+        )],
+    );
+    std::fs::create_dir_all(root.join("upload")).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(root.join("upload/x.jpg"), "<?php echo 'ran';")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let filename = root
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .join("front.php");
+    let filename = filename.display();
+    let server = Server::start(&root);
+    for (target, status, body) in [
+        (
+            "/front.php/index.php?x=1",
+            "HTTP/1.1 200 OK",
+            format!(
+                "SCRIPT_NAME=/front.php\nPATH_INFO=/index.php\nPHP_SELF=/front.php/index.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED=(none)\n"
+            ),
+        ),
+        (
+            "/front.php",
+            "HTTP/1.1 200 OK",
+            format!(
+                "SCRIPT_NAME=/front.php\nPATH_INFO=\nPHP_SELF=/front.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED=(none)\n"
+            ),
+        ),
+        (
+            "/upload/x.jpg/y.php",
+            "HTTP/1.1 404 Not Found",
+            String::new(),
+        ),
+        ("/upload/x.jpg/", "HTTP/1.1 404 Not Found", String::new()),
+    ] {
+        let mut stream = server.connect();
+        write!(
+            stream,
+            "GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let response = read_response(&mut stream);
+        assert_eq!(response.status, status, "{target}");
+        assert_eq!(String::from_utf8_lossy(&response.body), body, "{target}");
+    }
+}
+
 /// A body reaches `php://input` through the stream while the program
 /// runs (#2338): the program answers before it reads the input, and the
 /// client sends the second half of the body only once it has that answer,

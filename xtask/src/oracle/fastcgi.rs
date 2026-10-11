@@ -8,8 +8,12 @@
 //! `SCRIPT_FILENAME` as nginx sets it. [`Mapping`] is that file read as
 //! one typed value, so the production server's `$_SERVER` (#2347) and the
 //! php-fpm comparison (#2349) read the same parameters in the same order.
+//! #2637 added nginx's documented split of the path past the program,
+//! `fastcgi_split_path_info` with `PATH_INFO` sent first, as Debian's
+//! `snippets/fastcgi-php.conf` sends it ahead of `fastcgi.conf`.
 
 use anyhow::{Result, anyhow, bail};
+use regex_lite::Regex;
 use serde::Deserialize;
 
 /// The mapping: the nginx release the parameters were copied from, where
@@ -32,12 +36,27 @@ pub struct Mapping {
     pub nginx: String,
     /// Where the file was copied from, at that release's tag.
     pub source: String,
+    /// `fastcgi_split_path_info`'s pattern, of two captures (#2637).
+    pub split_path_info: String,
     pub params: Vec<Param>,
 }
 
+impl Mapping {
+    /// `$fastcgi_script_name` and `$fastcgi_path_info` for the request's
+    /// `uri`, as `fastcgi_split_path_info` sets them: the pattern's two
+    /// captures where it matches, and the whole `uri` with no path info
+    /// where it does not.
+    pub fn split<'a>(&self, uri: &'a str) -> (&'a str, &'a str) {
+        let parts = (Regex::new(&self.split_path_info).ok())
+            .and_then(|pattern| pattern.captures(uri))
+            .and_then(|found| Some((found.get(1)?.as_str(), found.get(2)?.as_str())));
+        parts.unwrap_or((uri, ""))
+    }
+}
+
 /// `[fastcgi]` as the pin spells it: `params` the file's bytes whole,
-/// held to `md5`, and `script_filename` the value nginx gives that one
-/// parameter.
+/// held to `md5`, `script_filename` and `path_info` the values nginx
+/// gives those two parameters, and `split_path_info` the split's pattern.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
@@ -45,6 +64,8 @@ struct File {
     source: String,
     md5: String,
     script_filename: String,
+    split_path_info: String,
+    path_info: String,
     params: String,
 }
 
@@ -73,10 +94,14 @@ pub enum Piece {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Variable {
     DocumentRoot,
-    /// `$fastcgi_script_name`: the request URI, with `fastcgi_index`
+    /// `$fastcgi_script_name`: the request URI, or its first capture
+    /// where `fastcgi_split_path_info` matches it, with `fastcgi_index`
     /// appended where it ends in a slash; named for what it holds, since
     /// the glossary keeps nginx's word out of item names.
     FastcgiUri,
+    /// `$fastcgi_path_info`: the split's second capture, empty where the
+    /// pattern does not match.
+    PathInfo,
     QueryString,
     RequestMethod,
     ContentType,
@@ -95,9 +120,10 @@ pub enum Variable {
 }
 
 impl Variable {
-    pub const ALL: [Variable; 17] = [
+    pub const ALL: [Variable; 18] = [
         Variable::DocumentRoot,
         Variable::FastcgiUri,
+        Variable::PathInfo,
         Variable::QueryString,
         Variable::RequestMethod,
         Variable::ContentType,
@@ -120,6 +146,7 @@ impl Variable {
         match self {
             Variable::DocumentRoot => "document_root",
             Variable::FastcgiUri => "fastcgi_script_name",
+            Variable::PathInfo => "fastcgi_path_info",
             Variable::QueryString => "query_string",
             Variable::RequestMethod => "request_method",
             Variable::ContentType => "content_type",
@@ -151,12 +178,21 @@ impl TryFrom<File> for Mapping {
                 file.source
             );
         }
-        let mut params = vec![Param {
-            name: "SCRIPT_FILENAME".to_owned(),
-            value: pieces(&file.script_filename)
-                .map_err(|e| anyhow!("[fastcgi] script_filename: {e}"))?,
-            if_not_empty: false,
-        }];
+        match Regex::new(&file.split_path_info) {
+            Ok(pattern) if pattern.captures_len() == 3 => {}
+            _ => bail!("[fastcgi] split_path_info is not a pattern of two captures"),
+        }
+        let mut params = Vec::new();
+        for (name, value) in [
+            ("PATH_INFO", &file.path_info),
+            ("SCRIPT_FILENAME", &file.script_filename),
+        ] {
+            params.push(Param {
+                name: name.to_owned(),
+                value: pieces(value).map_err(|e| anyhow!("[fastcgi] {name}: {e}"))?,
+                if_not_empty: false,
+            });
+        }
         for (n, line) in file.params.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -176,6 +212,7 @@ impl TryFrom<File> for Mapping {
         Ok(Mapping {
             nginx: file.nginx,
             source: file.source,
+            split_path_info: file.split_path_info,
             params,
         })
     }

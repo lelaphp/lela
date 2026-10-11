@@ -253,6 +253,14 @@ nginx = "1.30.5"
 source = "https://github.com/nginx/nginx/blob/release-1.30.5/conf/fastcgi_params"
 md5 = "4729c30112ca3071f4650479707993ad"
 script_filename = "$document_root$fastcgi_script_name"
+# The path past the program (Mitchell on #2637, 2026-10-10): nginx's
+# documented `fastcgi_split_path_info` with this pattern, so
+# $fastcgi_script_name is the path as far as the first `.php` with a `/`
+# after it and $fastcgi_path_info the rest, and `PATH_INFO` sent as
+# Debian's snippets/fastcgi-php.conf sends it, before the lines of
+# fastcgi.conf. `oracle::Pin::fastcgi` reads both.
+split_path_info = '^(.+?\.php)(/.*)$'
+path_info = "$fastcgi_path_info"
 params = '''
 
 fastcgi_param  QUERY_STRING       $query_string;
