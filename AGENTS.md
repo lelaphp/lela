@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 402 |  |
 
-<!-- /computed in=b7b22ce6abd600a30dde166617fddc21544f1a51f243e64cf2f1915a95b007a5 out=bc7f6d6d34b65330e62d9277f71b952efca81794b27e7812ef15380a0d961632 -->
+<!-- /computed in=7cb9157ed281db399824812c3d6d51fb00fde397a6f0712a91c6797e5dabdce5 out=bc7f6d6d34b65330e62d9277f71b952efca81794b27e7812ef15380a0d961632 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
