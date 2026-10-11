@@ -97,13 +97,13 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: Command) -> Result<Read
 }
 
 /// The tests of the pinned tree at `tree` one file serves whole, in the
-/// order of their paths, and how many CGI-shaped tests it left out: the
+/// order of their paths, and the CGI-shaped tests it left out: the
 /// served subset's tests (`phpt::http`), which says which tests are
 /// CGI-shaped for every lane of the production server.
-pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, usize)> {
+pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, Vec<String>)> {
     let mut files = http::subset(tree).tests()?;
     files.sort();
-    let (mut entries, mut left) = (Vec::new(), 0);
+    let (mut entries, mut left) = (Vec::new(), Vec::new());
     for path in files {
         let Ok(phpt) = Phpt::load(&path) else {
             continue;
@@ -111,7 +111,7 @@ pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, usize)> {
         let file = path.strip_prefix(tree).unwrap_or(&path);
         match entry(&phpt, &path, file) {
             Some(entry) => entries.push(entry),
-            None => left += 1,
+            None => left.push(file.display().to_string()),
         }
     }
     Ok((entries, left))
@@ -303,7 +303,7 @@ mod tests {
             .unwrap();
         tree.write("tests/c.phpt", test("")).unwrap();
         let (entries, left) = subset(tree.path()).unwrap();
-        assert_eq!(left, 1);
+        assert_eq!(left, ["tests/b.phpt"]);
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["tests/a.phpt"]);
         assert_eq!(entries[0].ini, ["precision=4"]);

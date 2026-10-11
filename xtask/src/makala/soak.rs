@@ -153,7 +153,7 @@ pub(crate) fn run(
         ("seconds", seconds),
         ("clients", clients as u64),
         ("entries", entries.len() as u64),
-        ("left_out", left as u64),
+        ("left_out", left.len() as u64),
         ("with_ini", with_ini as u64),
         ("unstable", unstable.len() as u64),
         ("borked", borked.len() as u64),
