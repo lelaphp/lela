@@ -675,8 +675,9 @@ fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
 }
 
 /// `E_ERROR`: `php_error_cb` renders it where the request stands and the
-/// request ends after this; the `Thrown` says so.
-pub fn fatal(req: &mut Request, message: &str) -> Thrown {
+/// request ends after this; the `Thrown` says so. The message is bytes,
+/// as [`docref`]'s is, since php's `"%s"` prints a `char *`.
+pub fn fatal(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
     req.end_in_fatal(message);
     Thrown::of(None)
 }

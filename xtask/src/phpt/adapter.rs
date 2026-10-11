@@ -816,7 +816,7 @@ fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) 
 
 /// The reason a `SKIPIF` gave, when its first word is `word`:
 /// upstream's `/^skip\s*(.+)/i` over what the section wrote.
-fn reason_after(word: &str, said: &str) -> Option<String> {
+pub(crate) fn reason_after(word: &str, said: &str) -> Option<String> {
     let said = said.trim_start();
     if said.len() < word.len() || !said[..word.len()].eq_ignore_ascii_case(word) {
         return None;

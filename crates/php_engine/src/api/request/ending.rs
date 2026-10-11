@@ -15,7 +15,7 @@ use crate::api::values::Value;
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
-use diagnostics::Display;
+use diagnostics::{Display, Message};
 
 use super::{Raised, Request, diagnostics};
 
@@ -115,7 +115,7 @@ impl Request {
     /// sd
     /// d
     /// ```
-    pub(crate) fn end_in_fatal(&mut self, message: &str) {
+    pub(crate) fn end_in_fatal(&mut self, message: &(impl AsRef<[u8]> + ?Sized)) {
         // One raised while a bailout is under way is not rendered: php
         // left what raised it at the first. One raised after the bailout
         // was caught, in a later step of `php_request_shutdown`, is.
@@ -129,11 +129,16 @@ impl Request {
     /// [`Request::end_in_fatal`] rendered at a site of its own, what a
     /// debug sensor's fatal names: the line of the handler that tripped
     /// it, which the frame has moved past by the time the loop asks.
-    pub(super) fn end_in_fatal_at(&mut self, message: &str, file: &[u8], line: u32) {
+    pub(super) fn end_in_fatal_at(
+        &mut self,
+        message: &(impl AsRef<[u8]> + ?Sized),
+        file: &[u8],
+        line: u32,
+    ) {
         if self.bailout {
             return;
         }
-        self.note_error_in(Level::Error, message, file, line);
+        self.note_message_in(Level::Error, Message::Text(message.as_ref()), file, line);
         self.bail_out();
     }
 

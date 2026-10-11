@@ -2121,6 +2121,7 @@ dependencies = [
  "clap",
  "md5",
  "nix",
+ "quote",
  "regex-lite",
  "serde",
  "serde_json",
