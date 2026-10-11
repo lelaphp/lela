@@ -62,8 +62,9 @@ impl Request {
             return;
         }
         let mut stack = std::mem::take(&mut self.vm.stack);
-        stack.close(&mut self.heap);
+        let dropped = stack.close(&mut self.heap);
         self.vm.stack = stack;
+        self.drop_frames(dropped);
         self.free_hash_tables();
         self.drop_request_states();
         let shared = &self.shared;

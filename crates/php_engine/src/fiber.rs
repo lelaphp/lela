@@ -1446,7 +1446,8 @@ fn switch_into<P: HoldsCoroutine>(
             if let Some(record) = record {
                 req.heap_mut().free_block(record);
             }
-            execution.vm.stack.close(req.heap_mut());
+            let dropped = execution.vm.stack.close(req.heap_mut());
+            req.drop_frames(dropped);
             if matches!(back, Transfer::Fatal) {
                 // `zend_fiber_switch_to` raises the fiber's bailout again
                 // on the resumer, which leaves its own open frames to
@@ -1458,7 +1459,8 @@ fn switch_into<P: HoldsCoroutine>(
         }
         Err(fatal) => {
             coroutine.status = CoroutineStatus::Dead;
-            execution.vm.stack.close(req.heap_mut());
+            let dropped = execution.vm.stack.close(req.heap_mut());
+            req.drop_frames(dropped);
             req.fatal_of::<()>(Err(fatal))?;
             Ok(Transfer::Fatal)
         }

@@ -3,15 +3,18 @@
 //! frames it set aside back over whatever stands above them. Every
 //! serving pops the frames it pushed on its way out, the fatal's way
 //! included, through the engine's pop, which takes each frame's
-//! [`crate::exec::Annex`] out of the request's slab, so neither finds a
-//! frame to drop and no annex stays behind. The test counts the slab
-//! across a debugger's evaluation with nothing executing that starts a
-//! fiber whose `eval` raises a fatal.
+//! [`crate::exec::Annex`] out of the request's slab; a frame the close
+//! or the put-back lets go of all the same hands its header back, and
+//! its annex leaves the slab there. The test counts the slab across a
+//! debugger's evaluation with nothing executing that starts a fiber
+//! whose `eval` raises a fatal, and across a serving that leaves a
+//! frame with an annex standing.
 
 use std::cell::Cell;
 
 use crate::api::abi::{ExtensionBuilder, Observed, ObserverHandlers};
 use crate::engine::Engine;
+use crate::exec::Header;
 use crate::test::Capture;
 use crate::tier::{self, Evaluated, Under};
 
@@ -22,18 +25,43 @@ use crate::tier::{self, Evaluated, Under};
 const CODE: &[u8] =
     b"(new Fiber(function () { eval('trigger_error(\"x\", E_USER_ERROR);'); }))->start()";
 
-thread_local! {
-    /// What the stop counted: whether the evaluation bailed out, and the
-    /// annexes standing before it and after it.
-    static COUNTED: Cell<Option<(bool, usize, usize)>> = const { Cell::new(None) };
+/// What the stop counted.
+#[derive(Debug, Clone, Copy)]
+struct Counted {
+    /// Whether the evaluation bailed out.
+    bailed_out: bool,
+    /// Whether the serving with nothing executing left a frame with an
+    /// annex standing.
+    left: bool,
+    /// The annexes standing before the evaluation, after it, and after
+    /// the serving that left its frame.
+    annexes: [usize; 3],
 }
 
-/// `pause()` begun: the annexes counted around the evaluation.
+thread_local! {
+    static COUNTED: Cell<Option<Counted>> = const { Cell::new(None) };
+}
+
+/// `pause()` begun: the annexes counted around the evaluation, and
+/// around a serving with nothing executing that pushes a call, gives it
+/// an annex and leaves it standing, which no serving of the engine's
+/// does today and the put-back lets go of.
 fn stop(observed: &mut Observed<'_>) {
     let before = observed.annexes().live();
     let evaluated = tier::evaluate(observed, Under::Nothing, CODE);
     let after = observed.annexes().live();
-    COUNTED.set(Some((evaluated == Evaluated::BailedOut, before, after)));
+    let function = observed.function();
+    let left = observed.nothing_executing(|req| {
+        function
+            .and_then(|function| req.push_room(0, Header::call(function, 0)).ok())
+            .is_some_and(|call| req.annex_mut(call).is_some())
+    });
+    let after_left = observed.annexes().live();
+    COUNTED.set(Some(Counted {
+        bailed_out: evaluated == Evaluated::BailedOut,
+        left,
+        annexes: [before, after, after_left],
+    }));
 }
 
 fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
@@ -47,10 +75,11 @@ fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
     }
 }
 
-/// The fiber's frames and the evaluation's leave with their annexes:
-/// the slab holds after the evaluation what it held before.
+/// The fiber's frames and the evaluation's leave with their annexes,
+/// and so does a frame the put-back lets go of: the slab holds after
+/// each what it held before.
 #[test]
-fn frames_dropped_after_a_fatal_leave_no_annex() {
+fn frames_let_go_after_a_fatal_or_left_standing_leave_no_annex() {
     let engine = Engine::cli_builder()
         .extensions(&[ExtensionBuilder::default().observer(init).build("debugger")])
         .build();
@@ -61,8 +90,10 @@ fn frames_dropped_after_a_fatal_leave_no_annex() {
     let out = String::from_utf8_lossy(&served.stdout);
     let counted = COUNTED.take();
     assert!(
-        counted.is_some_and(|(bailed_out, before, after)| bailed_out && before == after),
-        "bailed out, and the annexes before and after: {counted:?}; {out}"
+        counted.is_some_and(|counted| counted.bailed_out
+            && counted.left
+            && counted.annexes.iter().all(|&n| n == counted.annexes[0])),
+        "{counted:?}; {out}"
     );
     assert!(out.ends_with("on\n"), "the request went on: {out}");
 }

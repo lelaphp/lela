@@ -275,7 +275,8 @@ impl Request {
         self.swap_observing(&mut observing);
         std::mem::swap(&mut self.vm.stack, &mut vm.stack);
         self.vm = vm;
-        self.vm.stack.put_back(&mut self.heap, frames);
+        let dropped = self.vm.stack.put_back(&mut self.heap, frames);
+        self.drop_frames(dropped);
         for frame in bound {
             self.attach_symbol_table(frame);
         }
