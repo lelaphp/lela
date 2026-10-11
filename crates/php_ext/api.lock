@@ -723,7 +723,6 @@ request::Request::current_file
 request::Request::current_line
 request::Request::cwd
 request::Request::declared_classes
-request::Request::define_constant
 request::Request::defined_functions
 request::Request::disown
 request::Request::dl
@@ -764,11 +763,7 @@ request::Request::frameless
 request::Request::function_decl
 request::Request::function_extension
 request::Request::functions
-request::Request::gc_collect
-request::Request::gc_enable
-request::Request::gc_enabled
 request::Request::gc_possible_root
-request::Request::gc_status
 request::Request::global
 request::Request::global_names
 request::Request::header_add
@@ -814,7 +809,6 @@ request::Request::method_named
 request::Request::method_row
 request::Request::method_rows
 request::Request::multibyte_provider
-request::Request::named_arguments
 request::Request::native_static_trampoline
 request::Request::native_trampoline
 request::Request::observe_allocations
@@ -848,14 +842,11 @@ request::Request::request_headers
 request::Request::request_method
 request::Request::request_time
 request::Request::request_uri
-request::Request::reset_memory_peak
 request::Request::resolve_path
 request::Request::resource
 request::Request::resources
 request::Request::response_code
 request::Request::response_headers
-request::Request::restore_error_handler
-request::Request::restore_exception_handler
 request::Request::return_value_used
 request::Request::row_method
 request::Request::row_prototype
@@ -872,7 +863,6 @@ request::Request::set_cwd
 request::Request::set_display_errors
 request::Request::set_env
 request::Request::set_error_handler
-request::Request::set_exception_handler
 request::Request::set_frame_var
 request::Request::set_global
 request::Request::set_header_callback
@@ -880,7 +870,6 @@ request::Request::set_local_var
 request::Request::set_locale_name
 request::Request::set_response_code
 request::Request::set_shutdown_function
-request::Request::set_time_limit
 request::Request::set_umask
 request::Request::stack_limit_address
 request::Request::stack_overflowed
@@ -903,7 +892,6 @@ request::Request::unit_cache
 request::Request::unobserve_allocations
 request::Request::unregister_tick_function
 request::Request::update_server
-request::Request::variadic_arguments
 request::Request::virtual_file_ex
 request::Request::with_fake_scope
 request::Request::with_fiber_switch_blocked
