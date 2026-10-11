@@ -5,7 +5,7 @@
 //! can resolve at that scale.
 //!
 //! **The arms.** One makala, built in `release`, the bench lane's profile,
-//! serving the workload under its own name in a directory of its
+//! serving the workload as the recipe's `script_name` in a directory of its
 //! own; and one pool of the pinned php-fpm handed the same request under
 //! the pin's `[fastcgi]` mapping (`witness::makala::Fpm`), the client a web
 //! server in front of it would be. Each is started once for the bar and a
@@ -156,8 +156,8 @@ fn started(root: &Path, entry: &Entry) -> Result<Option<Started>> {
 /// Why a bar of the production server is not measured on this machine.
 const NO_FPM: &str = "this machine has not the pinned php-fpm oracle.toml's [sapi] names";
 
-/// One makala over a directory holding the workload under its own name,
-/// kept for every rep of a bar; the directory goes after
+/// One makala over a directory holding the workload as the recipe's
+/// `script_name`, kept for every rep of a bar; the directory goes after
 /// the server.
 struct Served {
     server: Server,

@@ -140,8 +140,11 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
 }
 
 /// The bench workloads of the workspace at `root`, each a `GET` with no
-/// ini of its own, in the order of their names.
+/// ini of its own, in the order of their names, written under the recipe's
+/// `script_name`, the request the server's bench series has sent since it
+/// began (#2351).
 pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
+    let script = Manifest::load(root)?.pin.recipe.script_name;
     let dir = root.join(WORKLOADS);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -157,7 +160,7 @@ pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
                 id: format!("{WORKLOADS}/{name}"),
                 program: std::fs::read(&path)
                     .with_context(|| format!("reading {}", path.display()))?,
-                script: name.into_owned(),
+                script: script.clone(),
                 skipif: None,
                 http: Http::get(),
                 ini: Vec::new(),
