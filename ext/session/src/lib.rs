@@ -40,6 +40,7 @@ mod user;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IntoReturn};
 use php_ext::attr::php_const;
+use php_ext::coerce::strtol;
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpRef, PhpString, Value};
@@ -357,29 +358,12 @@ fn ini(req: &Request, name: &[u8]) -> Vec<u8> {
 /// A long entry as `OnUpdateLong` stores it, `ZEND_STRTOL`'s leading
 /// number.
 fn ini_long(req: &Request, name: &[u8]) -> i64 {
-    atol(&ini(req, name))
+    strtol(&ini(req, name))
 }
 
 /// A boolean entry as `OnUpdateBool` stores it.
 fn ini_bool(req: &Request, name: &[u8]) -> bool {
     Request::ini_parse_bool(&ini(req, name))
-}
-
-/// `atol`: optional blanks, a sign and the digits that follow, zero for
-/// none, saturating as `strtol` does.
-fn atol(bytes: &[u8]) -> i64 {
-    let s = String::from_utf8_lossy(bytes);
-    let s = s.trim_start();
-    let (negative, digits) = match s.as_bytes().first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
-    };
-    let digits: String = digits.chars().take_while(char::is_ascii_digit).collect();
-    let n = digits
-        .parse::<i64>()
-        .unwrap_or(if digits.is_empty() { 0 } else { i64::MAX });
-    if negative { n.saturating_neg() } else { n }
 }
 
 /// `php_session_session_already_started_error`: the message, then where

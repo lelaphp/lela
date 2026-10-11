@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use php_ext::coerce::{atoi, strtol};
 use php_ext::request::{MAXPATHLEN, Request, StreamCtx};
 use php_ext::values::{Owner, PhpObject, Value, ValueRef};
 use php_ext_standard::md5::Md5;
@@ -29,7 +30,6 @@ use crate::model::{
     SOAP_1_1_ENC_NAMESPACE, SOAP_1_2_ENC_NAMESPACE, Sdl, SoapBinding, SoapBindingFunction,
     SoapFaultBinding, Style, ToXml, ToZval, Type, TypeId, TypeKind, Use, XSD_NAMESPACE, builtin,
 };
-use crate::schema::{atoi, strtol};
 use crate::sdl::get_encoder_ex;
 use crate::sdl::wsdl::load_wsdl;
 use crate::shared::{ClientSlot, client_slot, instance_of};

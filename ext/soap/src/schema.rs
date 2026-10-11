@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use php_ext::coerce::atoi;
 use php_ext::request::Request;
 use php_ext_libxml::ffi::{Library, Node};
 
@@ -26,57 +27,6 @@ use crate::{Error, Res, soap_error};
 /// Bytes as the text php prints them with `%s`.
 pub(crate) fn lossy(bytes: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(bytes)
-}
-
-/// `strtol(s, NULL, 10)`: leading blanks, a sign and the digits, the
-/// `long` held at its bounds where it overflows.
-pub(crate) fn strtol(s: &[u8]) -> i64 {
-    let mut at = 0;
-    while at < s.len() && matches!(s[at], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
-        at += 1;
-    }
-    let negative = match s.get(at) {
-        Some(b'-') => {
-            at += 1;
-            true
-        }
-        Some(b'+') => {
-            at += 1;
-            false
-        }
-        _ => false,
-    };
-    let mut n: i64 = 0;
-    let mut overflow = false;
-    while let Some(d) = s.get(at).filter(|c| c.is_ascii_digit()) {
-        match n
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(i64::from(d - b'0')))
-        {
-            Some(v) => n = v,
-            None => overflow = true,
-        }
-        at += 1;
-    }
-    match (overflow, negative) {
-        (true, true) => i64::MIN,
-        (true, false) => i64::MAX,
-        (false, true) => -n,
-        (false, false) => n,
-    }
-}
-
-/// `atoi`: [`strtol`] into an `int`, which keeps the low bits.
-pub(crate) fn atoi(s: &[u8]) -> i32 {
-    low_bits(strtol(s))
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "`atoi` is `(int)strtol(...)`, which keeps the low 32 bits"
-)]
-fn low_bits(long: i64) -> i32 {
-    long as i32
 }
 
 /// `node_is_equal_xsd`: the node named `name` in one of XML Schema's
@@ -1876,15 +1826,7 @@ pub(crate) fn schema_pass2(ctx: &mut Ctx) -> Res<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{atoi, white_space_collapse};
-
-    #[test]
-    fn atoi_reads_as_strtol_does() {
-        assert_eq!(atoi(b" 12x"), 12);
-        assert_eq!(atoi(b"-3"), -3);
-        assert_eq!(atoi(b"unbounded"), 0);
-        assert_eq!(atoi(b"4294967297"), 1);
-    }
+    use super::white_space_collapse;
 
     #[test]
     fn collapse_trims_and_joins() {

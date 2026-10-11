@@ -38,7 +38,7 @@ use php_ext::abi::{
     Validation, ZendExtension,
 };
 use php_ext::attr::{php_class, php_function};
-use php_ext::coerce::to_callable;
+use php_ext::coerce::{atoi, to_callable};
 use php_ext::raising::{Thrown, notice, warning};
 use php_ext::request::{
     CacheStatus, Invalidation, PHP_VERSION, PreloadStatistics, Request, Restart,
@@ -463,13 +463,13 @@ pub(crate) fn max_cached_keys(req: &Request) -> i64 {
         5, 11, 19, 53, 107, 223, 463, 983, 1979, 3907, 7963, 16229, 32531, 65407, 130_987, 262_237,
         524_521, 1_048_793,
     ];
-    let files = ini::atoi(value(req, "opcache.max_accelerated_files"));
+    let files = i64::from(atoi(value(req, "opcache.max_accelerated_files")));
     PRIMES.into_iter().find(|p| files <= *p).unwrap_or(files)
 }
 
 /// The megabytes `opcache.memory_consumption` gives the cache, in bytes.
 pub(crate) fn consumption(req: &Request) -> i64 {
-    ini::atoi(value(req, "opcache.memory_consumption")).saturating_mul(1 << 20)
+    i64::from(atoi(value(req, "opcache.memory_consumption"))).saturating_mul(1 << 20)
 }
 
 /// `date($format, $at)` as php's `php_format_date` answers it, under the

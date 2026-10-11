@@ -8,8 +8,8 @@ use php_ext::abi::{Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::lookup_class;
 use php_ext::coerce::{
-    callable_name, is_callable as callable, is_type, numeric_string, to_array, to_double, to_long,
-    to_object, to_string, truthy,
+    callable_name, is_callable as callable, is_space, is_type, numeric_string, to_array, to_double,
+    to_long, to_object, to_string, truthy,
 };
 use php_ext::raising::{Thrown, arg_value_error, throw_error, warning};
 use php_ext::request::Request;
@@ -398,6 +398,19 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
 /// int(0)
 /// int(1)
 /// ```
+///
+/// The white space `strtol` skips is C's `isspace` under the request's
+/// `LC_CTYPE`, which under macOS's `C.UTF-8`, php's default, counts 0xA0.
+///
+/// ```php
+/// var_dump(intval("\xa0 12", 16), intval("\xa012", 0));
+/// setlocale(LC_CTYPE, "C"); var_dump(intval("\xa012", 16));
+/// ```
+/// ```expect
+/// int(18)
+/// int(12)
+/// int(0)
+/// ```
 #[php_function]
 fn intval(req: &mut Request, value: Value, #[php(default = 10)] base: i64) -> Result<i64, Thrown> {
     let Some(text) = value.as_str_bytes().map(<[u8]>::to_vec) else {
@@ -424,15 +437,12 @@ fn intval(req: &mut Request, value: Value, #[php(default = 10)] base: i64) -> Re
     Ok(strtol(&text, base))
 }
 
-/// `isspace` in the C locale.
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r')
-}
-
 /// `ZEND_STRTOL(s, NULL, base)`, the C library's `strtoll`: whitespace,
 /// a sign, a `0x` prefix for base 16 or 0 and a leading `0` for base 0,
 /// the longest stretch of digits the base has, and the long's bound where it
-/// overflows; zero for a base outside 2 to 36.
+/// overflows; zero for a base outside 2 to 36. Kept beside the face's
+/// `strtol`, which reads base 10 alone; the white space it skips is the
+/// face's `is_space`, C's under the thread's `LC_CTYPE`.
 pub(crate) fn strtol(bytes: &[u8], base: i64) -> i64 {
     let mut at = bytes
         .iter()

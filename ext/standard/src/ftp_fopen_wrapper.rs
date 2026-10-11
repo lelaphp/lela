@@ -12,7 +12,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::truthy;
+use php_ext::coerce::{atoi, strtol, truthy};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
     Closer, DirListing, Handshake, MAXPATHLEN, Notification, NotifyCode, Opening, OwnedStream as _,
@@ -87,23 +87,6 @@ impl Reply {
     }
 }
 
-/// `strtol(buffer, NULL, 10)`: blanks, a sign, the digits.
-fn strtol(s: &[u8]) -> i64 {
-    let s = s.trim_ascii_start();
-    let (negative, digits) = match s.first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
-    };
-    let n = digits
-        .iter()
-        .take_while(|d| d.is_ascii_digit())
-        .fold(0i64, |n, d| {
-            n.saturating_mul(10).saturating_add(i64::from(d - b'0'))
-        });
-    if negative { -n } else { n }
-}
-
 /// The part of a byte string php's `%s` prints: what comes before its
 /// first NUL.
 fn cstr(s: &[u8]) -> &[u8] {
@@ -123,7 +106,8 @@ fn get_result(req: &mut Request, stream: Stream) -> Result<Reply, Thrown> {
         }
     }
     Ok(Reply {
-        code: strtol(cstr(&line)),
+        // `get_ftp_result` answers its `strtol` as an `int`: C's `atoi`.
+        code: i64::from(atoi(cstr(&line))),
         line,
     })
 }
@@ -611,7 +595,7 @@ fn prepare(
             }
             let mut file_size = 0;
             if let Some(space) = cstr(&last.line).iter().position(|b| *b == b' ') {
-                file_size = usize::try_from(strtol(&last.line[space + 1..])).unwrap_or(0);
+                file_size = usize::try_from(atoi(&last.line[space + 1..])).unwrap_or(0);
                 notify(
                     req,
                     ctx,
@@ -1018,7 +1002,7 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<Owner<PhpArray>>, Th
         command(req, control, b"SIZE", Some(&file));
         let reply = get_result(req, control)?;
         let size = if reply.class() == Class::Completion {
-            strtol(reply.line.get(4..).unwrap_or_default())
+            i64::from(atoi(reply.line.get(4..).unwrap_or_default()))
         } else if dir {
             0
         } else {

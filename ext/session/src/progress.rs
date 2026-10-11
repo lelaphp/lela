@@ -10,6 +10,7 @@
 //! starts, before the session's own `RINIT`.
 
 use php_ext::abi::{Beneath, chain};
+use php_ext::coerce::strtol;
 use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, walk};
@@ -272,7 +273,7 @@ fn freq(req: &mut Request) -> i64 {
     let text = String::from_utf8_lossy(&text);
     match text.trim().strip_suffix('%') {
         Some(percent) => -percent.trim().parse::<i64>().unwrap_or(0),
-        None => crate::atol(text.as_bytes()),
+        None => strtol(text.as_bytes()),
     }
 }
 

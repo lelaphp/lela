@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::abi::{Instance, OrFalse, Ref, Refusals, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::with_string;
+use php_ext::coerce::{atoi, with_string};
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -436,21 +436,6 @@ pub(crate) fn name_entries(
     Ok(())
 }
 
-/// `atoi`: leading digits after optional blanks and a sign, 0 for none.
-fn atoi(bytes: &[u8]) -> i64 {
-    let text = bytes.iter().skip_while(|b| b.is_ascii_whitespace());
-    let mut sign = 1;
-    let mut n: i64 = 0;
-    for (i, &b) in text.enumerate() {
-        match b {
-            b'-' | b'+' if i == 0 => sign = if b == b'-' { -1 } else { 1 },
-            b'0'..=b'9' => n = n.saturating_mul(10).saturating_add(i64::from(b - b'0')),
-            _ => break,
-        }
-    }
-    sign * n
-}
-
 /// `timegm`: seconds since the epoch of a broken-down UTC time, its
 /// fields normalised as `mktime` normalises them.
 fn timegm(year: i64, mon: i64, mday: i64, hour: i64, min: i64, sec: i64) -> i64 {
@@ -491,7 +476,7 @@ fn time_t(req: &mut Request, time: &Asn1String) -> i64 {
     let mut buf = time.data.clone();
     let mut at = len - 3;
     let mut take = |step: usize, buf: &mut Vec<u8>| {
-        let n = atoi(&buf[at..]);
+        let n = i64::from(atoi(&buf[at..]));
         buf[at] = 0;
         at = at.saturating_sub(step);
         n
@@ -502,10 +487,10 @@ fn time_t(req: &mut Request, time: &Asn1String) -> i64 {
     let mday = take(2, &mut buf);
     let mon = take(if time.kind == UTC { 2 } else { 4 }, &mut buf) - 1;
     let year = if time.kind == UTC {
-        let year = atoi(&buf[len - 13..]);
+        let year = i64::from(atoi(&buf[len - 13..]));
         if year < 68 { year + 2000 } else { year + 1900 }
     } else {
-        atoi(&buf[len - 15..])
+        i64::from(atoi(&buf[len - 15..]))
     };
     timegm(year, mon, mday, hour, min, sec)
 }
