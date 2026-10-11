@@ -211,9 +211,17 @@ impl Request {
     /// `set_exception_handler()` set, or rendered as the uncaught fatal
     /// and left by `zend_bailout` ([`Request::thrown_without_frame`]);
     /// pending for the frame that stands otherwise. A fatal or an exit
-    /// the raiser recorded itself is left as it stands.
+    /// the raiser recorded itself is left as it stands. Where the unwind
+    /// exit is what is pending, the throwable is given up, since php does
+    /// not put a different throwable in the place of what is unwinding
+    /// (`Z/Zend/zend_exceptions.c:195-199`); [`Request::leave_pending`]
+    /// gives it up so.
     pub(crate) fn throw_internal(&mut self, thrown: &Thrown) {
         if thrown.exception().is_none() {
+            return;
+        }
+        if self.unwind_exit() {
+            self.leave_pending(thrown);
             return;
         }
         match self.take_raised() {
