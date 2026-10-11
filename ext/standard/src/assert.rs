@@ -26,7 +26,7 @@ use php_ext::coerce::{to_callable, to_string, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, arity, docref, new_throwable, throw_chained, throw_value,
-    uncaught_at,
+    uncaught_at, while_pending,
 };
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
@@ -285,6 +285,42 @@ fn flag(req: &Request, name: &[u8]) -> bool {
 /// assert(false) / from the callback
 /// ```
 ///
+/// The warning is raised with that throwable pending, as php's
+/// `php_error_docref` is with `EG(exception)` set: a user error handler
+/// is handed nothing, since `zend_call_function` returns at once, and the
+/// `UNDEF` it leaves serves nothing, so with a handler set the warning is
+/// not shown; under `assert.bail` the throwable is then rendered uncaught
+/// at `E_WARNING`.
+///
+/// ```php
+/// @ini_set("assert.exception", 0);
+/// @ini_set("assert.bail", 1);
+/// @ini_set("assert.callback", "f1");
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// set_error_handler(function ($no, $str) { echo "handler($no): $str\n"; return false; });
+/// assert(false);
+/// echo "not reached\n";
+/// ```
+/// ```expect
+/// Warning: Uncaught Error: Invalid callback f1, function "f1" not found or invalid function name in %s:7
+/// Stack trace:
+/// #0 %s(7): assert(false, 'assert(false)')
+/// #1 {main}
+///   thrown in %s on line 7
+/// shutdown
+/// ```
+///
+/// ```php
+/// @ini_set("assert.exception", 0);
+/// function cb() { throw new Exception("from the callback"); }
+/// @ini_set("assert.callback", "cb");
+/// set_error_handler(function ($no, $str) { echo "handler($no): $str\n"; return false; });
+/// try { var_dump(assert(false)); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// from the callback
+/// ```
+///
 /// The entry's callback is made into a string once and kept, as
 /// `ASSERTG(callback)` keeps it, so an assertion that serves a callback
 /// with no function behind it keeps and peaks at php's sizes:
@@ -356,50 +392,7 @@ fn assert(
         None => None,
     };
     let text = described.map(|text| text.as_bytes().to_vec());
-    // `ZVAL_STRING(&ASSERTG(callback), ASSERTG(cb))`: the entry's string
-    // made once and kept as the callback until the entry changes.
-    if req.state::<crate::State>().assert.callback.is_none()
-        && let Some(cb) = req.ini_get(b"assert.callback").filter(|cb| !cb.is_empty())
-    {
-        let cb = cb.to_vec();
-        let cb = PhpString::new(req, &cb)?.into_value();
-        req.state::<crate::State>().assert.callback = Some(cb);
-    }
-    let callback = req
-        .state::<crate::State>()
-        .assert
-        .callback
-        .as_deref()
-        .copied();
-    // `call_user_function`: what the callback, or its resolution,
-    // throws stands pending while the assertion goes on, and an
-    // `AssertionError` chains it as its `previous`.
-    let mut pending = None;
-    if let Some(callback) = callback {
-        // `ZVAL_STR(&args[0], filename)`, the op array's file name, and
-        // `ZVAL_STR(&args[3], description_str)`, the argument itself:
-        // neither is a copy.
-        let file = req.current_file().unwrap_or(b"Unknown").to_vec();
-        let line = i64::from(req.current_line());
-        let mut arguments = vec![
-            Value::string(PhpString::interned(req, &file)?),
-            Value::int(line),
-            Value::null(),
-        ];
-        let described = described.map(|text| Owner::take(req, text));
-        if let Some(text) = &described {
-            arguments.push(Value::string(**text));
-        }
-        let returned =
-            to_callable(req, &callback).and_then(|callable| call(req, &callable, &arguments));
-        if let Some(text) = described {
-            text.give_up(req);
-        }
-        match returned {
-            Ok(returned) => returned.give_up(req),
-            Err(thrown) => pending = Some(thrown),
-        }
-    }
+    let pending = callback(req, described)?;
     let message = text.as_deref().map(String::from_utf8_lossy);
     if flag(req, b"assert.exception") {
         let message = message.as_deref().unwrap_or("");
@@ -429,7 +422,16 @@ fn assert(
     }
     if flag(req, b"assert.warning") {
         let what = message.as_deref().unwrap_or("Assertion");
-        docref(req, Level::Warning, &format!("{what} failed"));
+        let warn = |req: &mut Request| docref(req, Level::Warning, &format!("{what} failed"));
+        // `php_error_docref` with what the callback threw in
+        // `EG(exception)`: served as php serves a diagnostic while a
+        // throwable is pending, and nothing where a fatal or an exit left.
+        match &pending {
+            Some(thrown) => {
+                while_pending(req, thrown, warn);
+            }
+            None => warn(req),
+        }
     }
     if flag(req, b"assert.bail") {
         // "The callback might have thrown. Use E_WARNING to print the
@@ -443,6 +445,60 @@ fn assert(
         return Err(thrown);
     }
     Ok(false)
+}
+
+/// `assert()`'s `ASSERTG(callback)`, called with the file, the line,
+/// `null` and the description where one was given: what it threw, or
+/// what resolving it threw, is the `Ok`, for the assertion to carry on
+/// past as php carries on with it in `EG(exception)`.
+fn callback(req: &mut Request, described: Option<PhpString>) -> Result<Option<Thrown>, Thrown> {
+    // `ZVAL_STRING(&ASSERTG(callback), ASSERTG(cb))`: the entry's string
+    // made once and kept as the callback until the entry changes.
+    if req.state::<crate::State>().assert.callback.is_none()
+        && let Some(cb) = req.ini_get(b"assert.callback").filter(|cb| !cb.is_empty())
+    {
+        let cb = cb.to_vec();
+        let cb = PhpString::new(req, &cb)?.into_value();
+        req.state::<crate::State>().assert.callback = Some(cb);
+    }
+    let callback = req
+        .state::<crate::State>()
+        .assert
+        .callback
+        .as_deref()
+        .copied();
+    // `call_user_function`: what the callback, or its resolution,
+    // throws stands pending while the assertion goes on, and an
+    // `AssertionError` chains it as its `previous`.
+    let Some(callback) = callback else {
+        return Ok(None);
+    };
+    // `ZVAL_STR(&args[0], filename)`, the op array's file name, and
+    // `ZVAL_STR(&args[3], description_str)`, the argument itself:
+    // neither is a copy.
+    let file = req.current_file().unwrap_or(b"Unknown").to_vec();
+    let line = i64::from(req.current_line());
+    let mut arguments = vec![
+        Value::string(PhpString::interned(req, &file)?),
+        Value::int(line),
+        Value::null(),
+    ];
+    let described = described.map(|text| Owner::take(req, text));
+    if let Some(text) = &described {
+        arguments.push(Value::string(**text));
+    }
+    let returned =
+        to_callable(req, &callback).and_then(|callable| call(req, &callable, &arguments));
+    if let Some(text) = described {
+        text.give_up(req);
+    }
+    match returned {
+        Ok(returned) => {
+            returned.give_up(req);
+            Ok(None)
+        }
+        Err(thrown) => Ok(Some(thrown)),
+    }
 }
 
 /// `assert_options(int $option, mixed $value = UNKNOWN): mixed`,
