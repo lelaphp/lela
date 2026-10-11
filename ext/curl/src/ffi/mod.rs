@@ -48,7 +48,7 @@ use php_ext::raising::{Cause, Thrown};
 use php_ext::request::{ForeignId, Request};
 use php_ext::values::{Owner, Value};
 
-pub(crate) use easy::{Address, Easy, EasyId, Hook, Info, MimeBuilder};
+pub(crate) use easy::{Address, Easy, EasyId, Hook, Info, MimeBuilder, Posted};
 pub(crate) use multi::{Multi, MultiId, Persistent, Share, ShareRef, Shared};
 
 use sys::CURL_ERROR_SIZE as ERROR_SIZE;

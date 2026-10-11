@@ -83,3 +83,25 @@ fn a_copy_s_lists_and_file_parts_outlive_the_original() {
         "bool(false)\nint(37)\nbool(false)\n",
     );
 }
+
+/// A form whose element throws while it is built goes on past the
+/// throw, as php's walk goes on with `EG(exception)` set, and is set as
+/// the walk ends; the `CURLFile` part's stream closes with the `CurlHandle`
+/// and the throwable reaches the `catch` (#2519).
+#[test]
+fn a_form_whose_element_throws_closes_its_file_parts() {
+    let file = Scratch::new("curl-form-throws", b"x");
+    served(
+        &format!(
+            "<?php class T {{ function __toString(): string {{ throw new Exception('no'); }} }}\n\
+             class U {{ function __toString(): string {{ echo \"U\\n\"; return 'u'; }} }}\n\
+             $c = curl_init('file:///nonexistent-curl-form');\n\
+             try {{ curl_setopt($c, CURLOPT_POSTFIELDS, ['a' => new CURLFile('{0}'), 'b' => new T]); }} catch (Exception $e) {{ echo $e->getMessage(), \"\\n\"; }}\n\
+             try {{ curl_setopt($c, CURLOPT_POSTFIELDS, ['b' => new T, 'a' => new CURLFile('{0}'), 's' => new CURLStringFile('d', 'p')]); }} catch (Exception $e) {{ echo $e->getMessage(), \"\\n\"; }}\n\
+             try {{ curl_setopt($c, CURLOPT_POSTFIELDS, ['b' => new T, 'u' => new U, 'l' => [new U, new T]]); }} catch (Exception $e) {{ echo $e->getMessage(), \"\\n\"; }}\n\
+             unset($c); echo \"end\\n\";\n",
+            file.0.display()
+        ),
+        "no\nno\nno\nend\n",
+    );
+}

@@ -650,10 +650,29 @@ impl EasyId {
         self.with(req, None, |handle| info_of(handle.raw(), info))
     }
 
+    /// `curl_mime_init(ch->cp)` filled by `fill`, then, as `fill`
+    /// answers, pointed at by `CURLOPT_MIMEPOST` ([`EasyId::set_mime`])
+    /// or freed with the request lent, so its file parts close what they
+    /// opened (`out_mime`). The tree never leaves this call, so no way
+    /// out of `fill` leaves it standing. `None` where the library made no
+    /// tree; beside where the tree went, what its set or its free threw.
+    pub(crate) fn post_form(
+        self,
+        req: &mut Request,
+        fill: impl FnOnce(&mut Request, &mut MimeBuilder) -> bool,
+    ) -> Option<(Posted, Option<Thrown>)> {
+        let mut mime = self.mime(req)?;
+        if fill(req, &mut mime) {
+            let (code, thrown) = self.set_mime(req, mime.mime);
+            return Some((Posted::Set(code), thrown));
+        }
+        Some((Posted::Freed, mime.discard(req)))
+    }
+
     /// A MIME tree made on this `CURL *` and pointed at by
     /// `CURLOPT_MIMEPOST`, held by the `CURL *` in place of the ones it
     /// held; the code is the library's.
-    pub(crate) fn set_mime(self, req: &mut Request, mime: Mime) -> (i32, Option<Thrown>) {
+    fn set_mime(self, req: &mut Request, mime: Mime) -> (i32, Option<Thrown>) {
         let tree = mime.raw.as_ptr();
         let Some((raw, session)) = self.with(req, None, |handle| {
             Some((handle.raw(), handle.tag().session.clone()))
@@ -685,7 +704,7 @@ impl EasyId {
     }
 
     /// `curl_mime_init(ch->cp)`, `None` where the library made none.
-    pub(crate) fn mime(self, req: &mut Request) -> Option<MimeBuilder> {
+    fn mime(self, req: &mut Request) -> Option<MimeBuilder> {
         self.with(req, None, |handle| {
             // SAFETY: a live handle.
             let raw = NonNull::new(unsafe { sys::curl_mime_init(handle.raw()) })?;
@@ -837,7 +856,17 @@ struct FilePart {
     source: Source,
 }
 
-/// A MIME tree being built.
+/// Where [`EasyId::post_form`] left the tree it built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Posted {
+    /// Pointed at by `CURLOPT_MIMEPOST`, with the library's code.
+    Set(i32),
+    /// Freed, the form given up.
+    Freed,
+}
+
+/// A MIME tree being built, lent to the fill of
+/// [`EasyId::post_form`] and to nothing else.
 pub(crate) struct MimeBuilder {
     mime: Mime,
     session: Session,
@@ -926,14 +955,9 @@ impl MimeBuilder {
         }))
     }
 
-    /// The tree, to be set.
-    pub(crate) fn build(self) -> Mime {
-        self.mime
-    }
-
     /// The tree given up, freed with the request reachable so its file
     /// parts close what they opened.
-    pub(crate) fn discard(self, req: &mut Request) -> Option<Thrown> {
+    fn discard(self, req: &mut Request) -> Option<Thrown> {
         let session = self.session.clone();
         let ((), thrown) = session.enter(req, || drop(self));
         thrown
