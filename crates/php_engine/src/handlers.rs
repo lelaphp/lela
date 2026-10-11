@@ -19915,20 +19915,47 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 11
 /// ```
-pub(crate) fn isset_isempty_dim_obj<T: Tier>(
+///
+/// `$this` as the container is `FETCH_THIS` into a temporary first, as
+/// php compiles it, so the opcode reads only the kinds its spec lists,
+/// in a method and outside one alike:
+///
+/// ```php
+/// class T implements ArrayAccess {
+///     public function offsetExists($offset): bool { echo "e"; return $offset === 0; }
+///     public function offsetGet($offset): mixed { echo "g"; return [1 => 0]; }
+///     public function offsetSet($offset, $value): void {}
+///     public function offsetUnset($offset): void {}
+///     public function t() { return [isset($this[0]), empty($this[0]), isset($this[0][1]), isset($this[1])]; }
+/// }
+/// var_dump((new T)->t());
+/// try { var_dump(isset($this[0])); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// eegegearray(4) {
+///   [0]=>
+///   bool(true)
+///   [1]=>
+///   bool(false)
+///   [2]=>
+///   bool(true)
+///   [3]=>
+///   bool(false)
+/// }
+/// Using $this when not in object context
+/// ```
+pub(crate) fn isset_isempty_dim_obj<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    // Read through `ByKind` and not specialised: this compiler writes
-    // `isset($this[0])` over an `UNUSED` container where php's writes a
-    // `FETCH_THIS` first, a kind the spec does not list.
-    let at = req.vm().opline(frame);
-    let operands = (ByKind(op.op1_type), ByKind(op.op2_type));
+    let operands = (A::default(), B::default());
     if let Some(edge) = inline_isset_dim::<T>(req, frame, code, op, at, operands) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     tested_dim::<T>(req, frame, code, op)
 }
 
