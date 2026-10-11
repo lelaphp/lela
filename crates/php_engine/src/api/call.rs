@@ -51,9 +51,10 @@ impl Function {
     pub(crate) const ENUM: u32 = 1 << 29;
 
     /// Whether every request shares the function: a native, or a row of
-    /// the engine's published arena; not one of this request's own.
-    #[must_use]
-    pub fn is_published(self) -> bool {
+    /// the engine's published arena; not one of this request's own. Only
+    /// the preload's tests ask it.
+    #[cfg(test)]
+    pub(crate) fn is_published(self) -> bool {
         self.0 & Function::LOCAL == 0
     }
 

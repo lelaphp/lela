@@ -170,7 +170,6 @@ abi::Header::register
 abi::HoldsCoroutine
 abi::HoldsCoroutine::coroutine
 abi::IniStage
-abi::IniVerdict
 abi::Instance
 abi::Instance::object
 abi::Instance::of
@@ -340,7 +339,6 @@ attr::php_class
 attr::php_const
 attr::php_function
 call::Function
-call::Function::is_published
 call::Iter
 call::Iter::as_value
 call::Iter::invalidate
@@ -1102,13 +1100,8 @@ syntax::Tree
 syntax::Tree::elements
 syntax::Tree::nodes
 syntax::Tree::root
-syntax::amp_name
-syntax::cast_name
 syntax::highlight
-syntax::int_overflows
 syntax::lex
-syntax::magic_const_name
-syntax::operator_name
 syntax::parse
 syntax::parse_ini
 syntax::scanned
@@ -1152,7 +1145,6 @@ values::Charset::partial
 values::Charset::single_byte
 values::Charset::unicode_compat
 values::ClassId
-values::ClassId::is_published
 values::ClosureInfo
 values::DeclaredRows
 values::Emalloc

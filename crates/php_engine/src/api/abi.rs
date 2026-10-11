@@ -160,9 +160,12 @@ impl Refusal {
     }
 }
 
-/// What an ini entry's `on_modify` function says of a new value.
+/// What Core's own check of an ini value says of it, the `OnUpdate*`
+/// refusals of `Z/main/main.c` that [`Request::ini_verdict`] reads.
+///
+/// [`Request::ini_verdict`]: crate::api::request::Request::ini_verdict
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IniVerdict {
+pub(crate) enum IniVerdict {
     Accepted,
     Rejected,
 }
