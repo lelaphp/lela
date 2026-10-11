@@ -94,7 +94,7 @@ const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 
 /// The dump as it is written: bytes and not text, since php's
 /// `fprintf` prints a name, a jump table's key and the file name as the
-/// bytes they are (`%s`), whatever encoding they are in; only the words
+/// bytes they are (`%s`, up to a NUL), whatever encoding they are in; only the words
 /// around them are php's ASCII.
 #[derive(Default)]
 struct Out(Vec<u8>);
@@ -108,9 +108,11 @@ impl Out {
         self.0.extend_from_slice(words.as_bytes());
     }
 
-    /// A name, a key or a file name, byte for byte.
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.0.extend_from_slice(bytes);
+    /// A name, a key or a file name as `%s` prints a C string: byte for
+    /// byte, up to its first NUL.
+    fn c_string(&mut self, bytes: &[u8]) {
+        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+        self.0.extend_from_slice(&bytes[..end]);
     }
 }
 
@@ -257,7 +259,7 @@ fn shaped(
     frameless: &[Name],
 ) {
     out.push('\n');
-    out.bytes(name);
+    out.c_string(name);
     writeln!(
         out,
         ":\n     ; (lines={}, args={args}, vars={}, tmps={})",
@@ -270,7 +272,7 @@ fn shaped(
         writeln!(out, "     ; (before optimizer)").ok();
     }
     out.push_str("     ; ");
-    out.bytes(&body.filename.0);
+    out.c_string(&body.filename.0);
     writeln!(out, ":{}-{}", body.line_start, body.line_end).ok();
     if shape == Shape::BeforeOptimizer {
         writeln!(out, "     ; return  [] RANGE[0..0]").ok();
@@ -363,7 +365,7 @@ fn opline(out: &mut Out, body: &OpArray, op: &Opline, frameless: &[Name]) {
 fn frameless_name(out: &mut Out, op: &Opline, frameless: &[Name]) {
     out.push('(');
     match frameless.get(op.extended_value as usize) {
-        Some(name) => out.bytes(&name.0),
+        Some(name) => out.c_string(&name.0),
         None => out.push('?'),
     }
     out.push(')');
@@ -438,10 +440,8 @@ fn jump_table(out: &mut Out, value: Option<Zval>) {
                 write!(out, " {n}:").ok();
             }
             php_heap::Key::Str(s) => {
-                let bytes = s.bytes();
-                let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
                 out.push_str(" \"");
-                out.bytes(&bytes[..end]);
+                out.c_string(s.bytes());
                 out.push_str("\":");
             }
         }
@@ -499,7 +499,7 @@ fn var(out: &mut Out, body: &OpArray, kind: OperandKind, number: u32) {
                 .map(|n| &*n.0)
                 .unwrap_or_default();
             write!(out, "CV{number}($").ok();
-            out.bytes(name);
+            out.c_string(name);
             out.push(')');
         }
         OperandKind::Var => {
@@ -1182,7 +1182,9 @@ mod tests {
     /// The oracle over `ext/intl/tests/uconverter_oop_callback_return.phpt`
     /// prints `SWITCH_STRING CV2($codeUnits) "\x80": 0015, ...` with the
     /// key's own byte where UTF-8 has no character, as `%s` prints it;
-    /// a function's name, a CV's and the file's are bytes alike.
+    /// a function's name, a CV's and the file's are bytes alike, each up
+    /// to its first NUL, as `zend_dump_var` prints the CV of
+    /// `Zend/tests/heredoc_nowdoc/warning_during_heredoc_scan_ahead.phpt`.
     #[test]
     fn a_name_a_key_and_the_file_print_as_their_bytes() {
         use php_heap::{Intern, Key, Strings};
@@ -1220,7 +1222,7 @@ mod tests {
             vec![Zval::array(table)],
         );
         function.filename = Name(b"\xfe.php"[..].into());
-        function.vars = vec![Name(b"\xe9"[..].into())].into_boxed_slice();
+        function.vars = vec![Name(b"\xe9\0after"[..].into())].into_boxed_slice();
         function.num_cvs = 1;
         let unit = Unit {
             main: body(vec![], vec![]),
