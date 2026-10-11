@@ -1056,6 +1056,20 @@ fn throwing_resource(req: &mut Request) -> ResourceType {
 /// 4 #0 {main}
 /// 5 #0 {main} 3
 /// ```
+///
+/// Released by the unwinding of an `exit`, it is given up: what is
+/// unwinding is not replaced by a different throwable, and the request
+/// ends as the exit ends it, its shutdown functions served.
+///
+/// ```php
+/// function f() { $r = zend_test_create_throwing_resource(); exit("x\n"); }
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// f();
+/// ```
+/// ```expect
+/// x
+/// shutdown
+/// ```
 fn throw_from_dtor(req: &mut Request, _resource: Resource) -> Result<(), Thrown> {
     Err(throw(
         req,

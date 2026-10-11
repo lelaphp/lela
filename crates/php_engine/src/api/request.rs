@@ -942,12 +942,17 @@ impl Request {
 struct Hooks<'a>(&'a mut Request);
 
 impl Hooks<'_> {
-    /// A class's `dtor_obj` or `free_obj` served by a release. A stream
-    /// it closed whose user-space wrapper threw parks the throwable for
+    /// A step a release serves, a class's `dtor_obj` or `free_obj` or a
+    /// resource type's destructor, and what PHP code it served threw,
+    /// raised where the release stands as `zend_throw_exception_internal`
+    /// raises it ([`Request::throw_internal`]). A stream the step closed
+    /// whose user-space wrapper or filter threw parks the throwable for
     /// the native that asked to raise once it returns
-    /// ([`Request::stream_thrown`]); a release is no native, so what the
-    /// step parked is left pending here, for the release to raise, as
-    /// php's `EG(exception)` is.
+    /// ([`Request::stream_thrown`]); a release is no native, so the step
+    /// raises it here, where nothing was parked before the step began.
+    /// What the step answered as its `Err` is raised after that, so it
+    /// chains over the parked one, as php's `EG(exception)` takes both
+    /// in the order they were thrown.
     ///
     /// ```php
     /// class W {
@@ -969,11 +974,38 @@ impl Hooks<'_> {
     /// caught close
     /// end
     /// ```
-    fn released(&mut self, step: impl FnOnce(&mut Request)) {
+    ///
+    /// With no frame standing, at the request's end, it is handed to the
+    /// handler `set_exception_handler()` set:
+    ///
+    /// ```php
+    /// class W {
+    ///   public $context;
+    ///   function stream_open($p, $m, $o, &$op) { return true; }
+    ///   function stream_read($n) { return ''; }
+    ///   function stream_eof() { return true; }
+    ///   function stream_stat() { return []; }
+    ///   function url_stat($p, $f) { return ["mode" => 0100644]; }
+    ///   function stream_close() { echo "close\n"; throw new Exception("close"); }
+    /// }
+    /// stream_wrapper_register('ww', 'W');
+    /// set_exception_handler(function ($e) { echo "handler ", $e->getMessage(), "\n"; });
+    /// $f = new SplFileObject('ww://x');
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// close
+    /// handler close
+    /// ```
+    fn released(&mut self, step: impl FnOnce(&mut Request) -> Result<(), Thrown>) {
         let parked = self.0.stream_thrown.is_some();
-        step(self.0);
+        let answered = step(self.0);
         if !parked && let Some(thrown) = self.0.stream_thrown.take() {
-            self.0.leave_pending(&thrown);
+            self.0.throw_internal(&thrown);
+        }
+        if let Err(thrown) = answered {
+            self.0.throw_internal(&thrown);
         }
     }
 }
@@ -994,7 +1026,10 @@ impl HeapHooks for Hooks<'_> {
     /// as a release serves it ([`Hooks::released`]).
     fn destruct(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
-        self.released(|req| table.dtor_obj().serve(req, PhpObject::of(obj)));
+        self.released(|req| {
+            table.dtor_obj().serve(req, PhpObject::of(obj));
+            Ok(())
+        });
     }
 
     /// `free_obj`, through the table, as a release serves it
@@ -1002,7 +1037,10 @@ impl HeapHooks for Hooks<'_> {
     /// the drop after it is the heap's.
     fn free_native(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
-        self.released(|req| table.free_obj(req, PhpObject::of(obj)));
+        self.released(|req| {
+            table.free_obj(req, PhpObject::of(obj));
+            Ok(())
+        });
         self.0.free_beside(PhpObject::of(obj));
     }
 
@@ -1144,16 +1182,65 @@ impl HeapHooks for Hooks<'_> {
 
     /// `list_dtor_ex`: the type's destructor as registered, handed the
     /// resource with the type it had, as php hands it a copy of the
-    /// struct; a type with no destructor closes silently. What it throws
-    /// is raised as `zend_throw_exception_internal` raises it
-    /// ([`Request::throw_internal`]): chained over what was pending, and
-    /// at the request's end, with no frame standing, handed to the
-    /// handler `set_exception_handler()` set.
+    /// struct; a type with no destructor closes silently. What it throws,
+    /// answered as its `Err` or parked by a stream it closed, is raised
+    /// as a release raises it ([`Hooks::released`]).
+    ///
+    /// A stream an assignment releases, whose user-space wrapper's
+    /// `stream_close` throws, is the release's to raise (#2536):
+    ///
+    /// ```php
+    /// class W {
+    ///   public $context;
+    ///   function stream_open($p, $m, $o, &$op) { return true; }
+    ///   function stream_read($n) { return ''; }
+    ///   function stream_eof() { return true; }
+    ///   function stream_close() { echo "close\n"; throw new Exception("close"); }
+    /// }
+    /// stream_wrapper_register('ww', 'W');
+    /// $h = fopen('ww://y', 'r');
+    /// try { $h = null; echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// function f() { $h = fopen('ww://y', 'r'); return 1; }
+    /// try { f(); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// try { $a = [fopen('ww://y', 'r')]; array_pop($a); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// close
+    /// caught close
+    /// close
+    /// caught close
+    /// close
+    /// caught close
+    /// end
+    /// ```
+    ///
+    /// A user filter the stream's free flushes throws into the same
+    /// release:
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///   function filter($in, $out, &$consumed, $closing): int {
+    ///     while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///     if ($closing) { echo "closing\n"; throw new Exception("filter"); }
+    ///     return PSFS_PASS_ON;
+    ///   }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $h = fopen('php://memory', 'w+');
+    /// stream_filter_append($h, 'f', STREAM_FILTER_WRITE);
+    /// fwrite($h, "x");
+    /// try { $h = null; echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// closing
+    /// caught filter
+    /// end
+    /// ```
     fn free_resource(&mut self, res: Res, kind: ResourceType) {
-        if let Some(dtor) = self.0.resources.dtor(kind)
-            && let Err(thrown) = dtor(self.0, Resource::of(res))
-        {
-            self.0.throw_internal(&thrown);
+        if let Some(dtor) = self.0.resources.dtor(kind) {
+            self.released(|req| dtor(req, Resource::of(res)));
         }
         // `zend_close_rsrc_list`'s `zend_catch`: what a destructor bailed
         // out of is caught behind it, and the walk goes on.
