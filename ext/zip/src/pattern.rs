@@ -6,13 +6,11 @@
 use php_ext::abi::OrFalse;
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::{OwnedStream as _, Request, Streams as _};
+use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::object::{Intern, basedir_refuses};
 
-/// `MAXPATHLEN` on macOS.
-const MAXPATHLEN: usize = 1024;
 /// `PHP_GLOB_ONLYDIR`.
 const GLOB_ONLYDIR: i64 = 1 << 30;
 /// `PHP_GLOB_AVAILABLE_FLAGS`.
