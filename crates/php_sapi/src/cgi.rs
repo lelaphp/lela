@@ -12,12 +12,13 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
-use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape};
+use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape, Stat};
 
 use crate::ini::enabled;
 use crate::{Engine, IniEvent, IniValue, Method, ResponseHead, WebRequest};
 
-/// The file system as `init_request_info` asks it.
+/// The file system as `init_request_info` and the built-in server's path
+/// rules (`php_proto::vpath`) ask it.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Disk;
 
@@ -26,8 +27,15 @@ impl Files for Disk {
         std::fs::canonicalize(path_of(path)).is_ok()
     }
 
-    fn is_file(&self, path: &[u8]) -> bool {
-        std::fs::metadata(path_of(path)).is_ok_and(|meta| meta.is_file())
+    fn stat(&self, path: &[u8]) -> Option<Stat> {
+        let meta = std::fs::metadata(path_of(path)).ok()?;
+        Some(if meta.is_dir() {
+            Stat::Directory
+        } else if meta.is_file() {
+            Stat::File(meta.len())
+        } else {
+            Stat::Other(meta.len())
+        })
     }
 }
 

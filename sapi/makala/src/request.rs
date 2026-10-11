@@ -25,15 +25,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use hyper::body::Bytes;
 use php_proto::cgi::{Environment, RequestInfo, Settings};
+use php_proto::vpath::{self, Translated};
 use php_sapi::cgi::Disk;
-use php_sapi::vpath::{self, Translated};
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::options::Options;
+use crate::options::{Hidden, Options};
+use crate::route::{Refusal, Route};
 
 /// One request as its connection hands it over: the head as hyper read
 /// it, the body still arriving, and where the response goes.
@@ -154,16 +155,14 @@ fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
 pub(crate) fn serving(engine: &Engine, options: &Options) -> impl Fn(Job) + Clone + Send + 'static {
     let engine = engine.clone();
     let root: Arc<[u8]> = options.document_root.as_os_str().as_encoded_bytes().into();
-    move |job| serve(&engine, &root, job)
+    let hidden = options.hidden;
+    move |job| serve(&engine, &root, hidden, job)
 }
 
-/// One request: a program's through its own `Engine::serve`, and a
-/// static file's served from the disk, as `php -S` tells them apart
-/// (`php_sapi::vpath`, #2346). The path is `normalize_vpath`'s, decoded
-/// and with every `..` taken, so no request names a file outside the
-/// root; a file whose path holds a NUL is refused, as `php -S` refuses
-/// one, though `stat(2)` finds none such.
-fn serve(engine: &Engine, root: &[u8], job: Job) {
+/// One request, where its route goes ([`crate::route`]): a program's
+/// through its own `Engine::serve`, a static file's from the disk, and a
+/// refusal answered by the server.
+fn serve(engine: &Engine, root: &[u8], hidden: Hidden, job: Job) {
     let Job {
         head,
         body,
@@ -173,27 +172,15 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
         Some(at) => (&head.target[..at], &head.target[at + 1..]),
         None => (&head.target[..], &[][..]),
     };
-    let mut uri = php_proto::http::normalize_vpath(path);
-    if !uri.starts_with(b"/") {
-        uri.insert(0, b'/');
-    }
-    let found = vpath::translate(&uri, root);
-    if found
-        .as_ref()
-        .is_some_and(|found| found.path_translated.contains(&0))
-    {
-        return refuse(&mut sink, 400, Vec::new());
-    }
-    let program = match found {
-        Some(found) if found.is_program() => found,
-        found => return serve_static(&head, found.as_ref(), &mut sink),
+    let program = match crate::route::route(&head.method, path, root, hidden) {
+        Route::Program(program) => program,
+        Route::Static(found) => return serve_static(&head, &found, &mut sink),
+        Route::Refused(refusal) => return refuse(&mut sink, refusal),
     };
-    let mut script = program.vpath;
-    script.extend_from_slice(&program.path_info.unwrap_or_default());
-    let mut env = environment(&head, root, &script, query);
+    let mut env = environment(&head, root, &program, query);
     // php-fpm's defaults of the entries `init_request_info` reads, which
-    // this host declares none of: `cgi.fix_pathinfo` on, so a path's info
-    // after the script is taken apart as php-fpm takes it.
+    // this host declares none of: `cgi.fix_pathinfo` on, which finds the
+    // program as named and leaves the split as it came.
     let settings = Settings::default();
     let info = php_proto::cgi::request_info(&mut env, settings, None, &Disk);
     let cwd = info
@@ -216,6 +203,13 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
         })),
         head_ini: &[],
         headers: php_proto::cgi::request_headers(&newest),
+        // `SG(request_info).request_uri`, which a host outside CGI fills
+        // with the path the request asked for, as `php -S` does, and
+        // where phar's front controller finds its entry outside CGI
+        // (`Phar::webPhar`): the path as far as the program and past it,
+        // so the entry is the one php-fpm's `SCRIPT_NAME` and `PATH_INFO`
+        // give it, where php-fpm's `request_uri` is `SCRIPT_NAME` alone.
+        request_uri: env.get(b"DOCUMENT_URI").map(<[u8]>::to_vec),
         ..php_sapi::cgi::web(&env, &info)
     };
     let description = RequestDescription {
@@ -262,13 +256,18 @@ fn look(info: &RequestInfo) -> HostServes {
 }
 
 /// The CGI environment a web server hands php-fpm for `head`, after
-/// nginx's stock `fastcgi_params`: the script the request found under
-/// the root, the request's own variables, and each header field as an
-/// `HTTP_` variable. `script` is both nginx's `$uri`, after the internal
-/// redirect its `index` makes of a directory, and its
-/// `$fastcgi_script_name`: the path `php -S`'s rules translated to, with
-/// the index file where it named a directory and the path's info after
-/// it, which php-fpm's `cgi.fix_pathinfo` takes apart again.
+/// nginx's stock `fastcgi_params` with its documented split of the path
+/// past the program (`oracle.toml`'s `[fastcgi]`, #2637): the path's info
+/// first, the program the request found under the root, the request's
+/// own variables, and each header field as an `HTTP_` variable. The
+/// split is `php -S`'s walk ([`Translated`]), which routed the request:
+/// `SCRIPT_NAME` is the path as far as the program, with the index file
+/// where it named a directory, nginx's `$fastcgi_script_name`;
+/// `PATH_INFO` the rest, empty where there is none, as nginx sends
+/// `$fastcgi_path_info`; and `DOCUMENT_URI` the two, nginx's `$uri`
+/// after the internal redirect its `index` makes of a directory. No
+/// `PATH_TRANSLATED` is set: `php -S` sets none, nor does php-fpm for a
+/// program found as named.
 ///
 /// `$_SERVER` in php-fpm's order, held to the pinned php-fpm handed the
 /// same request under the recipe with its default `clear_env`: every row
@@ -320,9 +319,36 @@ fn look(info: &RequestInfo) -> HostServes {
 /// REQUEST_METHOD=POST
 /// QUERY_STRING=a=1
 /// SCRIPT_FILENAME=%SCRATCH%/witness.php
+/// PATH_INFO=
 /// PHP_SELF=/witness.php
 /// ```
-fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environment {
+///
+/// The path past the program is its `PATH_INFO` under both, and php-fpm,
+/// finding the program as named, sets no `PATH_TRANSLATED`:
+///
+/// ```php
+/// foreach (['SCRIPT_NAME', 'PATH_INFO', 'PHP_SELF', 'DOCUMENT_URI', 'PATH_TRANSLATED'] as $name) {
+///     echo $name, '=', $_SERVER[$name] ?? '(none)', "\n";
+/// }
+/// ```
+/// ```request makala
+/// --ENV--
+/// REQUEST_URI=/witness.php/index.php
+/// --GET--
+/// x=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// SCRIPT_NAME=/witness.php
+/// PATH_INFO=/index.php
+/// PHP_SELF=/witness.php/index.php
+/// DOCUMENT_URI=/witness.php/index.php
+/// PATH_TRANSLATED=(none)
+/// ```
+fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> Environment {
     let field = |name: &[u8]| {
         head.fields
             .iter()
@@ -336,9 +362,11 @@ fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environ
             _ => host,
         },
     );
+    let path_info = program.path_info.clone().unwrap_or_default();
     let mut filename = root.to_vec();
-    filename.extend_from_slice(script);
+    filename.extend_from_slice(&program.vpath);
     let mut env = vec![
+        (b"PATH_INFO".to_vec(), path_info.clone()),
         (b"SCRIPT_FILENAME".to_vec(), filename),
         (b"QUERY_STRING".to_vec(), query.to_vec()),
         (b"REQUEST_METHOD".to_vec(), head.method.clone()),
@@ -350,9 +378,12 @@ fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environ
             b"CONTENT_LENGTH".to_vec(),
             field(b"content-length").unwrap_or_default(),
         ),
-        (b"SCRIPT_NAME".to_vec(), script.to_vec()),
+        (b"SCRIPT_NAME".to_vec(), program.vpath.clone()),
         (b"REQUEST_URI".to_vec(), head.target.clone()),
-        (b"DOCUMENT_URI".to_vec(), script.to_vec()),
+        (
+            b"DOCUMENT_URI".to_vec(),
+            [&program.vpath[..], &path_info].concat(),
+        ),
         (b"DOCUMENT_ROOT".to_vec(), root.to_vec()),
         (
             b"SERVER_PROTOCOL".to_vec(),
@@ -408,28 +439,21 @@ fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environ
 /// How many bytes of a static file go in one write to the connection.
 const STATIC_PIECE: usize = 64 << 10;
 
-/// A request that is not a program's, served as `php -S` serves a static
-/// file (`php_cli_server_begin_send_static`,
+/// A static file, served as `php -S` serves one
+/// (`php_cli_server_begin_send_static`,
 /// `Z/sapi/cli/php_cli_server.c:2144`) on this request thread, which may
-/// wait on the disk where the connection side may not (M4): a method that
-/// writes refused with 405, a path that translated to nothing or a file
-/// that does not open with 404; else the type its extension has in php's
+/// wait on the disk where the connection side may not (M4): a file that
+/// does not open is a 404; else the type its extension has in php's
 /// table and the length of the file opened, and that many of its bytes
 /// after them but for `HEAD`, so a file that grows while it goes is sent
-/// as it was and one that shrinks cuts its connection. The
-/// refusals' bodies are empty, as the server's other refusals are. A
-/// static file holds its request thread while it goes, bounded by the
-/// minimum response data rate as a program's response is.
-fn serve_static(head: &Head, found: Option<&Translated>, sink: &mut Sink) {
-    if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&head.method.as_slice()) {
-        return refuse(sink, 405, vec![b"Allow: GET, HEAD, POST".to_vec()]);
-    }
-    let Some((found, file, length)) = found.and_then(|found| {
-        let file = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated)).ok()?;
-        let length = file.metadata().ok()?.len();
-        Some((found, file, length))
-    }) else {
-        return refuse(sink, 404, Vec::new());
+/// as it was and one that shrinks cuts its connection. A static file
+/// holds its request thread while it goes, bounded by the minimum
+/// response data rate as a program's response is.
+fn serve_static(head: &Head, found: &Translated, sink: &mut Sink) {
+    let opened = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated))
+        .and_then(|file| Ok((file.metadata()?.len(), file)));
+    let Ok((length, file)) = opened else {
+        return refuse(sink, Refusal::NotFound);
     };
     let mut lines = Vec::new();
     if let Some(content_type) = php_proto::mime::content_type(vpath::extension(&found.vpath)) {
@@ -453,12 +477,12 @@ fn serve_static(head: &Head, found: Option<&Translated>, sink: &mut Sink) {
     }
 }
 
-/// A response of the server's own, with `code`, header `lines` and no
-/// body.
-fn refuse(sink: &mut Sink, code: i64, lines: Vec<Vec<u8>>) {
+/// A response of the server's own, with no body: the refusal's code and
+/// header lines.
+fn refuse(sink: &mut Sink, refusal: Refusal) {
     sink.send_headers(&ResponseHead {
-        code,
-        lines,
+        code: i64::from(refusal.code()),
+        lines: refusal.lines(),
         ..ResponseHead::default()
     });
 }

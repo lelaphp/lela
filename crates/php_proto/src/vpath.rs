@@ -1,15 +1,17 @@
 //! The built-in server's path rules (`Z/sapi/cli/php_cli_server.c`), which
-//! `php -S` finds a request's file by and the production server finds its
-//! static files by (#2346): the path, made `normalize_vpath`'s
-//! (`php_proto::http`), translated under the document root as
-//! `php_cli_server_request_translate_vpath` translates it, its extension
-//! read as `php_cli_server_request_ctor` reads it, and the request a
-//! program's where that extension is `php` and the path translated to a
-//! file, a static file's otherwise, as `php_cli_server_dispatch` tells
-//! them apart. No path leaves the root: `normalize_vpath` has taken every
-//! `..`, decoded or not, before the root is put in front.
+//! `php -S` finds a request's file by and the production server routes
+//! and splits a request by (#2346, #2588, #2637): the path, made
+//! [`normalize_vpath`](crate::http::normalize_vpath)'s, translated under
+//! the document root as `php_cli_server_request_translate_vpath`
+//! translates it, its extension read as `php_cli_server_request_ctor`
+//! reads it, and the request a program's where that extension is `php`
+//! and the path translated to a file, a static file's otherwise, as
+//! `php_cli_server_dispatch` tells them apart. No path leaves the root:
+//! `normalize_vpath` has taken every `..`, decoded or not, before the
+//! root is put in front. The file system is asked through [`Files`], as
+//! `init_request_info` asks it.
 
-use crate::cgi::path_of;
+use crate::cgi::{Files, Stat};
 
 /// A path translated under the document root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,11 +38,12 @@ impl Translated {
 
 /// `php_cli_server_request_translate_vpath`
 /// (`Z/sapi/cli/php_cli_server.c:1440`): `vpath` under `root`, walked back
-/// a segment at a time until something is there, what was walked off the
-/// path's info; a directory is its `index.php` or `index.html`, and one
-/// with neither translates to nothing.
+/// a segment at a time until `stat(2)` finds something there, what was
+/// walked off the path's info; a directory is its `index.php` or
+/// `index.html`, whichever is a regular file first, and one with neither
+/// translates to nothing.
 #[must_use]
-pub fn translate(vpath: &[u8], root: &[u8]) -> Option<Translated> {
+pub fn translate(vpath: &[u8], root: &[u8], files: &dyn Files) -> Option<Translated> {
     let mut buf = root.to_vec();
     let start = buf.len();
     if !vpath.is_empty() && vpath[0] != b'/' {
@@ -52,9 +55,9 @@ pub fn translate(vpath: &[u8], root: &[u8]) -> Option<Translated> {
     let mut path_info: Option<Vec<u8>> = None;
     let mut size = 0;
     while q > 0 {
-        if let Ok(meta) = std::fs::metadata(path_of(&buf[..q])) {
-            size = meta.len();
-            if meta.is_dir() {
+        if let Some(found) = files.stat(&buf[..q]) {
+            size = found.size();
+            if found == Stat::Directory {
                 let mut dir = buf[..q].to_vec();
                 if dir.last() != Some(&b'/') {
                     dir.push(b'/');
@@ -64,8 +67,10 @@ pub fn translate(vpath: &[u8], root: &[u8]) -> Option<Translated> {
                         .into_iter()
                         .find_map(|file| {
                             let candidate = [dir.as_slice(), file].concat();
-                            let meta = std::fs::metadata(path_of(&candidate)).ok()?;
-                            meta.is_file().then_some((candidate, meta.len()))
+                            match files.stat(&candidate)? {
+                                Stat::File(len) => Some((candidate, len)),
+                                Stat::Directory | Stat::Other(_) => None,
+                            }
                         })?;
                 size = len;
                 buf = candidate;
@@ -110,37 +115,72 @@ pub fn is_program(extension: &[u8], translated: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// A file system of the paths it names, each a directory where it
+    /// ends in `/` and a file of its length's bytes otherwise.
+    struct Tree(&'static [&'static str]);
+
+    impl Files for Tree {
+        fn resolves(&self, path: &[u8]) -> bool {
+            self.stat(path).is_some()
+        }
+
+        fn stat(&self, path: &[u8]) -> Option<Stat> {
+            let path = path.strip_suffix(b"/").unwrap_or(path);
+            self.0.iter().find_map(|had| match had.as_bytes() {
+                dir if dir.strip_suffix(b"/") == Some(path) => Some(Stat::Directory),
+                file => (file == path).then_some(Stat::File(file.len() as u64)),
+            })
+        }
+    }
+
+    const TREE: Tree = Tree(&[
+        "/r/",
+        "/r/a/",
+        "/r/a/index.html",
+        "/r/empty/",
+        "/r/t.php",
+        "/r/up/",
+        "/r/up/x.jpg",
+    ]);
+
     /// A file is found as named; a path past a file is that file with
     /// the rest its path's info; a directory is its index; and a
     /// directory with no index translates to nothing.
     #[test]
     fn a_path_translates_to_the_file_it_names_under_the_root() {
-        let root = std::env::temp_dir().join(format!("php-sapi-vpath-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
-        for dir in ["a", "empty"] {
-            std::fs::create_dir_all(root.join(dir)).ok();
-        }
-        std::fs::write(root.join("a/index.html"), "<p>").ok();
-        std::fs::write(root.join("t.php"), "<?php").ok();
-        let at = root.as_os_str().as_encoded_bytes();
-        let joined = |tail: &str| [at, tail.as_bytes()].concat();
-        let file = translate(b"/t.php", at);
+        let file = translate(b"/t.php", b"/r", &TREE);
         assert_eq!(
             file,
             Some(Translated {
                 vpath: b"/t.php".to_vec(),
-                path_translated: joined("/t.php"),
+                path_translated: b"/r/t.php".to_vec(),
                 path_info: None,
-                size: 5,
+                size: 8,
             })
         );
-        let past = translate(b"/t.php/x/y", at);
+        let past = translate(b"/t.php/x/y", b"/r", &TREE);
         assert_eq!(past.as_ref().map(|t| &t.vpath[..]), Some(&b"/t.php"[..]));
         assert_eq!(past.and_then(|t| t.path_info), Some(b"/x/y".to_vec()));
-        let index = translate(b"/a/", at);
+        let index = translate(b"/a/", b"/r", &TREE);
         assert_eq!(index.map(|t| t.vpath), Some(b"/a/index.html".to_vec()));
-        assert_eq!(translate(b"/empty", at), None);
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(translate(b"/empty", b"/r", &TREE), None);
+    }
+
+    /// The walk stops at the first prefix that is there, so a program
+    /// named past a file that is not one is that file's: `x.jpg` with
+    /// `/y.php` its path's info, a static file's request.
+    #[test]
+    fn the_first_prefix_found_is_the_file_and_the_rest_its_path_s_info() {
+        let found = translate(b"/up/x.jpg/y.php", b"/r", &TREE);
+        assert_eq!(
+            found.as_ref().map(|t| &t.vpath[..]),
+            Some(&b"/up/x.jpg"[..])
+        );
+        assert_eq!(
+            found.as_ref().and_then(|t| t.path_info.as_deref()),
+            Some(&b"/y.php"[..])
+        );
+        assert_eq!(found.map(|t| t.is_program()), Some(false));
     }
 
     #[test]

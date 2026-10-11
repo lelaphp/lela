@@ -901,6 +901,16 @@ fn the_pin_refuses_a_key_outside_its_grammar() {
 /// The tracked pin with its `[fastcgi]` replaced by one of `params`, held
 /// to `md5` where named and to the params' own md5 otherwise.
 fn with_fastcgi(params: &str, md5: Option<&str>) -> anyhow::Result<Pin> {
+    with_split(
+        params,
+        md5,
+        [Some(r"^(.+?\.php)(/.*)$"), Some("$fastcgi_path_info")],
+    )
+}
+
+/// [`with_fastcgi`] with `split_path_info` and `path_info` as `split`
+/// has them, a key left out for `None`.
+fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 2]) -> anyhow::Result<Pin> {
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
     let mut pin: toml::Table = toml::from_str(&text).unwrap();
     let digest = md5.map_or_else(|| format!("{:x}", md5::compute(params)), str::to_owned);
@@ -912,7 +922,9 @@ fn with_fastcgi(params: &str, md5: Option<&str>) -> anyhow::Result<Pin> {
         ("params", params),
     ]
     .into_iter()
-    .map(|(key, value)| (key.to_owned(), value.into()))
+    .map(|(key, value)| (key, Some(value)))
+    .chain([("split_path_info", split[0]), ("path_info", split[1])])
+    .filter_map(|(key, value)| Some((key.to_owned(), value?.into())))
     .collect();
     pin.insert("fastcgi".to_owned(), fastcgi.into());
     Pin::parse(&pin.to_string())
@@ -941,6 +953,7 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     assert_eq!(
         mapping.params,
         [
+            param("PATH_INFO", &[var(Variable::PathInfo)], false),
             param(
                 "SCRIPT_FILENAME",
                 &[var(Variable::DocumentRoot), var(Variable::FastcgiUri)],
@@ -979,6 +992,37 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     let err = refused("fastcgi_param  SCRIPT_FILENAME  $document_root;\n", None);
     assert!(err.contains("SCRIPT_FILENAME twice"), "{err}");
 
+    // The split (#2637): the pattern's two captures, or the whole path
+    // with no path info where it does not match; a pattern of other
+    // than two captures is refused.
+    assert_eq!(
+        mapping.split("/front.php/index.php"),
+        ("/front.php", "/index.php")
+    );
+    assert_eq!(
+        mapping.split("/a.php.jpg/b.php/c"),
+        ("/a.php.jpg/b.php", "/c")
+    );
+    assert_eq!(mapping.split("/front.php"), ("/front.php", ""));
+    for split in [
+        [Some(r"^(.+?\.php)$"), Some("$fastcgi_path_info")],
+        [Some("("), Some("$fastcgi_path_info")],
+        [Some(r"^(.+?\.php)(/.*)$"), None],
+        [None, Some("$fastcgi_path_info")],
+    ] {
+        let err = with_split(params, None, split).unwrap_err().to_string();
+        assert!(err.contains("split_path_info"), "{split:?}: {err}");
+    }
+    // A pin from before the split reads, splitting nothing and sending
+    // no PATH_INFO, so a binary built here reads an older worktree's pin.
+    let before = with_split(params, None, [None, None]).unwrap();
+    let before = before.fastcgi().unwrap();
+    assert_eq!(before.params[0].name, "SCRIPT_FILENAME");
+    assert_eq!(
+        before.split("/front.php/index.php"),
+        ("/front.php/index.php", "")
+    );
+
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
     let mut bare: toml::Table = toml::from_str(&text).unwrap();
     bare.remove("fastcgi");
@@ -990,12 +1034,17 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
 }
 
 /// The tracked pin's mapping (#2334): nginx's stock `fastcgi_params` at
-/// the release it names, its source at that release's tag, and
-/// `SCRIPT_FILENAME` first as nginx's `fastcgi.conf` sets it.
+/// the release it names, its source at that release's tag,
+/// `SCRIPT_FILENAME` before them as nginx's `fastcgi.conf` sets it, and
+/// first the documented split's `PATH_INFO` (#2637).
 #[test]
 fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
     let pin = Manifest::load(workspace()).unwrap().pin;
     let mapping = pin.fastcgi().unwrap();
+    assert_eq!(
+        mapping.split_path_info.as_deref(),
+        Some(r"^(.+?\.php)(/.*)$")
+    );
     assert!(
         mapping
             .source
@@ -1006,6 +1055,7 @@ fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
     assert_eq!(
         names,
         [
+            "PATH_INFO",
             "SCRIPT_FILENAME",
             "QUERY_STRING",
             "REQUEST_METHOD",
