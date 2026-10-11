@@ -873,6 +873,7 @@ request::Request::superglobal
 request::Request::supplier
 request::Request::suspend_time_limit
 request::Request::take_http_status
+request::Request::take_pending
 request::Request::take_uploaded_file
 request::Request::temp_dir
 request::Request::this
