@@ -466,10 +466,13 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 /// }
 /// ```
 ///
-/// From inside a transfer's write callback it gives up the `CurlHandle`
-/// whose callback it is: the transfer holds its `CURL *`, which is
-/// cleaned up as `curl_multi_exec` ends, and the transfer runs to its end
-/// (#2317).
+/// From inside a transfer's write callback it takes the `CurlHandle`
+/// whose callback it is off the multi, and the transfer runs to its end.
+/// Where the multi held the `CurlHandle`'s last reference, the
+/// transfer holds its `CURL *`, which is cleaned
+/// up as `curl_multi_exec` ends (#2317), and ext/curl's leak sensor test
+/// `a_handle_freed_by_its_own_write_callback_transfers_to_its_end`
+/// serves that shape. The fence keeps `$d`.
 ///
 /// ```php
 /// $f = tempnam(sys_get_temp_dir(), 'curl');
@@ -482,7 +485,6 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 ///     return strlen($data);
 /// });
 /// curl_multi_add_handle($m, $d);
-/// unset($d);
 /// do { $status = curl_multi_exec($m, $active); } while ($active && $status == CURLM_OK);
 /// var_dump($status, curl_multi_get_handles($m));
 /// unlink($f);
