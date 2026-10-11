@@ -120,6 +120,20 @@ impl FFI {
     /// ```expect
     /// nowhere.h', file doesn't exist
     /// ```
+    ///
+    /// A relative path names a file in the request's working directory,
+    /// where `chdir()` moved it, as php's `stat` and `open` find it in
+    /// its process's (#2618): the file is found, and its parse fails.
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/ffi-load-' . getmypid(); mkdir($d); chdir($d);
+    /// file_put_contents('bad.h', "int x(;\n");
+    /// try { FFI::load('bad.h'); } catch (FFI\Exception $e) { echo $e->getMessage(), "\n"; }
+    /// unlink('bad.h'); chdir('/'); rmdir($d);
+    /// ```
+    /// ```expect
+    /// Failed loading 'bad.h'
+    /// ```
     fn load(
         req: &mut Request,
         filename: PhpString,
@@ -827,14 +841,15 @@ fn made_cdata(req: &mut Request, data: Data) -> Result<Owner<Instance<CData>>, T
 /// ```
 fn load(req: &mut Request, filename: &[u8]) -> Result<Owner<Instance<FFI>>, Thrown> {
     let shown = String::from_utf8_lossy(filename).into_owned();
-    let code = match std::fs::metadata(&shown) {
+    let file = crate::preload::header_file(req, filename);
+    let code = match std::fs::metadata(&file) {
         Ok(meta) if meta.is_file() => {
             let len = usize::try_from(meta.len()).unwrap_or(usize::MAX);
             Some(Emalloc::new(req, len.saturating_add(1))?)
         }
         _ => None,
     };
-    let loaded = load_read(req, filename, &shown);
+    let loaded = load_read(req, &file, &shown);
     if let Some(code) = code {
         code.free(req);
     }
@@ -844,11 +859,11 @@ fn load(req: &mut Request, filename: &[u8]) -> Result<Owner<Instance<FFI>>, Thro
 /// [`load`] once its `code` is held.
 fn load_read(
     req: &mut Request,
-    filename: &[u8],
+    file: &std::path::Path,
     shown: &str,
 ) -> Result<Owner<Instance<FFI>>, Thrown> {
     let from = types(req).len();
-    let loaded = match crate::preload::load_header(filename, types(req), attr::STORED, None) {
+    let loaded = match crate::preload::load_header(file, types(req), attr::STORED, None) {
         Ok(loaded) => loaded,
         Err(fail) => {
             let message = match fail {
