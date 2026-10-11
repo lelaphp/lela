@@ -116,11 +116,7 @@ fn ttf(
             Ok(OrFalse::Value(crate::list(req, &values)?))
         }
         Err(error) => {
-            docref(
-                req,
-                Level::Warning,
-                String::from_utf8_lossy(&error).as_bytes(),
-            );
+            docref(req, Level::Warning, &error);
             Ok(OrFalse::False)
         }
     }

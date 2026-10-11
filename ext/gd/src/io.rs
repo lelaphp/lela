@@ -145,6 +145,27 @@ fn imagecreatefromstring(
     wrap(req, image)
 }
 
+/// `"\"%s\"` and what follows: a path php's warnings quote, as its bytes,
+/// since php's `%s` prints a file name that is not UTF-8 as it is.
+///
+/// ```php
+/// set_error_handler(function ($n, $s) { echo $n, " ", bin2hex(strstr($s, '"')), "\n"; return true; });
+/// imagecreatefromgif("data:,GIF89a\xff");
+/// imagegd(imagecreatetruecolor(1, 1), "/nonexistent/\xff.gd");
+/// ```
+/// ```expect
+/// 2 22646174613a2c474946383961ff22206973206e6f7420612076616c6964204749462066696c65
+/// 2 222f6e6f6e6578697374656e742fff2e67642220666f722077726974696e67
+/// ```
+fn quoted(path: &[u8], after: &str) -> Vec<u8> {
+    let mut text = Vec::with_capacity(path.len() + after.len() + 2);
+    text.push(b'"');
+    text.extend_from_slice(path);
+    text.push(b'"');
+    text.extend_from_slice(after.as_bytes());
+    text
+}
+
 /// `_php_image_create_from`: the file opened through php's streams and
 /// read whole, then libgd's reader over it, `gd.jpeg_ignore_warning`
 /// read for a plain file's JPEG as php's `FILE *` path reads it.
@@ -188,10 +209,7 @@ fn create_from(
     stream.free(req);
     let image = image?;
     if image.is_none() {
-        let text = format!(
-            "\"{}\" is not a valid {name} file",
-            String::from_utf8_lossy(path)
-        );
+        let text = quoted(path, &format!(" is not a valid {name} file"));
         docref(req, Level::Warning, &text);
     }
     wrap(req, image)
@@ -933,10 +951,8 @@ fn output_gd(
             }
             let opening = Opening::default();
             let Some(stream) = req.open_stream_with(path, b"wb", opening)? else {
-                let text = format!(
-                    "Unable to open \"{}\" for writing",
-                    String::from_utf8_lossy(path)
-                );
+                let mut text = b"Unable to open ".to_vec();
+                text.extend(quoted(path, " for writing"));
                 docref(req, Level::Warning, &text);
                 return Ok(false);
             };
