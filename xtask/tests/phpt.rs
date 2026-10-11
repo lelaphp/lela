@@ -1217,11 +1217,15 @@ fn printed(at: &Path) -> String {
     String::new()
 }
 
-/// Whether a process runs under `pid`, as `kill -0` answers.
-fn running(pid: &str) -> bool {
-    let mut probe = Command::new("kill");
-    probe.args(["-0", pid]).stderr(std::process::Stdio::null());
-    probe.status().unwrap().success()
+/// When the process under `pid` started, as `ps -o lstart=` prints it,
+/// empty where none runs: what tells the process a test started from one
+/// that took its number since.
+fn started_at(pid: &str) -> String {
+    let ps = Command::new("ps")
+        .args(["-o", "lstart=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&ps.stdout).trim().to_owned()
 }
 
 /// A System V subset's run killed before its sweep leaves its claim, and
@@ -1231,8 +1235,8 @@ fn running(pid: &str) -> bool {
 /// `msg_get_queue(0)` leaves one, made by a test of `ext/sysvmsg` that
 /// then sleeps past the recipe's limit. The run is killed outright, which
 /// leaves the test's php running, and the next run kills it before it
-/// sweeps (#2522); a php still running then is killed by this test, which
-/// fails. The runs take their temporary directory
+/// sweeps (#2522); the same php still running then is killed by this
+/// test, which fails. The runs take their temporary directory
 /// apart, so the claims directory is theirs alone and no other run's
 /// reclaim takes the claim first; another run's sweep on the machine may
 /// still take the queue itself, which this test then cannot name.
@@ -1269,7 +1273,8 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     killed.wait().unwrap();
     let mut words = printed.split_whitespace();
     let pid = words.next().expect("the test printed its pid");
-    assert!(running(pid), "the killed run's php runs on");
+    let php = started_at(pid);
+    assert!(!php.is_empty(), "the killed run's php runs on");
     let appeared: Vec<&str> = words.collect();
     let left: Vec<PathBuf> = fs::read_dir(&claims)
         .unwrap()
@@ -1291,7 +1296,8 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     )
     .unwrap();
     let out = run().output().unwrap();
-    let orphan = running(pid);
+    // Killed by this test only where it is still the same process.
+    let orphan = started_at(pid) == php;
     if orphan {
         Command::new("kill").args(["-9", pid]).status().unwrap();
     }
