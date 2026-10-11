@@ -545,22 +545,29 @@ impl EasyId {
     /// `f`, a call into the library that serves the callbacks, over the
     /// `CURL *` held with the share it points at ([`Request::holding`]),
     /// so a callback that frees either's object leaves the cleanup to the
-    /// call's end; the request reachable by the callbacks meanwhile.
+    /// call's end, with no request lent ([`Session::withheld`]); the
+    /// request reachable by the callbacks meanwhile.
     fn transfer(
         self,
         req: &mut Request,
         f: impl FnOnce(*mut sys::CURL) -> i32,
     ) -> (i32, Option<Thrown>) {
-        let share = self.with(req, None, |handle| match handle.tag().share {
-            Some(ShareRef::Request(id)) => Some(id.0),
-            _ => None,
-        });
-        let held = req.holding(self.0, |req, held| {
-            let handle = held.get(req)?;
-            let (raw, session) = (handle.raw(), handle.tag().session.clone());
-            let mut body = Some(|req: &mut Request| session.enter(req, || f(raw)));
-            let ids: &[ForeignId<ShareHandle>] = share.as_slice();
-            holding_all(req, ids, &mut body)
+        let Some((session, share)) = self.with(req, None, |handle| {
+            let share = match handle.tag().share {
+                Some(ShareRef::Request(id)) => Some(id.0),
+                _ => None,
+            };
+            Some((handle.tag().session.clone(), share))
+        }) else {
+            return (GONE, None);
+        };
+        let held = session.withheld(|| {
+            req.holding(self.0, |req, held| {
+                let raw = held.get(req)?.raw();
+                let mut body = Some(|req: &mut Request| session.enter(req, || f(raw)));
+                let ids: &[ForeignId<ShareHandle>] = share.as_slice();
+                holding_all(req, ids, &mut body)
+            })
         });
         held.flatten().unwrap_or((GONE, None))
     }

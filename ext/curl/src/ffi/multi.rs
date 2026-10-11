@@ -155,22 +155,29 @@ impl MultiId {
         running: c_int,
     ) -> ((i64, i64), Option<Thrown>) {
         let gone = ((BAD_HANDLE, i64::from(running)), None);
+        let Some(session) = self.with(req, None, |multi| Some(multi.tag().session.clone())) else {
+            return gone;
+        };
         let (handles, shares) = EasyId::held_by(req, easies);
-        let held = req.holding(self.0, |req, held| {
-            let multi = held.get(req)?;
-            let (raw, session) = (multi.raw(), multi.tag().session.clone());
-            let mut call = Some(|req: &mut Request| {
-                session.enter(req, || {
-                    let mut running = running;
-                    // SAFETY: a live handle held for the call and a live
-                    // out-count; the callbacks find the request `enter`
-                    // leaves.
-                    let code = unsafe { sys::curl_multi_perform(raw, &raw mut running) };
-                    (i64::from(code), i64::from(running))
-                })
-            });
-            let mut with_shares = Some(|req: &mut Request| holding_all(req, &shares, &mut call));
-            holding_all(req, &handles, &mut with_shares).flatten()
+        // What the holds keep is cleaned up as they end with no request
+        // lent ([`Session::withheld`]).
+        let held = session.withheld(|| {
+            req.holding(self.0, |req, held| {
+                let raw = held.get(req)?.raw();
+                let mut call = Some(|req: &mut Request| {
+                    session.enter(req, || {
+                        let mut running = running;
+                        // SAFETY: a live handle held for the call and a live
+                        // out-count; the callbacks find the request `enter`
+                        // leaves.
+                        let code = unsafe { sys::curl_multi_perform(raw, &raw mut running) };
+                        (i64::from(code), i64::from(running))
+                    })
+                });
+                let mut with_shares =
+                    Some(|req: &mut Request| holding_all(req, &shares, &mut call));
+                holding_all(req, &handles, &mut with_shares).flatten()
+            })
         });
         held.flatten().unwrap_or(gone)
     }
