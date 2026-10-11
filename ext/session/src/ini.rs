@@ -7,7 +7,7 @@
 //! over the values the host started the engine with (#744).
 
 use php_ext::abi::{ExtensionBuilder, IniStage, OnModify};
-use php_ext::coerce::{numeric_string, strtol};
+use php_ext::coerce::{atoi, numeric_string, strtol};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{self, Level, Thrown, docref};
 use php_ext::request::Request;
@@ -410,7 +410,8 @@ fn per_dir(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> boo
     if name != b"session.upload_progress.freq" {
         return true;
     }
-    let percent = strtol(value);
+    // `int tmp = ZEND_ATOL(...)`: C's `atoi`.
+    let percent = i64::from(atoi(value));
     if percent < 0 {
         raise(
             req,

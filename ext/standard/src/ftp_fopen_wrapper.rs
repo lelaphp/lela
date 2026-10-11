@@ -12,7 +12,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{atoi, strtol, truthy};
+use php_ext::coerce::{atoi, is_space, strtol, truthy};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
     Closer, DirListing, Handshake, MAXPATHLEN, Notification, NotifyCode, Opening, OwnedStream as _,
@@ -485,9 +485,10 @@ fn passive(req: &mut Request, control: Stream) -> Result<Option<Passive>, Thrown
 }
 
 /// `(unsigned short) strtoul(s, &end, 10)`: the number and how many
-/// bytes it took.
+/// bytes it took. Kept beside the face's `strtol`, which answers no end
+/// and saturates a signed long; the white space it skips is the face's.
 fn strtoul_port(s: &[u8]) -> (u16, usize) {
-    let blanks = s.iter().take_while(|b| b.is_ascii_whitespace()).count();
+    let blanks = s.iter().take_while(|b| is_space(**b)).count();
     let digits = s[blanks..]
         .iter()
         .take_while(|b| b.is_ascii_digit())
@@ -595,7 +596,11 @@ fn prepare(
             }
             let mut file_size = 0;
             if let Some(space) = cstr(&last.line).iter().position(|b| *b == b' ') {
-                file_size = usize::try_from(atoi(&last.line[space + 1..])).unwrap_or(0);
+                // `size_t file_size = atoi(...)`: a negative `int` is the
+                // size it wraps to.
+                file_size =
+                    usize::try_from(i64::from(atoi(&last.line[space + 1..])).cast_unsigned())
+                        .unwrap_or(usize::MAX);
                 notify(
                     req,
                     ctx,

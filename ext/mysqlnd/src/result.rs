@@ -8,7 +8,7 @@
 //! `MYSQLND_ROW_BUFFER`s are one `emalloc` beside it, so
 //! `memory_get_usage()` and `memory_limit` see a set of rows as php's do.
 
-use php_ext::coerce::strtol;
+use php_ext::coerce::{is_space, strtol};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
@@ -1322,13 +1322,10 @@ fn text_stat(ty: FieldType) -> Stat {
 }
 
 /// C's `strtoull(p, NULL, 10)`, saturating, a leading `-` negating as C
-/// does.
+/// does: kept beside the face's signed `strtol`, the white space it skips
+/// the face's `is_space`.
 fn strtoull(text: &[u8]) -> u64 {
-    let s: Vec<u8> = text
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .collect();
+    let s: Vec<u8> = text.iter().copied().skip_while(|b| is_space(*b)).collect();
     let (negative, digits) = match s.first() {
         Some(b'-') => (true, &s[1..]),
         Some(b'+') => (false, &s[1..]),
