@@ -888,7 +888,7 @@ impl ZipArchive {
     const EM_AES_192: i64 = 258;
     const EM_AES_256: i64 = 259;
     const EM_UNKNOWN: i64 = 65535;
-    const LIBZIP_VERSION: &str = "1.11.4";
+    const LIBZIP_VERSION: &str = crate::LIBZIP_LIBRARY;
     const LENGTH_TO_END: i64 = 0;
     const LENGTH_UNCHECKED: i64 = -2;
 
