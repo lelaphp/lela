@@ -1,5 +1,5 @@
+api_check::defining_modules
 api_check::hold
-api_check::public_items
 api_check::run
 bench::Label
 bench::REPS

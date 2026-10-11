@@ -267,16 +267,7 @@ impl Run {
         // Each crate by the absolute directory a package id names.
         let mut by_dir: BTreeMap<PathBuf, String> = BTreeMap::new();
         for krate in crates {
-            // As cargo names it: a root reached through a symlink, as a
-            // macOS temporary directory is, names its packages by the
-            // path the link resolves to.
-            let dir = root.join(krate.path());
-            let dir = dir.canonicalize().unwrap_or(dir);
-            let package = metadata
-                .packages
-                .iter()
-                .find(|p| p.dir().canonicalize().is_ok_and(|d| d == dir))
-                .with_context(|| format!("cargo metadata names no package at {}", dir.display()))?;
+            let (dir, package) = metadata.package_of(root, krate)?;
             run.crates
                 .insert(krate.name.clone(), Built::of(package, targets));
             by_dir.insert(dir, krate.name.clone());
@@ -337,6 +328,34 @@ impl Run {
     }
 }
 
+/// `crates` as the cargo runs that build each as it ships (#2606). Cargo
+/// unifies the features of every package one run selects, so a binary
+/// built beside a crate that turns more of a shared dependency on is not
+/// the binary its own package builds: `sapi/makala`'s, built beside
+/// `sapi/cli`'s, loads cli's `pcntl` and `posix`, and makala's tests start
+/// it. So a crate whose package has a binary a test run builds, one that
+/// requires no feature, is a run of its own, and every other crate is in
+/// one run, first.
+pub(crate) fn runs<'c>(root: &Path, crates: &[&'c Crate]) -> Result<Vec<Vec<&'c Crate>>> {
+    let metadata = Metadata::read(root)?;
+    let mut shared = Vec::new();
+    let mut runs = Vec::new();
+    for krate in crates {
+        let (_, package) = metadata.package_of(root, krate)?;
+        let ships =
+            |t: &Target| t.kind.iter().any(|k| k == "bin") && t.required_features.is_empty();
+        if package.targets.iter().any(ships) {
+            runs.push(vec![*krate]);
+        } else {
+            shared.push(*krate);
+        }
+    }
+    if !shared.is_empty() {
+        runs.insert(0, shared);
+    }
+    Ok(runs)
+}
+
 /// The toolchain's library directories, from `rustc --print sysroot` and
 /// the host `rustc -vV` names, asked at `root` so its toolchain file holds.
 fn toolchain(root: &Path) -> Result<Vec<PathBuf>> {
@@ -388,6 +407,20 @@ impl Metadata {
             );
         }
         serde_json::from_slice(&out.stdout).context("cargo metadata wrote no metadata")
+    }
+
+    /// The package of `krate` and its directory, as cargo names it: a root
+    /// reached through a symlink, as a macOS temporary directory is, names
+    /// its packages by the path the link resolves to.
+    fn package_of(&self, root: &Path, krate: &Crate) -> Result<(PathBuf, &Package)> {
+        let dir = root.join(krate.path());
+        let dir = dir.canonicalize().unwrap_or(dir);
+        let package = self
+            .packages
+            .iter()
+            .find(|p| p.dir().canonicalize().is_ok_and(|d| d == dir))
+            .with_context(|| format!("cargo metadata names no package at {}", dir.display()))?;
+        Ok((dir, package))
     }
 }
 

@@ -117,7 +117,11 @@ pub(crate) fn run(
             format!("{INSTRUMENT}: this machine has no pinned php-src, so nothing was sent");
         return Ok(reading);
     };
-    let (subset, left) = super::subset(&tree)?;
+    let (subset, mut left) = super::subset(&tree)?;
+    // A section the soak does not run decides whether a test applies.
+    let (gated, subset): (Vec<Entry>, Vec<Entry>) =
+        subset.into_iter().partition(|entry| entry.skipif.is_some());
+    left.extend(gated.into_iter().map(|entry| entry.id));
     let with_ini = subset.iter().filter(|entry| !entry.ini.is_empty()).count();
     let mut entries: Vec<Entry> = subset.into_iter().filter(|e| e.ini.is_empty()).collect();
     entries.extend(super::workloads(root)?);
@@ -153,7 +157,7 @@ pub(crate) fn run(
         ("seconds", seconds),
         ("clients", clients as u64),
         ("entries", entries.len() as u64),
-        ("left_out", left as u64),
+        ("left_out", left.len() as u64),
         ("with_ini", with_ini as u64),
         ("unstable", unstable.len() as u64),
         ("borked", borked.len() as u64),

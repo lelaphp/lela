@@ -94,7 +94,13 @@ fn against_fpm(root: &Path, entry: &Entry) -> Result<Sides> {
     };
     let oracle = manifest.pin.oracle();
     let ports = Ports::default();
-    let pool = Fpm::start(&oracle, &fpm, served.dir(), &entry.http, (&ini(), ports))?;
+    let pool = Fpm::start(
+        &oracle,
+        &fpm,
+        &served.program(),
+        &entry.http,
+        (&ini(), ports),
+    )?;
     Ok(Ok([
         Box::new(ByMakala {
             name: "makala",
@@ -167,21 +173,21 @@ impl Served {
         let recipe = &manifest.pin.recipe;
         let binary = profile::released(root, &MAKALA.package(), MAKALA.binary)?;
         let own = Tree::new("bench-makala")?;
-        own.write(&recipe.script_name, &entry.program)?;
+        own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");
         let server = Server::start(recipe, &binary, own.path(), &ini(), None, &log, &[])?;
         Ok(Served {
             server,
             binary,
             http: entry.http.clone(),
-            script: recipe.script_name.clone(),
+            script: entry.script.clone(),
             timeout: Duration::from_secs(recipe.limits.timeout_s),
             own,
         })
     }
 
-    fn dir(&self) -> &Path {
-        self.own.path()
+    fn program(&self) -> PathBuf {
+        self.own.join(&self.script)
     }
 
     /// The workload's request sent once more: the response as it came.
