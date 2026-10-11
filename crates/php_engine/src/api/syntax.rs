@@ -12,8 +12,7 @@
 
 pub use php_compile::syntax::{
     Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, Position, ScannedToken,
-    SyntaxKind, Token, TokenId, Tree, amp_name, cast_name, int_overflows, lex, magic_const_name,
-    operator_name, parse, scanned,
+    SyntaxKind, Token, TokenId, Tree, lex, parse, scanned,
 };
 
 pub use crate::getopt::{Getopt, Need, Opt, Taken};

@@ -106,7 +106,7 @@ impl ClassId {
     /// Whether every request shares the class: one of the engine's, or a
     /// row of its published arena; not one only this request declared.
     #[must_use]
-    pub fn is_published(self) -> bool {
+    pub(crate) fn is_published(self) -> bool {
         self.0 & ClassId::LOCAL == 0
     }
 

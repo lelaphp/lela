@@ -16,6 +16,8 @@ use php_ext::request::{FrameView, MethodRow, OpArrayView, Opcode, Raised, Reques
 use php_ext::values::{ClassId, Value};
 use php_sapi::tier::{self, FrameRef};
 
+use crate::opcodes;
+
 /// Where a frame stands: the file and line of the opline the loop
 /// dispatches next, its index in the op array, its opcode, and the lines
 /// the op array spans.
@@ -121,12 +123,7 @@ fn ops_of(code: &OpArrayView<'_>) -> Vec<(Opcode, u32)> {
 fn received(code: &OpArrayView<'_>) -> u32 {
     let count = code
         .oplines()
-        .take_while(|op| {
-            matches!(
-                op.opcode(),
-                Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
-            )
-        })
+        .take_while(|op| opcodes::is(op.opcode(), opcodes::RECEIVES))
         .count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }
@@ -182,7 +179,7 @@ pub fn parameter_names(req: &Request, frame: FrameRef) -> Vec<Vec<u8>> {
     };
     let declared = code
         .oplines()
-        .take_while(|op| matches!(op.opcode(), Opcode::Recv | Opcode::RecvInit))
+        .take_while(|op| opcodes::is(op.opcode(), opcodes::DECLARED))
         .count();
     (0..declared)
         .map_while(|cv| code.variable(u32::try_from(cv).ok()?))

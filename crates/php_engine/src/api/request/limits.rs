@@ -514,7 +514,7 @@ impl Request {
     /// 32
     /// -32
     /// ```
-    pub fn set_time_limit(&mut self, seconds: i64) -> bool {
+    pub(crate) fn set_time_limit(&mut self, seconds: i64) -> bool {
         let Ok(string) = crate::api::coerce::int_to_string(self, seconds) else {
             return false;
         };

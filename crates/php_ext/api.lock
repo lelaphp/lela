@@ -101,7 +101,6 @@ abi::ExtensionBuilder::cached
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_linked_observer
-abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_reshaped
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
@@ -171,7 +170,6 @@ abi::Header::register
 abi::HoldsCoroutine
 abi::HoldsCoroutine::coroutine
 abi::IniStage
-abi::IniVerdict
 abi::Instance
 abi::Instance::object
 abi::Instance::of
@@ -341,7 +339,6 @@ attr::php_class
 attr::php_const
 attr::php_function
 call::Function
-call::Function::is_published
 call::Iter
 call::Iter::as_value
 call::Iter::invalidate
@@ -511,7 +508,6 @@ raising::throw_error
 raising::throw_error_chained
 raising::throw_value
 raising::throwing_warnings
-raising::too_few_arguments
 raising::uncaught_at
 raising::warning
 raising::while_pending
@@ -627,15 +623,8 @@ request::OpArrayView::opline
 request::OpArrayView::oplines
 request::OpArrayView::variable
 request::Opcode
-request::Opcode::COUNT
-request::Opcode::effects
-request::Opcode::from_u8
-request::Opcode::is_commutative
-request::Opcode::is_frameless_icall
-request::Opcode::is_safepoint_site
 request::Opcode::name
 request::Opcode::num
-request::Opcode::out_used
 request::Opening
 request::Operand
 request::OplineIdx
@@ -725,7 +714,6 @@ request::Request::current_file
 request::Request::current_line
 request::Request::cwd
 request::Request::declared_classes
-request::Request::define_constant
 request::Request::defined_functions
 request::Request::disown
 request::Request::dl
@@ -759,7 +747,6 @@ request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::foreign
 request::Request::fork
-request::Request::frame_args
 request::Request::frame_of
 request::Request::frame_var
 request::Request::frame_vars
@@ -767,11 +754,7 @@ request::Request::frameless
 request::Request::function_decl
 request::Request::function_extension
 request::Request::functions
-request::Request::gc_collect
-request::Request::gc_enable
-request::Request::gc_enabled
 request::Request::gc_possible_root
-request::Request::gc_status
 request::Request::global
 request::Request::global_names
 request::Request::header_add
@@ -817,7 +800,6 @@ request::Request::method_named
 request::Request::method_row
 request::Request::method_rows
 request::Request::multibyte_provider
-request::Request::named_arguments
 request::Request::native_static_trampoline
 request::Request::native_trampoline
 request::Request::observe_allocations
@@ -851,14 +833,11 @@ request::Request::request_headers
 request::Request::request_method
 request::Request::request_time
 request::Request::request_uri
-request::Request::reset_memory_peak
 request::Request::resolve_path
 request::Request::resource
 request::Request::resources
 request::Request::response_code
 request::Request::response_headers
-request::Request::restore_error_handler
-request::Request::restore_exception_handler
 request::Request::return_value_used
 request::Request::row_method
 request::Request::row_prototype
@@ -875,7 +854,6 @@ request::Request::set_cwd
 request::Request::set_display_errors
 request::Request::set_env
 request::Request::set_error_handler
-request::Request::set_exception_handler
 request::Request::set_frame_var
 request::Request::set_global
 request::Request::set_header_callback
@@ -883,7 +861,6 @@ request::Request::set_local_var
 request::Request::set_locale_name
 request::Request::set_response_code
 request::Request::set_shutdown_function
-request::Request::set_time_limit
 request::Request::set_umask
 request::Request::stack_limit_address
 request::Request::stack_overflowed
@@ -907,7 +884,6 @@ request::Request::unit_cache
 request::Request::unobserve_allocations
 request::Request::unregister_tick_function
 request::Request::update_server
-request::Request::variadic_arguments
 request::Request::virtual_file_ex
 request::Request::with_fake_scope
 request::Request::with_fiber_switch_blocked
@@ -1118,13 +1094,8 @@ syntax::Tree
 syntax::Tree::elements
 syntax::Tree::nodes
 syntax::Tree::root
-syntax::amp_name
-syntax::cast_name
 syntax::highlight
-syntax::int_overflows
 syntax::lex
-syntax::magic_const_name
-syntax::operator_name
 syntax::parse
 syntax::parse_ini
 syntax::scanned
@@ -1168,7 +1139,6 @@ values::Charset::partial
 values::Charset::single_byte
 values::Charset::unicode_compat
 values::ClassId
-values::ClassId::is_published
 values::ClosureInfo
 values::DeclaredRows
 values::Emalloc

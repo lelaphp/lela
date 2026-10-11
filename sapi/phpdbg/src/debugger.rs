@@ -12,10 +12,10 @@
 //! the program runs at the interpreter's speed.
 
 use php_ext::abi::AfterLog;
-use php_ext::request::Opcode;
 use php_sapi::tier::{self, Flow, FrameRef, Hooked, Request, Site, Stepped, Tier};
 
 use crate::bp::{At, OpArray};
+use crate::opcodes;
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
 use crate::read;
@@ -631,7 +631,7 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
             } else {
                 Next::HandBack
             }
-        } else if at.frame == entry && leaves(position.opcode) {
+        } else if at.frame == entry && opcodes::is(position.opcode, opcodes::LEAVES) {
             Next::HandBack
         } else {
             Next::Step
@@ -690,19 +690,6 @@ fn vm_return(req: &Request, before: FrameRef, edge: Stepped) -> i32 {
     } else {
         2
     }
-}
-
-/// Whether the opline pops the frame it stands in, which on the frame a
-/// serving entered is the loop's to run.
-fn leaves(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::Return
-            | Opcode::ReturnByRef
-            | Opcode::GeneratorReturn
-            | Opcode::Yield
-            | Opcode::YieldFrom
-    )
 }
 
 /// What php checks before a handler runs, in `phpdbg_execute_ex`'s

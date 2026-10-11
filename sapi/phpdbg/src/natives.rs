@@ -21,6 +21,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::bp::At;
+use crate::opcodes;
 use crate::out::{self, Element};
 use crate::read::{self, Code};
 use crate::session::{self, Logged};
@@ -616,40 +617,6 @@ impl Rows {
     }
 }
 
-/// `phpdbg_is_ignored_opcode`.
-fn ignored(opcode: Opcode) -> bool {
-    matches!(
-        opcode.name(),
-        "ZEND_NOP"
-            | "ZEND_OP_DATA"
-            | "ZEND_FE_FREE"
-            | "ZEND_FREE"
-            | "ZEND_ASSERT_CHECK"
-            | "ZEND_VERIFY_RETURN_TYPE"
-            | "ZEND_DECLARE_CONST"
-            | "ZEND_DECLARE_ATTRIBUTED_CONST"
-            | "ZEND_DECLARE_CLASS"
-            | "ZEND_DECLARE_FUNCTION"
-            | "ZEND_DECLARE_CLASS_DELAYED"
-            | "ZEND_DECLARE_ANON_CLASS"
-            | "ZEND_FAST_RET"
-            | "ZEND_TICKS"
-            | "ZEND_EXT_STMT"
-            | "ZEND_EXT_FCALL_BEGIN"
-            | "ZEND_EXT_FCALL_END"
-            | "ZEND_BIND_GLOBAL"
-            | "ZEND_BIND_INIT_STATIC_OR_JMP"
-    )
-}
-
-/// Whether an opline returns from its op array.
-fn returns(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::Return | Opcode::ReturnByRef | Opcode::GeneratorReturn
-    )
-}
-
 /// `phpdbg_oplog_fill_executable`: past the `RECV*` oplines, each opline
 /// that is not one of the ignored, a zero at its line or its number; the
 /// return the compiler put last left out, and a `NEW`'s constructor call
@@ -658,22 +625,22 @@ fn executable(rows: &mut Rows, at: Place, ops: &[(Opcode, u32)], params: u32, by
     let mut end = ops.len();
     // Every op array ends on the compiler's own return, `extended_value`
     // -1 in php, and a file's code on its `RETURN 1`: php leaves both out.
-    if end >= 1 && returns(ops[end - 1].0) {
+    if end >= 1 && opcodes::is(ops[end - 1].0, opcodes::RETURNS) {
         end -= 1;
     }
     let mut index = params as usize;
     while index < end {
         let (opcode, line) = ops[index];
-        if !ignored(opcode) {
+        if !opcodes::is(opcode, opcodes::IGNORED) {
             let key = if by_opcode {
                 i64::try_from(index).unwrap_or(i64::MAX)
             } else {
                 i64::from(line)
             };
-            if opcode == Opcode::New
+            if opcodes::is(opcode, opcodes::NEW)
                 && ops
                     .get(index + 1)
-                    .is_some_and(|(o, _)| *o == Opcode::DoFcall)
+                    .is_some_and(|(o, _)| opcodes::is(*o, opcodes::DO_FCALL))
             {
                 index += 1;
             }
@@ -724,7 +691,7 @@ fn oplog_rows(log: &[Logged], by_function: bool, by_opcode: bool) -> Rows {
         let key = if by_opcode {
             i64::from(entry.opline)
         } else {
-            if ignored(entry.opcode) {
+            if opcodes::is(entry.opcode, opcodes::IGNORED) {
                 continue;
             }
             i64::from(entry.line)

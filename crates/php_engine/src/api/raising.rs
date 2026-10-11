@@ -1340,17 +1340,6 @@ pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Th
     ))
 }
 
-/// `ArgumentCountError` for a call with fewer arguments than the
-/// declaration requires, `zend_wrong_parameters_count_error`.
-pub fn too_few_arguments(req: &mut Request, expected: u32, given: u32) -> Thrown {
-    let word = if expected == 1 {
-        "argument"
-    } else {
-        "arguments"
-    };
-    arg_count_error(req, &format!("at least {expected} {word}, {given} given"))
-}
-
 /// `zend_param_must_be_nullable`: the 8.1 deprecation for `null` passed
 /// to a non-nullable scalar parameter of a native, one sentence,
 /// `{fn}(): Passing null to parameter #N ($name) of type {type} is
