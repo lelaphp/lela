@@ -1160,6 +1160,7 @@ mod tests {
     /// the fork stress on [`Timer`] is what holds it.
     #[test]
     fn a_timers_thread_waits_once_armed_and_is_done_at_the_engines_end() {
+        let _forks = crate::fork::forks_held();
         let interrupt = Interrupt::default();
         let began = Instant::now();
         for _ in 0..100 {
@@ -1451,6 +1452,7 @@ mod tests {
     /// `max_execution_time`.
     #[test]
     fn a_fork_after_a_timed_request_joins_the_parked_thread() {
+        let _forks = crate::fork::forks_held();
         let engine = Engine::cli_builder()
             .ini("max_execution_time", "30")
             .build();
@@ -1486,6 +1488,7 @@ mod tests {
     /// engine touches no timer: the parked thread is the one that stood.
     #[test]
     fn a_refused_fork_leaves_the_parked_thread_standing() {
+        let _forks = crate::fork::forks_held();
         let engine = Engine::cli_builder()
             .ini("max_execution_time", "30")
             .build();
@@ -1504,6 +1507,7 @@ mod tests {
     /// A timer whose engine has ended is not one a fork finds.
     #[test]
     fn a_fork_does_not_find_an_ended_engines_timer() {
+        let _forks = crate::fork::forks_held();
         let timer = Timer::default();
         let gone = Arc::downgrade(&timer.0);
         drop(timer);

@@ -314,9 +314,25 @@ pub fn fork() -> io::Result<Forked> {
     fork_as(Asker::Host)
 }
 
+/// The tests' one rule for forks (#2715). A fork takes every engine's
+/// timer in the process and holds the inside count's [`FORKING`] bit,
+/// both for the length of the fork. Every test in the binary shares the
+/// process, so a test that forks, that takes the process's timers, or
+/// that reads what a fork holds while it runs holds this guard. Reading
+/// what a fork holds means a timer's end at its last drop, which a
+/// fork's clone delays, or the [`FORKING`] bit. No sibling's fork is
+/// then under way while the test reads.
+#[cfg(test)]
+pub(crate) fn forks_held() -> std::sync::MutexGuard<'static, ()> {
+    static FORKS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    FORKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EBUSY, FORKING, INSIDE, Inside, fork, host_thread, spawn};
+    use super::{EBUSY, FORKING, INSIDE, Inside, fork, forks_held, host_thread, spawn};
     use std::sync::atomic::Ordering;
 
     /// A thread started through the home is inside the engine while it
@@ -339,6 +355,7 @@ mod tests {
     /// asked meanwhile is refused.
     #[test]
     fn a_host_thread_is_inside_while_it_stands() {
+        let _forks = forks_held();
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let started = host_thread("php-host", 3 << 20, move || {
             rx.recv().ok();
@@ -361,6 +378,7 @@ mod tests {
     /// requests the harness's other tests serve.
     #[test]
     fn a_hosts_fork_is_refused_while_anything_is_inside() {
+        let _forks = forks_held();
         let inside = Inside::enter();
         let refused = fork().err().and_then(|e| e.raw_os_error());
         drop(inside);
