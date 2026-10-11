@@ -20,8 +20,8 @@ use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
 use crate::constants::PHP_NORMAL_READ;
 use crate::ffi::{self, Addr, SUN_PATH};
 use crate::socket::{
-    Handle, Sock, Socket, global_error, is_transient, live_stream, made, new_socket, sock,
-    socket_error, strerror, valid,
+    Sock, Socket, Waited, global_error, is_transient, live_stream, made, new_socket, release, sock,
+    socket_error, strerror, valid, wait_on, wait_on_one,
 };
 
 /// A by-reference parameter with no declared type, `&$address`.
@@ -95,14 +95,14 @@ fn family(req: &mut Request, socket: Instance<Socket>) -> Result<i32, Thrown> {
     Ok(sock(req, socket)?.family)
 }
 
-/// `php_sock_array_to_fd_set` (`Z/ext/sockets/sockets.c:559`): the
-/// fds of one array's sockets, php's `TypeError` for an element
+/// `php_sock_array_to_fd_set` (`Z/ext/sockets/sockets.c:559`): one
+/// array's sockets with their fds, php's `TypeError` for an element
 /// that is none or is closed; `None` for no array.
 fn to_fd_set(
     req: &mut Request,
     position: u32,
     array: Option<PhpArray>,
-) -> Result<Option<Vec<RawFd>>, Thrown> {
+) -> Result<Option<Vec<(PhpObject, RawFd)>>, Thrown> {
     let Some(array) = array else {
         return Ok(None);
     };
@@ -110,9 +110,9 @@ fn to_fd_set(
     let mut refused = None;
     for (_, element) in walk::rows(req, array) {
         let element = element.deref();
-        let fd = match element.as_ref() {
+        let (object, fd) = match element.as_ref() {
             ValueRef::Object(object) if object.native::<Sock>(req).is_some() => {
-                object.native::<Sock>(req).and_then(Sock::fd)
+                (*object, object.native::<Sock>(req).and_then(Sock::fd))
             }
             _ => {
                 refused = Some(Refused::Given(value_name(req, &element)));
@@ -123,7 +123,7 @@ fn to_fd_set(
             refused = Some(Refused::Closed);
             break;
         };
-        fds.push(fd);
+        fds.push((object, fd));
     }
     match refused {
         None => Ok(Some(fds)),
@@ -131,13 +131,14 @@ fn to_fd_set(
             let tail = format!("only have elements of type Socket, {given} given");
             Err(arg_type_error(req, position, &tail))
         }
-        Some(Refused::Closed) => Err(argument_error(
-            req,
-            "TypeError",
-            position,
-            "contains a closed socket",
-        )),
+        Some(Refused::Closed) => Err(closed_in_set(req, position)),
     }
+}
+
+/// `php_sock_array_to_fd_set`'s `TypeError` for a closed socket in the
+/// array at argument `position`.
+fn closed_in_set(req: &mut Request, position: u32) -> Thrown {
+    argument_error(req, "TypeError", position, "contains a closed socket")
 }
 
 /// Why [`to_fd_set`] refused an element, read in the walk and raised
@@ -211,7 +212,7 @@ fn socket_select(
     #[php(default = 0)] microseconds: i64,
 ) -> Result<OrFalse<i64>, Thrown> {
     let arrays = [&read, &write, &except].map(|each| each.get().copied().flatten());
-    let mut sets: [Option<Vec<RawFd>>; 3] = [None, None, None];
+    let mut sets: [Option<Vec<(PhpObject, RawFd)>>; 3] = [None, None, None];
     for (at, (set, array)) in sets.iter_mut().zip(arrays).enumerate() {
         *set = to_fd_set(req, u32::try_from(at).unwrap_or(0) + 1, array)?;
     }
@@ -222,7 +223,13 @@ fn socket_select(
             "socket_select(): At least one array argument must be passed",
         ));
     }
-    let max_fd = sets.iter().flatten().flatten().copied().max().unwrap_or(0);
+    let max_fd = sets
+        .iter()
+        .flatten()
+        .flatten()
+        .map(|(_, fd)| *fd)
+        .max()
+        .unwrap_or(0);
     if max_fd >= ffi::FD_SETSIZE {
         let text = format!(
             "You MUST recompile PHP with a larger value of FD_SETSIZE.\nIt is set to {}, but you have descriptors numbered at least as high as {max_fd}.\n --enable-fd-setsize={} is recommended, but you may want to set it\nto equal the maximum number of open files supported by your system,\nin order to avoid seeing this error again at a later date.",
@@ -239,13 +246,56 @@ fn socket_select(
             (sec, microseconds)
         }
     });
-    let empty = Vec::new();
-    let [r, w, e] = &sets;
-    let fds = [r, w, e].map(|set| set.as_ref().unwrap_or(&empty).as_slice());
-    // The wait lends the request ([`Request::blocking`]), so a callback C
-    // makes from another thread meanwhile is served in it (#2401); so do
-    // this file's other waits, the reads and the accept.
-    let (count, ready) = match req.blocking(|| ffi::select(fds, timeout)) {
+    // The sockets of the three arrays in one list for the wait, which
+    // holds each out of reach of a callback served in it (#2601), and the
+    // arrays held for the walk after it, whatever the callback assigns to
+    // the variables.
+    let [r_len, w_len, _] = sets.each_ref().map(|set| set.as_ref().map_or(0, Vec::len));
+    let (sockets, positions): (Vec<PhpObject>, Vec<u32>) = (1..)
+        .zip(&sets)
+        .flat_map(|(position, set)| {
+            set.iter()
+                .flatten()
+                .map(move |(object, _)| (*object, position))
+        })
+        .unzip();
+    let held: Vec<Owner<PhpArray>> = arrays
+        .iter()
+        .flatten()
+        .map(|array| Owner::take(req, *array))
+        .collect();
+    let waited = wait_on(req, &sockets, |fds| {
+        let (r, rest) = fds.split_at(r_len.min(fds.len()));
+        let (w, e) = rest.split_at(w_len.min(rest.len()));
+        ffi::select([r, w, e], timeout)
+    });
+    let selected = match waited {
+        Waited::Answered(selected) => selected,
+        Waited::Closed { at, .. } => {
+            for array in held {
+                array.give_up(req);
+            }
+            let position = positions.get(at).copied().unwrap_or(1);
+            return Err(closed_in_set(req, position));
+        }
+    };
+    let answered = select_answered(req, [&read, &write, &except], arrays, selected);
+    for array in held {
+        array.give_up(req);
+    }
+    answered
+}
+
+/// What `socket_select` answers once its wait returned: each array cut
+/// to the sockets `select(2)` left ready and their count, or php's
+/// warning and `false` for a failed call.
+fn select_answered(
+    req: &mut Request,
+    targets: [&Ref<Option<PhpArray>>; 3],
+    arrays: [Option<PhpArray>; 3],
+    selected: Result<(i32, [Vec<bool>; 3]), nix::errno::Errno>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let (count, ready) = match selected {
         Ok(answered) => answered,
         Err(errno) => {
             let code = errno as i32;
@@ -255,7 +305,7 @@ fn socket_select(
             return Ok(OrFalse::False);
         }
     };
-    for ((target, array), ready) in [&read, &write, &except].into_iter().zip(arrays).zip(&ready) {
+    for ((target, array), ready) in targets.into_iter().zip(arrays).zip(&ready) {
         if let Some(array) = array {
             from_fd_set(req, target, array, ready)?;
         }
@@ -344,11 +394,18 @@ fn socket_accept(
     req: &mut Request,
     socket: Instance<Socket>,
 ) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
-    let fd = valid(req, socket)?;
+    valid(req, socket)?;
     let blocking = sock(req, socket)?.blocking;
     let owner = laid(req)?;
     let object = *owner;
-    let (new, family) = match req.blocking(|| accept(fd, blocking)) {
+    let accepted = match wait_on_one(req, socket, |fd| accept(fd, blocking)) {
+        Ok(accepted) => accepted,
+        Err(thrown) => {
+            owner.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let (new, family) = match accepted {
         Ok(accepted) => accepted,
         Err(errno) => {
             socket_error(
@@ -510,12 +567,8 @@ fn socket_listen(
 #[php_function]
 fn socket_close(req: &mut Request, socket: Instance<Socket>) -> Result<(), Thrown> {
     valid(req, socket)?;
-    let handle = std::mem::take(&mut sock(req, socket)?.handle);
-    if let Handle::Stream { stream, .. } = handle {
-        if let Some(open) = live_stream(req, *stream) {
-            open.close(req);
-        }
-        stream.give_up(req);
+    if let Some(handle) = sock(req, socket)?.close() {
+        release(req, handle);
     }
     Ok(())
 }
@@ -644,18 +697,18 @@ fn socket_read(
     length: i64,
     #[php(default = PHP_BINARY_READ)] mode: i64,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let fd = valid(req, socket)?;
+    valid(req, socket)?;
     if length <= 0 || length == i64::MAX {
         return Ok(OrFalse::False);
     }
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX))?;
-    let read = req.blocking(|| {
+    let read = wait_on_one(req, socket, |fd| {
         if mode == PHP_NORMAL_READ {
             read_line(fd, &mut buf)
         } else {
             ffi::recv(fd, &mut buf, 0)
         }
-    });
+    })?;
     match read {
         Ok(n) => Ok(OrFalse::Value(PhpString::new(
             req,
@@ -1120,12 +1173,12 @@ fn socket_recv(
     length: i64,
     flags: i64,
 ) -> Result<OrFalse<i64>, Thrown> {
-    let fd = valid(req, socket)?;
+    valid(req, socket)?;
     if length <= 0 || length == i64::MAX {
         return Ok(OrFalse::False);
     }
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX))?;
-    let got = req.blocking(|| ffi::recv(fd, &mut buf, c_int(flags)));
+    let got = wait_on_one(req, socket, |fd| ffi::recv(fd, &mut buf, c_int(flags)))?;
     let value = match got {
         Ok(n) if n > 0 => string(req, &buf[..n])?,
         _ => Owner::null(),
@@ -1217,7 +1270,7 @@ fn socket_recvfrom(
     address: Out,
     #[php(default = null)] port: Out,
 ) -> Result<OrFalse<i64>, Thrown> {
-    let fd = valid(req, socket)?;
+    valid(req, socket)?;
     if length <= 0 || length > i64::MAX - 1 {
         return Ok(OrFalse::False);
     }
@@ -1238,7 +1291,9 @@ fn socket_recvfrom(
             "Wrong parameter count for socket_recvfrom()",
         ));
     }
-    let received = req.blocking(|| ffi::recvfrom(fd, &mut buf, c_int(flags), family));
+    let received = wait_on_one(req, socket, |fd| {
+        ffi::recvfrom(fd, &mut buf, c_int(flags), family)
+    })?;
     let (n, from) = match received {
         Ok(got) => got,
         Err(errno) => {

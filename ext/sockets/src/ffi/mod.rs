@@ -570,6 +570,32 @@ pub(crate) struct Received {
     pub(crate) flags: i32,
 }
 
+impl Received {
+    /// The fds the ancillary data's `SCM_RIGHTS` entries carried in,
+    /// adopted, for a message let go unread: the kernel installed them in
+    /// this process, and nothing else will close them.
+    pub(crate) fn rights(&self) -> Vec<OwnedFd> {
+        let control = self.control.as_slice();
+        let mut fds = Vec::new();
+        let mut at = 0;
+        while let Some(entry) = control.get(at..).filter(|rest| rest.len() >= cmsg::HEADER) {
+            let (length, level, ty) = cmsg::header(entry);
+            if length < cmsg::HEADER {
+                break;
+            }
+            if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
+                let body = entry.get(cmsg::DATA_AT..length).unwrap_or_default();
+                fds.extend(
+                    body.chunks_exact(4)
+                        .map(|b| adopt(i32::from_ne_bytes([b[0], b[1], b[2], b[3]]))),
+                );
+            }
+            at += cmsg::align(length);
+        }
+        fds
+    }
+}
+
 /// `sendmsg(fd, &msghdr, flags)` over the name, the buffers and the
 /// ancillary data php's conversions laid out.
 // `msg_iovlen` and `msg_controllen` are `size_t` on Linux and `int`/`socklen_t` on macOS: the conversion does work on one platform and none on the other.

@@ -570,7 +570,9 @@ impl EasyId {
         held.flatten().unwrap_or((GONE, None))
     }
 
-    /// `curl_easy_perform`, the request reachable by the callbacks.
+    /// `curl_easy_perform`, the request reachable by the callbacks. The
+    /// transfer's waits are libcurl's and lend nothing (#2595, `ffi`'s
+    /// *Waits*).
     pub(crate) fn perform(self, req: &mut Request) -> (i32, Option<Thrown>) {
         // SAFETY: a handle held for the call; its callbacks find the
         // request `enter` leaves.

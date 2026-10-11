@@ -464,11 +464,16 @@ impl Request {
     /// another thread meanwhile, which takes it, served on that thread,
     /// and gives it back before this returns (#1640): what a call into C
     /// and an engine native that blocks (`sleep`, `usleep`,
-    /// `stream_select`, a blocking read) wait through, so the request
-    /// never waits on C while C waits on the request. `wait` reaches
-    /// nothing of the request, which is borrowed for its length; where
-    /// no [`Reentry`] was made, nothing can call back and nothing is
-    /// lent.
+    /// `stream_select`, a blocking read, a child's wait, `flock`,
+    /// `stream_socket_accept`, and
+    /// ext/pcntl's and ext/sockets' waits, #2401) wait through, so the
+    /// request never waits on C while C waits on the request. `wait`
+    /// reaches nothing of the request, which is borrowed for its length;
+    /// where no [`Reentry`] was made, nothing can call back and nothing
+    /// is lent. `curl_exec` and `curl_multi_select` wait inside libcurl
+    /// without it, as php's one thread runs one libcurl call of a request
+    /// at a time, and a callback made meanwhile is served at the next
+    /// interrupt check after they return (#2595).
     pub fn blocking<T>(&mut self, wait: impl FnOnce() -> T) -> T {
         let Some(reentry) = self.limits.reentry.clone() else {
             return wait();

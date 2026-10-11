@@ -11,7 +11,7 @@ use crate::State;
 use crate::conv::{Ancillary, Conv};
 use crate::ffi::{self, cmsg};
 use crate::natives::long;
-use crate::socket::{Socket, sock, socket_error, strerror, valid};
+use crate::socket::{Socket, Waited, closed, sock, socket_error, strerror, valid, wait_on_socket};
 
 /// `LONG_CHECK_VALID_INT`: php's `ValueError` for a number no C `int`
 /// holds.
@@ -127,7 +127,7 @@ fn socket_recvmsg(
     #[php(default = 0)] flags: i64,
 ) -> Result<OrFalse<i64>, Thrown> {
     let flags = int_arg(req, flags, 3)?;
-    let fd = valid(req, socket)?;
+    valid(req, socket)?;
     let family = sock(req, socket)?.family;
     let Some(array) = message.get().copied() else {
         return Ok(OrFalse::False);
@@ -138,8 +138,19 @@ fn socket_recvmsg(
         conv.report(req);
         return Ok(OrFalse::False);
     }
-    // The wait lends the request ([`Request::blocking`], #2401).
-    let received = req.blocking(|| ffi::recvmsg(fd, room.name, room.size, room.controllen, flags));
+    let waited = wait_on_socket(req, socket, |fd| {
+        ffi::recvmsg(fd, room.name, room.size, room.controllen, flags)
+    });
+    let received = match waited {
+        Waited::Answered(received) => received,
+        Waited::Closed { answered, .. } => {
+            // The message is let go unread, and the fds it carried with it.
+            if let Some(Ok(got)) = answered {
+                drop(got.rights());
+            }
+            return Err(closed(req, 1));
+        }
+    };
     let got = match received {
         Ok(got) => got,
         Err(errno) => {

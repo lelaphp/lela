@@ -169,8 +169,14 @@ fn socket_export_stream(
     }
     let payload = sock(req, socket)?;
     let (family, blocking) = (payload.family, payload.blocking);
-    let Handle::Own(owned) = std::mem::take(&mut payload.handle) else {
-        return Ok(Untyped(OrFalse::False));
+    // A socket a wait holds (#2601) keeps its fd its own until the wait
+    // returns, so a callback served in the wait exports none.
+    let owned = match std::mem::take(&mut payload.handle) {
+        Handle::Own(owned) => owned,
+        other => {
+            payload.handle = other;
+            return Ok(Untyped(OrFalse::False));
+        }
     };
     let raw = owned.as_raw_fd();
     let kind = FdStream::Xport {
