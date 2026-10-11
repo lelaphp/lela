@@ -27,7 +27,7 @@
 pub mod api;
 mod arena;
 mod attributes;
-mod c_number;
+pub mod c_number;
 mod classes;
 mod command_line;
 mod constants;
