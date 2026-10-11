@@ -46,12 +46,17 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     // records a ticket, which the tree the tests run in need not be.
     let ticketed = checkout("fixtures-ticketed", Some(1));
     // One scoped to `where = "operating"` in a checkout whose merge no
-    // session of the fixture's started (#2476).
+    // session of the fixture's started (#2476), and every other `Bash`
+    // rule in a checkout where none stands, since the tests' own checkout
+    // holds a merge while its merge commit's hook runs them; a write is
+    // judged against the workspace's files.
     let merging = operating("fixtures-operating");
+    let quiet = checkout("fixtures-quiet", None);
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
         let kind = Kind::of(rule);
         let workspace = || match rule.within {
+            Where::Anywhere if rule.tool.iter().any(|t| t == "Bash") => quiet.path(),
             Where::Anywhere => workspace(),
             Where::Ticketed => ticketed.path(),
             Where::Operating => merging.path(),
@@ -211,7 +216,8 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
     let manifest = with_the_pathspec_rule(Manifest::load(workspace()).unwrap());
     let rule = manifest.rule("git.pathspec").unwrap();
     let dir = fixtures().join("rules/git.pathspec");
-    let judged = judge(&manifest, workspace(), &call(&dir.join("deny.json"))).unwrap();
+    let quiet = checkout("pathspec-quiet", None);
+    let judged = judge(&manifest, quiet.path(), &call(&dir.join("deny.json"))).unwrap();
     let denial = judged
         .denial()
         .unwrap_or_else(|| panic!("the denial did not fire: {judged:?}"));
@@ -222,7 +228,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
         denial.reason()
     );
     assert!(denial.reason().contains(&rule.text), "{}", denial.reason());
-    let judged = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+    let judged = judge(&manifest, quiet.path(), &call(&dir.join("allow.json"))).unwrap();
     assert!(
         judged.findings.iter().all(|f| f.rule != "git.pathspec"),
         "the neighbour fired: {judged:?}"
@@ -234,7 +240,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
         "git add -- .",
         "git -C /Users/x/dax-php commit -F /tmp/msg",
     ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
         assert_eq!(
             judged.denial().map(|f| f.rule.as_str()),
             Some("git.pathspec"),
@@ -248,7 +254,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
         "git worktree add -b t/x .claude/worktrees/t/x main",
         "cargo add serde",
     ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
         assert!(judged.denial().is_none(), "{line}: {judged:?}");
     }
 }
@@ -3017,8 +3023,9 @@ fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
 fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
     let manifest = Manifest::load(workspace()).unwrap();
     let dir = fixtures().join("rules/lanes.nightly");
+    let quiet = checkout("nightly-quiet", None);
     let rule = |file: &str| {
-        let judged = judge(&manifest, workspace(), &call(&dir.join(file))).unwrap();
+        let judged = judge(&manifest, quiet.path(), &call(&dir.join(file))).unwrap();
         judged.denial().map(|f| f.rule.clone())
     };
     let denied = Some("lanes.nightly".to_owned());
