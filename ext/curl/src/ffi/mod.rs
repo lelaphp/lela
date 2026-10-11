@@ -29,6 +29,15 @@
 //! hands back what a callback threw, which the library cannot carry. A
 //! trampoline outside such a call reaches no request and answers as php
 //! answers a callback that served nothing.
+//!
+//! **Waits.** `curl_easy_perform` (`curl_exec`) and `curl_multi_wait`
+//! (`curl_multi_select`) block inside libcurl without lending the request
+//! ([`Request::blocking`]), unlike the other waits of the engine's natives:
+//! lending there would let PHP code on a callback's thread call libcurl
+//! on the same handles, shares and session while the request's thread is
+//! inside libcurl, which php's one thread never does. A callback another
+//! thread makes during them is served at the request's next interrupt
+//! check after the native returns (Mitchell's ruling on #2595).
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
