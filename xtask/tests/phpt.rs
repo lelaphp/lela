@@ -1331,6 +1331,125 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     }
 }
 
+/// A System V subset's own sweep removes the private queue its test leaves
+/// that nobody sent to, naming no process, and counts it, where no other
+/// run holds a claim in the claims directory it reads (#1482, #2571); and
+/// with a claim held there from before the queue was made, as a run going
+/// beside it holds one (#2563), it leaves the queue standing and its own
+/// claim for a later reclaim, and this test removes the queue. The runs
+/// take a temporary directory of their own, so the claims they read are
+/// this test's alone; a private queue another session's run makes in the
+/// same second as the test's program may still be taken with it, as by
+/// any System V subset's sweep. On Linux, where `unshare` puts the subset
+/// in a private IPC namespace, the queue goes with its program, and the
+/// test says so and returns.
+#[test]
+fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a_claim_is_held() {
+    if oracle().is_none() {
+        return;
+    }
+    if let Some(why) = ipcs_readable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let tree = OneTree::new("sysv-own");
+    let dir = tree.corpus.join("ext/sysvmsg/tests");
+    fs::create_dir_all(&dir).unwrap();
+    let marks = Tree::new("phpt-sysv-own-marks").unwrap();
+    let started = marks.join("started");
+    let then = "echo 'left';\n--EXPECT--\nleft\n";
+    fs::write(
+        dir.join("leaves.phpt"),
+        leaves_a_private_queue(&started, then),
+    )
+    .unwrap();
+    let tmp = Tree::new("phpt-sysv-own-tmp").unwrap();
+    let claims = tmp.join("xtask-sysv-claims");
+    let checkout = OneTree::checkout("sysv-own");
+    let run = || {
+        fs::remove_file(&started).ok();
+        let mut command = tree.command(&checkout, "ext/sysvmsg");
+        let out = command.env("TMPDIR", tmp.path()).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let reading = xtask::reading::Store::of_workspace(checkout.path())
+            .read("phpt", "ext/sysvmsg")
+            .unwrap()
+            .expect("the run's reading");
+        let printed = printed(&started);
+        let queue = match printed.split_whitespace().collect::<Vec<_>>()[..] {
+            [_, queue] => Some(queue.to_owned()),
+            _ => None,
+        };
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            reading,
+            queue,
+        )
+    };
+    let stands = |queue: &str| ipcs().iter().any(|o| o.kind == "q" && o.id == queue);
+    // Whether the run's own sweep's words name `queue` among what it
+    // removed, beside any private queue a run going at once made in the
+    // same second; one gone that they do not name another run's sweep took.
+    let took = |reading: &Reading, queue: &str| {
+        let own = reading
+            .message
+            .split_once("of what its tests left, removed ")
+            .and_then(|(_, words)| words.split(';').next())
+            .unwrap_or_default();
+        own.split([' ', '(', ')', ',']).any(|word| word == queue)
+    };
+    let (said, reading, queue) = run();
+    if said.contains("private IPC namespace") {
+        eprintln!("skipped: the subset ran in a private IPC namespace: {said}");
+        return;
+    }
+    let Some(queue) = queue else {
+        eprintln!("the queue is not told apart: {}", reading.message);
+        return;
+    };
+    let left = stands(&queue);
+    if left {
+        Command::new("ipcrm").args(["-q", &queue]).status().ok();
+    }
+    assert!(!left, "the run left its test's queue {queue}: {said}");
+    if took(&reading, &queue) {
+        assert!(count(&reading, "sysv_removed") >= 1, "{reading:#?}");
+    } else {
+        eprintln!("another run's sweep took the queue {queue} first: {said}");
+    }
+    assert_eq!(
+        fs::read_dir(&claims).unwrap().count(),
+        0,
+        "the run's claim goes"
+    );
+    // A claim held from before the queue is made, as a run going beside
+    // this one holds its own.
+    let held = fs::File::create(claims.join("held")).unwrap();
+    held.try_lock().unwrap();
+    let (said, reading, queue) = run();
+    let Some(queue) = queue else {
+        eprintln!("the queue is not told apart: {}", reading.message);
+        return;
+    };
+    let left = stands(&queue);
+    Command::new("ipcrm").args(["-q", &queue]).status().ok();
+    assert!(
+        !took(&reading, &queue),
+        "the run took its test's queue {queue} while a claim was held: {reading:#?}"
+    );
+    if left {
+        assert!(said.contains("no process and stand"), "{said}");
+    } else {
+        eprintln!("another run's sweep took the queue {queue}: {said}");
+    }
+    assert_eq!(
+        fs::read_dir(&claims).unwrap().count(),
+        2,
+        "the run keeps its claim beside the held one"
+    );
+    drop(held);
+}
+
 /// On Linux, a run where no private IPC namespace is in play still removes
 /// what its test leaves (#1643): the fixture's subset is no System V
 /// subset, so its program runs in the machine's own namespace, as every
