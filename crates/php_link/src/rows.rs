@@ -314,6 +314,9 @@ impl<C: Case> Names<C> {
     /// The position among `rows`, the rows the index was made over, of
     /// the first named `name`.
     pub fn find<R: Named>(&self, rows: &[R], name: &[u8]) -> Option<usize> {
+        if self.index.is_empty() {
+            return None;
+        }
         let found = self.index.find(wide(hash::<C>(name)), |&at| {
             let at = usize::try_from(at).unwrap_or(usize::MAX);
             rows.get(at).is_some_and(|row| same::<C>(row.name(), name))
@@ -394,23 +397,164 @@ fn same<C: Case>(a: &[u8], b: &[u8]) -> bool {
     }
 }
 
-/// A name's hash under `C`, eight bytes at a time, each folded first
-/// where `C` folds: what the index files a row under and what the row
-/// keeps. php hashes the lowered name with DJBX33A; the choice is not
-/// observable (design §3 principle 1).
-fn hash<C: Case>(name: &[u8]) -> u32 {
-    let mut hash: u64 = 0;
-    for chunk in name.chunks(8) {
-        let mut word = [0u8; 8];
-        for (to, &from) in word.iter_mut().zip(chunk) {
-            *to = if C::FOLDED {
-                from.to_ascii_lowercase()
-            } else {
-                from
-            };
+/// A table that holds the name it files each value under, as php's
+/// `HashTable` holds a bucket's key: `EG(class_table)`'s rows past the
+/// engine's, a class's trampolines, any table whose rows do not carry
+/// their own name ([`Names`] indexes rows that do). The name is kept as
+/// it is handed in and found under `C`, so a folded table finds `Foo`
+/// under `FOO` with neither lowered; its hash is kept beside it.
+#[derive(Debug, Clone)]
+pub struct NameMap<C, V> {
+    table: HashTable<Filed<V>>,
+    case: PhantomData<C>,
+}
+
+/// One row of a [`NameMap`]: its name's hash, the name and the value.
+#[derive(Debug, Clone)]
+struct Filed<V> {
+    hash: u32,
+    name: Box<[u8]>,
+    value: V,
+}
+
+impl<C, V> NameMap<C, V> {
+    /// The table of no rows.
+    #[must_use]
+    pub const fn new() -> NameMap<C, V> {
+        NameMap {
+            table: HashTable::new(),
+            case: PhantomData,
         }
-        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
+
+    /// Every row given up, `zend_hash_clean`.
+    pub fn clear(&mut self) {
+        self.table.clear();
+    }
+}
+
+impl<C, V> Default for NameMap<C, V> {
+    fn default() -> Self {
+        NameMap::new()
+    }
+}
+
+impl<C: Case, V> NameMap<C, V> {
+    /// `zend_hash_find`: the value filed under `name`.
+    pub fn find(&self, name: &[u8]) -> Option<&V> {
+        if self.table.is_empty() {
+            return None;
+        }
+        let hash = hash::<C>(name);
+        let found = self.table.find(wide(hash), |filed| {
+            filed.hash == hash && same::<C>(&filed.name, name)
+        })?;
+        Some(&found.value)
+    }
+
+    /// `zend_hash_add`: `value` under `name`, unless a row of that name
+    /// stands already, which is kept. Whether it was added.
+    pub fn add(&mut self, name: &[u8], value: V) -> bool {
+        let hash = hash::<C>(name);
+        let entry = self.table.entry(
+            wide(hash),
+            |filed| filed.hash == hash && same::<C>(&filed.name, name),
+            |filed| wide(filed.hash),
+        );
+        match entry {
+            hashbrown::hash_table::Entry::Occupied(_) => false,
+            hashbrown::hash_table::Entry::Vacant(vacant) => {
+                vacant.insert(Filed {
+                    hash,
+                    name: name.into(),
+                    value,
+                });
+                true
+            }
+        }
+    }
+}
+
+/// The one hash of a name, as a `BuildHasher`, for a std `HashMap` whose
+/// key is a name compared byte for byte: what every other table by name
+/// here hashes with ([`Names`], [`Rows`], [`NameMap`]), so a name is
+/// hashed one way wherever it is a key. An extension reaches it on the
+/// face, which saves it a hash crate of its own (#2157).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NameHasher;
+
+impl std::hash::BuildHasher for NameHasher {
+    type Hasher = NameHash;
+
+    fn build_hasher(&self) -> NameHash {
+        NameHash(0)
+    }
+}
+
+/// [`NameHasher`]'s state: the words written so far, mixed as a name's
+/// eight-byte words are.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NameHash(u64);
+
+impl std::hash::Hasher for NameHash {
+    fn finish(&self) -> u64 {
+        wide(top(self.0))
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = words(bytes).fold(self.0, mix);
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.0 = mix(self.0, n as u64);
+    }
+}
+
+/// A name's hash under `C`, eight bytes at a time, each word folded
+/// first where `C` folds: what the index files a row under and what the
+/// row keeps. php hashes the lowered name with DJBX33A; the choice is
+/// not observable (design §3 principle 1).
+fn hash<C: Case>(name: &[u8]) -> u32 {
+    let hash = words(name).fold(0, |hash, word| {
+        mix(hash, if C::FOLDED { folded(word) } else { word })
+    });
+    top(hash)
+}
+
+/// `bytes` as little-endian words of eight, the last zero past its
+/// bytes where they do not fill it.
+fn words(bytes: &[u8]) -> impl Iterator<Item = u64> + '_ {
+    let chunks = bytes.chunks_exact(8);
+    let rest = chunks.remainder();
+    let last = (!rest.is_empty())
+        .then(|| (rest.iter().rev()).fold(0, |word, &byte| word << 8 | u64::from(byte)));
+    chunks
+        .map(|chunk| {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(chunk);
+            u64::from_le_bytes(word)
+        })
+        .chain(last)
+}
+
+/// `zend_str_tolower` over the eight bytes of `word` at once: each of
+/// `A` to `Z` gains the bit that lowers it, and no other byte changes.
+fn folded(word: u64) -> u64 {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    let seven = word & (ONES * 0x7f);
+    let from_a = seven + ONES * (0x80 - u64::from(b'A'));
+    let past_z = seven + ONES * (0x80 - u64::from(b'Z') - 1);
+    let upper = from_a & !past_z & !word & (ONES * 0x80);
+    word | (upper >> 2)
+}
+
+/// One word mixed into a hash.
+fn mix(hash: u64, word: u64) -> u64 {
+    (hash.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95)
+}
+
+/// A hash's top half, its best mixed bits.
+fn top(hash: u64) -> u32 {
     u32::try_from(hash >> 32).unwrap_or_default()
 }
 
@@ -488,6 +632,47 @@ mod tests {
         assert_eq!(names.find(&rows, b"B"), None);
         assert_eq!(names.find(&rows, b"a"), Some(0));
         assert_eq!(names.remove(&rows, b"b"), None);
+    }
+
+    #[test]
+    fn folding_a_word_lowers_each_byte_as_ascii_does() {
+        for byte in 0..=u8::MAX {
+            let word = u64::from_le_bytes([byte, b'Q', 0x80 | byte, b'@', b'[', b'z', 0xc1, byte]);
+            let lowered = word.to_le_bytes().map(|b| b.to_ascii_lowercase());
+            assert_eq!(
+                super::folded(word),
+                u64::from_le_bytes(lowered),
+                "{byte:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_map_keeps_the_first_row_of_a_name_and_finds_it_in_any_case() {
+        use super::NameMap;
+        let mut folded: NameMap<Folded, u32> = NameMap::new();
+        assert!(folded.add(b"ArrayObject", 1));
+        assert!(!folded.add(b"arrayobject", 2));
+        assert!(folded.add(b"ArrayIterator", 3));
+        assert_eq!(folded.find(b"ARRAYOBJECT"), Some(&1));
+        assert_eq!(folded.find(b"arrayiterator"), Some(&3));
+        assert_eq!(folded.find(b"Array"), None);
+        let mut exact: NameMap<Exact, u32> = NameMap::default();
+        exact.add(b"K", 1);
+        assert_eq!(exact.find(b"k"), None);
+        folded.clear();
+        assert_eq!(folded.find(b"ArrayObject"), None);
+    }
+
+    #[test]
+    fn a_std_map_under_the_name_hasher_finds_what_it_holds() {
+        let mut map: std::collections::HashMap<Vec<u8>, u32, super::NameHasher> =
+            std::collections::HashMap::default();
+        map.insert(b"Europe/Amsterdam".to_vec(), 1);
+        map.insert(b"UTC".to_vec(), 2);
+        assert_eq!(map.get(&b"UTC"[..]), Some(&2));
+        assert_eq!(map.get(&b"Europe/Amsterdam"[..]), Some(&1));
+        assert_eq!(map.get(&b"utc"[..]), None);
     }
 
     #[test]
