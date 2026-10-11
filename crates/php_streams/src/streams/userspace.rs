@@ -151,9 +151,15 @@ fn give_up_all(req: &mut Request, args: Vec<Owner<Value>>) {
     }
 }
 
-/// `zend_is_true`.
-fn truthy(req: &mut Request, value: &Value) -> bool {
-    crate::api::coerce::truthy(req, value)
+/// `zend_is_true` over what a method answered, the answer given up:
+/// `None` where the truth raised a fatal, kept for the native that
+/// asked as a method's throwable is ([`defer`]), and read by the
+/// caller as the method having thrown, since php's `zend_bailout`
+/// leaves the operation there.
+fn truth(req: &mut Request, value: Owner<Value>) -> Option<bool> {
+    let truth = crate::api::coerce::truthy(req, &value);
+    value.give_up(req);
+    truth.map_err(|thrown| defer(req, thrown)).ok()
 }
 
 /// `user_stream_create_object` (`Z/main/streams/userspace.c:242`): an
@@ -330,18 +336,14 @@ fn open_with(
             class_name(req, object)
         )),
         Called::Threw => Err(String::from("operation failed")),
-        Called::Value(value) => {
-            let open = truthy(req, &value);
-            value.give_up(req);
-            if open {
-                Ok(())
-            } else {
-                Err(format!(
-                    "\"{}::stream_open\" call failed",
-                    class_name(req, object)
-                ))
-            }
-        }
+        Called::Value(value) => match truth(req, value) {
+            None => Err(String::from("operation failed")),
+            Some(true) => Ok(()),
+            Some(false) => Err(format!(
+                "\"{}::stream_open\" call failed",
+                class_name(req, object)
+            )),
+        },
     };
     if let Err(message) = answer {
         held.give_up(req);
@@ -404,18 +406,14 @@ fn open_dir_with(
             class_name(req, object)
         )),
         Called::Threw => Err(String::from("operation failed")),
-        Called::Value(value) => {
-            let open = truthy(req, &value);
-            value.give_up(req);
-            if open {
-                Ok(())
-            } else {
-                Err(format!(
-                    "\"{}::dir_opendir\" call failed",
-                    class_name(req, object)
-                ))
-            }
-        }
+        Called::Value(value) => match truth(req, value) {
+            None => Err(String::from("operation failed")),
+            Some(true) => Ok(()),
+            Some(false) => Err(format!(
+                "\"{}::dir_opendir\" call failed",
+                class_name(req, object)
+            )),
+        },
     };
     if let Err(message) = answer {
         held.give_up(req);
@@ -559,12 +557,14 @@ impl UserStream {
                 *eof = true;
                 return None;
             }
-            Called::Value(value) => {
-                if truthy(req, &value) {
+            Called::Value(value) => match truth(req, value) {
+                Some(false) => {}
+                Some(true) => *eof = true,
+                None => {
                     *eof = true;
+                    return None;
                 }
-                value.give_up(req);
-            }
+            },
         }
         Some(didread)
     }
@@ -598,11 +598,7 @@ impl UserStream {
                 return Some(false);
             }
             Called::Threw => false,
-            Called::Value(value) => {
-                let sought = truthy(req, &value);
-                value.give_up(req);
-                sought
-            }
+            Called::Value(value) => truth(req, value) == Some(true),
         };
         if !sought {
             return Some(false);
@@ -653,9 +649,17 @@ impl UserStream {
             Called::Threw => return None,
             Called::Value(value) => value,
         };
-        if !truthy(req, &value) {
-            value.give_up(req);
-            return None;
+        match crate::api::coerce::truthy(req, &value) {
+            Ok(true) => {}
+            Ok(false) => {
+                value.give_up(req);
+                return None;
+            }
+            Err(thrown) => {
+                value.give_up(req);
+                defer(req, thrown);
+                return None;
+            }
         }
         let inner = Stream::from_value(req, &value.deref());
         value.give_up(req);
@@ -783,11 +787,7 @@ impl Ops for UserStream {
     /// `php_userstreamop_flush`: `stream_flush`, `true` its answer.
     fn flush(&mut self, req: &mut Request) -> bool {
         match call(req, self.object, b"stream_flush", &[]) {
-            Called::Value(value) => {
-                let flushed = truthy(req, &value);
-                value.give_up(req);
-                flushed
-            }
+            Called::Value(value) => truth(req, value) == Some(true),
             Called::Missing | Called::Threw => false,
         }
     }
@@ -935,9 +935,7 @@ impl Ops for UserStream {
             }
             Called::Threw => OptionAnswer::Err,
             Called::Value(value) => {
-                let set = truthy(req, &value);
-                value.give_up(req);
-                if set {
+                if truth(req, value) == Some(true) {
                     OptionAnswer::Ok
                 } else {
                     OptionAnswer::Err

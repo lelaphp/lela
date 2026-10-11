@@ -13,7 +13,7 @@ use php_link::LinkedClass;
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
 use php_unit::{FramelessEntry, Opcode, TopLevel, Unit};
 
-use crate::api::call::Function;
+use crate::api::call::{ClassNative, Function};
 use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, adopted};
 use crate::engine::Shared;
@@ -25,16 +25,12 @@ use super::{
 };
 
 /// A class's members before they are numbered ([`Request::members_of`]):
-/// for each of its methods whether it is an enum's own, and the rows of
-/// its methods and hooks, each method's beside its index.
+/// for each of its methods whether it is a native the class lays under
+/// its own scope, an enum's own or a native trait's copied in, and the
+/// rows of its methods and hooks, each method's beside its index.
 pub(super) struct Members {
-    served: Vec<Option<crate::enums::EnumMethod>>,
+    served: Vec<Option<ClassNative>>,
     rows: Vec<(Option<u32>, UserFunction)>,
-    /// The methods a native trait gave the class, each by its index
-    /// beside the native that serves it: the copy of the
-    /// `zend_internal_function` php lays in the class's function table
-    /// (`zend_add_trait_method`) keeps the trait's handler.
-    natives: Vec<(u32, Function)>,
 }
 
 /// What numbering a class's members settles: the function each of its
@@ -43,7 +39,7 @@ pub(super) type Numbered = (Box<[Option<Function>]>, std::ops::Range<u32>);
 
 impl Members {
     /// The function each method is, the members numbered from `numbers`
-    /// in order and an enum's own left for its caller.
+    /// in order and a class native left for its caller.
     fn functions(&self, numbers: std::ops::Range<u32>) -> Vec<Option<Function>> {
         let mut functions = vec![None; self.served.len()];
         for (number, (method, _)) in numbers.zip(&self.rows) {
@@ -51,14 +47,6 @@ impl Members {
                 method.and_then(|method| functions.get_mut(usize::try_from(method).ok()?))
             {
                 *slot = Some(Function(number));
-            }
-        }
-        for &(method, native) in &self.natives {
-            if let Some(slot) = usize::try_from(method)
-                .ok()
-                .and_then(|at| functions.get_mut(at))
-            {
-                *slot = Some(native);
             }
         }
         functions
@@ -673,32 +661,33 @@ impl Request {
     /// The members the class `row` declares binding settles under the
     /// number `class`, before they are numbered: each method and each
     /// hook of its own properties a user function's row, and which of its
-    /// methods are an enum's own `cases`, `from` and `tryFrom`.
+    /// methods are natives it lays under its own scope, an enum's own
+    /// `cases`, `from` and `tryFrom` and a native trait's methods.
     pub(super) fn members_of(&self, row: &Declared, class: ClassId) -> Option<Members> {
         let decl = row.decl()?;
         let enum_backing = (decl.kind == ClassKind::Enum).then_some(decl.backing);
-        let served: Vec<Option<crate::enums::EnumMethod>> = decl
-            .methods
-            .iter()
-            .map(|method| {
+        let served: Vec<Option<ClassNative>> = (0u32..)
+            .zip(&decl.methods)
+            .map(|(method, decl)| {
                 // `zend_enum_register_funcs` at the link: the enum's own
                 // `cases`, `from` and `tryFrom`, which the compiler
                 // declared after its methods and which no body of the
-                // unit serves.
-                let key = method.function.name.0.to_ascii_lowercase();
-                enum_backing.and_then(|backing| crate::enums::EnumMethod::of(&key, backing))
+                // unit serves; else `zend_add_trait_method`'s copy of a
+                // native trait's method, scoped to this class.
+                let key = decl.function.name.0.to_ascii_lowercase();
+                let own =
+                    enum_backing.and_then(|backing| crate::enums::EnumMethod::of(&key, backing));
+                own.map(ClassNative::Enum).or_else(|| {
+                    self.native_trait_method(row, method)
+                        .map(ClassNative::Trait)
+                })
             })
             .collect();
         // The rows the class's members take, in the order php's tables
         // list them, each method's beside its place among the methods.
         let mut rows: Vec<(Option<u32>, UserFunction)> = Vec::new();
-        let mut natives = Vec::new();
         for ((method, served), decl) in (0u32..).zip(&served).zip(&decl.methods) {
             if served.is_some() {
-                continue;
-            }
-            if let Some(native) = self.native_trait_method(row, method) {
-                natives.push((method, native));
                 continue;
             }
             let Some((unit, body)) = self.method_body(row, method) else {
@@ -749,11 +738,7 @@ impl Request {
                 ));
             }
         }
-        Some(Members {
-            served,
-            rows,
-            natives,
-        })
+        Some(Members { served, rows })
     }
 
     /// A class of the request's own's members numbered among the
@@ -768,8 +753,8 @@ impl Request {
             .extend(members.rows.into_iter().map(|(_, row)| row));
         for (slot, served) in functions.iter_mut().zip(members.served) {
             if let Some(served) = served {
-                *slot = Function::local_enum(self.enum_functions.len());
-                self.enum_functions.push((class, served));
+                *slot = Function::local_class_native(self.class_natives.len());
+                self.class_natives.push((class, served));
             }
         }
         Some((functions.into_boxed_slice(), numbers))
@@ -789,9 +774,9 @@ impl Request {
         }
         for (slot, served) in functions.iter_mut().zip(members.served) {
             if let Some(served) = served {
-                let function = self.arena.reserve_enum_method()?;
+                let function = self.arena.reserve_class_native()?;
                 self.arena
-                    .publish_enum_method(function, (class, served))
+                    .publish_class_native(function, (class, served))
                     .then_some(())?;
                 *slot = Some(function);
             }

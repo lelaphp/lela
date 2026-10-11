@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime};
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::oracle::{
-    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, TREE_VARIABLE, Verdict,
+    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Regime, Runner, Split, TREE_VARIABLE,
+    Verdict,
 };
 use xtask::scratch::Tree;
 
@@ -1042,7 +1043,7 @@ fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
     let pin = Manifest::load(workspace()).unwrap().pin;
     let mapping = pin.fastcgi().unwrap();
     assert_eq!(
-        mapping.split_path_info.as_deref(),
+        mapping.split_path_info.as_ref().map(Split::as_str),
         Some(r"^(.+?\.php)(/.*)$")
     );
     assert!(

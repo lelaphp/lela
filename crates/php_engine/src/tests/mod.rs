@@ -33,6 +33,7 @@ mod lifecycle;
 mod native_owners;
 mod observer;
 mod observer_notices;
+mod observer_traits;
 mod op_arrays;
 mod opcodes;
 mod owners;

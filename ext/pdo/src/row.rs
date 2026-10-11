@@ -274,11 +274,11 @@ impl ObjectHandlers for Handlers {
             return Ok(false);
         };
         let answer = match test {
-            PropertyTest::Isset => !crate::is_null(&value),
+            PropertyTest::Isset => Ok(!crate::is_null(&value)),
             PropertyTest::NotEmpty | PropertyTest::Exists => truthy(req, &value),
         };
         value.give_up(req);
-        Ok(answer)
+        answer
     }
 
     /// `row_dim_exists`.
@@ -302,6 +302,7 @@ impl ObjectHandlers for Handlers {
             };
             let answer = truthy(req, &value);
             value.give_up(req);
+            let answer = answer?;
             return Ok(answer);
         }
         let name = to_string(req, &offset.deref())?;

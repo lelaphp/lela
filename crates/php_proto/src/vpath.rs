@@ -56,8 +56,9 @@ pub fn translate(vpath: &[u8], root: &[u8], files: &dyn Files) -> Option<Transla
     let mut size = 0;
     while q > 0 {
         if let Some(found) = files.stat(&buf[..q]) {
-            size = found.size();
-            if found == Stat::Directory {
+            if let Stat::File(len) | Stat::Other(len) = found {
+                size = len;
+            } else {
                 let mut dir = buf[..q].to_vec();
                 if dir.last() != Some(&b'/') {
                     dir.push(b'/');

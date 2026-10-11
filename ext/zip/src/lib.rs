@@ -79,6 +79,18 @@ mod c {
 /// `PHP_ZIP_VERSION`.
 const VERSION: &str = "1.22.8";
 
+/// libzip's `LIBZIP_VERSION`, the `zipconf.h` the oracle's php was built
+/// against. This crate binds no libzip and re-derives its behaviour, so
+/// the two versions php reads are the oracle's, named here once each
+/// beside each other.
+const LIBZIP_HEADERS: &str = "1.11.4";
+
+/// `zip_libzip_version()`, the libzip the oracle's php loads: the
+/// closure frozen on 2026-10-11 carries 1.12 under headers of 1.11.4
+/// (#2654), which is what `ZipArchive::LIBZIP_VERSION` answers and what
+/// the information table compares the headers with.
+const LIBZIP_LIBRARY: &str = "1.12";
+
 /// `zend_ce_countable`, which `ZipArchive` implements.
 #[php_class(extern)]
 pub(crate) struct Countable;
@@ -107,7 +119,7 @@ struct State {
 /// ```expect
 /// bool(true)
 /// bool(true)
-/// string(6) "1.11.4"
+/// string(4) "1.12"
 /// array(1) {
 ///   ["pcre"]=>
 ///   string(8) "Required"
@@ -151,7 +163,10 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `PHP_MINFO_FUNCTION(zip)`: the version and the methods this build
-/// compresses and encrypts with.
+/// compresses and encrypts with. libzip's is one row where the headers
+/// and the library agree, and a row for each where they differ, as php
+/// compares `LIBZIP_VERSION` with `zip_libzip_version()`
+/// (`Z/ext/zip/php_zip.c:3204-3211`).
 ///
 /// ```php
 /// (new ReflectionExtension('zip'))->info();
@@ -162,7 +177,8 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 ///
 /// Zip => enabled
 /// Zip version => 1.22.8
-/// Libzip version => 1.11.4
+/// Libzip headers version => 1.11.4
+/// Libzip library version => 1.12
 /// BZIP2 compression => Yes
 /// XZ compression => Yes
 /// ZSTD compression => Yes
@@ -176,15 +192,28 @@ fn info(req: &mut Request) {
     let xz = yes(archive::compression_supported(95));
     let zstd = yes(archive::compression_supported(93));
     let aes = yes(archive::encryption_supported(0x0101));
-    req.info_table(&[
-        &["Zip", "enabled"],
-        &["Zip version", VERSION],
-        &["Libzip version", "1.11.4"],
-        &["BZIP2 compression", bzip2],
-        &["XZ compression", xz],
-        &["ZSTD compression", zstd],
-        &["AES-128 encryption", aes],
-        &["AES-192 encryption", aes],
-        &["AES-256 encryption", aes],
-    ]);
+    let head = [["Zip", "enabled"], ["Zip version", VERSION]];
+    let libzip: &[[&str; 2]] = if LIBZIP_HEADERS == LIBZIP_LIBRARY {
+        &[["Libzip version", LIBZIP_HEADERS]]
+    } else {
+        &[
+            ["Libzip headers version", LIBZIP_HEADERS],
+            ["Libzip library version", LIBZIP_LIBRARY],
+        ]
+    };
+    let methods = [
+        ["BZIP2 compression", bzip2],
+        ["XZ compression", xz],
+        ["ZSTD compression", zstd],
+        ["AES-128 encryption", aes],
+        ["AES-192 encryption", aes],
+        ["AES-256 encryption", aes],
+    ];
+    let rows: Vec<&[&str]> = head
+        .iter()
+        .chain(libzip)
+        .chain(&methods)
+        .map(|row| &row[..])
+        .collect();
+    req.info_table(&rows);
 }

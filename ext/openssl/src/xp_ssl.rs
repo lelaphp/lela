@@ -393,7 +393,7 @@ impl SslOptions {
         };
         let ctx = Some(context);
         let flag = |req: &mut Request, name: &[u8]| -> Result<Option<bool>, Thrown> {
-            Ok(option(req, ctx, name).map(|v| truthy(req, &v)))
+            option(req, ctx, name).map(|v| truthy(req, &v)).transpose()
         };
         let long = |req: &mut Request, name: &[u8]| -> Result<Option<i64>, Thrown> {
             match option(req, ctx, name) {

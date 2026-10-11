@@ -651,6 +651,7 @@ fn iterator_apply(
         };
         let keep = truthy(req, &answered);
         answered.give_up(req);
+        let keep = keep?;
         Ok(keep)
     })?;
     Ok(count)

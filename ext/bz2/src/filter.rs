@@ -272,14 +272,14 @@ pub(crate) fn factory(
         if let Some(params) = params {
             let asked = if matches!(params.as_ref(), ValueRef::Array(_) | ValueRef::Object(_)) {
                 if let Some(value) = param(req, params, b"concatenated")? {
-                    concatenated = truthy(req, &value);
+                    concatenated = truthy(req, &value)?;
                 }
                 param(req, params, b"small")?
             } else {
                 Some(*params)
             };
             if let Some(value) = asked {
-                small = truthy(req, &value);
+                small = truthy(req, &value)?;
             }
         }
         return Ok(Some(Box::new(Decompressing {

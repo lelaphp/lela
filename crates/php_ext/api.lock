@@ -1231,6 +1231,7 @@ values::PhpArray::cursor_reset
 values::PhpArray::empty
 values::PhpArray::filled
 values::PhpArray::find
+values::PhpArray::find_symtable
 values::PhpArray::get
 values::PhpArray::init_size
 values::PhpArray::is_empty

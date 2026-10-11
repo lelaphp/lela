@@ -1050,7 +1050,7 @@ impl ObjectHandlers for IntervalHandlers {
         };
         Ok(match test {
             PropertyTest::Exists => true,
-            PropertyTest::NotEmpty => truthy(req, &value),
+            PropertyTest::NotEmpty => truthy(req, &value)?,
             PropertyTest::Isset => !matches!(value.as_ref(), ValueRef::Null),
         })
     }
@@ -1395,10 +1395,10 @@ impl ObjectHandlers for PeriodHandlers {
         let value = self.read_property(req, object, name, PropertyRead::Silent)?;
         let answer = match test {
             PropertyTest::NotEmpty => truthy(req, &value),
-            _ => !matches!(value.as_ref(), ValueRef::Null),
+            _ => Ok(!matches!(value.as_ref(), ValueRef::Null)),
         };
         value.give_up(req);
-        Ok(answer)
+        answer
     }
 
     fn unset_property(

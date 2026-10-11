@@ -488,6 +488,7 @@ fn transform(
     let xinclude = Std.read_property(req, this, b"doXInclude", PropertyRead::Warning)?;
     let xinclude_on = truthy(req, &xinclude);
     xinclude.give_up(req);
+    let xinclude_on = xinclude_on?;
     let depth = read_int(req, this, b"maxTemplateDepth")?;
     let vars = read_int(req, this, b"maxTemplateVars")?;
     ctxt.set_limits(xinclude_on, depth, vars);
@@ -680,8 +681,9 @@ impl XSLTProcessor {
         };
         settled?;
         let clone = Std.read_property(req, this, b"cloneDocument", PropertyRead::Warning)?;
-        let has_keys = truthy(req, &clone) || sheet.doc().is_some_and(declares_keys);
+        let cloned = truthy(req, &clone);
         clone.give_up(req);
+        let has_keys = cloned? || sheet.doc().is_some_and(declares_keys);
         let sheet = ffi::Sheet::adopt(req, sheet);
         let replaced = match intern(req, this) {
             Some(i) => {

@@ -176,10 +176,10 @@ impl ObjectHandlers for Handlers {
         };
         let answer = match test {
             PropertyTest::NotEmpty => truthy(req, &value),
-            _ => !matches!(value.as_ref(), ValueRef::Null),
+            _ => Ok(!matches!(value.as_ref(), ValueRef::Null)),
         };
         value.give_up(req);
-        Ok(answer)
+        answer
     }
 
     fn unset_property(

@@ -2912,6 +2912,7 @@ fn filter_fetch(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         let answered = call_method(req, &this, b"accept", &[])?;
         let accepted = truthy(req, &answered);
         answered.give_up(req);
+        let accepted = accepted?;
         if accepted {
             return Ok(());
         }
@@ -3019,6 +3020,7 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
             let answered = crate::method(req, inner, b"hasChildren")?;
             let has = truthy(req, &answered);
             answered.give_up(req);
+            let has = has?;
             if !has {
                 return Ok(None);
             }
@@ -3456,7 +3458,7 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                         Ok(answered) => {
                             let has = truthy(req, &answered);
                             answered.give_up(req);
-                            has
+                            has?
                         }
                         Err(thrown) => {
                             set_state(req, this, State::Next)?;

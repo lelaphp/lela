@@ -38,7 +38,10 @@ php_ext = { path = "../../crates/php_ext" }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 httpdate = { workspace = true }
-tokio = { workspace = true }
+# `fs`: a static file read on tokio's blocking pool as the client takes
+# it, so no request thread is held for its transfer (#2587); no package
+# is added.
+tokio = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 # pcntl and posix turned on for the tests' build, as one build of the

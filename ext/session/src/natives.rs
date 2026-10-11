@@ -1028,9 +1028,9 @@ fn session_set_cookie_params(
                 return Ok(ControlFlow::Continue(()));
             }
             match key.as_slice() {
-                b"secure" => secure = Some(truthy(req, &value)),
-                b"partitioned" => partitioned = Some(truthy(req, &value)),
-                b"httponly" => httponly = Some(truthy(req, &value)),
+                b"secure" => secure = Some(truthy(req, &value)?),
+                b"partitioned" => partitioned = Some(truthy(req, &value)?),
+                b"httponly" => httponly = Some(truthy(req, &value)?),
                 _ => {
                     docref(
                         req,

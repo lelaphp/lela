@@ -657,7 +657,7 @@ fn has(
     })?;
     Ok(match value {
         None => false,
-        Some(value) if not_empty => truthy(req, &value),
+        Some(value) if not_empty => truthy(req, &value)?,
         Some(value) => !matches!(value.deref().as_ref(), ValueRef::Null),
     })
 }
@@ -794,6 +794,7 @@ impl ObjectHandlers for Handlers {
             let answered = call_method(req, &object, b"offsetExists", &[*offset])?;
             let answer = truthy(req, &answered);
             answered.give_up(req);
+            let answer = answer?;
             return Ok(answer);
         }
         has(req, object, offset, not_empty)

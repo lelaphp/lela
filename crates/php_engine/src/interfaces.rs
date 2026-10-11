@@ -234,7 +234,7 @@ impl Funcs {
                 let answered = crate::api::call::call_method(req, &data, b"valid", &[])?;
                 let valid = crate::api::coerce::truthy(req, &answered);
                 answered.give_up(req);
-                Ok(valid)
+                valid
             }
             Funcs::Generator => crate::generator::iterator_valid(req, data),
             Funcs::Element => Ok(match element(req, wrapper, data)? {

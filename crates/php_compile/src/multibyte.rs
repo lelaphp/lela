@@ -855,7 +855,9 @@ mod tests {
 
     /// The dump, read while the unit's strings stand.
     fn dump(unit: &Result<(crate::Unit, php_heap::Strings), CompileError>) -> String {
-        unit.as_ref().map(|(u, _)| u.dump(&[])).unwrap_or_default()
+        unit.as_ref()
+            .map(|(u, _)| String::from_utf8_lossy(&u.dump(&[])).into_owned())
+            .unwrap_or_default()
     }
 
     /// A byte order mark names the encoding and is taken off; UTF-16's

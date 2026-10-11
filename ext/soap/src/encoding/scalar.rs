@@ -521,7 +521,7 @@ pub(super) fn to_xml_bool(
     if find_zval_null(req, &data, ret, style) {
         return Ok(ret);
     }
-    if truthy(req, &data) {
+    if truthy(req, &data)? {
         ret.set_content(b"true");
     } else {
         ret.set_content(b"false");

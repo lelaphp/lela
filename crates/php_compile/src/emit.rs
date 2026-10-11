@@ -1032,8 +1032,6 @@ struct IsLink {
 enum Under {
     /// The link before it, whose temporary the fetch reads.
     Link,
-    /// `$this` inside a method, php's `IS_UNUSED` receiver.
-    This,
     /// The value the chain is read off.
     Value(Where),
 }
@@ -11873,7 +11871,6 @@ impl Emit<'_> {
             let mut delayed = Vec::new();
             return match self.silent_under(expr, &mut delayed)? {
                 Under::Value(value) => Ok(value),
-                Under::This => Ok(self.fetch_this(OperandKind::Tmp)),
                 Under::Link => match self.lay_silent(&mut delayed, None) {
                     Some(out) => Ok(Where::Temporary(out)),
                     None => Err(self.fatal("a `??` over a name with no fetch")),
@@ -11955,23 +11952,32 @@ impl Emit<'_> {
             tree::Expr::MemberAccessExpr(id) => {
                 let name = self.member_of(id)?;
                 let object = self.parsed.tree[id].obj;
-                let mut under = self.silent_under(object, delayed)?;
-                // A `?->`: the links under it laid down now and the
-                // `JMP_NULL` over what they left, as
-                // `zend_delayed_compile_prop` flushes them.
-                if self.is_nullsafe(id) && !self.is_this(object) {
-                    let pair = match under {
-                        Under::Link => {
-                            let out = self.lay_silent(delayed, None).unwrap_or_default();
-                            under = Under::Value(Where::Temporary(out));
-                            (OperandKind::Tmp, out)
-                        }
-                        Under::This => (OperandKind::Unused, 0),
-                        Under::Value(value) => self.operand(value),
-                    };
-                    self.jmp_null(pair, true);
-                }
-                let op1 = self.settled(&under);
+                // `zend_delayed_compile_prop`'s `is_this_fetch` arm:
+                // `$this` inside a method is the `IS_UNUSED` receiver, and
+                // outside one `FETCH_THIS` into a `VAR`, neither of which a
+                // `?->` stands over. Under a dimension `$this` is no
+                // receiver but `zend_compile_simple_var`'s temporary
+                // ([`Self::silent_under`]).
+                let op1 = if self.is_this(object) {
+                    Some(self.receiver_of(object)?)
+                } else {
+                    let mut under = self.silent_under(object, delayed)?;
+                    // A `?->`: the links under it laid down now and the
+                    // `JMP_NULL` over what they left, as
+                    // `zend_delayed_compile_prop` flushes them.
+                    if self.is_nullsafe(id) {
+                        let pair = match under {
+                            Under::Link => {
+                                let out = self.lay_silent(delayed, None).unwrap_or_default();
+                                under = Under::Value(Where::Temporary(out));
+                                (OperandKind::Tmp, out)
+                            }
+                            Under::Value(value) => self.operand(value),
+                        };
+                        self.jmp_null(pair, true);
+                    }
+                    self.settled(&under)
+                };
                 let name = self.prop_name(name)?;
                 let out = self.temporary();
                 delayed.push(IsLink {
@@ -12024,10 +12030,13 @@ impl Emit<'_> {
     }
 
     /// What stands under one link: the link before it where the node is
-    /// one of the three php delays, `$this` as the `IS_UNUSED` receiver
-    /// `zend_delayed_compile_prop` gives it inside a method, and
-    /// otherwise the value `zend_compile_expr` leaves, which is the read
-    /// that warns as php reads it there.
+    /// one of the three php delays, and otherwise the value
+    /// `zend_compile_expr` leaves, which is the read that warns as php
+    /// reads it there. `$this` under a dimension is that value,
+    /// `zend_compile_simple_var`'s `FETCH_THIS` into a temporary, as
+    /// `ISSET_ISEMPTY_DIM_OBJ` and `FETCH_DIM_IS` list no `UNUSED`
+    /// container; the receiver of a property is the link's own
+    /// ([`Self::silent_link`]).
     fn silent_under(
         &mut self,
         expr: tree::Expr,
@@ -12055,12 +12064,6 @@ impl Emit<'_> {
             self.silent_link(expr, delayed)?;
             return Ok(Under::Link);
         }
-        if self.is_this(expr) {
-            if self.this_in_scope {
-                return Ok(Under::This);
-            }
-            return Ok(Under::Value(self.fetch_this(OperandKind::Var)));
-        }
         Ok(Under::Value(self.chain_link_under(expr, Fetch::Is)?))
     }
 
@@ -12070,7 +12073,6 @@ impl Emit<'_> {
     fn settled(&mut self, under: &Under) -> Option<(OperandKind, u32)> {
         match *under {
             Under::Link => None,
-            Under::This => Some((OperandKind::Unused, 0)),
             Under::Value(value) => Some(self.operand(value)),
         }
     }

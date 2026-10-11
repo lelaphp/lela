@@ -34,10 +34,12 @@ pub mod options;
 mod request;
 mod route;
 mod socket;
+mod static_file;
 
 use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use php_sapi::Engine;
 
@@ -99,20 +101,22 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(1);
         }
     };
-    let (queue, pool) = match request::Pool::start(&options, request::serving(&engine, &options)) {
-        Ok(started) => started,
-        Err(e) => {
-            say(&format!("makala: cannot start a request thread: {e}\n"));
-            return php_sapi::exit_code(1);
-        }
-    };
+    let router = Arc::new(route::Router::new(&options));
+    let (queue, pool) =
+        match request::Pool::start(&options, request::serving(&engine, router.root())) {
+            Ok(started) => started,
+            Err(e) => {
+                say(&format!("makala: cannot start a request thread: {e}\n"));
+                return php_sapi::exit_code(1);
+            }
+        };
     if let Ok(local) = listener.local_addr() {
         say(&format!(
             "{SERVER_SOFTWARE} listening on http://{local}, document root {}\n",
             options.document_root.display()
         ));
     }
-    let drained = match side.run(options.limits, listener, queue) {
+    let drained = match side.run(options.limits, router, listener, queue) {
         Ok(drained) => drained,
         Err(e) => {
             say(&format!("makala: {e}\n"));

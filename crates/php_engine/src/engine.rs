@@ -4415,7 +4415,7 @@ impl Engine {
     /// The dump reads what the compiler emitted and nothing of where the
     /// strings live, so the two compiles print one dump.
     #[must_use]
-    pub fn dump_before_optimizer(&self, description: &RequestDescription) -> Option<String> {
+    pub fn dump_before_optimizer(&self, description: &RequestDescription) -> Option<Vec<u8>> {
         let level = ini_quantity(self.shared.ini_default(b"opcache.opt_debug_level")?);
         if level & BEFORE_OPTIMIZER == 0 {
             return None;
@@ -7766,7 +7766,7 @@ mod tests {
             .dump_before_optimizer(&described)
             .unwrap_or_default();
         assert_eq!(
-            dumped,
+            String::from_utf8_lossy(&dumped),
             "\n$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; witness.php:1-1\n     ; return  [] RANGE[0..0]\n0000 ECHO int(1)\n0001 RETURN int(1)\n",
             "the one op array, in php's format"
         );

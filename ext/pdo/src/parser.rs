@@ -276,7 +276,7 @@ fn quote(
         }
         (_, ValueRef::Null) | (BindKind::Null, _) => return Ok(Some(b"NULL".to_vec())),
         (BindKind::Bool, _) => {
-            return Ok(Some(if truthy(req, &value) {
+            return Ok(Some(if truthy(req, &value)? {
                 b"1".to_vec()
             } else {
                 b"0".to_vec()

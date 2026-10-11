@@ -599,8 +599,11 @@ fn uint_option(req: &mut Request, options: PhpArray, name: &[u8]) -> Result<u32,
 }
 
 /// `GET_BOOL_PROP`.
-fn bool_option(req: &mut Request, options: PhpArray, name: &[u8]) -> bool {
-    option(options, name).is_some_and(|value| truthy(req, &value))
+fn bool_option(req: &mut Request, options: PhpArray, name: &[u8]) -> Result<bool, Thrown> {
+    match option(options, name) {
+        Some(value) => truthy(req, &value),
+        None => Ok(false),
+    }
 }
 
 /// `line-break-chars` and `line-length` as the two encoders read them: no
@@ -645,8 +648,8 @@ fn conv_open(
         let (lbchars, line_len) = line_options(req, options)?;
         let mut opts = QprintOpts::default();
         if let Some(options) = options {
-            opts.binary = bool_option(req, options, b"binary");
-            opts.force_encode_first = bool_option(req, options, b"force-encode-first");
+            opts.binary = bool_option(req, options, b"binary")?;
+            opts.force_encode_first = bool_option(req, options, b"force-encode-first")?;
         }
         let line_len = if lbchars.is_some() { line_len } else { 0 };
         Conv::QprintEncode(QprintEncode {

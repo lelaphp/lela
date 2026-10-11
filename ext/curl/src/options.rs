@@ -749,7 +749,7 @@ pub(crate) fn setopt(
             saved(req, object, code)
         }
         Opt::SafeUpload => {
-            if !truthy(req, &value.deref()) {
+            if !truthy(req, &value.deref())? {
                 let text = format!(
                     "{}(): Disabling safe uploads is no longer supported",
                     req.active_function_name()
@@ -805,7 +805,7 @@ pub(crate) fn setopt(
         Opt::Ignored => saved(req, object, 0),
         Opt::PostFields => set_post_fields(req, object, value),
         Opt::ReturnTransfer => {
-            let on = truthy(req, &value.deref());
+            let on = truthy(req, &value.deref())?;
             payload(req, object)?.write.to = if on { WriteTo::Return } else { WriteTo::Stdout };
             saved(req, object, 0)
         }
@@ -834,7 +834,7 @@ pub(crate) fn setopt(
                     "CURLINFO_HEADER_OUT option must not be set when the CURLOPT_DEBUGFUNCTION option is set",
                 ));
             }
-            let on = truthy(req, &value.deref());
+            let on = truthy(req, &value.deref())?;
             easy.set_debug(req, on);
             easy.set_long(req, c::CURLOPT_VERBOSE, i64::from(on));
             saved(req, object, 0)

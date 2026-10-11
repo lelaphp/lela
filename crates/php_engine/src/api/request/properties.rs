@@ -1282,7 +1282,7 @@ impl Request {
             let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
             let truthy = crate::api::coerce::truthy(self, &answered);
             self.release(answered);
-            if !truthy {
+            if !truthy? {
                 return Ok(Some(Value::null()));
             }
         }
@@ -3883,7 +3883,7 @@ impl Request {
             return Ok(match test {
                 PropertyTest::Exists => true,
                 PropertyTest::Isset => value.tag() != TypeTag::Null,
-                PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
+                PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value)?,
             });
         }
         // `IS_PROP_UNINIT`: "Skip __isset() for uninitialized typed
@@ -3972,6 +3972,7 @@ impl Request {
         let answered = self.serve_accessor(object, issetter, name, &[])?;
         let truthy = crate::api::coerce::truthy(self, &answered);
         self.release(answered);
+        let truthy = truthy?;
         if test != PropertyTest::NotEmpty || !truthy {
             return Ok(truthy);
         }
@@ -3984,7 +3985,7 @@ impl Request {
         let answered = self.call_accessor(object, getter, IN_GET, name, &[])?;
         let truthy = crate::api::coerce::truthy(self, &answered);
         self.release(answered);
-        Ok(truthy)
+        truthy
     }
 
     /// `zend_std_has_property`'s `lazy_init:` arm: the object

@@ -283,7 +283,7 @@ impl OpArray {
     /// then each opline opened by `L` and its line, and the `try`/`catch`
     /// table. `frameless` is as [`Unit::dump`] takes it.
     #[must_use]
-    pub fn dump_lines(&self, name: &str, args: usize, frameless: &[Name]) -> String {
+    pub fn dump_lines(&self, name: &[u8], args: usize, frameless: &[Name]) -> Vec<u8> {
         crate::dump::lines(name, args, self, frameless)
     }
 }
@@ -301,9 +301,11 @@ impl Unit {
     /// name, in the order the bundle's natives registered their
     /// frameless entries: a `FRAMELESS_ICALL_*` prints the name its
     /// `extended_value` indexes, `FRAMELESS_ICALL_2(str_contains)`, and
-    /// a unit that calls none is dumped over an empty table.
+    /// a unit that calls none is dumped over an empty table. The dump is
+    /// bytes, as php's is: a name, a jump table's key and the file name
+    /// print as the bytes they are, whatever encoding they are in.
     #[must_use]
-    pub fn dump(&self, frameless: &[Name]) -> String {
+    pub fn dump(&self, frameless: &[Name]) -> Vec<u8> {
         crate::dump::unit(self, frameless)
     }
 }
