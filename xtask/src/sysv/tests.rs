@@ -639,8 +639,9 @@ fn a_process_is_a_cut_off_runs_program_only_by_its_number_its_group_and_its_star
 /// group, and writes its end (#2522); a process standing under a number
 /// whose program ended, as another run's may, and one standing under a
 /// started number that leads no group of its own, as a process that took
-/// the number would, are never signalled. Every process is a `sleep` this
-/// test started and ends.
+/// the number would, are never signalled, nor is a program still going
+/// under a claim another run holds. Every process is a `sleep` this test
+/// started and ends.
 #[test]
 fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
     use std::os::unix::process::CommandExt;
@@ -656,9 +657,11 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
     let dir = Tree::new("sysv-standing").unwrap();
     let claim = Claim::within(&dir, "sysv-test").unwrap();
     let path = claim.path().to_path_buf();
+    let theirs = Claim::within(&dir, "theirs").unwrap();
     let mut program = sleep(true);
-    let mut others = [sleep(true), sleep(false)];
+    let mut others = [sleep(true), sleep(false), sleep(true)];
     let pids = [program.id(), others[0].id(), others[1].id()];
+    std::fs::write(theirs.path(), format!("{STARTED} 0 {}\n", others[2].id())).unwrap();
     std::fs::write(
         &path,
         format!(
@@ -668,7 +671,13 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
     )
     .unwrap();
     drop(claim);
-    let mut claims = ended(&dir, 1);
+    let mut claims = (0..20)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            Claims::read(&dir, None)
+        })
+        .find(|read| read.ended.len() == 1)
+        .expect("the claim let go is read as ended");
     // The test is the programs' parent, as the killed run was, so it reaps
     // the one killed, as the process orphans pass to would.
     let reaper = std::thread::spawn(move || program.wait().unwrap());
@@ -687,7 +696,8 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
         !killed.success(),
         "the standing program was killed: {killed:?}"
     );
-    assert_eq!(still, [true, true], "neither other process was signalled");
+    assert_eq!(still, [true; 3], "no other process was signalled");
+    drop(theirs);
     assert!(journal.ends_with(&format!("{ENDED} 0\n")), "{journal}");
 }
 
