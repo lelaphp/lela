@@ -130,7 +130,7 @@ fn nothing_of_a_periodic_outlives_the_request_that_asked() {
     let holders = seen.interrupt.take().map(|interrupt| interrupt.holders());
     assert_eq!(holders, Some(1), "the sampler's clone alone");
     assert!(
-        engine.shared.timer.is_idle(),
+        engine.shared.timer.parks_with_no_request(),
         "the timer's thread parked with nothing scheduled"
     );
 }

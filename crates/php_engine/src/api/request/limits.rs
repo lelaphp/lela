@@ -379,19 +379,18 @@ impl Request {
         self.limits.deadlines.stop_periodic(periodic);
     }
 
-    /// `fork(2)` from this request, the engine's one home for it (#1807,
-    /// as #1779 ruled), which `pcntl_fork` asks: the process copied with
-    /// this request alone inside the engine and no thread of the engine's
-    /// alive (ADR-0010, Threads), returning in both as [`Forked::Parent`]
-    /// with the child's id and as [`Forked::Child`]. The engine's timer
-    /// thread is joined before it, as a host's fork joins it, and after it
-    /// started again in the parent over the same deadlines, which loses
-    /// none of them, as php's
+    /// `fork(2)` from this request, the engine's one home for it (#1807, as
+    /// #1779 ruled), which `pcntl_fork` asks: the process copied with this
+    /// request alone inside the engine and no thread of the engine's alive
+    /// (ADR-0010, Threads), returning in both as [`Forked::Parent`] with the
+    /// child's id and as [`Forked::Child`]. The engine's timer thread is joined
+    /// before it, as a host's fork joins it, and after it started again in the
+    /// parent over the same deadlines, which loses none of them, as php's
     /// interval timer counts on across the fork; in the child what php's
-    /// `php_child_init` restores is restored: every deadline is dropped,
-    /// the execution timer's and each periodic interrupt's, as a child
-    /// inherits no interval timer and no POSIX timer, so it runs untimed
-    /// until it sets a limit of its own, in its copy of this request.
+    /// `php_child_init` restores is restored: every deadline is dropped, the
+    /// execution timer's and each periodic interrupt's, as a child inherits no
+    /// interval timer and no POSIX timer, so it runs untimed until it sets a
+    /// limit of its own, in its copy of this request.
     ///
     /// Two and a half seconds of a three-second limit spent before the fork
     /// leave a half after it. A limit counted again from the fork could end

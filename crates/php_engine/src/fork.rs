@@ -30,6 +30,8 @@
 //! makes a child or daemonizes. Both fork through `fork_as`, which joins
 //! every engine's timer thread first, parked between requests as it is,
 //! and starts each again in the parent over the deadlines it had.
+//! Registering a timer counts as standing inside, so no fork copies the
+//! list of them held.
 //!
 //! What php's `php_child_init` (`Z/main/main.c:1865`) restores in the
 //! child is two things: `zend_max_execution_timer_init`, a timer of the
@@ -52,7 +54,7 @@ use crate::interrupt::Timers;
 static INSIDE: AtomicUsize = AtomicUsize::new(0);
 
 /// The bit of [`INSIDE`] an [`Alone`] holds: nothing enters while it is
-/// set, so nothing starts between the reading and the fork.
+/// set, so nothing starts between the first reading and the fork.
 const FORKING: usize = 1 << (usize::BITS - 1);
 
 /// `EBUSY`, the same number on every platform the engine builds for: the
@@ -180,9 +182,11 @@ impl Thread {
     }
 }
 
-/// The process with nothing inside the engine but the caller: the one
-/// type that forks, and the only caller of `php_process::fork`. It is
-/// held from the reading to the fork's return, so nothing enters between.
+/// A fork under way, from its first reading of what stands inside the
+/// engine to the fork's return: the one type that forks, and the only
+/// caller of `php_process::fork`. While it is held [`FORKING`] is set, so
+/// nothing enters the engine and what stands inside can only leave; a
+/// second fork waits for it to be let go.
 #[derive(Debug)]
 pub(crate) struct Alone(());
 
@@ -196,42 +200,38 @@ enum Asker {
 }
 
 impl Alone {
-    /// Refused with `EBUSY`, before any thread is joined, where more
-    /// stands inside the engine than the asker and the `parked` timer
-    /// threads the fork would join: so a fork refused leaves every
-    /// engine's timer serving as it was. [`Alone::hold`] reads the number
-    /// again once they are joined, which is what decides.
-    fn refused_beside(asker: Asker, parked: usize) -> io::Result<()> {
-        let inside = INSIDE.load(Ordering::Acquire);
-        if inside & FORKING == 0 && inside > asker as usize + parked {
-            return Err(io::Error::from_raw_os_error(EBUSY));
+    /// Held, once no other fork is under way. Nothing is read here: what
+    /// stands inside is [`Alone::beside`]'s to say.
+    fn take() -> Alone {
+        while INSIDE
+            .fetch_update(Ordering::Acquire, Ordering::Relaxed, |inside| {
+                (inside & FORKING == 0).then_some(inside | FORKING)
+            })
+            .is_err()
+        {
+            thread::yield_now();
         }
-        Ok(())
+        Alone(())
     }
 
-    /// Held, where what stands inside the engine is the asker alone.
-    /// Refused with `EBUSY` where anything else does, a request another
-    /// thread serves or a thread the engine started; a second fork under
-    /// way is waited out.
-    fn hold(asker: Asker) -> io::Result<Alone> {
-        let own = asker as usize;
-        loop {
-            match INSIDE.compare_exchange_weak(
-                own,
-                own | FORKING,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok(Alone(())),
-                Err(inside) if inside & FORKING != 0 || inside == own => thread::yield_now(),
-                Err(_) => return Err(io::Error::from_raw_os_error(EBUSY)),
-            }
-        }
+    /// How many things stand inside the engine beside `asker`. With the
+    /// fork held the number can only fall.
+    #[expect(
+        clippy::unused_self,
+        reason = "the hold is what makes the number one that only falls"
+    )]
+    fn beside(&self, asker: Asker) -> usize {
+        (INSIDE.load(Ordering::Acquire) & !FORKING).saturating_sub(asker as usize)
     }
 
-    /// `php_process::fork`: in both processes the hold is let go once it
-    /// returns, the child's copy of the number being the caller's own.
-    fn fork(self) -> io::Result<Forked> {
+    /// `php_process::fork`, where nothing stands inside the engine beside
+    /// `asker`, and `EBUSY` without a fork where anything does. In both
+    /// processes the hold is let go once it returns, the child's copy of
+    /// the number being the caller's own.
+    fn fork(self, asker: Asker) -> io::Result<Forked> {
+        if self.beside(asker) != 0 {
+            return Err(busy());
+        }
         #[expect(
             clippy::disallowed_methods,
             reason = "the home: Alone is php_process::fork's one caller"
@@ -248,18 +248,38 @@ impl Drop for Alone {
     }
 }
 
-/// Every fork, a request's and a host's: the timer thread of every engine
-/// in the process joined (ADR-0010, Threads), each of which stays parked
-/// between requests while its engine lives (#2541), [`Alone`] held for
-/// `asker` and forked, and each timer started again after where it has
-/// a deadline, in the process that asked, or where the fork was refused
-/// or failed. A child drops its copies unstarted, which it forgets as it
-/// reaches them (see [`Timer`](crate::interrupt::Timer)).
+/// The error a fork is refused with while something else stands inside
+/// the engine.
+fn busy() -> io::Error {
+    io::Error::from_raw_os_error(EBUSY)
+}
+
+/// Every fork, a request's and a host's (ADR-0010, Threads): the fork
+/// held, so nothing enters the engine from here; refused with `EBUSY`,
+/// touching no timer, where anything stands inside beside `asker` other
+/// than the timer threads of the process's engines, each parked between
+/// requests while its engine lives (#2541); those threads joined; then
+/// [`Alone::fork`], which reads the number again; and, the hold let go,
+/// each timer that had a thread given one again in the process that
+/// asked, over the deadlines it had, or where the fork was refused or
+/// failed. A child drops its copies unstarted, and forgets each schedule
+/// as it reaches it (see [`Timer`](crate::interrupt::Timer)).
+///
+/// What stands inside is read before the threads are counted, and only
+/// falls while the fork is held: a count that covers the reading means
+/// nothing but timer threads stood inside, so nothing holds a timer's
+/// mutex as its thread is joined, nor as the process is copied. Counting
+/// takes no timer's mutex that is held: one held is a request at work on
+/// it, and the fork is refused.
 fn fork_as(asker: Asker) -> io::Result<Forked> {
+    let alone = Alone::take();
+    let beside = alone.beside(asker);
     let timers = Timers::live();
-    Alone::refused_beside(asker, timers.threads())?;
+    if timers.threads().is_none_or(|threads| beside > threads) {
+        return Err(busy());
+    }
     let stopped = timers.stop();
-    let forked = Alone::hold(asker).and_then(Alone::fork);
+    let forked = alone.fork(asker);
     if !matches!(forked, Ok(Forked::Child)) {
         stopped.resume();
     }
@@ -279,10 +299,10 @@ pub(crate) fn fork_request() -> io::Result<Forked> {
 /// php's `php_child_init` restores in the child is the request's, and no
 /// request is in flight, so the child goes on as the parent would.
 ///
-/// The engine's timer thread, which stays parked between requests once a
-/// request has set a deadline, startup's and engine end's among them, is
-/// joined first and started again in the parent where it has a deadline,
-/// so a host's fork after a timed request is not refused (#2541).
+/// The engine's timer thread, which stays parked between requests once
+/// a request has set a deadline, the startup request's among them, is
+/// joined first and started again in the parent, so a host's fork after
+/// a timed request is not refused (#2541).
 ///
 /// # Errors
 ///
