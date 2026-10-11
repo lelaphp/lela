@@ -33,9 +33,14 @@ impl<'a> Bare<'a> {
     }
 
     /// `name`, which the compiler resolved or the engine spells in its
-    /// own source, as it stands.
+    /// own source, as it stands. A name as written handed here is a
+    /// strip missed, which a debug build refuses (#2711).
     #[must_use]
-    pub const fn resolved(name: &'a [u8]) -> Bare<'a> {
+    pub fn resolved(name: &'a [u8]) -> Bare<'a> {
+        debug_assert!(
+            !name.starts_with(b"\\"),
+            "a name as written handed to Bare::resolved"
+        );
         Bare(name)
     }
 
@@ -1142,4 +1147,24 @@ pub struct IniDecl {
     pub user: bool,
     pub per_dir: bool,
     pub system: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bare, Name};
+
+    #[test]
+    fn a_bare_name_drops_one_leading_backslash_once() {
+        assert_eq!(Bare::of(b"\\\\Foo").bytes(), b"\\Foo");
+        assert_eq!(Bare::of(b"Foo").bytes(), b"Foo");
+        let name = Name::from("NS\\Foo");
+        assert_eq!(Bare::from(&name).bytes(), b"NS\\Foo");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a name as written handed to Bare::resolved")]
+    fn a_resolved_name_refuses_a_leading_backslash_in_a_debug_build() {
+        assert!(Bare::resolved(b"\\Foo").bytes().is_empty());
+    }
 }
