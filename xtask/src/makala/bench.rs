@@ -5,7 +5,7 @@
 //! can resolve at that scale.
 //!
 //! **The arms.** One makala, built in `release`, the bench lane's profile,
-//! serving the workload as the recipe's `script_name` in a directory of its
+//! serving the workload under its own name in a directory of its
 //! own; and one pool of the pinned php-fpm handed the same request under
 //! the pin's `[fastcgi]` mapping (`witness::makala::Fpm`), the client a web
 //! server in front of it would be. Each is started once for the bar and a
@@ -94,7 +94,13 @@ fn against_fpm(root: &Path, entry: &Entry) -> Result<Sides> {
     };
     let oracle = manifest.pin.oracle();
     let ports = Ports::default();
-    let pool = Fpm::start(&oracle, &fpm, served.dir(), &entry.http, (&ini(), ports))?;
+    let pool = Fpm::start(
+        &oracle,
+        &fpm,
+        &served.program(),
+        &entry.http,
+        (&ini(), ports),
+    )?;
     Ok(Ok([
         Box::new(ByMakala {
             name: "makala",
@@ -150,8 +156,8 @@ fn started(root: &Path, entry: &Entry) -> Result<Option<Started>> {
 /// Why a bar of the production server is not measured on this machine.
 const NO_FPM: &str = "this machine has not the pinned php-fpm oracle.toml's [sapi] names";
 
-/// One makala over a directory holding the workload as the recipe's
-/// `script_name`, kept for every rep of a bar; the directory goes after
+/// One makala over a directory holding the workload under its own name,
+/// kept for every rep of a bar; the directory goes after
 /// the server.
 struct Served {
     server: Server,
@@ -167,21 +173,21 @@ impl Served {
         let recipe = &manifest.pin.recipe;
         let binary = profile::released(root, &MAKALA.package(), MAKALA.binary)?;
         let own = Tree::new("bench-makala")?;
-        own.write(&recipe.script_name, &entry.program)?;
+        own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");
         let server = Server::start(recipe, &binary, own.path(), &ini(), None, &log, &[])?;
         Ok(Served {
             server,
             binary,
             http: entry.http.clone(),
-            script: recipe.script_name.clone(),
+            script: entry.script.clone(),
             timeout: Duration::from_secs(recipe.limits.timeout_s),
             own,
         })
     }
 
-    fn dir(&self) -> &Path {
-        self.own.path()
+    fn program(&self) -> PathBuf {
+        self.own.join(&self.script)
     }
 
     /// The workload's request sent once more: the response as it came.

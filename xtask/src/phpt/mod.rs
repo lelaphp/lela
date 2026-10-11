@@ -157,6 +157,7 @@ mod census;
 pub(crate) mod file;
 pub(crate) mod miss;
 mod redirect;
+pub(crate) use redirect::Test;
 pub(crate) mod row;
 pub(crate) mod server;
 pub(crate) mod target;

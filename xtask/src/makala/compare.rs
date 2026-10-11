@@ -61,7 +61,8 @@ use super::{Consulted, Entry, Held, SCOPE};
 use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{Oracle, Promise, diff, normalise_in};
+use crate::oracle::{Invocation, Oracle, Program, Promise, diff, normalise_in};
+use crate::phpt::adapter::reason_after;
 use crate::reading::{Reading, Status};
 use crate::witness::makala::{self, Ports};
 
@@ -107,6 +108,11 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<R
     let registry = Registry::load(root)?;
     let mut ledger = Ledger::new(&registry);
     for entry in &entries {
+        if let Some(reason) = skipped(&oracle, entry)? {
+            println!("skip {} ({reason})", entry.id);
+            left.push(entry.id.clone());
+            continue;
+        }
         let came = compared(&oracle, &fpm, &host, entry)
             .unwrap_or_else(|why| Came::Bork(format!("{why:#}")));
         println!("{}", ledger.hold(&entry.id, came));
@@ -125,6 +131,20 @@ fn narrowed(entries: &mut Vec<Entry>, left: &mut Vec<String>, only: &[String]) {
     }
 }
 
+/// Why the pinned php's run of the entry's `--SKIPIF--` says to skip it,
+/// as the phpt lane reads the section (`adapter::reason_after`); none for
+/// an entry with no section or one the section does not skip.
+fn skipped(oracle: &Oracle<'_>, entry: &Entry) -> Result<Option<String>> {
+    let Some(body) = &entry.skipif else {
+        return Ok(None);
+    };
+    let own = oracle.tree("fpm-compare-skipif")?;
+    let program = own.write("skipif.php", body)?;
+    let php = &oracle.pin().oracle.path;
+    let ran = oracle.run_under(&Invocation::new(php, Program::Beside(&program)))?;
+    Ok(reason_after("skip", &String::from_utf8_lossy(&ran.stdout)))
+}
+
 /// One entry served by both and held: the same, a difference, unstable.
 fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Result<Came> {
     let recipe = &oracle.pin().recipe;
@@ -134,11 +154,12 @@ fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Resu
     let (by_makala, by_fpm) = (own.join("m"), own.join("f"));
     for dir in [&by_makala, &by_fpm] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        std::fs::write(dir.join(&recipe.script_name), &entry.program)?;
+        std::fs::write(dir.join(&entry.script), &entry.program)?;
     }
     let nginx = &oracle.pin().fastcgi()?.nginx;
+    let (in_makala, in_fpm) = (by_makala.join(&entry.script), by_fpm.join(&entry.script));
     let by_makala = || -> Result<(Vec<u8>, Ports)> {
-        let answered = makala::by_makala(recipe, host, &by_makala, &entry.http, &entry.ini, &[])?;
+        let answered = makala::by_makala(recipe, host, &in_makala, &entry.http, &entry.ini, &[])?;
         let rendered = names_folded(&makala::from_http(&answered.response));
         let rendered = super::uploads_named_alike(&software(&rendered, &answered.software, nginx));
         Ok((
@@ -147,7 +168,7 @@ fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Resu
         ))
     };
     let by_php_fpm = |ports: Ports| -> Result<Vec<u8>> {
-        let (stdout, _) = makala::by_fpm(oracle, fpm, &by_fpm, &entry.http, &entry.ini, ports)?;
+        let (stdout, _) = makala::by_fpm(oracle, fpm, &in_fpm, &entry.http, &entry.ini, ports)?;
         let rendered = super::uploads_named_alike(&names_folded(&makala::from_cgi(&stdout)));
         Ok(normalise_in(&recipe.normalise, &by_fpm, rendered))
     };
@@ -351,6 +372,8 @@ mod tests {
         let entry = |id: &str| Entry {
             id: id.to_owned(),
             program: Vec::new(),
+            script: "a.php".to_owned(),
+            skipif: None,
             http: crate::witness::makala::Http::get(),
             ini: Vec::new(),
         };

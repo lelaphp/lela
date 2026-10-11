@@ -117,7 +117,7 @@ impl Http {
 
     /// The request target: the `REQUEST_URI` the test names or else the
     /// program's file, and the query after a `?` where the target has none.
-    fn target(&self, script: &str) -> Vec<u8> {
+    pub(crate) fn target(&self, script: &str) -> Vec<u8> {
         let mut target = match self.uri.as_slice() {
             [] => format!("/{script}").into_bytes(),
             uri => uri.to_vec(),
@@ -162,7 +162,7 @@ pub(crate) fn served(
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let http = Http::of(&own, &program, request)?;
     let started = Instant::now();
-    let answered = by_makala(recipe, host, own.path(), &http, &[], env)?;
+    let answered = by_makala(recipe, host, &program, &http, &[], env)?;
     Ok(Observation {
         stdout: normalise_in(&recipe.normalise, own.path(), from_http(&answered.response)),
         stderr: normalise_in(&recipe.normalise, own.path(), php_logged(&answered.logged)),
@@ -188,21 +188,31 @@ pub(crate) struct Ports {
     pub(crate) remote: u16,
 }
 
-/// `http` served by a makala of its own at `host` over the program in
-/// `dir` named by the recipe's `script_name`, under the recipe's ini and
-/// `ini` after it, ended once its response is read.
+/// The directory a program stands in, which a server serves, and its
+/// name, which a request that names no target asks for.
+fn placed(program: &Path) -> Result<(&Path, &str)> {
+    let dir = program.parent().context("a program with no directory")?;
+    let name = (program.file_name().and_then(|name| name.to_str()))
+        .context("a program with no name of text")?;
+    Ok((dir, name))
+}
+
+/// `http` served by a makala of its own at `host` over the directory of
+/// `program`, under the recipe's ini and `ini` after it, ended once its
+/// response is read.
 pub(crate) fn by_makala(
     recipe: &Recipe,
     host: &Path,
-    dir: &Path,
+    program: &Path,
     http: &Http,
     ini: &[String],
     env: &[(String, OsString)],
 ) -> Result<Answered> {
+    let (dir, script) = placed(program)?;
     let log = dir.join("errors");
     let server = Server::start(recipe, host, dir, ini, Some(1), &log, env)?;
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
-    let (response, remote) = server.ask(http, &recipe.script_name, timeout)?;
+    let (response, remote) = server.ask(http, script, timeout)?;
     let (software, server_port) = (server.software.clone(), server.port);
     drop(server);
     Ok(Answered {
@@ -349,7 +359,7 @@ pub(crate) fn served_by_mapping(
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let http = Http::of(&own, &program, request)?;
     let started = Instant::now();
-    let (stdout, stderr) = by_fpm(oracle, host, own.path(), &http, &[], Ports::default())?;
+    let (stdout, stderr) = by_fpm(oracle, host, &program, &http, &[], Ports::default())?;
     Ok(Observation {
         stdout: normalise_in(&recipe.normalise, own.path(), from_cgi(&stdout)),
         stderr: normalise_in(&recipe.normalise, own.path(), stderr),
@@ -358,26 +368,26 @@ pub(crate) fn served_by_mapping(
     })
 }
 
-/// `http` handed by a pool of its own of the php-fpm at `host` the program
-/// in `dir`, under the pin's `[fastcgi]` mapping with `ports` as the
+/// `http` handed by a pool of its own of the php-fpm at `host` to
+/// `program`, under the pin's `[fastcgi]` mapping with `ports` as the
 /// connection's and the recipe's ini and `ini` after it; what it wrote on
 /// `FCGI_STDOUT` and `FCGI_STDERR`.
 pub(crate) fn by_fpm(
     oracle: &Oracle<'_>,
     host: &Path,
-    dir: &Path,
+    program: &Path,
     http: &Http,
     ini: &[String],
     ports: Ports,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut fpm = Fpm::start(oracle, host, dir, http, (ini, ports))?;
+    let mut fpm = Fpm::start(oracle, host, program, http, (ini, ports))?;
     let answered = fpm.ask()?;
     fpm.settle()?;
     Ok(answered)
 }
 
 /// A pool of its own of the php-fpm at `host`, kept to hand one request,
-/// `http` to the program in `dir` under the pin's `[fastcgi]` mapping, as
+/// `http` to `program` under the pin's `[fastcgi]` mapping, as
 /// many times as it is asked: what [`by_fpm`] asks once and a bench arm
 /// asks each rep (#2351). Ended when dropped.
 pub(crate) struct Fpm {
@@ -395,12 +405,13 @@ impl Fpm {
     pub(crate) fn start(
         oracle: &Oracle<'_>,
         host: &Path,
-        dir: &Path,
+        program: &Path,
         http: &Http,
         (ini, ports): (&[String], Ports),
     ) -> Result<Fpm> {
         let pin = oracle.pin();
         let recipe = &pin.recipe;
+        let (dir, script) = placed(program)?;
         let root = dir.canonicalize()?.to_string_lossy().into_owned();
         // The socket in a tree with a short name, since a socket's address
         // holds no longer path than `SUN_LEN`; and php-fpm's default
@@ -409,7 +420,7 @@ impl Fpm {
         let sockets = Tree::new("mkf")?;
         Ok(Fpm {
             pool: Pool::start(oracle, host, &sockets, &[], ini, true)?,
-            params: mapped(pin.fastcgi()?, http, &root, &recipe.script_name, ports),
+            params: mapped(pin.fastcgi()?, http, &root, script, ports),
             body: http.body.clone(),
             timeout: Duration::from_secs(recipe.limits.timeout_s),
             _sockets: sockets,
