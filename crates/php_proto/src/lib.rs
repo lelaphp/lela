@@ -2,7 +2,10 @@
 //! CGI's environment and response head, the dev server's HTTP/1.x
 //! framing, and the built-in server's path rules, which `php -S` and the
 //! production server find a request's file by (`vpath`, #2588). Each
-//! takes bytes to plain values and plain values back to bytes; `php_sapi` turns what they decode into a request description.
+//! takes bytes to plain values and plain values back to bytes, but for
+//! the two that ask the file system, through [`cgi::Files`], as php asks
+//! `stat(2)`: `cgi::request_info` and `vpath::translate`. `php_sapi`
+//! turns what they decode into a request description.
 //! Nothing here names the engine or the heap, so a protocol test builds
 //! this crate alone.
 #![forbid(unsafe_code)]

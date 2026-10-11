@@ -63,7 +63,9 @@ pub enum Stat {
 }
 
 impl Stat {
-    /// `st_size`, none for a directory.
+    /// `st_size`, and 0 for a directory, which [`Stat::Directory`] does not
+    /// carry: no caller keeps it, `vpath::translate` taking a directory's
+    /// index file's size in its place.
     #[must_use]
     pub fn size(self) -> u64 {
         match self {
