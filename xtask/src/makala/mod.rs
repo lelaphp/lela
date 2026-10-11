@@ -25,10 +25,10 @@
 //! itself, redirects to another test, sends a compressed body or takes
 //! arguments is left out, since none of that crosses one request to one
 //! file. A test with a `--SKIPIF--` is compared where the pinned php's run
-//! of the section does not say skip, as the phpt lane runs it, and left
-//! out where it does; the soak, which runs no section, leaves it out. The soak adds the
-//! bench workloads committed under `docs/perf/workloads/` (measurement
-//! protocol §11), each a `GET` of its own.
+//! of the section does not say skip and left out where it does; the soak,
+//! which runs no section, leaves it out. The soak adds the bench workloads
+//! committed under `docs/perf/workloads/` (measurement protocol §11), each
+//! a `GET` of its own.
 //!
 //! **What a by-design difference is.** Where makala answers a test
 //! otherwise than php's SAPIs by design, an accepted `makala:` row of the
@@ -121,10 +121,10 @@ pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, Vec<String>)> {
 /// test names one.
 fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
     let program = phpt.section("FILE")?;
-    let written = Test::own(path.to_path_buf()).beside(None);
     if LEFT_OUT.iter().any(|section| phpt.has(section)) {
         return None;
     }
+    let written = Test::own(path.to_path_buf()).beside(None);
     let mut env = Environment::from(Vec::new());
     env.reset();
     env.extend(crate::phpt::env_of(phpt, path));

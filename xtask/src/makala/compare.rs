@@ -108,7 +108,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<R
     let registry = Registry::load(root)?;
     let mut ledger = Ledger::new(&registry);
     for entry in &entries {
-        if let Some(reason) = skipped(&oracle, entry)? {
+        if let Some(reason) = skipped(&oracle, &tree, entry)? {
             println!("skip {} ({reason})", entry.id);
             left.push(entry.id.clone());
             continue;
@@ -132,16 +132,26 @@ fn narrowed(entries: &mut Vec<Entry>, left: &mut Vec<String>, only: &[String]) {
 }
 
 /// Why the pinned php's run of the entry's `--SKIPIF--` says to skip it,
-/// as the phpt lane reads the section (`adapter::reason_after`); none for
-/// an entry with no section or one the section does not skip.
-fn skipped(oracle: &Oracle<'_>, entry: &Entry) -> Result<Option<String>> {
+/// its words read by the phpt lane's rule (`adapter::reason_after`); none
+/// for an entry with no section or one the section does not skip. The
+/// section is written to a directory of its own, so the pinned tree at
+/// `tree` is never written to, and runs in the test's directory there, so
+/// its `include('skipif.inc')` finds the file beside the test through the
+/// include path's `.`; it runs under the recipe alone, without the test's
+/// `--ENV--`, so a section that reads `__DIR__` or the test's environment
+/// may answer otherwise than in the phpt lane.
+fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<String>> {
     let Some(body) = &entry.skipif else {
         return Ok(None);
     };
     let own = oracle.tree("fpm-compare-skipif")?;
     let program = own.write("skipif.php", body)?;
     let php = &oracle.pin().oracle.path;
-    let ran = oracle.run_under(&Invocation::new(php, Program::Beside(&program)))?;
+    let beside = tree.join(&entry.id);
+    let ran = oracle.run_under(&Invocation {
+        cwd: beside.parent(),
+        ..Invocation::new(php, Program::Beside(&program))
+    })?;
     Ok(reason_after("skip", &String::from_utf8_lossy(&ran.stdout)))
 }
 
