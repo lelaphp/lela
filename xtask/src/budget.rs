@@ -280,7 +280,7 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
     }
     for path in build_rs_baking_their_dir(root)? {
         failures.push(format!(
-            "{path} reads {BAKED} when it compiles; a build.rs reads std::env::var_os(\"CARGO_MANIFEST_DIR\") when it runs, since cargo runs one compiled build.rs for every checkout sharing a target directory (#2628)"
+            "{path} reads {MANIFEST_DIR_AT_COMPILE} when it compiles; a build.rs reads std::env::var_os(\"CARGO_MANIFEST_DIR\") when it runs, since cargo runs one compiled build.rs for every checkout sharing a target directory (#2628)"
         ));
     }
     if failures.is_empty() {
@@ -447,59 +447,56 @@ fn text_of(root: &Path, path: &str) -> Result<Option<String>> {
     Ok(String::from_utf8(bytes).ok())
 }
 
-/// The crate directory as a `build.rs` bakes it in when it compiles.
-const BAKED: &str = "env!(\"CARGO_MANIFEST_DIR\")";
+/// The crate directory as a `build.rs` reads it when it compiles, the
+/// text matched with its whitespace dropped.
+const MANIFEST_DIR_AT_COMPILE: &str = "env!(\"CARGO_MANIFEST_DIR\")";
 
 /// The `build.rs` files under the crate trees that bake their crate's
 /// directory in: cargo reuses one compiled `build.rs` for every checkout
 /// whose crate sits at the same path below its workspace root, so one
 /// sharing a target directory with another checkout reads that checkout's
 /// files (#2628). The `build.rs` held is the one beside a `Cargo.toml`,
-/// which cargo runs when the package names no other. The harness's own
-/// negative controls are left out.
+/// which cargo runs when the package names no other.
 fn build_rs_baking_their_dir(root: &Path) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    let dirs = layout::CRATE_DIRS.iter().map(|d| d.dir);
-    for dir in dirs.chain([layout::HARNESS]) {
-        for path in git::files(root, Path::new(dir))? {
-            let file = Path::new(&path);
-            if path.starts_with("xtask/fixtures/")
-                || file.file_name() != Some("build.rs".as_ref())
-                || !root.join(file.with_file_name("Cargo.toml")).is_file()
-            {
-                continue;
-            }
-            let text = std::fs::read_to_string(root.join(file))
-                .with_context(|| format!("reading {path}"))?;
-            let bare: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-            if bare.contains(BAKED) {
-                out.push(path);
-            }
-        }
-    }
+    let mut out = crate_tree_files(root)?;
+    out.retain(|path| {
+        let file = Path::new(path);
+        file.file_name() == Some("build.rs".as_ref())
+            && root.join(file.with_file_name("Cargo.toml")).is_file()
+            && std::fs::read_to_string(root.join(file)).is_ok_and(|text| {
+                let bare: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+                bare.contains(MANIFEST_DIR_AT_COMPILE)
+            })
+    });
     Ok(out)
 }
 
 /// Committed generated files under the crate trees: a `generated` path
 /// component, or an `@generated` marker in the first lines, outside the
-/// files the manifest declares as generated and committed. The harness's
-/// own negative controls hold generated code on purpose and are left out.
+/// files the manifest declares as generated and committed.
 pub(crate) fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Vec<String>> {
+    let mut out = crate_tree_files(root)?;
+    out.retain(|path| {
+        !exceptions.contains(&path.as_str())
+            && (path.split('/').any(|part| part == "generated")
+                || std::fs::read_to_string(root.join(path))
+                    .is_ok_and(|text| text.lines().take(5).any(|l| l.contains("@generated"))))
+    });
+    Ok(out)
+}
+
+/// The files under the crate trees and the harness that git does not
+/// ignore, less the harness's own negative controls, which break the
+/// rules on purpose.
+fn crate_tree_files(root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let dirs = layout::CRATE_DIRS.iter().map(|d| d.dir);
     for dir in dirs.chain([layout::HARNESS]) {
-        for path in git::files(root, Path::new(dir))? {
-            if exceptions.contains(&path.as_str()) || path.starts_with("xtask/fixtures/") {
-                continue;
-            }
-            let by_path = path.split('/').any(|part| part == "generated");
-            let by_marker = by_path
-                || std::fs::read_to_string(root.join(&path))
-                    .is_ok_and(|text| text.lines().take(5).any(|l| l.contains("@generated")));
-            if by_marker {
-                out.push(path);
-            }
-        }
+        out.extend(
+            git::files(root, Path::new(dir))?
+                .into_iter()
+                .filter(|path| !path.starts_with("xtask/fixtures/")),
+        );
     }
     Ok(out)
 }
