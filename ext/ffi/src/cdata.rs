@@ -658,7 +658,7 @@ pub(crate) fn write_value(
                 }
             }
             Scalar::Bool => {
-                let truth = truthy(req, &value);
+                let truth = truthy(req, &value)?;
                 ffi::write(ptr, u8::from(truth));
             }
             Scalar::Char => {

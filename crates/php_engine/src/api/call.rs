@@ -26,11 +26,12 @@ use crate::exec::{self, Body};
 /// §5.14, *Identities*). With its top bit clear it is one every request
 /// shares: a native, then a native method, numbered from zero, then a
 /// user function or method of the engine's published arena past them;
-/// or, from [`Function::ENUM`] on, a published enum's own `cases`,
-/// `from` or `tryFrom`. With it set it is the request's own: a user
-/// function, method or closure among its rows, an enum's method from
-/// `ENUM` on, and from [`Function::TRAMPOLINE`] on a call's trampoline.
-/// Either stays the function's for as long as the request runs.
+/// or, from [`Function::CLASS_NATIVE`] on, a native a published class's
+/// table lays under its own scope ([`ClassNative`]). With it set it is
+/// the request's own: a user function, method or closure among its
+/// rows, a native one of its classes lays from `CLASS_NATIVE` on, and
+/// from [`Function::TRAMPOLINE`] on a call's trampoline. Either stays
+/// the function's for as long as the request runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Function(pub(crate) u32);
 
@@ -46,20 +47,24 @@ impl Function {
     /// The bit, under the top one, that marks the request's trampolines.
     pub(crate) const TRAMPOLINE: u32 = 1 << 30;
 
-    /// The bit, under those, that marks an enum's own method; the
-    /// numbers below it are a space's user functions.
-    pub(crate) const ENUM: u32 = 1 << 29;
+    /// The bit, under those, that marks a [`ClassNative`]; the numbers
+    /// below it are a space's user functions.
+    pub(crate) const CLASS_NATIVE: u32 = 1 << 29;
 
     /// The request's own user function at `at` among its rows.
     pub(crate) fn local(at: usize) -> Option<Function> {
-        let at = u32::try_from(at).ok().filter(|at| *at < Function::ENUM)?;
+        let at = u32::try_from(at)
+            .ok()
+            .filter(|at| *at < Function::CLASS_NATIVE)?;
         Some(Function(at | Function::LOCAL))
     }
 
     /// Where the function stands among the request's own user functions,
     /// if it is one.
     pub(crate) fn local_at(self) -> Option<usize> {
-        if self.0 & (Function::LOCAL | Function::TRAMPOLINE | Function::ENUM) != Function::LOCAL {
+        if self.0 & (Function::LOCAL | Function::TRAMPOLINE | Function::CLASS_NATIVE)
+            != Function::LOCAL
+        {
             return None;
         }
         usize::try_from(self.0 & !Function::LOCAL).ok()
@@ -68,32 +73,53 @@ impl Function {
     /// The number of a native or a published user function, which the
     /// arena's rows are numbered past the natives in.
     pub(crate) fn published_number(self) -> Option<u32> {
-        (self.0 < Function::ENUM).then_some(self.0)
+        (self.0 < Function::CLASS_NATIVE).then_some(self.0)
     }
 
-    /// The published enum method at `at` of the arena's.
-    pub(crate) fn published_enum(at: u32) -> Option<Function> {
-        (at < Function::ENUM).then_some(Function(Function::ENUM | at))
+    /// The published class native at `at` of the arena's.
+    pub(crate) fn published_class_native(at: u32) -> Option<Function> {
+        (at < Function::CLASS_NATIVE).then_some(Function(Function::CLASS_NATIVE | at))
     }
 
-    /// Where a published enum method stands among the arena's.
-    pub(crate) fn published_enum_at(self) -> Option<u32> {
-        (self.0 & !(Function::ENUM - 1) == Function::ENUM).then_some(self.0 & (Function::ENUM - 1))
+    /// Where a published class native stands among the arena's.
+    pub(crate) fn published_class_native_at(self) -> Option<u32> {
+        (self.0 & !(Function::CLASS_NATIVE - 1) == Function::CLASS_NATIVE)
+            .then_some(self.0 & (Function::CLASS_NATIVE - 1))
     }
 
-    /// The request's own enum method at `at` among its rows.
-    pub(crate) fn local_enum(at: usize) -> Option<Function> {
-        let at = u32::try_from(at).ok().filter(|at| *at < Function::ENUM)?;
-        Some(Function(Function::LOCAL | Function::ENUM | at))
+    /// The request's own class native at `at` among its rows.
+    pub(crate) fn local_class_native(at: usize) -> Option<Function> {
+        let at = u32::try_from(at)
+            .ok()
+            .filter(|at| *at < Function::CLASS_NATIVE)?;
+        Some(Function(Function::LOCAL | Function::CLASS_NATIVE | at))
     }
 
-    /// Where an enum method of the request's own stands among its rows.
-    pub(crate) fn local_enum_at(self) -> Option<usize> {
-        if self.0 & !(Function::ENUM - 1) != Function::LOCAL | Function::ENUM {
+    /// Where a class native of the request's own stands among its rows.
+    pub(crate) fn local_class_native_at(self) -> Option<usize> {
+        if self.0 & !(Function::CLASS_NATIVE - 1) != Function::LOCAL | Function::CLASS_NATIVE {
             return None;
         }
-        usize::try_from(self.0 & (Function::ENUM - 1)).ok()
+        usize::try_from(self.0 & (Function::CLASS_NATIVE - 1)).ok()
     }
+}
+
+/// A native a class's function table lays under that class's scope, a
+/// `zend_internal_function` of the class's own whose `common.scope` is
+/// the class: one function number per class, as php allocates one, so
+/// `func->common.scope` names the class and an observer is asked of it
+/// once per class (`zend_observer_fcall_init`). The row beside each
+/// number is the class and this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClassNative {
+    /// `zend_enum_register_funcs`: an enum's own `cases`, `from` or
+    /// `tryFrom`, which a program's enum is given at its link.
+    Enum(crate::enums::EnumMethod),
+    /// `zend_add_trait_method` over a native trait's method: the copy
+    /// php lays in the using class's function table, whose handler is the
+    /// trait's native, served as the trait's own number is, and
+    /// whose scope is the using class.
+    Trait(Function),
 }
 
 /// What a [`Callable`] resolved to, `zend_fcall_info_cache`'s three
@@ -2266,7 +2292,7 @@ fn evaluate_node(
                 b"-" => crate::ops::mul(req, &Value::int(-1), &operand),
                 b"+" => crate::ops::add(req, &Value::int(0), &operand),
                 b"~" => crate::ops::bitwise_not(req, &operand),
-                b"!" => Ok(Value::bool(!crate::ops::is_true(req, &operand))),
+                b"!" => crate::ops::is_true(req, &operand).map(|truth| Value::bool(!truth)),
                 _ => Err(invalid_operations(req)),
             };
             req.release(operand);
@@ -2278,7 +2304,14 @@ fn evaluate_node(
             otherwise,
         } => {
             let held = evaluate(req, cond, scope)?;
-            let taken = match (crate::ops::is_true(req, &held), then) {
+            let truth = match crate::ops::is_true(req, &held) {
+                Ok(truth) => truth,
+                Err(thrown) => {
+                    req.release(held);
+                    return Err(thrown);
+                }
+            };
+            let taken = match (truth, then) {
                 (true, None) => return Ok(held),
                 (true, Some(then)) => then,
                 (false, _) => otherwise,
@@ -2291,7 +2324,7 @@ fn evaluate_node(
         ConstExpr::Cast { to, operand, .. } => {
             let value = evaluate(req, operand, scope)?;
             let cast = if *to == IS_BOOL {
-                Ok(Value::bool(crate::ops::is_true(req, &value)))
+                crate::ops::is_true(req, &value).map(Value::bool)
             } else {
                 match crate::ops::CastTo::of(*to) {
                     Some(to) => crate::ops::cast(req, &value, to),
@@ -2515,13 +2548,13 @@ fn binary_node(
             let lhs = evaluate(req, lhs, scope)?;
             let held = crate::ops::is_true(req, &lhs);
             req.release(lhs);
-            if held == or {
+            if held? == or {
                 return Ok(Value::bool(or));
             }
             let rhs = evaluate(req, rhs, scope)?;
             let held = crate::ops::is_true(req, &rhs);
             req.release(rhs);
-            Ok(Value::bool(held))
+            held.map(Value::bool)
         }
         b"??" => {
             let lhs = chain(req, lhs, scope, true)?.value;

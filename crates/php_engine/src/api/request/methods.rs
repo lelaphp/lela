@@ -9,7 +9,7 @@
 use php_link::{LinkedClass, Row};
 use php_unit::decl::{ClassKind, MethodDecl, Visibility};
 
-use crate::api::call::Function;
+use crate::api::call::{ClassNative, Function};
 use crate::api::raising::{Thrown, none_pending};
 use crate::api::values::{ClassId, PhpObject, PhpString};
 use crate::engine::{MethodAt, NativeMethod};
@@ -94,7 +94,7 @@ impl Request {
             // scope, which its call carries and no row of the table does.
             return method.at.class();
         }
-        if let Some((class, _)) = self.enum_method_of(function) {
+        if let Some((class, _)) = self.class_native_of(function) {
             return Some(class);
         }
         if let Some((trampoline, _)) = self.trampoline_of(function) {
@@ -302,27 +302,42 @@ impl Request {
         functions.get(at).copied().flatten()
     }
 
-    /// The enum method an enum's function number names, the request's
-    /// own or the published arena's ([`Function::ENUM`]), and its enum.
-    pub(super) fn enum_method_of(
-        &self,
-        function: Function,
-    ) -> Option<(ClassId, crate::enums::EnumMethod)> {
-        match function.local_enum_at() {
-            Some(at) => self.enum_functions.get(at).copied(),
-            None => self.arena.enum_method(function),
+    /// The class native a function number names, the request's own or
+    /// the published arena's ([`Function::CLASS_NATIVE`]), and its class.
+    pub(super) fn class_native_of(&self, function: Function) -> Option<(ClassId, ClassNative)> {
+        match function.local_class_native_at() {
+            Some(at) => self.class_natives.get(at).copied(),
+            None => self.arena.class_native(function),
+        }
+    }
+
+    /// The native a function number serves by: the trait's own for a
+    /// native trait's method copied into a class, the function itself
+    /// for any other. What php's copy shares with the trait's, its
+    /// handler, its declaration, its flags and its runtime cache, is read
+    /// through this alone (`entry_of`, `method_decl`, `function_flags`,
+    /// `native_place`); its scope is the class's (`method_class`).
+    pub(super) fn served_native(&self, function: Function) -> Function {
+        match self.class_native_of(function) {
+            Some((_, ClassNative::Trait(native))) => native,
+            _ => function,
         }
     }
 
     /// The place of a native among the natives, in one count from zero:
     /// a native function or method at its own number, which is dense
-    /// from zero, and an enum's method after them at its place among
-    /// the published enums' methods and the request's; none for any
+    /// from zero, and a class native after them at its place among
+    /// the published class natives and the request's; none for any
     /// other function, a user one, a call's trampoline or
     /// `zend_pass_function`. Where php's
     /// internal runtime cache gives each native its own extension slot
-    /// (`zend_observer_fcall_internal_function_extension`).
+    /// (`zend_observer_fcall_internal_function_extension`). A native
+    /// trait's method copied into a class has the trait's place, since
+    /// `zend_add_trait_method`'s copy shares the trait's runtime cache
+    /// pointer: an observer is asked of the method once, under the
+    /// scope of the first class to call it.
     pub(super) fn native_place(&self, function: Function) -> Option<usize> {
+        let function = self.served_native(function);
         let natives = self
             .shared
             .functions
@@ -332,16 +347,16 @@ impl Request {
         if at < natives {
             return Some(at);
         }
-        self.enum_method_of(function)?;
-        // The published enums' methods and the request's own take turns,
+        self.class_native_of(function)?;
+        // The published class natives and the request's own take turns,
         // so neither's count moves the other's places.
-        let enum_at = match function.local_enum_at() {
+        let class_native_at = match function.local_class_native_at() {
             Some(at) => at.checked_mul(2)?.checked_add(1)?,
-            None => usize::try_from(function.published_enum_at()?)
+            None => usize::try_from(function.published_class_native_at()?)
                 .ok()?
                 .checked_mul(2)?,
         };
-        natives.checked_add(enum_at)
+        natives.checked_add(class_native_at)
     }
 
     /// The number of the first native method the predicate takes, which
@@ -362,7 +377,8 @@ impl Request {
 
     /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
-        if let Some((class, method)) = self.enum_method_of(function) {
+        let function = self.served_native(function);
+        if let Some((class, ClassNative::Enum(method))) = self.class_native_of(function) {
             return self
                 .class_decl(class)?
                 .methods

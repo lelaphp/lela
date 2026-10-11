@@ -45,10 +45,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::api::call::Function;
+use crate::api::call::{ClassNative, Function};
 use crate::api::request::{Declared, UserFunction};
 use crate::api::values::ClassId;
-use crate::enums::EnumMethod;
 
 /// How many slots a column's first segment holds; each segment after
 /// holds twice the one before.
@@ -141,7 +140,7 @@ impl<T> Column<T> {
 }
 
 /// The arena of one epoch: the classes, the user functions and methods,
-/// and the enums' own `cases`, `from` and `tryFrom` published past the
+/// and the natives a class lays under its own scope published past the
 /// engine's own and the preload's, each numbered past what is numbered
 /// below them, with the caches that name them.
 pub(crate) struct Arena {
@@ -151,15 +150,15 @@ pub(crate) struct Arena {
     below: Option<Arc<Arena>>,
     classes: Column<Declared>,
     functions: Column<UserFunction>,
-    enum_methods: Column<(ClassId, EnumMethod)>,
+    class_natives: Column<(ClassId, ClassNative)>,
     /// The classes below, the engine's and the preload's, which the
     /// arena's are numbered past.
     first_class: u32,
     /// The functions below, the engine's natives and native methods and
     /// the preload's user functions, which the arena's are numbered past.
     first_function: u32,
-    /// The preload's enum methods, which the arena's are numbered past.
-    first_enum_method: u32,
+    /// The preload's class natives, which the arena's are numbered past.
+    first_class_native: u32,
     /// php's inheritance cache over the classes published here, dropped
     /// with them ([`crate::inheritance_cache`]).
     pub(crate) inheritance: crate::inheritance_cache::InheritanceCache,
@@ -174,26 +173,26 @@ impl Arena {
     /// `functions` natives and native methods, holding `files`.
     pub(crate) fn past(classes: usize, functions: usize, files: crate::unit_cache::Files) -> Arena {
         let first_class = u32::try_from(classes).unwrap_or(ClassId::LOCAL);
-        let first_function = u32::try_from(functions).unwrap_or(Function::ENUM);
+        let first_function = u32::try_from(functions).unwrap_or(Function::CLASS_NATIVE);
         Arena::numbered(None, [first_class, first_function, 0], files)
     }
 
     /// An empty arena numbered from `first` (its classes, functions and
-    /// enum methods) over `below`, holding `files`.
+    /// class natives) over `below`, holding `files`.
     fn numbered(
         below: Option<Arc<Arena>>,
         first: [u32; 3],
         files: crate::unit_cache::Files,
     ) -> Arena {
-        let [first_class, first_function, first_enum_method] = first;
+        let [first_class, first_function, first_class_native] = first;
         Arena {
             below,
             classes: Column::below(ClassId::LOCAL.saturating_sub(first_class)),
-            functions: Column::below(Function::ENUM.saturating_sub(first_function)),
-            enum_methods: Column::below(Function::ENUM.saturating_sub(first_enum_method)),
+            functions: Column::below(Function::CLASS_NATIVE.saturating_sub(first_function)),
+            class_natives: Column::below(Function::CLASS_NATIVE.saturating_sub(first_class_native)),
             first_class,
             first_function,
-            first_enum_method,
+            first_class_native,
             inheritance: crate::inheritance_cache::InheritanceCache::default(),
             files,
         }
@@ -202,11 +201,11 @@ impl Arena {
     /// An empty arena laid over `base`, which is laid over nothing,
     /// numbered past every number it reserved.
     fn over(base: Arc<Arena>) -> Arena {
-        let [classes, functions, enum_methods] = base.counts();
+        let [classes, functions, class_natives] = base.counts();
         let first = [
             base.first_class.saturating_add(classes),
             base.first_function.saturating_add(functions),
-            base.first_enum_method.saturating_add(enum_methods),
+            base.first_class_native.saturating_add(class_natives),
         ];
         let files = base.files.emptied();
         Arena::numbered(Some(base), first, files)
@@ -218,7 +217,7 @@ impl Arena {
         let first = [
             self.first_class,
             self.first_function,
-            self.first_enum_method,
+            self.first_class_native,
         ];
         Arena::numbered(self.below.clone(), first, self.files.emptied())
     }
@@ -252,16 +251,16 @@ impl Arena {
         base.functions.get(number.checked_sub(base.first_function)?)
     }
 
-    /// The published enum's method `function` names, and its enum.
-    pub(crate) fn enum_method(&self, function: Function) -> Option<(ClassId, EnumMethod)> {
-        let at = function.published_enum_at()?;
-        if let Some(own) = at.checked_sub(self.first_enum_method) {
-            return self.enum_methods.get(own).copied();
+    /// The published class native `function` names, and its class.
+    pub(crate) fn class_native(&self, function: Function) -> Option<(ClassId, ClassNative)> {
+        let at = function.published_class_native_at()?;
+        if let Some(own) = at.checked_sub(self.first_class_native) {
+            return self.class_natives.get(own).copied();
         }
         let base = self.base()?;
         let row = base
-            .enum_methods
-            .get(at.checked_sub(base.first_enum_method)?);
+            .class_natives
+            .get(at.checked_sub(base.first_class_native)?);
         row.copied()
     }
 
@@ -278,10 +277,10 @@ impl Arena {
         Some(first..first.checked_add(count)?)
     }
 
-    /// The number of an enum's method to publish.
-    pub(crate) fn reserve_enum_method(&self) -> Option<Function> {
-        let at = self.enum_methods.reserve(1)?;
-        Function::published_enum(self.first_enum_method.checked_add(at)?)
+    /// The number of a class native to publish.
+    pub(crate) fn reserve_class_native(&self) -> Option<Function> {
+        let at = self.class_natives.reserve(1)?;
+        Function::published_class_native(self.first_class_native.checked_add(at)?)
     }
 
     /// The row of a reserved class, written once; `false` where the
@@ -307,28 +306,28 @@ impl Arena {
         self.functions.fill(at, row).is_ok()
     }
 
-    /// The row of a reserved enum method, written once.
-    pub(crate) fn publish_enum_method(
+    /// The row of a reserved class native, written once.
+    pub(crate) fn publish_class_native(
         &self,
         function: Function,
-        row: (ClassId, EnumMethod),
+        row: (ClassId, ClassNative),
     ) -> bool {
         let Some(at) = function
-            .published_enum_at()
-            .and_then(|at| at.checked_sub(self.first_enum_method))
+            .published_class_native_at()
+            .and_then(|at| at.checked_sub(self.first_class_native))
         else {
             return false;
         };
-        self.enum_methods.fill(at, row).is_ok()
+        self.class_natives.fill(at, row).is_ok()
     }
 
-    /// How many classes, functions and enum methods this arena reserved,
+    /// How many classes, functions and class natives this arena reserved,
     /// what is below it not among them.
     pub(crate) fn counts(&self) -> [u32; 3] {
         [
             self.classes.reserved(),
             self.functions.reserved(),
-            self.enum_methods.reserved(),
+            self.class_natives.reserved(),
         ]
     }
 }
@@ -404,6 +403,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{Arena, Column, Epochs, FIRST, locate};
+    use crate::api::call::ClassNative;
     use crate::api::values::ClassId;
     use crate::enums::EnumMethod;
 
@@ -415,9 +415,9 @@ mod tests {
         let epochs = Epochs::of(Arena::past(10, 20, crate::unit_cache::Files::new(16)));
         let preload = epochs.enter(|_| false);
         assert_eq!(preload.reserve_class(), Some(ClassId(10)));
-        let method = preload.reserve_enum_method();
-        let row = (ClassId(10), EnumMethod::Cases);
-        assert!(method.is_some_and(|method| preload.publish_enum_method(method, row)));
+        let method = preload.reserve_class_native();
+        let row = (ClassId(10), ClassNative::Enum(EnumMethod::Cases));
+        assert!(method.is_some_and(|method| preload.publish_class_native(method, row)));
         epochs.lay_base(&preload);
         let first = epochs.enter(|_| false);
         assert_eq!(
@@ -425,22 +425,22 @@ mod tests {
             Some(ClassId(11)),
             "numbered past the preload's"
         );
-        let own = first.reserve_enum_method();
-        let mine = (ClassId(11), EnumMethod::From);
-        assert!(own.is_some_and(|own| first.publish_enum_method(own, mine)));
+        let own = first.reserve_class_native();
+        let mine = (ClassId(11), ClassNative::Enum(EnumMethod::From));
+        assert!(own.is_some_and(|own| first.publish_class_native(own, mine)));
         assert_ne!(own, method);
         let second = epochs.enter(|_| true);
         assert!(!Arc::ptr_eq(&first, &second), "a new epoch");
         assert_eq!(second.counts(), [0, 0, 0]);
         for epoch in [&first, &second] {
             assert_eq!(
-                method.and_then(|method| epoch.enum_method(method)),
+                method.and_then(|method| epoch.class_native(method)),
                 Some(row)
             );
         }
-        assert_eq!(own.and_then(|own| first.enum_method(own)), Some(mine));
+        assert_eq!(own.and_then(|own| first.class_native(own)), Some(mine));
         assert_eq!(
-            own.and_then(|own| second.enum_method(own)),
+            own.and_then(|own| second.class_native(own)),
             None,
             "not the new epoch's"
         );

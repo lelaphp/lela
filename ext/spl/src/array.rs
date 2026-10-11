@@ -1936,6 +1936,7 @@ fn has(
         let answered = call_method(req, &object, b"offsetExists", &[*offset])?;
         let exists = truthy(req, &answered);
         answered.give_up(req);
+        let exists = exists?;
         if !exists {
             return Ok(false);
         }
@@ -1968,10 +1969,10 @@ fn has(
     let answer = if how > 0 {
         truthy(req, &value)
     } else {
-        !matches!((*value).deref().as_ref(), ValueRef::Null)
+        Ok(!matches!((*value).deref().as_ref(), ValueRef::Null))
     };
     value.give_up(req);
-    Ok(answer)
+    answer
 }
 
 /// The flags a user sets, the storage bits left out.

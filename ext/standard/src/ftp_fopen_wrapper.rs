@@ -627,7 +627,7 @@ fn prepare(
         Transfer::Write => {
             let overwrite = match ctx {
                 Some(ctx) => match ctx.option(req, b"ftp", b"overwrite") {
-                    Some(value) => truthy(req, &value),
+                    Some(value) => truthy(req, &value)?,
                     None => false,
                 },
                 None => false,

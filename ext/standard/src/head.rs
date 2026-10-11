@@ -431,10 +431,10 @@ fn cookie_options(
             b"expires" => cookie.expires = to_long(req, &value)?,
             b"path" => cookie.path = Some(string(req)?),
             b"domain" => cookie.domain = Some(string(req)?),
-            b"secure" => cookie.secure = truthy(req, &value.deref()),
-            b"httponly" => cookie.httponly = truthy(req, &value.deref()),
+            b"secure" => cookie.secure = truthy(req, &value.deref())?,
+            b"httponly" => cookie.httponly = truthy(req, &value.deref())?,
             b"samesite" => cookie.samesite = Some(string(req)?),
-            b"partitioned" => cookie.partitioned = truthy(req, &value.deref()),
+            b"partitioned" => cookie.partitioned = truthy(req, &value.deref())?,
             _ => {
                 let text = format!(
                     "{function}(): option \"{}\" is invalid",

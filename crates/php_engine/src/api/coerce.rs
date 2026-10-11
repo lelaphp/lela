@@ -43,8 +43,14 @@ pub enum BinaryOp {
 }
 
 /// `zend_is_true`, the kernel [`crate::ops::is_true`] through the face:
-/// a NAN warns as it is coerced, which is why the request is here.
-pub fn truthy(req: &mut Request, value: &Value) -> bool {
+/// a NAN warns as it is coerced, which is why the request is here. The
+/// `Err` is the request leaving by `zend_bailout`, the fatal an object
+/// that refuses `_IS_BOOL` raises among it, which longjmps out of the
+/// native that asked; a throwable raised on the way stays pending, as
+/// php's `EG(exception)` does, and the native goes on. `array_filter`
+/// over a callback that answers such an object is the witness, in
+/// `ext/zend_test`.
+pub fn truthy(req: &mut Request, value: &Value) -> Result<bool, Thrown> {
     crate::ops::is_true(req, value)
 }
 
@@ -1159,7 +1165,7 @@ pub(crate) fn scalar_type_hint(
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_)
         )
     {
-        return Ok(Some(Value::bool(truthy(req, &value))));
+        return Ok(Some(Value::bool(truthy(req, &value)?)));
     }
     Ok(None)
 }

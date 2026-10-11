@@ -9,7 +9,7 @@
 //! engine to an enum a native declares. A native enum's rows are served
 //! as its other native methods are; a program's enum gets one function
 //! number per method where its class is bound, the request's own or the
-//! published arena's ([`crate::api::call::Function::ENUM`]), the scope
+//! published arena's ([`crate::api::call::Function::CLASS_NATIVE`]), the scope
 //! of each the enum itself, as php allocates a `zend_internal_function`
 //! per method per enum.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).

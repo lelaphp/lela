@@ -6212,7 +6212,10 @@ pub(crate) fn isset_isempty_var<T: Tier>(
     let answer = match held {
         None => op.extended_value & ISEMPTY != 0,
         Some(value) if op.extended_value & ISEMPTY == 0 => crate::ops::is_set(&value),
-        Some(value) => !crate::ops::is_true(req, &value),
+        Some(value) => match crate::ops::is_true(req, &value) {
+            Ok(truth) => !truth,
+            Err(thrown) => return threw(req, frame, &thrown),
+        },
     };
     smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
 }
@@ -19578,7 +19581,7 @@ pub(crate) fn bool<T: Tier>(
         return edge;
     }
     unary(req, frame, code, op, |req, value| {
-        Ok(Value::bool(crate::ops::is_true(req, value)))
+        crate::ops::is_true(req, value).map(Value::bool)
     })
 }
 
@@ -19686,7 +19689,7 @@ pub(crate) fn bool_not<T: Tier>(
         return edge;
     }
     unary(req, frame, code, op, |req, value| {
-        Ok(Value::bool(!crate::ops::is_true(req, value)))
+        Ok(Value::bool(!crate::ops::is_true(req, value)?))
     })
 }
 
@@ -19718,7 +19721,7 @@ pub(crate) fn bool_xor<T: Tier>(
 ) -> Edge {
     binary(req, frame, code, op, |req, left, right| {
         Ok(Value::bool(
-            crate::ops::is_true(req, left) != crate::ops::is_true(req, right),
+            crate::ops::is_true(req, left)? != crate::ops::is_true(req, right)?,
         ))
     })
 }
@@ -19758,11 +19761,11 @@ pub(crate) fn isset_isempty_cv<T: Tier>(
 ) -> Edge {
     let value = req.slot(frame, op.op1);
     let answer = if op.extended_value & ISEMPTY == 0 {
-        crate::ops::is_set(&value)
+        Ok(crate::ops::is_set(&value))
     } else {
-        !crate::ops::is_true(req, &value)
+        crate::ops::is_true(req, &value).map(|truth| !truth)
     };
-    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
+    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `ZEND_ISSET_ISEMPTY_THIS` (`Z/Zend/zend_vm_def.h:9239`),
@@ -19837,12 +19840,12 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let answer = if op.extended_value & ISEMPTY == 0 {
-        crate::ops::is_set(&held)
+        Ok(crate::ops::is_set(&held))
     } else {
-        !crate::ops::is_true(req, &held)
+        crate::ops::is_true(req, &held).map(|truth| !truth)
     };
     req.release(held);
-    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
+    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `ZEND_ISSET_ISEMPTY_DIM_OBJ` (`Z/Zend/zend_vm_def.h:7546`), what
@@ -20833,6 +20836,10 @@ fn branched<T: Tier, const ON: bool, const EX: bool>(
     let value = exec::operand(req, frame, code, op.op1_type, op.op1);
     let truth = crate::ops::is_true(req, &value);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let truth = match truth {
+        Ok(truth) => truth,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     if EX {
         write_out(req, frame, code, op, &Value::bool(truth));
     }
@@ -20874,9 +20881,16 @@ pub(crate) fn jmp_set<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    if !crate::ops::is_true(req, &value) {
-        exec::free_operand(req, frame, code, op.op1_type, op.op1);
-        return Ok(advance(req, frame));
+    match crate::ops::is_true(req, &value) {
+        Ok(true) => {}
+        Ok(false) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return Ok(advance(req, frame));
+        }
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     set_out(req, frame, code, op, taken);

@@ -514,15 +514,16 @@ pub(crate) fn type_name(req: &Request, value: &Value) -> String {
 /// Warning: unexpected NAN value was coerced to bool in %s on line 2
 /// int(0)
 /// ```
-pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
-    match value.deref().as_ref() {
+pub(crate) fn is_true(req: &mut Request, value: &Value) -> Result<bool, Thrown> {
+    Ok(match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => false,
         ValueRef::Bool(true) => true,
-        ValueRef::Object(o) => object_is_true(req, *o),
+        ValueRef::Object(o) => return object_is_true(req, *o),
         ValueRef::Int(n) => n != 0,
         ValueRef::Float(f) => {
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to bool");
+                left_by_fatal(req)?;
             }
             f != 0.0
         }
@@ -530,8 +531,20 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
         ValueRef::Array(a) => !a.is_empty(),
         ValueRef::Resource(r) => r.id() != 0,
         // `deref` followed the reference already.
-        ValueRef::Reference(r) => is_true(req, &r.get()),
+        ValueRef::Reference(r) => return is_true(req, &r.get()),
+    })
+}
+
+/// `zend_bailout` from a diagnostic a truth raised: the fatal the
+/// built-in handler served, or one a user handler raised, longjmps out
+/// of whoever asked, so the asker is handed the `Thrown` that carries no
+/// throwable. A throwable a handler raised stays pending, php's
+/// `EG(exception)`, and the asker goes on as php's does.
+fn left_by_fatal(req: &Request) -> Result<(), Thrown> {
+    if req.bailing_out() {
+        return Err(Thrown::of(None));
     }
+    Ok(())
 }
 
 /// `zend_object_is_true` (`Z/Zend/zend_operators.c:2911`): the class's
@@ -542,8 +555,9 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
 /// pending, as php's `EG(exception)`. The `E_RECOVERABLE_ERROR` is
 /// `zend_error`'s: where no user error handler takes it, `php_error_cb`
 /// bails out of it as of every fatal level, so the request ends there,
-/// the fatal left standing for the caller to leave by as a throw is
-/// left pending; a handler that takes it lets the request go on with
+/// and the asker, a handler of the loop or a native, is handed the
+/// fatal as its `Err` and leaves by it, as `zend_bailout` longjmps out
+/// of both; a handler that takes it lets the request go on with
 /// `false`. `ext/zend_test`'s `LongCastableNoOperations`, whose handler
 /// casts to an int alone, is the witness.
 ///
@@ -567,13 +581,13 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
 /// string(1) "n"
 /// bool(true)
 /// ```
-fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
+fn object_is_true(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     let table = req.object_handlers(object.heap());
     match table.cast_object(req, object, TypeTag::Bool) {
         Ok(Some(value)) => {
             let truth = value.as_bool() == Some(true);
             value.give_up(req);
-            truth
+            Ok(truth)
         }
         Ok(None) => {
             let class = req.class_name(object.class());
@@ -581,11 +595,13 @@ fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
             if req.note_error(Level::RecoverableError, &message) {
                 req.bail_out();
             }
-            false
+            left_by_fatal(req)?;
+            Ok(false)
         }
         Err(thrown) => {
             req.leave_pending(&thrown);
-            false
+            left_by_fatal(req)?;
+            Ok(false)
         }
     }
 }
@@ -2901,28 +2917,28 @@ fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Orde
         // object; then an object's handler, then an array, then both
         // sides as numbers.
         (ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false), _) => {
-            if is_true(req, right) {
+            if is_true(req, right)? {
                 Ordering::Less
             } else {
                 Ordering::Equal
             }
         }
         (ValueRef::Bool(true), _) => {
-            if is_true(req, right) {
+            if is_true(req, right)? {
                 Ordering::Equal
             } else {
                 Ordering::Greater
             }
         }
         (_, ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)) => {
-            if is_true(req, left) {
+            if is_true(req, left)? {
                 Ordering::Greater
             } else {
                 Ordering::Equal
             }
         }
         (_, ValueRef::Bool(true)) => {
-            if is_true(req, left) {
+            if is_true(req, left)? {
                 Ordering::Equal
             } else {
                 Ordering::Less
@@ -4615,7 +4631,7 @@ pub(crate) fn isset_dim(
     let found = array.heap().get(key).map(crate::exec::value_of);
     if empty {
         return Ok(match found {
-            Some(value) => !is_true(req, &value.deref()),
+            Some(value) => !is_true(req, &value.deref())?,
             None => true,
         });
     }

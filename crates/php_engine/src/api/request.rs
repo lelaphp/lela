@@ -315,11 +315,13 @@ pub struct Request {
     constants: constants::Constants,
     /// The class constants' state ([`class_constants::ClassConstants`]).
     class_constants: class_constants::ClassConstants,
-    /// The methods `zend_enum_register_funcs` gives each enum the request
-    /// declared, one function number each of the request's own from
-    /// [`Function::ENUM`] on, as php allocates a `zend_internal_function`
-    /// per method per enum. A published enum's are the arena's.
-    enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
+    /// The natives the classes the request declared lay under their own
+    /// scope ([`crate::api::call::ClassNative`]): an enum's own methods
+    /// and the copies of a native trait's, one function number each of
+    /// the request's own from [`Function::CLASS_NATIVE`] on, as php
+    /// allocates a `zend_internal_function` per method per class. A
+    /// published class's are the arena's.
+    class_natives: Vec<(ClassId, crate::api::call::ClassNative)>,
     /// The properties' guards, source lists and scope
     /// ([`properties::Properties`]).
     properties: properties::Properties,
@@ -844,7 +846,7 @@ impl Request {
             hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),
             class_constants: class_constants::ClassConstants::default(),
-            enum_functions: Vec::new(),
+            class_natives: Vec::new(),
             calls: calls::Calls::default(),
             properties: properties::Properties::default(),
             site_override: None,

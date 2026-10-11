@@ -438,7 +438,7 @@ fn phpdbg_end_oplog(
         );
         return Ok(None);
     };
-    let (by_function, by_opcode) = shape(req, options);
+    let (by_function, by_opcode) = shape(req, options)?;
     Ok(Some(to_array(
         req,
         &oplog_rows(&log, by_function, by_opcode),
@@ -476,7 +476,7 @@ fn phpdbg_get_executable(
     req: &mut Request,
     #[php(default = [])] options: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let (by_function, by_opcode) = shape(req, options);
+    let (by_function, by_opcode) = shape(req, options)?;
     let sources = session::with(|s| s.sources.clone()).unwrap_or_default();
     let named = options.find(b"files").map(|value| value.deref());
     let files: Vec<Vec<u8>> = if let Some(named) = named
@@ -537,13 +537,14 @@ fn phpdbg_get_executable(
 
 /// `functions` and `opcodes` of an options array: `opcodes` counts only
 /// with `functions`.
-fn shape(req: &mut Request, options: PhpArray) -> (bool, bool) {
-    let flag = |req: &mut Request, name: &[u8]| {
-        options.find(name).is_some_and(|value| truthy(req, &value))
+fn shape(req: &mut Request, options: PhpArray) -> Result<(bool, bool), Thrown> {
+    let flag = |req: &mut Request, name: &[u8]| match options.find(name) {
+        Some(value) => truthy(req, &value),
+        None => Ok(false),
     };
-    let by_function = flag(req, b"functions");
-    let by_opcode = by_function && flag(req, b"opcodes");
-    (by_function, by_opcode)
+    let by_function = flag(req, b"functions")?;
+    let by_opcode = by_function && flag(req, b"opcodes")?;
+    Ok((by_function, by_opcode))
 }
 
 /// The rows of the array a native answers: each key in the order it was

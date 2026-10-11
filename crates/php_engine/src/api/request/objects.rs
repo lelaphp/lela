@@ -985,7 +985,7 @@ impl Request {
                 )?;
                 let answer = crate::api::coerce::truthy(req, &exists);
                 req.release(exists);
-                if !answer {
+                if !answer? {
                     return Ok(Value::null());
                 }
             }
@@ -1053,6 +1053,7 @@ impl Request {
             )?;
             let answer = crate::api::coerce::truthy(req, &exists);
             req.release(exists);
+            let answer = answer?;
             if !answer || !not_empty {
                 return Ok(answer);
             }
@@ -1064,7 +1065,7 @@ impl Request {
             )?;
             let answer = crate::api::coerce::truthy(req, &value);
             req.release(value);
-            Ok(answer)
+            answer
         })
     }
 
