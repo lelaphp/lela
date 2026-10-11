@@ -50,14 +50,6 @@ impl Function {
     /// numbers below it are a space's user functions.
     pub(crate) const ENUM: u32 = 1 << 29;
 
-    /// Whether every request shares the function: a native, or a row of
-    /// the engine's published arena; not one of this request's own. Only
-    /// the preload's tests ask it.
-    #[cfg(test)]
-    pub(crate) fn is_published(self) -> bool {
-        self.0 & Function::LOCAL == 0
-    }
-
     /// The request's own user function at `at` among its rows.
     pub(crate) fn local(at: usize) -> Option<Function> {
         let at = u32::try_from(at).ok().filter(|at| *at < Function::ENUM)?;
