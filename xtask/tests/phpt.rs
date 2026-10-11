@@ -1217,6 +1217,18 @@ fn printed(at: &Path) -> String {
     String::new()
 }
 
+/// Held by each test here that makes a private queue naming no process,
+/// for its length: two at once each read the other's queue among their
+/// own and take it in their sweeps, the kernel keeping no maker for it.
+static PRIVATE_QUEUES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`PRIVATE_QUEUES`] held, whatever test panicked holding it before.
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    PRIVATE_QUEUES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// When the process under `pid` started, as `ps -o lstart=` prints it,
 /// empty where none runs: what tells the process a test started from one
 /// that took its number since.
@@ -1245,6 +1257,7 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     if oracle().is_none() {
         return;
     }
+    let _alone = alone();
     if let Some(why) = ipcs_readable() {
         eprintln!("skipped: {why}");
         return;
@@ -1354,6 +1367,7 @@ fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a
     if oracle().is_none() {
         return;
     }
+    let _alone = alone();
     if let Some(why) = ipcs_readable() {
         eprintln!("skipped: {why}");
         return;
