@@ -6,6 +6,8 @@
 
 use std::fmt::Write as _;
 
+use php_sapi::c_number::atoi;
+
 /// One parameter, `phpdbg_param_t` by its type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Param {
@@ -222,19 +224,6 @@ fn digits_len(rest: &[u8]) -> usize {
     if body == 0 { 0 } else { sign + body }
 }
 
-/// `atoi`.
-fn atoi(text: &[u8]) -> i64 {
-    let (negative, digits) = match text.split_first() {
-        Some((b'-', rest)) => (true, rest),
-        _ => (false, text),
-    };
-    let mut n: i64 = 0;
-    for b in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        n = n.wrapping_mul(10).wrapping_add(i64::from(b - b'0'));
-    }
-    if negative { -n } else { n }
-}
-
 /// `{GENERIC_ID}`'s first alternative, `([^ \r\n\t:#\000"']|":\\")+`.
 fn plain_id_len(rest: &[u8]) -> usize {
     let mut at = 0;
@@ -378,7 +367,12 @@ fn normal(rest: &[u8]) -> (Token, usize, bool) {
         };
     }
     if digits == longest {
-        return (Token::Digits(atoi(&rest[..digits])), digits, false);
+        // `yylval->num = atoi(yytext)`: the `int` C's `atoi` reads.
+        return (
+            Token::Digits(i64::from(atoi(&rest[..digits]))),
+            digits,
+            false,
+        );
     }
     if addr == longest {
         let value = u64::from_str_radix(&String::from_utf8_lossy(&rest[2..addr]), 16).unwrap_or(0);
