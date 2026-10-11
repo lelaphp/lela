@@ -70,9 +70,8 @@
 //! A run killed outright drops nothing, so its programs run on past the
 //! recipe's limit, and what they make past the window would stand. So the
 //! next run first kills each program the claim started and never saw end
-//! that still stands: the process under its number that leads its own
-//! group, as each program was spawned, and started inside the window, so
-//! a process that took the number since is never signalled. Its end is
+//! that still stands, as [`Process::spawned_as`] tells it, so a process
+//! that took the number since is never signalled. Its end is
 //! written to the claim as the run would have written it, and the window
 //! reaches the kill (#2522).
 //!
@@ -109,6 +108,7 @@
 //! rather than failing the run.
 //!
 //! [`Oracle`]: crate::oracle::Oracle
+//! [`Process::spawned_as`]: crate::oracle::Process::spawned_as
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -908,12 +908,12 @@ impl Claims {
     /// what the program made until then.
     fn stop(&mut self) {
         for ended in &mut self.ended {
-            let window = (seconds(ended.from, false), seconds(ended.last, true));
-            let Ok(mut journal) = File::options().append(true).open(&ended.path) else {
-                continue;
-            };
+            let last = seconds(ended.last, true);
+            let mut journal = File::options().append(true).open(&ended.path).ok();
             for (number, pid) in ended.journal.unended() {
-                let Some(group) = Group::standing(pid, window) else {
+                // Dropped, the group is killed (`oracle::Group`); its
+                // leader is waited for, as long as a second, to be gone.
+                let Some(group) = Group::standing(pid, last) else {
                     continue;
                 };
                 drop(group);
@@ -923,7 +923,9 @@ impl Claims {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                writeln!(journal, "{ENDED} {number}").ok();
+                if let Some(journal) = journal.as_mut() {
+                    writeln!(journal, "{ENDED} {number}").ok();
+                }
                 ended.last = SystemTime::now();
             }
         }

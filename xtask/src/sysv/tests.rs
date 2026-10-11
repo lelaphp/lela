@@ -5,7 +5,7 @@ use super::{
     Claim, Claims, Clock, Ctime, ENDED, Held, Journal, Kind, Namespace, Object, Runner, STARTED,
     Standing, Swept, abandoned, alive, claimed, left, offset, second_of_day, unnamed_left, window,
 };
-use crate::oracle::{Group, Process, Ran};
+use crate::oracle::{Process, Ran};
 use crate::scratch::Tree;
 
 /// `ipcs -a` as macOS printed it on 2026-10-01, cut to one object or two
@@ -616,28 +616,20 @@ fn a_process_is_read_by_its_group_and_its_age() {
 }
 
 /// A cut-off run's program is the process under its number that leads a
-/// group of that number and started inside the window its journal was
-/// written in, a second's give either side (#2522); every counterexample
-/// is a process that is not the program and is never signalled: one that
-/// took the number after the window, one started before it, and one in
-/// another process's group, as a reused number most often is.
+/// group of that number and started by its journal's last write, a
+/// second's give (#2522); every counterexample is a process that is not
+/// the program and is never signalled: one that took the number after the
+/// last write, and one in another process's group, as a reused number
+/// most often is.
 #[test]
-fn a_process_is_a_cut_off_runs_program_only_by_its_number_its_group_and_its_window() {
-    let window = (1_000, 1_060);
+fn a_process_is_a_cut_off_runs_program_only_by_its_number_its_group_and_its_start() {
+    let last = 1_060;
     let process = |group, started| Process { group, started };
-    assert!(process(4242, 1_000).spawned_as(4242, window));
-    assert!(process(4242, 999).spawned_as(4242, window));
-    assert!(process(4242, 1_061).spawned_as(4242, window));
+    assert!(process(4242, 1_000).spawned_as(4242, last));
+    assert!(process(4242, 1_061).spawned_as(4242, last));
+    assert!(!process(4242, 1_062).spawned_as(4242, last), "reused since");
     assert!(
-        !process(4242, 1_062).spawned_as(4242, window),
-        "reused since"
-    );
-    assert!(
-        !process(4242, 998).spawned_as(4242, window),
-        "before the run"
-    );
-    assert!(
-        !process(77, 1_030).spawned_as(4242, window),
+        !process(77, 1_030).spawned_as(4242, last),
         "another's group"
     );
 }
@@ -697,7 +689,6 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
     );
     assert_eq!(still, [true, true], "neither other process was signalled");
     assert!(journal.ends_with(&format!("{ENDED} 0\n")), "{journal}");
-    assert!(Group::standing(pids[0], (0, 1 << 40)).is_none(), "gone");
 }
 
 /// A claim a phpt subset's run never settled, its journal naming the

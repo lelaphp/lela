@@ -1239,12 +1239,13 @@ impl Group {
         Ok(Group(nix::unistd::Pid::from_raw(pid)))
     }
 
-    /// The group a program spawned as `pid` inside `window` leads, where
-    /// the process running under that number now is that program as
-    /// [`Process::spawned_as`] tells it: one of a cut-off run's that still
-    /// stands, and never a process that took the number since.
-    pub(crate) fn standing(pid: u32, window: (i64, i64)) -> Option<Group> {
-        Process::of(pid).filter(|found| found.spawned_as(pid, window))?;
+    /// The group a program spawned as `pid` leads, where the process
+    /// running under that number now is that program, as
+    /// [`Process::spawned_as`] tells it by `last`, the second of its run's
+    /// journal's last write: one of a cut-off run's that still stands, and
+    /// never a process that took the number since.
+    pub(crate) fn standing(pid: u32, last: i64) -> Option<Group> {
+        Process::of(pid).filter(|found| found.spawned_as(pid, last))?;
         Some(Group(nix::unistd::Pid::from_raw(i32::try_from(pid).ok()?)))
     }
 }
@@ -1283,15 +1284,16 @@ impl Process {
         })
     }
 
-    /// Whether this is the program spawned as `pid` while a run's journal
-    /// was written, from `window`'s first second to its last: a process
-    /// that leads its own group under that number, as every program is
-    /// spawned (`process_group(0)`), and started inside the window, a
-    /// second's give either side for the whole seconds `ps` prints. A
-    /// process that took the number once the program ended started past
-    /// the window, and one in another group is not a program's.
-    pub(crate) fn spawned_as(self, pid: u32, (from, to): (i64, i64)) -> bool {
-        self.group == pid && from - 1 <= self.started && self.started <= to + 1
+    /// Whether this is the program spawned as `pid` that a run's journal
+    /// names started and never ended by `last`, the second of its last
+    /// write: a process that leads its own group under that number, as
+    /// every program is spawned (`process_group(0)`), and started by then,
+    /// a second's give for the whole seconds `ps` prints. No two living
+    /// processes share a number, so one that took it started once the
+    /// program had ended, past its journal's last write; and one in
+    /// another group is not a program's.
+    pub(crate) fn spawned_as(self, pid: u32, last: i64) -> bool {
+        self.group == pid && self.started <= last + 1
     }
 }
 
