@@ -188,7 +188,7 @@ Commands:
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the protocol: paired reps with the A/A control and the load average, one reading per bar, exit 0 always
-  budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
+  budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code, a stale generated file and a `build.rs` that bakes its crate's directory in
   clippy             `cargo clippy` with every warning denied, on every target of each crate and in release where it names `debug_assertions`, as the readings `done` reads; one per crate and profile
   test               `cargo test` on each crate, as the reading `done` reads; one reading per crate, with what passed, failed, was ignored and was filtered out in its numbers
   miri               `cargo miri test` on `php_heap`, or on the crates named, as the lane design §9 runs per commit; one reading per crate, with what ran, failed and was ignored in its numbers
@@ -211,7 +211,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=90ebf66c69cc5fe472f68a41f74a69e4ca73146d1add3d3c4e4ecdccd2951525 out=607732a408bc68e0472d3a3d5f9c666e4b79f8771e867ec56a0dbe7f3b5d86ed -->
+<!-- /computed in=39190a4376fc397d39c881de84fc9341486a3d4d3baa3b9232516be333bb3d6e out=4e2f456144c5db93cafae3e5c76a2c53c43947b8bcdbaf092ed171daaa414359 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

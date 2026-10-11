@@ -248,7 +248,8 @@ pub(crate) enum Command {
     /// Without an argument, every bar the harness declares.
     Bench(Bench),
     /// Hold every crate to its line ceiling and the workspace to [budget];
-    /// refuse committed generated code and a stale generated file.
+    /// refuse committed generated code, a stale generated file and a
+    /// `build.rs` that bakes its crate's directory in.
     Budget {
         /// For pre-commit: leave out each crate whose reading passes and
         /// was taken over what is staged, naming the reading (#1143).
