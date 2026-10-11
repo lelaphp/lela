@@ -717,7 +717,7 @@ No `rules.ts`, no `scripts/`. The command hooks and the function-hook module are
 | compile identity | | file, on request | | 6.5k files | 172k | corpus |
 | crosscheck (`php -n --re <name>` and `php -n --ri <name>` renderings against the oracle's bytes, design §7.1) | | `--ext` on request | | default extensions, both columns | all features, both columns | extension, one reading per column |
 | `fpm-compare` (makala against the pinned php-fpm over the HTTP-served subset, #2349) | | on request, where the pinned php-fpm and php-src are | | | | `sapi/makala` |
-| `soak` (many clients against one makala, each response held to the request served alone, #2350) | | the 30-second smoke, a bare call | | the 30-second smoke, `sapi/makala/tests/soak.rs` in makala's `test` | `--nightly`: ten minutes, 64 clients, over the HTTP-served subset and the bench workloads, against `release-da` | `sapi/makala` |
+| `soak` (many clients against one makala, each response held to the request served alone, #2350) | | the 30-second smoke, a bare call | | the 30-second smoke, `sapi/makala/tests/soak.rs` in makala's `test` | `--nightly`: ten minutes, 64 clients, over the HTTP-served subset and the bench workloads, against a debug build, `release-da` | `sapi/makala` |
 | `api-check` | | | yes | yes | | seam |
 | `budget`, `unsafe-audit` | | | yes | yes | | crate |
 | Miri (`php_heap`), `cargo careful` | | | | Miri | careful | crate |
