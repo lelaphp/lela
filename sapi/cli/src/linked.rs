@@ -17,7 +17,7 @@
 //! same directory; then it answers `served` on a line of its own and
 //! reads the next. A request that panics leaves `panicked` instead, and
 //! the binary goes on to the next. End of input ends it. Before the
-//! first line it closes every descriptor beyond its three streams, so it
+//! first line it closes every fd beyond its three streams, so it
 //! holds no pipe of the harness's but its own two (#2550).
 //!
 //! A request that forks leaves a child that returns here after its
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // A descriptor beyond its three streams is one the harness's other
+    // An fd beyond its three streams is one the harness's other
     // threads leaked into it, which it must not hold while idle (#2550).
     php_sapi_cli::close_inherited_fds();
     let pid = std::process::id();

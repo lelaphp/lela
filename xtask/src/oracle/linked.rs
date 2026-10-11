@@ -313,7 +313,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    /// A server holds no descriptor beyond the three it is handed (#2550):
+    /// A server holds no fd beyond the three it is handed (#2550):
     /// one started holding the writing end of another's pipe as fd 3, as a
     /// server spawned while another thread's pipe is not yet close-on-exec
     /// holds it, lets that pipe reach its end while it stands idle.
