@@ -464,7 +464,8 @@ impl Request {
     /// another thread meanwhile, which takes it, served on that thread,
     /// and gives it back before this returns (#1640): what a call into C
     /// and an engine native that blocks (`sleep`, `usleep`,
-    /// `stream_select`, a blocking read, a child's wait, `flock`, and
+    /// `stream_select`, a blocking read, a child's wait, `flock`,
+    /// `stream_socket_accept`, and
     /// ext/pcntl's and ext/sockets' waits, #2401) wait through, so the
     /// request never waits on C while C waits on the request. `wait`
     /// reaches nothing of the request, which is borrowed for its length;

@@ -5,9 +5,11 @@
 //! side is a Rust function with C's calling convention, reached from
 //! PHP code by `FFI::cast` of its address; its thread writes what the
 //! callback returned to a file of its own, which the test reads. Every
-//! engine native that blocks lends the request (#2401), so the window
-//! in which a call stays posted is held open by a native of this
-//! test's own, `hold_unlent`, which blocks without lending.
+//! engine native that blocks lends the request (#2401) but `curl_exec`
+//! and `curl_multi_select`, whose waits are libcurl's (#2595), so the
+//! window in which a call stays posted is held open by a native of this
+//! test's own, `hold_unlent`, which blocks without lending and needs no
+//! server to wait on.
 
 #![allow(
     clippy::disallowed_methods,
@@ -58,7 +60,8 @@ extern "C" fn later_reading(callback: Callback) {
 }
 
 /// `hold_unlent(float $seconds): void`: the request held for that long in
-/// a native that never lends it, as no engine native that blocks is.
+/// a native that never lends it, as only curl's waits among the engine's
+/// natives are (#2595).
 #[php_function]
 fn hold_unlent(seconds: f64) {
     std::thread::sleep(Duration::from_secs_f64(seconds));
