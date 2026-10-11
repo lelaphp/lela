@@ -268,18 +268,14 @@ fn process_chunk(
 
 /// `lexbor_libxml2_bridge_report_errors` with php's two reporters.
 fn report_errors(req: &mut Request, app: &mut App<'_>, doc: &HtmlDocument, chunk: &[u8]) {
-    let name = String::from_utf8_lossy(app.name).into_owned();
     let tokenizer = doc.tokenizer_errors(app.tokenizer_index, chunk);
     app.tokenizer_index += tokenizer.len();
     for error in tokenizer {
         let offset = error.offset.wrapping_add(app.total_offset);
         app.find(offset);
         let (line, column) = (app.cache.line, app.cache.column);
-        let message = format!(
-            "tokenizer error {} in {name}, line: {line}, column: {column}\n",
-            tokenizer_error_name(error.id)
-        );
-        pretend(req, app.name, line, column, &message);
+        let what = tokenizer_error_name(error.id);
+        pretend(req, app.name, "tokenizer", what, line, column, None);
     }
     let tree = doc.tree_errors(app.tree_index);
     app.tree_index += tree.len();
@@ -289,22 +285,41 @@ fn report_errors(req: &mut Request, app: &mut App<'_>, doc: &HtmlDocument, chunk
             continue;
         }
         let what = tree_error_name(error.id);
-        let message = if len <= 1 {
-            format!("tree error {what} in {name}, line: {line}, column: {column}\n")
-        } else {
-            format!(
-                "tree error {what} in {name}, line: {line}, column: {column}-{}\n",
-                column + len - 1
-            )
-        };
-        pretend(req, app.name, line, column, &message);
+        let last = (len > 1).then(|| column + len - 1);
+        pretend(req, app.name, "tree", what, line, column, last);
     }
 }
 
-fn pretend(req: &mut Request, file: &[u8], line: usize, column: usize, message: &str) {
+/// The two reporters' `php_libxml_pretend_ctx_error_ex`: `"%s error %s in
+/// %s, line: %zu, column: %zu\n"`, the column a range up to `last` where
+/// the tree's error spans more than one, and the input's name as its
+/// bytes, as php's `%s` prints them.
+///
+/// ```php
+/// set_error_handler(function ($n, $s) { echo $n, " ", bin2hex(strstr($s, " in ")), "\n"; return true; });
+/// Dom\HTMLDocument::createFromFile("data:text/html,<!DOCTYPE html><p a=>\xff");
+/// Dom\HTMLDocument::createFromFile("data:text/html,<p>x</b>\xff");
+/// ```
+/// ```expect
+/// 2 20696e20646174613a746578742f68746d6c2c3c21444f43545950452068746d6c3e3c7020613d3eff2c206c696e653a20312c20636f6c756d6e3a203231
+/// 2 20696e20646174613a746578742f68746d6c2c3c703e783c2f623eff2c206c696e653a20312c20636f6c756d6e3a2032
+/// ```
+fn pretend(
+    req: &mut Request,
+    file: &[u8],
+    kind: &str,
+    what: &str,
+    line: usize,
+    column: usize,
+    last: Option<usize>,
+) {
+    let columns = last.map_or_else(|| column.to_string(), |last| format!("{column}-{last}"));
+    let head = format!("{kind} error {what} in ");
+    let tail = format!(", line: {line}, column: {columns}\n");
+    let message = [head.as_bytes(), file, tail.as_bytes()].concat();
     let line = i32::try_from(line).unwrap_or(i32::MAX);
     let column = i32::try_from(column).unwrap_or(i32::MAX);
-    Errors::pretend(req, file, line, column, message);
+    Errors::pretend(req, file, line, column, &message);
 }
 
 // ---- decoding and encoding the input

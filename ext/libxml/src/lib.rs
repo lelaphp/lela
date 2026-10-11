@@ -271,10 +271,10 @@ impl Errors {
     /// `php_libxml_pretend_ctx_error_ex`: an error raised as if a parser
     /// of `file` had raised it at `line` and `column`, which lexbor's
     /// parse errors are: onto the list with the position and the file,
-    /// or a warning with the text alone.
-    pub fn pretend(req: &mut Request, file: &[u8], line: i32, column: i32, message: &str) {
+    /// or a warning with the text alone, its bytes as they are.
+    pub fn pretend(req: &mut Request, file: &[u8], line: i32, column: i32, message: &[u8]) {
         let state = req.state::<State>();
-        state.buffer.extend_from_slice(message.as_bytes());
+        state.buffer.extend_from_slice(message);
         let mut end = state.buffer.len();
         while end > 0 && state.buffer[end - 1] == b'\n' {
             end -= 1;
@@ -292,11 +292,7 @@ impl Errors {
             list.push(error);
             return;
         }
-        docref(
-            req,
-            Level::Warning,
-            String::from_utf8_lossy(&text).as_bytes(),
-        );
+        docref(req, Level::Warning, &text);
     }
 
     /// `php_libxml_ctx_error` from php's own code, the entity loader's:
@@ -367,16 +363,9 @@ impl Errors {
         if suppressed {
             return;
         }
-        let text = String::from_utf8_lossy(&text);
         let message = match site {
-            Some(site) => {
-                let file = site.file.as_deref().map_or_else(
-                    || String::from("Entity"),
-                    |f| String::from_utf8_lossy(f).into_owned(),
-                );
-                format!("{text} in {file}, line: {line}")
-            }
-            None => text.into_owned(),
+            Some(site) => in_input(&text, site.file.as_deref(), line),
+            None => text,
         };
         docref(req, Level::Warning, &message);
     }
@@ -386,8 +375,23 @@ impl Errors {
     /// `php_list_set_error_structure`; otherwise joined in the buffer until a
     /// message ends with its newline and raised then, as
     /// `php_libxml_internal_error_handler_ex` does, with the text and level
-    /// of the handler the error reached.
+    /// of the handler the error reached. The text is libxml's bytes and the
+    /// file the input's name as it was given, each raised as php's `%s`
+    /// prints it, a byte that is not UTF-8 among them.
     ///
+    /// ```php
+    /// set_error_handler(function ($n, $s) { echo $n, " ", bin2hex(strstr($s, " in ") ?: $s), "\n"; return true; });
+    /// $d = new DOMDocument;
+    /// $d->load("data:,<r>x</b>\xff");
+    /// simplexml_load_file("data:,<r/>\xff");
+    /// ```
+    /// ```expect
+    /// 2 20696e20646174613a2c3c723e783c2f623eff2c206c696e653a2031
+    /// 2 20696e20646174613a2c3c723e783c2f623eff2c206c696e653a2031
+    /// 2 73696d706c65786d6c5f6c6f61645f66696c6528293a20646174613a2c3c722f3eff3a313a20706172736572206572726f72203a20457874726120636f6e74656e742061742074686520656e64206f662074686520646f63756d656e74
+    /// 2 73696d706c65786d6c5f6c6f61645f66696c6528293a203c722f3eff
+    /// 2 73696d706c65786d6c5f6c6f61645f66696c6528293a20202020205e
+    /// ```
     pub fn route(req: &mut Request, raised: Vec<Raised>) {
         for error in raised {
             let state = req.state::<State>();
@@ -440,7 +444,7 @@ impl Errors {
             return;
         }
         state.buffer.truncate(end);
-        let message = String::from_utf8_lossy(&std::mem::take(&mut state.buffer)).into_owned();
+        let message = std::mem::take(&mut state.buffer);
         match error.route {
             Route::Parser => {
                 let level = if error.level == ffi::Level::Warning {
@@ -448,21 +452,23 @@ impl Errors {
                 } else {
                     Level::Warning
                 };
-                let file = error.file.as_deref().map_or_else(
-                    || String::from("Entity"),
-                    |f| String::from_utf8_lossy(f).into_owned(),
-                );
-                docref(
-                    req,
-                    level,
-                    &format!("{message} in {file}, line: {}", error.line),
-                );
+                let message = in_input(&message, error.file.as_deref(), error.line);
+                docref(req, level, &message);
             }
             Route::Generic | Route::Default | Route::Silent => {
                 docref(req, Level::Warning, &message);
             }
         }
     }
+}
+
+/// `php_libxml_ctx_error_level`'s `"%s in %s, line: %d"`: the message at
+/// the parser's input, named `Entity` where the input has no file. Bytes
+/// throughout, as php's `%s` prints a document's file name and libxml's
+/// text, so a name that is not UTF-8 is raised as it is.
+fn in_input(message: &[u8], file: Option<&[u8]>, line: i32) -> Vec<u8> {
+    let line = format!(", line: {line}");
+    [message, b" in ", file.unwrap_or(b"Entity"), line.as_bytes()].concat()
 }
 
 // ---- the face php_libxml.h declares: the document handlers
