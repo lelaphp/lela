@@ -96,6 +96,8 @@ fn held_as<T: FromArgument>(req: &mut Request, value: Value, position: u32) -> R
     if admits(T::MASK, &value) {
         return T::from_value(req, value);
     }
+    // The type the declaration carries, `T::declared()`, which the
+    // native's arginfo is built from: not a type spelled again.
     let held = match T::declared() {
         Some(ty) => coerce::coerce_param(req, &value, &ty, position)?,
         None => value,
@@ -211,6 +213,7 @@ fn default_value(
         value
     } else {
         match declared() {
+            // The declared type, as above, over a default.
             Some(ty) if !coerce::holds(req, &value, &ty, coerce::Scopes::default()) => {
                 let held = coerce::coerce_param(req, &value, &ty, position)?;
                 req.release(value);

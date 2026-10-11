@@ -306,6 +306,9 @@ pub(super) fn setlocale(
         .collect();
     let mut candidates: Vec<Value> = Vec::with_capacity(given.len());
     for (value, position) in given.into_iter().zip(2u32..) {
+        // Each one an array, or `zend_parse_arg_str`'s string or null, past
+        // `Z_PARAM_VARIADIC('+')`, where the stub declares `$locales,
+        // ...$rest` untyped.
         let ty = php_ext::decl::Type::Union(vec![
             php_ext::decl::Type::Array,
             php_ext::decl::Type::String,

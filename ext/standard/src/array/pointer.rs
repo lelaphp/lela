@@ -565,7 +565,9 @@ fn extreme(
     wanted: Ordering,
 ) -> Result<Value, Thrown> {
     if values.0.is_empty() {
-        // One argument is the array to walk, refused as php refuses it.
+        // One argument is the array to walk, held to `array` as php's
+        // `IS_ARRAY` check past `Z_PARAM_VARIADIC` refuses it, where the
+        // stub declares `mixed $value`.
         let only = coerce_param(req, &value, &Type::Array, 1)?;
         let Some(array) = only.as_array() else {
             return Ok(Value::null());
