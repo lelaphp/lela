@@ -1193,13 +1193,62 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     );
 }
 
+/// A test of `ext/sysvmsg` that makes a private queue of mode 0600 and
+/// sends nothing to it, so it names no process, as php's
+/// `msg_get_queue(0)` leaves one, writes its pid and the new private
+/// queues `ipcs -q` lists to `started`, and goes on with `then`, its
+/// expectation after it.
+fn leaves_a_private_queue(started: &Path, then: &str) -> String {
+    format!(
+        "--TEST--\nleaves a private queue\n--FILE--\n<?php\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$q = msg_get_queue(0, 0600);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\n{then}",
+        started.display()
+    )
+}
+
+/// What a test wrote to `at`, waited for as long as the recipe's limit.
+fn printed(at: &Path) -> String {
+    for _ in 0..6000 {
+        let printed = fs::read_to_string(at).unwrap_or_default();
+        if !printed.is_empty() {
+            return printed;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    String::new()
+}
+
+/// Held by each test here that makes a private queue naming no process,
+/// for its length: two at once each read the other's queue among their
+/// own and take it in their sweeps, the kernel keeping no maker for it.
+static PRIVATE_QUEUES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`PRIVATE_QUEUES`] held, whatever test panicked holding it before.
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    PRIVATE_QUEUES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// When the process under `pid` started, as `ps -o lstart=` prints it,
+/// empty where none runs: what tells the process a test started from one
+/// that took its number since.
+fn started_at(pid: &str) -> String {
+    let ps = Command::new("ps")
+        .args(["-o", "lstart=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&ps.stdout).trim().to_owned()
+}
+
 /// A System V subset's run killed before its sweep leaves its claim, and
 /// the next System V subset's run removes what the killed one's tests
 /// left and names it in its reading (#2448): here a private queue of
 /// mode 0600 nobody sends to, naming no process, as php's
 /// `msg_get_queue(0)` leaves one, made by a test of `ext/sysvmsg` that
-/// then hangs; the run is killed, and the test's php with it, both
-/// processes this test started. The runs take their temporary directory
+/// then sleeps past the recipe's limit. The run is killed outright, which
+/// leaves the test's php running, and the next run kills it before it
+/// sweeps (#2522); the same php still running then is killed by this
+/// test, which fails. The runs take their temporary directory
 /// apart, so the claims directory is theirs alone and no other run's
 /// reclaim takes the claim first; another run's sweep on the machine may
 /// still take the queue itself, which this test then cannot name.
@@ -1208,6 +1257,7 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     if oracle().is_none() {
         return;
     }
+    let _alone = alone();
     if let Some(why) = ipcs_readable() {
         eprintln!("skipped: {why}");
         return;
@@ -1219,10 +1269,7 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     let started = marks.join("started");
     fs::write(
         dir.join("leaves.phpt"),
-        format!(
-            "--TEST--\nleaves a private queue and hangs\n--FILE--\n<?php\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$q = msg_get_queue(0, 0600);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\nsleep(50);\n--EXPECT--\n",
-            started.display()
-        ),
+        leaves_a_private_queue(&started, "sleep(120);\n--EXPECT--\n"),
     )
     .unwrap();
     let tmp = Tree::new("phpt-sysv-killed-tmp").unwrap();
@@ -1234,19 +1281,13 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
         command
     };
     let mut killed = run().spawn().unwrap();
-    let mut printed = String::new();
-    for _ in 0..6000 {
-        printed = fs::read_to_string(&started).unwrap_or_default();
-        if !printed.is_empty() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let printed = printed(&started);
     killed.kill().unwrap();
     killed.wait().unwrap();
     let mut words = printed.split_whitespace();
     let pid = words.next().expect("the test printed its pid");
-    Command::new("kill").args(["-9", pid]).status().unwrap();
+    let php = started_at(pid);
+    assert!(!php.is_empty(), "the killed run's php runs on");
     let appeared: Vec<&str> = words.collect();
     let left: Vec<PathBuf> = fs::read_dir(&claims)
         .unwrap()
@@ -1268,6 +1309,15 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     )
     .unwrap();
     let out = run().output().unwrap();
+    // Killed by this test only where it is still the same process.
+    let orphan = started_at(pid) == php;
+    if orphan {
+        Command::new("kill").args(["-9", pid]).status().unwrap();
+    }
+    assert!(
+        !orphan,
+        "the next run left the killed run's php {pid} running"
+    );
     assert!(out.status.success(), "{out:?}");
     let reading = xtask::reading::Store::of_workspace(checkout.path())
         .read("phpt", "ext/sysvmsg")
@@ -1298,6 +1348,126 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
             reading.message
         );
     }
+}
+
+/// A System V subset's own sweep removes the private queue its test leaves
+/// that nobody sent to, naming no process, and counts it, where no other
+/// run holds a claim in the claims directory it reads (#1482, #2571); and
+/// with a claim held there from before the queue was made, as a run going
+/// beside it holds one (#2563), it leaves the queue standing and its own
+/// claim for a later reclaim, and this test removes the queue. The runs
+/// take a temporary directory of their own, so the claims they read are
+/// this test's alone; a private queue another session's run makes in the
+/// same second as the test's program may still be taken with it, as by
+/// any System V subset's sweep. On Linux, where `unshare` puts the subset
+/// in a private IPC namespace, the queue goes with its program, and the
+/// test says so and returns.
+#[test]
+fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a_claim_is_held() {
+    if oracle().is_none() {
+        return;
+    }
+    let _alone = alone();
+    if let Some(why) = ipcs_readable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let tree = OneTree::new("sysv-own");
+    let dir = tree.corpus.join("ext/sysvmsg/tests");
+    fs::create_dir_all(&dir).unwrap();
+    let marks = Tree::new("phpt-sysv-own-marks").unwrap();
+    let started = marks.join("started");
+    let then = "echo 'left';\n--EXPECT--\nleft\n";
+    fs::write(
+        dir.join("leaves.phpt"),
+        leaves_a_private_queue(&started, then),
+    )
+    .unwrap();
+    let tmp = Tree::new("phpt-sysv-own-tmp").unwrap();
+    let claims = tmp.join("xtask-sysv-claims");
+    let checkout = OneTree::checkout("sysv-own");
+    let run = || {
+        fs::remove_file(&started).ok();
+        let mut command = tree.command(&checkout, "ext/sysvmsg");
+        let out = command.env("TMPDIR", tmp.path()).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let reading = xtask::reading::Store::of_workspace(checkout.path())
+            .read("phpt", "ext/sysvmsg")
+            .unwrap()
+            .expect("the run's reading");
+        let printed = printed(&started);
+        let queue = match printed.split_whitespace().collect::<Vec<_>>()[..] {
+            [_, queue] => Some(queue.to_owned()),
+            _ => None,
+        };
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            reading,
+            queue,
+        )
+    };
+    let stands = |queue: &str| ipcs().iter().any(|o| o.kind == "q" && o.id == queue);
+    // Whether the run's own sweep's words name `queue` among what it
+    // removed, beside any private queue a run going at once made in the
+    // same second; one gone that they do not name another run's sweep took.
+    let took = |reading: &Reading, queue: &str| {
+        let own = reading
+            .message
+            .split_once("of what its tests left, removed ")
+            .and_then(|(_, words)| words.split(';').next())
+            .unwrap_or_default();
+        own.split([' ', '(', ')', ',']).any(|word| word == queue)
+    };
+    let (said, reading, queue) = run();
+    if said.contains("private IPC namespace") {
+        eprintln!("skipped: the subset ran in a private IPC namespace: {said}");
+        return;
+    }
+    let Some(queue) = queue else {
+        eprintln!("the queue is not told apart: {}", reading.message);
+        return;
+    };
+    let left = stands(&queue);
+    if left {
+        Command::new("ipcrm").args(["-q", &queue]).status().ok();
+    }
+    assert!(!left, "the run left its test's queue {queue}: {said}");
+    if took(&reading, &queue) {
+        assert!(count(&reading, "sysv_removed") >= 1, "{reading:#?}");
+    } else {
+        eprintln!("another run's sweep took the queue {queue} first: {said}");
+    }
+    assert_eq!(
+        fs::read_dir(&claims).unwrap().count(),
+        0,
+        "the run's claim goes"
+    );
+    // A claim held from before the queue is made, as a run going beside
+    // this one holds its own.
+    let held = fs::File::create(claims.join("held")).unwrap();
+    held.try_lock().unwrap();
+    let (said, reading, queue) = run();
+    let Some(queue) = queue else {
+        eprintln!("the queue is not told apart: {}", reading.message);
+        return;
+    };
+    let left = stands(&queue);
+    Command::new("ipcrm").args(["-q", &queue]).status().ok();
+    assert!(
+        !took(&reading, &queue),
+        "the run took its test's queue {queue} while a claim was held: {reading:#?}"
+    );
+    if left {
+        assert!(said.contains("no process and stand"), "{said}");
+    } else {
+        eprintln!("another run's sweep took the queue {queue}: {said}");
+    }
+    assert_eq!(
+        fs::read_dir(&claims).unwrap().count(),
+        2,
+        "the run keeps its claim beside the held one"
+    );
+    drop(held);
 }
 
 /// On Linux, a run where no private IPC namespace is in play still removes
