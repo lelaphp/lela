@@ -358,10 +358,12 @@ pub(crate) fn build_mime(
     let posted = easy.post_form(req, |req, mime| {
         let mut form = Form {
             mime,
+            object,
+            array,
             error: 0,
             pending: None,
         };
-        let walked = form.fill(req, object, array);
+        let walked = form.fill(req);
         // `SAVE_CURL_ERROR(ch, error)` where the walk reached its end.
         if walked && let Some(curl) = object.native_mut::<Curl>(req) {
             curl.err = i64::from(form.error);
@@ -377,9 +379,9 @@ pub(crate) fn build_mime(
     {
         curl.err = i64::from(code);
     }
-    let thrown = match (pending, thrown) {
-        (Some(earlier), Some(later)) => Some(earlier.chain(req, later)),
-        (earlier, later) => earlier.or(later),
+    let thrown = match thrown {
+        Some(later) => Some(raised(req, pending, later)),
+        None => pending,
     };
     match thrown {
         Some(thrown) => Err(thrown),
@@ -387,28 +389,43 @@ pub(crate) fn build_mime(
     }
 }
 
-/// `build_mime_structure_from_hash`'s walk: the tree being built, php's
+/// `later` raised while `earlier` stands pending: chained onto it, as
+/// `zend_throw_exception_internal` chains one raised while another is
+/// pending. A call made while a throwable stands answers that same
+/// throwable, having served nothing, which is no second throwable.
+fn raised(req: &mut Request, earlier: Option<Thrown>, later: Thrown) -> Thrown {
+    match earlier {
+        Some(earlier) if earlier.exception() == later.exception() => earlier,
+        Some(earlier) => earlier.chain(req, later),
+        None => later,
+    }
+}
+
+/// `build_mime_structure_from_hash`'s walk over `array`, the option's
+/// argument, for the `CurlHandle` `object`: the tree being built, php's
 /// `error`, and what the walk left in `EG(exception)`, which php's walk
 /// goes on past.
 struct Form<'m> {
     mime: &'m mut MimeBuilder,
+    object: PhpObject,
+    array: PhpArray,
     error: i32,
     pending: Option<Thrown>,
 }
 
 impl Form<'_> {
-    /// The walk over `array`: whether it reached its end, where an
-    /// element may end it early (`goto out_string`).
-    fn fill(&mut self, req: &mut Request, object: PhpObject, array: PhpArray) -> bool {
+    /// The walk: whether it reached its end, where an element may end it
+    /// early (`goto out_string`).
+    fn fill(&mut self, req: &mut Request) -> bool {
         // `ZEND_HASH_FOREACH_KEY_VAL(postfields, …)` (`Z/ext/curl/interface.c:1387`)
         // holds nothing: the option's argument holds the table.
-        let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<()> {
+        let walked = walk::foreach(req, self.array, Hold::None, |req, row| -> walk::Step<()> {
             let name = match row.key() {
                 Key::Int(n) => n.to_string().into_bytes(),
                 Key::Str(s) => s.as_bytes().to_vec(),
             };
             let value = row.value().deref().deref();
-            Ok(self.element(req, object, array, &name, &value))
+            Ok(self.element(req, &name, &value))
         });
         match walked {
             Ok(ended) => ended.is_none(),
@@ -420,21 +437,14 @@ impl Form<'_> {
     }
 
     /// One element of the form, its parts added under `name`.
-    fn element(
-        &mut self,
-        req: &mut Request,
-        object: PhpObject,
-        array: PhpArray,
-        name: &[u8],
-        value: &Value,
-    ) -> ControlFlow<()> {
+    fn element(&mut self, req: &mut Request, name: &[u8], value: &Value) -> ControlFlow<()> {
         match self.step(req, |req, _| is_a(req, value, b"CURLFile")) {
-            Some(Some(file)) => return self.file(req, object, array, name, file),
+            Some(Some(file)) => return self.file(req, name, file),
             Some(None) => {}
             None => return self.flow(),
         }
         match self.step(req, |req, _| is_a(req, value, b"CURLStringFile")) {
-            Some(Some(file)) => return self.string_file(req, object, array, name, file),
+            Some(Some(file)) => return self.string_file(req, name, file),
             Some(None) => {}
             None => return self.flow(),
         }
@@ -445,19 +455,11 @@ impl Form<'_> {
     }
 
     /// A `CURLFile` part, read from its path by the transfer: a stream
-    /// opened on it now, held by the part until its `free_cb`.
-    fn file(
-        &mut self,
-        req: &mut Request,
-        object: PhpObject,
-        array: PhpArray,
-        name: &[u8],
-        file: PhpObject,
-    ) -> ControlFlow<()> {
-        let Some(path) = self.step(req, |req, _| prop_bytes(req, file, b"name")) else {
-            return self.flow();
-        };
-        let Some(path) = path else {
+    /// opened on it now, held by the part until its `free_cb`. Each
+    /// property read that throws leaves the throwable pending and reads
+    /// as no string, as php's `zend_read_property` answers then.
+    fn file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
+        let Some(path) = self.prop(req, file, b"name") else {
             let text = format!("Invalid filename for key {}", String::from_utf8_lossy(name));
             self.step(req, |req, _| {
                 docref(req, Level::Warning, &text);
@@ -465,12 +467,18 @@ impl Form<'_> {
             });
             return self.flow();
         };
+        match self.step(req, |req, _| {
+            Ok(req.check_open_basedir(&path, true).is_ok())
+        }) {
+            Some(true) => {}
+            // `goto out_string`.
+            Some(false) => return ControlFlow::Break(()),
+            None => return self.flow(),
+        }
+        let kind = self.prop(req, file, b"mime").filter(|m| !m.is_empty());
+        let postname = self.prop(req, file, b"postname").filter(|p| !p.is_empty());
+        let (object, array) = (self.object, self.array);
         let added = self.step(req, |req, mime| {
-            if req.check_open_basedir(&path, true).is_err() {
-                return Ok(None);
-            }
-            let kind = prop_bytes(req, file, b"mime")?.filter(|m| !m.is_empty());
-            let postname = prop_bytes(req, file, b"postname")?.filter(|p| !p.is_empty());
             keep_postfields(req, object, array);
             let opening = Opening {
                 must_seek: true,
@@ -478,7 +486,7 @@ impl Form<'_> {
             };
             // A wrapper's throw leaves the part with no stream, as php's
             // `php_stream_open_wrapper` answers `NULL` with it pending.
-            let (stream, refused) = match req.open_stream_with(&path, b"rb", opening) {
+            let (stream, thrown) = match req.open_stream_with(&path, b"rb", opening) {
                 Ok(stream) => (stream, None),
                 Err(thrown) => (None, Some(thrown)),
             };
@@ -493,14 +501,13 @@ impl Form<'_> {
             let kind = kind.unwrap_or_else(|| b"application/octet-stream".to_vec());
             let filename = postname.unwrap_or_else(|| path.clone());
             let code = mime.add_file(req, name, source, size, &filename, &kind);
-            Ok(Some((code, refused)))
+            Ok((code, thrown))
         });
-        // `goto out_string`: the path outside `open_basedir`.
-        let Some(Some((code, refused))) = added else {
-            return added.map_or_else(|| self.flow(), |_| ControlFlow::Break(()));
+        let Some((code, thrown)) = added else {
+            return self.flow();
         };
-        if let Some(refused) = refused {
-            self.park(req, refused);
+        if let Some(thrown) = thrown {
+            self.park(req, thrown);
         }
         match code {
             Some(0) => {}
@@ -511,19 +518,13 @@ impl Form<'_> {
     }
 
     /// A `CURLStringFile` part: its data, file name and type.
-    fn string_file(
-        &mut self,
-        req: &mut Request,
-        object: PhpObject,
-        array: PhpArray,
-        name: &[u8],
-        file: PhpObject,
-    ) -> ControlFlow<()> {
+    fn string_file(&mut self, req: &mut Request, name: &[u8], file: PhpObject) -> ControlFlow<()> {
         // `if (EG(exception)) goto out_string;` after each read, which
         // finds a throwable the walk left pending as well.
         if self.pending.is_some() {
             return ControlFlow::Break(());
         }
+        let (object, array) = (self.object, self.array);
         let added = self.step(req, |req, mime| {
             let postname = prop_bytes(req, file, b"postname")?.unwrap_or_default();
             let kind = prop_bytes(req, file, b"mime")?.unwrap_or_default();
@@ -570,6 +571,8 @@ impl Form<'_> {
     /// standing in `EG(exception)` ([`while_pending`]), so a call it
     /// makes returns at once and a diagnostic it raises reaches no
     /// handler; what it throws is left pending in turn, and `None`.
+    /// `None` too where what stands is a fatal or an `exit`, which
+    /// [`Form::flow`] ends the walk on before any further step.
     fn step<R>(
         &mut self,
         req: &mut Request,
@@ -589,16 +592,16 @@ impl Form<'_> {
         }
     }
 
-    /// `thrown` left pending: chained onto what stands, as
-    /// `zend_throw_exception_internal` chains one raised while another
-    /// is pending. A call made while one stands answers with that one,
-    /// having served nothing, which is no second throwable.
+    /// A string property of `file`, read as a step: `None` for one that
+    /// holds no string or whose read threw, the throwable left pending.
+    fn prop(&mut self, req: &mut Request, file: PhpObject, name: &[u8]) -> Option<Vec<u8>> {
+        self.step(req, |req, _| prop_bytes(req, file, name))
+            .flatten()
+    }
+
+    /// `thrown` left pending ([`raised`]).
     fn park(&mut self, req: &mut Request, thrown: Thrown) {
-        self.pending = Some(match self.pending.take() {
-            Some(earlier) if earlier.exception() == thrown.exception() => earlier,
-            Some(earlier) => earlier.chain(req, thrown),
-            None => thrown,
-        });
+        self.pending = Some(raised(req, self.pending.take(), thrown));
     }
 
     /// Whether the walk goes on: past a throwable, as php's loop goes on
