@@ -155,10 +155,14 @@ impl MultiId {
         running: c_int,
     ) -> ((i64, i64), Option<Thrown>) {
         let gone = ((BAD_HANDLE, i64::from(running)), None);
+        let Some(session) = self.with(req, None, |multi| Some(multi.tag().session.clone())) else {
+            return gone;
+        };
         let (handles, shares) = EasyId::held_by(req, easies);
-        let held = req.holding(self.0, |req, held| {
-            let multi = held.get(req)?;
-            let (raw, session) = (multi.raw(), multi.tag().session.clone());
+        // What the holds keep is cleaned up as they end with no request
+        // lent ([`Session::holding`]).
+        let held = session.holding(req, self.0, |req, held| {
+            let raw = held.get(req)?.raw();
             let mut call = Some(|req: &mut Request| {
                 session.enter(req, || {
                     let mut running = running;

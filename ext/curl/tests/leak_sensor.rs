@@ -83,3 +83,58 @@ fn a_copy_s_lists_and_file_parts_outlive_the_original() {
         "bool(false)\nint(37)\nbool(false)\n",
     );
 }
+
+/// A form whose element throws while it is built goes on past the
+/// throw, as php's walk goes on with `EG(exception)` set, and is set as
+/// the walk ends; the `CURLFile` part's stream closes with the `CurlHandle`
+/// and the throwable reaches the `catch` (#2519).
+#[test]
+fn a_form_whose_element_throws_closes_its_file_parts() {
+    let file = Scratch::new("curl-form-throws", b"x");
+    served(
+        &format!(
+            "<?php class T {{ function __toString(): string {{ throw new Exception('no'); }} }}\n\
+             class U {{ function __toString(): string {{ echo \"U\\n\"; return 'u'; }} }}\n\
+             $c = curl_init('file:///nonexistent-curl-form');\n\
+             try {{ curl_setopt($c, CURLOPT_POSTFIELDS, ['a' => new CURLFile('{0}'), 'b' => new T]); }} catch (Exception $e) {{ echo $e->getMessage(), \"\\n\"; }}\n\
+             try {{ curl_setopt($c, CURLOPT_POSTFIELDS, ['b' => new T, 'a' => new CURLFile('{0}'), 's' => new CURLStringFile('d', 'p')]); }} catch (Exception $e) {{ echo $e->getMessage(), \"\\n\"; }}\n\
+             try {{ curl_setopt($c, CURLOPT_POSTFIELDS, ['b' => new T, 'u' => new U, 'l' => [new U, new T]]); }} catch (Exception $e) {{ echo $e->getMessage(), \"\\n\"; }}\n\
+             unset($c); echo \"end\\n\";\n",
+            file.0.display()
+        ),
+        "no\nno\nno\nend\n",
+    );
+}
+
+/// A `CurlHandle` whose form holds a `CURLFile` freed from inside the
+/// write callback of a transfer started from another transfer's
+/// callback: the inner transfer holds its `CURL *`, which is cleaned up
+/// as that transfer ends, while the outer one still lends the request
+/// (#2520).
+#[test]
+fn a_handle_freed_inside_a_nested_transfer_is_cleaned_up_with_no_request_lent() {
+    let body = Scratch::new("curl-nested-body", &vec![b'x'; 40000]);
+    let upload = Scratch::new("curl-nested-upload", b"upload body");
+    served(
+        &format!(
+            "<?php $url = '{0}'; $f = '{1}';\n\
+             $outer = curl_init($url);\n\
+             curl_setopt($outer, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($url, $f) {{\n\
+                 static $n = 0;\n\
+                 if ($n++ === 0) {{\n\
+                     $m = curl_multi_init(); $d = curl_init($url);\n\
+                     curl_setopt($d, CURLOPT_POSTFIELDS, ['file' => new CURLFile($f)]);\n\
+                     curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($m) {{ static $k = 0; if ($k++ === 0) {{ curl_multi_close($m); echo \"closed\\n\"; }} return strlen($data); }});\n\
+                     curl_multi_add_handle($m, $d); unset($d);\n\
+                     do {{ $status = curl_multi_exec($m, $active); }} while ($active && $status == CURLM_OK);\n\
+                     echo \"inner \", $status, \"\\n\";\n\
+                 }}\n\
+                 return strlen($data);\n\
+             }});\n\
+             var_dump(curl_exec($outer));\n",
+            body.url(),
+            upload.0.display()
+        ),
+        "closed\ninner 0\nbool(true)\n",
+    );
+}
