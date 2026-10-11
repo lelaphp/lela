@@ -335,20 +335,13 @@ mod tests {
         assert_eq!(first_line(&diff(b"200\n\na\nb", b"200\n\na\nc")), "-b / +c");
     }
 
-    /// The fixture's registry (`xtask/fixtures/makala`): one accepted row
-    /// naming 004.phpt and covering 007.phpt, none for 011.phpt.
-    pub(crate) fn fixture() -> Registry {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/makala");
-        Registry::parse(&std::fs::read_to_string(dir.join("divergence.toml")).unwrap()).unwrap()
-    }
-
     /// The negative control: a difference no `makala:` row names fails the
     /// reading, one the row names is accepted, counted apart and named
     /// under the row, and a test the row covers that now agrees names the
     /// row stale without failing the reading.
     #[test]
     fn a_difference_no_makala_row_names_fails_and_one_a_row_names_is_accepted() {
-        let registry = fixture();
+        let registry = crate::makala::fixture();
         let differs = || Came::Differs("-a\n+b\n".to_owned());
         let came = vec![
             ("ext/filter/tests/004.phpt".to_owned(), differs()),

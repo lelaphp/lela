@@ -180,7 +180,8 @@ pub(super) fn verdict<'a>(line: &'a str, test: &Path) -> Option<&'a str> {
 
 /// What `run-tests.php` calls a verdict of this runner's: a difference a
 /// registry row accepts is still its `FAIL`, and a test the compiler did
-/// not read has none, since only the engine's compiler refuses one.
+/// not read has none, since only the engine's compiler refuses one, nor
+/// one the served lane left out, since only that lane sends HTTP.
 fn word(judgement: Judgement) -> Option<&'static str> {
     match judgement {
         Judgement::Pass => Some("PASS"),
@@ -188,7 +189,7 @@ fn word(judgement: Judgement) -> Option<&'static str> {
         Judgement::Skip => Some("SKIP"),
         Judgement::Bork => Some("BORK"),
         Judgement::XFail => Some("XFAIL"),
-        Judgement::Unread => None,
+        Judgement::Unread | Judgement::Unsent => None,
     }
 }
 

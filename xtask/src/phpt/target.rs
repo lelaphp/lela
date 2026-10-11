@@ -97,6 +97,9 @@ pub(crate) enum LeftOut {
         cause: Option<Signature>,
         row: Option<Held>,
     },
+    /// The served lane left it out whatever the oracle did: its `--ENV--`
+    /// sets a variable no HTTP field carries ([`Judgement::Unsent`]).
+    Unsent,
 }
 
 /// The accepted registry row that holds a test the oracle missed.
@@ -116,6 +119,9 @@ impl fmt::Display for LeftOut {
             }
             LeftOut::Skipped(Some(reason)) => write!(f, "skipped by the oracle {reason:?}"),
             LeftOut::Skipped(None) => f.write_str("skipped by the oracle, its reason not kept"),
+            LeftOut::Unsent => {
+                f.write_str("left out of the lane, its --ENV-- setting what no HTTP field carries")
+            }
             LeftOut::Missed { cause, row } => {
                 f.write_str("missed by the oracle")?;
                 if let Some(cause) = cause {
@@ -241,10 +247,18 @@ impl Target {
     }
 
     /// Where the test stands, the engine having come to `engine` on it.
+    /// A test the engine came to `Diverged` on is met, since a registry
+    /// row accepted its difference, under its own id or, in the served
+    /// subset, a `makala:` one (#2644); one the served lane left out is
+    /// outside, whatever the oracle did.
     pub(crate) fn standing(&self, registry: &Registry, id: &str, engine: Judgement) -> Standing {
+        if engine == Judgement::Unsent {
+            return Standing::Outside(LeftOut::Unsent);
+        }
         match self.0.verdicts.get(id) {
             Some(&oracle) if self.holds(id) => {
-                if engine == oracle || registry.accepted(id).is_some() {
+                let accepted = engine == Judgement::Diverged || registry.accepted(id).is_some();
+                if engine == oracle || accepted {
                     Standing::Met
                 } else {
                     Standing::Missed
@@ -404,15 +418,21 @@ impl Measure {
             let held = (self.outside.iter())
                 .filter(|(_, left)| matches!(left, LeftOut::Missed { row: Some(_), .. }))
                 .count();
+            let unsent = (self.outside.iter())
+                .filter(|(_, left)| *left == LeftOut::Unsent)
+                .count();
             let mut kinds = Vec::new();
             if skipped > 0 {
                 kinds.push(format!("{skipped} skipped by the oracle"));
             }
-            if n > skipped {
-                kinds.push(format!("{} missed by it", n - skipped));
+            if n > skipped + unsent {
+                kinds.push(format!("{} missed by it", n - skipped - unsent));
             }
             if held > 0 {
                 kinds.push(format!("{held} of those under a registry row"));
+            }
+            if unsent > 0 {
+                kinds.push(format!("{unsent} left out of the lane"));
             }
             return format!("{n} outside ({})", kinds.join(", "));
         }
@@ -432,8 +452,9 @@ impl Measure {
     }
 }
 
-/// A divergence key as the reading names the test: its path in the corpus.
-fn named(id: &str) -> &str {
+/// A divergence key as the reading names the test: its path in the corpus,
+/// which a `makala:` row's id carries after its prefix.
+pub(super) fn named(id: &str) -> &str {
     (id.strip_prefix("phpt:"))
         .and_then(|rest| rest.strip_prefix(CORPUS))
         .and_then(|rest| rest.strip_prefix('/'))
@@ -519,6 +540,31 @@ mod tests {
         let measure = measured();
         assert_eq!(measure.outside.len(), 3, "{measure:#?}");
         assert_eq!(measure.target, 4, "{measure:#?}");
+    }
+
+    /// A test the engine came to `Diverged` on is met, though no `phpt:`
+    /// row holds it, since a `makala:` row accepted it in the served lane;
+    /// and one the served lane left out is outside the target whatever the
+    /// oracle did, named with why (#2644).
+    #[test]
+    fn a_diverged_test_is_met_and_one_the_served_lane_left_out_is_outside() {
+        let target = Target::of(fixture("control.json"));
+        let test = id("kept.phpt");
+        let standing = target.standing(&Registry::default(), &test, Judgement::Diverged);
+        assert_eq!(standing, Standing::Met);
+        let standing = target.standing(&Registry::default(), &test, Judgement::Unsent);
+        assert_eq!(standing, Standing::Outside(LeftOut::Unsent));
+        let measure = Measure::of(
+            &target,
+            &Registry::default(),
+            [(test.as_str(), Judgement::Unsent)],
+        );
+        assert!(
+            measure.words(kept(), "").contains(
+                "left out of the lane, its --ENV-- setting what no HTTP field carries: ext/fixture/tests/kept.phpt"
+            ),
+            "{measure:?}"
+        );
     }
 
     /// Met-of-target: the engine's verdict equal to the oracle's, an expected

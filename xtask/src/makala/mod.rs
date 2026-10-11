@@ -231,11 +231,14 @@ impl Consulted {
         found
     }
 
-    /// The reading's `accepted` and `stale` counts, and the words that
-    /// name each test under its row, none where no row was met.
+    /// The reading's `accepted` count, its `stale` one where there are
+    /// any, as `predated` is written, and the words that name each test
+    /// under its row, none where no row was met.
     pub(crate) fn counted(&self, reading: &mut Reading) -> Result<Option<String>> {
         reading.count("accepted", self.accepted.len() as u64)?;
-        reading.count("stale", self.stale.len() as u64)?;
+        if !self.stale.is_empty() {
+            reading.count("stale", self.stale.len() as u64)?;
+        }
         let named = |held: &[(String, String)]| -> String {
             let each = held
                 .iter()
@@ -262,6 +265,16 @@ impl Consulted {
 /// makala's binary, built now in the lanes' profile.
 pub(crate) fn makala(root: &Path) -> Result<PathBuf> {
     profile::build(root, &MAKALA.package(), MAKALA.binary, None, None)
+}
+
+/// The fixture's registry (`xtask/fixtures/makala`): one accepted row
+/// naming 004.phpt and covering 007.phpt, none for 011.phpt; the negative
+/// control both comparisons are held to.
+#[cfg(test)]
+pub(crate) fn fixture() -> Registry {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/makala");
+    let text = std::fs::read_to_string(dir.join("divergence.toml")).unwrap_or_default();
+    Registry::parse(&text).unwrap_or_default()
 }
 
 #[cfg(test)]
