@@ -605,6 +605,7 @@ request::Interrupt::receive_signals
 request::Invalidation
 request::Lent
 request::Lent::at
+request::MAXPATHLEN
 request::MethodRow
 request::MethodRow::class
 request::MethodRow::scope

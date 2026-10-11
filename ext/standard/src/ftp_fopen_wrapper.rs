@@ -15,8 +15,8 @@
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Closer, DirListing, Handshake, Notification, NotifyCode, Opening, OwnedStream as _, Request,
-    SocketOptions, Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
+    Closer, DirListing, Handshake, MAXPATHLEN, Notification, NotifyCode, Opening, OwnedStream as _,
+    Request, SocketOptions, Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{Owner, PhpArray, ValueRef};
 use php_ext_uri::UriStruct;
@@ -960,9 +960,6 @@ fn listing(
     }
     Ok(Listed::Names(names, data))
 }
-
-/// `sizeof(ent->d_name)`, `MAXPATHLEN`.
-const MAXPATHLEN: usize = 1024;
 
 /// `php_ftp_dirstream_read`'s cut of one listed line: its base name,
 /// `php_basename`, less the last two bytes, a line's `\r\n`, as php's

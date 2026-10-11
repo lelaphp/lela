@@ -31,7 +31,7 @@ use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
 pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
-pub use crate::virtual_cwd::Resolve;
+pub use crate::virtual_cwd::{MAXPATHLEN, Resolve};
 pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
 /// `zend_call_stack`: a thread's machine stack as the platform describes

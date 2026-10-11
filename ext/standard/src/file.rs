@@ -152,8 +152,8 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
 };
 use php_ext::request::{
-    OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption, Streams as _, Whence,
-    WrapperOp,
+    MAXPATHLEN, OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption,
+    Streams as _, Whence, WrapperOp,
 };
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -206,7 +206,6 @@ use std::os::unix::ffi::OsStrExt;
 use crate::State;
 use crate::ffi::locale::{self as c, Class};
 use crate::streamsfuncs::{NullContext, context_of};
-use crate::virtual_cwd::MAXPATHLEN;
 
 use constants::{
     FILE_APPEND, FILE_IGNORE_NEW_LINES, FILE_NO_DEFAULT_CONTEXT, FILE_SKIP_EMPTY_LINES,

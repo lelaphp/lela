@@ -13,18 +13,12 @@ use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref, raise};
-use php_ext::request::Request;
+use php_ext::request::{MAXPATHLEN, Request};
 
 use crate::{State, session};
 
 /// `FILE_PREFIX`.
 const PREFIX: &[u8] = b"sess_";
-
-/// `MAXPATHLEN` on the host.
-#[cfg(target_os = "macos")]
-const MAXPATHLEN: usize = 1024;
-#[cfg(not(target_os = "macos"))]
-const MAXPATHLEN: usize = 4096;
 
 /// `O_NOFOLLOW`, which the standard library names on no platform: the
 /// BSDs' and macOS's bit, and Linux's, which the architectures number

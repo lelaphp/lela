@@ -5,8 +5,8 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    DirListing, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper, Streams as _,
-    Whence,
+    DirListing, MAXPATHLEN, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper,
+    Streams as _, Whence,
 };
 use php_ext::values::{Owner, PhpArray};
 
@@ -549,7 +549,7 @@ fn make_dirstream(a: &archive::Archive, dir: &[u8]) -> Vec<Vec<u8>> {
     out.sort();
     // `phar_dir_read` answers no entry for a name `d_name[MAXPATHLEN]`
     // cannot hold with its NUL, so `readdir()` meets `false` there.
-    if let Some(long) = out.iter().position(|n| n.len() >= archive::MAXPATHLEN) {
+    if let Some(long) = out.iter().position(|n| n.len() >= MAXPATHLEN) {
         out.truncate(long);
     }
     out

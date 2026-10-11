@@ -93,13 +93,11 @@ use php_ext::raising::{
     throw_error,
 };
 use php_ext::request::{
-    Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx, StreamOption,
-    Streams as _, Whence,
+    MAXPATHLEN, Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx,
+    StreamOption, Streams as _, Whence,
 };
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
-
-use crate::virtual_cwd::MAXPATHLEN;
 
 /// `sizeof(zend_fcall_info_cache)`, the callable's cache
 /// `parse_context_params` `emalloc`s for the notifier's `ptr`: the
