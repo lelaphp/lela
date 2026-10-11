@@ -37,14 +37,40 @@ impl Environment {
     }
 }
 
-/// What a file system answers about a path: the two questions
-/// `init_request_info` asks, `realpath(3)` succeeding and `stat(2)`
-/// finding a regular file.
+/// What a file system answers about a path: `realpath(3)` succeeding and
+/// what `stat(2)` finds, the questions `init_request_info` and the
+/// built-in server's path rules (`crate::vpath`) ask.
 pub trait Files {
     /// Whether `realpath(3)` resolves the path.
     fn resolves(&self, path: &[u8]) -> bool;
+    /// What `stat(2)` finds at the path, following a symlink; nothing
+    /// where it fails.
+    fn stat(&self, path: &[u8]) -> Option<Stat>;
     /// Whether `stat(2)` finds a regular file at the path.
-    fn is_file(&self, path: &[u8]) -> bool;
+    fn is_file(&self, path: &[u8]) -> bool {
+        matches!(self.stat(path), Some(Stat::File(_)))
+    }
+}
+
+/// What `stat(2)` found: its `st_mode`'s kind, and its `st_size`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stat {
+    Directory,
+    /// A regular file, of so many bytes.
+    File(u64),
+    /// A device, a FIFO or a socket, of its `st_size`.
+    Other(u64),
+}
+
+impl Stat {
+    /// `st_size`, none for a directory.
+    #[must_use]
+    pub fn size(self) -> u64 {
+        match self {
+            Stat::Directory => 0,
+            Stat::File(size) | Stat::Other(size) => size,
+        }
+    }
 }
 
 /// The `cgi.*` entries `init_request_info` reads, at php's defaults, and
@@ -598,8 +624,8 @@ mod tests {
         fn resolves(&self, path: &[u8]) -> bool {
             self.0.contains(&path)
         }
-        fn is_file(&self, path: &[u8]) -> bool {
-            self.0.contains(&path)
+        fn stat(&self, path: &[u8]) -> Option<Stat> {
+            self.0.contains(&path).then_some(Stat::File(0))
         }
     }
 

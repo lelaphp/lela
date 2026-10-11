@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
-use php_sapi::cgi::ini_text;
+use php_sapi::cgi::{Disk, ini_text};
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
     OutputSink, ProgramFile, RequestDescription, ResponseHead, WebRequest,
@@ -738,19 +738,6 @@ fn url_decode(text: &[u8]) -> Vec<u8> {
         i += 1;
     }
     out
-}
-
-/// The file system as `init_request_info` asks it.
-struct Disk;
-
-impl php_proto::cgi::Files for Disk {
-    fn resolves(&self, path: &[u8]) -> bool {
-        std::fs::canonicalize(crate::conf::path(path)).is_ok()
-    }
-
-    fn is_file(&self, path: &[u8]) -> bool {
-        std::fs::metadata(crate::conf::path(path)).is_ok_and(|m| m.is_file())
-    }
 }
 
 /// How a request the child served ended.

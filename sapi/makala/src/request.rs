@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use hyper::body::Bytes;
 use php_proto::cgi::{Environment, RequestInfo, Settings};
+use php_proto::vpath::{self, Translated};
 use php_sapi::cgi::Disk;
-use php_sapi::vpath::{self, Translated};
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
     ResponseHead, WebRequest,

@@ -15,9 +15,11 @@ use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use php_proto::http::{self, Credentials, Events, Parser};
+use php_proto::vpath;
+use php_sapi::cgi::Disk;
 use php_sapi::{
     Aborted, Method, OutputSink, PHP_VERSION, ProgramFile, RequestDescription, ResponseHead,
-    Routed, WebRequest, vpath,
+    Routed, WebRequest,
 };
 
 use super::Site;
@@ -272,14 +274,14 @@ impl Building {
     }
 }
 
-/// `php_cli_server_request_translate_vpath`, the rule `php_sapi::vpath`
+/// `php_cli_server_request_translate_vpath`, the rule `php_proto::vpath`
 /// holds for both servers: the request's path under the document root,
 /// left as it was where it translates to nothing.
 fn translate_vpath(request: &mut Request, root: &[u8]) {
     let Some(translated) = request
         .vpath
         .as_deref()
-        .and_then(|vpath| vpath::translate(vpath, root))
+        .and_then(|vpath| vpath::translate(vpath, root, &Disk))
     else {
         return;
     };

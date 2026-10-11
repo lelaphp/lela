@@ -1,5 +1,5 @@
 //! Where a request goes under the document root: `php -S`'s path rules
-//! (`php_sapi::vpath`, #2346), and over them the refusals of a server that
+//! (`php_proto::vpath`, #2346, #2588), and over them the refusals of a server that
 //! faces the internet (#2586). The path is `normalize_vpath`'s, decoded and
 //! with every `..` taken, so no request names a file outside the root; a
 //! symlink under the root is followed wherever it leads, as `php -S` and
@@ -7,7 +7,8 @@
 //! [`Hidden`] refuses is refused here and nowhere else: `php -S` keeps its
 //! rules.
 
-use php_sapi::vpath::{self, Translated};
+use php_proto::vpath::{self, Translated};
+use php_sapi::cgi::Disk;
 
 use crate::options::Hidden;
 
@@ -79,7 +80,7 @@ pub(crate) fn route(method: &[u8], path: &[u8], root: &[u8], hidden: Hidden) -> 
     if hidden == Hidden::Refused && has_dot_segment(&uri) {
         return Route::Refused(Refusal::NotFound);
     }
-    let found = vpath::translate(&uri, root);
+    let found = vpath::translate(&uri, root, &Disk);
     match found {
         Some(found) if found.is_program() => {
             if found.path_translated.contains(&0) {

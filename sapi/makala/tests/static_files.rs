@@ -1,5 +1,5 @@
 //! Static files (#2346) over a real socket against the binary, by
-//! `php -S`'s path rules (`php_sapi::vpath`) and the refusals over them
+//! `php -S`'s path rules (`php_proto::vpath`) and the refusals over them
 //! (#2586): a file that is not PHP is served with the type php's table
 //! gives its extension, a `.php` file is run and never sent as its
 //! source, no path, `..` or encoded, leaves the document root, and a dot
