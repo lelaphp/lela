@@ -12337,7 +12337,7 @@ fn inline_assign_obj(
     })?;
     let z = data_value(req, frame, code, op, at)?;
     place.write(z);
-    Some(Ok(Next::Jump(at.saturating_add(2))))
+    Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
 /// The `OP_DATA` value an assignment's inline path takes, as
@@ -13911,7 +13911,7 @@ fn inline_assign_dim(
     let z = data_value(req, frame, code, op, at)?;
     placed.entry.write(z);
     free_dim_operands(req, frame, code, op, (a, placed.free_dim));
-    Some(Ok(Next::Jump(at.saturating_add(2))))
+    Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
 /// `ASSIGN_DIM` past its inline path: the container placed for the
@@ -20683,7 +20683,7 @@ fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, num
         }
         continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(number))))?;
     }
-    Ok(Next::Jump(target))
+    Ok(Next::jump(target))
 }
 
 /// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a
@@ -21768,7 +21768,7 @@ fn write_owning_nothing(slots: &mut [Zval], code: &OpArray, op: &Opline, z: Zval
 /// `ZEND_VM_NEXT_OPCODE` after an inline path, which serves no user
 /// code and so leaves nothing pending for [`advance`] to test.
 fn advanced() -> Next {
-    Next::Advance
+    Next::ADVANCE
 }
 
 /// The body the one-operand kernels' handlers share: the operand
@@ -22026,8 +22026,8 @@ fn compared(
 /// the chain. Every target is forward, so none is a safepoint site.
 fn switched(req: &Request, frame: FrameRef, switched: Switched, op: &Opline) -> Next {
     match switched {
-        Switched::Target(target) => Next::Jump(target),
-        Switched::Default => Next::Jump(op.extended_value),
+        Switched::Target(target) => Next::jump(target),
+        Switched::Default => Next::jump(op.extended_value),
         Switched::Chain => advance(req, frame),
     }
 }
@@ -22055,7 +22055,7 @@ fn advance(req: &Request, frame: FrameRef) -> Next {
     if req.is_pending() {
         return Stepped::Threw(frame).into();
     }
-    Next::Advance
+    Next::ADVANCE
 }
 
 /// `ZEND_VM_NEXT_OPCODE_EX(1, 2)`, [`advance`] for a handler that is two
@@ -22087,7 +22087,7 @@ fn advance_over_data(req: &Request, frame: FrameRef, at: u32) -> Next {
     if req.is_pending() {
         return Stepped::Threw(frame).into();
     }
-    Next::Jump(at.saturating_add(2))
+    Next::jump(at.saturating_add(2))
 }
 
 /// The body the by-value `SEND_*` handlers share: the operand placed in
@@ -22672,7 +22672,7 @@ fn free_throwing_result(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
 /// `ZEND_VM_JMP_EX(target, 0)`: the frame at `at`, with neither the
 /// interrupt test nor the pending test the loop's own jumps make.
 fn jump_to(at: u32) -> Edge {
-    Ok(Next::Jump(at))
+    Ok(Next::jump(at))
 }
 
 /// `ZEND_RETURN_BY_REF` (`Z/Zend/zend_vm_def.h:4586`), what a function

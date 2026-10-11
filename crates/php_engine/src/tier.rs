@@ -174,8 +174,17 @@ pub enum Stepped {
 /// throw or a return, and wherever a step hands the frame to a tier.
 /// Every other edge is a [`Stepped`] with every frame's position
 /// written where the handler left it.
+///
+/// One word, so that a handler's answer, `Result<Next, Fatal>`, is two
+/// registers and never a slot in memory the loop reads back: the way in
+/// the high half and the opline or the frame in the low, which
+/// [`Next::way`] reads back as a [`Way`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Next {
+pub(crate) struct Next(u64);
+
+/// What a [`Next`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Way {
     /// `ZEND_VM_NEXT_OPCODE`: the opline after this one.
     Advance,
     /// `ZEND_VM_SET_OPCODE`: this opline of the same frame.
@@ -184,9 +193,46 @@ pub(crate) enum Next {
     Left(Stepped),
 }
 
+impl Next {
+    /// `ZEND_VM_NEXT_OPCODE`.
+    pub(crate) const ADVANCE: Next = Next(0);
+
+    /// `ZEND_VM_SET_OPCODE(to)`.
+    pub(crate) const fn jump(to: u32) -> Next {
+        Next(1 << 32 | to as u64)
+    }
+
+    /// Where the handler sends the loop.
+    #[inline(always)] // read once per opline by the loop: a shift and a compare
+    #[allow(clippy::inline_always)]
+    pub(crate) const fn way(self) -> Way {
+        // The low half is the opline or the frame, as the high half says.
+        #[allow(clippy::cast_possible_truncation)]
+        let low = self.0 as u32;
+        match self.0 >> 32 {
+            0 => Way::Advance,
+            1 => Way::Jump(low),
+            2 => Way::Left(Stepped::Same(FrameRef(low))),
+            3 => Way::Left(Stepped::Pushed(FrameRef(low))),
+            4 => Way::Left(Stepped::Popped(FrameRef(low))),
+            5 => Way::Left(Stepped::Moved(FrameRef(low))),
+            6 => Way::Left(Stepped::Threw(FrameRef(low))),
+            _ => Way::Left(Stepped::Done),
+        }
+    }
+}
+
 impl From<Stepped> for Next {
     fn from(stepped: Stepped) -> Next {
-        Next::Left(stepped)
+        let (way, frame): (u64, u32) = match stepped {
+            Stepped::Same(at) => (2, at.0),
+            Stepped::Pushed(at) => (3, at.0),
+            Stepped::Popped(at) => (4, at.0),
+            Stepped::Moved(at) => (5, at.0),
+            Stepped::Threw(at) => (6, at.0),
+            Stepped::Done => (7, 0),
+        };
+        Next(way << 32 | u64::from(frame))
     }
 }
 
@@ -196,10 +242,10 @@ impl From<Stepped> for Next {
 /// written to `frame`, the opline at `at` being the one the handler
 /// served.
 pub(crate) fn settled(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Stepped {
-    let to = match next {
-        Next::Left(stepped) => return stepped,
-        Next::Advance => at.saturating_add(1),
-        Next::Jump(to) => to,
+    let to = match next.way() {
+        Way::Left(stepped) => return stepped,
+        Way::Advance => at.saturating_add(1),
+        Way::Jump(to) => to,
     };
     req.vm_mut().stand(frame, to);
     Stepped::Same(frame)
@@ -521,10 +567,10 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             let next = dispatch::dispatch::<T>(req, frame, code, op, at)?;
             #[cfg(debug_assertions)]
             req.sensed_after(code, op)?;
-            at = match next {
-                Next::Advance => at.saturating_add(1),
-                Next::Jump(to) => to,
-                Next::Left(stepped) => break stepped,
+            at = match next.way() {
+                Way::Advance => at.saturating_add(1),
+                Way::Jump(to) => to,
+                Way::Left(stepped) => break stepped,
             };
         };
     }
