@@ -453,7 +453,7 @@ fn mapped(
             Variable::QueryString => http.query.clone(),
             Variable::ContentType => http.field("Content-Type"),
             Variable::ContentLength => http.field("Content-Length"),
-            Variable::RequestUri => http.target(script),
+            Variable::RequestUri => target.clone(),
             Variable::DocumentRoot => root.as_bytes().to_vec(),
             Variable::FastcgiUri => name.as_bytes().to_vec(),
             Variable::PathInfo => info.as_bytes().to_vec(),

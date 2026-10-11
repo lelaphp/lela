@@ -1042,7 +1042,10 @@ fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
     let pin = Manifest::load(workspace()).unwrap().pin;
     let mapping = pin.fastcgi().unwrap();
     assert_eq!(
-        mapping.split_path_info.as_deref(),
+        mapping
+            .split_path_info
+            .as_ref()
+            .map(|split| split.0.as_str()),
         Some(r"^(.+?\.php)(/.*)$")
     );
     assert!(
