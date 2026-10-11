@@ -300,9 +300,9 @@ impl Request {
     /// Excimer's `timer_create` and its handler storing
     /// `EG(vm_interrupt)`, is the engine's here, since an extension owns
     /// no thread (ADR-0005, ADR-0010): one thread per engine serves every
-    /// request's execution timer and periodic interrupts alike, and is
-    /// joined once a change leaves the engine no deadline, around a fork
-    /// ([`Request::fork`]) and at the engine's end.
+    /// request's execution timer and periodic interrupts alike, parked
+    /// between requests, and is joined before a fork ([`Request::fork`])
+    /// and at the engine's end.
     ///
     /// It is served through the interrupt hook the extension supplies
     /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
@@ -347,8 +347,8 @@ impl Request {
     /// Guards nest, and the outermost one's drop is the resume.
     ///
     /// The deadline is taken out of the engine's schedule and its time
-    /// left kept, so with nothing else scheduled the timer's thread is
-    /// joined until the resume, and a periodic interrupt an extension
+    /// left kept, so with nothing else scheduled the timer's thread waits
+    /// parked until the resume, and a periodic interrupt an extension
     /// started counts on through it: a profiler's clock is its own. A
     /// limit set while it is suspended, `set_time_limit()` from PHP code
     /// the handler calls, is kept whole for the resume and, as any
@@ -379,18 +379,18 @@ impl Request {
         self.limits.deadlines.stop_periodic(periodic);
     }
 
-    /// `fork(2)` from this request, the engine's one home for it (#1807,
-    /// as #1779 ruled), which `pcntl_fork` asks: the process copied with
-    /// this request alone inside the engine and no thread of the engine's
-    /// alive (ADR-0010, Threads), returning in both as [`Forked::Parent`]
-    /// with the child's id and as [`Forked::Child`]. The engine's timer
-    /// thread is joined before it, and after it started again in the
+    /// `fork(2)` from this request, the engine's one home for it (#1807, as
+    /// #1779 ruled), which `pcntl_fork` asks: the process copied with this
+    /// request alone inside the engine and no thread of the engine's alive
+    /// (ADR-0010, Threads), returning in both as [`Forked::Parent`] with the
+    /// child's id and as [`Forked::Child`]. The engine's timer thread is joined
+    /// before it, as a host's fork joins it, and after it started again in the
     /// parent over the same deadlines, which loses none of them, as php's
     /// interval timer counts on across the fork; in the child what php's
-    /// `php_child_init` restores is restored: every deadline is dropped,
-    /// the execution timer's and each periodic interrupt's, as a child
-    /// inherits no interval timer and no POSIX timer, so it runs untimed
-    /// until it sets a limit of its own, in its copy of this request.
+    /// `php_child_init` restores is restored: every deadline is dropped, the
+    /// execution timer's and each periodic interrupt's, as a child inherits no
+    /// interval timer and no POSIX timer, so it runs untimed until it sets a
+    /// limit of its own, in its copy of this request.
     ///
     /// Two and a half seconds of a three-second limit spent before the fork
     /// leave a half after it. A limit counted again from the fork could end
@@ -432,7 +432,7 @@ impl Request {
     /// child what they held; otherwise the OS error `fork(2)` failed with,
     /// `EAGAIN` and `ENOMEM` among them, and no process was made.
     pub fn fork(&mut self) -> std::io::Result<Forked> {
-        self.limits.deadlines.forked(crate::fork::fork_request)
+        crate::fork::fork_request()
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a
