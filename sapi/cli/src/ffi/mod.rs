@@ -2,8 +2,9 @@
 //! does not answer, the host's one `unsafe` home (ADR-0008): the
 //! process's own fds 0, 1 and 2, which `do_cli` registers its standard
 //! streams over, the area `ps` shows its title from ([`title`]), the
-//! local time the built-in server's log writes, and the `SIGINT` and the
-//! wait its loop serves between.
+//! local time the built-in server's log writes, the `SIGINT` and the
+//! wait its loop serves between, and the fds above 2 `php-linked` closes
+//! before it serves (`close_inherited_fds`).
 //! Each `unsafe` block is one operation with its `SAFETY` comment.
 #![deny(
     clippy::undocumented_unsafe_blocks,
@@ -153,6 +154,33 @@ pub(crate) fn poll(fds: &mut [Polled], millis: i32) -> std::io::Result<usize> {
         return Err(std::io::Error::from_raw_os_error(libc::EBADF));
     }
     Ok(ready)
+}
+
+/// Every fd above 2 the process was started holding, closed, as
+/// a server that outlives its caller's other children does before it
+/// serves (#2550). On macOS the standard library opens a pipe with
+/// `pipe(2)` and marks it close-on-exec after, so a process another
+/// thread spawns in between inherits that pipe, and holding it keeps the
+/// pipe from reaching its end for whoever reads it. `/dev/fd` lists what
+/// is open; called first in `main`, with no thread started and nothing
+/// of this process's own open beyond the three, so each one closed is
+/// one nothing here owns.
+#[cfg(feature = "linked")]
+pub fn close_inherited_fds() {
+    let Ok(open) = std::fs::read_dir("/dev/fd") else {
+        return;
+    };
+    let inherited: Vec<RawFd> = open
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > 2)
+        .collect();
+    // The listing's own fd is among them and closed with the
+    // listing already; its close here answers `EBADF`, which is no error.
+    for fd in inherited {
+        // SAFETY: `close(2)` reads its one integer argument; the fd is
+        // owned by no value of this process (see above).
+        unsafe { libc::close(fd) };
+    }
 }
 
 /// `php_cli_server_worker_install_pdeathsig`

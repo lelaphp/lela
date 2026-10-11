@@ -304,3 +304,37 @@ fn binary() -> Result<PathBuf> {
         .clone()
         .map_err(|why| anyhow!("{why}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// A server holds no fd beyond the three it is handed (#2550):
+    /// one started holding the writing end of another's pipe as fd 3, as a
+    /// server spawned while another thread's pipe is not yet close-on-exec
+    /// holds it, lets that pipe reach its end while it stands idle.
+    #[test]
+    fn a_server_lets_go_of_a_pipe_it_inherited_beyond_its_streams() {
+        let binary = super::binary().unwrap();
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let mut server = Command::new("/bin/sh")
+            .args(["-c", "exec \"$0\" --serve 3>&1 >/dev/null"])
+            .arg(&binary)
+            .stdin(Stdio::piped())
+            .stdout(writer)
+            .spawn()
+            .unwrap();
+        let (tell, ended) = mpsc::channel();
+        thread::spawn(move || tell.send(reader.read_to_end(&mut Vec::new()).is_ok()));
+        let reached = ended.recv_timeout(Duration::from_secs(10));
+        let standing = server.try_wait().unwrap().is_none();
+        drop(server.stdin.take());
+        server.wait().unwrap();
+        assert_eq!(reached, Ok(true), "the idle server still holds the pipe");
+        assert!(standing, "the server ended instead of standing idle");
+    }
+}
