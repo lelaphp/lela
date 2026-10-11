@@ -101,7 +101,6 @@ abi::ExtensionBuilder::cached
 abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_linked_observer
-abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_reshaped
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
@@ -511,7 +510,6 @@ raising::throw_error
 raising::throw_error_chained
 raising::throw_value
 raising::throwing_warnings
-raising::too_few_arguments
 raising::uncaught_at
 raising::warning
 raising::while_pending
@@ -759,7 +757,6 @@ request::Request::flush
 request::Request::forbid_dynamic_call
 request::Request::foreign
 request::Request::fork
-request::Request::frame_args
 request::Request::frame_of
 request::Request::frame_var
 request::Request::frame_vars
@@ -896,7 +893,6 @@ request::Request::superglobal
 request::Request::supplier
 request::Request::suspend_time_limit
 request::Request::take_http_status
-request::Request::take_pending
 request::Request::take_uploaded_file
 request::Request::temp_dir
 request::Request::this

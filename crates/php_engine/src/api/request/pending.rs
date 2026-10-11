@@ -762,18 +762,11 @@ impl Request {
         }
     }
 
-    /// The pending throwable out, the slot left empty and its one owner
-    /// the caller's: php's `EG(exception) = NULL` beside the object it
-    /// took, which is what a matching `CATCH` does with it. An exit
-    /// standing is left where it stands.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub fn take_pending(&mut self) -> Option<Owner<PhpObject>> {
-        let object = self.take_pending_view()?;
-        Some(Owner::adopt(object))
-    }
-
-    /// What [`take_pending`](Self::take_pending) takes, its one owner not
-    /// yet named.
+    /// The pending throwable out, the slot left empty and its one
+    /// reference the caller's, not yet named as an owner: php's
+    /// `EG(exception) = NULL` beside the object it took, which is what a
+    /// matching `CATCH` does with it. An exit standing is left where it
+    /// stands.
     pub(crate) fn take_pending_view(&mut self) -> Option<PhpObject> {
         let object = self.pending()?;
         self.raised = None;

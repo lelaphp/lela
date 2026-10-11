@@ -511,14 +511,6 @@ impl Request {
         )
     }
 
-    /// The arguments of the frame `depth` levels up, `func_get_args` from
-    /// outside.
-    #[must_use]
-    pub fn frame_args(&self, depth: u32) -> Option<Vec<Value>> {
-        let _ = depth;
-        None
-    }
-
     /// `zend_get_executed_scope`, the class scope where the native being
     /// served was called: a native method's own class
     /// (`func->common.scope`), and for a native function the scope of
