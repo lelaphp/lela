@@ -4,8 +4,8 @@
 //! the pin's `[fastcgi]` mapping (#2334), the same client the `request
 //! makala` witnesses are served by (`witness::makala`), and the two
 //! responses are held to each other as a client of nginx in front of
-//! php-fpm reads them: the status code, each header line PHP set in order,
-//! and the body. One reading, at makala's crate.
+//! php-fpm reads them: the status code, each header line PHP set, in
+//! order within its name, and the body. One reading, at makala's crate.
 //!
 //! **The differences known before a request is sent**, each handled in
 //! the one place this list names (#2349, from #2347's witnesses):
@@ -234,24 +234,27 @@ fn tally(
     let mut consulted = Consulted::default();
     // What stands once the rows are read: each unaccepted difference,
     // and the unstable and borked entries, which no row touches.
-    let standing: Vec<(&str, &Came)> = (came.iter())
-        .filter(|(id, c)| match c {
+    let (mut standing, mut same) = (Vec::new(), 0);
+    for (id, c) in came {
+        let stands = match c {
             Came::Same => {
+                same += 1;
                 consulted.hold(registry, id, true);
                 false
             }
             Came::Differs(_) => consulted.hold(registry, id, false) == Held::Differs,
             Came::Unstable | Came::Bork(_) => true,
-        })
-        .map(|(id, c)| (id.as_str(), c))
-        .collect();
+        };
+        if stands {
+            standing.push((id.as_str(), c));
+        }
+    }
     let count = |kind: fn(&Came) -> bool| standing.iter().filter(|(_, c)| kind(c)).count();
     let (differs, unstable, borked) = (
         count(|c| matches!(c, Came::Differs(_))),
         count(|c| matches!(c, Came::Unstable)),
         count(|c| matches!(c, Came::Bork(_))),
     );
-    let same = came.iter().filter(|(_, c)| matches!(c, Came::Same)).count();
     for (key, n) in [
         ("entries", came.len()),
         ("same", same),

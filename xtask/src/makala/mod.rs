@@ -32,9 +32,10 @@
 //! registry says so, one row per fact for both of the production server's
 //! comparisons, `fpm-compare` and the served phpt lane (#2629, #2639).
 //! Each holds a test to the rows through [`held`]: a differing test a row
-//! names reads as accepted, counted apart from the failures and named,
-//! and a row whose test now agrees is stale, named so a person retires it
-//! ([`Consulted`]).
+//! names reads as accepted, counted apart from the failures and named
+//! ([`Consulted`]). `fpm-compare` also names a row whose test now agrees
+//! stale, so a person retires it; the served lane names none, since a
+//! test held to its own expectation may not show what php-fpm shows.
 
 pub(crate) mod bench;
 pub(crate) mod compare;
@@ -45,7 +46,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::cli::Command;
-use crate::divergence::{Divergence, Registry};
+use crate::divergence::{Divergence, Kind, Registry};
 use crate::manifest::Manifest;
 use crate::oracle::hosts::MAKALA;
 use crate::oracle::profile;
@@ -211,21 +212,20 @@ pub(crate) fn held<'r>(registry: &'r Registry, test: &str, alike: bool) -> Held<
 
 /// What the `makala:` rows made of one run of a comparison: each differing
 /// test a row accepted and each test that agreed though a row names it,
-/// with the row's id, in the order the run held them.
+/// with the row, in the order the run held them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Consulted {
-    pub(crate) accepted: Vec<(String, String)>,
-    pub(crate) stale: Vec<(String, String)>,
+pub(crate) struct Consulted<'r> {
+    pub(crate) accepted: Vec<(String, &'r Divergence)>,
+    pub(crate) stale: Vec<(String, &'r Divergence)>,
 }
 
-impl Consulted {
+impl<'r> Consulted<'r> {
     /// One test held through [`held`], what a row made of it kept.
-    pub(crate) fn hold<'r>(&mut self, registry: &'r Registry, test: &str, alike: bool) -> Held<'r> {
+    pub(crate) fn hold(&mut self, registry: &'r Registry, test: &str, alike: bool) -> Held<'r> {
         let found = held(registry, test, alike);
-        let kept = |row: &Divergence| (test.to_owned(), row.id.to_string());
         match found {
-            Held::Accepted(row) => self.accepted.push(kept(row)),
-            Held::Stale(row) => self.stale.push(kept(row)),
+            Held::Accepted(row) => self.accepted.push((test.to_owned(), row)),
+            Held::Stale(row) => self.stale.push((test.to_owned(), row)),
             Held::Alike | Held::Differs => {}
         }
         found
@@ -239,13 +239,14 @@ impl Consulted {
         if !self.stale.is_empty() {
             reading.count("stale", self.stale.len() as u64)?;
         }
-        let named = |held: &[(String, String)]| -> String {
-            let each = held
-                .iter()
-                .map(|(test, row)| match row.strip_prefix("makala:") {
-                    Some(own) if own == test => row.clone(),
-                    _ => format!("{test} under {row}"),
-                });
+        let named = |held: &[(String, &Divergence)]| -> String {
+            let each = held.iter().map(|(test, row)| {
+                let own = row.id.as_str().strip_prefix(Kind::Makala.prefix());
+                match own {
+                    Some(own) if own == test => row.id.to_string(),
+                    _ => format!("{test} under {}", row.id),
+                }
+            });
             each.collect::<Vec<_>>().join(", ")
         };
         let mut words = Vec::new();

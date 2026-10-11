@@ -21,9 +21,11 @@
 //! the code is not 200, the header lines, a blank line and the body. The
 //! rest of the judge is the CGI one, but for a header's name, which is held
 //! without regard to its case, since makala writes every name lowercase by
-//! design (#2570); since the judge holds `--EXPECTHEADERS--` by name, as
-//! run-tests.php does, the order of lines across names is folded and the
-//! order within one held, as #2640 ruled. A difference an accepted
+//! design (#2570). The judge holds `--EXPECTHEADERS--` as run-tests.php
+//! does, each wanted name by the last line of that name, so it reads no
+//! order across names and makala's grouping of a name's lines (#2640)
+//! cannot miss it; within a name it reads which line comes last, which
+//! the grouping keeps. The served lane needs no fold of its own. A difference an accepted
 //! `makala:` row names is accepted, as `fpm-compare` reads it
 //! (`crate::makala::held`, #2644). What CGI has and HTTP cannot carry is
 //! not sent: the words of `--ARGS--`, and an environment variable no field
@@ -134,7 +136,10 @@ pub(super) fn consulted(
         return Ok(());
     }
     let mut consulted = Consulted::default();
-    let diverged = (tally.judged.iter()).filter(|judged| judged.judgement == Judgement::Diverged);
+    // A difference a `phpt:` row accepted is that row's, never makala's.
+    let diverged = (tally.judged.iter()).filter(|judged| {
+        judged.judgement == Judgement::Diverged && registry.accepted(&judged.id).is_none()
+    });
     for judged in diverged {
         consulted.hold(registry, named(&judged.id), false);
     }
@@ -370,10 +375,11 @@ mod tests {
         }
     }
 
-    /// The served lane holds `--EXPECTHEADERS--` by name, as run-tests.php
-    /// does, so the order across names is folded and the order within one
-    /// held (#2640): makala's grouped `Vary` lines meet bug51269.phpt's
-    /// expectation, and the same two lines swapped miss it.
+    /// The served lane holds `--EXPECTHEADERS--` by name, the last line of
+    /// a name standing, as run-tests.php does, so the order across names
+    /// is never read (#2640): makala's grouped `Vary` lines meet
+    /// bug51269.phpt's expectation, and the same two lines swapped, whose
+    /// last line is then another, miss it.
     #[test]
     fn the_served_lane_folds_header_order_across_names_and_holds_it_within_one() {
         let wanted = "Vary: Cookie\nContent-Encoding: gzip\nVary: Accept-Encoding";
