@@ -23,8 +23,8 @@ pub use crate::log::Destination;
 #[must_use]
 pub fn usage() -> String {
     let mut usage = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --listen <addr>:<port> \
-                     --root <dir> [--threads <n>] [--queue <n>] [--access-log <path>] \
-                     [--error-log <path>] [--limit <name>=<value>]...\n\
+                     --root <dir> [--threads <n>] [--queue <n>] [--serve-hidden] \
+                     [--access-log <path>] [--error-log <path>] [--limit <name>=<value>]...\n\
                      limits, a time being <n>s or <n>ms and a rate <bytes a second>,<grace time> or off:\n"
         .to_owned();
     for (name, shape, _) in LIMITS {
@@ -86,6 +86,9 @@ pub struct Options {
     pub request_queue: usize,
     /// The stack of each request thread, [`REQUEST_STACK`].
     pub stack_size: usize,
+    /// Whether dot segments and PHP's source are refused, or served as
+    /// `php -S` serves them.
+    pub hidden: Hidden,
     /// The `-d` entries, in the order given, over the ini files.
     pub ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// `-n` and `-c`, which steer the ini file search.
@@ -96,6 +99,20 @@ pub struct Options {
     /// Where the error log goes: stderr without `--error-log`.
     pub error_log: Destination,
     pub limits: Limits,
+}
+
+/// What the document root shows that `php -S` serves and a server facing
+/// the internet does not (#2586).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Hidden {
+    /// Answered 404 as though absent: a path with a segment that starts
+    /// with `.`, but under `/.well-known/` (RFC 8615), and a static file
+    /// whose extension is one of PHP's source (`phps`, `phtml`, `inc`,
+    /// `php3` to `php8`), in any case.
+    #[default]
+    Refused,
+    /// Served by `php -S`'s rules exactly: `--serve-hidden`.
+    Served,
 }
 
 /// The limits, with Kestrel's defaults, which are IIS's, Apache's and
@@ -325,6 +342,7 @@ impl Options {
         let mut limits = Limits::default();
         let mut access_log = None;
         let mut error_log = Destination::Stderr;
+        let mut hidden = Hidden::Refused;
         while let Some(word) = words.next() {
             let mut value = |name: &str| {
                 words
@@ -342,6 +360,7 @@ impl Options {
                     threads = Some(option_count("--threads", &value("--threads")?)?);
                 }
                 b"--queue" => queue = Some(option_count("--queue", &value("--queue")?)?),
+                b"--serve-hidden" => hidden = Hidden::Served,
                 b"--limit" => limits.set(&value("--limit")?)?,
                 b"--access-log" => {
                     access_log = Some(Destination::File(path(&value("--access-log")?)));
@@ -365,6 +384,7 @@ impl Options {
             request_threads,
             request_queue: queue.unwrap_or(request_threads.saturating_mul(4)),
             stack_size: REQUEST_STACK,
+            hidden,
             ini,
             ini_search,
             access_log,
@@ -419,7 +439,10 @@ mod tests {
         assert_eq!(options.request_threads, 3);
         assert_eq!(options.request_queue, 12);
         assert_eq!(options.stack_size, 8 << 20);
+        assert_eq!(options.hidden, Hidden::Refused);
         assert_eq!(options.limits, Limits::default());
+        let served = parse(&["--listen", "127.0.0.1:0", "--root", "/", "--serve-hidden"])?;
+        assert_eq!(served.hidden, Hidden::Served);
         Ok(())
     }
 

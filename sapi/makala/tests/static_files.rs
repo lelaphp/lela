@@ -1,8 +1,9 @@
 //! Static files (#2346) over a real socket against the binary, by
-//! `php -S`'s path rules (`php_sapi::vpath`): a file that is not PHP is
-//! served with the type php's table gives its extension, a `.php` file is
-//! run and never sent as its source, and no path, `..` or encoded, leaves
-//! the document root.
+//! `php -S`'s path rules (`php_sapi::vpath`) and the refusals over them
+//! (#2586): a file that is not PHP is served with the type php's table
+//! gives its extension, a `.php` file is run and never sent as its
+//! source, no path, `..` or encoded, leaves the document root, and a dot
+//! segment or a file of PHP's source is not found.
 
 #![allow(
     clippy::disallowed_methods,
@@ -143,4 +144,93 @@ fn dot_dot_and_encoded_traversal_never_leave_the_document_root() {
     }
     let inside = ask(&server, "GET", "/%2e/in.txt");
     assert_eq!(String::from_utf8_lossy(&inside.body), "inside");
+}
+
+/// The paths a server facing the internet does not serve (#2586), each
+/// with the file it names in the root: a dot segment anywhere, and a file
+/// of PHP's source under another extension than `php`.
+const HIDDEN: [&str; 8] = [
+    "/.env",
+    "/.git/config",
+    "/.user.ini",
+    "/a/.htaccess",
+    "/x.inc",
+    "/x.phtml",
+    "/x.phps",
+    "/x.PHP5",
+];
+
+/// A root holding a file at each of [`HIDDEN`] and one under
+/// `/.well-known/`, each file's text its path.
+fn hidden_root(name: &str) -> std::path::PathBuf {
+    let root = common::root(name, &[]);
+    for path in HIDDEN.iter().chain(&["/.well-known/acme-challenge/t"]) {
+        let file = root.join(&path[1..]);
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("{e}"));
+        }
+        std::fs::write(&file, path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    }
+    root
+}
+
+/// Each of [`HIDDEN`] is answered 404 with no body, as a path with nothing
+/// at it is, so the server never says whether the file exists: a write to
+/// a source file is refused 405 as a write to a file that is not there is.
+/// A file under `/.well-known/` (RFC 8615) is served.
+#[test]
+fn dot_segments_and_php_sources_are_not_found() {
+    let root = hidden_root("hidden");
+    let server = Server::start(&root);
+    for target in HIDDEN {
+        for method in ["GET", "HEAD"] {
+            let response = ask(&server, method, target);
+            assert_eq!(
+                response.status, "HTTP/1.1 404 Not Found",
+                "{method} {target}"
+            );
+            assert!(response.body.is_empty(), "{target}: {:?}", response.body);
+        }
+    }
+    for (target, status) in [
+        ("/.env", "HTTP/1.1 404 Not Found"),
+        ("/x.inc", "HTTP/1.1 405 Method Not Allowed"),
+        ("/absent.inc", "HTTP/1.1 405 Method Not Allowed"),
+    ] {
+        assert_eq!(ask(&server, "PUT", target).status, status, "PUT {target}");
+    }
+    let challenge = ask(&server, "GET", "/.well-known/acme-challenge/t");
+    assert_eq!(challenge.status, "HTTP/1.1 200 OK");
+    assert_eq!(challenge.body, b"/.well-known/acme-challenge/t");
+}
+
+/// `--serve-hidden` serves each of [`HIDDEN`] by `php -S`'s rules: its
+/// bytes.
+#[test]
+fn serve_hidden_serves_them_as_php_s_does() {
+    let root = hidden_root("hidden-served");
+    let server = Server::with_args(&root, &["--threads", "2", "--serve-hidden"]);
+    for target in HIDDEN {
+        let response = ask(&server, "GET", target);
+        assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
+        assert_eq!(String::from_utf8_lossy(&response.body), target);
+    }
+}
+
+/// A symlink under the root to a file outside it is followed, as `php -S`
+/// and nginx's `disable_symlinks off` follow one: a layout that links its
+/// public storage into the root depends on it.
+#[test]
+fn a_symlink_under_the_root_to_a_file_outside_it_is_served() {
+    let root = common::root("linked", &[]);
+    let outside = common::root("linked-outside", &[("shared.txt", "shared")]);
+    std::os::unix::fs::symlink(outside.join("shared.txt"), root.join("shared.txt"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    std::os::unix::fs::symlink(&outside, root.join("storage")).unwrap_or_else(|e| panic!("{e}"));
+    let server = Server::start(&root);
+    for target in ["/shared.txt", "/storage/shared.txt"] {
+        let response = ask(&server, "GET", target);
+        assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
+        assert_eq!(response.body, b"shared", "{target}");
+    }
 }

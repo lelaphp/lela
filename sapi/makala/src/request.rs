@@ -33,7 +33,8 @@ use php_sapi::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::options::Options;
+use crate::options::{Hidden, Options};
+use crate::route::{Refusal, Route};
 
 /// One request as its connection hands it over: the head as hyper read
 /// it, the body still arriving, and where the response goes.
@@ -154,16 +155,14 @@ fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
 pub(crate) fn serving(engine: &Engine, options: &Options) -> impl Fn(Job) + Clone + Send + 'static {
     let engine = engine.clone();
     let root: Arc<[u8]> = options.document_root.as_os_str().as_encoded_bytes().into();
-    move |job| serve(&engine, &root, job)
+    let hidden = options.hidden;
+    move |job| serve(&engine, &root, hidden, job)
 }
 
-/// One request: a program's through its own `Engine::serve`, and a
-/// static file's served from the disk, as `php -S` tells them apart
-/// (`php_sapi::vpath`, #2346). The path is `normalize_vpath`'s, decoded
-/// and with every `..` taken, so no request names a file outside the
-/// root; a file whose path holds a NUL is refused, as `php -S` refuses
-/// one, though `stat(2)` finds none such.
-fn serve(engine: &Engine, root: &[u8], job: Job) {
+/// One request, where its route goes ([`crate::route`]): a program's
+/// through its own `Engine::serve`, a static file's from the disk, and a
+/// refusal answered by the server.
+fn serve(engine: &Engine, root: &[u8], hidden: Hidden, job: Job) {
     let Job {
         head,
         body,
@@ -173,20 +172,10 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
         Some(at) => (&head.target[..at], &head.target[at + 1..]),
         None => (&head.target[..], &[][..]),
     };
-    let mut uri = php_proto::http::normalize_vpath(path);
-    if !uri.starts_with(b"/") {
-        uri.insert(0, b'/');
-    }
-    let found = vpath::translate(&uri, root);
-    if found
-        .as_ref()
-        .is_some_and(|found| found.path_translated.contains(&0))
-    {
-        return refuse(&mut sink, 400, Vec::new());
-    }
-    let program = match found {
-        Some(found) if found.is_program() => found,
-        found => return serve_static(&head, found.as_ref(), &mut sink),
+    let program = match crate::route::route(&head.method, path, root, hidden) {
+        Route::Program(program) => program,
+        Route::Static(found) => return serve_static(&head, &found, &mut sink),
+        Route::Refused(refusal) => return refuse(&mut sink, refusal),
     };
     let mut script = program.vpath;
     script.extend_from_slice(&program.path_info.unwrap_or_default());
@@ -408,28 +397,21 @@ fn environment(head: &Head, root: &[u8], script: &[u8], query: &[u8]) -> Environ
 /// How many bytes of a static file go in one write to the connection.
 const STATIC_PIECE: usize = 64 << 10;
 
-/// A request that is not a program's, served as `php -S` serves a static
-/// file (`php_cli_server_begin_send_static`,
+/// A static file, served as `php -S` serves one
+/// (`php_cli_server_begin_send_static`,
 /// `Z/sapi/cli/php_cli_server.c:2144`) on this request thread, which may
-/// wait on the disk where the connection side may not (M4): a method that
-/// writes refused with 405, a path that translated to nothing or a file
-/// that does not open with 404; else the type its extension has in php's
+/// wait on the disk where the connection side may not (M4): a file that
+/// does not open is a 404; else the type its extension has in php's
 /// table and the length of the file opened, and that many of its bytes
 /// after them but for `HEAD`, so a file that grows while it goes is sent
-/// as it was and one that shrinks cuts its connection. The
-/// refusals' bodies are empty, as the server's other refusals are. A
-/// static file holds its request thread while it goes, bounded by the
-/// minimum response data rate as a program's response is.
-fn serve_static(head: &Head, found: Option<&Translated>, sink: &mut Sink) {
-    if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&head.method.as_slice()) {
-        return refuse(sink, 405, vec![b"Allow: GET, HEAD, POST".to_vec()]);
-    }
-    let Some((found, file, length)) = found.and_then(|found| {
-        let file = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated)).ok()?;
-        let length = file.metadata().ok()?.len();
-        Some((found, file, length))
-    }) else {
-        return refuse(sink, 404, Vec::new());
+/// as it was and one that shrinks cuts its connection. A static file
+/// holds its request thread while it goes, bounded by the minimum
+/// response data rate as a program's response is.
+fn serve_static(head: &Head, found: &Translated, sink: &mut Sink) {
+    let opened = std::fs::File::open(php_sapi::cgi::path_of(&found.path_translated))
+        .and_then(|file| Ok((file.metadata()?.len(), file)));
+    let Ok((length, file)) = opened else {
+        return refuse(sink, Refusal::NotFound);
     };
     let mut lines = Vec::new();
     if let Some(content_type) = php_proto::mime::content_type(vpath::extension(&found.vpath)) {
@@ -453,12 +435,12 @@ fn serve_static(head: &Head, found: Option<&Translated>, sink: &mut Sink) {
     }
 }
 
-/// A response of the server's own, with `code`, header `lines` and no
-/// body.
-fn refuse(sink: &mut Sink, code: i64, lines: Vec<Vec<u8>>) {
+/// A response of the server's own, with no body: the refusal's code and
+/// header lines.
+fn refuse(sink: &mut Sink, refusal: Refusal) {
     sink.send_headers(&ResponseHead {
-        code,
-        lines,
+        code: i64::from(refusal.code()),
+        lines: refusal.lines(),
         ..ResponseHead::default()
     });
 }

@@ -32,6 +32,7 @@ mod log;
 mod natives;
 pub mod options;
 mod request;
+mod route;
 mod socket;
 
 use std::ffi::OsString;
