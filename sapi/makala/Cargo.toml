@@ -42,6 +42,10 @@ httpdate = { workspace = true }
 # it, so no request thread is held for its transfer (#2587); no package
 # is added.
 tokio = { workspace = true, features = ["fs"] }
+# TLS 1.2 and 1.3 with SNI on the TLS listener (#2343), rustls on its
+# aws-lc-rs provider (#2333); the tests' client is the same rustls.
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 
 [dev-dependencies]
 # pcntl and posix turned on for the tests' build, as one build of the
