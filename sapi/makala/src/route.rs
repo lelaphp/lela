@@ -19,8 +19,8 @@ use crate::static_file::StaticFile;
 /// The extensions of PHP's source under another name than `php` (#2586):
 /// a file with one is never sent as a static file unless the operator
 /// serves hidden paths, matched without regard to case.
-const SOURCE_EXTENSIONS: [&[u8]; 8] = [
-    b"phps", b"phtml", b"inc", b"php3", b"php4", b"php5", b"php7", b"php8",
+const SOURCE_EXTENSIONS: [&[u8]; 9] = [
+    b"phps", b"phtml", b"inc", b"php3", b"php4", b"php5", b"php6", b"php7", b"php8",
 ];
 
 /// The one dot segment a path may begin with (RFC 8615): ACME's
@@ -54,14 +54,14 @@ impl Router {
     /// translates it, a program's where `php_cli_server_dispatch` says so,
     /// the path past it its path's info (#2637), and a static file's
     /// otherwise, in `php_cli_server_begin_send_static`'s order: a method
-    /// that writes refused, then a path that translated to nothing or past
-    /// the file it found, then, under [`Hidden::Refused`], a file of PHP's
-    /// source, then a file that does not open. A static file is served
-    /// only as named, so a request for `/upload/x.jpg/y.php` serves no program
-    /// and sends nothing: the walk that routes is the walk that splits,
-    /// and it found no program (`cgi.fix_pathinfo`'s class of exploit
-    /// needs a front end that routes on the suffix while PHP finds a
-    /// shorter path).
+    /// that writes refused, then a path that translated to nothing, then,
+    /// under [`Hidden::Refused`], a path past the file it found or a file
+    /// of PHP's source, then a file that does not open. The walk that
+    /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
+    /// program (`cgi.fix_pathinfo`'s class of exploit needs a front end
+    /// that routes on the suffix while PHP finds a shorter path); `php -S`
+    /// sends `x.jpg` for it, and so does [`Hidden::Served`], where
+    /// [`Hidden::Refused`] serves a static file only as named (#2642).
     pub(crate) fn route(&self, method: &[u8], path: &[u8]) -> Route {
         let hidden = self.hidden;
         let mut uri = php_proto::http::normalize_vpath(path);
@@ -72,19 +72,14 @@ impl Router {
             return Route::Refused(Refusal::NotFound);
         }
         match vpath::translate(&uri, &self.root, &Disk) {
-            Some(found) if found.is_program() => {
-                if found.path_translated.contains(&0) {
-                    return Route::Refused(Refusal::BadRequest);
-                }
-                Route::Program(found)
-            }
+            Some(found) if found.is_program() => Route::Program(found),
             _ if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method) => {
                 Route::Refused(Refusal::MethodNotAllowed)
             }
             Some(found)
-                if found.path_info.is_none()
-                    && !(hidden == Hidden::Refused
-                        && is_source(vpath::extension(&found.vpath))) =>
+                if hidden == Hidden::Served
+                    || (found.path_info.is_none()
+                        && !is_source(vpath::extension(&found.vpath))) =>
             {
                 StaticFile::open(&found).map_or(Route::Refused(Refusal::NotFound), Route::Static)
             }
@@ -107,8 +102,6 @@ pub(crate) enum Route {
 /// A request the server answers on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
-    /// 400: a program whose path holds a NUL, which `php -S` refuses.
-    BadRequest,
     /// 404: nothing under the root, or a path [`Hidden`] refuses, which is
     /// answered as nothing, so the server never says whether it exists.
     NotFound,
@@ -122,7 +115,6 @@ impl Refusal {
     /// allows with a 405.
     pub(crate) fn head(self) -> ResponseHead {
         let (code, lines) = match self {
-            Refusal::BadRequest => (400, Vec::new()),
             Refusal::NotFound => (404, Vec::new()),
             Refusal::MethodNotAllowed => (405, vec![b"Allow: GET, HEAD, POST".to_vec()]),
         };
@@ -171,7 +163,7 @@ mod tests {
 
     #[test]
     fn php_s_source_extensions_match_in_any_case() {
-        for source in ["inc", "phtml", "phps", "PHP5", "Php8"] {
+        for source in ["inc", "phtml", "phps", "PHP5", "php6", "Php8"] {
             assert!(is_source(source.as_bytes()), "{source}");
         }
         for other in ["php", "php9", "html", "inc/x", ""] {

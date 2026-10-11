@@ -106,9 +106,9 @@ pub struct Options {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Hidden {
     /// Answered 404 as though absent: a path with a segment that starts
-    /// with `.`, but under `/.well-known/` (RFC 8615), and a static file
-    /// whose extension is one of PHP's source (`phps`, `phtml`, `inc`,
-    /// `php3` to `php8`), in any case.
+    /// with `.`, but under `/.well-known/` (RFC 8615), a static file whose
+    /// extension is one of PHP's source (`route::SOURCE_EXTENSIONS`), in
+    /// any case, and a static file with a path past it (#2642).
     #[default]
     Refused,
     /// Served by `php -S`'s rules exactly: `--serve-hidden`.

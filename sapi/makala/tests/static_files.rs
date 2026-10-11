@@ -149,7 +149,7 @@ fn dot_dot_and_encoded_traversal_never_leave_the_document_root() {
 /// The paths a server facing the internet does not serve (#2586), each
 /// with the file it names in the root: a dot segment anywhere, and a file
 /// of PHP's source under another extension than `php`.
-const HIDDEN: [&str; 8] = [
+const HIDDEN: [&str; 9] = [
     "/.env",
     "/.git/config",
     "/.user.ini",
@@ -158,6 +158,7 @@ const HIDDEN: [&str; 8] = [
     "/x.phtml",
     "/x.phps",
     "/x.PHP5",
+    "/x.php6",
 ];
 
 /// A root holding a file at each of [`HIDDEN`] and one under
@@ -205,15 +206,29 @@ fn dot_segments_and_php_sources_are_not_found() {
 }
 
 /// `--serve-hidden` serves each of [`HIDDEN`] by `php -S`'s rules: its
-/// bytes.
+/// bytes; and a static file with a path past it, which `php -S` sends
+/// (`php_cli_server_begin_send_static`) and the default refuses (#2642),
+/// as the file.
 #[test]
 fn serve_hidden_serves_them_as_php_s_does() {
     let root = hidden_root("hidden-served");
+    std::fs::create_dir_all(root.join("upload")).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(root.join("upload/x.jpg"), "jpeg").unwrap_or_else(|e| panic!("{e}"));
     let server = Server::with_args(&root, &["--threads", "2", "--serve-hidden"]);
     for target in HIDDEN {
         let response = ask(&server, "GET", target);
         assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
         assert_eq!(String::from_utf8_lossy(&response.body), target);
+    }
+    for target in ["/upload/x.jpg/y.php", "/upload/x.jpg/"] {
+        let response = ask(&server, "GET", target);
+        assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
+        assert_eq!(
+            response.header("Content-Type"),
+            Some("image/jpeg"),
+            "{target}"
+        );
+        assert_eq!(response.body, b"jpeg", "{target}");
     }
 }
 
