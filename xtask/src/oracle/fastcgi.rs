@@ -36,8 +36,9 @@ pub struct Mapping {
     pub nginx: String,
     /// Where the file was copied from, at that release's tag.
     pub source: String,
-    /// `fastcgi_split_path_info`'s pattern, of two captures (#2637).
-    pub split_path_info: String,
+    /// `fastcgi_split_path_info`'s pattern, of two captures (#2637); none
+    /// in a pin from before it, whose mapping splits nothing.
+    pub split_path_info: Option<String>,
     pub params: Vec<Param>,
 }
 
@@ -47,7 +48,8 @@ impl Mapping {
     /// captures where it matches, and the whole `uri` with no path info
     /// where it does not.
     pub fn split<'a>(&self, uri: &'a str) -> (&'a str, &'a str) {
-        let parts = (Regex::new(&self.split_path_info).ok())
+        let pattern = self.split_path_info.as_deref();
+        let parts = (pattern.and_then(|pattern| Regex::new(pattern).ok()))
             .and_then(|pattern| pattern.captures(uri))
             .and_then(|found| Some((found.get(1)?.as_str(), found.get(2)?.as_str())));
         parts.unwrap_or((uri, ""))
@@ -57,6 +59,8 @@ impl Mapping {
 /// `[fastcgi]` as the pin spells it: `params` the file's bytes whole,
 /// held to `md5`, `script_filename` and `path_info` the values nginx
 /// gives those two parameters, and `split_path_info` the split's pattern.
+/// The split's two keys are both there or neither, so a binary reads a
+/// pin from before them, as another worktree's binary may.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
@@ -64,8 +68,10 @@ struct File {
     source: String,
     md5: String,
     script_filename: String,
-    split_path_info: String,
-    path_info: String,
+    #[serde(default)]
+    split_path_info: Option<String>,
+    #[serde(default)]
+    path_info: Option<String>,
     params: String,
 }
 
@@ -178,15 +184,19 @@ impl TryFrom<File> for Mapping {
                 file.source
             );
         }
-        match Regex::new(&file.split_path_info) {
-            Ok(pattern) if pattern.captures_len() == 3 => {}
-            _ => bail!("[fastcgi] split_path_info is not a pattern of two captures"),
-        }
+        let path_info = match (&file.split_path_info, &file.path_info) {
+            (Some(split), Some(path_info)) => match Regex::new(split) {
+                Ok(pattern) if pattern.captures_len() == 3 => Some(("PATH_INFO", path_info)),
+                _ => bail!("[fastcgi] split_path_info is not a pattern of two captures"),
+            },
+            (None, None) => None,
+            _ => bail!("[fastcgi] split_path_info and path_info are both set or neither"),
+        };
         let mut params = Vec::new();
-        for (name, value) in [
-            ("PATH_INFO", &file.path_info),
-            ("SCRIPT_FILENAME", &file.script_filename),
-        ] {
+        for (name, value) in path_info
+            .into_iter()
+            .chain([("SCRIPT_FILENAME", &file.script_filename)])
+        {
             params.push(Param {
                 name: name.to_owned(),
                 value: pieces(value).map_err(|e| anyhow!("[fastcgi] {name}: {e}"))?,
