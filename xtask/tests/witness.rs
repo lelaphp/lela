@@ -515,7 +515,10 @@ fn accept_streams_writes_the_marked_fences_alone() {
 /// fixture's one fence is marked `capture` and prints a length its scratch
 /// directory moves, so the oracle's two runs differ and the capture
 /// writes nothing and leaves the crate failing; the note naming the line
-/// is held beside the judge.
+/// is held beside the judge. The run is bounded: one that waits on a pipe
+/// something outside it holds fails in a minute rather than holding a
+/// hook for good, as it held one for 23 minutes on a pipe a `php-linked`
+/// server had inherited (#2550).
 #[test]
 fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
     if oracle().is_none() {
@@ -525,17 +528,19 @@ fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
     let file = root.join("ext/pcre/src/lib.rs");
     let before = fs::read_to_string(&file).unwrap();
     let manifest = Manifest::load(&root).unwrap();
-    let readings = witness::run(
-        &root,
-        &manifest,
-        &Registry::default(),
-        &Ask {
+    let (tell, ran) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let ask = Ask {
             crates: vec!["ext/pcre".to_owned()],
             accept: Accept::Streams,
             ..Ask::default()
-        },
-    )
-    .unwrap();
+        };
+        tell.send(witness::run(&root, &manifest, &Registry::default(), &ask))
+    });
+    let readings = ran
+        .recv_timeout(std::time::Duration::from_mins(1))
+        .expect("the run ended within a minute")
+        .unwrap();
     let [reading] = &readings[..] else {
         panic!("{readings:#?}")
     };
