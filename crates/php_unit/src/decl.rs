@@ -707,6 +707,59 @@ impl Radix {
     }
 }
 
+/// What an attribute stands on, one `ZEND_ATTRIBUTE_TARGET_*` bit
+/// (`Z/Zend/zend_attributes.h`), each variant the bit itself: what
+/// `zend_compile_attributes` hands an internal attribute's validator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttributeTarget {
+    Class = 1 << 0,
+    Function = 1 << 1,
+    Method = 1 << 2,
+    Property = 1 << 3,
+    ClassConstant = 1 << 4,
+    Parameter = 1 << 5,
+    Constant = 1 << 6,
+}
+
+impl TryFrom<u32> for AttributeTarget {
+    type Error = u32;
+
+    /// The target one `ZEND_ATTRIBUTE_TARGET_*` bit names; any other
+    /// mask is handed back.
+    fn try_from(bit: u32) -> Result<AttributeTarget, u32> {
+        Ok(match bit {
+            1 => AttributeTarget::Class,
+            2 => AttributeTarget::Function,
+            4 => AttributeTarget::Method,
+            8 => AttributeTarget::Property,
+            16 => AttributeTarget::ClassConstant,
+            32 => AttributeTarget::Parameter,
+            64 => AttributeTarget::Constant,
+            other => return Err(other),
+        })
+    }
+}
+
+/// `zend_internal_attribute.validator`: what an extension's attribute
+/// class runs over each place a program applies it, once the target is
+/// one its `#[Attribute]` allows, handed the attribute as written and
+/// the target; the sentence of the compile error that refuses it, none
+/// where it takes the target. The compiler raises the sentence where the
+/// attribute is applied, and `ReflectionAttribute::newInstance` throws
+/// it where `#[\DelayedTargetValidation]` deferred it, php's
+/// `zend_attribute.validation_error`.
+#[derive(Debug, Clone, Copy)]
+pub struct AttributeValidator(pub fn(&Attribute, AttributeTarget) -> Option<String>);
+
+/// One validator where it is one function, by address
+/// (`std::ptr::fn_addr_eq`), which is all two declarations compared
+/// for equality can ask of it.
+impl PartialEq for AttributeValidator {
+    fn eq(&self, other: &AttributeValidator) -> bool {
+        std::ptr::fn_addr_eq(self.0, other.0)
+    }
+}
+
 /// One argument of an attribute, positional or named.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttributeArgument {
@@ -1069,6 +1122,11 @@ pub struct ClassDecl {
     /// connection's `pdo_dbh_t`), given back as the object is freed
     /// (design §5.13). Empty where it makes none.
     pub object_beside: Box<[u32]>,
+    /// The validator an extension's attribute class declares,
+    /// `zend_internal_attribute.validator` as its `MINIT` sets it after
+    /// `zend_mark_internal_attribute`; none on every other class, a
+    /// program's among them.
+    pub attribute_validator: Option<AttributeValidator>,
 }
 
 /// A global constant, `const X = ...;` or `define()` folded at compile time.

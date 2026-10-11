@@ -14,10 +14,11 @@
 
 use php_heap::{Intern, Key, Zval, ZvalType};
 use php_unit::decl::{
-    AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
-    ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
-    ImmutableArray, MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl,
-    PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type, Visibility,
+    AliasModifier, Attribute, AttributeArgument, AttributeValidator, ClassConstDecl, ClassDecl,
+    ClassFlags, ClassKind, ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking,
+    FunctionDecl, HookKind, ImmutableArray, MethodDecl, Name, NameKind, Parameter,
+    ParameterDefault, PropertyDecl, PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type,
+    Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, HookBody, Level, LiveKind, LiveRange, MapPtrOffset,
@@ -138,6 +139,19 @@ impl<T: Wire> Wire for Option<T> {
         } else {
             Some(None)
         }
+    }
+}
+
+/// An extension's attribute validator, which no unit's class carries: a
+/// unit's classes are a program's, and only a native class declares one
+/// ([`ClassDecl::attribute_validator`]). Present, it is no unit the
+/// compiler makes, so neither direction has bytes for it.
+impl Wire for AttributeValidator {
+    fn put(&self, _: &mut Vec<u8>) -> Option<()> {
+        None
+    }
+    fn take(_: &mut Reader<'_>) -> Option<Self> {
+        None
     }
 }
 
@@ -389,7 +403,7 @@ record! {
     ClassDecl {
         name, kind, flags, parent, interfaces, implementors, aliases, traits, adaptations,
         backing, constants, properties, methods, attributes, doc_comment, file, line, end_line,
-        object_size, object_beside,
+        object_size, object_beside, attribute_validator,
     }
     ConstDecl { name, value, attributes }
     MethodBody { class, method, body }

@@ -933,6 +933,7 @@ mod tests {
             end_line: 9,
             object_size: 0,
             object_beside: Box::default(),
+            attribute_validator: None,
         };
         let at = |line_start: u32| OpArray {
             line_start,

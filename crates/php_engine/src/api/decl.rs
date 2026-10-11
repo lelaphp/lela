@@ -3,8 +3,9 @@
 //! what the compiler emits for user code.
 
 pub use php_unit::decl::{
-    Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
-    ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind, IniDecl,
-    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Radix,
-    TraitAdaptation, Type, Visibility, class_attribute_refusal, hook_attribute_refusal,
+    Attribute, AttributeArgument, AttributeTarget, AttributeValidator, ClassConstDecl, ClassDecl,
+    ClassFlags, ClassKind, ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking,
+    FunctionDecl, HookKind, IniDecl, MethodDecl, Name, NameKind, Parameter, ParameterDefault,
+    PropertyDecl, PropertyHooks, Radix, TraitAdaptation, Type, Visibility, class_attribute_refusal,
+    hook_attribute_refusal,
 };

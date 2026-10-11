@@ -7,18 +7,21 @@
 //! ([`Config`]), where php's `zend_internal_attribute_get` answers, by
 //! the attribute's lowered name.
 
-use php_unit::decl::{Attribute, ClassDecl, ClassFlags, ClassKind, ConstExpr};
+use php_unit::decl::{
+    Attribute, AttributeTarget, AttributeValidator, ClassDecl, ClassFlags, ClassKind, ConstExpr,
+};
 
 use super::walk::ClassModifiers;
 
-/// `ZEND_ATTRIBUTE_TARGET_*` (`Z/Zend/zend_attributes.h`).
-pub(super) const TARGET_CLASS: u32 = 1 << 0;
-pub(super) const TARGET_FUNCTION: u32 = 1 << 1;
-pub(super) const TARGET_METHOD: u32 = 1 << 2;
-pub(super) const TARGET_PROPERTY: u32 = 1 << 3;
-pub(super) const TARGET_CLASS_CONST: u32 = 1 << 4;
-pub(super) const TARGET_PARAMETER: u32 = 1 << 5;
-pub(super) const TARGET_CONST: u32 = 1 << 6;
+/// `ZEND_ATTRIBUTE_TARGET_*` (`Z/Zend/zend_attributes.h`), each the bit
+/// its [`AttributeTarget`] is.
+pub(super) const TARGET_CLASS: u32 = AttributeTarget::Class as u32;
+pub(super) const TARGET_FUNCTION: u32 = AttributeTarget::Function as u32;
+pub(super) const TARGET_METHOD: u32 = AttributeTarget::Method as u32;
+pub(super) const TARGET_PROPERTY: u32 = AttributeTarget::Property as u32;
+pub(super) const TARGET_CLASS_CONST: u32 = AttributeTarget::ClassConstant as u32;
+pub(super) const TARGET_PARAMETER: u32 = AttributeTarget::Parameter as u32;
+pub(super) const TARGET_CONST: u32 = AttributeTarget::Constant as u32;
 const TARGET_ALL: u32 = (1 << 7) - 1;
 /// `ZEND_ATTRIBUTE_IS_REPEATABLE`.
 const IS_REPEATABLE: u32 = 1 << 7;
@@ -154,12 +157,17 @@ impl InternalAttribute {
 /// for an attribute class of the engine: one of Core's, whose validator
 /// the compiler runs, or one an extension declares with `#[Attribute]`
 /// (`zend_mark_internal_attribute`), with the flags its `#[Attribute]`
-/// was given, the targets it may stand on and whether it may repeat.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// was given, the targets it may stand on and whether it may repeat,
+/// with the validator the extension declared for it.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) struct Config {
     /// Core's attribute, none for an extension's.
     pub(super) core: Option<InternalAttribute>,
     flags: u32,
+    /// `zend_internal_attribute.validator` of an extension's attribute
+    /// class, none for Core's, whose validators the compiler runs
+    /// itself.
+    pub(super) validator: Option<AttributeValidator>,
 }
 
 impl Config {
@@ -174,9 +182,11 @@ impl Config {
             return Some(Config {
                 core: Some(core),
                 flags: core.targets(),
+                validator: None,
             });
         }
-        let attribute = classes(name)?
+        let class = classes(name)?;
+        let attribute = class
             .attributes
             .iter()
             .find(|attribute| attribute.name.0.eq_ignore_ascii_case(b"Attribute"))?;
@@ -186,7 +196,11 @@ impl Config {
             Some(argument) => flags_of(&argument.value)?,
             None => TARGET_ALL,
         };
-        Some(Config { core: None, flags })
+        Some(Config {
+            core: None,
+            flags,
+            validator: class.attribute_validator,
+        })
     }
 
     /// The targets it may stand on, `flags & ZEND_ATTRIBUTE_TARGET_ALL`.
