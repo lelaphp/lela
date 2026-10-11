@@ -58,7 +58,14 @@ impl Mapping {
 /// `fastcgi_split_path_info`'s pattern, compiled once as the pin is read,
 /// and of two captures, the program's name and the path past it.
 #[derive(Debug, Clone)]
-pub struct Split(pub Regex);
+pub struct Split(Regex);
+
+impl Split {
+    /// The pattern as the pin spells it.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
 
 /// `[fastcgi]` as the pin spells it: `params` the file's bytes whole,
 /// held to `md5`, `script_filename` and `path_info` the values nginx
