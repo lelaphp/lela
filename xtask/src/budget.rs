@@ -1,7 +1,8 @@
 //! `xtask budget` (design §4.1, §10; harness-design.md §6, §12 item 6):
 //! every `[[crate]]` against its ceiling, the workspace against `[budget]`,
-//! committed generated code refused unless the manifest declares it, and
-//! a declared file held to its regenerated form. The numbers are the
+//! committed generated code refused unless the manifest declares it, a
+//! `build.rs` that bakes its crate's directory in refused, and a
+//! declared file held to its regenerated form. The numbers are the
 //! manifest's; nothing here states one. One reading per crate, one for the
 //! workspace, one for `scripts/**` against `[budget] scripts`, one per
 //! generated file.
@@ -220,7 +221,8 @@ fn crate_reading(snapshot: &Snapshot, krate: &Crate) -> Result<(Reading, Count)>
 }
 
 /// The workspace against `[budget]`: the pooled counts, every crate
-/// declared, no committed generated code outside the exceptions.
+/// declared, no committed generated code outside the exceptions, and no
+/// `build.rs` that bakes its crate's directory in.
 fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> Result<Reading> {
     let root = snapshot.root();
     let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
@@ -274,6 +276,11 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
     for path in committed_generated(root, &manifest.generated_files())? {
         failures.push(format!(
             "{path} is committed generated code; generated code is generated in build.rs and never committed (design §10)"
+        ));
+    }
+    for path in build_rs_baking_their_dir(root)? {
+        failures.push(format!(
+            "{path} reads {BAKED} when it compiles; a build.rs reads std::env::var_os(\"CARGO_MANIFEST_DIR\") when it runs, since cargo runs one compiled build.rs for every checkout sharing a target directory (#2628)"
         ));
     }
     if failures.is_empty() {
@@ -438,6 +445,39 @@ fn lines_of(root: &Path, path: &str) -> Result<Option<u64>> {
 fn text_of(root: &Path, path: &str) -> Result<Option<String>> {
     let bytes = std::fs::read(root.join(path)).with_context(|| format!("reading {path}"))?;
     Ok(String::from_utf8(bytes).ok())
+}
+
+/// The crate directory as a `build.rs` bakes it in when it compiles.
+const BAKED: &str = "env!(\"CARGO_MANIFEST_DIR\")";
+
+/// The `build.rs` files under the crate trees that bake their crate's
+/// directory in: cargo reuses one compiled `build.rs` for every checkout
+/// whose crate sits at the same path below its workspace root, so one
+/// sharing a target directory with another checkout reads that checkout's
+/// files (#2628). The `build.rs` held is the one beside a `Cargo.toml`,
+/// which cargo runs when the package names no other. The harness's own
+/// negative controls are left out.
+fn build_rs_baking_their_dir(root: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let dirs = layout::CRATE_DIRS.iter().map(|d| d.dir);
+    for dir in dirs.chain([layout::HARNESS]) {
+        for path in git::files(root, Path::new(dir))? {
+            let file = Path::new(&path);
+            if path.starts_with("xtask/fixtures/")
+                || file.file_name() != Some("build.rs".as_ref())
+                || !root.join(file.with_file_name("Cargo.toml")).is_file()
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(root.join(file))
+                .with_context(|| format!("reading {path}"))?;
+            let bare: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            if bare.contains(BAKED) {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Committed generated files under the crate trees: a `generated` path

@@ -26,7 +26,11 @@ use std::path::Path;
 use inputs::{MANIFEST_FILE, SOURCES_DIR, manifest_digest, source_files, sources_digest};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Read when `build.rs` runs, not when it compiles: cargo runs one
+    // compiled `build.rs` for every checkout sharing a target directory
+    // (#2628).
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let root = Path::new(&dir)
         .parent()
         .unwrap_or(Path::new(".."))
         .to_path_buf();

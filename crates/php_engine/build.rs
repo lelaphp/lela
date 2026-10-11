@@ -48,7 +48,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     build_defs();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Read when `build.rs` runs, not when it compiles: cargo runs one
+    // compiled `build.rs` for every checkout sharing a target directory
+    // (#2628).
+    let Some(dir) = env::var_os("CARGO_MANIFEST_DIR") else {
+        println!("cargo:warning=CARGO_MANIFEST_DIR is unset; cargo sets it for every `build.rs`");
+        std::process::exit(1);
+    };
+    let root = Path::new(&dir);
     let spec = root.join("../../ops.toml");
     let bodies = root.join("src/handlers.rs");
     println!("cargo:rerun-if-changed={}", spec.display());

@@ -12,7 +12,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ops.toml");
+    // Read when `build.rs` runs, not when it compiles: cargo runs one
+    // compiled `build.rs` for every checkout sharing a target directory
+    // (#2628).
+    let Some(dir) = env::var_os("CARGO_MANIFEST_DIR") else {
+        println!("cargo:warning=CARGO_MANIFEST_DIR is unset; cargo sets it for every `build.rs`");
+        std::process::exit(1);
+    };
+    let root = Path::new(&dir).join("../../ops.toml");
     println!("cargo:rerun-if-changed={}", root.display());
     let out = PathBuf::from(env::var("OUT_DIR").unwrap_or_default()).join("opcode.rs");
     match generate(&root) {
