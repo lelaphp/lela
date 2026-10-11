@@ -314,7 +314,9 @@ impl Request {
     /// The native a function number serves by: the trait's own for a
     /// native trait's method copied into a class, the function itself
     /// for any other. What php's copy shares with the trait's, its
-    /// handler, its declaration and its flags, is read through this.
+    /// handler, its declaration, its flags and its runtime cache, is read
+    /// through this alone (`entry_of`, `method_decl`, `function_flags`,
+    /// `native_place`); its scope is the class's (`method_class`).
     pub(super) fn served_native(&self, function: Function) -> Function {
         match self.class_native_of(function) {
             Some((_, ClassNative::Trait(native))) => native,
@@ -324,7 +326,7 @@ impl Request {
 
     /// The place of a native among the natives, in one count from zero:
     /// a native function or method at its own number, which is dense
-    /// from zero, and an enum's method after them at its place among
+    /// from zero, and a class native after them at its place among
     /// the published class natives and the request's; none for any
     /// other function, a user one, a call's trampoline or
     /// `zend_pass_function`. Where php's
@@ -348,13 +350,13 @@ impl Request {
         self.class_native_of(function)?;
         // The published class natives and the request's own take turns,
         // so neither's count moves the other's places.
-        let enum_at = match function.local_class_native_at() {
+        let class_native_at = match function.local_class_native_at() {
             Some(at) => at.checked_mul(2)?.checked_add(1)?,
             None => usize::try_from(function.published_class_native_at()?)
                 .ok()?
                 .checked_mul(2)?,
         };
-        natives.checked_add(enum_at)
+        natives.checked_add(class_native_at)
     }
 
     /// The number of the first native method the predicate takes, which
@@ -375,16 +377,13 @@ impl Request {
 
     /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
-        match self.class_native_of(function) {
-            Some((class, ClassNative::Enum(method))) => {
-                return self
-                    .class_decl(class)?
-                    .methods
-                    .iter()
-                    .find(|decl| decl.function.name.0.eq_ignore_ascii_case(method.name()));
-            }
-            Some((_, ClassNative::Trait(native))) => return self.method_decl(native),
-            None => {}
+        let function = self.served_native(function);
+        if let Some((class, ClassNative::Enum(method))) = self.class_native_of(function) {
+            return self
+                .class_decl(class)?
+                .methods
+                .iter()
+                .find(|decl| decl.function.name.0.eq_ignore_ascii_case(method.name()));
         }
         if let Some((trampoline, _)) = self.trampoline_of(function) {
             return Some(&trampoline.decl);

@@ -803,10 +803,9 @@ impl Request {
     /// method numbered past them; none for a number nothing is linked
     /// under.
     fn entry_of(&self, function: Function) -> Option<crate::api::abi::Entry> {
-        match self.class_native_of(function) {
-            Some((_, ClassNative::Enum(method))) => return Some(method.entry()),
-            Some((_, ClassNative::Trait(native))) => return self.entry_of(native),
-            None => {}
+        let function = self.served_native(function);
+        if let Some((_, ClassNative::Enum(method))) = self.class_native_of(function) {
+            return Some(method.entry());
         }
         if let Some((trampoline, served)) = self.trampoline_of(function) {
             use crate::trampoline::{Served, Via};
