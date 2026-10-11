@@ -70,11 +70,11 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
         return Ok(Vec::new());
     }
     let mut readings = Vec::with_capacity(crates.len());
-    for crates in batch::runs(root, &crates)? {
-        let built = Run::of(root, &["build", "--keep-going"], &crates, Targets::Tests)?;
-        let docs = doctests(root, &built, &crates)?;
-        let missed = Pin::missed(root, &built, &crates)?;
-        for krate in crates {
+    for run in batch::runs(root, &crates)? {
+        let built = Run::of(root, &["build", "--keep-going"], &run, Targets::Tests)?;
+        let docs = doctests(root, &built, &run)?;
+        let missed = Pin::missed(root, &built, &run)?;
+        for krate in run {
             let missed = missed.get(&krate.name).map_or(&[][..], Vec::as_slice);
             readings.push(reading(
                 &snapshot,
