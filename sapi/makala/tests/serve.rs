@@ -312,3 +312,31 @@ fn header_fields_reach_server_as_nginx_passes_them() {
          HTTP_X_FORWARDED_FOR=10.0.0.1\nHTTP_HOST=a\n"
     );
 }
+
+/// Forwarded fields are trusted from no proxy (research/production-server.r2.md
+/// §6): a client's `X-Forwarded-For` and `Forwarded` reach `$_SERVER` as
+/// fields alone, and `REMOTE_ADDR` stays the peer the socket saw.
+#[test]
+fn forwarded_fields_are_trusted_from_no_proxy() {
+    let root = root(
+        "forwarded",
+        &[(
+            "peer.php",
+            "<?php echo $_SERVER['REMOTE_ADDR'], ' ', $_SERVER['HTTP_X_FORWARDED_FOR'], ' ', \
+             $_SERVER['HTTP_FORWARDED'], \"\\n\";",
+        )],
+    );
+    let server = Server::start(&root);
+    let mut stream = server.connect();
+    stream
+        .write_all(
+            b"GET /peer.php HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 10.9.9.9\r\n\
+              Forwarded: for=10.8.8.8\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    let response = read_response(&mut stream);
+    assert_eq!(
+        String::from_utf8_lossy(&response.body),
+        "127.0.0.1 10.9.9.9 for=10.8.8.8\n"
+    );
+}
