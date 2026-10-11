@@ -12,10 +12,9 @@
 //! - **The header timeout**, from a head's first byte until hyper has
 //!   parsed it: past it the server answers 408 and closes. A client that
 //!   trickles bytes does not move it. The first byte is the first the
-//!   socket reads while the connection idles: a head whose start came
-//!   in with the request before it, sent before that request's response
-//!   ended, is timed from the next read after that end, and by the
-//!   keep-alive clock until then.
+//!   socket reads while the connection idles; a head whose start hyper
+//!   read with the request before it, which a pipelining client sends,
+//!   is timed from that request's response's end ([`Boundary`], #2572).
 //! - **The minimum data rate** of the response, Kestrel's
 //!   `MinResponseDataRate`, on each write the kernel would not take
 //!   ([`WriteClock::wrote`]): past its deadline with a write stalled, the
@@ -47,6 +46,7 @@ use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Instant, Sleep};
 
+use crate::boundary::{BodyLength, Boundary};
 use crate::options::{Limits, MinDataRate};
 
 /// How long a closing socket reads and drops what its client still
@@ -55,7 +55,8 @@ const LINGER: Duration = Duration::from_secs(1);
 
 /// What a connection waits on, which says which clock of its socket
 /// runs: set by its requests as each begins and as its response ends, and
-/// by its socket as a head's first byte arrives.
+/// by its socket as a head's first byte arrives, which the bytes it has
+/// read, held against the requests they carry, say.
 pub(crate) struct Watch {
     held: Mutex<Watched>,
 }
@@ -69,6 +70,8 @@ struct Watched {
     /// the response ends: hyper polls its read again only when woken, and
     /// the keep-alive clock that starts then must be set.
     reader: Option<Waker>,
+    /// Where the bytes read stand against the requests they carry.
+    boundary: Boundary,
 }
 
 /// What a connection waits on.
@@ -91,21 +94,31 @@ impl Watch {
                 phase: Phase::Idle(Instant::now()),
                 responses: 0,
                 reader: None,
+                boundary: Boundary::default(),
             }),
         }
     }
 
-    /// A request's head is parsed and the request in hand.
-    pub(crate) fn request_began(&self) {
-        self.held().phase = Phase::Busy;
+    /// A request's head is parsed and the request in hand, its body
+    /// `length` long as hyper frames it.
+    pub(crate) fn request_began(&self, length: BodyLength) {
+        let mut held = self.held();
+        held.phase = Phase::Busy;
+        held.boundary.began(length);
     }
 
     /// A response has ended, and the connection waits for the next
-    /// request: its read is woken to set the clock.
+    /// request, whose head is timed from now where any of it has been
+    /// read: its read is woken to set the clock.
     pub(crate) fn response_ended(&self) {
         let reader = {
             let mut held = self.held();
-            held.phase = Phase::Idle(Instant::now());
+            let now = Instant::now();
+            held.phase = if held.boundary.ahead() {
+                Phase::Head(now)
+            } else {
+                Phase::Idle(now)
+            };
             held.responses += 1;
             held.reader.take()
         };
@@ -132,10 +145,13 @@ impl Watch {
         self.held().reader = Some(reader.clone());
     }
 
-    /// Bytes arrived at `now`: a head's first where the connection idled.
-    fn arrived(&self, now: Instant) {
+    /// `bytes` read at `now`: a head's first where the connection idled
+    /// and they hold the start of a request.
+    fn arrived(&self, bytes: &[u8], now: Instant) {
         let mut held = self.held();
-        if let Phase::Idle(_) = held.phase {
+        if held.boundary.read(bytes)
+            && let Phase::Idle(_) = held.phase
+        {
             held.phase = Phase::Head(now);
         }
     }
@@ -346,7 +362,7 @@ impl AsyncRead for Socket {
         match this.stream()?.poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
                 if buf.filled().len() > filled {
-                    this.watch.arrived(now);
+                    this.watch.arrived(&buf.filled()[filled..], now);
                 }
                 Poll::Ready(Ok(()))
             }

@@ -26,6 +26,7 @@
     clippy::unimplemented
 )]
 
+mod boundary;
 mod connection;
 mod framing;
 mod log;

@@ -53,6 +53,7 @@ use php_sapi::ResponseHead;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 
+use crate::boundary::BodyLength;
 use crate::framing;
 use crate::log::Access;
 use crate::options::Limits;
@@ -348,7 +349,14 @@ async fn respond(
     connection: Arc<Connection>,
     request: Request<Incoming>,
 ) -> Result<Response<Reply>, Infallible> {
-    connection.watch.request_began();
+    // The body's length as hyper frames it: exact where it is sized, or
+    // none, and chunked where it is not.
+    connection
+        .watch
+        .request_began(match request.body().size_hint().exact() {
+            Some(length) => BodyLength::Exact(length),
+            None => BodyLength::Chunked,
+        });
     let begun = connection.begun.fetch_add(1, Ordering::Relaxed) + 1;
     let mut access = Access::begun(connection.peer, &request);
     let body_in = access.as_ref().map(|access| Arc::clone(&access.body_in));
