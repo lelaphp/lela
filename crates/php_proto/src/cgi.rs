@@ -62,19 +62,6 @@ pub enum Stat {
     Other(u64),
 }
 
-impl Stat {
-    /// `st_size`, and 0 for a directory, which [`Stat::Directory`] does not
-    /// carry: no caller keeps it, `vpath::translate` taking a directory's
-    /// index file's size in its place.
-    #[must_use]
-    pub fn size(self) -> u64 {
-        match self {
-            Stat::Directory => 0,
-            Stat::File(size) | Stat::Other(size) => size,
-        }
-    }
-}
-
 /// The `cgi.*` entries `init_request_info` reads, at php's defaults, and
 /// whether it reads Apache's proxy URLs as php-fpm's does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
