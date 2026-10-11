@@ -39,12 +39,11 @@ pub(crate) struct Boundary {
 /// Where the next byte read falls.
 #[derive(Debug, Default)]
 enum At {
-    /// Before a request line. `blank_lines` whether an empty line came,
-    /// which hyper holds as the start of the next request.
+    /// Before a request line, where empty lines are skipped: RFC 9112
+    /// §2.2 has a server ignore the CRLF an old client sends after a
+    /// body, so none of them is a request's start.
     #[default]
     Between,
-    /// Empty lines came before a request line.
-    BlankLines,
     /// In a head's lines; `empty` while its line holds nothing but CR.
     Head { empty: bool },
     /// Past a head, until its request begins and says its body's length.
@@ -86,15 +85,13 @@ impl Boundary {
     fn follow(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             bytes = match &mut self.at {
-                At::Between | At::BlankLines => {
-                    if let Some(start) = bytes.iter().position(|b| !matches!(b, b'\r' | b'\n')) {
+                At::Between => match bytes.iter().position(|b| !matches!(b, b'\r' | b'\n')) {
+                    Some(start) => {
                         self.at = At::Head { empty: false };
                         &bytes[start..]
-                    } else {
-                        self.at = At::BlankLines;
-                        &[]
                     }
-                }
+                    None => &[],
+                },
                 At::Head { empty } => match lines(bytes, empty) {
                     Some(rest) => {
                         self.at = At::Unframed;
@@ -142,17 +139,20 @@ impl Boundary {
                 digits: false,
             }),
         };
-        let unframed = std::mem::take(&mut self.unframed);
+        let mut unframed = std::mem::take(&mut self.unframed);
         self.follow(&unframed);
-        // The buffer kept for the next head, emptied.
-        self.unframed = unframed;
-        self.unframed.clear();
+        // What followed may have ended the next head, and what is past
+        // that is held again; else the buffer is kept, emptied, for it.
+        if self.unframed.is_empty() {
+            unframed.clear();
+            self.unframed = unframed;
+        }
     }
 
     /// Whether any byte of a request after the ones whose bodies have
     /// ended has been read.
     pub(crate) fn ahead(&self) -> bool {
-        matches!(self.at, At::BlankLines | At::Head { .. } | At::Unframed)
+        matches!(self.at, At::Head { .. } | At::Unframed)
     }
 }
 
@@ -268,14 +268,20 @@ mod tests {
             3,
             BodyLength::Exact(0)
         ));
-        // Empty lines before a request line are skipped, and held ahead.
+        // Empty lines before a request line are skipped, and are no
+        // request's start: an old client's CRLF after a body.
         assert!(!ahead(
             &[b"\r\n\r\nGET / HTTP/1.1\r\n\r\n"],
             1,
             BodyLength::Exact(0)
         ));
-        assert!(ahead(
+        assert!(!ahead(
             &[b"GET / HTTP/1.1\r\n\r\n\r\n"],
+            1,
+            BodyLength::Exact(0)
+        ));
+        assert!(ahead(
+            &[b"GET / HTTP/1.1\r\n\r\n\r\nG"],
             1,
             BodyLength::Exact(0)
         ));
@@ -323,6 +329,22 @@ mod tests {
         assert!(ahead(&bytes, head, BodyLength::Chunked));
         let bytes: Vec<&[u8]> = request.chunks(1).collect();
         assert!(!ahead(&bytes, head, BodyLength::Chunked));
+    }
+
+    #[test]
+    fn three_requests_read_at_once_are_followed_to_the_third() {
+        let mut boundary = Boundary::default();
+        boundary.read(
+            b"GET /a HTTP/1.1\r\n\r\nPOST /b HTTP/1.1\r\nContent-Length: 2\r\n\r\nhiGET /c HT",
+        );
+        boundary.began(BodyLength::Exact(0));
+        assert!(boundary.ahead());
+        boundary.began(BodyLength::Exact(2));
+        assert!(boundary.ahead());
+        boundary.read(b"TP/1.1\r\n\r\n");
+        boundary.began(BodyLength::Exact(0));
+        assert!(!boundary.ahead());
+        assert!(boundary.read(b"G"));
     }
 
     #[test]
