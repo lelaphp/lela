@@ -31,7 +31,7 @@ pub(crate) enum Handle {
     /// holds one owner. The number stays the socket's after the stream
     /// is closed, as php's `bsd_socket` does.
     Stream { fd: RawFd, stream: Owner<Resource> },
-    /// Out of the socket for a wait that stands on its fd ([`blocking`],
+    /// Out of the socket for a wait that stands on its fd ([`wait_on`],
     /// #2601), which holds what stood here and gives it back when it
     /// returns: the fd, and the stream the socket holds an owner of
     /// where it holds one, as a callback served in the wait reaches them.
@@ -95,14 +95,14 @@ impl Sock {
     }
 
     /// The socket closed, `bsd_socket = -1`: what it held, for the
-    /// caller to let go ([`release`]), or nothing where a wait holds it,
+    /// caller to let go ([`release`]), or `None` where a wait holds it,
     /// which lets it go when it returns.
-    pub(crate) fn close(&mut self) -> Handle {
+    pub(crate) fn close(&mut self) -> Option<Handle> {
         if let Handle::Waiting { .. } = self.handle {
             self.handle = Handle::Closing;
-            return Handle::Closed;
+            return None;
         }
-        std::mem::take(&mut self.handle)
+        Some(std::mem::take(&mut self.handle))
     }
 }
 
@@ -117,14 +117,14 @@ pub(crate) fn release(req: &mut Request, handle: Handle) {
     }
 }
 
-/// What a wait on sockets answered ([`blocking`]).
+/// What a wait on sockets answered ([`wait_on`]).
 pub(crate) enum Waited<R> {
     /// What the wait answered, every socket open when it returned.
     Answered(R),
-    /// The socket at this index of the list was closed, before the wait
-    /// or in it: the wait's answer is let go, and the native answers as
-    /// php's closed-socket path does.
-    Closed(usize),
+    /// The socket at index `at` of the list was closed, before the wait
+    /// or in it, and the native answers as php's closed-socket path does:
+    /// what the wait answered, where it waited, is the native's to let go.
+    Closed { at: usize, answered: Option<R> },
 }
 
 /// `wait` on the fds of `sockets`, in their order, with the request lent
@@ -135,7 +135,8 @@ pub(crate) enum Waited<R> {
 /// that closes one of them closes it to the program at once, and the fd
 /// is let go only when the wait returns, so the fd the wait stands on is
 /// the socket's until then and nothing opened meanwhile takes its
-/// number. php shows none of this, since no code of the program is
+/// number through a `socket_close` (a stream that owns the fd, closed by
+/// `fclose`, is #2664's). php shows none of this, since no code of the program is
 /// served during its wait. The close is deferred rather than refused
 /// because the streams layer defers an `fclose` of a stream that is out
 /// the same way, and a refusal would raise in the callback what php
@@ -147,7 +148,7 @@ pub(crate) enum Waited<R> {
 /// it stands and let go by the wait that holds it. Each socket is kept
 /// alive for the wait, whatever the callback does to the variables that
 /// name it.
-pub(crate) fn blocking<R>(
+pub(crate) fn wait_on<R>(
     req: &mut Request,
     sockets: &[PhpObject],
     wait: impl FnOnce(&[RawFd]) -> R,
@@ -169,7 +170,7 @@ pub(crate) fn blocking<R>(
         });
         let Some((fd, handle)) = taken else {
             give_back(req, held);
-            return Waited::Closed(at);
+            return Waited::Closed { at, answered: None };
         };
         if let Some(handle) = handle {
             held.push((Owner::take(req, *object), handle));
@@ -182,23 +183,48 @@ pub(crate) fn blocking<R>(
         .position(|object| object.native::<Sock>(req).and_then(Sock::fd).is_none());
     give_back(req, held);
     match closed {
-        Some(at) => Waited::Closed(at),
+        Some(at) => Waited::Closed {
+            at,
+            answered: Some(answered),
+        },
         None => Waited::Answered(answered),
     }
 }
 
-/// [`blocking`] on the one socket of a native's first argument, php's
-/// closed-socket `Error` where it was closed in the wait.
-pub(crate) fn blocking_on<R>(
+/// [`wait_on`] the one socket of a native's first argument, php's
+/// closed-socket `Error` where it was closed in the wait, its answer
+/// dropped.
+pub(crate) fn wait_on_one<R>(
     req: &mut Request,
     socket: Instance<Socket>,
     wait: impl FnOnce(RawFd) -> R,
 ) -> Result<R, Thrown> {
-    match blocking(req, &[socket.object()], |fds| {
-        fds.first().map(|fd| wait(*fd))
-    }) {
-        Waited::Answered(Some(answered)) => Ok(answered),
-        Waited::Answered(None) | Waited::Closed(_) => Err(closed(req, 1)),
+    match wait_on_socket(req, socket, wait) {
+        Waited::Answered(answered) => Ok(answered),
+        Waited::Closed { .. } => Err(closed(req, 1)),
+    }
+}
+
+/// [`wait_on`] the one socket of a native's first argument.
+pub(crate) fn wait_on_socket<R>(
+    req: &mut Request,
+    socket: Instance<Socket>,
+    wait: impl FnOnce(RawFd) -> R,
+) -> Waited<R> {
+    let mut wait = Some(wait);
+    let waited = wait_on(req, &[socket.object()], |fds| {
+        fds.first().zip(wait.take()).map(|(fd, wait)| wait(*fd))
+    });
+    match waited {
+        Waited::Answered(Some(answered)) => Waited::Answered(answered),
+        Waited::Answered(None) => Waited::Closed {
+            at: 0,
+            answered: None,
+        },
+        Waited::Closed { at, answered } => Waited::Closed {
+            at,
+            answered: answered.flatten(),
+        },
     }
 }
 
@@ -349,7 +375,7 @@ pub(crate) fn valid_at(
 
 /// `ENSURE_SOCKET_VALID`'s `Error` for the socket at argument
 /// `position`.
-fn closed(req: &mut Request, position: u32) -> Thrown {
+pub(crate) fn closed(req: &mut Request, position: u32) -> Thrown {
     argument_error(req, "Error", position, "has already been closed")
 }
 

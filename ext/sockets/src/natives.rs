@@ -20,8 +20,8 @@ use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
 use crate::constants::PHP_NORMAL_READ;
 use crate::ffi::{self, Addr, SUN_PATH};
 use crate::socket::{
-    Sock, Socket, Waited, blocking, blocking_on, global_error, is_transient, live_stream, made,
-    new_socket, release, sock, socket_error, strerror, valid,
+    Sock, Socket, Waited, global_error, is_transient, live_stream, made, new_socket, release, sock,
+    socket_error, strerror, valid, wait_on, wait_on_one,
 };
 
 /// A by-reference parameter with no declared type, `&$address`.
@@ -251,35 +251,31 @@ fn socket_select(
     // arrays held for the walk after it, whatever the callback assigns to
     // the variables.
     let [r_len, w_len, _] = sets.each_ref().map(|set| set.as_ref().map_or(0, Vec::len));
-    let sockets: Vec<PhpObject> = sets
-        .iter()
-        .flatten()
-        .flatten()
-        .map(|(object, _)| *object)
-        .collect();
+    let (sockets, positions): (Vec<PhpObject>, Vec<u32>) = (1..)
+        .zip(&sets)
+        .flat_map(|(position, set)| {
+            set.iter()
+                .flatten()
+                .map(move |(object, _)| (*object, position))
+        })
+        .unzip();
     let held: Vec<Owner<PhpArray>> = arrays
         .iter()
         .flatten()
         .map(|array| Owner::take(req, *array))
         .collect();
-    let waited = blocking(req, &sockets, |fds| {
+    let waited = wait_on(req, &sockets, |fds| {
         let (r, rest) = fds.split_at(r_len.min(fds.len()));
         let (w, e) = rest.split_at(w_len.min(rest.len()));
         ffi::select([r, w, e], timeout)
     });
     let selected = match waited {
         Waited::Answered(selected) => selected,
-        Waited::Closed(at) => {
+        Waited::Closed { at, .. } => {
             for array in held {
                 array.give_up(req);
             }
-            let position = if at < r_len {
-                1
-            } else if at < r_len + w_len {
-                2
-            } else {
-                3
-            };
+            let position = positions.get(at).copied().unwrap_or(1);
             return Err(closed_in_set(req, position));
         }
     };
@@ -402,7 +398,7 @@ fn socket_accept(
     let blocking = sock(req, socket)?.blocking;
     let owner = laid(req)?;
     let object = *owner;
-    let accepted = match blocking_on(req, socket, |fd| accept(fd, blocking)) {
+    let accepted = match wait_on_one(req, socket, |fd| accept(fd, blocking)) {
         Ok(accepted) => accepted,
         Err(thrown) => {
             owner.give_up(req);
@@ -571,8 +567,9 @@ fn socket_listen(
 #[php_function]
 fn socket_close(req: &mut Request, socket: Instance<Socket>) -> Result<(), Thrown> {
     valid(req, socket)?;
-    let handle = sock(req, socket)?.close();
-    release(req, handle);
+    if let Some(handle) = sock(req, socket)?.close() {
+        release(req, handle);
+    }
     Ok(())
 }
 
@@ -705,7 +702,7 @@ fn socket_read(
         return Ok(OrFalse::False);
     }
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX))?;
-    let read = blocking_on(req, socket, |fd| {
+    let read = wait_on_one(req, socket, |fd| {
         if mode == PHP_NORMAL_READ {
             read_line(fd, &mut buf)
         } else {
@@ -1181,7 +1178,7 @@ fn socket_recv(
         return Ok(OrFalse::False);
     }
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX))?;
-    let got = blocking_on(req, socket, |fd| ffi::recv(fd, &mut buf, c_int(flags)))?;
+    let got = wait_on_one(req, socket, |fd| ffi::recv(fd, &mut buf, c_int(flags)))?;
     let value = match got {
         Ok(n) if n > 0 => string(req, &buf[..n])?,
         _ => Owner::null(),
@@ -1294,7 +1291,7 @@ fn socket_recvfrom(
             "Wrong parameter count for socket_recvfrom()",
         ));
     }
-    let received = blocking_on(req, socket, |fd| {
+    let received = wait_on_one(req, socket, |fd| {
         ffi::recvfrom(fd, &mut buf, c_int(flags), family)
     })?;
     let (n, from) = match received {
