@@ -38,16 +38,20 @@
 //! counted apart, since no comparison of one run of each can hold it; and
 //! two runs that differ alike are a difference, named by its test and its
 //! first differing line. A request either side could not be served is a
-//! bork. The reading passes with no difference and no bork, and is a skip
-//! where nothing was compared; a difference that stands is filed as a
-//! ticket, and an accepted one would be a divergence row, a person's.
+//! bork. A difference an accepted `makala:` row names is accepted,
+//! counted apart and named under its row, and a row whose test agrees is
+//! named stale (`super::held`, #2629). The reading passes with no other
+//! difference and no bork, and is a skip where nothing was compared; a
+//! difference that stands is filed as a ticket, and its acceptance is a
+//! row, a person's.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::{Entry, SCOPE};
+use super::{Consulted, Entry, Held, SCOPE};
+use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Oracle, Promise, diff, normalise_in};
@@ -110,7 +114,7 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<R
             (entry.id.clone(), came)
         })
         .collect();
-    tally(&mut reading, &came, left)?;
+    tally(&mut reading, &came, left, &Registry::load(root)?)?;
     Ok(reading)
 }
 
@@ -193,15 +197,37 @@ fn word(came: &Came) -> &'static str {
     }
 }
 
-/// The reading's numbers, status and message from what each entry came to.
-fn tally(reading: &mut Reading, came: &[(String, Came)], left: usize) -> Result<()> {
-    let count = |kind: fn(&Came) -> bool| came.iter().filter(|(_, c)| kind(c)).count();
-    let (same, differs, unstable, borked) = (
-        count(|c| matches!(c, Came::Same)),
+/// The reading's numbers, status and message from what each entry came
+/// to, each entry held to the `makala:` rows of `registry`: a difference a
+/// row accepts is counted apart from the failures and named under its row,
+/// and a row whose test now agrees is named stale.
+fn tally(
+    reading: &mut Reading,
+    came: &[(String, Came)],
+    left: usize,
+    registry: &Registry,
+) -> Result<()> {
+    let mut consulted = Consulted::default();
+    // What stands once the rows are read: each unaccepted difference,
+    // and the unstable and borked entries, which no row touches.
+    let standing: Vec<(&str, &Came)> = (came.iter())
+        .filter(|(id, c)| match c {
+            Came::Same => {
+                consulted.hold(registry, id, true);
+                false
+            }
+            Came::Differs(_) => consulted.hold(registry, id, false) == Held::Differs,
+            Came::Unstable | Came::Bork(_) => true,
+        })
+        .map(|(id, c)| (id.as_str(), c))
+        .collect();
+    let count = |kind: fn(&Came) -> bool| standing.iter().filter(|(_, c)| kind(c)).count();
+    let (differs, unstable, borked) = (
         count(|c| matches!(c, Came::Differs(_))),
         count(|c| matches!(c, Came::Unstable)),
         count(|c| matches!(c, Came::Bork(_))),
     );
+    let same = came.iter().filter(|(_, c)| matches!(c, Came::Same)).count();
     for (key, n) in [
         ("entries", came.len()),
         ("same", same),
@@ -212,6 +238,7 @@ fn tally(reading: &mut Reading, came: &[(String, Came)], left: usize) -> Result<
     ] {
         reading.count(key, n as u64)?;
     }
+    let rows = consulted.counted(reading)?;
     reading.status = match (came.len(), differs + borked) {
         (0, _) => Status::Skip,
         (_, 0) => Status::Pass,
@@ -221,7 +248,7 @@ fn tally(reading: &mut Reading, came: &[(String, Came)], left: usize) -> Result<
         "{same} of {} requests answered alike by makala and the pinned php-fpm; {differs} differ, {unstable} unstable, {borked} borked; {left} CGI-shaped tests left out",
         came.len()
     );
-    let named: Vec<String> = (came.iter())
+    let named: Vec<String> = (standing.iter())
         .filter_map(|(id, c)| match c {
             Came::Differs(diff) => Some(format!("{id} ({})", first_line(diff))),
             Came::Bork(why) => Some(format!("{id} ({why})")),
@@ -235,6 +262,9 @@ fn tally(reading: &mut Reading, came: &[(String, Came)], left: usize) -> Result<
         if named.len() > NAMED {
             write!(message, "; and {} more", named.len() - NAMED).ok();
         }
+    }
+    if let Some(rows) = rows {
+        write!(message, "; {rows}").ok();
     }
     reading.message = message;
     Ok(())
@@ -264,7 +294,7 @@ mod tests {
             ("b.phpt".to_owned(), Came::Differs("-x / +y".to_owned())),
             ("c.phpt".to_owned(), Came::Unstable),
         ];
-        tally(&mut reading, &came, 4).unwrap();
+        tally(&mut reading, &came, 4, &Registry::default()).unwrap();
         assert_eq!(reading.status, Status::Fail);
         assert!(
             reading.message.contains("b.phpt (-x / +y)"),
@@ -273,11 +303,52 @@ mod tests {
         );
         assert!(reading.message.contains("4 CGI-shaped tests left out"));
         let mut reading = Reading::new(INSTRUMENT, SCOPE);
-        tally(&mut reading, &came[..1], 0).unwrap();
+        tally(&mut reading, &came[..1], 0, &Registry::default()).unwrap();
         assert_eq!(reading.status, Status::Pass);
         let mut reading = Reading::new(INSTRUMENT, SCOPE);
-        tally(&mut reading, &[], 0).unwrap();
+        tally(&mut reading, &[], 0, &Registry::default()).unwrap();
         assert_eq!(reading.status, Status::Skip, "nothing compared is no pass");
         assert_eq!(first_line(&diff(b"200\n\na\nb", b"200\n\na\nc")), "-b / +c");
+    }
+
+    /// The fixture's registry (`xtask/fixtures/makala`): one accepted row
+    /// naming 004.phpt and covering 007.phpt, none for 011.phpt.
+    pub(crate) fn fixture() -> Registry {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/makala");
+        Registry::parse(&std::fs::read_to_string(dir.join("divergence.toml")).unwrap()).unwrap()
+    }
+
+    /// The negative control: a difference no `makala:` row names fails the
+    /// reading, one the row names is accepted, counted apart and named
+    /// under the row, and a test the row covers that now agrees names the
+    /// row stale without failing the reading.
+    #[test]
+    fn a_difference_no_makala_row_names_fails_and_one_a_row_names_is_accepted() {
+        let registry = fixture();
+        let differs = || Came::Differs("-a\n+b\n".to_owned());
+        let came = vec![
+            ("ext/filter/tests/004.phpt".to_owned(), differs()),
+            ("ext/filter/tests/007.phpt".to_owned(), Came::Same),
+            ("ext/filter/tests/011.phpt".to_owned(), differs()),
+        ];
+        let mut reading = Reading::new(INSTRUMENT, SCOPE);
+        tally(&mut reading, &came, 0, &registry).unwrap();
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        let said = &reading.message;
+        assert!(
+            said.contains("1 differ,") && said.contains("011.phpt (-a / +b)"),
+            "{said}"
+        );
+        assert!(
+            said.contains("1 differs as a makala: row accepts: makala:ext/filter/tests/004.phpt"),
+            "{said}"
+        );
+        assert!(said.contains("stale, the test now alike: ext/filter/tests/007.phpt under makala:ext/filter/tests/004.phpt"), "{said}");
+        let mut reading = Reading::new(INSTRUMENT, SCOPE);
+        tally(&mut reading, &came[..2], 0, &registry).unwrap();
+        assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+        let count = |key: &str| reading.numbers.get(key).copied();
+        assert_eq!(count("accepted"), Some(crate::reading::Number::count(1)));
+        assert_eq!(count("differs"), Some(crate::reading::Number::count(0)));
     }
 }

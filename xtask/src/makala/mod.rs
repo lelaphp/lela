@@ -26,6 +26,15 @@
 //! since none of that crosses one request to one file. The soak adds the
 //! bench workloads committed under `docs/perf/workloads/` (measurement
 //! protocol §11), each a `GET` of its own.
+//!
+//! **What a by-design difference is.** Where makala answers a test
+//! otherwise than php's SAPIs by design, an accepted `makala:` row of the
+//! registry says so, one row per fact for both of the production server's
+//! comparisons, `fpm-compare` and the served phpt lane (#2629, #2639).
+//! Each holds a test to the rows through [`held`]: a differing test a row
+//! names reads as accepted, counted apart from the failures and named,
+//! and a row whose test now agrees is stale, named so a person retires it
+//! ([`Consulted`]).
 
 pub(crate) mod bench;
 pub(crate) mod compare;
@@ -36,13 +45,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::cli::Command;
+use crate::divergence::{Divergence, Registry};
 use crate::manifest::Manifest;
 use crate::oracle::hosts::MAKALA;
 use crate::oracle::profile;
 use crate::phpt::environment::Environment;
 use crate::phpt::file::Phpt;
 use crate::phpt::{adapter, cgi, http};
-use crate::reading::Reading;
+use crate::reading::{Reading, plural};
 use crate::witness::makala::Http;
 
 /// The crate both instruments' readings are scoped to.
@@ -173,6 +183,80 @@ pub(crate) fn uploads_named_alike(response: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// One test of a comparison held to the `makala:` rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Held<'r> {
+    /// The two sides agree, and no row names the test.
+    Alike,
+    /// They differ, and no accepted row names the test: a failure.
+    Differs,
+    /// They differ, and the accepted row names the test.
+    Accepted(&'r Divergence),
+    /// They agree though the accepted row names the test: the row is stale.
+    Stale(&'r Divergence),
+}
+
+/// `test`, a path in php-src the two sides answered `alike` or not, held
+/// to the registry's `makala:` rows: the one rule both comparisons read.
+pub(crate) fn held<'r>(registry: &'r Registry, test: &str, alike: bool) -> Held<'r> {
+    match (alike, registry.makala(test)) {
+        (true, None) => Held::Alike,
+        (false, None) => Held::Differs,
+        (false, Some(row)) => Held::Accepted(row),
+        (true, Some(row)) => Held::Stale(row),
+    }
+}
+
+/// What the `makala:` rows made of one run of a comparison: each differing
+/// test a row accepted and each test that agreed though a row names it,
+/// with the row's id, in the order the run held them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Consulted {
+    pub(crate) accepted: Vec<(String, String)>,
+    pub(crate) stale: Vec<(String, String)>,
+}
+
+impl Consulted {
+    /// One test held through [`held`], what a row made of it kept.
+    pub(crate) fn hold<'r>(&mut self, registry: &'r Registry, test: &str, alike: bool) -> Held<'r> {
+        let found = held(registry, test, alike);
+        let kept = |row: &Divergence| (test.to_owned(), row.id.to_string());
+        match found {
+            Held::Accepted(row) => self.accepted.push(kept(row)),
+            Held::Stale(row) => self.stale.push(kept(row)),
+            Held::Alike | Held::Differs => {}
+        }
+        found
+    }
+
+    /// The reading's `accepted` and `stale` counts, and the words that
+    /// name each test under its row, none where no row was met.
+    pub(crate) fn counted(&self, reading: &mut Reading) -> Result<Option<String>> {
+        reading.count("accepted", self.accepted.len() as u64)?;
+        reading.count("stale", self.stale.len() as u64)?;
+        let named = |held: &[(String, String)]| -> String {
+            let each = held
+                .iter()
+                .map(|(test, row)| match row.strip_prefix("makala:") {
+                    Some(own) if own == test => row.clone(),
+                    _ => format!("{test} under {row}"),
+                });
+            each.collect::<Vec<_>>().join(", ")
+        };
+        let mut words = Vec::new();
+        if let n @ 1.. = self.accepted.len() {
+            let differ = if n == 1 { "differs" } else { "differ" };
+            let said = format!("{n} {differ} as a makala: row accepts");
+            words.push(format!("{said}: {}", named(&self.accepted)));
+        }
+        if let n @ 1.. = self.stale.len() {
+            let said = format!("{n} makala: row{} stale, the test now alike", plural(n));
+            words.push(format!("{said}: {}", named(&self.stale)));
+        }
+        Ok((!words.is_empty()).then(|| words.join("; ")))
+    }
 }
 
 /// makala's binary, built now in the lanes' profile.

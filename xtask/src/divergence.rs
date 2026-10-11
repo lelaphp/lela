@@ -1,8 +1,9 @@
 //! The divergence registry, `docs/divergence.toml` (harness-design.md §4.3):
 //! one row per accepted difference from the oracle, keyed by a witness hash,
-//! a phpt path, a compile-identity path, an extension's name, a trace site
-//! or, for a difference on the wire, which the RFCs judge through a
-//! conformance suite rather than the oracle, a suite's case (#2334). A
+//! a phpt path, a compile-identity path, an extension's name, a trace site,
+//! for a difference on the wire, which the RFCs judge through a
+//! conformance suite rather than the oracle, a suite's case (#2334), or a
+//! test the production server answers otherwise by design (#2629). A
 //! row's `kind` says which lane reads it and its `cause` whether it is
 //! parity debt, counted against the manifest's day-30 target, or a
 //! difference that does not count (#2460, #2462). A row whose one reason
@@ -41,7 +42,8 @@ pub const FILE: &str = "docs/divergence.toml";
 pub const INSTRUMENT: &str = "divergence-reason";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
-/// `crosscheck:<name>`, `trace:<site>` or `wire:<suite>/<case>`. Only
+/// `crosscheck:<name>`, `trace:<site>`, `wire:<suite>/<case>` or
+/// `makala:<test path>`. Only
 /// [`Id::of`] makes one, so an id in hand carries the prefix of the kind it
 /// was decoded under.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -216,11 +218,16 @@ pub enum Kind {
     /// does not, since php ships no such server (#2334). The case may
     /// carry slashes of its own, as h2spec's `http2/6.5.3/1` does.
     Wire,
+    /// A `makala:<test path>` id, the path relative to php-src: one test
+    /// where the production server differs from php's SAPIs by design,
+    /// which `fpm-compare` and the served phpt lane consult
+    /// ([`Registry::makala`], #2629, #2639).
+    Makala,
 }
 
 impl Kind {
-    /// The seven kinds, in the registry's order.
-    pub const ALL: [Kind; 7] = [
+    /// The eight kinds, in the registry's order.
+    pub const ALL: [Kind; 8] = [
         Kind::Witness,
         Kind::Phpt,
         Kind::Runner,
@@ -228,6 +235,7 @@ impl Kind {
         Kind::Crosscheck,
         Kind::Trace,
         Kind::Wire,
+        Kind::Makala,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -239,6 +247,7 @@ impl Kind {
             Kind::Crosscheck => "crosscheck",
             Kind::Trace => "trace",
             Kind::Wire => "wire",
+            Kind::Makala => "makala",
         }
     }
 
@@ -251,6 +260,7 @@ impl Kind {
             Kind::Crosscheck => "crosscheck:",
             Kind::Trace => "trace:",
             Kind::Wire => "wire:",
+            Kind::Makala => "makala:",
         }
     }
 }
@@ -491,6 +501,14 @@ impl Registry {
     pub fn accepted(&self, id: &str) -> Option<&Divergence> {
         self.row(id)
             .filter(|r| r.status == Status::Accepted && !r.pins(id))
+    }
+
+    /// The accepted `makala:` row that holds `test`, a path in php-src, as
+    /// its own id or one it covers: the one lookup both of the production
+    /// server's comparisons make, `fpm-compare` and the served phpt lane
+    /// (#2629, #2639), through [`crate::makala::Consulted`].
+    pub fn makala(&self, test: &str) -> Option<&Divergence> {
+        self.accepted(&format!("{}{test}", Kind::Makala.prefix()))
     }
 
     /// The accepted `trace:` row that covers `id`, a `witness:` id: the
