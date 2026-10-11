@@ -688,7 +688,7 @@ impl Request {
         self.declared.clear_own();
         self.aliases.clear_own();
         self.own_classes.clear();
-        self.enum_functions.clear();
+        self.class_natives.clear();
         Ok(Published {
             classes: Rows::of(classes),
             aliases: Rows::of(aliases),

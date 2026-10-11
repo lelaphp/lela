@@ -10,7 +10,7 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::api::call::Function;
+use crate::api::call::{ClassNative, Function};
 use crate::api::raising::Thrown;
 use crate::api::values::{
     ClassId, ClosureInfo, Owner, PhpObject, PhpString, Value, ValueRef, adopted,
@@ -803,8 +803,10 @@ impl Request {
     /// method numbered past them; none for a number nothing is linked
     /// under.
     fn entry_of(&self, function: Function) -> Option<crate::api::abi::Entry> {
-        if let Some((_, method)) = self.enum_method_of(function) {
-            return Some(method.entry());
+        match self.class_native_of(function) {
+            Some((_, ClassNative::Enum(method))) => return Some(method.entry()),
+            Some((_, ClassNative::Trait(native))) => return self.entry_of(native),
+            None => {}
         }
         if let Some((trampoline, served)) = self.trampoline_of(function) {
             use crate::trampoline::{Served, Via};
@@ -870,6 +872,7 @@ impl Request {
     /// what the callee's declaration raised where it was linked, none
     /// for an enum's own method and the pass function.
     pub(crate) fn function_flags(&self, function: Function) -> crate::attributes::Flags {
+        let function = self.served_native(function);
         if let Some(user) = self.user_function(function) {
             return user.flags;
         }
@@ -1144,6 +1147,7 @@ impl Request {
     /// that no extension declares, which allocates as its caller.
     #[cfg(debug_assertions)]
     fn function_origin(&self, function: Function) -> Option<ExtensionId> {
+        let function = self.served_native(function);
         self.function_extension(function).or_else(|| {
             self.native_method(function)
                 .and_then(|method| method.at.class())
