@@ -832,6 +832,12 @@ impl Annexes {
         }
         taken
     }
+
+    /// How many annexes stand: what a test counts to see a frame's go.
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> usize {
+        self.rows.len() - self.free.len()
+    }
 }
 
 /// One frame read where it stands, on a stack or off one, with the

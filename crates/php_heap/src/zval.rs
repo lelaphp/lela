@@ -748,6 +748,6 @@ mod tests {
         assert_eq!(frame.slot(crate::Slot(1)), Zval::long(4));
         assert_eq!(at.read(), Zval::long(4));
         assert_eq!(frame.slot_ptr(crate::Slot(2)), None);
-        stack.close(&mut heap);
+        drop(stack.close(&mut heap));
     }
 }
