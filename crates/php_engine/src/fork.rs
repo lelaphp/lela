@@ -61,7 +61,7 @@ const FORKING: usize = 1 << (usize::BITS - 1);
 /// error a fork is refused with while something else runs inside the
 /// engine, which `pcntl_fork` renders as php renders an `errno` it has
 /// no text of its own for.
-const EBUSY: i32 = 16;
+pub(crate) const EBUSY: i32 = 16;
 
 /// One thing running inside the engine: a request in flight, or a thread
 /// the engine started, from before it starts to after it is joined.

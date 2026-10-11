@@ -349,7 +349,13 @@ impl Stopped {
     /// Each one's thread started again, over the same deadlines, which
     /// are instants, so a periodic interrupt keeps its grid and the
     /// execution timer its stage: the process is left as it was.
+    ///
+    /// The restart stands inside the engine, as a request does when it
+    /// starts a timer's thread: a spawn waits out a fork under way while
+    /// it holds the timer's mutex, so a second fork must count it, and
+    /// refuse, rather than wait on that mutex itself or copy it held.
     pub(crate) fn resume(self) {
+        let _inside = crate::fork::Inside::enter();
         for timer in &self.0 {
             let mut control = timer.control();
             if control.thread.is_none() {
@@ -1490,7 +1496,7 @@ mod tests {
         let inside = crate::fork::Inside::enter();
         let refused = crate::fork::fork().err().and_then(|e| e.raw_os_error());
         drop(inside);
-        assert_eq!(refused, Some(16), "EBUSY");
+        assert_eq!(refused, Some(crate::fork::EBUSY));
         assert_eq!(serving(timer), thread, "the same thread, never joined");
         assert_eq!(started(timer), 1);
     }
