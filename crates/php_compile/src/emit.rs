@@ -1032,8 +1032,6 @@ struct IsLink {
 enum Under {
     /// The link before it, whose temporary the fetch reads.
     Link,
-    /// `$this` inside a method, php's `IS_UNUSED` receiver.
-    This,
     /// The value the chain is read off.
     Value(Where),
 }
@@ -11873,7 +11871,6 @@ impl Emit<'_> {
             let mut delayed = Vec::new();
             return match self.silent_under(expr, &mut delayed)? {
                 Under::Value(value) => Ok(value),
-                Under::This => Err(self.fatal("a `??` over a name read as a receiver")),
                 Under::Link => match self.lay_silent(&mut delayed, None) {
                     Some(out) => Ok(Where::Temporary(out)),
                     None => Err(self.fatal("a `??` over a name with no fetch")),
@@ -11957,32 +11954,30 @@ impl Emit<'_> {
                 let object = self.parsed.tree[id].obj;
                 // `zend_delayed_compile_prop`'s `is_this_fetch` arm:
                 // `$this` inside a method is the `IS_UNUSED` receiver, and
-                // outside one `FETCH_THIS` into a `VAR`. Under a dimension
-                // `$this` is no receiver but `zend_compile_simple_var`'s
-                // temporary ([`Self::silent_under`]).
-                let mut under = if !self.is_this(object) {
-                    self.silent_under(object, delayed)?
-                } else if self.this_in_scope {
-                    Under::This
+                // outside one `FETCH_THIS` into a `VAR`, neither of which a
+                // `?->` stands over. Under a dimension `$this` is no
+                // receiver but `zend_compile_simple_var`'s temporary
+                // ([`Self::silent_under`]).
+                let op1 = if self.is_this(object) {
+                    Some(self.receiver_of(object)?)
                 } else {
-                    Under::Value(self.fetch_this(OperandKind::Var))
+                    let mut under = self.silent_under(object, delayed)?;
+                    // A `?->`: the links under it laid down now and the
+                    // `JMP_NULL` over what they left, as
+                    // `zend_delayed_compile_prop` flushes them.
+                    if self.is_nullsafe(id) {
+                        let pair = match under {
+                            Under::Link => {
+                                let out = self.lay_silent(delayed, None).unwrap_or_default();
+                                under = Under::Value(Where::Temporary(out));
+                                (OperandKind::Tmp, out)
+                            }
+                            Under::Value(value) => self.operand(value),
+                        };
+                        self.jmp_null(pair, true);
+                    }
+                    self.settled(&under)
                 };
-                // A `?->`: the links under it laid down now and the
-                // `JMP_NULL` over what they left, as
-                // `zend_delayed_compile_prop` flushes them.
-                if self.is_nullsafe(id) && !self.is_this(object) {
-                    let pair = match under {
-                        Under::Link => {
-                            let out = self.lay_silent(delayed, None).unwrap_or_default();
-                            under = Under::Value(Where::Temporary(out));
-                            (OperandKind::Tmp, out)
-                        }
-                        Under::This => (OperandKind::Unused, 0),
-                        Under::Value(value) => self.operand(value),
-                    };
-                    self.jmp_null(pair, true);
-                }
-                let op1 = self.settled(&under);
                 let name = self.prop_name(name)?;
                 let out = self.temporary();
                 delayed.push(IsLink {
@@ -12078,7 +12073,6 @@ impl Emit<'_> {
     fn settled(&mut self, under: &Under) -> Option<(OperandKind, u32)> {
         match *under {
             Under::Link => None,
-            Under::This => Some((OperandKind::Unused, 0)),
             Under::Value(value) => Some(self.operand(value)),
         }
     }
