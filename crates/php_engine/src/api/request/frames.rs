@@ -847,6 +847,21 @@ impl Request {
         self.push_room(room, header)
     }
 
+    /// The call of a frameless native, which php serves over no frame
+    /// unless the native is observed ([`crate::observer::frameless_observed`]):
+    /// its record off the VM stack's pages
+    /// ([`php_heap::VmStack::push_frameless`]), so it takes no room php's
+    /// call does not.
+    pub(crate) fn push_frameless(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
+        let Some(function) = header.function else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a frameless call pushed with no callee",
+            )));
+        };
+        let room = self.call_room(function, header.num_args);
+        Ok(self.vm.stack.push_frameless(room, header))
+    }
+
     /// A call pushed with `room` slots past its header, which the caller
     /// sized for its callee ([`Request::call_room`]), `header` laid
     /// down whole; the fatal is the memory limit, as [`Request::push_call`]'s.

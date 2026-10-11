@@ -36,6 +36,10 @@
 //! [`VmStack::pop_frame`] and [`VmStack::close`]; a stack dropped
 //! without closing leaves its pages to the heap's own end, which is
 //! php's mass release.
+//!
+//! An unobserved frameless call's frame, which php lays down nowhere,
+//! stands off the pages and off the heap ([`VmStack::push_frameless`]),
+//! so it takes no room php's call does not.
 
 use std::marker::PhantomData;
 use std::mem::{align_of, needs_drop, size_of};
@@ -57,6 +61,9 @@ const PAGE_HEADER_SLOTS: usize = (3 * size_of::<usize>()).div_ceil(SLOT);
 /// `ZEND_CALL_FRAME_SLOT`: `sizeof(zend_execute_data)`, eighty bytes on
 /// a 64-bit build, rounded up to slots.
 const FRAME_HEADER_SLOTS: usize = 80usize.div_ceil(SLOT);
+/// The room a frameless call's frame takes: the header's and three
+/// operands, the most a `ZEND_FRAMELESS_ICALL_3` passes.
+const LOOSE_SLOTS: usize = FRAME_HEADER_SLOTS + 3;
 
 /// A slot index within one frame: a CV, a temporary or an extra argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -111,13 +118,69 @@ struct Page {
 
 /// Where a frame stands: on the page that was the top, from slot
 /// `from`, at the start of a page it opened, php's
-/// `ZEND_CALL_ALLOCATED`, or in an allocation of its own beginning at
-/// `block`, the generator's `emalloc(used_stack)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `ZEND_CALL_ALLOCATED`, in an allocation of its own beginning at
+/// `block`, the generator's `emalloc(used_stack)`, or in a room off
+/// the pages and off the request's heap ([`Loose`]).
+#[derive(Debug)]
 enum Placed {
     On { from: usize },
     Opened,
     Heap { block: NonNull<Zval> },
+    Loose(Loose),
+}
+
+impl Placed {
+    /// The slot of the page the frame's room starts at; none for a
+    /// frame that stands on no page.
+    fn page_from(&self) -> Option<usize> {
+        match self {
+            Placed::On { from } => Some(*from),
+            Placed::Opened => Some(PAGE_HEADER_SLOTS),
+            Placed::Heap { .. } | Placed::Loose(_) => None,
+        }
+    }
+}
+
+/// The room of a frame php lays down nowhere, an unobserved frameless
+/// call's (`ZEND_FRAMELESS_ICALL_*` hands its native the operands where
+/// they stand and pushes no frame): slots of the process's allocator
+/// and not of the request's heap, so the frame opens no page, moves
+/// neither `memory_get_usage()` nor its peak, and meets no
+/// `memory_limit`, as php's call meets none. The stack keeps the rooms
+/// its frames gave back for the next ([`VmStack::push_frameless`]), and
+/// a room is freed when it is dropped.
+#[derive(Debug)]
+struct Loose(NonNull<[Zval]>);
+
+// SAFETY: a room is the request's, as a page is, and read on its
+// thread alone.
+unsafe impl Send for Loose {}
+
+impl Loose {
+    /// A room of `slots` slots, each `UNDEF`.
+    fn new(slots: usize) -> Loose {
+        Loose(NonNull::from(Box::leak(
+            vec![Zval::UNDEF; slots].into_boxed_slice(),
+        )))
+    }
+
+    /// How many slots the room holds.
+    fn slots(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The room's first slot.
+    fn at(&self) -> NonNull<Zval> {
+        self.0.cast()
+    }
+}
+
+impl Drop for Loose {
+    fn drop(&mut self) {
+        // SAFETY: the room is the box `Loose::new` leaked, and this
+        // value, its one owner, is dropped once.
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
 }
 
 /// One call frame: its header `H`, the engine's record of the call laid
@@ -282,6 +345,9 @@ pub struct VmStack<H> {
     pages: Vec<Page>,
     frames: Vec<Frame<H>>,
     entries: Vec<FrameRef>,
+    /// The rooms off the pages the frameless calls' frames gave back,
+    /// for the next ones.
+    rooms: Vec<Loose>,
 }
 
 impl<H> Default for VmStack<H> {
@@ -291,6 +357,7 @@ impl<H> Default for VmStack<H> {
             pages: Vec::new(),
             frames: Vec::new(),
             entries: Vec::new(),
+            rooms: Vec::new(),
         }
     }
 }
@@ -439,6 +506,41 @@ impl<H> VmStack<H> {
         Ok(FrameRef(position))
     }
 
+    /// Push the frame of a call php lays down nowhere, an unobserved
+    /// frameless call's, of `slots` slots and the header's room before
+    /// them: in a room off the pages and off `heap` ([`Loose`]), the
+    /// one the last such frame gave back where it holds them. php's
+    /// `ZEND_FRAMELESS_ICALL_*` pushes no frame unless an observer
+    /// watches the function (`Z/Zend/zend_vm_def.h:9775`), so this one
+    /// opens no page where the top page has no room for it, reads in
+    /// neither `memory_get_usage()` nor its peak, and leaves the pages
+    /// as they stood for what the native pushes while it is served.
+    pub fn push_frameless(&mut self, slots: usize, header: H) -> FrameRef {
+        let () = Frame::<H>::FITS;
+        let used = FRAME_HEADER_SLOTS + slots;
+        let room = match self.rooms.pop() {
+            Some(room) if room.slots() >= used => room,
+            _ => Loose::new(used.max(LOOSE_SLOTS)),
+        };
+        // SAFETY: the room holds at least `FRAME_HEADER_SLOTS` slots, so
+        // the first CV's place is inside it.
+        let at = unsafe { room.at().add(FRAME_HEADER_SLOTS) };
+        let mut frame = Frame {
+            at,
+            len: slots,
+            placed: Placed::Loose(room),
+            header: PhantomData,
+        };
+        // SAFETY: the header's room is the `FRAME_HEADER_SLOTS` slots of
+        // the room before the first CV, which `FITS` holds an `H` to fit,
+        // aligned, and nothing else names.
+        unsafe { frame.header_at().write(header) };
+        frame.cells_mut().fill(Zval::UNDEF);
+        let position = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
+        self.frames.push(frame);
+        FrameRef(position)
+    }
+
     /// Pop the frame the loop is executing,
     /// `zend_vm_stack_free_call_frame`: the page it stood on keeps its
     /// room for the next push, and a page the frame opened goes back to
@@ -462,24 +564,20 @@ impl<H> VmStack<H> {
     /// its own, is not grown, and that is the engine's error.
     pub fn grow_top(&mut self, heap: &mut Heap, f: FrameRef, more: usize) -> Result<(), Fatal> {
         let top = self.frames.len().checked_sub(1);
-        let Some((placed, len, old)) = self
+        let Some((from, len, old)) = self
             .frames
             .last()
             .filter(|_| top == Some(f.0 as usize))
-            .map(|frame| (frame.placed, frame.len, frame.at))
+            .map(|frame| (frame.placed.page_from(), frame.len, frame.at))
         else {
             return Err(Fatal::Error(String::from(
                 "InternalError: a VM stack frame grown that is not the top one",
             )));
         };
-        let from = match placed {
-            Placed::On { from } => from,
-            Placed::Opened => PAGE_HEADER_SLOTS,
-            Placed::Heap { .. } => {
-                return Err(Fatal::Error(String::from(
-                    "InternalError: a frame in an allocation of its own grown on the VM stack",
-                )));
-            }
+        let Some(from) = from else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a frame off the VM stack's pages grown on it",
+            )));
         };
         let fits = self
             .pages
@@ -547,10 +645,12 @@ impl<H> VmStack<H> {
     }
 
     /// Where a frame the stack let go of stood given back: its room on
-    /// the page, the page it opened, or the allocation of its own.
+    /// the page, the page it opened, the allocation of its own, or the
+    /// room off the pages, kept for the next frameless call.
     fn leave(&mut self, heap: &mut Heap, frame: Frame<H>) {
         match frame.placed {
             Placed::Heap { .. } => frame.free(heap),
+            Placed::Loose(room) => self.rooms.push(room),
             Placed::On { from } => {
                 if let Some(page) = self.pages.last_mut() {
                     page.top = from;
@@ -584,6 +684,12 @@ impl<H> VmStack<H> {
             Placed::Heap { .. } => return Ok(Some(frame)),
             Placed::On { from } => from,
             Placed::Opened => PAGE_HEADER_SLOTS,
+            Placed::Loose(_) => {
+                self.frames.push(frame);
+                return Err(Fatal::Error(String::from(
+                    "InternalError: a frameless call's frame moved off the VM stack",
+                )));
+            }
         };
         let Some(page) = self.pages.last() else {
             return Err(Fatal::Error(String::from(
@@ -901,6 +1007,65 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(heap.memory_usage(false) - start, 3 * PAGE_SIZE);
+        drop(stack.close(&mut heap));
+        assert_eq!(heap.memory_usage(false), start);
+    }
+
+    /// A frameless call's frame takes no page room: on a full page it
+    /// opens none and the heap reads the same, its slots and header are
+    /// a frame's as any other's, a frame pushed above it lands on the
+    /// pages where it would have without it, and its room is the next
+    /// one's after it pops.
+    #[test]
+    fn a_frameless_frame_opens_no_page_and_leaves_the_pages_as_they_stood() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let mut stack = VmStack::<Head>::new();
+        for _ in 0..1092 {
+            assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        }
+        let full = heap.memory_usage(false);
+        assert_eq!(full - start, PAGE_SIZE);
+        let called = Head {
+            function: 7,
+            ..Head::default()
+        };
+        heap.reset_peak();
+        let call = stack.push_frameless(3, called.clone());
+        assert_eq!(heap.memory_usage(false), full);
+        assert_eq!(heap.memory_peak(), full);
+        assert_eq!(stack.current(), call);
+        assert_eq!(stack.header(call), Some(&called));
+        if let Some(f) = stack.frame_mut(call) {
+            f.set(Slot(2), Zval::long(3));
+        }
+        assert_eq!(
+            stack.frame(call).map(|f| f.slot(Slot(2))),
+            Some(Zval::long(3))
+        );
+        assert_eq!(stack.frame(call).map(Frame::len), Some(3));
+        // A callback the native serves opens the page php's opens.
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
+        stack.pop_frame(&mut heap);
+        assert_eq!(heap.memory_usage(false), full);
+        stack.pop_frame(&mut heap);
+        // On a page with room, as on a full one: the room is the one
+        // given back, and the page's top stands where it stood.
+        stack.pop_frame(&mut heap);
+        let again = stack.push_frameless(2, Head::default());
+        assert_eq!(
+            stack.frame(again).map(|f| f.slot(Slot(0))),
+            Some(Zval::UNDEF)
+        );
+        assert_eq!(stack.rooms.len(), 0);
+        stack.pop_frame(&mut heap);
+        assert_eq!(stack.rooms.len(), 1);
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert_eq!(heap.memory_usage(false), full);
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
         drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }

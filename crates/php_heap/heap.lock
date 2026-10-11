@@ -336,6 +336,7 @@ VmStack::pop_entry
 VmStack::pop_frame
 VmStack::push_entry
 VmStack::push_frame
+VmStack::push_frameless
 VmStack::put_back
 VmStack::restore_frame
 VmStack::resume_frame

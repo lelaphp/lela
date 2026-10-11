@@ -117,6 +117,16 @@ impl Request {
         }
     }
 
+    /// Whether the observers were asked of the native `function` and
+    /// none answered with a handler, php's slot holding
+    /// `ZEND_OBSERVER_NONE_OBSERVED`: false while none was asked yet, as
+    /// `zend_observer_handler_is_unobserved` reads an unresolved slot.
+    pub(crate) fn native_unobserved(&self, function: Function) -> bool {
+        self.native_place(function)
+            .and_then(|place| self.observing.natives.get(place))
+            .is_some_and(|slot| matches!(slot, Slot::Declined))
+    }
+
     /// Whether `function` is a native with an observer slot: a native
     /// function or method, or an enum's `cases`, `from` or `tryFrom`;
     /// not a call's trampoline, nor `zend_pass_function`, which php
