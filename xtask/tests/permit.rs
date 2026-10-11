@@ -109,7 +109,9 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
         // in a checkout whose operation the fixture's session started,
         // which a walk does not record: each one's own test holds it.
         let neighbours = named("allow").into_iter().filter(|p| {
-            let starter = p.to_string_lossy().contains("/allow-starter");
+            let starter = p
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("allow-starter"));
             !starter && (rule.within == Where::Anywhere || !p.ends_with("allow-main.json"))
         });
         for neighbour in neighbours {
