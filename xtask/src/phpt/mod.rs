@@ -600,11 +600,15 @@ pub(crate) enum Judgement {
     /// compiler's and not a failure of the crate whose subset it is
     /// (harness §4.5 condition 1, #319).
     Unread,
+    /// A test of the served subset whose request HTTP cannot carry, its
+    /// `--ENV--` setting a variable no field stands for: left out of the
+    /// lane, outside the target, and never run (#2639).
+    Unsent,
 }
 
 impl Judgement {
     /// Every verdict, in the order the reading counts them.
-    pub(crate) const ALL: [Judgement; 7] = [
+    pub(crate) const ALL: [Judgement; 8] = [
         Judgement::Pass,
         Judgement::Fail,
         Judgement::Skip,
@@ -612,6 +616,7 @@ impl Judgement {
         Judgement::XFail,
         Judgement::Diverged,
         Judgement::Unread,
+        Judgement::Unsent,
     ];
 
     /// Whether the test missed and keeps why: it fails the reading, or the
@@ -632,6 +637,7 @@ impl Judgement {
             Judgement::Bork => "borked",
             Judgement::XFail => "xfailed",
             Judgement::Unread => "unread",
+            Judgement::Unsent => "unsent",
         }
     }
 }
@@ -651,6 +657,7 @@ impl tally::Judgement for Judgement {
             Judgement::Bork => "bork",
             Judgement::XFail => "xfail",
             Judgement::Unread => "unread",
+            Judgement::Unsent => "unsent",
         }
     }
 
@@ -1085,6 +1092,7 @@ pub fn run(
             registry,
             (runner, pin),
         )?;
+        http::consulted(&mut reading, (subset, runner), &tally, registry)?;
         if let Some(under) = pin.oracle.read_under() {
             told(&mut reading, runner, &under);
         }

@@ -46,6 +46,7 @@ divergence::Registry
 divergence::Registry::accepted
 divergence::Registry::counts
 divergence::Registry::load
+divergence::Registry::makala
 divergence::Registry::parse
 divergence::Registry::propose
 divergence::Registry::row

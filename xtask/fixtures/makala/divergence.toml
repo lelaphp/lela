@@ -1,0 +1,8 @@
+[[divergence]]
+id = "makala:ext/filter/tests/004.phpt"
+kind = "makala"
+cause = "by-design"
+reason = "The fixture's refusal (third-engine-design.md §4.8)."
+status = "accepted"
+since = "2026-10-11"
+covers = ["makala:ext/filter/tests/007.phpt"]

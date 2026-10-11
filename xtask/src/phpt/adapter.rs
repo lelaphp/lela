@@ -231,7 +231,10 @@ impl<'a> Adapter<'a> {
             (met, expectation.text()),
             actual,
         );
-        let compared = oracle::verdict(self.registry, &id, met, &wanted, &actual);
+        let mut compared = oracle::verdict(self.registry, &id, met, &wanted, &actual);
+        if self.hosts.http.is_some() {
+            compared = http::accepted(self.registry, &id, compared);
+        }
         Ok(match (compared, expected_to_fail) {
             (Compared::Same, Some(why)) => Judged::new(
                 &id,
@@ -273,6 +276,9 @@ impl<'a> Adapter<'a> {
     ) -> Result<Result<Admitted, Judged>> {
         if let Some(why) = unhosted(phpt, &self.hosts) {
             return Ok(Err(Judged::new(id, name, Judgement::Skip, why)));
+        }
+        if let Some(why) = (self.hosts.http.as_ref()).and_then(|_| http::unsent(phpt, &test.file)) {
+            return Ok(Err(Judged::new(id, name, Judgement::Unsent, why)));
         }
         if let Some(why) = self.missing(phpt, test) {
             return Ok(Err(Judged::new(id, name, Judgement::Skip, why)));

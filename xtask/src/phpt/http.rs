@@ -21,8 +21,16 @@
 //! the code is not 200, the header lines, a blank line and the body. The
 //! rest of the judge is the CGI one, but for a header's name, which is held
 //! without regard to its case, since makala writes every name lowercase by
-//! design (#2570). What CGI has and HTTP cannot carry, the words of
-//! `--ARGS--` and an environment variable no field stands for, is not sent.
+//! design (#2570). The judge holds `--EXPECTHEADERS--` as run-tests.php
+//! does, each wanted name by the last line of that name, so it reads no
+//! order across names and makala's grouping of a name's lines (#2640)
+//! cannot miss it; within a name it reads which line comes last, which
+//! the grouping keeps. The served lane needs no fold of its own. A difference an accepted
+//! `makala:` row names is accepted, as `fpm-compare` reads it
+//! (`crate::makala::held`, #2644). What CGI has and HTTP cannot carry is
+//! not sent: the words of `--ARGS--`, and an environment variable no field
+//! stands for, whose test is left out of the lane, outside the target
+//! ([`unsent`], #2639).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,9 +40,13 @@ use anyhow::{Context, Result, anyhow};
 use super::cgi;
 use super::environment::Environment;
 use super::file::Phpt;
-use super::{Holds, Subset, is_phpt};
+use super::target::named;
+use super::{Holds, Judgement, Subset, Tally, is_phpt};
+use crate::divergence::Registry;
+use crate::makala::{Consulted, Held, held};
 use crate::oracle::hosts::MAKALA;
-use crate::oracle::{PastLimit, Recipe};
+use crate::oracle::{PastLimit, Recipe, Runner, Verdict};
+use crate::reading::Reading;
 use crate::scratch::Tree;
 use crate::tally;
 use crate::witness::makala::{Http, Server, split_head};
@@ -63,6 +75,78 @@ pub(crate) fn subset(source: &Path) -> Subset {
 /// `.phpt`.
 pub(super) fn is_served(path: &Path) -> bool {
     is_phpt(path) && Phpt::load(path).is_ok_and(|phpt| phpt.is_cgi())
+}
+
+/// The variables of a CGI request HTTP carries: those the request line
+/// stands for and the body's two fields; every `HTTP_` one is a field of
+/// its own.
+const CARRIED: [&str; 7] = [
+    "REQUEST_METHOD",
+    "REQUEST_URI",
+    "QUERY_STRING",
+    "SCRIPT_NAME",
+    "PATH_INFO",
+    "CONTENT_TYPE",
+    "CONTENT_LENGTH",
+];
+
+/// Why the served lane leaves the test at `path` out, where it does: its
+/// `--ENV--` sets a variable no HTTP field carries, which a request
+/// cannot hand the server, so no verdict on it would be makala's (#2639).
+/// Counted outside the target and named, never a row.
+pub(super) fn unsent(phpt: &Phpt, path: &Path) -> Option<String> {
+    let carried = |name: &str| name.starts_with("HTTP_") || CARRIED.contains(&name);
+    let unsent: Vec<String> = (super::env_of(phpt, path).into_iter())
+        .map(|(name, _)| name)
+        .filter(|name| !carried(name))
+        .collect();
+    (!unsent.is_empty()).then(|| {
+        format!(
+            "its --ENV-- sets {}, which no HTTP field carries",
+            unsent.join(", ")
+        )
+    })
+}
+
+/// A served test's verdict, `compared` as the registry read it under the
+/// test's `phpt:` key `id`: a difference no row accepted there is accepted
+/// where an accepted `makala:` row names the test, as `fpm-compare` reads
+/// it (#2644), and stands otherwise.
+pub(super) fn accepted(registry: &Registry, id: &str, compared: Verdict) -> Verdict {
+    match (&compared, held(registry, named(id), false)) {
+        (Verdict::Differs(_), Held::Accepted(row)) => Verdict::Diverged(row.clone()),
+        _ => compared,
+    }
+}
+
+/// The `makala:` rows that accepted a difference in the engine's run of
+/// the served subset, counted on `reading` and each test named under its
+/// row, as `fpm-compare` counts and names them (#2644); nothing for
+/// another subset or the runner's control. The lane
+/// names no row stale: a row records what php-fpm shows, and a test held
+/// to its own expectation may not show it, as bug60761.phpt, which
+/// prints the length of `phpinfo()`'s page, does not.
+pub(super) fn consulted(
+    reading: &mut Reading,
+    (subset, runner): (&Subset, &Runner),
+    tally: &Tally,
+    registry: &Registry,
+) -> Result<()> {
+    if subset.holds != Holds::Served || matches!(runner, Runner::Control(_)) {
+        return Ok(());
+    }
+    let mut consulted = Consulted::default();
+    // A difference a `phpt:` row accepted is that row's, never makala's.
+    let diverged = (tally.judged.iter()).filter(|judged| {
+        judged.judgement == Judgement::Diverged && registry.accepted(&judged.id).is_none()
+    });
+    for judged in diverged {
+        consulted.hold(registry, named(&judged.id), false);
+    }
+    if let Some(words) = consulted.counted(reading)? {
+        super::told(reading, runner, &words);
+    }
+    Ok(())
 }
 
 /// makala beside `binary`, the binary under test, where it was built.
@@ -152,6 +236,9 @@ pub(super) fn as_cgi(answer: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oracle::Normalise;
+    use crate::phpt::Judged;
+    use crate::reading::Number;
 
     /// A response of another code carries it as php-cgi's `Status:` line,
     /// the server's own lines are left out, and a 200 carries none.
@@ -208,5 +295,103 @@ mod tests {
                 "ext/c/tests/headers.phpt"
             ]
         );
+    }
+
+    /// The negative control of #2644, over the fixture `fpm-compare` is
+    /// held to: a difference on a test an accepted `makala:` row names is
+    /// accepted under the row and counted apart, one on a test no row
+    /// names stands and fails, and a test the row covers that met its
+    /// expectation is no row stale.
+    #[test]
+    fn the_served_lane_reads_makala_rows_as_fpm_compare_does() {
+        let registry = crate::makala::fixture();
+        let id = |test: &str| format!("phpt:php-src/ext/filter/tests/{test}");
+        let differs = || Verdict::Differs("-a\n+b\n".to_owned());
+        let held = accepted(&registry, &id("004.phpt"), differs());
+        assert!(
+            matches!(&held, Verdict::Diverged(row) if row.id.as_str() == "makala:ext/filter/tests/004.phpt"),
+            "{held:?}"
+        );
+        let standing = accepted(&registry, &id("011.phpt"), differs());
+        assert!(
+            matches!(standing, Verdict::Differs(_)),
+            "no row names 011.phpt: {standing:?}"
+        );
+        assert_eq!(
+            accepted(&registry, &id("007.phpt"), Verdict::Same),
+            Verdict::Same
+        );
+        let judged = |test: &str, judgement| Judged::new(&id(test), test, judgement, "");
+        let tally = Tally {
+            judged: vec![
+                judged("004.phpt", Judgement::Diverged),
+                judged("007.phpt", Judgement::Pass),
+                judged("011.phpt", Judgement::Fail),
+            ],
+            found: 3,
+        };
+        let mut reading = Reading::new(super::super::INSTRUMENT, SCOPE);
+        let served = subset(Path::new("php-src"));
+        consulted(&mut reading, (&served, &Runner::Linked), &tally, &registry).unwrap();
+        let words = &reading.message;
+        assert!(
+            words.contains("1 differs as a makala: row accepts: makala:ext/filter/tests/004.phpt"),
+            "{words}"
+        );
+        assert!(!words.contains("stale"), "{words}");
+        assert_eq!(
+            reading.numbers.get("accepted").copied(),
+            Some(Number::count(1))
+        );
+    }
+
+    /// A served test whose `--ENV--` sets what no HTTP field carries is
+    /// left out by the rule and not by its name: `FOO` is no field, while
+    /// a field's `HTTP_` variable and those the request line stands for
+    /// are carried.
+    #[test]
+    fn a_test_whose_env_no_http_field_carries_is_left_out() {
+        let tree = Tree::new("phpt-http-unsent").unwrap();
+        let test = |env: &str| {
+            format!("--TEST--\nt\n--CGI--\n--ENV--\n{env}\n--FILE--\n<?php\n--EXPECT--\n")
+        };
+        for (file, env, unsent) in [
+            (
+                "a.phpt",
+                "FOO=BAR",
+                Some("its --ENV-- sets FOO, which no HTTP field carries"),
+            ),
+            ("b.phpt", "HTTP_ACCEPT_ENCODING=gzip", None),
+            (
+                "c.phpt",
+                "SCRIPT_NAME=/c.php\nREQUEST_URI=/c.php/x\nPATH_INFO=/x",
+                None,
+            ),
+        ] {
+            tree.write(file, test(env)).unwrap();
+            let path = tree.path().join(file);
+            let phpt = Phpt::load(&path).unwrap();
+            assert_eq!(super::unsent(&phpt, &path).as_deref(), unsent, "{file}");
+        }
+    }
+
+    /// The served lane holds `--EXPECTHEADERS--` by name, the last line of
+    /// a name standing, as run-tests.php does, so the order across names
+    /// is never read (#2640): makala's grouped `Vary` lines meet
+    /// bug51269.phpt's expectation, and the same two lines swapped, whose
+    /// last line is then another, miss it.
+    #[test]
+    fn the_served_lane_folds_header_order_across_names_and_holds_it_within_one() {
+        let wanted = "Vary: Cookie\nContent-Encoding: gzip\nVary: Accept-Encoding";
+        let missed = |vary: [&str; 2]| {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nvary: {}\r\nvary: {}\r\ncontent-encoding: gzip\r\n\r\nx",
+                vary[0], vary[1]
+            );
+            let (headers, _) = cgi::parted(&as_cgi(head.as_bytes()), &Normalise::default());
+            cgi::headers_missed(wanted, (&headers, cgi::Names::Folded))
+        };
+        assert_eq!(missed(["Cookie", "Accept-Encoding"]), None);
+        assert!(missed(["Accept-Encoding", "Cookie"]).is_some());
     }
 }
