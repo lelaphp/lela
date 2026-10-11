@@ -683,6 +683,18 @@ mod tests {
     use php_unit::decl::{ConstExpr, ConstantName, NameKind, Parameter, Type, Visibility};
     use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
 
+    /// A dump read as text by the tests below, which hold it to php's
+    /// words; a byte that is no character reads as U+FFFD here alone.
+    trait Text {
+        fn text(&self) -> String;
+    }
+
+    impl Text for Vec<u8> {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(self).into_owned()
+        }
+    }
+
     /// A unit whose constant strings are one engine's, which is what the
     /// unit cache holds (design §6.3).
     fn unit_of(source: &[u8]) -> Unit {
@@ -711,7 +723,7 @@ mod tests {
             .filter_map(|entry| functions.get(entry.function as usize))
             .map(|decl| decl.name.clone())
             .collect();
-        unit.dump(&names)
+        unit.dump(&names).text()
     }
 
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
@@ -886,7 +898,7 @@ mod tests {
     fn echo_of_a_number_is_one_echo_and_the_final_return() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1;");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
             "the constant 1 is echoed and returned"
         );
@@ -957,6 +969,7 @@ mod tests {
         compile_source(source, &options, &mut strings)
             .unwrap_or_default()
             .dump(&[])
+            .text()
     }
 
     /// [`Options::short_open_tag`] reaching the scanner (#608): with the
@@ -994,7 +1007,7 @@ mod tests {
     fn a_nested_call_sends_what_the_inner_call_returned() {
         let (unit, _strings) = unit_and_strings(b"<?php var_dump(extension_loaded('demo'));");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 7,
                 0,
@@ -1053,7 +1066,7 @@ mod tests {
     fn arithmetic_over_two_constants_is_folded_the_way_php_folds_it() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1 + 2;");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(2, 0, 0, "0000 ECHO int(3)\n0001 RETURN int(1)\n"),
             "the sum is one literal and no ZEND_ADD"
         );
@@ -1106,7 +1119,7 @@ mod tests {
         // `zend_add_literal` appends each.
         let (unit, _strings) = unit_and_strings(b"<?php echo null + 1;");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
         );
         assert_eq!(unit.main.literals.len(), 2);
@@ -1186,7 +1199,7 @@ mod tests {
         assert!(compiled.is_ok(), "{compiled:?}");
         let unit = compiled.unwrap_or_default();
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
              \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
              0000 ECHO int(259)\n\
@@ -1205,7 +1218,7 @@ mod tests {
         );
         assert!(lowered.is_ok(), "{lowered:?}");
         assert_eq!(
-            lowered.unwrap_or_default().dump(&[]),
+            lowered.unwrap_or_default().dump(&[]).text(),
             "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
              \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
              0000 T0 = FETCH_CONSTANT string(\"t_lnumber\")\n\
@@ -1326,7 +1339,7 @@ mod tests {
         ] {
             let (unit, _strings) = unit_and_strings(source);
             assert_eq!(
-                unit.dump(&[]),
+                unit.dump(&[]).text(),
                 main_dump(
                     3,
                     0,
@@ -1618,7 +1631,7 @@ mod tests {
             b"<?php $a = 1; echo 2 . $a; echo $a . 2.5; echo 'a' . 'b' . $a; echo NAN . $a;",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 10,
                 1,
@@ -1670,7 +1683,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php\necho 'a';\necho NAN . 'z';\necho 1 . NAN . NAN;");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=4, args=0, vars=0, tmps=0)\n\
              \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
              0000 ECHO string(\"a\")\n\
@@ -1835,7 +1848,7 @@ mod tests {
     fn an_empty_for_is_php_s_forward_jump_and_a_conditional_jump_to_itself() {
         let (unit, _strings) = unit_and_strings(b"<?php set_time_limit(1); for (;;) {}");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 6,
                 0,
@@ -1886,7 +1899,7 @@ mod tests {
             b"<?php for (extension_loaded('i'); extension_loaded('a'), extension_loaded('b'); extension_loaded('s')) echo 'body';",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 16,
                 0,
@@ -1926,7 +1939,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php for ($i = 0; $i < 1000; $i++) { echo 'dax'; }");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 7,
                 1,
@@ -2285,7 +2298,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php\nwhile (extension_loaded('a')) {\n  echo 1;\n}");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
              \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
              0000 JMP 0002\n\
@@ -2312,7 +2325,7 @@ mod tests {
     fn a_constant_no_table_holds_is_fetched_as_the_program_serves() {
         let (unit, _strings) = unit_and_strings(b"<?php echo FOO;");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
              \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
              0000 T0 = FETCH_CONSTANT string(\"FOO\")\n\
@@ -2426,7 +2439,7 @@ mod tests {
             b"<?php $a = 1; $a + 1; str_repeat(\"a\", 3) . \"b\"; extension_loaded('Core'); $a++;",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 14,
                 1,
@@ -2497,7 +2510,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php echo str_repeat(\"a\", 2) . str_repeat(\"b\", 2);");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 11,
                 0,
@@ -2614,7 +2627,7 @@ mod tests {
     fn strlen_over_a_constant_string_is_its_length_and_the_sum_folds_over_it() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1 + strlen('a');");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n"),
             "one ECHO of a constant, no INIT_FCALL and no ADD"
         );
@@ -2890,7 +2903,7 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         let unit = compile_source(b"echo 1; ?>x", &options, &mut strings).unwrap_or_default();
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 3,
                 0,
@@ -2911,7 +2924,7 @@ mod tests {
     fn a_name_the_bundle_has_not_is_init_fcall_by_name_over_the_constant_pair() {
         let (unit, _strings) = unit_and_strings(b"<?php echo nope($a);");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 5,
                 1,
@@ -2954,7 +2967,7 @@ mod tests {
     fn a_call_by_name_sends_each_argument_as_php_sends_it_for_an_unknown_callee() {
         let (unit, _strings) = unit_and_strings(b"<?php echo NoPe(nope2($a), 1 + $a, 'x');");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 11,
                 1,
@@ -2991,7 +3004,7 @@ mod tests {
     fn a_name_the_bundle_has_keeps_init_fcall_and_do_icall() {
         let (unit, _strings) = unit_and_strings(b"<?php echo StrLen('a', 'b');");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 6,
                 0,
@@ -3801,7 +3814,7 @@ mod tests {
     fn a_silenced_call_is_php_s_op_array_ending_in_its_silence_live_range() {
         let (unit, _strings) = unit_and_strings(b"<?php echo @str_repeat(\"a\", 2);");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 8,
                 0,
@@ -3905,7 +3918,7 @@ mod tests {
     fn a_three_part_interpolation_is_php_s_op_array_ending_in_its_rope_live_range() {
         let (unit, _strings) = unit_and_strings(b"<?php $a = 1; $b = 2; echo \"$a-$b-$a\";");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 9,
                 2,
@@ -4011,7 +4024,7 @@ mod tests {
             b"<?php $a = [1]; $o = new stdClass; echo \"$a[0]-$a[k]-$o->p-{$a[0]}-{$o->p}\";",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 20,
                 2,
@@ -4080,6 +4093,7 @@ mod tests {
         let (unit, _strings) = unit_and_strings(b"<?php\necho \"${a[0]}\";");
         assert_eq!(
             unit.dump(&[])
+                .text()
                 .split_once("RANGE[0..0]\n")
                 .map(|(_, rest)| rest),
             Some(
@@ -4102,6 +4116,7 @@ mod tests {
         );
         assert_eq!(
             unit.dump(&[])
+                .text()
                 .split_once("RANGE[0..0]\n")
                 .map(|(_, rest)| rest),
             Some(
@@ -4176,7 +4191,7 @@ mod tests {
         let source = b"<?php\n$a = 1;\nswitch ($a) { case 1: echo \"a\"; break; case 2: echo \"b\"; break; default: echo \"c\"; }\necho match ($a) { 1 => \"x\", \"s\" => \"y\", default => \"z\" };\n";
         let (unit, _strings) = unit_and_strings(source);
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=20, args=0, vars=1, tmps=4)\n\
              \x20    ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n\
              0000 ASSIGN CV0($a) int(1)\n\
@@ -4777,7 +4792,7 @@ mod tests {
         let source: &[u8] = b"<?php namespace A; class M {} new M;";
         let (unit, _strings) = unit_and_strings(source);
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 4,
                 0,
@@ -4840,7 +4855,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php namespace A; class M { const K = 1; } new M; echo M::K;");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 6,
                 0,
@@ -5635,7 +5650,8 @@ mod tests {
             &mut strings,
         )
         .unwrap_or_default()
-        .dump(&[]);
+        .dump(&[])
+        .text();
         assert_eq!(
             dump,
             main_dump(
@@ -5666,7 +5682,7 @@ mod tests {
             b"<?php\nclass M { /** P */ public $x, $y = 1 /** P2 */; /** K */ const A = 1, B = 2; static $s; /** F */ final protected const C = -A; }\n/** D */ { } class N /** D2 */ { var $v /** V */; }\necho 1;\n",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n0000 ECHO int(1)\n0001 RETURN int(1)\n",
             "the class emits no opline; php binds it at compile time"
         );
@@ -7342,6 +7358,7 @@ class C {
             )
             .unwrap_or_default()
             .dump(&[])
+            .text()
         };
         assert_eq!(
             dump(b"<?php $a = 1; phptoken::TOKENIZE('<?php ', $a);"),
@@ -7492,7 +7509,7 @@ class C {
     fn a_foreach_is_php_s_op_array_ending_in_its_loop_live_range() {
         let (unit, _strings) = unit_and_strings(b"<?php foreach ([1, 2] as $v) { echo $v; }");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 6,
                 1,
@@ -7754,7 +7771,7 @@ class C {
     fn an_array_with_a_variable_is_init_array_and_add_array_element_as_php_emits_them() {
         let (unit, _strings) = unit_and_strings(b"<?php $a = ['x', 'y']; $b = [1, $a, 'k' => 2];");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 6,
                 2,
@@ -7868,7 +7885,7 @@ class C {
             b"<?php $k = '2'; $x = [1, $k, '3' => 4, 'a' => 5, 1.5 => 6, null => 7, true => 8]; $y = [$k => 1, 5 => 2, 'b' => 3]; [9223372036854775807 => 1, 2];",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             main_dump(
                 17,
                 3,
@@ -7981,7 +7998,7 @@ class C {
         let source = b"<?php\ntry { throw new Exception(\"x\"); } catch (ValueError $e) { echo 1; } catch (TypeError|Error $e) { echo 2; }\n";
         let (unit, _strings) = unit_and_strings(source);
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=13, args=0, vars=1, tmps=2)\n\
              \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
              0000 V1 = NEW 1 string(\"Exception\")\n\
@@ -8025,7 +8042,7 @@ class C {
         let (unit, _strings) =
             unit_and_strings(b"<?php\nfunction f() { try { return 1; } finally { echo 2; } }\n");
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n\
              \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
              0000 RETURN int(1)\n\
@@ -8055,7 +8072,7 @@ class C {
             b"<?php\nforeach ([1,2] as $v) { try { break; } finally { echo \"f\"; } }\n",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=11, args=0, vars=1, tmps=2)\n\
              \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
              0000 V1 = FE_RESET_R array(...) 0009\n\
@@ -8078,7 +8095,7 @@ class C {
             b"<?php\nforeach ([1,2] as $v) { foreach ([3] as $w) { try { try { break 2; } finally { echo \"i\"; } } finally { echo \"o\"; } } }\n",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=21, args=0, vars=2, tmps=4)\n\
              \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
              0000 V2 = FE_RESET_R array(...) 0019\n\
@@ -8123,7 +8140,7 @@ class C {
             b"<?php\nfunction &f(array &$a): array { try { return $a; } finally { echo \"f\"; } }\n",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n\
              \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
              0000 RETURN int(1)\n\
@@ -8174,7 +8191,7 @@ class C {
             b"<?php\nfunction f() { try { try { goto x; } finally { echo \"a\"; } x: echo \"b\"; } finally { echo \"c\"; } }\n",
         );
         assert_eq!(
-            unit.dump(&[]),
+            unit.dump(&[]).text(),
             "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n\
              \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
              0000 RETURN int(1)\n\
@@ -8252,7 +8269,8 @@ class C {
             &mut strings,
         )
         .unwrap_or_default()
-        .dump(&[]);
+        .dump(&[])
+        .text();
         assert_eq!(
             dump,
             main_dump(

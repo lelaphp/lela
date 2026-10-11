@@ -289,7 +289,7 @@ impl Request {
     /// `extended_value` indexes in `zend_flf_functions`, which is the
     /// engine's, so the dump is the request's to write.
     #[must_use]
-    pub fn dump_op_array(&self, code: OpArrayView<'_>, name: &str, parameters: usize) -> String {
+    pub fn dump_op_array(&self, code: OpArrayView<'_>, name: &[u8], parameters: usize) -> Vec<u8> {
         let frameless = self.shared.frameless_names();
         code.code.dump_lines(name, parameters, &frameless)
     }
