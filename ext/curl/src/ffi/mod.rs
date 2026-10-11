@@ -45,7 +45,7 @@ use std::ptr::{self, NonNull};
 use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::raising::{Cause, Thrown};
-use php_ext::request::{ForeignId, Request};
+use php_ext::request::{ForeignId, Held, Request};
 use php_ext::values::{Owner, Value};
 
 pub(crate) use easy::{Address, Easy, EasyId, Hook, Info, MimeBuilder, Posted};
@@ -220,22 +220,28 @@ impl Session {
         self.0.enter(req, f)
     }
 
-    /// `f` served with no request where a callback finds it, whatever
-    /// call into the library this one is made inside, and that call's
-    /// request left where it stood after. What wraps every
-    /// [`Request::holding`] of the library's objects: one given up during
-    /// the hold is dropped as the hold ends, inside `holding`, which
-    /// still borrows the request, so a trampoline its cleanup reaches (a
-    /// file part's `free_cb` under `curl_easy_cleanup` or
-    /// `curl_mime_free`) finds no request, as at the top level, and not
-    /// the one an enclosing transfer lent. What the hold serves lends the
-    /// request again ([`Session::enter`]).
-    fn withheld<R>(&self, f: impl FnOnce() -> R) -> R {
+    /// `body` served with the object `id` names held
+    /// ([`Request::holding`]) and no request where a callback finds it,
+    /// whatever call into the library this one is made inside, that
+    /// call's request put back after. The only way the binding holds the
+    /// library's objects: one given up during the hold is dropped as the
+    /// hold ends, inside `holding`, which still borrows the request, so a
+    /// trampoline its cleanup reaches (a file part's `free_cb` under
+    /// `curl_easy_cleanup` or `curl_mime_free`) finds no request, as at
+    /// the top level, and not the one an enclosing transfer lent. What
+    /// `body` calls the library with lends the request again
+    /// ([`Session::enter`]).
+    fn holding<T: Send + 'static, R>(
+        &self,
+        req: &mut Request,
+        id: ForeignId<T>,
+        body: impl for<'h> FnOnce(&mut Request, Held<'h, T>) -> R,
+    ) -> Option<R> {
         let slot = self.0.0.as_ptr();
         // SAFETY: an owner's allocation; the write is the only access.
         let outer = unsafe { std::mem::replace(&mut (*slot).req, ptr::null_mut()) };
-        let answered = f();
-        // SAFETY: as above; every `enter` inside `f` restored what it
+        let answered = req.holding(id, body);
+        // SAFETY: as above; every `enter` inside `body` restored what it
         // found before this write.
         unsafe { (*slot).req = outer };
         answered
@@ -272,8 +278,8 @@ impl Lent {
         // which that call does not touch until the library returns, so
         // this is the one live mutable borrow of it. Nothing reaches the
         // request through the link while a `Request::holding` that ends a
-        // hold is on the stack: every hold of the library's objects is
-        // taken inside `Session::withheld`, so between the `enter`s it
+        // hold is on the stack: the binding holds the library's objects
+        // through `Session::holding` alone, so between the `enter`s a hold
         // serves, where the hold's end drops what was given up, the link
         // holds null and not an enclosing call's request.
         unsafe { req.as_mut() }
@@ -353,8 +359,8 @@ impl Cx<'_> {
 
 /// `body` served with each object `ids` names held ([`Request::holding`]),
 /// the ones no owner keeps any more passed over: what a call into the
-/// library holds of the handles it may reach, inside
-/// [`Session::withheld`].
+/// library holds of the handles it may reach, inside the
+/// [`Session::holding`] of the `CURL *` or `CURLM *` it calls with.
 fn holding_all<T: Send + 'static, R>(
     req: &mut Request,
     ids: &[ForeignId<T>],

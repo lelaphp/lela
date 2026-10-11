@@ -545,7 +545,7 @@ impl EasyId {
     /// `f`, a call into the library that serves the callbacks, over the
     /// `CURL *` held with the share it points at ([`Request::holding`]),
     /// so a callback that frees either's object leaves the cleanup to the
-    /// call's end, with no request lent ([`Session::withheld`]); the
+    /// call's end, with no request lent ([`Session::holding`]); the
     /// request reachable by the callbacks meanwhile.
     fn transfer(
         self,
@@ -561,13 +561,11 @@ impl EasyId {
         }) else {
             return (GONE, None);
         };
-        let held = session.withheld(|| {
-            req.holding(self.0, |req, held| {
-                let raw = held.get(req)?.raw();
-                let mut body = Some(|req: &mut Request| session.enter(req, || f(raw)));
-                let ids: &[ForeignId<ShareHandle>] = share.as_slice();
-                holding_all(req, ids, &mut body)
-            })
+        let held = session.holding(req, self.0, |req, held| {
+            let raw = held.get(req)?.raw();
+            let mut body = Some(|req: &mut Request| session.enter(req, || f(raw)));
+            let ids: &[ForeignId<ShareHandle>] = share.as_slice();
+            holding_all(req, ids, &mut body)
         });
         held.flatten().unwrap_or((GONE, None))
     }

@@ -160,24 +160,21 @@ impl MultiId {
         };
         let (handles, shares) = EasyId::held_by(req, easies);
         // What the holds keep is cleaned up as they end with no request
-        // lent ([`Session::withheld`]).
-        let held = session.withheld(|| {
-            req.holding(self.0, |req, held| {
-                let raw = held.get(req)?.raw();
-                let mut call = Some(|req: &mut Request| {
-                    session.enter(req, || {
-                        let mut running = running;
-                        // SAFETY: a live handle held for the call and a live
-                        // out-count; the callbacks find the request `enter`
-                        // leaves.
-                        let code = unsafe { sys::curl_multi_perform(raw, &raw mut running) };
-                        (i64::from(code), i64::from(running))
-                    })
-                });
-                let mut with_shares =
-                    Some(|req: &mut Request| holding_all(req, &shares, &mut call));
-                holding_all(req, &handles, &mut with_shares).flatten()
-            })
+        // lent ([`Session::holding`]).
+        let held = session.holding(req, self.0, |req, held| {
+            let raw = held.get(req)?.raw();
+            let mut call = Some(|req: &mut Request| {
+                session.enter(req, || {
+                    let mut running = running;
+                    // SAFETY: a live handle held for the call and a live
+                    // out-count; the callbacks find the request `enter`
+                    // leaves.
+                    let code = unsafe { sys::curl_multi_perform(raw, &raw mut running) };
+                    (i64::from(code), i64::from(running))
+                })
+            });
+            let mut with_shares = Some(|req: &mut Request| holding_all(req, &shares, &mut call));
+            holding_all(req, &handles, &mut with_shares).flatten()
         });
         held.flatten().unwrap_or(gone)
     }
