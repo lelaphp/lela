@@ -3638,15 +3638,16 @@ pub(crate) fn do_ucall<T: Tier>(
 /// §5.6): the served call taken off the call stack and pushed as the
 /// callee's frame, its arguments in the parameters' CVs and its
 /// receiver carried over ([`Request::push_user_frame`]), the caller's
-/// slot for the value recorded where `RETURN_VALUE_USED`; then the
-/// `RECV*` prologue. php skips the whole prologue where the function has
-/// no typed parameter and was passed at least as many arguments as it
-/// declares (`Z/Zend/zend_execute.c:4426-4437`), and runs it from opline
-/// zero otherwise; here it runs to the entry safepoint, which the
-/// compiler numbered after the prologue, so a `RECV` that throws is
-/// never inside a recording and the frame is reported [`Stepped::Threw`].
-/// A prologue that raised nothing is [`Stepped::Pushed`], and the loop's
-/// activation performs the interrupt check and raises `Site::Entry`.
+/// slot for the value recorded where `RETURN_VALUE_USED`, the frame
+/// standing where php's push leaves it: past the whole `RECV*` prologue
+/// where the function has no typed parameter and was passed at least as
+/// many arguments as it declares (`Z/Zend/zend_execute.c:4426-4437`),
+/// and at opline zero otherwise. The answer is [`Stepped::Pushed`], and
+/// the loop that takes it, which holds the callee's op array as it
+/// enters it, runs what is left of the prologue to the entry safepoint
+/// ([`exec::prologue`]), so a `RECV` that throws is never inside a
+/// recording and the frame is reported [`Stepped::Threw`], and then the
+/// activation's interrupt check and `Site::Entry`.
 fn enter(
     req: &mut Request,
     frame: FrameRef,
@@ -3658,9 +3659,6 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| exec::temporary_slot(code, op.out));
     let activated = req.activate_user(call, shape, returns_to, exec::Caller::Opline(frame))?;
-    if let Some(at) = exec::parameter_prologue(req, activated)? {
-        return Ok(Stepped::Threw(at).into());
-    }
     Ok(Stepped::Pushed(activated.frame).into())
 }
 

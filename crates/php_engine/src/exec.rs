@@ -2300,11 +2300,12 @@ pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32
 ///
 /// `Some` is the frame a `RECV` raised on, whose throwable is pending;
 /// the caller decides what a raise before the activation means to it.
-/// Every call a user function is reached by crosses this: the one an
-/// opline pushed ([`enter`]) and the one a native served
-/// ([`Request::serve_user`]), so a `ReflectionMethod::invoke` verifies
-/// what `DO_UCALL` verifies, and the coercion a scalar parameter
-/// carries outside `strict_types` is served there too:
+/// Every call a user function is reached by crosses it: the one an
+/// opline pushed, which the loop serves as it takes the push
+/// ([`crate::tier`]), and the one a native served
+/// ([`Request::serve_user`]), here, so a `ReflectionMethod::invoke`
+/// verifies what `DO_UCALL` verifies, and the coercion a scalar
+/// parameter carries outside `strict_types` is served there too:
 ///
 /// ```php
 /// function f(int $a, float $b, string $c) { var_dump($a, $b, $c); }
@@ -2323,10 +2324,13 @@ pub(crate) fn parameter_prologue(
     // A frame whose push skipped every `RECV*` stands at its entry
     // already, which its activation told, and its op array is not held
     // for a run of none.
-    match activated.prologue {
-        None => Ok(None),
-        Some(entry) => prologue_from(req, activated.frame, entry),
+    if activated.prologue.is_none() {
+        return Ok(None);
     }
+    let serving = standing(req, activated.frame)?;
+    let code = serving_code(&serving, activated.frame)?;
+    let told = <crate::observer::Declared as crate::observer::Telling>::of(req);
+    prologue(req, activated.frame, code, told)
 }
 
 /// A call made a user frame ([`Request::activate_user`]): the frame, and
@@ -2338,34 +2342,38 @@ pub(crate) struct Activated {
     pub(crate) prologue: Option<u32>,
 }
 
-/// The `RECV*` oplines of [`parameter_prologue`], up to the entry
-/// safepoint at `entry`.
+/// The `RECV*` oplines of [`parameter_prologue`] from where `callee`
+/// stands up to the entry safepoint of `code`, the op array it serves,
+/// the observers of a declared opcode told of each as `told` says: the
+/// loop's own choice where the loop serves the push, so an engine where
+/// no extension declared an opcode tests nothing here either (design
+/// §5.8, #2287).
 #[inline(never)]
-fn prologue_from(
+pub(crate) fn prologue<D: crate::observer::Telling>(
     req: &mut Request,
     callee: FrameRef,
-    entry: u32,
+    code: &OpArray,
+    told: D,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
-    let serving = standing(req, callee)?;
-    let body = serving_code(&serving, callee)?;
+    let entry = code.safepoints.first().map_or(0, |at| at.0);
     loop {
         let at = req.vm().opline(callee);
         if at >= entry {
             break;
         }
-        let Some(prologue) = opline_at(body, at) else {
+        let Some(prologue) = opline_at(code, at) else {
             break;
         };
-        crate::observer::tell_before(req, callee, prologue.opcode);
+        told.before(req, callee, at, prologue.opcode);
         let next = match prologue.opcode {
             php_unit::Opcode::Recv => {
-                crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             php_unit::Opcode::RecvInit => {
-                crate::handlers::recv_init::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv_init::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             php_unit::Opcode::RecvVariadic => {
-                crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             other => {
                 return Err(php_heap::Fatal::error(format!(
