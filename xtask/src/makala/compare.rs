@@ -258,9 +258,9 @@ fn word(came: &Came) -> &'static str {
 struct Ledger<'r> {
     registry: &'r Registry,
     consulted: Consulted<'r>,
-    /// Each entry, what it came to, and whether it stands once the rows
-    /// are read: an unaccepted difference, an unstable or a borked entry.
-    held: Vec<(String, Came, bool)>,
+    /// Each entry, what it came to, and what the rows made of it: none
+    /// for an unstable or a borked entry, which no row touches.
+    held: Vec<(String, Came, Option<Held<'r>>)>,
 }
 
 impl<'r> Ledger<'r> {
@@ -293,8 +293,7 @@ impl<'r> Ledger<'r> {
                 write!(line, "\n  {changed}").ok();
             }
         }
-        let stands = held.is_none_or(|held| held == Held::Differs);
-        self.held.push((id.to_owned(), came, stands));
+        self.held.push((id.to_owned(), came, held));
         line
     }
 
@@ -305,8 +304,10 @@ impl<'r> Ledger<'r> {
     fn tally(self, reading: &mut Reading, left: usize) -> Result<()> {
         let came = &self.held;
         let same = came.iter().filter(|(_, c, _)| *c == Came::Same).count();
+        // What stands once the rows are read: an unaccepted difference,
+        // and an unstable or a borked entry.
         let standing: Vec<(&str, &Came)> = (came.iter())
-            .filter(|(_, _, stands)| *stands)
+            .filter(|(_, _, held)| held.is_none_or(|held| held == Held::Differs))
             .map(|(id, c, _)| (id.as_str(), c))
             .collect();
         let count = |kind: fn(&Came) -> bool| standing.iter().filter(|(_, c)| kind(c)).count();
