@@ -919,10 +919,10 @@ fn has_property(
     };
     let answer = match test {
         PropertyTest::NotEmpty => truthy(req, &value),
-        _ => !matches!(value.as_ref(), ValueRef::Null),
+        _ => Ok(!matches!(value.as_ref(), ValueRef::Null)),
     };
     value.give_up(req);
-    Ok(answer)
+    answer
 }
 
 fn unset_property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
@@ -2033,7 +2033,7 @@ fn coerce_property(
         Declared::Bool => match v.as_ref() {
             ValueRef::Bool(_) => Ok(Owner::take(req, v)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_) => {
-                let truth = truthy(req, &v);
+                let truth = truthy(req, &v)?;
                 Ok(Owner::bool(truth))
             }
             _ => Err(fail(req, "bool")),

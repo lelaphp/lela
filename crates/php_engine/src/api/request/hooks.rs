@@ -740,10 +740,10 @@ impl Request {
         let value = self.call_hook(object, get, &[])?;
         let answer = match test {
             PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
-            PropertyTest::Isset | PropertyTest::Exists => value.deref().tag() != TypeTag::Null,
+            PropertyTest::Isset | PropertyTest::Exists => Ok(value.deref().tag() != TypeTag::Null),
         };
         self.release(value);
-        Ok(answer)
+        answer
     }
 
     /// The backing value tested as `zend_std_has_property`'s slot arm
@@ -770,7 +770,7 @@ impl Request {
         Ok(match test {
             PropertyTest::Exists => true,
             PropertyTest::Isset => value.tag() != TypeTag::Null,
-            PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
+            PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value)?,
         })
     }
 

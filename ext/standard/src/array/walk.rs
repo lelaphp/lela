@@ -558,9 +558,9 @@ fn array_filter(
                 let answer = call(req, callback, &arguments)?;
                 let truth = truthy(req, &answer);
                 answer.give_up(req);
-                truth
+                truth?
             }
-            None => truthy(req, &operand.deref()),
+            None => truthy(req, &operand.deref())?,
         };
         if keep {
             let value = copied(req, *row.value());
@@ -606,6 +606,7 @@ fn find(
         let answer = call(req, callback, &[*row.value(), key_value(row.key())])?;
         let truth = truthy(req, &answer);
         answer.give_up(req);
+        let truth = truth?;
         if truth == negate {
             return Ok(ControlFlow::Continue(()));
         }

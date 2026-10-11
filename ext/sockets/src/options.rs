@@ -555,7 +555,7 @@ fn ip_mcast(
             };
             addr.octets().to_vec()
         }
-        libc::IP_MULTICAST_LOOP => vec![u8::from(truthy(req, value))],
+        libc::IP_MULTICAST_LOOP => vec![u8::from(truthy(req, value)?)],
         libc::IP_MULTICAST_TTL => {
             let ttl = to_long(req, value)?;
             let Ok(ttl) = u8::try_from(ttl) else {
@@ -587,7 +587,7 @@ fn ipv6_mcast(
             };
             index.to_ne_bytes().to_vec()
         }
-        libc::IPV6_MULTICAST_LOOP => i32::from(truthy(req, value)).to_ne_bytes().to_vec(),
+        libc::IPV6_MULTICAST_LOOP => i32::from(truthy(req, value)?).to_ne_bytes().to_vec(),
         libc::IPV6_MULTICAST_HOPS => {
             let hops = to_long(req, value)?;
             if !(-1..=255).contains(&hops) {

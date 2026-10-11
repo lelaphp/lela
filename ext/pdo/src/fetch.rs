@@ -361,7 +361,7 @@ pub(super) fn value(
 fn convert(req: &mut Request, value: Value, ty: BindKind) -> Result<Option<Owner<Value>>, Thrown> {
     let scalar = match ty {
         BindKind::Int => Value::int(to_long(req, &value)?),
-        BindKind::Bool => Value::bool(truthy(req, &value)),
+        BindKind::Bool => Value::bool(truthy(req, &value)?),
         BindKind::Null => Value::null(),
         BindKind::Str => match value.as_ref() {
             ValueRef::Bool(false) => return crate::string(req, b"0").map(Some),

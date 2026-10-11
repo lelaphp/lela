@@ -468,7 +468,7 @@ impl ObjectHandlers for WeakMapHandlers {
             return Ok(false);
         };
         if not_empty {
-            return Ok(crate::ops::is_true(req, &value.deref()));
+            return crate::ops::is_true(req, &value.deref());
         }
         Ok(value.deref().tag() != crate::api::values::TypeTag::Null)
     }

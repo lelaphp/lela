@@ -350,7 +350,7 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
             }
         }
         b"bool" | b"boolean" => {
-            let truth = truthy(req, &current);
+            let truth = truthy(req, &current)?;
             Owner::bool(truth)
         }
         b"null" => Owner::null(),
@@ -524,7 +524,7 @@ fn floatval(req: &mut Request, value: Value) -> Result<f64, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn boolval(req: &mut Request, value: Value) -> bool {
+fn boolval(req: &mut Request, value: Value) -> Result<bool, Thrown> {
     truthy(req, &value)
 }
 

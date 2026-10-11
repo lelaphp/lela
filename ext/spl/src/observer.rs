@@ -1689,7 +1689,7 @@ impl ObjectHandlers for Handlers {
         })?;
         match found {
             None => Ok(false),
-            Some(inf) if not_empty => Ok(truthy(req, &inf)),
+            Some(inf) if not_empty => truthy(req, &inf),
             Some(_) => Ok(true),
         }
     }

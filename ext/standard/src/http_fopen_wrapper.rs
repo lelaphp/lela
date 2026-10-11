@@ -294,10 +294,10 @@ impl HttpOptions {
             .as_ref()
             .and_then(filled);
         if let Some(value) = get(req, b"http", b"request_fulluri") {
-            options.request_fulluri = Some(truthy(req, &value));
+            options.request_fulluri = Some(truthy(req, &value)?);
         }
         if let Some(value) = get(req, b"http", b"follow_location") {
-            options.follow_location = Some(truthy(req, &value));
+            options.follow_location = Some(truthy(req, &value)?);
         }
         if let Some(value) = get(req, b"http", b"max_redirects") {
             options.max_redirects = Some(to_long(req, &value)?);
@@ -309,10 +309,10 @@ impl HttpOptions {
             options.timeout = Some(to_double(req, &value)?);
         }
         if let Some(value) = get(req, b"http", b"ignore_errors") {
-            options.ignore_errors = truthy(req, &value);
+            options.ignore_errors = truthy(req, &value)?;
         }
         if let Some(value) = get(req, b"http", b"auto_decode") {
-            options.auto_decode = Some(truthy(req, &value));
+            options.auto_decode = Some(truthy(req, &value)?);
         }
         Ok(options)
     }

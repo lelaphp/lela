@@ -742,6 +742,7 @@ impl ObjectHandlers for TokenListHandlers {
             let value = item_value(req, object, index)?;
             let answer = truthy(req, &value);
             value.give_up(req);
+            let answer = answer?;
             return Ok(answer);
         }
         let n = tokens(req, object).len();

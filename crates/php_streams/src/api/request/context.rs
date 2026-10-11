@@ -515,13 +515,13 @@ impl StreamCtx {
             (b"so_broadcast", &mut options.so_broadcast),
         ] {
             if let Some(value) = self.option(req, b"socket", name) {
-                *flag = truthy(req, &value);
+                *flag = truthy(req, &value)?;
             }
         }
         if let Some(value) = self.option(req, b"socket", b"ipv6_v6only")
             && !matches!(value.as_ref(), ValueRef::Null)
         {
-            options.ipv6_v6only = Some(truthy(req, &value));
+            options.ipv6_v6only = Some(truthy(req, &value)?);
         }
         Ok(options)
     }

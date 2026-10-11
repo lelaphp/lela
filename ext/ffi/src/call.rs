@@ -301,7 +301,7 @@ fn pass_arg(
                 }
             }
             Scalar::Bool => {
-                let truth = truthy(req, arg);
+                let truth = truthy(req, arg)?;
                 ffi::write(slot, u8::from(truth));
                 Layout::U8
             }

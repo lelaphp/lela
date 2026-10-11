@@ -2266,7 +2266,7 @@ fn evaluate_node(
                 b"-" => crate::ops::mul(req, &Value::int(-1), &operand),
                 b"+" => crate::ops::add(req, &Value::int(0), &operand),
                 b"~" => crate::ops::bitwise_not(req, &operand),
-                b"!" => Ok(Value::bool(!crate::ops::is_true(req, &operand))),
+                b"!" => crate::ops::is_true(req, &operand).map(|truth| Value::bool(!truth)),
                 _ => Err(invalid_operations(req)),
             };
             req.release(operand);
@@ -2278,7 +2278,14 @@ fn evaluate_node(
             otherwise,
         } => {
             let held = evaluate(req, cond, scope)?;
-            let taken = match (crate::ops::is_true(req, &held), then) {
+            let truth = match crate::ops::is_true(req, &held) {
+                Ok(truth) => truth,
+                Err(thrown) => {
+                    req.release(held);
+                    return Err(thrown);
+                }
+            };
+            let taken = match (truth, then) {
                 (true, None) => return Ok(held),
                 (true, Some(then)) => then,
                 (false, _) => otherwise,
@@ -2291,7 +2298,7 @@ fn evaluate_node(
         ConstExpr::Cast { to, operand, .. } => {
             let value = evaluate(req, operand, scope)?;
             let cast = if *to == IS_BOOL {
-                Ok(Value::bool(crate::ops::is_true(req, &value)))
+                crate::ops::is_true(req, &value).map(Value::bool)
             } else {
                 match crate::ops::CastTo::of(*to) {
                     Some(to) => crate::ops::cast(req, &value, to),
@@ -2515,13 +2522,13 @@ fn binary_node(
             let lhs = evaluate(req, lhs, scope)?;
             let held = crate::ops::is_true(req, &lhs);
             req.release(lhs);
-            if held == or {
+            if held? == or {
                 return Ok(Value::bool(or));
             }
             let rhs = evaluate(req, rhs, scope)?;
             let held = crate::ops::is_true(req, &rhs);
             req.release(rhs);
-            Ok(Value::bool(held))
+            held.map(Value::bool)
         }
         b"??" => {
             let lhs = chain(req, lhs, scope, true)?.value;

@@ -347,7 +347,7 @@ fn assert(
     arity(req, 1, Some(2))?;
     let assertion = assertion.value();
     let description = description.hold(req)?;
-    if truthy(req, &assertion) {
+    if truthy(req, &assertion)? {
         return Ok(true);
     }
     let described = match description {

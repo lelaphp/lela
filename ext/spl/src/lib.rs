@@ -293,6 +293,7 @@ fn valid(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     let answered = method(req, object, b"valid")?;
     let valid = truthy(req, &answered);
     answered.give_up(req);
+    let valid = valid?;
     Ok(valid)
 }
 

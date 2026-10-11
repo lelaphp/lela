@@ -153,6 +153,20 @@ impl ObjectHandlers for Donc {
 /// sd
 /// ```
 ///
+/// A native that asks the truth leaves with the request: `array_filter`
+/// calls its callback once, and the fatal is raised once, as
+/// `zend_bailout` longjmps out of the native.
+///
+/// ```php
+/// var_dump(array_filter([1, 2, 3], function ($x) { echo "cb $x\n"; return new LongCastableNoOperations(1); }));
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+/// cb 1
+///
+/// Recoverable fatal error: Object of class LongCastableNoOperations could not be converted to bool in %s on line 2
+/// ```
+///
 /// A user error handler that takes it lets the request go on, the truth
 /// `false`.
 ///

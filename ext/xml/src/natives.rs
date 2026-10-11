@@ -746,13 +746,13 @@ fn xml_parser_set_option(
     };
     match option {
         Setting::CaseFolding => {
-            let on = truthy(req, &value);
+            let on = truthy(req, &value)?;
             if let Some(p) = parser_mut(req, object) {
                 p.options.case_folding = on;
             }
         }
         Setting::SkipWhite => {
-            let on = truthy(req, &value);
+            let on = truthy(req, &value)?;
             if let Some(p) = parser_mut(req, object) {
                 p.options.skip_white = on;
             }
@@ -765,7 +765,7 @@ fn xml_parser_set_option(
                     "Cannot change option XML_OPTION_PARSE_HUGE while parsing",
                 ));
             }
-            let on = truthy(req, &value);
+            let on = truthy(req, &value)?;
             if let Some(p) = parser_mut(req, object) {
                 p.options.parse_huge = on;
             }
