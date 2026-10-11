@@ -753,6 +753,14 @@ with = "git commit"
 text = "A commit is never rewritten: make a new one. An amend of a pushed commit forks main from origin (#2267)."
 
 [[rule]]
+id = "git.operation"
+tool = "Bash"
+where = "operating"   # grammar: where, a checkout holding a merge, cherry-pick, revert, rebase or am the calling session did not start (#2476)
+deny_argv = ["add", "stage", "commit", "rm", "mv", "restore", "reset", "apply", "merge", "cherry-pick", "revert", "rebase", "am"]
+with = "git"
+text = "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage or step there lands in its commit: wait for it to end, or work in your own worktree (#2476)."
+
+[[rule]]
 id = "ticket.close"
 tool = "Bash"
 deny_argv = ["close", "reopen"]

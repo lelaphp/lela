@@ -36,6 +36,9 @@ pub(crate) struct Row {
     failed: Option<u64>,
     /// Those that differ under an accepted registry row.
     diverged: Option<u64>,
+    /// Those an accepted `trace:` row covers, held to their pinned
+    /// verdict against the engine alone (#1728).
+    covered: Option<u64>,
     /// Those with no verdict pinned yet.
     unpinned: Option<u64>,
     /// Those the lane skipped.
@@ -68,6 +71,7 @@ impl PerReading for Row {
             passed: n(numbers::PASSED),
             failed: n(numbers::FAILED),
             diverged: n(numbers::DIVERGED),
+            covered: n(numbers::COVERED),
             unpinned: n(numbers::UNPINNED),
             skipped: n(numbers::SKIPPED),
             not_run: n(numbers::NOT_RUN),
@@ -91,8 +95,9 @@ mod tests {
         every::reading(super::INSTRUMENT, scope, counts)
     }
 
-    /// A crate's tally renders count for count, and a reading that counts
-    /// nothing, the harness's skip or a run cut short, renders nulls.
+    /// A crate's tally renders count for count, `covered` beside `diverged`
+    /// (#2509), and a reading that counts nothing, the harness's skip, a
+    /// run cut short or one from before `covered` was kept, renders nulls.
     #[test]
     fn a_tally_renders_count_for_count_and_none_as_null() {
         let engine = Row::of(&reading(
@@ -102,6 +107,7 @@ mod tests {
                 ("passed", 897),
                 ("failed", 1),
                 ("diverged", 2),
+                ("covered", 3),
                 ("subjects", 1200),
                 ("missing", 0),
                 ("wall_ms", 81_000),
@@ -113,12 +119,16 @@ mod tests {
                 engine.passed,
                 engine.failed,
                 engine.diverged,
+                engine.covered,
                 engine.subjects
             ),
-            (Some(900), Some(897), Some(1), Some(2), Some(1200))
+            (Some(900), Some(897), Some(1), Some(2), Some(3), Some(1200))
         );
         let cut = Row::of(&reading("ext/standard", &[("in_flight", 3), ("signal", 9)]));
-        assert_eq!((cut.run, cut.passed, cut.failed), (None, None, None));
+        assert_eq!(
+            (cut.run, cut.passed, cut.failed, cut.covered),
+            (None, None, None, None)
+        );
         let line = serde_json::to_value(&cut).unwrap();
         assert_eq!(
             (&line["v"], line.get("wall_ms")),
