@@ -1,8 +1,9 @@
 //! `xtask clippy` and `xtask test` measure every crate in one cargo run
-//! (#2165). The fixture at `xtask/fixtures/test/batch` is seven crates:
+//! (#2165). The fixture at `xtask/fixtures/test/batch` is nine crates:
 //! one clean, one carrying a lint, one built on it, one that does not
 //! compile, one built on that, a proc-macro crate, and one whose lint is
-//! behind a feature (#140). Each crate's reading out of the one run is the
+//! behind a feature (#140), and two hosts whose binaries turn a feature of
+//! `php_heap` on and off (#2606). Each crate's reading out of the one run is the
 //! reading a run over it alone gives: a crate's lint is its own and blocks
 //! none above it, and a crate that does not compile stops only the crates
 //! built on it.
@@ -23,7 +24,7 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test/batch")
 }
 
-const CRATES: [&str; 7] = [
+const CRATES: [&str; 9] = [
     "php_heap",
     "php_unit",
     "php_syntax",
@@ -31,6 +32,8 @@ const CRATES: [&str; 7] = [
     "php_engine",
     "php_macros",
     "php_link",
+    "sapi/cli",
+    "sapi/makala",
 ];
 
 /// The fixture as a repository of its own, committed once, with the
@@ -159,6 +162,14 @@ fn one_test_run_reads_each_crate_as_a_run_over_it_alone() {
         Status::Pass,
         "a test run turns on no feature, so the lint behind one is not built"
     );
+    // Each host's test starts its binary and holds it to the features its
+    // own package turns on: makala's, built beside cli's, would carry
+    // cli's `loud` (#2606).
+    for host in ["sapi/cli", "sapi/makala"] {
+        let reading = of(&all, host);
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(int(reading, "passed"), 1, "{reading:#?}");
+    }
     for broken in ["php_compile", "php_engine"] {
         let reading = of(&all, broken);
         assert_eq!(reading.status, Status::Fail, "{reading:#?}");

@@ -1,9 +1,10 @@
 # The fixture workspace of #2165: one crate clean, one with a lint, one
 # built on it, one that does not compile, one built on that, a
-# proc-macro crate, and one whose lint is behind a feature (#140).
+# proc-macro crate, one whose lint is behind a feature (#140), and two
+# hosts whose binaries turn a feature of php_heap on and off (#2606).
 [workspace]
 resolver = "3"
-members = ["crates/php_heap", "crates/php_macros", "crates/php_unit", "crates/php_syntax", "crates/php_compile", "crates/php_engine", "crates/php_link"]
+members = ["crates/php_heap", "crates/php_macros", "crates/php_unit", "crates/php_syntax", "crates/php_compile", "crates/php_engine", "crates/php_link", "sapi/cli", "sapi/makala"]
 
 [workspace.package]
 edition = "2024"

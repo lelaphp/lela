@@ -2,7 +2,9 @@
 //! names, in the shapes it calls them, and nothing behind them, so `clippy`
 //! checks the laid-down crate without building an engine (#2524). Each
 //! public item is one of the real facade's, as `tests/new_sapi.rs` holds
-//! (#2544).
+//! (#2544), in its shape: a field one of the real item's `pub` fields, a
+//! function's parameters as many as the real one's and each written as
+//! the real one writes it where it names no generic (#2545).
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
@@ -74,7 +76,7 @@ impl Engine {
 impl EngineBuilder {
     /// The host's name.
     #[must_use]
-    pub fn sapi_name(self, _name: &str) -> Self {
+    pub fn sapi_name(self, _name: &'static str) -> Self {
         self
     }
 
@@ -86,7 +88,7 @@ impl EngineBuilder {
 
     /// The `configure` switches.
     #[must_use]
-    pub fn configure(self, _switches: &[&str]) -> Self {
+    pub fn configure(self, _switches: &'static [&'static str]) -> Self {
         self
     }
 

@@ -39,6 +39,8 @@
 //! instrument states about the same call is the other thing — that the
 //! paired rig is honest about it.
 
+pub(crate) mod row;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -209,7 +211,13 @@ fn stats(samples: &[f64]) -> Stats {
 /// §4.3: whether the paired delta's sign is established. `<=` and `>=` and
 /// not `<` and `>`, since a quartile exactly at zero still straddles it.
 fn sign_of(delta: &Stats) -> &'static str {
-    if delta.n < MIN_REPS_TO_RESOLVE || (delta.q1 <= 0.0 && delta.q3 >= 0.0) {
+    sign(delta.n, delta.q1, delta.q3)
+}
+
+/// [`sign_of`] over a delta's reps and quartiles, as a reading keeps them:
+/// the one rule a run and a row of its reading judge by (`row`, #2646).
+pub(crate) fn sign(n: usize, q1: f64, q3: f64) -> &'static str {
+    if n < MIN_REPS_TO_RESOLVE || (q1 <= 0.0 && q3 >= 0.0) {
         SWAMPED
     } else {
         RESOLVED
