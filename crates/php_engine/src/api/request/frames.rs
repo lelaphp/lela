@@ -819,13 +819,14 @@ impl Request {
 
     /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3694`,
     /// `:3818`): `class` and the callee it answered into `slot`, with
+    /// whether the callee takes `$this` ([`Request::takes_this`]) and
     /// `frame`'s scope as the key [`Request::cached_callee`] reads back.
     pub(crate) fn prime_callee(
         &mut self,
         frame: FrameRef,
         slot: CacheSlot,
         class: crate::api::values::ClassId,
-        function: Function,
+        (function, instance): (Function, bool),
     ) {
         let scope = self.frame_scope(frame);
         let from = self
@@ -833,9 +834,6 @@ impl Request {
             .at(frame)
             .filter(|header| header.closure.is_none())
             .and_then(|header| header.function);
-        let instance = self
-            .method_decl(function)
-            .is_some_and(|decl| decl.is_instance);
         self.prime(
             frame,
             slot,
@@ -914,6 +912,15 @@ impl Request {
             typed,
         };
         self.prime(frame, slot, cached);
+    }
+
+    /// `!(fbc->common.fn_flags & ZEND_ACC_STATIC)`: whether the method
+    /// `function` takes `$this`, read off its declaration, what a
+    /// method call's lookup asks once and the cache slot then holds
+    /// beside the callee ([`exec::Cached::ClassAndCallee`]).
+    pub(crate) fn takes_this(&self, function: Function) -> bool {
+        self.method_decl(function)
+            .is_some_and(|decl| decl.is_instance)
     }
 
     /// The room on the VM stack a call to `function` takes when its

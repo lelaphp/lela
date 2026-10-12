@@ -5157,13 +5157,13 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // The pair answers where it holds this pass's class and was written
     // from this frame's scope ([`Request::cached_callee`]).
     let cached_callee = match (op.op2_type, primed) {
-        (OperandKind::Const, Cached::ClassAndCallee { .. }) => req
-            .cached_callee(frame, slot, class)
-            .map(|(function, _)| function),
+        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
+            req.cached_callee(frame, slot, class)
+        }
         _ => None,
     };
-    if let Some(function) = cached_callee {
-        return static_call_frame(req, frame, op, class, function);
+    if let Some((function, instance)) = cached_callee {
+        return static_call_frame(req, frame, op, class, (function, instance));
     }
     let mut uncached = false;
     let function = match op.op2_type {
@@ -5220,10 +5220,11 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // a callee reached through a trampoline, one marked
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
+    let instance = req.takes_this(function);
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
-        req.prime_callee(frame, slot, class, function);
+        req.prime_callee(frame, slot, class, (function, instance));
     }
-    static_call_frame(req, frame, op, class, function)
+    static_call_frame(req, frame, op, class, (function, instance))
 }
 
 /// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
@@ -5290,7 +5291,10 @@ fn static_call_named(
     let this = req.vm().this(frame);
     let found = static_method(req, class, &method.lowered(), &method.written, this);
     let edge = match found {
-        Ok((function, _)) => static_call_frame(req, frame, op, class, function),
+        Ok((function, _)) => {
+            let instance = req.takes_this(function);
+            static_call_frame(req, frame, op, class, (function, instance))
+        }
         Err(thrown) => threw(req, frame, &thrown),
     };
     method.release(req);
@@ -5301,13 +5305,15 @@ fn static_call_named(
 /// callee, whether the slot answered or the tables did: php's
 /// `!(fbc->common.fn_flags & ZEND_ACC_STATIC)` rule, which is applied
 /// on every pass and not only the one that resolved, and the call frame
-/// over the class as its called scope.
+/// over the class as its called scope. `callee` is the function with
+/// whether it takes `$this`, which the cache slot holds beside it and
+/// a pass that looked it up read once ([`Request::takes_this`]).
 fn static_call_frame(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
     class: crate::api::values::ClassId,
-    function: Function,
+    (function, instance): (Function, bool),
 ) -> Edge {
     // `if (!(fbc->common.fn_flags & ZEND_ACC_STATIC))`: an instance
     // method takes the calling frame's `$this` where it is an instance
@@ -5315,10 +5321,7 @@ fn static_call_frame(
     // through `self` or `parent` forwards the calling frame's called
     // scope, `Z_OBJCE(EX(This))` or `Z_CE(EX(This))`.
     let receiver = req.vm().this(frame);
-    let (this, called) = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let (this, called) = if instance {
         let Some(this) = receiver.filter(|this| req.instance_of(this.class(), class)) else {
             let thrown = non_static_method_call(req, function);
             return threw(req, frame, &thrown);
@@ -5833,12 +5836,10 @@ fn method_of_call(
         &method.written,
         Undefined::OnCalled,
     )?;
+    let instance = req.takes_this(function);
     if named && receiver.is_none() && !req.never_cached(function) {
-        req.prime_callee(frame, slot, class, function);
+        req.prime_callee(frame, slot, class, (function, instance));
     }
-    let instance = req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance);
     Ok((function, receiver, instance))
 }
 
