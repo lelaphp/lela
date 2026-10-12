@@ -39,7 +39,9 @@ mod text;
 mod zend;
 
 use ffi::mbfl::{Encoding, Language};
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OrFalse, Path, Union};
+use php_ext::abi::{
+    Dependency, DependencyKind, Extension, ExtensionBuilder, LongHandler, OrFalse, Path, Union,
+};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
@@ -161,6 +163,9 @@ pub fn extension() -> Extension {
         .rshutdown(rshutdown);
     for (name, handler) in settings::handlers() {
         builder = builder.on_modify(name, handler);
+    }
+    for name in settings::LONGS {
+        builder = builder.on_update_long(name, LongHandler::Any);
     }
     builder.build("mbstring")
 }

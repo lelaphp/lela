@@ -692,6 +692,9 @@ pub(crate) fn entries() -> Vec<IniDecl> {
     ]
 }
 
+/// The two entries `PHP_INI_BEGIN()` declares with `OnUpdateLong`.
+pub(crate) const LONGS: [&[u8]; 2] = [b"mbstring.regex_stack_limit", b"mbstring.regex_retry_limit"];
+
 /// The two `STD_PHP_INI_BOOLEAN` entries.
 pub(crate) fn is_boolean(name: &[u8]) -> bool {
     name == b"mbstring.encoding_translation" || name == b"mbstring.strict_detection"
