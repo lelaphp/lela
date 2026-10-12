@@ -112,17 +112,17 @@ pub(super) struct Diagnostics {
     /// by `error_get_last()` as its `trace`: the array, one owner held
     /// here, beside its rendering.
     last_fatal_error_backtrace: Option<(Option<PhpArray>, String)>,
-    /// php's `EG(user_error_handler)`, the handler `set_error_handler`
-    /// installed, `IS_UNDEF` as none; the stack under it is
-    /// `EG(user_error_handlers)`, each row the handler it replaced and
-    /// that handler's mask, `EG(user_error_handlers_error_reporting)`
-    /// kept beside it. Every handler here is one owner of its value.
     /// `EG(error_handling)` at `EH_THROW` with `EG(exception_class)`: the
     /// class a warning is thrown as meanwhile, `None` at `EH_NORMAL`.
     error_handling: Option<String>,
     /// What a warning was thrown as under `EH_THROW`, held until the
     /// native that asked for it hands it on.
     error_handling_thrown: Option<Thrown>,
+    /// php's `EG(user_error_handler)`, the handler `set_error_handler`
+    /// installed, `IS_UNDEF` as none; the stack under it is
+    /// `EG(user_error_handlers)`, each row the handler it replaced and
+    /// that handler's mask, `EG(user_error_handlers_error_reporting)`
+    /// kept beside it. Every handler here is one owner of its value.
     error_handler: Option<Callable>,
     /// `EG(user_error_handler_error_reporting)`: the levels the handler
     /// is handed, `set_error_handler`'s `$error_levels`.
