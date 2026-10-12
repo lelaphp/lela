@@ -395,22 +395,21 @@ pub(crate) fn number(kind: SyntaxKind, text: &[u8]) -> Number {
         None => (Radix::Decimal, 0),
     };
     // The digits as written, `_` dropped, up to the byte the radix
-    // does not take.
-    let mut digits: Vec<u8> = Vec::with_capacity(text.len());
-    let mut bad_digit = None;
-    for (i, &b) in text.iter().enumerate().skip(first) {
-        if b == b'_' {
-            continue;
-        }
-        if radix.digit(b).is_none() {
-            bad_digit = Some(i);
-            break;
-        }
-        digits.push(b);
-    }
+    // does not take: read in place, since a literal is read once per
+    // compile and nearly every one fits a long.
+    let bad_digit = text
+        .iter()
+        .enumerate()
+        .skip(first)
+        .find(|&(_, &b)| b != b'_' && radix.digit(b).is_none())
+        .map(|(i, _)| i);
+    let written = text
+        .get(first..bad_digit.unwrap_or(text.len()))
+        .unwrap_or_default();
+    let digits = || written.iter().filter(|&&b| b != b'_');
     let base = radix.base();
     let mut long: i64 = 0;
-    let fits = digits.iter().all(|&b| {
+    let fits = digits().all(|&b| {
         match long
             .checked_mul(i64::from(base))
             .and_then(|v| v.checked_add(i64::from(radix.digit(b).unwrap_or(0))))
@@ -425,10 +424,10 @@ pub(crate) fn number(kind: SyntaxKind, text: &[u8]) -> Number {
     let value = if fits {
         TokenValue::Int(long)
     } else if radix == Radix::Decimal {
-        let digits: String = digits.iter().map(|&b| char::from(b)).collect();
+        let digits: String = digits().map(|&b| char::from(b)).collect();
         TokenValue::Float(digits.parse().unwrap_or(0.0))
     } else {
-        TokenValue::Float(digits.iter().fold(0.0, |value, &b| {
+        TokenValue::Float(digits().fold(0.0, |value, &b| {
             let step = value * f64::from(base);
             match radix {
                 // `value = value * 16 + c`, `c` the digit's worth.

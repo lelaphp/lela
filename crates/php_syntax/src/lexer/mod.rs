@@ -175,6 +175,57 @@ pub(crate) struct StateFrame {
     pub(crate) aux: StateAux,
 }
 
+/// The state stack: the base state, which is never popped, and the
+/// states pushed above it, the last of them the active one. The base
+/// stands inline, so a source that pushes no state, an `eval` of a
+/// statement or two, allocates nothing for the stack.
+pub(crate) struct States {
+    base: StateFrame,
+    above: Vec<StateFrame>,
+}
+
+impl States {
+    fn new(base: StateFrame) -> States {
+        States {
+            base,
+            above: Vec::new(),
+        }
+    }
+
+    /// The active entry.
+    pub(crate) fn top(&self) -> &StateFrame {
+        self.above.last().unwrap_or(&self.base)
+    }
+
+    /// The active entry, to replace or annotate.
+    pub(crate) fn top_mut(&mut self) -> &mut StateFrame {
+        match self.above.last_mut() {
+            Some(top) => top,
+            None => &mut self.base,
+        }
+    }
+
+    /// How many entries stand, the base among them.
+    pub(crate) fn depth(&self) -> usize {
+        self.above.len() + 1
+    }
+
+    /// Every entry, the base first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &StateFrame> {
+        std::iter::once(&self.base).chain(&self.above)
+    }
+
+    /// A state pushed above the active one.
+    fn push(&mut self, frame: StateFrame) {
+        self.above.push(frame);
+    }
+
+    /// The active state popped, unless it is the base, which stays.
+    fn pop(&mut self) {
+        self.above.pop();
+    }
+}
+
 /// Progress of the `__halt_compiler ( ) ;` recognizer, `?>` standing as
 /// the `;`. Armed when `HALT_COMPILER_KW` is emitted in `Scripting`,
 /// disarmed when the next significant tokens deviate from `( ) ;`.
@@ -210,8 +261,8 @@ pub(crate) struct Lexer<'a> {
     pub(crate) short_open_tag: bool,
     /// Current scan position; always a token boundary between dispatches.
     pub(crate) pos: usize,
-    /// The state stack; the last element is the active state.
-    pub(crate) frames: Vec<StateFrame>,
+    /// The state stack ([`States`]).
+    pub(crate) frames: States,
     pub(crate) tokens: Vec<Token>,
     pub(crate) diags: Vec<Diagnostic>,
     halt: HaltStage,
@@ -243,7 +294,7 @@ impl<'a> Lexer<'a> {
             lines,
             short_open_tag: options.short_open_tag,
             pos: 0,
-            frames: vec![StateFrame {
+            frames: States::new(StateFrame {
                 state: match options.position {
                     Position::AtOpenTag | Position::AtShebang => State::InlineHtml,
                     Position::AfterOpenTag => State::Scripting,
@@ -252,8 +303,11 @@ impl<'a> Lexer<'a> {
                     opener: here,
                     heredoc: None,
                 },
-            }],
-            tokens: Vec::new(),
+            }),
+            // php source runs four to six bytes a token: room for a
+            // token every four, so a small source never grows the stream
+            // and a large one seldom does.
+            tokens: Vec::with_capacity(text.len() / 4 + 4),
             diags: Vec::new(),
             halt: HaltStage::Off,
             emitted: 0,
@@ -266,7 +320,7 @@ impl<'a> Lexer<'a> {
         }
         while self.pos < self.text.len() {
             #[cfg(debug_assertions)]
-            let before = (self.pos, self.frames.len(), self.state_kind());
+            let before = (self.pos, self.frames.depth(), self.state_kind());
             match self.state_kind() {
                 StateKind::InlineHtml => self.lex_inline_html(),
                 StateKind::Scripting => self.lex_scripting(),
@@ -283,7 +337,7 @@ impl<'a> Lexer<'a> {
             // state stack.
             #[cfg(debug_assertions)]
             debug_assert!(
-                (self.pos, self.frames.len(), self.state_kind()) != before,
+                (self.pos, self.frames.depth(), self.state_kind()) != before,
                 "lexer made no progress at offset {} in {:?}",
                 self.pos,
                 before.2,
@@ -297,11 +351,9 @@ impl<'a> Lexer<'a> {
     }
 
     /// The active (top-of-stack) state. The base state is never popped, so
-    /// the stack is never empty; an empty one reads as Zend's `INITIAL`.
+    /// the stack is never empty.
     pub(crate) fn active_state(&self) -> &State {
-        self.frames
-            .last()
-            .map_or(&State::InlineHtml, |frame| &frame.state)
+        &self.frames.top().state
     }
 
     fn state_kind(&self) -> StateKind {
@@ -376,10 +428,8 @@ impl<'a> Lexer<'a> {
 
     /// Zend `yy_pop_state()`. The base state stays.
     pub(crate) fn pop_state(&mut self) {
-        debug_assert!(self.frames.len() > 1, "popping the base state");
-        if self.frames.len() > 1 {
-            self.frames.pop();
-        }
+        debug_assert!(self.frames.depth() > 1, "popping the base state");
+        self.frames.pop();
     }
 
     /// Zend `BEGIN(state)`: replace the active state, keep the stack below.
@@ -391,15 +441,12 @@ impl<'a> Lexer<'a> {
                 heredoc: None,
             },
         };
-        match self.frames.last_mut() {
-            Some(top) => *top = frame,
-            None => self.frames.push(frame),
-        }
+        *self.frames.top_mut() = frame;
     }
 
     /// May `}` pop? Zend pops only when its state stack is non-empty.
     pub(crate) fn can_pop_brace(&self) -> bool {
-        self.frames.len() > 1
+        self.frames.depth() > 1
     }
 
     /// `<SHEBANG>"#!" .* {NEWLINE}`: the line and its end, `.*` running

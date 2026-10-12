@@ -91,7 +91,7 @@ pub(crate) fn expr_list_trailing(p: &mut Parser<'_>, closer: K) {
             p.error(d);
             break;
         }
-        if !p.eat(K::COMMA) || p.peek_at(closer) {
+        if !p.eat(K::COMMA) || p.at(closer) {
             break;
         }
         after_comma = true;
@@ -308,7 +308,7 @@ fn expr_bp_inner(p: &mut Parser<'_>, min_bp: u8) -> Option<Lhs> {
         if kind == K::QUESTION {
             let m = lhs.wrap(p);
             p.bump(K::QUESTION);
-            if !p.peek_at(K::COLON) {
+            if !p.at(K::COLON) {
                 // The full form: the middle is a complete expression.
                 if let Some(then) = expr_bp(p, 0) {
                     then.finish(p);
@@ -391,7 +391,7 @@ fn expr_bp_inner(p: &mut Parser<'_>, min_bp: u8) -> Option<Lhs> {
 /// attributes, or is the freshly opened marker in the bare case.
 fn static_closure_or_arrow(p: &mut Parser<'_>, m: Marker) -> CompletedMarker {
     p.bump(K::STATIC_KW);
-    if p.peek_at(K::FUNCTION_KW) {
+    if p.at(K::FUNCTION_KW) {
         decl::closure_expr(p, Some(m))
     } else {
         decl::arrow_fn_expr(p, Some(m))
@@ -517,7 +517,7 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
         K::EXIT_KW | K::DIE_KW => {
             let m = p.start();
             p.bump(kind);
-            if p.peek_at(K::L_PAREN) {
+            if p.at(K::L_PAREN) {
                 decl::arg_list(p);
             }
             done(m.complete(p, K::EXIT_EXPR))
@@ -544,7 +544,7 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
             // target, or nested in an enclosing destructuring pattern;
             // `var_dump(list($a))` is a parse error at the next token,
             // `expecting "="` (php-src list_011).
-            if !list_target_ok && !p.peek_at(K::EQ) {
+            if !list_target_ok && !p.at(K::EQ) {
                 let d = p.unexpected_here_expecting("\"=\"");
                 p.error(d);
             }
@@ -634,7 +634,7 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
         K::STATIC_KW => {
             let m = p.start();
             p.bump_remap(K::IDENT);
-            if !p.peek_at(K::COLON_COLON) && !p.grants.class_ref {
+            if !p.at(K::COLON_COLON) && !p.grants.class_ref {
                 let d = p.unexpected_here_expecting("\"::\"");
                 p.error(d);
             }
@@ -810,7 +810,7 @@ pub(crate) fn unset_operands(p: &mut Parser<'_>) {
     let mut after_comma = false;
     // `?>` is the `;` php's scanner makes of it, unexpected here with
     // no clause, and left for the enclosing construct.
-    if p.peek_at(K::CLOSE_TAG) {
+    if p.at(K::CLOSE_TAG) {
         p.error_unexpected();
     }
     // `unset_variables` is `unset_variable | unset_variables ','
@@ -819,10 +819,10 @@ pub(crate) fn unset_operands(p: &mut Parser<'_>) {
     // it, `unexpected token ")"` with no clause (probed 8.5.9). Without
     // this the list walks straight out and the statement stands with an
     // `UNSET_STMT` carrying nothing.
-    if p.peek_at(K::R_PAREN) {
+    if p.at(K::R_PAREN) {
         p.error_unexpected();
     }
-    while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
+    while !p.at_eof() && !p.at(K::R_PAREN) && !p.at(K::CLOSE_TAG) {
         // After a comma php's clause collapses to the closer
         // (`unset($x, ;` is `expecting ")"`, probed 8.5.9); at the first
         // argument the set is too large to spell.
@@ -882,10 +882,10 @@ pub(crate) fn variable_variable(p: &mut Parser<'_>) -> CompletedMarker {
                 // that cascades a second diagnostic onto the one the cap
                 // already reported.
                 let e = p.start();
-                while p.peek_at(K::DOLLAR) {
+                while p.at(K::DOLLAR) {
                     p.bump_any();
                 }
-                if p.peek_at(K::VARIABLE) {
+                if p.at(K::VARIABLE) {
                     p.bump_any();
                 }
                 e.complete(p, K::ERROR);
@@ -907,14 +907,14 @@ pub(crate) fn variable_variable(p: &mut Parser<'_>) -> CompletedMarker {
 fn yield_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(K::YIELD_KW);
-    if p.peek_at(K::FROM_KW) {
+    if p.at(K::FROM_KW) {
         p.bump(K::FROM_KW);
         operand(p, BP_YIELD);
         return m.complete(p, K::YIELD_FROM_EXPR);
     }
     // A bare `yield`, `yield $v`, or `yield $k => $v`.
     if let Some(first) = expr_bp(p, BP_YIELD) {
-        if p.peek_at(K::FAT_ARROW) {
+        if p.at(K::FAT_ARROW) {
             // What was parsed was the key (`=>` lives inside `YieldKey`).
             let key_wrap = first.wrap(p);
             p.bump(K::FAT_ARROW);
@@ -952,7 +952,7 @@ fn new_expr(p: &mut Parser<'_>) -> Lhs {
         }
         k > 0 && p.nth(k) == K::CLASS_KW
     };
-    if p.peek_at(K::CLASS_KW) || p.peek_at(K::ATTRIBUTE_OPEN) || modifiers_then_class {
+    if p.at(K::CLASS_KW) || p.at(K::ATTRIBUTE_OPEN) || modifiers_then_class {
         decl::anon_class_decl(p);
         // An anonymous class is always dereferenceable.
         return Lhs::Done(m.complete(p, K::NEW_EXPR));
@@ -965,14 +965,14 @@ fn new_expr(p: &mut Parser<'_>) -> Lhs {
         // bison-state nuance with no corpus row; the pinned clause stands.
         // Elsewhere php spells `"class"`, the anonymous class being the
         // one keyword continuation (`new ;`, probed 8.5.9).
-        let d = if p.peek_at(K::NAMESPACE_KW) {
+        let d = if p.at(K::NAMESPACE_KW) {
             p.unexpected_here_expecting("\":\"")
         } else {
             p.unexpected_here_expecting("\"class\"")
         };
         p.error(d);
     }
-    let has_args = p.peek_at(K::L_PAREN);
+    let has_args = p.at(K::L_PAREN);
     if has_args {
         decl::arg_list(p);
     }
@@ -1074,13 +1074,13 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
         p.error(d);
     }
     if p.eat(K::L_CURLY) {
-        while !p.at_eof() && !p.peek_at(K::R_CURLY) {
+        while !p.at_eof() && !p.at(K::R_CURLY) {
             let arm = p.start();
-            if p.peek_at(K::DEFAULT_KW) {
+            if p.at(K::DEFAULT_KW) {
                 p.bump(K::DEFAULT_KW);
                 // `default , => …`: the trailing comma is grammar-legal
                 // here too (php-src match/041, pinned 8.5.6).
-                if !p.peek_at(K::FAT_ARROW) {
+                if !p.at(K::FAT_ARROW) {
                     p.eat(K::COMMA);
                 }
             } else {
@@ -1101,7 +1101,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
                         break;
                     }
                     first = false;
-                    if !p.eat(K::COMMA) || p.peek_at(K::FAT_ARROW) {
+                    if !p.eat(K::COMMA) || p.at(K::FAT_ARROW) {
                         break;
                     }
                 }
@@ -1117,7 +1117,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
                 }
                 arm.complete(p, K::MATCH_ARM);
                 // Recovery: skip to `,` or `}`.
-                while !p.at_eof() && !p.peek_at(K::COMMA) && !p.peek_at(K::R_CURLY) {
+                while !p.at_eof() && !p.at(K::COMMA) && !p.at(K::R_CURLY) {
                     p.bump_any();
                 }
                 if !p.eat(K::COMMA) {
@@ -1177,25 +1177,25 @@ pub(crate) fn array_elements(p: &mut Parser<'_>, closer: K) {
     // `?>` is a hard recovery anchor: never consumed as a stray element;
     // it is the `;` php's scanner makes of it, reported here with the
     // element position's clause and left for the enclosing construct.
-    if p.peek_at(K::CLOSE_TAG) {
+    if p.at(K::CLOSE_TAG) {
         let d = p.unexpected_here_expecting(php_list_closer(closer));
         p.error(d);
     }
-    while !p.at_eof() && !p.peek_at(closer) && !p.peek_at(K::CLOSE_TAG) {
+    while !p.at_eof() && !p.at(closer) && !p.at(K::CLOSE_TAG) {
         let el = p.start();
-        if p.peek_at(K::COMMA) {
+        if p.at(K::COMMA) {
             // An elision, a fully empty element, legal only in
             // destructuring, which the compiler holds.
             el.complete(p, K::ARRAY_ELEMENT);
             p.bump(K::COMMA);
             continue;
         }
-        if p.peek_at(K::DOT_DOT_DOT) {
+        if p.at(K::DOT_DOT_DOT) {
             p.bump(K::DOT_DOT_DOT);
             operand(p, 0);
             el.complete(p, K::ARRAY_ELEMENT);
         } else {
-            let byref_first = p.peek_at(K::AMP);
+            let byref_first = p.at(K::AMP);
             if byref_first {
                 p.bump(K::AMP);
             }
@@ -1205,14 +1205,14 @@ pub(crate) fn array_elements(p: &mut Parser<'_>, closer: K) {
             // parses in php too; its rejection is the compiler's).
             p.grants.list_target = true;
             if let Some(parsed) = expr_bp(p, 0) {
-                if !byref_first && p.peek_at(K::FAT_ARROW) {
+                if !byref_first && p.at(K::FAT_ARROW) {
                     // It was the key: wrapped as `ArrayKey`, with the `=>`.
                     let key = parsed.wrap(p);
                     p.bump(K::FAT_ARROW);
                     key.complete(p, K::ARRAY_KEY);
                     first.abandon(p);
                     p.eat(K::AMP);
-                    if p.peek_at(K::DOT_DOT_DOT) {
+                    if p.at(K::DOT_DOT_DOT) {
                         // `k => ...$v` is invalid; parsed, and the
                         // compiler rejects the spread.
                         p.bump(K::DOT_DOT_DOT);
@@ -1237,7 +1237,7 @@ pub(crate) fn array_elements(p: &mut Parser<'_>, closer: K) {
             el.complete(p, K::ARRAY_ELEMENT);
         }
         if !p.eat(K::COMMA) {
-            if !p.peek_at(closer) && !p.at_eof() && at_expr_start(p) {
+            if !p.at(closer) && !p.at_eof() && at_expr_start(p) {
                 // A missing comma between elements: the repair.
                 super::missing_comma(p, php_list_closer(closer));
                 continue;
@@ -1390,7 +1390,7 @@ fn apply_trailer(p: &mut Parser<'_>, lhs: Lhs, trailer: Trailer) -> Lhs {
             // `$x[]` is legal (a push), so at `[` php spells the closer
             // beside the operand (`$x[ ;` is `expecting "]"`, probed
             // 8.5.9).
-            if !p.peek_at(K::R_BRACK) && expr_bp(p, 0).map(|e| e.finish(p)).is_none() {
+            if !p.at(K::R_BRACK) && expr_bp(p, 0).map(|e| e.finish(p)).is_none() {
                 let d = p.unexpected_here_expecting("\"]\"");
                 p.error(d);
             }
