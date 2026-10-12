@@ -194,14 +194,6 @@ impl Request {
         self.method_function(row.holder_in(class), row.at)
     }
 
-    /// [`Request::method_named`] for a method `class` declares itself,
-    /// none where the entry under the name is one it inherited.
-    fn own_method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
-        let MethodRow { row, .. } = self.method_row(class, name)?;
-        self.method_function(class, row.at)
-            .filter(|_| row.holder.is_none())
-    }
-
     /// `zend_hash_find_ptr(&ce->function_table, lcname)` as a
     /// [`MethodRow`]: the row of `class`'s function table under the
     /// name, whatever its case, which [`Request::row_method`] reads;
@@ -769,16 +761,28 @@ impl Request {
     /// ```expect
     /// M
     /// ```
+    ///
+    /// php reads the scope only for a method its flags mark
+    /// `ZEND_ACC_CHANGED`, private or protected. The scope's private
+    /// method stands in only from a class above `class` that declares
+    /// it, and such a method above a public one is what
+    /// `ZEND_ACC_CHANGED` records, since no class below a public method
+    /// can declare it private: so the scope's tests answer what the
+    /// bit would, with no walk of the ancestors and no declaration read
+    /// where the scope is none or `class` itself. A call from the
+    /// private method's class reaches it, whatever a child made public:
+    ///
+    /// ```php
+    /// class M { private function f() { return "M"; } function g() { return $this->f(); } }
+    /// class P extends M { public function f() { return "P"; } }
+    /// $p = new P;
+    /// echo $p->g(), $p->f(), "\n";
+    /// ```
+    /// ```expect
+    /// MP
+    /// ```
     pub(crate) fn std_method(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         let found = self.method_named(class, lowered)?;
-        // `zend_std_get_method` reads the scope only for a method its
-        // flags mark `ZEND_ACC_CHANGED`, private or protected: a public
-        // one no class above its own declares privately is the answer
-        // whatever the scope, since the scope's private method can
-        // stand in for it only from above it.
-        if self.method_visibility(found) == Visibility::Public && !self.changed(found, lowered) {
-            return Some(found);
-        }
         let Some(scope) = self.executed_scope() else {
             return Some(found);
         };
@@ -797,32 +801,6 @@ impl Request {
             }
             _ => Some(found),
         }
-    }
-
-    /// `ZEND_ACC_CHANGED` on `function`, which
-    /// `do_inheritance_check_on_method` sets where a class above the
-    /// method's own declares a private method of its name, found here by
-    /// walking up from its class: a call from that class's scope reaches
-    /// its private method, whatever the child made public. The walk is
-    /// cut at a depth no declaration can make.
-    ///
-    /// ```php
-    /// class M { private function f() { return "M"; } function g() { return $this->f(); } }
-    /// class P extends M { public function f() { return "P"; } }
-    /// $p = new P;
-    /// echo $p->g(), $p->f(), "\n";
-    /// ```
-    /// ```expect
-    /// MP
-    /// ```
-    fn changed(&self, function: Function, lowered: &[u8]) -> bool {
-        let Some(class) = self.method_class(function) else {
-            return false;
-        };
-        self.ancestors(class).any(|class| {
-            self.own_method_named(class, lowered)
-                .is_some_and(|own| self.method_visibility(own) == Visibility::Private)
-        })
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`) with
