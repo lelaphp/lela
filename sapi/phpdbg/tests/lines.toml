@@ -640,3 +640,38 @@ args = ["-qIb", "-n", "{dir}/f.php"]
 files = { "f.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nclass A { function b() { return 2; } }\nfoo();\n(new A)->b();\n" }
 stdin = "b foo#0\nb foo#0\nb baz#0\nb baz#0\nb A::b#0\nb A::b#0\ni b\nq\n"
 mask = [['#\d{10,}', '#N']]
+
+# A breakpoint stops a run between two handlers, `ev` evaluates in the frame
+# stopped in, and `c` runs on to the end (#2507).
+[[line]]
+name = "a-run-stops-at-a-breakpoint-and-evaluates-in-the-frame"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$i = 1;\necho PHP_SAPI, $i++, \"\\n\";\necho $i, \"\\n\";\n" }
+stdin = "b 4\nr\nev $i * 10\nc\nq\n"
+
+# A step from a function's breakpoint stops at the next line, and the end of
+# stdin quits (#2507).
+[[line]]
+name = "a-step-stops-at-the-next-line-and-the-end-of-input-quits"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f() {\n\treturn 1;\n}\nf();\n" }
+stdin = "b f\nr\ns\n"
+
+# A watchpoint's report writes the values through the program's output, so
+# its first byte sends the headers and the header callback runs under the
+# debugger, which stops in it on the same change before the report goes on
+# (`sapi/phpdbg/tests/gh15210_002.phpt`'s shape, #2507).
+[[line]]
+name = "a-watch-report-sends-the-headers-and-the-callback-is-debugged"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nheader_register_callback(function() { echo \"sent\";});\n$a = [0];\n$a[0] = 1;\n" }
+stdin = "b 4\nr\nw $a[0]\nc\nc\nq\n"
+
+# `phpdbg_prompt()` and `phpdbg_break_function()`, natives the prompt serves
+# through `register` and `ev`, read and write the session they are called in
+# (#2507).
+[[line]]
+name = "a-native-the-prompt-serves-reads-the-session"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f() {\n  echo \"in f\\n\";\n}\nf();\necho \"done\\n\";\n" }
+stdin = "register phpdbg_prompt\nphpdbg_prompt y>\nev phpdbg_break_function(\"f\")\nr\nq\n"

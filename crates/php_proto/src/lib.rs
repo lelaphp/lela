@@ -24,3 +24,11 @@ pub mod fcgi;
 pub mod http;
 pub mod mime;
 pub mod vpath;
+
+/// `bytes` as php reads a `char *` through `strlen`: the bytes before the
+/// first NUL. A file system call reads a path so, and so does every value
+/// php registers without its length.
+#[must_use]
+pub fn c_str(bytes: &[u8]) -> &[u8] {
+    bytes.split(|&b| b == 0).next().unwrap_or(bytes)
+}

@@ -587,13 +587,39 @@ pub trait OutputSink: Any {
 pub struct Dispatched {
     /// What the router answered; `Taken` where there is none.
     pub routed: Routed,
-    /// `SG(sapi_headers).http_response_code` just after the program ran,
-    /// where one was served.
-    pub code: Option<i64>,
-    /// `PG(last_error_message)`, `PG(last_error_file)` and
-    /// `PG(last_error_lineno)` then, where `PG(last_error_type)` is one of
-    /// `E_FATAL_ERRORS`.
-    pub fatal: Option<(String, Vec<u8>, u32)>,
+    /// What `php_cli_server_dispatch_script` did with the program, where
+    /// the request named one and no router took it.
+    pub program: Option<ProgramServed>,
+}
+
+/// What `php_cli_server_dispatch_script` did with a program
+/// (`Z/sapi/cli/php_cli_server.c:2125`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramServed {
+    /// It ran.
+    Ran {
+        /// `SG(sapi_headers).http_response_code` just after it.
+        code: i64,
+        /// `PG(last_error_message)`, `PG(last_error_file)` and
+        /// `PG(last_error_lineno)` then, where `PG(last_error_type)` is
+        /// one of `E_FATAL_ERRORS`.
+        fatal: Option<(String, Vec<u8>, u32)>,
+    },
+    /// Its path holds a NUL, which php refuses
+    /// (`can't handle paths that contain nul bytes`): it was never served,
+    /// and the 400 php logs is of a page it built and never sent, the
+    /// request ending with the head it had.
+    NulInPath,
+}
+
+/// What a request [`Engine::dispatch`] serves names after its router.
+enum Named {
+    /// No program: a static file's request.
+    Nothing,
+    /// A program to serve.
+    Program,
+    /// A program whose path holds a NUL.
+    NulInPath,
 }
 
 /// What the built-in server's router answered, `decline` in
@@ -5021,7 +5047,9 @@ impl Engine {
     /// it declined, the program the request names is served in the same
     /// request, and the response code and the last error just after it
     /// are what `php_cli_server_log_response` writes, a 304 then
-    /// committing no default `Content-type`. A request the router declined
+    /// committing no default `Content-type`; a program whose path holds a
+    /// NUL is never served, and the request ends with the head it has
+    /// ([`ProgramServed::NulInPath`]). A request the router declined
     /// that names no program is a static file, the host's to send, and
     /// the request ends with its head not sent
     /// (`sapi_cli_server_discard_headers`).
@@ -5031,11 +5059,17 @@ impl Engine {
         router: Option<&[u8]>,
         sink: Box<dyn OutputSink + Send>,
     ) -> (Observables, Dispatched, Box<dyn OutputSink + Send>) {
-        let program = description.script_name.is_some();
+        // `php_cli_server_dispatch_script`'s check
+        // (`Z/sapi/cli/php_cli_server.c:2127`): a path holding a NUL is
+        // one php refuses.
+        let named = match description.script_name.as_deref() {
+            None => Named::Nothing,
+            Some(script) if script.contains(&0) => Named::NulInPath,
+            Some(_) => Named::Program,
+        };
         let mut dispatched = Dispatched {
             routed: Routed::Taken,
-            code: None,
-            fatal: None,
+            program: None,
         };
         let mut req = match self.start_request(description, sink, false) {
             Begun::Started(req) => req,
@@ -5057,15 +5091,22 @@ impl Engine {
         if let Some(router) = router {
             dispatched.routed = self.execute_router(&mut req, router);
         }
-        if program && (router.is_none() || dispatched.routed == Routed::Declined) {
-            self.execute_script(&mut req, None);
-            dispatched.code = Some(req.response_code());
-            dispatched.fatal = req.last_fatal();
-            if req.response_code() == 304 {
-                req.output_mut().no_default_content_type();
+        if router.is_none() || dispatched.routed == Routed::Declined {
+            match named {
+                Named::Program => {
+                    self.execute_script(&mut req, None);
+                    dispatched.program = Some(ProgramServed::Ran {
+                        code: req.response_code(),
+                        fatal: req.last_fatal(),
+                    });
+                    if req.response_code() == 304 {
+                        req.output_mut().no_default_content_type();
+                    }
+                }
+                Named::NulInPath => dispatched.program = Some(ProgramServed::NulInPath),
+                Named::Nothing if dispatched.routed == Routed::Declined => req.discard_headers(),
+                Named::Nothing => {}
             }
-        } else if dispatched.routed == Routed::Declined {
-            req.discard_headers();
         }
         let (observed, sink) = self.shutdown_untraced(&mut req);
         (observed, dispatched, sink)
