@@ -549,6 +549,7 @@ pub fn judge(
             Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
         }
     }
+    slack_porting_notes(snapshot, manifest, store, &mut notes)?;
 
     Ok(Verdict {
         base,
@@ -668,6 +669,68 @@ fn no_binary_yet(reading: &Reading) -> bool {
 /// carries the sentence.
 fn porting_meter(krate: &Crate, instrument: &str) -> bool {
     krate.porting && instrument == "crosscheck"
+}
+
+/// Why a `porting = true` key excuses nothing, `None` while it may excuse
+/// something (#2726, as #2717 ruled). Since #725 the key excuses
+/// `crosscheck` alone ([`porting_meter`]), so on a crate that is no
+/// extension, which no `crosscheck` is asked of, it binds nothing, and on
+/// one whose two columns, `columns`, are both fresh over `key` and pass,
+/// it excuses nothing; a column failing or never taken is what it is
+/// for. What `done` notes so slack keys cannot pile up again, never
+/// unmet: the drop is a person's edit of `seams.toml`.
+fn slack_porting(
+    krate: &Crate,
+    columns: &[Option<Reading>],
+    key: &str,
+    pin: &str,
+) -> Option<&'static str> {
+    if !krate.porting {
+        return None;
+    }
+    if !krate.name.starts_with("ext/") {
+        return Some("no extension, so no `crosscheck` is asked of it");
+    }
+    let passes = |column: &Option<Reading>| {
+        column
+            .as_ref()
+            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(key, pin))
+    };
+    columns
+        .iter()
+        .all(passes)
+        .then_some("an extension whose two `crosscheck` columns are fresh and pass")
+}
+
+/// The note on every row whose `porting = true` excuses nothing
+/// ([`slack_porting`]), the rows of one cause named in one line.
+fn slack_porting_notes(
+    snapshot: &Snapshot,
+    manifest: &Manifest,
+    store: &Store,
+    notes: &mut Vec<String>,
+) -> Result<()> {
+    let mut slack: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for krate in manifest.crates.iter().filter(|k| k.porting) {
+        let mut columns = Vec::new();
+        let mut key = String::new();
+        if krate.name.starts_with("ext/") {
+            for scope in scopes_of(snapshot.root(), "crosscheck", krate)? {
+                columns.push(store.read("crosscheck", &scope)?);
+            }
+            key = snapshot.key(&krate.path())?;
+        }
+        if let Some(why) = slack_porting(krate, &columns, &key, manifest.pin.digest()) {
+            slack.entry(why).or_default().push(&krate.name);
+        }
+    }
+    for (why, rows) in slack {
+        notes.push(format!(
+            "porting: `porting = true` excuses nothing on {} ({why}); dropping the key from seams.toml is a person's edit (harness.self)",
+            rows.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a `miri` fail is met all the same because every test that
@@ -1148,6 +1211,7 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 mod tests {
     use super::{
         FRESH, instruments_of, met_without_passing, miri_unsupported, no_binary_yet, porting_meter,
+        slack_porting,
     };
     use crate::carried::Carried;
     use crate::manifest::Crate;
@@ -1427,6 +1491,43 @@ mod tests {
                 !met_without_passing(&porting, instrument, &red(instrument, Status::Fail)),
                 "{instrument}"
             );
+        }
+    }
+
+    /// #2726: a `porting = true` key that excuses nothing is said, under
+    /// #2717's two rules. A row that is no extension binds nothing; an
+    /// extension whose two columns are fresh and pass needs no excuse; one
+    /// whose column fails, is stale or was never taken is what the key is
+    /// for; and a row without the key is never said.
+    #[test]
+    fn a_porting_key_that_excuses_nothing_is_said_and_one_excusing_a_failure_is_not() {
+        let porting = |name: &str| {
+            let mut krate = Crate::named(name);
+            krate.porting = true;
+            krate
+        };
+        // A reading's key is the empty one, the key the column is fresh
+        // over; any other key now is one it is stale for.
+        let column = |status: Status| {
+            let mut reading = Reading::new("crosscheck", "ext/zip");
+            reading.status = status;
+            reading.recipe = Some("pin".to_owned());
+            Some(reading)
+        };
+        let said = |krate: &Crate, columns: &[Option<Reading>], key: &str| {
+            slack_porting(krate, columns, key, "pin")
+        };
+        let no_extension = said(&porting("sapi/cli"), &[], "");
+        assert!(no_extension.is_some_and(|w| w.starts_with("no extension")));
+        let passing = [column(Status::Pass), column(Status::Pass)];
+        assert!(said(&porting("ext/zip"), &passing, "").is_some());
+        assert_eq!(said(&Crate::named("ext/zip"), &passing, ""), None);
+        assert_eq!(said(&porting("ext/zip"), &passing, "moved"), None);
+        for columns in [
+            [column(Status::Pass), column(Status::Fail)],
+            [column(Status::Pass), None],
+        ] {
+            assert_eq!(said(&porting("ext/zip"), &columns, ""), None, "{columns:?}");
         }
     }
 }
