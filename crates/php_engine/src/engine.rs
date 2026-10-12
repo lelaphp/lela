@@ -91,6 +91,9 @@ pub struct RequestDescription {
     /// How the host hands a wrapped program's file over, which decides
     /// whether the request holds it open, and until when.
     pub program_file: ProgramFile,
+    /// Whether a wrapped program is served in its own directory, the
+    /// request starting in [`RequestDescription::cwd`] either way.
+    pub chdir: Chdir,
     /// php's `EG(exit_status)` as the request starts: zero, as
     /// `init_executor` writes it, but where a host serves one request of
     /// php's as several of the engine's and hands each the status the
@@ -155,6 +158,26 @@ pub enum ProgramFile {
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1905`), and `shutdown_executor` closes
     /// the list after the shutdown functions and destructors.
     Listed,
+}
+
+/// Where `php_execute_script` serves a wrapped program
+/// (`Z/main/main.c:2596-2604`): in the working directory the request
+/// started in, under `SAPI_OPTION_NO_CHDIR`, or in the program's own
+/// directory, `VCWD_CHDIR_FILE` over its name before `auto_prepend_file`,
+/// and the directory before it restored once the program and
+/// `auto_append_file` have been served. What request startup resolves, a
+/// relative `upload_tmp_dir` among it, is resolved in the directory the
+/// request started in, and so are the shutdown functions and destructors
+/// after.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Chdir {
+    /// `SAPI_OPTION_NO_CHDIR`: php's CLI, and php-cgi's `-C`.
+    #[default]
+    Stay,
+    /// The program's directory, as php-fpm and php-cgi serve a program:
+    /// its name cut at its last `/`, as `virtual_chdir_file` cuts it,
+    /// resolved against the working directory as `chdir(2)` resolves it.
+    IntoProgramDir,
 }
 
 /// A throwable the program left uncaught, for a host that renders it:
@@ -4813,6 +4836,11 @@ impl Engine {
     /// whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
         let script = req.primary() == Primary::Wrapped;
+        let left = if script {
+            req.enter_program_dir()
+        } else {
+            None
+        };
         if script {
             req.expand_primary_file(source.is_some());
         }
@@ -4821,6 +4849,9 @@ impl Engine {
         }
         let ran = self.execute_wrapped(req, source, script);
         req.close_served_files();
+        if let Some(left) = left {
+            req.leave_program_dir(left);
+        }
         ran
     }
 

@@ -198,6 +198,41 @@ impl Request {
         Ok(())
     }
 
+    /// `VCWD_CHDIR_FILE` over the program's name where the host serves
+    /// it in its own directory ([`Chdir::IntoProgramDir`]): the working
+    /// directory moved to the directory the name names, cut at its last
+    /// `/` as `virtual_chdir_file` cuts it, where that resolves to a
+    /// directory, as `virtual_chdir` moves only there; and the directory
+    /// it stood in handed back for [`Request::leave_program_dir`]. `None`
+    /// where the host stays or names no program, as
+    /// `php_execute_script_ex` keeps no directory to go back to then.
+    ///
+    /// [`Chdir::IntoProgramDir`]: crate::engine::Chdir::IntoProgramDir
+    pub(crate) fn enter_program_dir(&mut self) -> Option<PathBuf> {
+        if self.description.chdir != crate::engine::Chdir::IntoProgramDir {
+            return None;
+        }
+        let name = self.description.script_name.clone()?;
+        let left = self.cwd.clone();
+        // A name with no `/` is `ENOENT` to `virtual_chdir_file`, and one
+        // whose only `/` leads keeps it, the root.
+        if let Some(cut) = name.iter().rposition(|b| *b == b'/') {
+            let dir = &name[..cut.max(1)];
+            if let Some(real) = self.realpath(dir).filter(|real| real.is_dir()) {
+                self.cwd = real;
+            }
+        }
+        Some(left)
+    }
+
+    /// The working directory `php_execute_script_ex` restores once the
+    /// program has been served, `left`, which
+    /// [`Request::enter_program_dir`] handed back, whatever the program
+    /// moved it to.
+    pub(crate) fn leave_program_dir(&mut self, left: PathBuf) {
+        self.cwd = left;
+    }
+
     /// `php_get_temporary_directory`
     /// (`Z/main/php_open_temporary_file.c:236`): what `sys_get_temp_dir()`
     /// answers, and where `tempnam()` falls back to and `tmpfile()` and a

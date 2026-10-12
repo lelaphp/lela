@@ -238,6 +238,44 @@ fn a_form_post_is_post_and_input_whole() {
     );
 }
 
+/// A relative `upload_tmp_dir` puts an upload under the process's working
+/// directory, as php-fpm's rfc1867 resolves it at request startup in its
+/// pool's (#2610), and not under the program's, which the program itself
+/// is served in.
+#[test]
+fn a_relative_upload_tmp_dir_is_under_the_process_s_working_directory() {
+    let root = root(
+        "upload",
+        &[(
+            "up.php",
+            "<?php echo dirname($_FILES['f']['tmp_name']), ' ', $_FILES['f']['error'], ' ',              getcwd() === __DIR__ ? 'in its own' : 'elsewhere';",
+        )],
+    );
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("makala-upload-cwd");
+    std::fs::create_dir_all(dir.join("spool")).unwrap_or_else(|e| panic!("{e}"));
+    let dir = dir.canonicalize().unwrap_or_else(|e| panic!("{e}"));
+    let server = Server::in_dir(
+        &root,
+        &dir,
+        &["--threads", "2", "-d", "upload_tmp_dir=spool"],
+    );
+    let body = "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\
+                Content-Type: text/plain\r\n\r\nhello\r\n--b--\r\n";
+    let mut stream = server.connect();
+    write!(
+        stream,
+        "POST /up.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let response = read_response(&mut stream);
+    assert_eq!(
+        String::from_utf8_lossy(&response.body),
+        format!("{}/spool 0 in its own", dir.display())
+    );
+}
+
 /// `connection_aborted()` turns true on the write after the client has
 /// gone, and not before (#2337, user story 23): the program writes once,
 /// waits until the client has read that and closed, reads
