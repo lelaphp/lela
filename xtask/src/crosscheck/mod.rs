@@ -680,7 +680,8 @@ impl Reads {
     }
 }
 
-/// `crosscheck --staged`, pre-commit's run (#1159): of the extensions
+/// `crosscheck --staged`, a run over what a commit would take (#1159;
+/// pre-commit's until revision 140): of the extensions
 /// `carried` names, the ones to render again for what is staged. One
 /// whose rendering reads no staged file ([`Reads`]) is not rendered,
 /// whatever its reading says, since nothing it reads is in the commit;
