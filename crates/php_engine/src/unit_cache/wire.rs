@@ -807,7 +807,7 @@ echo (string) 0.1, PHP_EOL;
 __halt_compiler(); data"#;
         let mut strings = php_heap::Strings::new();
         let options = php_compile::Options {
-            filename: Name(b"/srv/n.php"[..].into()),
+            filename: b"/srv/n.php",
             ..php_compile::Options::default()
         };
         let unit = php_compile::compile_source(source, &options, &mut strings);
