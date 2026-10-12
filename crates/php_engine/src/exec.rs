@@ -1449,6 +1449,18 @@ impl Vm {
         self.stack.push_frame(heap, slots, extra_args, header)
     }
 
+    /// The frame of an unobserved frameless call, off the VM stack's
+    /// pages ([`php_heap::VmStack::push_frameless`]): `slots` slots,
+    /// every one `IS_UNDEF` until its operand is placed; more than three
+    /// is the engine's error.
+    pub(crate) fn push_frameless(
+        &mut self,
+        slots: usize,
+        header: Header,
+    ) -> Result<FrameRef, Fatal> {
+        self.stack.push_frameless(slots, header)
+    }
+
     /// A frame that was off the stack back on top of it, the half of a
     /// generator's resumption that is the engine's, and the calls its
     /// body was building when it yielded back on the stack above it,

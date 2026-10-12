@@ -11357,6 +11357,33 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// pending as `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` finds it. The loop
 /// steps past the opline and past the `OP_DATA` a third argument came
 /// in.
+///
+/// php lays that call down only where an observer watches the native,
+/// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`); any
+/// other is served over no frame, so here its record stands off the
+/// VM stack's pages ([`Request::push_frameless`]) and takes no room
+/// php's does not. A recursion that leaves its last frame one slot
+/// short of a page's end opens the next page at the same depth whether
+/// its innermost frame then calls a frameless native or not, and
+/// `memory_get_peak_usage()` reads that page where php's reads it:
+///
+/// ```php
+/// function f($n, $a, $call) {
+///     return $n ? f($n - 1, $a, $call) : ($call ? in_array(2, $a) . substr('abc', $n, 1) . strlen('a' . $n) : 0);
+/// }
+/// foreach ([false, true] as $call) {
+///     for ($d = 1; ; $d++) {
+///         memory_reset_peak_usage();
+///         $base = memory_get_usage();
+///         f($d, [1, 2], $call);
+///         if (memory_get_peak_usage() - $base >= 262144) { echo $d, "\n"; break; }
+///     }
+/// }
+/// ```
+/// ```expect
+/// 909
+/// 909
+/// ```
 fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
@@ -11378,7 +11405,7 @@ fn frameless_call(
     );
     header.info.set_serving();
     header.info.set_frameless(true);
-    let call = req.push_call(header)?;
+    let call = req.push_frameless(header)?;
     for (at, &(kind, field)) in arguments.iter().enumerate() {
         let value = exec::take_operand(req, frame, code, kind, field);
         let placed = req
@@ -11391,10 +11418,9 @@ fn frameless_call(
             None => req.release(value),
         }
     }
-    // php falls back to a full call where the callee is observed,
-    // `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`), which
-    // the call laid down here already is, and ends it with the result
-    // whether the native threw or not (`Z/Zend/zend_execute.c:1597`).
+    // The call ends with the result whether the native threw or not, as
+    // php's frameless handler and its full call for an observed one do
+    // (`Z/Zend/zend_execute.c:1597`).
     let served = req.serve_native(Function(entry.function), OnThrow::ReturnValue);
     req.pop_call();
     let at = req.vm().opline(frame);
