@@ -306,6 +306,50 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
     );
 }
 
+/// The `FAST_RET` that takes an uncaught throwable up again past `a`'s
+/// `finally` is where `a`'s frame stands for userland too: the
+/// foreach's iterated object, freed there as the unwind leaves the
+/// loop, reads `a`'s line in its destructor's backtrace as line 12,
+/// the `finally`'s close. php reads line 10, the `echo`, the last
+/// handler before it that saved its opline: line 11's `JMPZ` takes its
+/// fast path without saving one, and `ZEND_FAST_RET` dispatches to
+/// `zend_dispatch_try_catch_finally_helper` without `SAVE_OPLINE`.
+/// `docs/divergence.toml`'s `trace:fast-ret-frame-opline` row records
+/// the difference as php's. The program is #2478's, its `ArrayIterator`
+/// a plain object with one property, which this crate serves without
+/// ext/spl; the pinned php prints line 10 for either.
+#[test]
+fn a_backtrace_the_unwind_past_a_finally_calls_reads_its_fast_ret_line() {
+    let engine = Engine::cli_builder().build();
+    let dir = super::observer::scratch("fast_ret_line");
+    let served = super::observer::serve_main(
+        &engine,
+        &dir,
+        r#"<?php
+class D { public $p = 1; function __destruct() { echo "dtor sees a() at line ", debug_backtrace()[0]['line'], "\n"; } }
+function b() { throw new Exception("x"); }
+function a() {
+    $t = true;
+    foreach (new D as $v) {
+        try {
+            b();
+        } finally {
+            echo "f\n";                  // line 10: ECHO saves the opline
+            if (!$t) { $u = 2; }       // line 11: JMPZ's fast path saves none
+            $t;
+        }
+    }
+}
+function c() { try { a(); } catch (Exception $e) { echo "c\n"; } }
+c();
+"#,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "f\ndtor sees a() at line 12\nc\n"
+    );
+}
+
 /// One frame of a walk as `observer_show_init_backtrace` writes it:
 /// `C::m`, `f`, or `{main}` and the file's base name, `[no active file]`
 /// where it has none; then, for a user frame standing on a stack, the
