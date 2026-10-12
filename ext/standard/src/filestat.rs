@@ -377,18 +377,20 @@ fn plain_access(req: &mut Request, filename: &[u8], ty: Fs) -> Option<bool> {
 ///
 /// The bits another wrapper's file is read by are the owner's where the
 /// process's user owns it, the group's where its group or one of its
-/// supplementary groups does, and the others' otherwise.
+/// supplementary groups does, and the others' otherwise. The groups are
+/// asked in a child, as ext/posix's `posix_getgroups` witness asks them.
 ///
 /// ```php
 /// class W { public $context; static $st; function url_stat($p, $f) { return W::$st; } }
 /// stream_wrapper_register('ww', 'W');
-/// $u = posix_getuid(); $g = posix_getgid(); $gs = posix_getgroups(); $o = max([$g, ...$gs]) + 1;
+/// $p = proc_open([PHP_BINARY, '-n', '-r', 'echo json_encode(posix_getgroups());'], [1 => ['pipe', 'w']], $pipes);
+/// $u = posix_getuid(); $g = posix_getgid(); $gs = json_decode(stream_get_contents($pipes[1])); $o = max([$g, ...$gs]) + 1;
 /// foreach ([[0400, $u, $o], [0040, $u + 1, $g], [0040, $u + 1, $gs[0] ?? $g], [0004, $u + 1, $o], [0400, $u + 1, $o]] as $i => [$m, $uid, $gid]) {
 ///     W::$st = ['mode' => 0100000 | $m, 'uid' => $uid, 'gid' => $gid];
 ///     var_dump(is_readable("ww://$i"));
 /// }
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// bool(true)
