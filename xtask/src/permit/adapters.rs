@@ -174,7 +174,9 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
                 println!("{output}");
             }
             record_the_approvals(&checkout, &call, &judgement);
-            record_the_operation(&workspace, &call, &judgement);
+            if adapter == Adapter::CommandHook {
+                record_the_operation(&workspace, &call, &judgement);
+            }
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
@@ -213,6 +215,12 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
 /// "operating"` rule into the working tree it stands in, and a starter
 /// recorded only under such a rule left that one foreign to every session
 /// (#2694). Best effort, as recording the decision is.
+///
+/// The command hook alone records it, the adapter that judges a call
+/// last: the function hook above it admits a call the command hook then
+/// judges again, and an `--abort` that admission dropped the record for
+/// was refused beneath it as foreign, with every later abort of its
+/// starter's (#2734).
 fn record_the_operation(root: &Path, call: &Call, judgement: &Judgement) {
     let Some(command) = call.command() else {
         return;

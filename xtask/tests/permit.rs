@@ -1457,6 +1457,57 @@ fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
     assert_eq!(reading.status, Status::Fail);
 }
 
+/// #2734 as it happened: an agent's merge stands in main's checkout, its
+/// starter recorded, and its line aborting it there and starting a merge
+/// in its own worktree is judged by both adapters, the function hook's
+/// first. That admission dropped the record, as the abort's own, and
+/// recorded the worktree's start, before the command hook beneath judged
+/// the same call; that one found the merge standing with no record,
+/// refused the abort, and every later abort of the starter's with it. The
+/// operation is recorded by the command hook alone, the adapter that
+/// judges a call last, so the abort is the starter's under both.
+#[test]
+fn an_abort_the_function_hook_admits_is_its_starter_s_under_the_command_hook_too() {
+    let root = scratch("operation-adapters");
+    let worktree = root.join("own");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git").args(args).current_dir(dir).output();
+        assert!(out.unwrap().status.success(), "git {}", args.join(" "));
+    };
+    git(&root, &["worktree", "add", "-q", "-b", "own", "own"]);
+    let line = |command: &str| {
+        serde_json::json!({
+            "session_id": "s1",
+            "agent_id": "comp",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })
+        .to_string()
+    };
+    let admitted = |stdin: &str, args: &[&str], what: &str| {
+        let (code, out, err) = permit(&root, stdin, args);
+        assert_eq!(code, 0, "{err}");
+        assert!(!out.contains("\"deny\""), "{what} {args:?}: {out}");
+    };
+    let above: &[&str] = &["--above-the-command-hook"];
+    let start = line("git merge --no-ff --no-commit topic");
+    for adapter in [above, &[]] {
+        admitted(&start, adapter, "the start");
+    }
+    std::fs::write(root.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
+    let abort = line(&format!(
+        "C={}; git -C $C merge --abort; git -C $C status --short | head -3; \
+         git -C $C log --oneline -1; W={}; git -C $W status --short | head; \
+         git -C $W merge main 2>&1 | tail -3",
+        root.display(),
+        worktree.display()
+    ));
+    for adapter in [above, &[]] {
+        admitted(&abort, adapter, "the starter's abort");
+    }
+}
+
 /// The adapter hands the call to permit on stdin, which no argument-length
 /// limit bounds (harness-design.md §13 D.17): a Write of several megabytes
 /// is judged whole.
