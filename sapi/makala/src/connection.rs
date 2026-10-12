@@ -47,12 +47,14 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use hyper::body::{Body as _, Bytes, Frame, Incoming, SizeHint};
+use hyper::ext::ReasonPhrase;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
+use php_proto::cgi;
 use php_sapi::ResponseHead;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -576,9 +578,9 @@ async fn hand_over(
             } else {
                 Content::File(file.body())
             };
-            return response(connection, &head, content);
+            return own(connection, &head, content);
         }
-        Route::Refused(refusal) => return response(connection, &refusal.head(), Content::Empty),
+        Route::Refused(refusal) => return own(connection, &refusal.head(), Content::Empty),
     };
     let (feed, body) = mpsc::channel(BODY_PIECES);
     let (head_sent, answered) = oneshot::channel();
@@ -604,7 +606,7 @@ async fn hand_over(
             if let Ok(fault) = fault.try_recv() {
                 cut(connection, fault);
             }
-            response(
+            sent(
                 connection,
                 &head,
                 Content::Written(Written { pieces, whole }),
@@ -796,22 +798,75 @@ fn cut(connection: &Connection, fault: BodyFault) {
     connection.cut.notify_one();
 }
 
-/// The response for `head`: its code, 200 where it set none, and its
-/// header lines in order, each one hyper cannot carry left out; the body
-/// `content`.
-fn response(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
+/// The response for the head a request sent, as php-fpm writes it and
+/// the web server in front of it reads it (#2636, #2608): the lines
+/// `sapi_cgi_send_headers` writes ([`cgi::lines`]), so a 304 carries no
+/// `Content-Type` of PHP's; the status their status line says, 200 where
+/// there is none, with the reason phrase it carries, which is the one PHP
+/// set (`header("HTTP/1.1 403 Access Denied")`) or php's for the code; and
+/// each header line after it. A status whose code is not three digits,
+/// which nginx refuses, is a 500.
+fn sent(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
+    let lines = cgi::lines(
+        cgi::Shape::default(),
+        head.code,
+        head.status_line.as_deref(),
+        &head.lines,
+    );
+    let (mut status, mut reason) = (StatusCode::OK, &[][..]);
+    let mut fields = Vec::with_capacity(lines.len());
+    for line in &lines {
+        match line {
+            cgi::Line::Status(_) => {
+                (status, reason) = line
+                    .status()
+                    .and_then(|(code, reason)| Some((StatusCode::from_u16(code).ok()?, reason)))
+                    .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, &[]));
+            }
+            cgi::Line::Field(field) => fields.push(*field),
+        }
+    }
+    let mut response = response(connection, status, fields, content);
+    if let Some(reason) = reason_phrase(status, reason) {
+        response.extensions_mut().insert(reason);
+    }
+    response
+}
+
+/// The reason phrase hyper writes for `status` in place of its own:
+/// `reason`, where it is one and not hyper's canonical text; an empty one
+/// where there is none to write and the code has no canonical text, so
+/// the line never reads `<none>`, hyper's text for that, as nginx writes
+/// the code and a space; and none where hyper's own is the phrase. A
+/// reason that is no phrase on the wire (a control byte) is not written.
+fn reason_phrase(status: StatusCode, reason: &[u8]) -> Option<ReasonPhrase> {
+    let canonical = status.canonical_reason().map(str::as_bytes);
+    let set = (!reason.is_empty() && canonical != Some(reason))
+        .then(|| ReasonPhrase::try_from(reason).ok())
+        .flatten();
+    match set {
+        Some(set) => Some(set),
+        None if canonical.is_none() => Some(ReasonPhrase::from_static(b"")),
+        None => None,
+    }
+}
+
+/// A response of `status` with the header lines `fields` in order, each
+/// one hyper cannot carry left out; the body `content`.
+fn response<'a>(
+    connection: &Connection,
+    status: StatusCode,
+    fields: impl IntoIterator<Item = &'a [u8]>,
+    content: Content,
+) -> Response<Reply> {
     let mut response = Response::new(Reply {
         content,
         watch: Arc::clone(&connection.watch),
         access: None,
     });
-    let code = u16::try_from(head.code).unwrap_or(500);
-    *response.status_mut() = match code {
-        0 => StatusCode::OK,
-        code => StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-    };
+    *response.status_mut() = status;
     let headers = response.headers_mut();
-    for line in &head.lines {
+    for line in fields {
         let Some(colon) = line.iter().position(|b| *b == b':') else {
             continue;
         };
@@ -826,15 +881,24 @@ fn response(connection: &Connection, head: &ResponseHead, content: Content) -> R
     response
 }
 
+/// The response for a head of the server's own, a static file's or a
+/// refusal's: its code and its header lines, with hyper's reason.
+fn own(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
+    let status = u16::try_from(head.code)
+        .ok()
+        .and_then(|code| StatusCode::from_u16(code).ok())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    response(
+        connection,
+        status,
+        head.lines.iter().map(Vec::as_slice),
+        content,
+    )
+}
+
 /// A response of the server's own, with no body.
 fn plain(connection: &Connection, status: StatusCode) -> Response<Reply> {
-    let mut response = Response::new(Reply {
-        content: Content::Empty,
-        watch: Arc::clone(&connection.watch),
-        access: None,
-    });
-    *response.status_mut() = status;
-    response
+    response(connection, status, [], Content::Empty)
 }
 
 /// A response of the server's own after which the connection closes:

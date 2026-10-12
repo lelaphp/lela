@@ -340,3 +340,56 @@ fn forwarded_fields_are_trusted_from_no_proxy() {
         "127.0.0.1 10.9.9.9 for=10.8.8.8\n"
     );
 }
+
+/// What one `GET` of `path` on a connection of its own reads back, whole.
+fn get(server: &Server, path: &str) -> Vec<u8> {
+    let mut stream = server.connect();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let mut bytes = Vec::new();
+    stream
+        .read_to_end(&mut bytes)
+        .unwrap_or_else(|e| panic!("reading the response: {e}"));
+    bytes
+}
+
+/// The status line carries the reason phrase PHP set, as php-fpm hands it
+/// on in `Status:` and the web server in front of it writes it (#2636):
+/// phar's `403 Access Denied`, a code hyper has no phrase for with one,
+/// and with none the code and a space, never hyper's `<none>`. A phrase
+/// set on a 200 is no status php-fpm writes, so the line is `200 OK`.
+#[test]
+fn the_status_line_carries_the_reason_php_set() {
+    let root = root(
+        "reason",
+        &[
+            ("denied.php", "<?php header('HTTP/1.1 403 Access Denied');"),
+            (
+                "adventure.php",
+                "<?php header('HTTP/1.1 399 Choose Your Own Adventure');",
+            ),
+            ("bare.php", "<?php http_response_code(399);"),
+            ("fine.php", "<?php header('HTTP/1.1 200 Fine');"),
+            ("plain.php", "<?php http_response_code(404);"),
+        ],
+    );
+    let server = Server::start(&root);
+    for (path, status) in [
+        ("/denied.php", "HTTP/1.1 403 Access Denied"),
+        ("/adventure.php", "HTTP/1.1 399 Choose Your Own Adventure"),
+        ("/bare.php", "HTTP/1.1 399 "),
+        ("/fine.php", "HTTP/1.1 200 OK"),
+        ("/plain.php", "HTTP/1.1 404 Not Found"),
+    ] {
+        let bytes = get(&server, path);
+        let line = bytes.split(|b| *b == b'\n').next().unwrap_or_default();
+        assert_eq!(
+            String::from_utf8_lossy(line),
+            format!("{status}\r"),
+            "{path}"
+        );
+    }
+}

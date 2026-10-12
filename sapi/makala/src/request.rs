@@ -671,6 +671,14 @@ mod tests {
     /// after a head and a write, and any other program is answered with
     /// the serving thread's name.
     fn start() -> SocketAddr {
+        // A head as the engine sends a request's: its code, 200 where
+        // the program set none.
+        fn ok() -> ResponseHead {
+            ResponseHead {
+                code: 200,
+                ..ResponseHead::default()
+            }
+        }
         let root = root();
         let argv: Vec<std::ffi::OsString> = [
             "--listen",
@@ -697,7 +705,7 @@ mod tests {
             match &head.target[..] {
                 b"/panic.php" => panic!("a request panicked before its head, on cue"),
                 b"/cut.php" => {
-                    sink.send_headers(&ResponseHead::default());
+                    sink.send_headers(&ok());
                     sink.write(b"partial").ok();
                     let (read, seen) = &READ;
                     let guard = read.lock().unwrap_or_else(PoisonError::into_inner);
@@ -708,7 +716,7 @@ mod tests {
                     panic!("a request panicked mid-response, on cue");
                 }
                 _ => {
-                    sink.send_headers(&ResponseHead::default());
+                    sink.send_headers(&ok());
                     let name = std::thread::current().name().unwrap_or("").to_owned();
                     sink.write(name.as_bytes()).ok();
                 }
