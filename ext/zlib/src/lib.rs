@@ -46,7 +46,7 @@ mod header {
     include!(concat!(env!("OUT_DIR"), "/header.rs"));
 }
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{Extension, ExtensionBuilder, LongHandler};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
@@ -142,6 +142,7 @@ pub fn extension() -> Extension {
         ])
         .on_modify(output::COMPRESSION.as_bytes(), output::on_compression)
         .on_modify(output::HANDLER.as_bytes(), output::on_handler)
+        .on_update_long(output::LEVEL.as_bytes(), LongHandler::Any)
         .constants(constants::declared())
         .functions(vec![
             output::ob_gzhandler::declared(),
