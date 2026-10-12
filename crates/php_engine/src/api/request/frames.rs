@@ -410,6 +410,34 @@ impl Request {
         Some(served)
     }
 
+    /// `f` served with the request running on the stack `coroutine` left
+    /// off the running chain, suspended or waiting on a suspend that
+    /// passed through it, as a debugger serves a suspended fiber's frame
+    /// with `EG(current_execute_data)` moved into `fiber->execute_data`'s
+    /// chain: every running coroutine set aside, so the chain runs from
+    /// that stack and ends at the coroutine's bottom frame, where
+    /// `zend_fiber_suspend` cut `prev_execute_data`. The request's own
+    /// stack is kept where [`crate::fiber::Fibers::request_stack`] finds
+    /// it, so `EG(symbol_table)`'s CVs are read where they stand. As in
+    /// [`Request::on_stack`], the error-reporting level and the machine
+    /// stack's limit stay the running fiber's, and no fiber starts,
+    /// suspends or resumes meanwhile. `None` where the coroutine holds
+    /// no execution.
+    pub(super) fn on_held_stack<R>(
+        &mut self,
+        coroutine: PhpObject,
+        f: impl FnOnce(&mut Request) -> R,
+    ) -> Option<R> {
+        let mut execution = self.fibers.set_aside_for(coroutine)?;
+        self.switch_stack(&mut execution);
+        self.fibers.displace(execution);
+        let served = self.with_fiber_switch_blocked(f);
+        let mut execution = self.fibers.take_displaced();
+        self.switch_stack(&mut execution);
+        self.fibers.hold_again(execution);
+        Some(served)
+    }
+
     /// The stacks php's one `prev_execute_data` chain runs through: the
     /// one the request is running on, then each resumer's below it, the
     /// request's own last.

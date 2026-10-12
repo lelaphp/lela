@@ -231,10 +231,14 @@ fn a_frame_below_a_fiber_is_written_and_evaluated_in() {
 thread_local! {
     /// The frame the first stop kept, for the stops after it.
     static KEPT: Cell<Option<FrameId>> = const { Cell::new(None) };
+    /// What the stops after the first evaluate in the kept frame, and
+    /// whether what it throws is shown with its trace.
+    static KEPT_CODE: Cell<(&'static str, bool)> = const { Cell::new(("$x * 2", false)) };
 }
 
 /// `pause()` begun: the first stop keeps its caller's frame; every one
-/// after writes `$x` of the kept frame and evaluates `$x * 2` there.
+/// after writes `$x` of the kept frame and evaluates [`KEPT_CODE`]
+/// there, `$x * 2` unless a test says otherwise.
 fn stop_kept(observed: &mut Observed<'_>) {
     let Some(frame) = KEPT.get() else {
         KEPT.set(observed.caller().map(|caller| caller.id()));
@@ -243,9 +247,85 @@ fn stop_kept(observed: &mut Observed<'_>) {
     let set = observed.set_frame_var(frame, b"x", Owner::int(5));
     let line = format!("[set {}]", if set { "ok" } else { "refused" });
     observed.write(line.as_bytes());
-    let answered = observed.eval_in_frame(frame, b"$x * 2", b"debugger");
-    let line = format!("[eval {}]", shown(observed, answered, false));
+    let (code, traced) = KEPT_CODE.get();
+    let answered = observed.eval_in_frame(frame, code.as_bytes(), b"debugger");
+    let line = format!("[eval {}]", shown(observed, answered, traced));
     observed.write(line.as_bytes());
+}
+
+/// `source` served with a debugger whose first stop keeps its caller's
+/// frame and whose stops after it evaluate `code` there.
+fn serve_kept(code: &'static str, traced: bool, source: &str) -> String {
+    KEPT.set(None);
+    KEPT_CODE.set((code, traced));
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .observer(init_kept)
+            .build("debugger")])
+        .build();
+    let served = engine.serve_capture(source, Capture::default());
+    KEPT.set(None);
+    KEPT_CODE.set(("$x * 2", false));
+    String::from_utf8_lossy(&served.stdout).into_owned()
+}
+
+/// A frame inside a fiber, kept while the fiber ran, is written and
+/// evaluated in while the fiber is suspended, on the stack the fiber
+/// holds, and the fiber reads the write when it is resumed, as php's
+/// `fiber->execute_data` reaches it; once the fiber has returned, the
+/// frame is refused.
+#[test]
+fn a_suspended_fibers_frame_is_written_and_evaluated_in() {
+    let out = serve_kept(
+        "$x * 2",
+        false,
+        "<?php\nfunction pause() {}\nfunction f() {\n    $x = 1;\n    pause();\n    Fiber::suspend();\n    echo $x, \"\\n\";\n}\n\
+         $fiber = new Fiber(function () { f(); });\n$fiber->start();\npause();\n$fiber->resume();\npause();\n",
+    );
+    assert_eq!(out, "[set ok][eval int(10)]5\n[set refused][eval refused]");
+}
+
+/// What code evaluated in a suspended fiber's frame throws traces down
+/// php's `prev_execute_data` chain from that frame, which ends at the
+/// fiber's bottom frame, `zend_fiber_suspend` having cut what stood
+/// under it: the fiber's callable is called from `[internal function]`,
+/// and no row names the `start` that ran it or the frame that stops.
+/// The evaluated code's own row is php's `unknown()` at the frame's
+/// line, as `zend_fetch_debug_backtrace` names a code frame whose caller
+/// stands at no `INCLUDE_OR_EVAL`; the rows under it are the oracle's
+/// for a throw reached from `f()` while the fiber runs, cut where its
+/// resumer's begin.
+#[test]
+fn what_an_evaluation_in_a_suspended_fibers_frame_throws_traces_to_its_bottom() {
+    let out = serve_kept(
+        "throw new Exception('no')",
+        true,
+        "<?php\nfunction pause() {}\nfunction f() {\n    $x = 1;\n    pause();\n    Fiber::suspend();\n}\n\
+         $fiber = new Fiber(function () { f(); });\n$fiber->start();\npause();\n",
+    );
+    assert_eq!(
+        out,
+        "[set ok][eval Exception: no\n#0 Standard input code(6): unknown()\n\
+         #1 Standard input code(8): f()\n#2 [internal function]: {closure:Standard input code:8}()\n#3 {main}]"
+    );
+}
+
+/// A frame of a fiber suspended while it ran above another, kept on its
+/// stack and not the one below it, is written and evaluated in once
+/// both are suspended, and the inner fiber reads the write when it is
+/// resumed.
+#[test]
+fn a_frame_of_a_fiber_suspended_above_another_is_written_and_evaluated_in() {
+    let out = serve_kept(
+        "$x * 2",
+        false,
+        "<?php\nfunction pause() {}\n\
+         $outer = new Fiber(function () {\n\
+             $inner = new Fiber(function () {\n        $x = 1;\n        pause();\n        Fiber::suspend();\n        echo $x, \"\\n\";\n    });\n\
+             $inner->start();\n    Fiber::suspend();\n    $inner->resume();\n});\n\
+         $outer->start();\npause();\n$outer->resume();\n",
+    );
+    assert_eq!(out, "[set ok][eval int(10)]5\n");
 }
 
 fn init_kept(observed: &mut Observed<'_>) -> ObserverHandlers {
