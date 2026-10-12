@@ -666,6 +666,12 @@ impl Request {
         self.ini.stage = IniStage::Deactivate;
         let changed: Vec<Vec<u8>> = self.ini.changed.iter().map(|(n, ..)| n.clone()).collect();
         for name in changed {
+            // A long entry's handler reads its startup value again, and
+            // warns again where the quantity rule interprets it.
+            if LongHandler::of(&name).is_some() {
+                let original = self.shared.ini_default(&name).unwrap_or_default().to_vec();
+                self.ini_quantity_warn(&name, &original);
+            }
             if let Some(handler) = self.ini_handler(&name) {
                 let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
                 // Each rule under its own `zend_try`: what it bails out
@@ -1021,6 +1027,21 @@ impl Request {
     /// string(4) "0644"
     /// string(5) "0600 "
     /// string(2) "7x"
+    /// ```
+    ///
+    /// The request's end restores what it changed through the same
+    /// handler, which reads the startup value again:
+    ///
+    /// ```php
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'error_log_mode=7x', '-r', 'ini_set("error_log_mode", "0600"); echo "end\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// ```
+    /// ```expect process
+    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
+    /// end
+    ///
+    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
+    /// 0
     /// ```
     pub(crate) fn ini_quantity_warn(&mut self, name: &[u8], value: &[u8]) -> i64 {
         let (quantity, sentence) = crate::ini_quantity::parse(value);
