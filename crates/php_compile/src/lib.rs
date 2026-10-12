@@ -9092,6 +9092,31 @@ class C {
         }
     }
 
+    /// `zend_try_compile_cv` takes a CV only for a name php's tree holds as
+    /// `ZEND_AST_ZVAL`: `${1}` and `${'1'}` are the CV `$1`, while `${true}`
+    /// names it by `ZEND_AST_CONST`, which `zend_compile_simple_var_no_cv`
+    /// compiles, converts to a string and fetches by name, `FETCH_W (local)`
+    /// under the write and `FETCH_R (local)` under the read. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 (#2686).
+    #[test]
+    fn a_name_written_as_a_constant_other_than_a_string_is_fetched_by_name_not_a_cv() {
+        assert_eq!(
+            dump_of(b"<?php ${true} = 1; ${1}; ${'1'}; echo ${true}, ${1};"),
+            "\n$_main:\n\
+             \x20    ; (lines=6, args=0, vars=1, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 V1 = FETCH_W (local) string(\"1\")\n\
+             0001 ASSIGN V1 int(1)\n\
+             0002 T3 = FETCH_R (local) string(\"1\")\n\
+             0003 ECHO T3\n\
+             0004 ECHO CV0($1)\n\
+             0005 RETURN int(1)\n\
+             "
+        );
+    }
+
     /// #690's shapes under the oracle's `[regime.dump]`: a `global` over
     /// a name no CV has is `FETCH_W (global+lock)` and an `ASSIGN_REF`
     /// over a fetch by the same name, the local variable's or, for an

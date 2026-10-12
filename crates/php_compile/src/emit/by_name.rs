@@ -247,15 +247,48 @@ impl Emit<'_> {
         })
     }
 
-    /// The name under `$` or `${…}`: one written out, folded, or the
-    /// value the program computes.
+    /// The name under `$` or `${…}`: one written out, php's
+    /// `ZEND_AST_ZVAL`, is what `is_this_fetch`, `is_globals_fetch` and
+    /// `zend_try_compile_cv` make of it; any other expression is
+    /// compiled (`zend_compile_simple_var_no_cv`) and fetched by the
+    /// value, a constant one converted to a string first and never a
+    /// CV, so `${true}` is the variable `$1` fetched by name while
+    /// `${1}` and `${'1'}` are its CV.
+    ///
+    /// ```php
+    /// ${true} = 42;
+    /// var_dump(${true}, ${1}, ${'1'}, ${null} ?? 'unset', ${PHP_EOL} ?? 'unset');
+    /// ${false} = 'e';
+    /// var_dump(${''});
+    /// ```
+    /// ```expect
+    /// int(42)
+    /// int(42)
+    /// int(42)
+    /// string(5) "unset"
+    /// string(5) "unset"
+    /// string(1) "e"
+    /// ```
     pub(super) fn named_by_expr(&mut self, inner: tree::Expr) -> Result<Named, CompileError> {
         if let Some(value) = self.written(inner)? {
-            return self.named_by_value(value);
+            let name = self.name_string(value)?;
+            return self.named_by(name);
         }
         let name = match self.expr(inner)? {
-            // `convert_to_string` over a name the compiler folded.
-            Where::Constant(value) => return self.named_by_value(value),
+            Where::Constant(value) => {
+                let name = self.name_string(value)?;
+                let table = match AutoGlobal::of(&name) {
+                    Some(global) => {
+                        self.arm(global);
+                        Symbols::Global
+                    }
+                    None => Symbols::Local,
+                };
+                return Ok(Named::Fetch {
+                    name: Where::Constant(self.string(&name)?),
+                    table,
+                });
+            }
             name => name,
         };
         Ok(Named::Fetch {
@@ -264,13 +297,14 @@ impl Emit<'_> {
         })
     }
 
-    /// A name known while the file compiles, as a string.
-    fn named_by_value(&mut self, value: Zval) -> Result<Named, CompileError> {
+    /// `convert_to_string` over a variable's name known while the file
+    /// compiles.
+    fn name_string(&mut self, value: Zval) -> Result<Vec<u8>, CompileError> {
         let value = self.stringified(value)?.unwrap_or(value);
-        let Some(name) = value.as_str().map(|s| s.bytes().to_vec()) else {
-            return Err(self.fatal("a variable's name that is no string"));
-        };
-        self.named_by(name)
+        value
+            .as_str()
+            .map(|s| s.bytes().to_vec())
+            .ok_or_else(|| self.fatal("a variable's name that is no string"))
     }
 
     /// A name written out: `this`, an auto-global's, or a CV's.
