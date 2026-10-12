@@ -412,10 +412,38 @@ pub(super) fn setlocale(
 /// string(0) ""
 /// string(1) ","
 /// ```
+///
+/// Each string is `add_assoc_string`'s `zend_string_init`, an allocation
+/// whatever its length, so the empty values and the one-byte `"."` cost
+/// what they cost php, where `ZVAL_STRINGL_FAST` would hand out the
+/// interned string:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// pk(function () { $a = localeconv(); });
+/// ```
+/// ```expect
+/// 3000
+/// ```
 #[php_function]
 pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let lconv = c::conventions();
+    // php's order (`Z/ext/standard/string.c:5649-5691`): the three arrays
+    // first, the two groupings filled, then the rows, the groupings
+    // last; what stands while the result's table grows is the peak.
     let mut array = PhpArray::new(req)?;
+    let mut groupings = Vec::with_capacity(2);
+    for (name, grouping) in [
+        (&b"grouping"[..], &lconv.grouping),
+        (b"mon_grouping", &lconv.mon_grouping),
+    ] {
+        let mut list = PhpArray::new(req)?;
+        for (at, byte) in (0i64..).zip(grouping) {
+            let value = i64::from(c_char::from_ne_bytes([*byte]));
+            list.set(req, Owner::index(at), Owner::int(value))?;
+        }
+        groupings.push((name, list));
+    }
     let strings: [(&[u8], &[u8]); 8] = [
         (b"decimal_point", &lconv.decimal_point),
         (b"thousands_sep", &lconv.thousands_sep),
@@ -427,8 +455,10 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         (b"negative_sign", &lconv.negative_sign),
     ];
     for (name, value) in strings {
-        let value = PhpString::new(req, value)?.into_value();
-        array.set_str(req, name, value)?;
+        // `add_assoc_string`'s `zend_string_init`, never the interned
+        // string `PhpString::new` hands out for one byte or none.
+        let value = PhpString::filled(req, value.len(), |bytes| bytes.copy_from_slice(value))?;
+        array.set_str(req, name, value.into_value())?;
     }
     let chars: [(&[u8], c_char); 8] = [
         (b"int_frac_digits", lconv.int_frac_digits),
@@ -443,15 +473,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     for (name, value) in chars {
         array.set_str(req, name, Owner::int(i64::from(value)))?;
     }
-    for (name, grouping) in [
-        (&b"grouping"[..], &lconv.grouping),
-        (b"mon_grouping", &lconv.mon_grouping),
-    ] {
-        let mut list = PhpArray::new(req)?;
-        for (at, byte) in (0i64..).zip(grouping) {
-            let value = i64::from(c_char::from_ne_bytes([*byte]));
-            list.set(req, Owner::index(at), Owner::int(value))?;
-        }
+    for (name, list) in groupings {
         array.set_str(req, name, list.into_value())?;
     }
     Ok(array)
