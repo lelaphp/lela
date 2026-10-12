@@ -11561,15 +11561,15 @@ fn frameless_call(
     header.info.set_frameless(true);
     let call = req.push_frameless(header)?;
     for (at, &(kind, field)) in arguments.iter().enumerate() {
-        let value = exec::take_operand(req, frame, code, kind, field);
+        let operand = exec::frameless_operand(req, frame, code, kind, field);
         let placed = req
             .vm_mut()
             .stack
             .frame_mut(call)
             .and_then(|record| record.slots_mut().get_mut(at));
         match placed {
-            Some(slot) => *slot = value.to_zval(),
-            None => req.release(value),
+            Some(slot) => *slot = operand,
+            None => req.release_zval_nogc(operand),
         }
     }
     // The call ends with the result whether the native threw or not, as

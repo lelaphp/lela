@@ -1011,7 +1011,7 @@ impl Request {
             }
         }
         for operand in operands {
-            self.release_nogc(Value::of_zval(operand));
+            self.release_zval_nogc(operand);
         }
         self.vm.stack.pop_frame(&mut self.heap);
     }
@@ -1539,8 +1539,20 @@ impl Request {
     /// [`Request::set_slot`] and what the slot held released after the
     /// write, the `zval_ptr_dtor` php's assignment over a slot ends with.
     pub(crate) fn replace_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
-        let previous = self.set_slot(frame, at, value);
-        self.release(previous);
+        let Some(slot) = self
+            .vm
+            .stack
+            .frame_mut(frame)
+            .and_then(|f| f.slots_mut().get_mut(at as usize))
+        else {
+            return self.release(value);
+        };
+        let old = std::mem::replace(slot, value.to_zval());
+        if old.is_refcounted() {
+            #[cfg(debug_assertions)]
+            self.sense_dirty_temporary(frame, at, old.kind());
+            php_heap::Heap::release(&mut super::Hooks(self), old);
+        }
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
