@@ -130,7 +130,7 @@ static ESTATE: usize = 55768;
 /// C keeps `Int32`s, so its own asks a page less of the heap.
 static DSTATE: usize = 64144;
 
-/// The `opaque` a lent stream is made with: the C size of the state its
+/// The `opaque` a [`Lent`] stream is made with: the C size of the state its
 /// init allocates, which [`alloc`] asks the heap for in place of the
 /// Rust library's, so `memory_get_usage()` counts the pages php's libbz2 takes.
 fn state_size(size: &'static usize) -> *mut c_void {
@@ -194,18 +194,6 @@ fn avail(len: usize) -> c_uint {
     c_uint::try_from(len).unwrap_or(c_uint::MAX)
 }
 
-/// A `bz_stream` before its init with the allocator a filter's is set
-/// to, `php_bz2_alloc` and `php_bz2_free`, and its state's C size as
-/// `opaque` ([`state_size`]).
-#[allow(clippy::unnecessary_box_returns)]
-fn fresh_lent(state: &'static usize) -> Box<bz::bz_stream> {
-    let mut stream = fresh();
-    stream.bzalloc = Some(alloc);
-    stream.bzfree = Some(free);
-    stream.opaque = state_size(state);
-    stream
-}
-
 /// One call over `stream` with `input` and `output` for its length; the
 /// `Err` is what `call` answered in place of a code.
 fn step<E>(
@@ -232,18 +220,6 @@ fn step<E>(
         read,
         written,
     })
-}
-
-/// One call over a stream whose state is on the request's heap, with the
-/// heap lent for its length (ADR-0014), so what the library allocates
-/// and frees is the request's; the `Err` is the memory limit's fatal an
-/// allocation met, which ends the request as php's `emalloc` does.
-fn lent(
-    req: &mut Request,
-    stream: *mut bz::bz_stream,
-    call: impl FnOnce(*mut bz::bz_stream) -> c_int,
-) -> Result<c_int, Thrown> {
-    req.lend_heap(|| call(stream))
 }
 
 /// A `bz_stream` after `BZ2_bzCompressInit`, ended by
@@ -332,18 +308,60 @@ impl Drop for Decompress {
     }
 }
 
-/// A `bz_stream` after `BZ2_bzCompressInit` with its state on the
-/// request's heap, as `php_bz2_filter_create` makes a `bzip2.compress`
-/// filter's that is not persistent. Every call into the library is made
-/// with the heap lent ([`lent`]). It is ended through
-/// [`LentCompress::end`], which gives the state back; one dropped without
-/// is left to the request's end, whose heap takes what the library held,
-/// and the library is not called again, since its state is in memory
-/// the heap may already have given back.
-pub(crate) struct LentCompress(Box<bz::bz_stream>);
+/// A `bz_stream` whose state is on the request's heap, as a filter that
+/// is not persistent keeps it (design §5.13): libbz2 allocates through
+/// [`alloc`] and [`free`], and every call into it is made through
+/// [`Lent::call`], which lends the heap for that call alone. It is ended
+/// through [`LentCompress::end`] or [`LentDecompress::end`], which gives
+/// its state back; one dropped without is left to the request's end,
+/// whose heap takes what the library held, and the library is not called
+/// again, since its state is in memory the heap may already have given
+/// back.
+struct Lent(Box<bz::bz_stream>);
 
 // SAFETY: as for Compress: one owner, one thread at a time (ADR-0005).
-unsafe impl Send for LentCompress {}
+unsafe impl Send for Lent {}
+
+impl Lent {
+    /// A stream before its init with the allocator a filter's is set to,
+    /// `php_bz2_alloc` and `php_bz2_free`, and the C size of the state
+    /// its init allocates as `opaque` ([`state_size`]).
+    fn new(state: &'static usize) -> Lent {
+        let mut stream = fresh();
+        stream.bzalloc = Some(alloc);
+        stream.bzfree = Some(free);
+        stream.opaque = state_size(state);
+        Lent(stream)
+    }
+
+    /// `call` over the stream with `req`'s heap lent for its length
+    /// (ADR-0014), so what the library allocates and frees is the
+    /// request's; the `Err` is the memory limit's fatal an allocation
+    /// met, which ends the request as php's `emalloc` does.
+    fn call(
+        &mut self,
+        req: &mut Request,
+        call: impl FnOnce(*mut bz::bz_stream) -> c_int,
+    ) -> Result<c_int, Thrown> {
+        let stream = &raw mut *self.0;
+        req.lend_heap(|| call(stream))
+    }
+
+    /// One step over `input` into `output` for their length alone.
+    fn step(
+        &mut self,
+        req: &mut Request,
+        input: &[u8],
+        output: &mut [u8],
+        call: impl FnOnce(*mut bz::bz_stream) -> c_int,
+    ) -> Result<Step, Thrown> {
+        step(&mut self.0, input, output, |s| req.lend_heap(|| call(s)))
+    }
+}
+
+/// A [`Lent`] stream after `BZ2_bzCompressInit`, as `php_bz2_filter_create`
+/// makes a `bzip2.compress` filter's that is not persistent.
+pub(crate) struct LentCompress(Lent);
 
 impl LentCompress {
     /// `BZ2_bzCompressInit(&strm, block_size, 0, work_factor)`: the
@@ -354,9 +372,9 @@ impl LentCompress {
         block_size: i32,
         work_factor: i32,
     ) -> Result<Result<LentCompress, Code>, Thrown> {
-        let mut stream = fresh_lent(&ESTATE);
+        let mut stream = Lent::new(&ESTATE);
         // SAFETY: the stream is fresh with its allocator set.
-        let code = lent(req, &raw mut *stream, |s| unsafe {
+        let code = stream.call(req, |s| unsafe {
             bz::BZ2_bzCompressInit(s, block_size, 0, work_factor)
         })?;
         Ok(match Code::of(code) {
@@ -374,10 +392,10 @@ impl LentCompress {
         action: Action,
     ) -> Result<Step, Thrown> {
         let action = action.code();
-        step(&mut self.0, input, output, |s| {
-            // SAFETY: the stream was initialised by BZ2_bzCompressInit,
-            // and step points it at the two slices for this call alone.
-            lent(req, s, |s| unsafe { bz::BZ2_bzCompress(s, action) })
+        // SAFETY: the stream was initialised by BZ2_bzCompressInit, and
+        // step points it at the two slices for this call alone.
+        self.0.step(req, input, output, |s| unsafe {
+            bz::BZ2_bzCompress(s, action)
         })
     }
 
@@ -385,20 +403,15 @@ impl LentCompress {
     pub(crate) fn end(mut self, req: &mut Request) {
         // SAFETY: an initialised stream, ended once, here, as `self` is
         // given up.
-        lent(req, &raw mut *self.0, |s| unsafe {
-            bz::BZ2_bzCompressEnd(s)
-        })
-        .ok();
+        self.0
+            .call(req, |s| unsafe { bz::BZ2_bzCompressEnd(s) })
+            .ok();
     }
 }
 
-/// A `bz_stream` after `BZ2_bzDecompressInit` with its state on the
-/// request's heap, as a `bzip2.decompress` filter that is not persistent
-/// makes one; ended as [`LentCompress`] is.
-pub(crate) struct LentDecompress(Box<bz::bz_stream>);
-
-// SAFETY: as for Compress: one owner, one thread at a time (ADR-0005).
-unsafe impl Send for LentDecompress {}
+/// A [`Lent`] stream after `BZ2_bzDecompressInit`, as a `bzip2.decompress`
+/// filter that is not persistent makes one.
+pub(crate) struct LentDecompress(Lent);
 
 impl LentDecompress {
     /// `BZ2_bzDecompressInit(&strm, 0, small)`: the stream, or the
@@ -407,9 +420,9 @@ impl LentDecompress {
         req: &mut Request,
         small: bool,
     ) -> Result<Result<LentDecompress, Code>, Thrown> {
-        let mut stream = fresh_lent(&DSTATE);
+        let mut stream = Lent::new(&DSTATE);
         // SAFETY: the stream is fresh with its allocator set.
-        let code = lent(req, &raw mut *stream, |s| unsafe {
+        let code = stream.call(req, |s| unsafe {
             bz::BZ2_bzDecompressInit(s, 0, c_int::from(small))
         })?;
         Ok(match Code::of(code) {
@@ -425,20 +438,18 @@ impl LentDecompress {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<Step, Thrown> {
-        step(&mut self.0, input, output, |s| {
-            // SAFETY: the stream was initialised by BZ2_bzDecompressInit,
-            // and step points it at the two slices for this call alone.
-            lent(req, s, |s| unsafe { bz::BZ2_bzDecompress(s) })
-        })
+        // SAFETY: the stream was initialised by BZ2_bzDecompressInit, and
+        // step points it at the two slices for this call alone.
+        self.0
+            .step(req, input, output, |s| unsafe { bz::BZ2_bzDecompress(s) })
     }
 
     /// `BZ2_bzDecompressEnd`: the state given back to the request's heap.
     pub(crate) fn end(mut self, req: &mut Request) {
         // SAFETY: an initialised stream, ended once, here, as `self` is
         // given up.
-        lent(req, &raw mut *self.0, |s| unsafe {
-            bz::BZ2_bzDecompressEnd(s)
-        })
-        .ok();
+        self.0
+            .call(req, |s| unsafe { bz::BZ2_bzDecompressEnd(s) })
+            .ok();
     }
 }

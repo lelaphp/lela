@@ -88,11 +88,12 @@ struct Decompressing {
     buffers: Option<Buffers>,
 }
 
-/// `bzip2.compress`: the stream and the buffers, `None` once the dtor
-/// ended and freed them, and `is_flushed`, whether no flush is pending
-/// since the last bucket.
+/// `bzip2.compress`: the stream, `None` once the dtor ended it, the
+/// buffers, `None` once the dtor freed them, and `is_flushed`, whether no
+/// flush is pending since the last bucket.
 struct Compressing {
-    stream: Option<(LentCompress, Buffers)>,
+    stream: Option<LentCompress>,
+    buffers: Option<Buffers>,
     flushed: bool,
 }
 
@@ -201,7 +202,7 @@ impl StreamFilter for Compressing {
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown> {
-        let Some((stream, buffers)) = self.stream.as_mut() else {
+        let (Some(stream), Some(buffers)) = (self.stream.as_mut(), self.buffers.as_mut()) else {
             return Ok(FilterStatus::ErrFatal);
         };
         let action = match flags {
@@ -257,8 +258,10 @@ impl StreamFilter for Compressing {
     /// `php_bz2_compress_dtor`: `BZ2_bzCompressEnd`, then the buffers and
     /// `data` freed.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        if let Some((stream, buffers)) = self.stream.take() {
+        if let Some(stream) = self.stream.take() {
             stream.end(req);
+        }
+        if let Some(buffers) = self.buffers.take() {
             buffers.free(req);
         }
         Ok(())
@@ -443,7 +446,8 @@ pub(crate) fn factory(
         return Ok(None);
     };
     Ok(Some(Box::new(Compressing {
-        stream: Some((stream, buffers)),
+        stream: Some(stream),
+        buffers: Some(buffers),
         flushed: true,
     })))
 }
