@@ -7368,6 +7368,19 @@ impl Emit<'_> {
     /// string(1) "C"
     /// ```
     ///
+    /// A `??` over `null` and a conditional over a constant are the side
+    /// the evaluator picked, as the default Reflection prints shows:
+    ///
+    /// ```php
+    /// function f($x = null ?? Y, $y = true ? Z : 1, $z = [1 ? W : 2, null ?? V]) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo $p, "\n";
+    /// ```
+    /// ```expect
+    /// Parameter #0 [ <optional> $x = Y ]
+    /// Parameter #1 [ <optional> $y = Z ]
+    /// Parameter #2 [ <optional> $z = [W, V] ]
+    /// ```
+    ///
     /// A property fetch's object is evaluated before the fetch is looked
     /// at, as `zend_eval_const_expr` walks it, so what the object
     /// refuses is refused first, and an attribute's argument is compiled
@@ -7382,6 +7395,14 @@ impl Emit<'_> {
     /// ```
     #[allow(clippy::too_many_lines)]
     fn const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
+        // `zend_compile_const_expr` walks the tree `zend_eval_const_expr`
+        // left ([`eval`]): a node it folded is its value, and a `??` or a
+        // conditional it replaced is the side it picked.
+        match self.rewrites.get(expr) {
+            Some(eval::Rewrite::Value(value)) => return self.folded(value),
+            Some(eval::Rewrite::Node(node)) => return self.const_expr(node),
+            None => {}
+        }
         let line = expr.line(self.parsed);
         self.check_stack()?;
         let tree = &self.parsed.tree;

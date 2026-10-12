@@ -89,6 +89,11 @@ impl Emit<'_> {
     /// The fold [`Self::constant_expr`] made of a node, kept where it is
     /// `zend_eval_const_expr`'s: the node is replaced by its value.
     pub(super) fn record_fold(&mut self, expr: tree::Expr, folded: &Result<Zval, CompileError>) {
+        // A number or a string written out is the same value before the
+        // evaluator and after it, so it is kept nowhere.
+        if matches!(expr, tree::Expr::LiteralExpr(_) | tree::Expr::NowdocExpr(_)) {
+            return;
+        }
         if self.fold == Fold::EvalConstExpr
             && let Ok(value) = folded
         {
