@@ -11,7 +11,9 @@
 //! Whose an operation is cannot be read from git, so permit records it at
 //! the one moment the starting session is known: when it admits the `git
 //! merge`, `pull`, `cherry-pick`, `revert` or `rebase` that starts it in a
-//! checkout where none stands ([`record`]). The record names the session
+//! checkout where none stands ([`record`]), the command hook's admission
+//! alone, since the function hook above it admits a call the command hook
+//! then judges again (#2734). The record names the session
 //! and its subagent, and the commit `HEAD` stands on, which is the
 //! operation's base: `HEAD` itself while a merge or one pick stands,
 //! `sequencer/head` through a sequence and `orig-head` through a rebase.
@@ -27,12 +29,18 @@
 //! A record is dropped by the next line that runs git in its checkout and
 //! finds nothing standing, since what it named has ended or never began (a
 //! merge already up to date, a call the person refused, one a `reset`
-//! ended), and by a `--abort` or `--quit`. What that leaves open, stated:
+//! ended), and by that operation's own `--abort` or `--quit`, never
+//! while it stands otherwise (#2734). What that leaves open, stated:
 //! between a start that began nothing and the next git line in that
 //! checkout, an operation another hand starts outside permit on the same
 //! `HEAD` would read as the recorded session's. A rebase whose `orig-head`
 //! is not the `HEAD` it was started on (`git rebase <upstream> <branch>`)
-//! is refused to its own starter, the safe side.
+//! is refused to its own starter, the safe side. An abort the command
+//! hook admits and that is then refused before it runs, by the person or
+//! by Claude Code's own permission check, has dropped its record while the
+//! operation still stands (#2723). A start no command hook judges, its
+//! every candidate failing to run, is handed on unrecorded and is refused
+//! to its own starter.
 //!
 //! A git command past a directory change the line makes after its first
 //! command touches no record, since where it runs is not read (#2720): a
@@ -57,6 +65,7 @@ use serde::{Deserialize, Serialize};
 use super::argv::{Argv, Line};
 use super::call::Call;
 use super::rules::{acts_in, fired_in, placed};
+use crate::manifest::OneOrMany;
 use crate::reading::{self, Store};
 use crate::{git, track};
 
@@ -106,6 +115,28 @@ impl Operation {
             }
         }
     }
+
+    /// Whether `git` is this operation's own `--abort` or `--quit`: the
+    /// flag among the words of the subcommand that steps it, not a word
+    /// of another command's, so a `git rebase --abort` or a `git commit
+    /// -m --abort` leaves a merge's record standing (#2734).
+    fn ended_by(self, git: &Argv) -> bool {
+        let subcommand = match self {
+            Operation::Merge => "git merge",
+            Operation::CherryPick => "git cherry-pick",
+            Operation::Revert => "git revert",
+            Operation::Rebase => "git rebase",
+            Operation::Am => "git am",
+        };
+        ends(git, subcommand)
+    }
+}
+
+/// Whether `git` runs `subcommand` with `--abort` or `--quit` among its
+/// own words.
+fn ends(git: &Argv, subcommand: &str) -> bool {
+    let flags = ENDING.map(str::to_owned);
+    git.denies(&flags, &OneOrMany::One(subcommand.to_owned()))
 }
 
 impl fmt::Display for Operation {
@@ -119,6 +150,9 @@ impl fmt::Display for Operation {
         })
     }
 }
+
+/// The flags that end an operation, given to the subcommand that steps it.
+const ENDING: [&str; 2] = ["--abort", "--quit"];
 
 /// The git subcommands that start an operation a session may own: each
 /// leaves one of [`Operation`]'s markers but `am`'s, a `pull` a merge's or
@@ -208,11 +242,12 @@ pub(crate) fn foreign(
 
 /// What `line` does to the records of the checkouts it runs git in: each
 /// git command whose place it reads ([`placed`]) and that finds nothing
-/// standing drops the record, as does an `--abort` or `--quit`; then the
-/// session making `call` is recorded as the starter of each operation the
-/// line starts where none stands. A
-/// command run while an operation stands, its `--continue`, `--skip` or
-/// `--edit-todo` among them, leaves the record as it is.
+/// standing drops the record, as does the standing operation's own
+/// `--abort` or `--quit` ([`Operation::ended_by`]); then the session
+/// making `call` is recorded as the starter of each operation the line
+/// starts where none stands. Any other command run while an operation
+/// stands, its `--continue`, `--skip` or `--edit-todo` among them, or
+/// another subcommand's `--abort`, leaves the record as it is.
 pub(crate) fn record(root: &Path, call: &Call, line: &Line) -> Result<()> {
     let mut starting = Vec::new();
     for (git, checkout) in placed(root, line)
@@ -222,11 +257,8 @@ pub(crate) fn record(root: &Path, call: &Call, line: &Line) -> Result<()> {
         let Some(git_dir) = git_dir(&checkout) else {
             continue;
         };
-        let ends = ["--abort", "--quit"]
-            .iter()
-            .any(|flag| git.words().iter().any(|w| w == flag));
-        let standing = Operation::in_progress(&git_dir).is_some();
-        if !standing || ends {
+        let standing = Operation::in_progress(&git_dir);
+        if standing.is_none_or(|operation| operation.ended_by(git)) {
             let file = starter_file(&checkout, &git_dir);
             match fs::remove_file(&file) {
                 Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
@@ -235,7 +267,10 @@ pub(crate) fn record(root: &Path, call: &Call, line: &Line) -> Result<()> {
                 _ => {}
             }
         }
-        if !standing && !ends && STARTING.iter().any(|phrase| git.runs(phrase)) {
+        let starts = STARTING
+            .iter()
+            .any(|phrase| git.runs(phrase) && !ends(git, phrase));
+        if standing.is_none() && starts {
             starting.push((checkout, git_dir));
         }
     }
@@ -427,6 +462,38 @@ mod tests {
         }
         record(&dir, &call("s1", None), &Line::read("git merge --abort")).unwrap();
         assert_eq!(standing(&dir, add, "s1", None), Some(Operation::Merge));
+    }
+
+    /// #2734: a record is never dropped while its operation stands but by
+    /// that operation's own `--abort` or `--quit`. Another subcommand's
+    /// abort, a `--abort` that is a message or a pattern, and a step of
+    /// the operation leave the merge its starter's, whoever runs them;
+    /// `git merge --quit` or `--abort`, through `-C` among them, drops it.
+    #[test]
+    fn a_record_stands_while_its_operation_does_but_for_its_own_abort() {
+        let dir = repository("operation-own-abort");
+        let at = dir.display();
+        for ends in ["git merge --quit", &format!("git -C {at} merge --abort")] {
+            let start = Line::read("git merge --no-commit topic");
+            record(&dir, &call("s1", None), &start).unwrap();
+            merging(&dir);
+            for line in [
+                "git rebase --abort",
+                "git cherry-pick --quit",
+                "git am --abort",
+                "git commit -m --abort -- a",
+                "git log --grep --abort",
+                "git merge --continue",
+                "git status --short",
+            ] {
+                record(&dir, &call("s2", None), &Line::read(line)).unwrap();
+                assert_eq!(standing(&dir, "git add -- a", "s1", None), None, "{line}");
+            }
+            record(&dir, &call("s1", None), &Line::read(ends)).unwrap();
+            let after = standing(&dir, "git add -- a", "s1", None);
+            assert_eq!(after, Some(Operation::Merge), "{ends}");
+            ended(&dir);
+        }
     }
 
     /// #2720: a sibling agent's line that `cd`s into its own worktree past
