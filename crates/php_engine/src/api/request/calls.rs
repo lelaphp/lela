@@ -146,9 +146,9 @@ impl Request {
     /// The copy reads a runtime cache of its own for the call where the
     /// scope is not the closure's or the closure has one of its own, as
     /// php's `emalloc`s one beside the copy and frees it after, since the
-    /// slots hold what the scope decides; a generator's frame outlives
-    /// the call, and php makes it a closure of its own, so its function
-    /// keeps the closure's cache.
+    /// slots hold what the scope decides. A generator's frame outlives
+    /// the call, so php serves it through a closure of its own instead,
+    /// which `Closure::call` makes ([`crate::classes::ClosureObject`]).
     pub(crate) fn serve_closure_as(
         &mut self,
         object: PhpObject,
@@ -161,9 +161,6 @@ impl Request {
         let Some(closure) = object.closure(self).cloned() else {
             return Ok(Value::null());
         };
-        let generator = self
-            .function_decl(closure.function)
-            .is_some_and(|decl| decl.is_generator);
         let own_cache = self
             .user_function(closure.function)
             .is_some()
@@ -173,9 +170,7 @@ impl Request {
                     .map(|payload| payload.cache)
             })
             .flatten()
-            .filter(|cache| {
-                !generator && (closure.scope != Some(scope) || *cache != ClosureCache::Function)
-            })
+            .filter(|cache| closure.scope != Some(scope) || *cache != ClosureCache::Function)
             .map(|_| self.own_cache());
         let held = object.native_mut::<ClosureObject>(self).map(|payload| {
             let cache = match own_cache {

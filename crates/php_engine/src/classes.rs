@@ -554,7 +554,7 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
     if let Some(this) = closure.this {
         req.addref(&this.as_value());
     }
-    let cache = closure_cache(req, closure.function, closure.scope, Some(from));
+    let cache = closure_cache(req, closure.function, closure.scope, from);
     let made = req.clone_with_payload(
         object,
         ClosureObject {
@@ -590,7 +590,12 @@ pub(crate) enum ClosureCache {
 /// `zend_create_closure_ex`'s choice of runtime cache
 /// (`Z/Zend/zend_closures.c:794-819`) for a closure over `function` in
 /// `scope`, made from a closure whose cache is `from`, or from the
-/// function itself where `from` is none. A closure made from one with a
+/// function itself, whose cache is [`ClosureCache::Function`]. The op
+/// array's scope is read as php without opcache leaves it, rewritten to
+/// the scope of the first closure made over it; under opcache an
+/// immutable op array keeps its declared scope, so a closure written in
+/// a trait's method takes a cache of its own in the using class there.
+/// A closure made from one with a
 /// cache of its own takes another (`ZEND_ACC_HEAP_RT_CACHE`). A real
 /// closure's op array whose cache no closure has laid down yet has it
 /// laid down now for `scope`, which php writes onto the op array as
@@ -611,14 +616,14 @@ pub(crate) fn closure_cache(
     req: &mut Request,
     function: Function,
     scope: Option<ClassId>,
-    from: Option<ClosureCache>,
+    from: ClosureCache,
 ) -> ClosureCache {
     let Some(user) = req.user_function(function) else {
         return ClosureCache::Function;
     };
     let (cache, size) = (user.shape.cache, user.shape.cache_size);
     let real = matches!(user.body, crate::exec::Body::Dynamic(_));
-    if let Some(ClosureCache::Own(_)) = from {
+    if let ClosureCache::Own(_) = from {
         return ClosureCache::Own(req.own_cache());
     }
     if !req.cache_laid(cache) {
@@ -977,6 +982,23 @@ impl Closure {
     /// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 3
     /// NULL
     /// ```
+    ///
+    /// A generator's frame outlives the call, so php makes a closure of
+    /// its own for it, `zend_create_closure` with the new receiver and
+    /// scope, whose runtime cache is chosen as any made closure's
+    /// ([`closure_cache`]), and serves the generator through it; the
+    /// closure called stays as it was:
+    ///
+    /// ```php
+    /// class A { private $x = 'A'; }
+    /// class B { private $x = 'B'; }
+    /// $g = function () { yield $this->x; yield static::class; };
+    /// foreach ([new A, new B, new A] as $o) { foreach ($g->call($o) as $v) { echo $v, ","; } }
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// A,A,B,B,A,A,
+    /// ```
     fn call(
         req: &mut Request,
         this: This<Self>,
@@ -994,13 +1016,33 @@ impl Closure {
         // `fci.named_params`, placed by `zend_call_function` over the
         // closure's function.
         let placed = crate::api::call::placed(req, info.function, &args.positional, args.named())?;
-        let returned = req.serve_closure_as(
-            closure,
-            newThis,
-            class,
-            &placed.arguments,
-            &placed.extra_named,
-        )?;
+        let generator = req
+            .function_decl(info.function)
+            .is_some_and(|decl| decl.is_generator);
+        let returned = if generator {
+            let from = closure
+                .native::<ClosureObject>(req)
+                .map_or(ClosureCache::Function, |payload| payload.cache);
+            let made = create_closure(
+                req,
+                (&info, from),
+                Some(class),
+                info.called_scope,
+                Some(newThis),
+            )?;
+            let served = req.serve_closure(made, &placed.arguments, &placed.extra_named);
+            // `GC_DELREF(&closure->std)`: the generator holds its own.
+            req.release(made.as_value());
+            served?
+        } else {
+            req.serve_closure_as(
+                closure,
+                newThis,
+                class,
+                &placed.arguments,
+                &placed.extra_named,
+            )?
+        };
         // `zend_unwrap_reference(&closure_result)`: the cell a closure
         // returning by reference handed back given up for the value it
         // holds, whose owner is the caller's.
@@ -1273,7 +1315,13 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
         bound: None,
         fake: true,
     };
-    create_closure(req, (&fake, None), scope, called_scope, this)
+    create_closure(
+        req,
+        (&fake, ClosureCache::Function),
+        scope,
+        called_scope,
+        this,
+    )
 }
 
 /// `zend_ast_evaluate`'s `ZEND_AST_OP_ARRAY` arm: a closure of a
@@ -1331,7 +1379,7 @@ pub(crate) fn const_expr_closure(
         bound,
         fake: false,
     };
-    let made = create_closure(req, (&info, None), scope, scope, None);
+    let made = create_closure(req, (&info, ClosureCache::Function), scope, scope, None);
     if let Some(bound) = info.bound {
         req.release(Value::array(bound));
     }
@@ -2243,7 +2291,7 @@ fn do_closure_bind(
     // before a receiver with none takes `Closure` as its dummy one.
     let called_scope = scope;
     let scope = scope.or_else(|| this.and_then(|_| req.class_named(Bare::resolved(b"Closure"))));
-    create_closure(req, (&info, Some(from)), scope, called_scope, this)
+    create_closure(req, (&info, from), scope, called_scope, this)
         .map(|made| Some(Instance::of(made)))
 }
 
@@ -2255,7 +2303,7 @@ fn do_closure_bind(
 /// `called_scope`, as `zend_create_closure_ex` stores it.
 fn create_closure(
     req: &mut Request,
-    (info, from): (&ClosureInfo, Option<ClosureCache>),
+    (info, from): (&ClosureInfo, ClosureCache),
     scope: Option<ClassId>,
     called_scope: Option<ClassId>,
     this: Option<PhpObject>,

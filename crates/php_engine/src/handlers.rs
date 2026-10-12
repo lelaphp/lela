@@ -793,7 +793,8 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     }
     // `zend_create_closure_ex` over the op array: its cache, laid down
     // for the scope here where no closure laid it down yet.
-    let cache = crate::classes::closure_cache(req, function, scope, None);
+    let cache =
+        crate::classes::closure_cache(req, function, scope, crate::classes::ClosureCache::Function);
     let payload = crate::classes::ClosureObject {
         info: closure,
         cache,
