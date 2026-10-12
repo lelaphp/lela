@@ -152,6 +152,13 @@ impl Tree {
         std::fs::remove_dir_all(&named).ok();
         std::fs::create_dir_all(&named)
             .map_err(|err| made(err, &named, "creating the scratch tree"))?;
+        // A file takes its directory's group on macOS, and `/tmp`'s is
+        // `wheel`, which the user running a lane is not in: there a
+        // `chmod` drops the setgid bit, as php's chmod tests read (#2807).
+        // The tree takes the process's own group, so what is made in it
+        // does too.
+        std::os::unix::fs::chown(&named, None, Some(nix::unistd::getegid().as_raw()))
+            .with_context(|| format!("giving {} the process's group", named.display()))?;
         let path = std::fs::canonicalize(&named)
             .with_context(|| format!("resolving the scratch tree {}", named.display()))?;
         if keep {
@@ -872,6 +879,22 @@ mod tests {
             assert!(numbers.bytes().all(|b| b == b'-' || b.is_ascii_digit()));
             assert_eq!(pid.parse::<u32>().unwrap(), std::process::id());
         }
+    }
+
+    /// A program's tree under `/tmp` is the process's group and not
+    /// `/tmp`'s, and so is a file made in it: a `chmod` there keeps the
+    /// setgid bit, as php's chmod tests read (#2807).
+    #[test]
+    fn a_programs_tree_and_its_files_are_the_processs_group() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let tree = Tree::short("group").unwrap();
+        let ours = nix::unistd::getegid().as_raw();
+        assert_eq!(std::fs::metadata(tree.path()).unwrap().gid(), ours);
+        let file = tree.join("f");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().gid(), ours);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o2755)).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o7777, 0o2755);
     }
 
     /// A scratch tree the volume has no room for is [`Full`], naming the
