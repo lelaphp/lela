@@ -6375,6 +6375,48 @@ class C {
                  0002 V1 = DO_FCALL\n";
         assert!(dump.contains(x), "php's C::$x::get, {dump}");
         assert!(dump.contains(y), "php's C::$y::get, {dump}");
+        let call = |opcode: &str| {
+            format!(
+                "0000 INIT_METHOD_CALL 0 THIS string(\"p\")\n\
+                 0001 V0 = {opcode}\n\
+                 0002 RETURN V0\n"
+            )
+        };
+        let above = dump_of(
+            b"<?php
+class C {
+    private function p() { return 1; }
+    public $x { get => $this->p(); }
+}
+",
+        );
+        assert!(above.contains(&call("DO_UCALL")), "php's dump, {above}");
+        let below = dump_of(
+            b"<?php
+class C {
+    public $x { get => $this->p(); }
+    private function p() { return 1; }
+}
+",
+        );
+        assert!(below.contains(&call("DO_FCALL")), "php's dump, {below}");
+        let scoped = dump_of(
+            b"<?php
+class C {
+    private static function p() { return 1; }
+    public $x { get => self::p() + C::p(); }
+}
+",
+        );
+        assert!(
+            scoped.contains(
+                "0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string(\"p\")\n\
+                 0001 V0 = DO_UCALL\n\
+                 0002 INIT_STATIC_METHOD_CALL 0 string(\"C\") string(\"p\")\n\
+                 0003 V1 = DO_UCALL\n"
+            ),
+            "php's dump, {scoped}"
+        );
     }
 
     /// `zend_compile_static_call`'s `self::` reads

@@ -6416,8 +6416,8 @@ impl Emit<'_> {
         property: &walk::Property,
         name: &[u8],
     ) -> Result<(), CompileError> {
-        let Some((kind, is_readonly_class)) =
-            (self.classes.get(at)).map(|decl| (decl.kind, decl.flags.is_readonly))
+        let Some((kind, is_readonly_class, declared_before)) = (self.classes.get(at))
+            .map(|decl| (decl.kind, decl.flags.is_readonly, decl.properties.len()))
         else {
             return Err(self.fatal("InternalError: a property of a class the unit has not"));
         };
@@ -6439,7 +6439,6 @@ impl Emit<'_> {
             Some(written) => Some(self.property_type(written, &member)?),
             None => None,
         };
-        let declared_before = (self.classes.get(at)).map_or(0, |decl| decl.properties.len());
         if (self.classes.get(at))
             .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *property.name))
         {
