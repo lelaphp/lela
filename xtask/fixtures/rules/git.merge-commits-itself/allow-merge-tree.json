@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git merge-tree --write-tree main t1234","description":"Test-merge two branches, which commits nothing"}}
