@@ -4,7 +4,7 @@ What CI's runners are made of, as Mitchell ruled on 2026-10-07 (#2218, #2253): t
 
 - `runner.sh linux|mac` sets up one machine as a runner of this repository. Its header says what each one gets.
 - `wizard.sh` walks a person through the steps only a person can take: ordering both machines, the SSH key, the registration tokens, auto-login, the Cloudflare secret, billing, and the variable below. It runs `runner.sh` on each machine over SSH. `DRY_RUN=1` prints each command that would change a machine, GitHub or a secret, instead of running it.
-- `pinned-php.sh` pours the keg `oracle.toml` pins and holds it to the pin's md5. Both `oracle` jobs and `runner.sh mac` run it.
+- `pinned-php.sh` pours the keg `oracle.toml` pins and holds it to the pin's md5, after pouring and `brew pin`ning each keg of its `[closure]` at the recorded version (#2657). Both `oracle` jobs and `runner.sh mac` run it. `DRY_RUN=1` says what it would pour and pours nothing.
 - `red-main.sh` files a red `main` once (#1156). `DRY_RUN=1` prints what it would write.
 
 ## `DAX_BUILD_RUNNER`: the Linux jobs on a hosted image

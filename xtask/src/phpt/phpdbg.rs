@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 use anyhow::Result;
 
 use super::file::Phpt;
-use crate::oracle::{Host, Pin};
+use crate::oracle::Pin;
 
 /// The flags before the program: no banner, no init file, no colours
 /// (run-tests.php:1908).
@@ -28,7 +28,7 @@ pub(crate) const FLAGS: [&str; 2] = ["-qIb", "-f"];
 /// straight away and quit (run-tests.php:1912).
 pub(super) const SECTION_FLAGS: [&str; 2] = ["-qIb", "-rr"];
 
-/// The pinned phpdbg, held to its digest once per run: the first program
+/// The pinned phpdbg, held to its digest and the pin's closure once per run: the first program
 /// it would run asserts it, and every later one reads what that found.
 #[derive(Debug, Default)]
 pub(super) struct Pinned {
@@ -43,7 +43,7 @@ impl Pinned {
             return Ok(());
         };
         self.digest
-            .get_or_init(|| Host::assert_digest(pinned).map_err(|e| format!("{e:#}")))
+            .get_or_init(|| (pin.oracle().host_asserted(pinned)).map_err(|e| format!("{e:#}")))
             .clone()
             .map_err(anyhow::Error::msg)
     }

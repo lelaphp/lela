@@ -2,11 +2,13 @@
 # oracle job (harness.yml, #678, #2200) and the dashboard's oracle job both
 # run, scripts/ci/pinned-php.sh over the pin as xtask renders it. The version,
 # keg path and md5 are oracle.toml's, read by xtask alone (`status --section
-# oracle`'s `binary`), so this file spells none of them. The runner keeps the
-# keg between jobs: a keg already at the pin's md5 is checked and left, and a
-# pour whose md5 is not the pin's stops the job before any lane.
+# oracle`'s `binary`), so this file spells none of them; so are the kegs php
+# loads and their versions (`closure`, #2657), each poured and pinned first.
+# The runner keeps the kegs between jobs: a keg already at the pin's md5 or
+# the recorded version is checked and left, and a pour that lands elsewhere
+# stops the job before any lane.
 name: pinned php
-description: Pour the keg oracle.toml pins and hold it to the pin's md5
+description: Pour the keg oracle.toml pins and the kegs it loads, held to the pin's md5 and versions
 inputs:
   xtask:
     description: The command the job runs the harness by

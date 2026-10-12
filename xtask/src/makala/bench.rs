@@ -129,7 +129,7 @@ fn against_itself(root: &Path, entry: &Entry) -> Result<Sides> {
 }
 
 /// What a bar of the production server starts from: the manifest, the
-/// pinned php-fpm held to its digest, and a makala serving the workload.
+/// pinned php-fpm held to its digest and the pin's closure, and a makala serving the workload.
 struct Started {
     manifest: Manifest,
     fpm: PathBuf,
@@ -143,7 +143,7 @@ fn started(root: &Path, entry: &Entry) -> Result<Option<Started>> {
     let Some(fpm) = (manifest.pin.sapi.fpm.as_ref()).filter(|fpm| fpm.path.is_file()) else {
         return Ok(None);
     };
-    fpm.assert_digest()?;
+    manifest.pin.oracle().host_asserted(fpm)?;
     let fpm = fpm.path.clone();
     let served = Rc::new(Served::start(root, &manifest, entry)?);
     Ok(Some(Started {
