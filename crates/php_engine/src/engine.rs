@@ -4836,12 +4836,9 @@ impl Engine {
     /// whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
         let script = req.primary() == Primary::Wrapped;
-        let left = if script {
-            req.enter_program_dir()
-        } else {
-            None
-        };
+        let mut left = None;
         if script {
+            left = req.enter_program_dir();
             req.expand_primary_file(source.is_some());
         }
         if script && source.is_none() {

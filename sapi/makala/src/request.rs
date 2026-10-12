@@ -195,7 +195,8 @@ fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
 
 /// How the pool serves each request: through its own `Engine::serve` on
 /// `engine`, under the document root `root`, starting in the process's
-/// working directory as it stands now, which no request moves.
+/// working directory as it stands now, which no request moves; in the
+/// document root where the process's has gone and `getcwd(3)` fails.
 pub(crate) fn serving(engine: &Engine, root: &Arc<[u8]>) -> impl Fn(Job) + Clone + Send + 'static {
     let engine = engine.clone();
     let root = Arc::clone(root);
