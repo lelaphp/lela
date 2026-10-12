@@ -168,3 +168,31 @@ env = { SCRIPT_FILENAME = "{dir}/www/t.php" }
 [[line.then]]
 args = ["-c", "{dir}/php.ini"]
 env = { SCRIPT_FILENAME = "{dir}/out/t.php" }
+
+# A request starts in the process's working directory, and
+# `php_execute_script` enters the program's by the name it was given,
+# relative or whole, and leaves it once the program has been served, so
+# shutdown functions and destructors run where the request started; `-C` is
+# `SAPI_OPTION_NO_CHDIR` (`Z/sapi/cgi/cgi_main.c:2304`), and the program is
+# served where the process stands (#2748).
+[[line]]
+name = "a-request-enters-the-program-directory-and-leaves-it-before-shutdown"
+args = ["-n", "www/t.php"]
+files = { "at.php" = '''
+<?php
+function at() {
+    $cwd = getcwd();
+    return match (true) { $cwd === __DIR__ . '/www' => 'program', $cwd === __DIR__ => 'start', default => basename($cwd) };
+}
+''', "www/t.php" = '''
+<?php
+require_once __DIR__ . '/../at.php';
+echo 'run ', at(), "\n";
+register_shutdown_function(fn () => print('shutdown ' . at() . "\n"));
+$o = new class { function __destruct() { echo 'destructor ', at(), "\n"; } };
+''' }
+[[line.then]]
+args = ["-n", "-C", "www/t.php"]
+[[line.then]]
+args = ["-n"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/www/t.php" }

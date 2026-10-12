@@ -38,7 +38,6 @@ mod natives;
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
-use std::path::Path;
 use std::process::ExitCode;
 
 use php_proto::cgi::{Environment, RequestInfo};
@@ -46,7 +45,7 @@ use php_sapi::cgi::{Disk, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{Search, define, enabled};
 use php_sapi::{
-    Aborted, Engine, HostPage, HostServes, IniFiles, IniOrigin, Observables, OutputSink,
+    Aborted, Chdir, Engine, HostPage, HostServes, IniFiles, IniOrigin, Observables, OutputSink,
     RequestDescription, ResponseHead, WebRequest,
 };
 
@@ -535,13 +534,13 @@ fn describe(
         activated.extend(user.into_iter().map(|(k, v)| (k, v, IniOrigin::PerDir)));
     }
     let primary = Primary::of(path, invocation);
-    let process_cwd = std::env::current_dir().unwrap_or_default();
-    let cwd = match (&primary, invocation.no_chdir) {
-        (Primary::Path(Some(path)), false) => {
-            let file = process_cwd.join(path_of(path));
-            file.parent().map_or(process_cwd.clone(), Path::to_path_buf)
-        }
-        _ => process_cwd,
+    // The request starts in the process's directory, and
+    // `php_execute_script` enters the program's but under `-C`,
+    // `SAPI_OPTION_NO_CHDIR` (`Z/sapi/cgi/cgi_main.c:2304`); `-i` and
+    // stdin serve no file to enter by.
+    let chdir = match (&primary, invocation.no_chdir) {
+        (Primary::Path(Some(_)), false) => Chdir::IntoProgramDir,
+        _ => Chdir::Stay,
     };
     let rows = php_sapi::cgi::server_variables(&env, &info, settings);
     // The body, `sapi_cgi_read_post`'s stdin up to `CONTENT_LENGTH`, where
@@ -575,7 +574,8 @@ fn describe(
         RequestDescription {
             argv,
             env: env.0,
-            cwd,
+            cwd: std::env::current_dir().unwrap_or_default(),
+            chdir,
             server: rows,
             sapi_name: String::from(NAME),
             web: Some(web),

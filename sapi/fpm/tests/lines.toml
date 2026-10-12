@@ -275,3 +275,30 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
+# A request starts in the child's working directory, the pool's `chdir`
+# (`fpm_unix_init_child`), and `php_execute_script` enters the program's and
+# leaves it once the program has been served, so shutdown functions and
+# destructors run where the request started (#2748).
+[[line]]
+name = "a-request-enters-the-program-directory-and-leaves-it-before-shutdown"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\nchdir = {dir}/home\npm = static\npm.max_children = 1\n", "home/" = "", "at.php" = '''
+<?php
+function at() {
+    $cwd = getcwd();
+    return match (true) { $cwd === __DIR__ . '/www' => 'program', $cwd === __DIR__ => 'start', default => basename($cwd) };
+}
+''', "www/t.php" = '''
+<?php
+require_once __DIR__ . '/../at.php';
+echo 'run ', at(), "\n";
+register_shutdown_function(fn () => print('shutdown ' . at() . "\n"));
+$o = new class { function __destruct() { echo 'destructor ', at(), "\n"; } };
+''' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/www/t.php"], ["REQUEST_METHOD", "GET"]]

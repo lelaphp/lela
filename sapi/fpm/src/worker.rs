@@ -18,7 +18,7 @@ use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::cgi::{Disk, ini_text};
 use php_sapi::{
-    Aborted, Body, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
+    Aborted, Body, Chdir, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
     OutputSink, ProgramFile, RequestDescription, ResponseHead, WebRequest,
 };
 
@@ -1073,17 +1073,6 @@ impl Worker {
             .map(|(n, v)| (n.into_encoded_bytes(), v.into_encoded_bytes()))
             .collect();
         let newest = Environment(fcgi::newest_first(env).cloned().collect());
-        // The file's directory, which `php_execute_script` moves to; the
-        // child's own where the request names no file.
-        let cwd = info
-            .path_translated
-            .as_deref()
-            .and_then(|path| {
-                crate::conf::path(path)
-                    .parent()
-                    .map(std::path::Path::to_path_buf)
-            })
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let web = WebRequest {
             body,
             response_code: info.response_code,
@@ -1095,7 +1084,11 @@ impl Worker {
         RequestDescription {
             env: process_env,
             params: newest.0,
-            cwd,
+            // The child's directory, the pool's `chdir` where it names
+            // one (`fpm_unix_init_child`); `php_execute_script` enters the
+            // program's and comes back before the request shuts down.
+            cwd: std::env::current_dir().unwrap_or_default(),
+            chdir: Chdir::IntoProgramDir,
             server: rows,
             sapi_name: String::from(NAME),
             web: Some(web),
