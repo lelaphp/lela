@@ -574,7 +574,9 @@ http = "HEAD /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 http = "GET /nope%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 
 # The same requests under a router that declines each: the router runs
-# first, and then the file is served or refused as without one (#2695).
+# first, and then the file is served or refused as without one (#2695). The
+# text after a 400's ` - ` is masked for the reason the line above gives: a
+# stale errno no call of the request's set (#2758).
 [[line]]
 name = "the-built-in-server-refuses-a-path-holding-a-nul-after-the-router"
 args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/router.php"]
