@@ -746,6 +746,56 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
     );
 }
 
+/// The tree is read as itself under a hook (#2799): git exports `GIT_DIR`
+/// to pre-commit, and a tree read through it named the commit of the
+/// repository being committed to. Here the tree is a checkout at one
+/// commit and `GIT_DIR` names another repository at another, and the
+/// refusal names the tree's own.
+#[test]
+fn the_tree_is_read_as_itself_under_a_hook_s_git_dir() {
+    let commit = |dir: &Path| {
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-c", "user.name=x", "-c", "user.email=x@x"])
+                .args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a"), dir.display().to_string()).unwrap();
+        git(&["add", "a"]);
+        git(&["commit", "-qm", "a"]);
+        git(&["rev-parse", "HEAD"])
+    };
+    let root = scratch("oracle-hook-git-dir");
+    let scratchpad = Tree::new("oracle-hook-git-dir-repos").unwrap();
+    let (tree, other) = (scratchpad.join("tree"), scratchpad.join("other"));
+    let (own, committing) = (commit(&tree), commit(&other));
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
+        .arg("--root")
+        .arg(&*root)
+        .args(["status", "--section", "oracle", "--format", "json"])
+        .env(TREE_VARIABLE, &tree)
+        .env("GIT_DIR", other.join(".git"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let error = json["found"]["error"].as_str().unwrap();
+    assert!(error.contains(&own), "{error}");
+    assert!(!error.contains(&committing), "{error}");
+}
+
 /// The pinned php a runner pours (#2253): its version, keg path and md5
 /// as the pin states them, so the oracle job reads the pin off this
 /// section and never parses `oracle.toml` a second time.
