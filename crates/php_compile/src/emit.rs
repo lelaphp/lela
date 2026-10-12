@@ -129,6 +129,7 @@ mod assert;
 mod attributes;
 mod by_name;
 mod chain;
+mod eval;
 mod export;
 mod extended;
 mod hooks;
@@ -632,6 +633,9 @@ pub(crate) struct Emit<'a> {
     /// Whose fold is running, `zend_compile_expr`'s or
     /// `zend_eval_const_expr`'s ([`Fold`]).
     fold: Fold,
+    /// The nodes `zend_eval_const_expr` replaced in php's tree, which
+    /// every compile after it reads ([`eval`]).
+    rewrites: eval::Rewrites,
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
@@ -1346,6 +1350,7 @@ impl<'a> Emit<'a> {
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,
+            rewrites: eval::Rewrites::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),
@@ -1727,20 +1732,6 @@ impl Emit<'_> {
         });
     }
 
-    /// Where the diagnostics raised so far end: the mark
-    /// [`Self::unraise`] goes back to.
-    pub(crate) fn raised(&self) -> Raised {
-        Raised(self.diagnostics.len())
-    }
-
-    /// The diagnostics raised past `mark` taken back: a fold tried for
-    /// a shape that then refuses, whose expressions the ordinary call
-    /// folds again and raises again. php folds each node once, in place
-    /// (`zend_eval_const_expr`), so what it raised stands once.
-    pub(crate) fn unraise(&mut self, mark: Raised) {
-        self.diagnostics.truncate(mark.0);
-    }
-
     /// The constant string for these bytes, interned into whichever home
     /// this compilation was given: php's `zend_new_interned_string` over
     /// the string a `CONST` operand holds. A home with no memory left
@@ -1947,9 +1938,11 @@ impl Emit<'_> {
     /// `'(' expr ')'` and hands the compiler the inner node, so what a
     /// compile function looks at to sort an operand by its kind is the
     /// inner node, and the parenthesised conditional's mark is the one
-    /// thing the parentheses leave, on the node ([`Self::expr`]).
+    /// thing the parentheses leave, on the node ([`Self::expr`]). A node
+    /// `zend_eval_const_expr` replaced with one of its sides is that side
+    /// ([`Self::replaced`]).
     pub(crate) fn peel(&self, expr: tree::Expr) -> tree::Expr {
-        peel(self.parsed, expr)
+        self.replaced(peel(self.parsed, expr))
     }
 
     /// The line php's node for `expr` carries, `zend_ast.lineno`: the
@@ -3605,7 +3598,8 @@ impl Emit<'_> {
     /// it folds to, or `null` where none is written, is what the table
     /// starts with, and one `BIND_STATIC` binds the CV to the table's
     /// entry by reference. An initializer it cannot fold leaves `null`
-    /// in the table and runs where it stands: `BIND_INIT_STATIC_OR_JMP`
+    /// in the table and runs as the evaluator left it ([`eval`]), a `??`
+    /// over `null` its right side: `BIND_INIT_STATIC_OR_JMP`
     /// steps over it once the entry holds a value, and the
     /// `BIND_STATIC` after it binds the value it computed the first
     /// time. The slot and the `ZEND_BIND_REF` bit share `extended_value`
@@ -3658,14 +3652,7 @@ impl Emit<'_> {
             let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
             let folded = match init {
                 None => Some(Zval::null()),
-                Some(init) => {
-                    let mark = self.raised();
-                    let folded = self.eval_const(init)?;
-                    if folded.is_none() {
-                        self.unraise(mark);
-                    }
-                    folded
-                }
+                Some(init) => self.eval_const(init)?,
             };
             self.static_vars.push(BoundVar {
                 name: Name(name.as_slice().into()),
@@ -10914,6 +10901,10 @@ impl Emit<'_> {
     /// calls ([`Self::call`]); every other node is compiled as a read's.
     fn expr_under(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let node = self.peel(expr);
+        // `ZEND_AST_ZVAL` where `zend_eval_const_expr` folded the node.
+        if let Some(value) = self.rewritten_value(node) {
+            return Ok(Where::Constant(value));
+        }
         if self.memo.mode != memo::MemoMode::None {
             return self.memoized(node);
         }
@@ -15051,6 +15042,9 @@ impl Emit<'_> {
     /// `zend_eval_const_expr`, so it holds the dispatch and nothing else:
     /// each arm is one call whose answer is this function's.
     pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+        if let Some(evaluated) = self.evaluated(expr) {
+            return evaluated;
+        }
         // `zend_eval_const_expr` checks the stack and leaves
         // `CG(zend_lineno)` where it stands: the fold emits no opline,
         // so the line the compiler is on is the one the opline that
@@ -15058,7 +15052,7 @@ impl Emit<'_> {
         let line = expr.line(self.parsed);
         self.check_stack()?;
         let eval_const_expr = self.fold == Fold::EvalConstExpr;
-        match expr {
+        let folded = match expr {
             tree::Expr::ParenExpr(id) => self.paren_constant(id),
             tree::Expr::LiteralExpr(id) => self.literal_constant(id),
             tree::Expr::MagicConstExpr(id) => self.magic_node(id),
@@ -15095,9 +15089,10 @@ impl Emit<'_> {
                 self.no_constant("a call is no constant expression")
             }
             tree::Expr::CallExpr(id) => self.call_constant(id, line),
-            tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) | tree::Expr::NewExpr(_) => {
+            tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) => {
                 self.no_constant("a call is no constant expression")
             }
+            tree::Expr::NewExpr(id) => self.new_constant(id),
             tree::Expr::SimpleVarExpr(_)
             | tree::Expr::VarVarExpr(_)
             | tree::Expr::DynamicVarExpr(_)
@@ -15108,9 +15103,7 @@ impl Emit<'_> {
             }
             // `zend_eval_const_expr` folds no property fetch, and
             // `zend_compile_prop` emits its fetch.
-            tree::Expr::MemberAccessExpr(_) => {
-                self.no_constant("a property fetch is read as the program serves")
-            }
+            tree::Expr::MemberAccessExpr(id) => self.member_constant(id),
             // `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
             // ([`Self::dimension_fold`]); `zend_compile_dim` folds
             // nothing.
@@ -15155,7 +15148,9 @@ impl Emit<'_> {
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
                 self.no_constant("a `yield` is no constant expression")
             }
-        }
+        };
+        self.record_fold(expr, &folded);
+        folded
     }
 
     /// A node [`Self::constant_expr`] folds to nothing, refused as `why`.
@@ -15305,21 +15300,7 @@ impl Emit<'_> {
             Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
                 self.short_circuit_fold(true, left, right)
             }
-            // `zend_compile_coalesce` emits two oplines whatever stands
-            // on either side; `zend_eval_const_expr`'s
-            // `ZEND_AST_COALESCE` arm folds a left side that folds, to
-            // itself where it is not `null` and to the right side's fold
-            // where it is.
-            Some(SyntaxKind::QUESTION_QUESTION) if self.fold == Fold::EvalConstExpr => {
-                let value = self.constant_expr(left)?;
-                if value.kind() == ZvalType::Null {
-                    return self.constant_expr(right);
-                }
-                Ok(value)
-            }
-            Some(SyntaxKind::QUESTION_QUESTION) => {
-                Err(self.fatal("a `??` is no constant expression"))
-            }
+            Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce_constant(id, left, right),
             Some(kind) => match binary_op(kind) {
                 Some(op) => self.binary_constant(op, left, right),
                 None => Err(self.unread("a binary operator")),
@@ -15409,24 +15390,6 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_eval_const_expr`'s `ZEND_AST_CONDITIONAL` arm: the condition
-    /// folded, then the branch `zend_is_true` picks folded in its place,
-    /// the condition itself for `a ?: b`.
-    fn ternary_constant(&mut self, id: NodeId<tree::TernaryExpr>) -> Result<Zval, CompileError> {
-        let node = &self.parsed.tree[id];
-        let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
-        let otherwise = self.required(otherwise, "a conditional")?;
-        let value = self.constant_expr(cond)?;
-        if value.as_double().is_some_and(f64::is_nan) {
-            self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
-        }
-        match (truth(value), then) {
-            (true, None) => Ok(value),
-            (true, Some(then)) => self.constant_expr(then),
-            (false, _) => self.constant_expr(otherwise),
-        }
-    }
-
     /// [`Self::constant_expr`]'s `ZEND_AST_BINARY_OP` arm, one fold per
     /// family: `zend_try_ct_eval_binary_op` over `concat_function`, over
     /// `bitwise_or_function` and its kin, over `zend_compare` and
@@ -15439,8 +15402,7 @@ impl Emit<'_> {
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Zval, CompileError> {
-        let left = self.constant_expr(left)?;
-        let right = self.constant_expr(right)?;
+        let (left, right) = self.constant_pair(left, right)?;
         self.constant_operands(op, left, right)
     }
 
@@ -15502,8 +15464,7 @@ impl Emit<'_> {
         let Some(index) = index else {
             return Err(self.compile_error("Cannot use [] for reading"));
         };
-        let container = self.constant_expr(base)?;
-        let dim = self.constant_expr(index)?;
+        let (container, dim) = self.constant_pair(base, index)?;
         let refused = |emit: &Self| emit.fatal("a dimension this compiler leaves to the request");
         if let Some(array) = container.as_arr() {
             let key = match (dim.as_long(), dim.as_str()) {
@@ -15534,26 +15495,6 @@ impl Emit<'_> {
             };
         }
         Err(refused(self))
-    }
-
-    /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm:
-    /// the left side folded, and where its truth is the operator's
-    /// answer on its own, that bool, with the right side never folded;
-    /// else the right side's truth, since the left one has settled
-    /// nothing and the operator answers what the right one is. A side
-    /// that does not fold leaves the whole expression unfolded, which is
-    /// php's `return` out of the arm.
-    fn short_circuit_fold(
-        &mut self,
-        or: bool,
-        left: tree::Expr,
-        right: tree::Expr,
-    ) -> Result<Zval, CompileError> {
-        let held = truth(self.constant_expr(left)?);
-        if held == or {
-            return Ok(Zval::bool(held));
-        }
-        Ok(Zval::bool(truth(self.constant_expr(right)?)))
     }
 
     /// `zend_try_ct_eval_array` (`Z/Zend/zend_compile.c:10085`) over an
@@ -15639,29 +15580,36 @@ impl Emit<'_> {
     ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
         let elements = self.elements_of(elements)?;
         let mut folded: Vec<FoldedElement> = Vec::with_capacity(elements.len());
+        let mut constant = true;
         for element in elements {
-            let (key, value) = match element {
-                Element::Value { key, value } => (key, value),
-                Element::Ref { .. } => return Ok(None),
+            let (key, value, by_ref) = match element {
+                Element::Value { key, value } => (key, value, false),
+                Element::Ref { key, value } => (key, value, true),
                 Element::Unpack(value) => {
-                    let Some(value) = self.eval_const(value)? else {
-                        return Ok(None);
-                    };
-                    folded.push(FoldedElement::Unpack(value));
+                    match self.eval_const(value)? {
+                        Some(value) => folded.push(FoldedElement::Unpack(value)),
+                        None => constant = false,
+                    }
                     continue;
                 }
             };
+            // `ZEND_AST_ARRAY_ELEM` holds the value first and the key
+            // second, and php evaluates them in that order.
+            let value = self.eval_const(value)?;
             let key = match key {
-                Some(key) => match self.eval_const(key)? {
-                    Some(key) => Some(key),
-                    None => return Ok(None),
-                },
+                Some(key) => Some(self.eval_const(key)?),
                 None => None,
             };
-            let Some(value) = self.eval_const(value)? else {
-                return Ok(None);
-            };
-            folded.push(FoldedElement::Pair(key, value));
+            match (value, key, by_ref) {
+                (Some(value), None, false) => folded.push(FoldedElement::Pair(None, value)),
+                (Some(value), Some(Some(key)), false) => {
+                    folded.push(FoldedElement::Pair(Some(key), value));
+                }
+                _ => constant = false,
+            }
+        }
+        if !constant {
+            return Ok(None);
         }
         self.keyed_entries(folded)
     }
@@ -15802,7 +15750,7 @@ impl Emit<'_> {
         for (i, element) in elements.into_iter().enumerate() {
             let (key, value, by_ref) = match element {
                 Element::Unpack(value) => {
-                    let value = self.walked(value)?;
+                    let value = self.expr(value)?;
                     let (op1_type, op1) = self.operand(value);
                     if i == 0 {
                         out = self.temporary();
@@ -15829,7 +15777,7 @@ impl Emit<'_> {
             };
             let key = match key {
                 Some(key) => {
-                    let key = self.walked(key)?;
+                    let key = self.expr(key)?;
                     Some(Self::numeric_op(key))
                 }
                 None => None,
@@ -15837,7 +15785,7 @@ impl Emit<'_> {
             let (op1_type, op1) = if by_ref {
                 self.element_ref(value)?
             } else {
-                let value = self.walked(value)?;
+                let value = self.expr(value)?;
                 self.operand(value)
             };
             let (op2_type, op2) = match key {
@@ -15978,21 +15926,6 @@ impl Emit<'_> {
                 self.var_for_reference(node)
             }
             _ => Err(self.compile_error("Cannot use temporary expression in write context")),
-        }
-    }
-
-    /// `zend_eval_const_expr` over one node and then
-    /// `zend_compile_expr` over what it left, which is the order inside
-    /// an array expression: `zend_try_ct_eval_array`'s first pass folds
-    /// every key and value in place, and the emission after it reads
-    /// what the fold left, so a cast inside an array is folded where the
-    /// same cast written anywhere else is the `CAST` opline
-    /// `zend_compile_cast` emits. The constant where the node folds,
-    /// else the oplines that build it.
-    fn walked(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
-        match self.eval_const(expr)? {
-            Some(value) => Ok(Where::Constant(value)),
-            None => self.expr(expr),
         }
     }
 
@@ -19017,11 +18950,6 @@ fn number(value: Zval) -> Option<Number> {
     }
 }
 
-/// How many diagnostics a compilation had raised at one point
-/// ([`Emit::raised`]).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Raised(usize);
-
 /// `zval_is_true` over a folded constant: [`Scalar::is_true`] for a
 /// scalar and, for an array, whether it holds anything
 /// (`i_zend_is_true`'s `IS_ARRAY` arm). No object, resource or
@@ -19578,6 +19506,7 @@ mod tests {
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,
+            rewrites: eval::Rewrites::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),

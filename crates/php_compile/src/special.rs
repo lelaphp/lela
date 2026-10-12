@@ -709,8 +709,8 @@ impl Emit<'_> {
     /// temporary, `$strict` in `extended_value`. Every refusal is the
     /// ordinary call, which refuses a third argument that is no bool
     /// under `strict_types` as any native parameter is refused, and
-    /// raises nothing of the haystack's fold, since the call folds it
-    /// again where php reads the node it folded in place.
+    /// compiles the haystack as the fold left it, so what the fold
+    /// raised stands once.
     ///
     /// ```php
     /// declare(strict_types=1);
@@ -763,12 +763,10 @@ impl Emit<'_> {
         let Some(haystack) = haystack.tree() else {
             return Ok(None);
         };
-        let raised = self.raised();
         let Some(keys) = self
             .array_entries(haystack)?
             .and_then(|entries| in_array_keys(&entries, strict))
         else {
-            self.unraise(raised);
             return Ok(None);
         };
         let table = self.lay_array(&keys)?;

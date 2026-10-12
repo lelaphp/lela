@@ -7660,6 +7660,76 @@ class C {
         );
     }
 
+    /// php passes a `static` variable's initializer through
+    /// `zend_eval_const_expr` before it compiles it, and the evaluator
+    /// replaces a `??` whose left side is `null` with its right side, so
+    /// `static $v = null ?? A[1] ?? 1;` compiles `A[1] ?? 1`: one `COALESCE`
+    /// over the `FETCH_DIM_IS`. Outside an initializer nothing folds the
+    /// `??`, and `$x = null ?? $a ?? 1;` keeps both. The dump is the oracle's
+    /// under `[regime.dump]` at 8.5.9 (#2681).
+    #[test]
+    fn a_static_initializer_compiles_what_the_constant_evaluator_left_of_it() {
+        assert_eq!(
+            dump_of(b"<?php function f() { static $v = null ?? A[1] ?? 1; } $x = null ?? $a ?? 1;"),
+            "\n$_main:\n\
+             \x20    ; (lines=6, args=0, vars=2, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T2 = COALESCE null 0004\n\
+             0001 T3 = COALESCE CV1($a) 0003\n\
+             0002 T3 = QM_ASSIGN int(1)\n\
+             0003 T2 = QM_ASSIGN T3\n\
+             0004 ASSIGN CV0($x) T2\n\
+             0005 RETURN int(1)\n\
+             \nf:\n\
+             \x20    ; (lines=7, args=0, vars=1, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 BIND_INIT_STATIC_OR_JMP CV0($v) 0006\n\
+             0001 T1 = FETCH_CONSTANT string(\"A\")\n\
+             0002 T2 = FETCH_DIM_IS T1 int(1)\n\
+             0003 T3 = COALESCE T2 0005\n\
+             0004 T3 = QM_ASSIGN int(1)\n\
+             0005 BIND_STATIC (ref) CV0($v) T3\n\
+             0006 RETURN null\n\
+             "
+        );
+    }
+
+    /// `zend_try_ct_eval_array` evaluates every key and value of an array
+    /// before it knows whether the array folds, and what the evaluator left
+    /// of each is what `zend_compile_array` compiles where it does not: a
+    /// conditional over a constant is the branch it picks, a cast over a
+    /// constant its value, a `??` over `null` its right side. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 (#2681).
+    #[test]
+    fn an_array_element_compiles_what_the_constant_evaluator_left_of_it() {
+        assert_eq!(
+            dump_of(b"<?php $x = [true ? $a : 2, $k => (int) \"4\"]; $d = [&$e, 1 ? 2 : 3]; static $s = [null ?? $b];"),
+            "\n$_main:\n\
+             \x20    ; (lines=10, args=0, vars=7, tmps=5)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T7 = INIT_ARRAY 2 (packed) CV1($a) NEXT\n\
+             0001 T7 = ADD_ARRAY_ELEMENT int(4) CV2($k)\n\
+             0002 ASSIGN CV0($x) T7\n\
+             0003 T9 = INIT_ARRAY 2 (packed) (ref) CV4($e) NEXT\n\
+             0004 T9 = ADD_ARRAY_ELEMENT int(2) NEXT\n\
+             0005 ASSIGN CV3($d) T9\n\
+             0006 BIND_INIT_STATIC_OR_JMP CV5($s) 0009\n\
+             0007 T11 = INIT_ARRAY 1 (packed) CV6($b) NEXT\n\
+             0008 BIND_STATIC (ref) CV5($s) T11\n\
+             0009 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    7: 0001 - 0002 (tmp/var)\n\
+             \x20    9: 0004 - 0005 (tmp/var)\n\
+             "
+        );
+    }
+
     /// php's `dereferenceable_scalar` under a read (#482): a string
     /// written out, an array written out, a chain over one, a
     /// parenthesised expression and the `BP_VAR_IS` chain a `??` puts
