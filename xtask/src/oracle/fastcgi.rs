@@ -102,6 +102,7 @@ pub struct Param {
 /// When a parameter is handed to php-fpm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sent {
+    /// On every request.
     Always,
     /// Where its value is not empty (`if_not_empty`, as nginx leaves
     /// `HTTPS` out on a plain connection).
