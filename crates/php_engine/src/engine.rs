@@ -4921,8 +4921,11 @@ impl Engine {
             // `php_execute_script` (`php_fopen_primary_script`), so its
             // `opened_path` is whole against the directory the request
             // started in, and the program's is entered by the name written.
+            // php -S hands a name it has not opened, which `php_execute_script`
+            // opens after it entered the directory; the name is whole, so
+            // either order reads the same file.
             req.expand_primary_file(source.is_some());
-            left = req.enter_program_dir(written.clone());
+            left = req.enter_program_dir(written.as_deref());
         }
         if script && source.is_none() {
             req.open_primary_file();
@@ -5123,11 +5126,12 @@ impl Engine {
     /// and held open until the router and the append file are served, as
     /// `zend_destroy_file_handle` closes it after `php_execute_script_ex`
     /// ([`HandlePath::Kept`]); and whether it declined. It is served in
-    /// the directory the request stands in, under
-    /// `SAPI_OPTION_NO_CHDIR` (`:2269-2270`), which is restored after it
-    /// whatever it moved to, as the server's `VCWD_CHDIR(old_cwd)`.
+    /// the directory the request stands in, under `SAPI_OPTION_NO_CHDIR`
+    /// (`Z/sapi/cli/php_cli_server.c:2269-2270`), which is restored after
+    /// it whatever it moved to, as the server's `VCWD_CHDIR(old_cwd)`
+    /// (`:2284-2286`).
     fn execute_router(&self, req: &mut Request, router: &[u8]) -> Routed {
-        let left = req.left_dir();
+        let left = req.standing_dir();
         let answered = self.execute_router_files(req, router);
         req.close_served_files();
         req.go_back(left);

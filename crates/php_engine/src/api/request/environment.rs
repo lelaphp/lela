@@ -16,7 +16,7 @@ use crate::engine::Chdir;
 
 /// The working directory a request stood in before it entered its
 /// program's ([`Request::enter_program_dir`]) or served its router
-/// ([`Request::left_dir`]), which it goes back to
+/// ([`Request::standing_dir`]), which it goes back to
 /// ([`Request::go_back`]).
 pub(crate) struct LeftDir(PathBuf);
 
@@ -219,12 +219,12 @@ impl Request {
     /// points.
     ///
     /// [`Chdir::IntoProgramDir`]: crate::engine::Chdir::IntoProgramDir
-    pub(crate) fn enter_program_dir(&mut self, name: Option<Vec<u8>>) -> Option<LeftDir> {
+    pub(crate) fn enter_program_dir(&mut self, name: Option<&[u8]>) -> Option<LeftDir> {
         if self.description.chdir != Chdir::IntoProgramDir {
             return None;
         }
         let name = name?;
-        let left = LeftDir(self.cwd.clone());
+        let left = self.standing_dir();
         // A name with no `/` is `ENOENT` to `virtual_chdir_file`, and one
         // whose only `/` leads keeps it, the root.
         if let Some(cut) = name.iter().rposition(|b| *b == b'/') {
@@ -239,7 +239,7 @@ impl Request {
     /// The working directory the request stands in, kept to go back to:
     /// the built-in server's `VCWD_GETCWD` before its router is served
     /// (`Z/sapi/cli/php_cli_server.c:2260`).
-    pub(crate) fn left_dir(&self) -> LeftDir {
+    pub(crate) fn standing_dir(&self) -> LeftDir {
         LeftDir(self.cwd.clone())
     }
 
@@ -247,7 +247,8 @@ impl Request {
     /// the one [`Request::enter_program_dir`] left, as
     /// `php_execute_script_ex` restores it once the program has been
     /// served (`Z/main/main.c:2670-2672`), or the one the built-in server
-    /// kept before its router ([`Request::left_dir`]; `:2284-2286`).
+    /// kept before its router ([`Request::standing_dir`];
+    /// `Z/sapi/cli/php_cli_server.c:2284-2286`).
     pub(crate) fn go_back(&mut self, left: LeftDir) {
         self.cwd = left.0;
     }

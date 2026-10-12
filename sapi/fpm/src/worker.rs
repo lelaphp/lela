@@ -1087,8 +1087,9 @@ impl Worker {
             env: process_env,
             params: newest.0,
             // The child's directory, the pool's `chdir` where it names
-            // one (`fpm_unix_init_child`); `php_execute_script` enters the
-            // program's and comes back before the request shuts down.
+            // one (`fpm_unix_init_child`, `Z/sapi/fpm/fpm/fpm_unix.c:457`);
+            // `php_execute_script` enters the program's and comes back
+            // before the request shuts down.
             cwd: std::env::current_dir().unwrap_or_default(),
             chdir: Chdir::IntoProgramDir,
             server: rows,
