@@ -709,29 +709,70 @@ pub(crate) enum Standing<'a> {
     /// The fiber is suspended, or runs below a fiber it resumed: the
     /// execution it left, which the request holds, or that resume.
     Held(&'a Execution),
+    /// The fiber waits running on a suspend of a coroutine below it that
+    /// passed through it. php writes no `fiber->execute_data` for that
+    /// suspend, so the pointer names the bottom frame `zend_fiber_execute`
+    /// laid down, and under it stands the resumer's frame,
+    /// `stack_bottom->prev_execute_data`. Where the fiber's own suspend,
+    /// or its resume of another fiber, wrote the pointer since, php's
+    /// names a frame popped by now, and the bottom is read there too.
+    Waiting {
+        /// The execution the fiber left, which the request holds.
+        own: &'a Execution,
+        /// The execution of the coroutine that resumed it, held too while
+        /// the suspend is out; none where the bottom frame names no
+        /// resumer's, a fiber a destroy resumed.
+        below: Option<&'a Execution>,
+    },
+}
+
+impl<'a> Standing<'a> {
+    /// The stack the fiber's own frames stand on.
+    pub(crate) fn stack(&self, req: &'a Request) -> &'a Vm {
+        match self {
+            Standing::Active => req.vm(),
+            Standing::Held(held) | Standing::Waiting { own: held, .. } => &held.vm,
+        }
+    }
 }
 
 /// A fiber as a view of it reads it: its callable, php's `fci`, from its
 /// construction until it is dead, and where its execution stands, none
 /// before it starts and once it is dead. None for an object that is no
 /// fiber.
+///
+/// A `Fiber` a suspend passed through stands at its bottom frame, as
+/// php's `fiber->execute_data` was left by its start
+/// ([`Standing::Waiting`]); `_ZendTestFiber::suspend` is the witness.
 pub(crate) fn view(
     req: &Request,
     object: PhpObject,
 ) -> Option<(Option<Callable>, Option<Standing<'_>>)> {
     let fiber = object.native::<ZendFiber>(req)?;
+    let fibers = req.fibers();
     let standing = match fiber.coroutine.status {
         CoroutineStatus::Init | CoroutineStatus::Dead => None,
-        CoroutineStatus::Suspended => req.fibers().held(object).map(Standing::Held),
+        CoroutineStatus::Suspended => fibers.held(object).map(Standing::Held),
         CoroutineStatus::Running => {
-            let running = &req.fibers().running;
-            running
+            let running = &fibers.running;
+            match running
                 .iter()
                 .position(|running| running.fiber.index() == object.index())
-                .map(|at| match running.get(at.saturating_add(1)) {
+            {
+                Some(at) => Some(match running.get(at.saturating_add(1)) {
                     Some(above) => Standing::Held(&above.below),
                     None => Standing::Active,
-                })
+                }),
+                None => fibers.held(object).map(|own| Standing::Waiting {
+                    own,
+                    below: match fiber.coroutine.caller {
+                        Some(Caller::Coroutine(resumer)) if !fiber.coroutine.destroyed => {
+                            fibers.held(resumer)
+                        }
+                        _ => None,
+                    },
+                }),
+            }
         }
     };
     Some((fiber.callable.clone(), standing))

@@ -91,9 +91,15 @@ impl Request {
             site: None,
             this: None,
         };
+        // Where php's `fiber->execute_data` reads: the innermost frame of
+        // user code on the fiber's stack, or, from its bottom frame, the
+        // resumer's below it.
         let vm = match standing {
-            None => return Some(execution),
-            Some(standing) => self.stack_of(&standing),
+            None | Some(Standing::Waiting { below: None, .. }) => return Some(execution),
+            Some(Standing::Waiting {
+                below: Some(below), ..
+            }) => &below.vm,
+            Some(standing) => standing.stack(self),
         };
         if let Some(state) = vm.innermost_at().and_then(|at| self.frame_on(vm, at)) {
             execution.stand(state);
@@ -188,19 +194,17 @@ impl Request {
             let Some((_, Some(standing))) = crate::fiber::view(self, object) else {
                 return Ok(None);
             };
-            let vm = self.stack_of(&standing);
-            let links: Vec<Link> = links_of(self, vm, 0..vm.depth(), Expand::Generators).collect();
+            // From a bottom frame php cuts the chain under, no row.
+            let links: Vec<Link> = match standing {
+                Standing::Waiting { .. } => Vec::new(),
+                standing => {
+                    let vm = standing.stack(self);
+                    links_of(self, vm, 0..vm.depth(), Expand::Generators).collect()
+                }
+            };
             self.trace_rows(&links)
         };
         self.render_trace(rows, options).map(Some)
-    }
-
-    /// The stack a fiber's execution stands on.
-    fn stack_of<'a>(&'a self, standing: &Standing<'a>) -> &'a Vm {
-        match standing {
-            Standing::Active => &self.vm,
-            Standing::Held(held) => &held.vm,
-        }
     }
 
     fn generator_execution(&mut self, object: PhpObject) -> Execution {
@@ -304,10 +308,13 @@ impl Request {
             return Some(found);
         }
         let fiber = generator::in_fiber(self, generator)?;
-        let Some((_, Some(Standing::Held(held)))) = crate::fiber::view(self, fiber) else {
-            return None;
+        let vm = match crate::fiber::view(self, fiber) {
+            Some((_, Some(standing @ (Standing::Held(_) | Standing::Waiting { .. })))) => {
+                standing.stack(self)
+            }
+            _ => return None,
         };
-        place(&held.vm).map(|at| (&held.vm, at))
+        place(vm).map(|at| (vm, at))
     }
 }
 
