@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::Union;
 use php_ext::attr::php_function;
-use php_ext::coerce::with_string;
+use php_ext::coerce::{is_space, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -36,6 +36,18 @@ use php_ext::values::{Owner, PhpArray, PhpString};
 /// string(2) "1 "
 /// string(1) "x"
 /// string(2) "ab"
+/// ```
+///
+/// A `<` before C's `isspace` under the request's `LC_CTYPE` opens no tag,
+/// and macOS's `C.UTF-8`, php's default, counts 0xA0 among it.
+///
+/// ```php
+/// var_dump(bin2hex(strip_tags("a<\xa0b>c")));
+/// setlocale(LC_CTYPE, "C"); var_dump(bin2hex(strip_tags("a<\xa0b>c")));
+/// ```
+/// ```expect
+/// string(12) "613ca0623e63"
+/// string(4) "6163"
 /// ```
 #[php_function]
 pub(super) fn strip_tags(
@@ -65,11 +77,6 @@ pub(super) fn strip_tags(
     };
     let out = strip_tags_ex(string.as_bytes(), allowed.as_deref(), false);
     PhpString::new(req, &out)
-}
-
-/// C's `isspace` under the C locale.
-const fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
 /// `php_strip_tags_ex(rbuf, len, allow, allow_len, allow_tag_spaces)`,

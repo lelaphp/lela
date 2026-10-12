@@ -16,7 +16,7 @@ use php_ext::call::{internal_iterator, lookup_class, new_object};
 use php_ext::raising::{
     Thrown, arg_value_error, argument_error, fatal, illegal_container_offset, throw_error,
 };
-use php_ext::request::Request;
+use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::{Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::breakiterator::IteratorAggregate;
@@ -28,9 +28,6 @@ use crate::formatter::locale_too_long;
 /// What a lookup answers where it fell back to a parent locale or the
 /// default one.
 const FELL_BACK: [Code; 2] = [Code::USING_FALLBACK, Code::USING_DEFAULT];
-
-/// `MAXPATHLEN`, which a bundle's name stays below.
-const MAXPATHLEN: usize = 1024;
 
 /// `ResourceBundle_object` past its `zend_object`: the error and the
 /// bundle a constructor opened, or an element handed on.

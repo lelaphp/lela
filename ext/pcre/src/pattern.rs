@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use php_ext::abi::{Cache, Start};
+use php_ext::coerce::is_space;
 use php_ext::raising::{Level, Thrown, docref, raise_while_pending};
 use php_ext::request::Request;
 
@@ -230,7 +231,18 @@ fn compile(
 /// The delimiters: leading whitespace skipped, the delimiter read and
 /// refused where it is alphanumeric, a backslash or NUL, a bracket
 /// paired with its closer and nested, and the end found past escaped
-/// delimiters. The pattern between them and the modifiers after.
+/// delimiters. The pattern between them and the modifiers after. The
+/// whitespace is C's `isspace` under the request's `LC_CTYPE`, as
+/// `pcre_get_compiled_regex_cache_ex` reads it, which counts 0xA0 under
+/// macOS's `C.UTF-8`, php's default.
+///
+/// ```php
+/// var_dump(preg_match("\xa0/a/", "a"), preg_match(" \v/b/", "b"));
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// ```
 fn split(regex: &[u8]) -> Result<(&[u8], &[u8]), String> {
     let mut at = regex
         .iter()
@@ -274,9 +286,4 @@ fn split(regex: &[u8]) -> Result<(&[u8], &[u8]), String> {
         ));
     }
     Ok((&regex[body_start..at], &regex[at + 1..]))
-}
-
-/// C's `isspace` in the C locale.
-fn is_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }

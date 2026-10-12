@@ -895,6 +895,8 @@ impl ReflectionProperty {
         let Passed::Given(value) = value else {
             return Err(arg_count_error(req, "exactly 2 arguments, 1 given"));
         };
+        // Its `Z_PARAM_OBJ`, where the stub declares `mixed
+        // $objectOrValue`.
         let given = php_ext::coerce::coerce_param(req, &objectOrValue, &Type::Object, 1)?;
         let Some(object) = given.as_object() else {
             return Ok(());

@@ -7,39 +7,13 @@
 //! heap grown to a length a record claims, so a length past the memory
 //! limit is php's fatal and a negative one stops the walk.
 
+use php_ext::coerce::atoi;
 use php_ext::raising::{Thrown, fatal};
 use php_ext::request::{Request, Stream, Whence};
 use php_ext::values::Emalloc;
 
 /// `FLATFILE_BLOCK_SIZE`.
 const BLOCK: usize = 1024;
-
-/// `atoi`: optional blanks, a sign and digits, as C's `int` wraps them.
-pub(crate) fn atoi(bytes: &[u8]) -> i32 {
-    let mut rest = bytes
-        .iter()
-        .skip_while(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
-        .peekable();
-    let negative = match rest.peek() {
-        Some(b'-') => {
-            rest.next();
-            true
-        }
-        Some(b'+') => {
-            rest.next();
-            false
-        }
-        _ => false,
-    };
-    let magnitude = rest.take_while(|d| d.is_ascii_digit()).fold(0i32, |n, d| {
-        n.wrapping_mul(10).wrapping_add(i32::from(d - b'0'))
-    });
-    if negative {
-        magnitude.wrapping_neg()
-    } else {
-        magnitude
-    }
-}
 
 /// `atoi` narrowed to `size_t` as C converts a negative `int`.
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]

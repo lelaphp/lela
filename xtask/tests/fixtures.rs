@@ -142,6 +142,26 @@ fn committed_generated_code_outside_the_declared_exception_fails_the_workspace()
     );
 }
 
+/// A `build.rs` that bakes its crate's directory in fails the workspace
+/// (#2628); a module that happens to be named `build.rs`, with no
+/// `Cargo.toml` beside it, is not one cargo runs and is not named.
+#[test]
+fn a_build_rs_baking_its_crate_dir_in_fails_the_workspace() {
+    let root = fixture("budget", "build-rs-dir");
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = budget::run(&root, &manifest).unwrap();
+    let workspace = readings.iter().find(|r| r.scope == "workspace").unwrap();
+    assert_eq!(workspace.status, Status::Fail, "{workspace:#?}");
+    let message = &workspace.message;
+    assert!(
+        message.contains(
+            "crates/php_unit/build.rs reads env!(\"CARGO_MANIFEST_DIR\") when it compiles"
+        ),
+        "{message}"
+    );
+    assert!(!message.contains("src/build.rs"), "{message}");
+}
+
 #[test]
 fn an_unsafe_block_outside_the_homes_fails_naming_the_file_and_the_rule() {
     let root = fixture("rules", "unsafe.homes");

@@ -320,7 +320,6 @@ pub(crate) enum Class {
     Alpha,
     Digit,
     Punct,
-    Space,
 }
 
 /// `isalnum((unsigned char) c)` and the rest: whether `byte` is in
@@ -331,7 +330,6 @@ pub(crate) fn is(class: Class, byte: u8) -> bool {
         Class::Alpha => libc::isalpha,
         Class::Digit => libc::isdigit,
         Class::Punct => libc::ispunct,
-        Class::Space => libc::isspace,
     };
     // SAFETY: every class function takes any value an `unsigned char`
     // holds and reads the thread's locale, nothing else.

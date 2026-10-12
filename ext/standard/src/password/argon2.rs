@@ -2,6 +2,8 @@
 //! libargon2 (phc-winner-argon2 20190702, version 0x13, the `ref.c` fill),
 //! with php's own reading of argon2 hashes from `Z/ext/standard/password.c`.
 
+use php_ext::coerce::is_space;
+
 /// `ARGON2_SYNC_POINTS`: slices per pass.
 const SYNC_POINTS: u32 = 4;
 /// `ARGON2_QWORDS_IN_BLOCK`.
@@ -1276,17 +1278,11 @@ pub(super) fn extract_parameters(hash: &[u8], costs: &mut Costs) -> bool {
     true
 }
 
-/// `isspace` in the `C.UTF-8` `LC_CTYPE` php sets at startup, as macOS's libc answers it:
-/// the six ASCII spaces and byte 0xA0.
-fn scanf_space(c: u8) -> bool {
-    matches!(c, b'\t' | b'\n' | 0x0B | 0x0C | b'\r' | b' ' | 0xA0)
-}
-
 /// One `%ld` of the BSD `vfscanf` php's libc uses: skips spaces, then takes a sign and
 /// decimal digits, at most 512 bytes in all, and converts them with `strtoimax`, which
 /// saturates. `None` where no digit was taken, the match failure that ends `sscanf`.
 fn scan_long(s: &mut CStr<'_>) -> Option<i64> {
-    while s.cur() != 0 && scanf_space(s.cur()) {
+    while s.cur() != 0 && is_space(s.cur()) {
         s.at += 1;
     }
     // `char buf[BUF]` with `BUF` 513 caps the field width at 512.

@@ -6,10 +6,11 @@
 //! file the unit cache preloads.
 
 use php_ext::abi::{Beneath, PostStartup, chain};
+use php_ext::coerce::atoi;
 use php_ext::process;
 use php_ext::request::{CacheBudget, Request};
 
-use crate::ini::{Log, accel_log, atoi, flag, long, value};
+use crate::ini::{Log, accel_log, flag, long, value};
 use crate::{Startup, cli, consumption, max_cached_keys, verdict};
 
 /// `sizeof(zend_accel_shared_globals)` on the oracle's build, what
@@ -63,7 +64,7 @@ fn refused(req: &mut Request) -> Option<String> {
     let file_cache = value(req, "opcache.file_cache").to_vec();
     if !flag(req, "opcache.file_cache_only") {
         let buffer = long(req, "opcache.interned_strings_buffer");
-        let memory = atoi(value(req, "opcache.memory_consumption"));
+        let memory = i64::from(atoi(value(req, "opcache.memory_consumption")));
         if buffer > 0 && buffer >= memory {
             let tried = buffer
                 .saturating_mul(1 << 20)

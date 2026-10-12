@@ -146,6 +146,7 @@ pub(crate) mod environment;
 pub(crate) use environment::env_of;
 mod across;
 pub(crate) mod against;
+pub use against::kept_run;
 pub(crate) mod base;
 pub(crate) mod cgi;
 mod fpm;

@@ -374,7 +374,7 @@ pub fn request_info(
     info.path_translated = path_translated_kept.filter(|path| valid_path(path));
     info.query = env.get(b"QUERY_STRING").map(<[u8]>::to_vec);
     info.content_type = Some(content_type.unwrap_or_default());
-    info.content_length = content_length.as_deref().map_or(0, atol);
+    info.content_length = content_length.as_deref().map_or(0, strtol);
     info.auth = env.get(b"HTTP_AUTHORIZATION").and_then(basic_auth);
     info
 }
@@ -412,9 +412,14 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// C's `atol`.
-fn atol(bytes: &[u8]) -> i64 {
-    let bytes = bytes.trim_ascii_start();
+/// C's `strtol(s, NULL, 10)`, which `atol` is on a 64-bit host and
+/// `init_request_info` reads `CONTENT_LENGTH` with: the [`is_space`]
+/// bytes skipped, one sign, the digits, and the long's end by the sign
+/// where they spell a number past it. A copy of `php_engine`'s
+/// `c_number`, which `php_sapi` re-exports for the hosts: this crate names
+/// no engine crate (design §4.8), and `php_sapi` stands above it.
+fn strtol(bytes: &[u8]) -> i64 {
+    let bytes = &bytes[bytes.iter().take_while(|b| is_space(**b)).count()..];
     let (negative, digits) = match bytes.first() {
         Some(b'-') => (true, &bytes[1..]),
         Some(b'+') => (false, &bytes[1..]),
@@ -422,13 +427,39 @@ fn atol(bytes: &[u8]) -> i64 {
     };
     let mut value: i64 = 0;
     for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        value = value.wrapping_mul(10).wrapping_add(i64::from(digit - b'0'));
+        let digit = i64::from(digit - b'0');
+        let next = value.checked_mul(10).and_then(|n| {
+            if negative {
+                n.checked_sub(digit)
+            } else {
+                n.checked_add(digit)
+            }
+        });
+        let Some(next) = next else {
+            return if negative { i64::MIN } else { i64::MAX };
+        };
+        value = next;
     }
-    if negative {
-        value.wrapping_neg()
-    } else {
-        value
-    }
+    value
+}
+
+/// C's `atoi`, `(int) strtol(s, NULL, 10)`, which `sapi_cgi_send_headers`
+/// reads a status line's code with and `zend_ini_parse_bool` an entry:
+/// [`strtol`]'s long cut to its low 32 bits.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "C's `(int)` of `strtol`'s long, whose cut is the behaviour being copied"
+)]
+fn atoi(bytes: &[u8]) -> i32 {
+    strtol(bytes) as i32
+}
+
+/// C's `isspace` in the `C` locale: space, `\t`, `\n`, `\v`, `\f`, `\r`.
+/// php's hosts read it under the process's `LC_CTYPE`, `C.UTF-8`, which
+/// on macOS counts `0xA0` too; this crate binds no C library, so a status
+/// line or entry opening with that byte is the one place it reads otherwise.
+fn is_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
 /// `php_handle_auth_data`'s `Basic` half: the user and the password.
@@ -518,14 +549,14 @@ pub struct Shape {
 impl Shape {
     /// The shape the two entries' values give, each read as
     /// `zend_ini_parse_bool` reads it: `true`, `yes` or `on` in any case,
-    /// else `atoi` of it not 0.
+    /// else [`atoi`] of it not 0.
     #[must_use]
     pub fn of(nph: &[u8], rfc2616_headers: &[u8]) -> Shape {
         let on = |value: &[u8]| {
             [&b"true"[..], b"yes", b"on"]
                 .iter()
                 .any(|word| value.eq_ignore_ascii_case(word))
-                || atol(value) != 0
+                || atoi(value) != 0
         };
         Shape {
             opens: if on(nph) {
@@ -561,14 +592,14 @@ pub fn head(shape: Shape, code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8
     if shape.opens == Opens::Always || code != 200 {
         let status = if let (Form::Line, Some(line)) = (shape.form, status_line) {
             if let Some(space) = line.iter().position(|b| *b == b' ') {
-                response_status = atol(&line[space + 1..]);
+                response_status = i64::from(atoi(&line[space + 1..]));
             }
             Some(line.to_vec())
         } else if let Some(rest) = status_line.and_then(|line| {
             let space = line.iter().position(|b| *b == b' ')?;
             (space >= 5 && line[..5].eq_ignore_ascii_case(b"HTTP/")).then(|| &line[space..])
         }) {
-            response_status = atol(&rest[1..]);
+            response_status = i64::from(atoi(&rest[1..]));
             let mut built = b"Status:".to_vec();
             built.extend_from_slice(rest);
             Some(built)
@@ -704,6 +735,19 @@ mod tests {
             ),
             b"Status: 299 Mine\r\n\r\n"
         );
+    }
+
+    /// The edges C's library reads, as `php_engine`'s `c_number` does: a
+    /// long saturating by its sign, and `atoi`'s cut of it to `int`, so
+    /// `cgi.nph=4294967296` is off as php's `zend_ini_parse_bool` reads it.
+    #[test]
+    fn strtol_and_atoi_read_the_edges_c_reads() {
+        assert_eq!(strtol(b" \t\x0b-12x"), -12);
+        assert_eq!(strtol(b"99999999999999999999"), i64::MAX);
+        assert_eq!(strtol(b"-99999999999999999999"), i64::MIN);
+        assert_eq!(atoi(b"4294967497"), 201);
+        assert_eq!(atoi(b"-2147483649"), 2_147_483_647);
+        assert_eq!(Shape::of(b"4294967296", b"0").opens, Opens::Changed);
     }
 
     #[test]

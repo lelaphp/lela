@@ -17,7 +17,7 @@ use std::process::Stdio;
 
 use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
-use php_ext::coerce::value_name;
+use php_ext::coerce::{is_space, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{FormatDate, OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -196,7 +196,7 @@ fn clean(field: &[u8]) -> Vec<u8> {
     let field = field.split(|c| *c == 0).next().unwrap_or(field);
     let end = field
         .iter()
-        .rposition(|c| !matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .rposition(|c| !is_space(*c))
         .map_or(0, |at| at + 1);
     let mut out = field[..end].to_vec();
     let at = |out: &[u8], i: usize| out.get(i).copied().unwrap_or(0);

@@ -766,6 +766,8 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
         };
         fd.map_or(-1, i64::from)
     } else {
+        // `Z_PARAM_LONG` past the stream arm, where the stub declares
+        // the untyped `$file_descriptor` that admits a resource too.
         match coerce_param(req, &given, &Type::Int, 1) {
             Ok(value) => match value.as_ref() {
                 ValueRef::Int(n) => n,

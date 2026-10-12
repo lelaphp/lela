@@ -296,7 +296,7 @@ pub fn extension() -> Extension {
 /// its two numbers are `PCRE2_MAJOR` and `PCRE2_MINOR`, the header a build
 /// compiled against (see [`header`]), which may be older than the library
 /// it loads: the pinned oracle's header is 10.47's though the keg it links
-/// is 10.48 (`crosscheck:pcre`), and `pcre2-sys`'s bindings carry 10.45's.
+/// is 10.49 (`crosscheck:pcre`), and `pcre2-sys`'s bindings carry 10.45's.
 /// The library's Unicode is the keg's too: U+10940, a letter Unicode 17 assigns, is `\p{L}` and
 /// `\p{Sidetic}` under `/u`.
 ///
@@ -323,7 +323,7 @@ pub fn extension() -> Extension {
 /// int(10)
 /// bool(true)
 /// bool(true)
-/// string(16) "10.48 2026-08-31"
+/// string(16) "10.49 2026-09-28"
 /// bool(true)
 /// bool(true)
 /// int(1)
@@ -349,7 +349,7 @@ pub(crate) mod constants {
     pub(crate) const PREG_BAD_UTF8_OFFSET_ERROR: i64 = 5;
     pub(crate) const PREG_JIT_STACKLIMIT_ERROR: i64 = 6;
 
-    /// The linked library's version, the keg's `"10.48 2026-08-31"`.
+    /// The linked library's version, the keg's `"10.49 2026-09-28"`.
     pub(crate) fn PCRE_VERSION() -> String {
         ffi::version()
     }
