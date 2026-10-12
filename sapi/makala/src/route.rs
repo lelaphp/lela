@@ -1,12 +1,12 @@
 //! Where a request goes under the document root: a program's path split
 //! at its first `.php` segment as the recipe's nginx splits it (#2693),
 //! else `php -S`'s path rules (`php_proto::vpath`, #2346, #2588), and over
-//! them the refusals of a server that faces the internet (#2586). The path is `normalize_vpath`'s, decoded and
-//! with every `..` taken, so no request names a file outside the root; a
-//! symlink under the root is followed wherever it leads, as `php -S` and
-//! nginx's `disable_symlinks off` follow one. What the operator's
-//! [`Hidden`] refuses is refused here and nowhere else: `php -S` keeps its
-//! rules.
+//! them the refusals of a server that faces the internet (#2586). The
+//! path is `normalize_vpath`'s, decoded and with every `..` taken, so no
+//! request names a file outside the root; a symlink under the root is
+//! followed wherever it leads, as `php -S` and nginx's `disable_symlinks
+//! off` follow one. What the operator's [`Hidden`] refuses is refused here
+//! and nowhere else: `php -S` keeps its rules.
 
 use std::sync::Arc;
 
@@ -62,9 +62,11 @@ impl Router {
     /// under [`Hidden::Refused`], a path past the file it found or a file
     /// of PHP's source, then a file that does not open. The walk that
     /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
-    /// program the walk finds; split at `y.php`, it meets php-fpm's own
-    /// checks (`request::look`), which run no `x.jpg` and answer a
-    /// directory named `d.php` 404, as php-fpm under the recipe does.
+    /// program the walk finds; split at `y.php`, `cgi.fix_pathinfo`'s walk
+    /// in php-fpm's checks finds `x.jpg`, the exploit's shape, and
+    /// `security.limit_extensions`' default refuses it (`request::look`),
+    /// so no file whose name does not end in `.php` runs, and a directory
+    /// named `d.php` is answered 404, as php-fpm under the recipe answers.
     /// `php -S` sends `x.jpg` for `/upload/x.jpg/`, and so does
     /// [`Hidden::Served`], where [`Hidden::Refused`] serves a static file
     /// only as named (#2642).
@@ -77,14 +79,8 @@ impl Router {
         if hidden == Hidden::Refused && has_dot_segment(&uri) {
             return Route::Refused(Refusal::NotFound);
         }
-        if let Some((name, info)) = vpath::split_at_program(&uri) {
-            // No size: a program's request reads none.
-            return Route::Program(Translated {
-                vpath: name.to_vec(),
-                path_translated: [&self.root[..], name].concat(),
-                path_info: (!info.is_empty()).then(|| info.to_vec()),
-                size: 0,
-            });
+        if let Some(program) = vpath::split_at_program(&uri, &self.root) {
+            return Route::Program(program);
         }
         match vpath::translate(&uri, &self.root, &Disk) {
             Some(found) if found.is_program() => Route::Program(found),
