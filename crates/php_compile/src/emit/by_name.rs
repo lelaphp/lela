@@ -277,17 +277,13 @@ impl Emit<'_> {
         let name = match self.expr(inner)? {
             Where::Constant(value) => {
                 let name = self.name_string(value)?;
-                let table = match AutoGlobal::of(&name) {
-                    Some(global) => {
-                        self.arm(global);
-                        Symbols::Global
-                    }
-                    None => Symbols::Local,
+                return match AutoGlobal::of(&name) {
+                    Some(global) => self.auto_global(global),
+                    None => Ok(Named::Fetch {
+                        name: Where::Constant(self.string(&name)?),
+                        table: Symbols::Local,
+                    }),
                 };
-                return Ok(Named::Fetch {
-                    name: Where::Constant(self.string(&name)?),
-                    table,
-                });
             }
             name => name,
         };
