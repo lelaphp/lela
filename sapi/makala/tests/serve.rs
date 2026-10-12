@@ -56,9 +56,10 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
     );
 }
 
-/// A path that names nothing under the root is a 404, a `.php` one
-/// among them, and so is one that climbs out of the root to a file beside
-/// it; a file that is not PHP is served as itself, never run.
+/// A path that names nothing under the root is a 404: a `.php` one is
+/// php-fpm's `File not found.`, as one that climbs out of the root to a
+/// file beside it is, and any other has no body; a file that is not PHP
+/// is served as itself, never run.
 #[test]
 fn a_path_with_no_php_file_is_not_served_as_a_program() {
     let root = root("missing", &[("notes.txt", "<?php echo 'ran';")]);
@@ -66,75 +67,105 @@ fn a_path_with_no_php_file_is_not_served_as_a_program() {
     std::fs::write(&outside, "<?php echo 'escaped';").unwrap_or_else(|e| panic!("{e}"));
     let server = Server::start(&root);
     for (path, status, body) in [
-        ("/nothing.php", "HTTP/1.1 404 Not Found", ""),
+        (
+            "/nothing.php",
+            "HTTP/1.1 404 Not Found",
+            "File not found.\n",
+        ),
+        ("/nothing", "HTTP/1.1 404 Not Found", ""),
         ("/notes.txt", "HTTP/1.1 200 OK", "<?php echo 'ran';"),
-        ("/../makala-outside.php", "HTTP/1.1 404 Not Found", ""),
+        (
+            "/../makala-outside.php",
+            "HTTP/1.1 404 Not Found",
+            "File not found.\n",
+        ),
     ] {
-        let mut stream = server.connect();
-        write!(
-            stream,
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-        let response = read_response(&mut stream);
+        let response = common::parse_response(&get(&server, path));
         assert_eq!(response.status, status, "{path}");
         assert_eq!(String::from_utf8_lossy(&response.body), body, "{path}");
     }
 }
 
-/// The path past the program is its `PATH_INFO`, split by `php -S`'s
-/// walk (#2637): `SCRIPT_NAME` and `SCRIPT_FILENAME` the program's,
-/// `PHP_SELF` the two, an empty `PATH_INFO` where nothing is past it, and
+/// The path past the program is its `PATH_INFO`, split at the first
+/// segment that ends in `.php` as the recipe's nginx splits it (#2637,
+/// #2693): `SCRIPT_NAME` and `SCRIPT_FILENAME` the program's, `PHP_SELF`
+/// the two, an empty `PATH_INFO` where nothing is past it, and
 /// `PATH_TRANSLATED` the root and `PATH_INFO`, none where that is empty
-/// (RFC 3875 §4.1.6, #2650). A program named
-/// past a file that is not one is not found, and nothing runs: the walk
-/// that routes is the walk that splits.
+/// (RFC 3875 §4.1.6, #2650). What is split meets php-fpm's own checks,
+/// and is answered as the pinned php-fpm answers it under the recipe: a
+/// program named past a file that is not one is refused and runs
+/// nothing, a directory named `*.php` is no program's and its index never
+/// runs, and a name that ends in `.PHP` is not split and is refused.
 #[test]
 fn the_path_past_the_program_is_its_path_info() {
     let root = root(
         "path-info",
-        &[(
-            "front.php",
-            "<?php foreach (['SCRIPT_NAME', 'PATH_INFO', 'PHP_SELF', 'SCRIPT_FILENAME', 'PATH_TRANSLATED'] as $n) \
-             echo $n, '=', $_SERVER[$n] ?? '(none)', \"\\n\";",
-        )],
+        &[
+            (
+                "front.php",
+                "<?php foreach (['SCRIPT_NAME', 'PATH_INFO', 'PHP_SELF', 'SCRIPT_FILENAME', 'PATH_TRANSLATED'] as $n) \
+                 echo $n, '=', $_SERVER[$n] ?? '(none)', \"\\n\";",
+            ),
+            ("x.PHP", "<?php echo 'ran';"),
+        ],
     );
-    std::fs::create_dir_all(root.join("upload")).unwrap_or_else(|e| panic!("{e}"));
-    std::fs::write(root.join("upload/x.jpg"), "<?php echo 'ran';")
-        .unwrap_or_else(|e| panic!("{e}"));
+    for dir in ["upload", "d.php"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap_or_else(|e| panic!("{e}"));
+    }
+    for file in ["upload/x.jpg", "d.php/index.php"] {
+        std::fs::write(root.join(file), "<?php echo 'ran';").unwrap_or_else(|e| panic!("{e}"));
+    }
     let root = root.canonicalize().unwrap_or_else(|e| panic!("{e}"));
     let filename = root.join("front.php");
     let (root_shown, filename) = (root.display(), filename.display());
     let server = Server::start(&root);
-    for (target, status, body) in [
+    let answer = |code, body: &str| (code, body.to_owned());
+    for (target, (status, body)) in [
         (
             "/front.php/index.php?x=1",
-            "HTTP/1.1 200 OK",
-            format!(
-                "SCRIPT_NAME=/front.php\nPATH_INFO=/index.php\nPHP_SELF=/front.php/index.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED={root_shown}/index.php\n"
+            answer(
+                "HTTP/1.1 200 OK",
+                &format!(
+                    "SCRIPT_NAME=/front.php\nPATH_INFO=/index.php\nPHP_SELF=/front.php/index.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED={root_shown}/index.php\n"
+                ),
             ),
         ),
         (
             "/front.php",
-            "HTTP/1.1 200 OK",
-            format!(
-                "SCRIPT_NAME=/front.php\nPATH_INFO=\nPHP_SELF=/front.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED=(none)\n"
+            answer(
+                "HTTP/1.1 200 OK",
+                &format!(
+                    "SCRIPT_NAME=/front.php\nPATH_INFO=\nPHP_SELF=/front.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED=(none)\n"
+                ),
             ),
         ),
         (
             "/upload/x.jpg/y.php",
-            "HTTP/1.1 404 Not Found",
-            String::new(),
+            answer("HTTP/1.1 403 Forbidden", "Access denied.\n"),
         ),
-        ("/upload/x.jpg/", "HTTP/1.1 404 Not Found", String::new()),
+        ("/upload/x.jpg/", answer("HTTP/1.1 404 Not Found", "")),
+        (
+            "/d.php/index.php",
+            answer("HTTP/1.1 404 Not Found", "No input file specified.\n"),
+        ),
+        (
+            "/d.php/",
+            answer("HTTP/1.1 404 Not Found", "No input file specified.\n"),
+        ),
+        (
+            "/d.php",
+            answer("HTTP/1.1 404 Not Found", "No input file specified.\n"),
+        ),
+        (
+            "/x.PHP/a",
+            answer("HTTP/1.1 403 Forbidden", "Access denied.\n"),
+        ),
+        (
+            "/x.PHP",
+            answer("HTTP/1.1 403 Forbidden", "Access denied.\n"),
+        ),
     ] {
-        let mut stream = server.connect();
-        write!(
-            stream,
-            "GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-        let response = read_response(&mut stream);
+        let response = common::parse_response(&get(&server, target));
         assert_eq!(response.status, status, "{target}");
         assert_eq!(String::from_utf8_lossy(&response.body), body, "{target}");
     }

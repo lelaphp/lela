@@ -283,7 +283,9 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
 /// `security.limit_extensions`, so no file of another kind runs as a
 /// program, `T.PHP` among them; for one that does not open,
 /// `Access denied.` with a 403 where it may not be read and `No input
-/// file specified.` with a 404 otherwise; and else the program.
+/// file specified.` with a 404 otherwise, a directory among them, which
+/// php's plain-files opener refuses for a script as no regular file
+/// (`Z/main/streams/plain_wrapper.c:1225-1230`); and else the program.
 fn look(info: &RequestInfo) -> HostServes {
     let refused = |code, body: &[u8]| {
         HostServes::Page(HostPage {
@@ -298,12 +300,12 @@ fn look(info: &RequestInfo) -> HostServes {
     if !(path.len() > b".php".len() && path.ends_with(b".php")) {
         return refused(403, b"Access denied.\n");
     }
-    match std::fs::File::open(php_sapi::cgi::path_of(path)) {
-        Ok(_) => HostServes::Program,
+    match std::fs::File::open(php_sapi::cgi::path_of(path)).and_then(|file| file.metadata()) {
+        Ok(opened) if opened.is_file() => HostServes::Program,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             refused(403, b"Access denied.\n")
         }
-        Err(_) => refused(404, b"No input file specified.\n"),
+        _ => refused(404, b"No input file specified.\n"),
     }
 }
 
@@ -312,7 +314,8 @@ fn look(info: &RequestInfo) -> HostServes {
 /// past the program (`oracle.toml`'s `[fastcgi]`, #2637): the path's info
 /// first, the program the request found under the root, the request's
 /// own variables, and each header field as an `HTTP_` variable. The
-/// split is `php -S`'s walk ([`Translated`]), which routed the request:
+/// split is the route's ([`Translated`]), at the first segment that ends
+/// in `.php` as the recipe's nginx splits, or else by `php -S`'s walk:
 /// `SCRIPT_NAME` is the path as far as the program, with the index file
 /// where it named a directory, nginx's `$fastcgi_script_name`;
 /// `PATH_INFO` the rest, empty where there is none, as nginx sends

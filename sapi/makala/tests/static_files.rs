@@ -208,7 +208,9 @@ fn dot_segments_and_php_sources_are_not_found() {
 /// `--serve-hidden` serves each of [`HIDDEN`] by `php -S`'s rules: its
 /// bytes; and a static file with a path past it, which `php -S` sends
 /// (`php_cli_server_begin_send_static`) and the default refuses (#2642),
-/// as the file.
+/// as the file. A path past it that ends in `.php` is a program's path,
+/// split as the recipe's nginx splits it under either (#2693), and
+/// php-fpm's checks refuse the file it names.
 #[test]
 fn serve_hidden_serves_them_as_php_s_does() {
     let root = hidden_root("hidden-served");
@@ -220,16 +222,13 @@ fn serve_hidden_serves_them_as_php_s_does() {
         assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
         assert_eq!(String::from_utf8_lossy(&response.body), target);
     }
-    for target in ["/upload/x.jpg/y.php", "/upload/x.jpg/"] {
-        let response = ask(&server, "GET", target);
-        assert_eq!(response.status, "HTTP/1.1 200 OK", "{target}");
-        assert_eq!(
-            response.header("Content-Type"),
-            Some("image/jpeg"),
-            "{target}"
-        );
-        assert_eq!(response.body, b"jpeg", "{target}");
-    }
+    let response = ask(&server, "GET", "/upload/x.jpg/");
+    assert_eq!(response.status, "HTTP/1.1 200 OK");
+    assert_eq!(response.header("Content-Type"), Some("image/jpeg"));
+    assert_eq!(response.body, b"jpeg");
+    let response = ask(&server, "GET", "/upload/x.jpg/y.php");
+    assert_eq!(response.status, "HTTP/1.1 403 Forbidden");
+    assert_eq!(response.body, b"Access denied.\n");
 }
 
 /// A symlink under the root to a file outside it is followed, as `php -S`

@@ -1,6 +1,8 @@
 //! The built-in server's path rules (`Z/sapi/cli/php_cli_server.c`), which
-//! `php -S` finds a request's file by and the production server routes
-//! and splits a request by (#2346, #2588, #2637): the path, made
+//! `php -S` finds a request's file by and the production server routes a
+//! request by where no segment of its path ends in `.php` (#2346, #2588,
+//! #2637); where one does, the production server splits it as nginx's
+//! recipe does instead ([`split_at_program`], #2693). The path, made
 //! [`normalize_vpath`](crate::http::normalize_vpath)'s, translated under
 //! the document root as `php_cli_server_request_translate_vpath`
 //! translates it, its extension read as `php_cli_server_request_ctor`
@@ -90,6 +92,25 @@ pub fn translate(vpath: &[u8], root: &[u8], files: &dyn Files) -> Option<Transla
         path_info,
         size,
     })
+}
+
+/// The program's path and the path past it, as nginx's documented split
+/// splits a request's path for php-fpm (`fastcgi_split_path_info
+/// ^(.+?\.php)(/.*)$`, `oracle.toml`'s `[fastcgi]`): the path as far as
+/// the first segment that ends in `.php`, in that case, with a `/` or the
+/// path's end after it, and the rest. The production server splits by it
+/// where `php -S` walks ([`translate`]), so a directory named `*.php` is
+/// the program's path and no program is found in it (#2693). A path
+/// holding a NUL is not split: nginx refuses one before any location.
+#[must_use]
+pub fn split_at_program(vpath: &[u8]) -> Option<(&[u8], &[u8])> {
+    if vpath.contains(&0) {
+        return None;
+    }
+    let end = (b"/.php".len()..=vpath.len()).find(|&end| {
+        vpath[..end].ends_with(b".php") && matches!(vpath.get(end), None | Some(b'/'))
+    })?;
+    Some(vpath.split_at(end))
 }
 
 /// The request's extension, as `php_cli_server_request_ctor` reads it: what
@@ -182,6 +203,31 @@ mod tests {
             Some(&b"/y.php"[..])
         );
         assert_eq!(found.map(|t| t.is_program()), Some(false));
+    }
+
+    /// nginx's pattern's split: at the first `.php` that a `/` or the end
+    /// follows, in that case only, whatever is on the disk; nothing where
+    /// no segment ends so, or where the path holds a NUL.
+    #[test]
+    fn the_program_s_path_ends_at_the_first_php_segment() {
+        for (path, split) in [
+            ("/front.php/index.php", Some(("/front.php", "/index.php"))),
+            ("/d.php/index.php", Some(("/d.php", "/index.php"))),
+            ("/d.php/", Some(("/d.php", "/"))),
+            ("/d.php", Some(("/d.php", ""))),
+            ("/a.php.jpg/b.php/c", Some(("/a.php.jpg/b.php", "/c"))),
+            ("/up/x.jpg/y.php", Some(("/up/x.jpg/y.php", ""))),
+            ("/.php/x", Some(("/.php", "/x"))),
+            ("/x.PHP/a", None),
+            ("/a.php5/b", None),
+            ("/a/", None),
+            ("/x.php\0/y", None),
+            ("", None),
+        ] {
+            let split_bytes =
+                split.map(|(name, info): (&str, &str)| (name.as_bytes(), info.as_bytes()));
+            assert_eq!(split_at_program(path.as_bytes()), split_bytes, "{path:?}");
+        }
     }
 
     #[test]
