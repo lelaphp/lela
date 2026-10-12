@@ -439,9 +439,8 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// git merge --no-commit t1955` started a merge no record named (#2723).
 /// A change inside a subshell, a substitution or a child shell moves the
 /// commands in it alone, and the one after it is read where the shell
-/// stood before it ([`Line::shells`], #2764). [`standing`] does not read
-/// scopes yet, so [`runs_in`], [`fired_in`] and [`acts_in`] read a leading
-/// change inside a subshell as the whole line's (#2787).
+/// stood before it ([`Line::shells`], #2764), as [`standing`] reads the
+/// line's leading changes (#2787).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
     let (mut dir, mut pushed) = (root.to_path_buf(), Vec::new());
     let mut entered: Vec<(u32, PathBuf, Vec<PathBuf>)> = Vec::new();
@@ -507,9 +506,14 @@ pub(super) fn fired_in(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) 
 /// one checkout.
 pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
     let (dir, rest) = standing(root, line);
-    let mut named = rest
-        .iter()
-        .map(|argv| (argv.program() == "git").then(|| moved(dir.clone(), argv)));
+    let placed = line.map(|line| placed(root, line)).unwrap_or_default();
+    // Where a git command runs, a subshell's change and its `-C` read.
+    let mut named = rest.iter().map(|argv| {
+        (argv.program() == "git")
+            .then(|| placed.iter().find(|(at, _)| std::ptr::eq(*at, argv)))
+            .flatten()
+            .map(|(_, at)| at.clone())
+    });
     match named.next() {
         Some(Some(first)) if first != dir && named.all(|other| other.as_ref() == Some(&first)) => {
             first
@@ -536,15 +540,28 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// variable the line did not assign (one the environment holds), `cd`
 /// with no operand or `-`, `pushd` with an option, a stack place (`+1`)
 /// or none, and `popd` with an option or no `pushd` before it.
+///
+/// A change inside a subshell, a substitution or a child shell moves the
+/// commands in it alone, as [`placed`] reads it, and never the line:
+/// `(cd /other && git status); git add x` stands where it started, and
+/// its `git add` runs there (#2787).
 fn standing<'a>(root: &Path, line: Option<&'a Line>) -> (PathBuf, &'a [Argv]) {
-    let commands = line.map_or(&[][..], Line::commands);
+    let Some(line) = line else {
+        return (root.to_path_buf(), &[]);
+    };
+    let commands = line.commands();
     let mut dir = root.to_path_buf();
     let mut pushed = Vec::new();
-    for (at_command, argv) in commands.iter().enumerate() {
+    for (at_command, (argv, shells)) in commands.iter().zip(line.shells()).enumerate() {
         let words = argv.words();
         let exports = words.first().is_some_and(|w| w == "export")
             && words.iter().skip(1).all(|w| w.contains('='));
-        if !exports && !change(&mut dir, &mut pushed, argv) {
+        let changes = if shells.is_empty() {
+            change(&mut dir, &mut pushed, argv)
+        } else {
+            change(&mut dir.clone(), &mut pushed.clone(), argv)
+        };
+        if !exports && !changes {
             return (dir, commands.get(at_command..).unwrap_or_default());
         }
     }
@@ -711,6 +728,29 @@ fn adds_a_pub_item(root: &Path, call: &Call, path: Option<&Path>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2787: a leading `cd` inside a subshell moves that subshell alone,
+    /// so the line stands where it started, its `git add` runs and acts
+    /// there and is judged there; a line whose every git command runs in
+    /// the subshell's checkout acts in it, and a change outside a
+    /// subshell still moves the line.
+    #[test]
+    fn a_leading_change_inside_a_subshell_moves_that_subshell_alone() {
+        let (root, other) = (Path::new("/shell"), Path::new("/other"));
+        let line = Line::read("(cd /other && git status); git add x");
+        assert_eq!(runs_in(root, Some(&line)), root);
+        assert_eq!(acts_in(root, Some(&line)), root);
+        let adds = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "add");
+        assert_eq!(fired_in(root, &line, adds), [root]);
+        let statuses = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "status");
+        assert_eq!(fired_in(root, &line, statuses), [root, other]);
+        let inside = Line::read("(cd /other && git add x && git commit -m y)");
+        assert_eq!(runs_in(root, Some(&inside)), root);
+        assert_eq!(acts_in(root, Some(&inside)), other);
+        let outside = Line::read("cd /wt && (cd sub && ls); git add x");
+        assert_eq!(runs_in(root, Some(&outside)), Path::new("/wt"));
+        assert_eq!(acts_in(root, Some(&outside)), Path::new("/wt"));
+    }
 
     #[test]
     fn scopes_match_files_at_or_under_them() {
