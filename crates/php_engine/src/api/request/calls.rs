@@ -859,6 +859,7 @@ impl Request {
     /// The user function or method `function` is, if it is one: one of
     /// the request's own rows, or the published arena's, which are
     /// numbered past the natives and the native methods (design §5.14).
+    #[inline]
     pub(crate) fn user_function(&self, function: Function) -> Option<&UserFunction> {
         match function.local_at() {
             Some(at) => self.user_functions.get(at),

@@ -461,6 +461,7 @@ impl<H> VmStack<H> {
     /// 20000: 12
     /// 0
     /// ```
+    #[inline]
     pub fn push_frame(
         &mut self,
         heap: &mut Heap,
@@ -468,8 +469,34 @@ impl<H> VmStack<H> {
         extra_args: usize,
         header: H,
     ) -> Result<FrameRef, Fatal> {
-        self.open(heap)?;
         let used = FRAME_HEADER_SLOTS + slots + extra_args;
+        // `zend_vm_stack_push_call_frame_ex`'s test and bump, where the
+        // top page has the room, which is every call in a loop.
+        if let Some(page) = self.pages.last_mut()
+            && used <= page.slots - page.top
+        {
+            let from = page.top;
+            page.top += used;
+            let at = page.slot(from + FRAME_HEADER_SLOTS);
+            return Ok(self.lay(at, slots, Placed::On { from }, header));
+        }
+        self.push_opening(heap, slots, used, header)
+    }
+
+    /// [`VmStack::push_frame`] where no page stands yet or the top one
+    /// has no room for the frame: the first page laid down, and a page
+    /// of the frame's own where that one cannot hold it either
+    /// (`zend_vm_stack_extend`).
+    #[cold]
+    #[inline(never)]
+    fn push_opening(
+        &mut self,
+        heap: &mut Heap,
+        slots: usize,
+        used: usize,
+        header: H,
+    ) -> Result<FrameRef, Fatal> {
+        self.open(heap)?;
         let fits = self
             .pages
             .last()
@@ -506,6 +533,7 @@ impl<H> VmStack<H> {
     /// `at` and every slot `UNDEF`, as `i_init_func_execute_data` finds
     /// them; the room is the push's, `FRAME_HEADER_SLOTS` and `len` slots
     /// long, which nothing else names.
+    #[inline]
     fn lay(&mut self, at: NonNull<Zval>, len: usize, placed: Placed, header: H) -> FrameRef {
         let () = Frame::<H>::FITS;
         let mut frame = Frame {
@@ -557,11 +585,40 @@ impl<H> VmStack<H> {
     /// `zend_vm_stack_free_call_frame`: the page it stood on keeps its
     /// room for the next push, and a page the frame opened goes back to
     /// `heap`.
+    #[inline(always)] // once per return, in the loop's RETURN arms
+    #[allow(clippy::inline_always)]
     pub fn pop_frame(&mut self, heap: &mut Heap) {
         let Some(frame) = self.frames.pop() else {
             return;
         };
+        // `zend_vm_stack_free_call_frame_ex` over a frame on the top page,
+        // `EG(vm_stack_top) = call`: every return of a call in a loop.
+        if let Placed::On { from } = frame.placed
+            && let Some(page) = self.pages.last_mut()
+        {
+            page.top = from;
+            return;
+        }
         self.leave(heap, frame);
+    }
+
+    /// The frame on top of the stack, the one the loop is executing or
+    /// the call being built, and its position: what [`VmStack::current`]
+    /// and [`VmStack::frame`] answer together, read once.
+    #[must_use]
+    #[inline]
+    pub fn top(&self) -> Option<(FrameRef, &Frame<H>)> {
+        let at = self.frames.len().checked_sub(1)?;
+        let frame = self.frames.last()?;
+        Some((FrameRef(u32::try_from(at).ok()?), frame))
+    }
+
+    /// The frame on top of the stack, mutably, and its position.
+    #[inline]
+    pub fn top_mut(&mut self) -> Option<(FrameRef, &mut Frame<H>)> {
+        let at = self.frames.len().checked_sub(1)?;
+        let frame = self.frames.last_mut()?;
+        Some((FrameRef(u32::try_from(at).ok()?), frame))
     }
 
     /// The frame on top, `f`, grown by `more` addressable slots, each
@@ -660,6 +717,8 @@ impl<H> VmStack<H> {
     /// the page, the page it opened, the allocation of its own, or the
     /// room off the pages, kept for the next frameless call unless one
     /// is kept already.
+    #[cold]
+    #[inline(never)]
     fn leave(&mut self, heap: &mut Heap, frame: Frame<H>) {
         match frame.placed {
             Placed::Heap { .. } => frame.free(heap),

@@ -346,6 +346,8 @@ VmStack::put_back
 VmStack::restore_frame
 VmStack::resume_frame
 VmStack::set_aside
+VmStack::top
+VmStack::top_mut
 Zval
 Zval::UNDEF
 Zval::array

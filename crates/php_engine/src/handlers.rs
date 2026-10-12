@@ -3299,12 +3299,17 @@ pub(crate) fn do_icall<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn do_fcall_by_name<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_enter(req, frame, code, op, true) {
+        return edge;
+    }
     do_call(req, frame, code, op, "ZEND_DO_FCALL_BY_NAME")
 }
 
@@ -3327,12 +3332,17 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
 /// ```expect
 /// bool(true)
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn do_fcall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_enter(req, frame, code, op, true) {
+        return edge;
+    }
     do_call(req, frame, code, op, "ZEND_DO_FCALL")
 }
 
@@ -3634,13 +3644,39 @@ fn answered(
 /// int(200)
 /// int(0)
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn do_ucall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_enter(req, frame, code, op, false) {
+        return edge;
+    }
     do_call(req, frame, code, op, "ZEND_DO_UCALL")
+}
+
+/// The inline path of `DO_UCALL`, and of `DO_FCALL` and
+/// `DO_FCALL_BY_NAME` where `flagged`: a call to a user function that
+/// `i_init_func_execute_data` makes a frame of by writing words alone
+/// ([`Request::enter_call`]), entered with no call out of the loop. The
+/// answer is [`Stepped::Pushed`], as [`enter`]'s; `None`, with nothing
+/// touched, for every other call, which [`do_call`] serves.
+#[inline(always)] // as `inline_init_fcall`
+#[allow(clippy::inline_always)]
+fn inline_enter(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    flagged: bool,
+) -> Option<Edge> {
+    let returns_to =
+        (op.out_type != OperandKind::Unused).then(|| exec::temporary_slot(code, op.out));
+    let callee = req.enter_call(returns_to, frame, flagged)?;
+    Some(Ok(Stepped::Pushed(callee).into()))
 }
 
 /// The `ZEND_USER_FUNCTION` arm of the `DO_*CALL` handlers
@@ -21403,29 +21439,11 @@ fn inline_return<T: Tier>(
         }
         _ => return None,
     };
-    let leave = req.leaves_plainly(frame, moved)?;
-    match leave.returns_to {
-        Some(slot)
-            if req
-                .slots_mut(leave.caller)
-                .get(slot as usize)?
-                .is_refcounted() =>
-        {
-            return None;
-        }
-        None if z.is_refcounted() => return None,
-        _ => {}
-    }
+    let leave = req.leaves_plainly(frame, moved, z)?;
     if let Err(fatal) = continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)))) {
         return Some(Err(fatal));
     }
-    req.leave_plainly(leave);
-    if let Some(slot) = leave.returns_to
-        && let Some(into) = req.slots_mut(leave.caller).get_mut(slot as usize)
-    {
-        *into = z;
-    }
-    req.vm_mut().advance(leave.caller);
+    req.leave_plainly(leave, z);
     Some(Ok(Stepped::Popped(leave.caller).into()))
 }
 

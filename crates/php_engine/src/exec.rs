@@ -1023,6 +1023,7 @@ impl RuntimeCache {
     /// up every pass, which is the reading a program that was never
     /// given the slot would have had; php's would be a read past the
     /// allocation.
+    #[inline]
     pub(crate) fn get(&self, slot: CacheSlot) -> Cached {
         self.slots
             .as_ref()
@@ -1110,10 +1111,10 @@ pub(crate) fn init_runtime_cache(map: &mut RuntimeCaches, code: &OpArray, body: 
 /// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
 /// the function's first activation in the request, found laid down by
 /// every one after.
+#[inline]
 pub(crate) fn lay_runtime_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) {
-    let cache = map.map(at);
-    if cache.slots.is_none() {
-        cache.lay_down(cache_size);
+    if !map.laid(at) {
+        map.map(at).lay_down(cache_size);
     }
 }
 
@@ -1609,6 +1610,7 @@ impl Vm {
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, read off the request's map table
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
+    #[inline]
     pub(crate) fn cached(&self, map: &RuntimeCaches, frame: FrameRef, slot: CacheSlot) -> Cached {
         self.at(frame)
             .and_then(|header| map.get(header.runtime_cache()))
