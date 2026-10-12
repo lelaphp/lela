@@ -10,6 +10,10 @@
 //!   `ExtensionBuilder::class::<C>()`. A Rust `enum` is a PHP enum.
 //! - `#[php_const]` on a `const` or an inline `mod` declares constants.
 //!
+//! Beside them, `#[mirrors]` on an item of an extension's surface names
+//! the php-src declaration it stands for and expands to the item as
+//! written; `xtask api-check` holds what it names (design §4.10, #2020).
+//!
 //! What a Rust type cannot say is written in the inert `#[php(..)]`, which
 //! these three read and strip. A parameter's PHP type, by-reference bit,
 //! hold and absent path are its Rust type's, through `FromArgument`, and a return's
@@ -39,6 +43,7 @@ mod constant;
 mod expr;
 mod function;
 mod keys;
+mod marker;
 
 /// A native function: its declaration from the signature, its entry as
 /// php's ZPP.
@@ -62,6 +67,16 @@ pub fn php_class(attribute: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn php_const(attribute: TokenStream, item: TokenStream) -> TokenStream {
     constant::expand(attribute.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// The php-src declaration a surface item stands for: the header from
+/// php-src's root and the symbol it declares `PHPAPI`, `PDO_API` or
+/// `ZEND_API`. The item is emitted unchanged.
+#[proc_macro_attribute]
+pub fn mirrors(attribute: TokenStream, item: TokenStream) -> TokenStream {
+    marker::expand(attribute.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

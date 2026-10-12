@@ -15,18 +15,27 @@
 //! `api.lock` is ([`super::hold_lock`]): the lock is the one place the
 //! items live, landed in the same diff as the code that changes them, and
 //! the rows' Items and Mirrors cells are a person's prose about them.
+//!
+//! **The marker.** An item of the surface may carry `#[mirrors]`, the
+//! php-src declaration it stands for, held against the pinned tree
+//! ([`super::mirrors`], #2353). Where the tree is not on this machine the
+//! markers are not held and the reading says so, unless the machine
+//! promised the tree, when that fails it.
 
+use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use super::LockKind;
 use super::inventory::Inventory;
 use super::lock::{Block, Lock};
+use super::mirrors;
 use super::workspace::{Crates, Present};
+use crate::oracle::{Promise, Promised, Source};
 
 /// The design of record, at the workspace root.
 const DESIGN: &str = "third-engine-design.md";
@@ -45,6 +54,11 @@ pub(crate) struct Surfaces {
     /// on a row and the reading says why.
     found: bool,
     edges: BTreeSet<(String, String)>,
+    /// The pin's php-src, which a marker is held against.
+    source: Source,
+    /// Where that tree is on this machine, asked once, by the
+    /// first marker that needs it.
+    tree: OnceCell<Result<PathBuf, String>>,
 }
 
 /// What the hold makes of one extension: problems, which fail the reading,
@@ -56,15 +70,19 @@ pub(crate) struct Held {
 }
 
 impl Surfaces {
-    /// §4.10 of `root`'s [`DESIGN`]; a workspace without the file has no
-    /// rows.
-    pub(crate) fn read(root: &Path) -> Result<Surfaces> {
+    /// §4.10 of `root`'s [`DESIGN`], with the markers to be held against
+    /// `source`; a workspace without the file has no rows.
+    pub(crate) fn read(root: &Path, source: &Source) -> Result<Surfaces> {
         let path = root.join(DESIGN);
-        match fs::read_to_string(&path) {
-            Ok(text) => Ok(Surfaces::parse(&text)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Surfaces::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-        }
+        let surfaces = match fs::read_to_string(&path) {
+            Ok(text) => Surfaces::parse(&text),
+            Err(e) if e.kind() == ErrorKind::NotFound => Surfaces::default(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        Ok(Surfaces {
+            source: source.clone(),
+            ..surfaces
+        })
     }
 
     /// The rows as `text`, a design document, writes them in its §4.10.
@@ -160,7 +178,45 @@ impl Surfaces {
             held.notes.push(format!("{n} {subject} match {shown}"));
         }
         held.problems.extend(problems);
+        self.hold_markers(krate, &mut held)?;
         Ok(held)
+    }
+
+    /// Hold `krate`'s `#[mirrors]` markers against the pinned php-src.
+    fn hold_markers(&self, krate: &Present, held: &mut Held) -> Result<()> {
+        let markers = mirrors::markers(krate)?;
+        if markers.is_empty() {
+            return Ok(());
+        }
+        let n = markers.len();
+        let tag = &self.source.tag;
+        match self
+            .tree
+            .get_or_init(|| self.source.tree().map_err(|e| format!("{e:#}")))
+        {
+            Ok(tree) => {
+                let problems = mirrors::hold(&markers, tree, tag)?;
+                if problems.is_empty() {
+                    held.notes.push(format!(
+                        "{n} #[mirrors] {} what php-src at {tag} declares",
+                        if n == 1 {
+                            "marker names"
+                        } else {
+                            "markers name"
+                        }
+                    ));
+                }
+                held.problems.extend(problems);
+            }
+            Err(absent) if Promised::load()?.holds(Promise::Tree) => held.problems.push(format!(
+                "{n} #[mirrors] held against nothing: {absent}, and this machine promised the {}",
+                Promise::Tree.word()
+            )),
+            Err(absent) => held
+                .notes
+                .push(format!("{n} #[mirrors] not held: {absent}")),
+        }
+        Ok(())
     }
 }
 
