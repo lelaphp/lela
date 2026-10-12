@@ -200,11 +200,14 @@ pub(crate) enum LongHandler {
     AtLeastZero,
 }
 
+/// One of [`LongHandler::ENTRIES`]: the entry's name and its handler.
+pub(crate) type LongEntry = (&'static [u8], LongHandler);
+
 impl LongHandler {
     /// `main.c`'s entries under the two handlers, in the order
     /// `PHP_INI_BEGIN()` declares them (`Z/main/main.c:807-885`), which
     /// is the order their startup warnings are raised in.
-    pub(crate) const ENTRIES: [(&'static [u8], LongHandler); 12] = [
+    pub(crate) const ENTRIES: [LongEntry; 12] = [
         (b"xmlrpc_error_number", LongHandler::Any),
         (b"max_input_time", LongHandler::Any),
         (b"output_buffering", LongHandler::Any),
@@ -218,6 +221,12 @@ impl LongHandler {
         (b"user_ini.cache_ttl", LongHandler::Any),
         (b"hard_timeout", LongHandler::Any),
     ];
+
+    /// Whether the handler refuses `value`: `OnUpdateLongGEZero`'s
+    /// negative quantity.
+    pub(crate) fn refuses(self, value: &[u8]) -> bool {
+        self == LongHandler::AtLeastZero && Request::ini_parse_bytes(value) < 0
+    }
 
     /// The handler of the core entry `name`, `None` where it has
     /// neither.
@@ -666,14 +675,13 @@ impl Request {
         self.ini.stage = IniStage::Deactivate;
         let changed: Vec<Vec<u8>> = self.ini.changed.iter().map(|(n, ..)| n.clone()).collect();
         for name in changed {
+            let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
             // A long entry's handler reads its startup value again, and
             // warns again where the quantity rule interprets it.
             if LongHandler::of(&name).is_some() {
-                let original = self.shared.ini_default(&name).unwrap_or_default().to_vec();
-                self.ini_quantity_warn(&name, &original);
+                self.ini_quantity_warn(&name, original.as_deref().unwrap_or_default());
             }
             if let Some(handler) = self.ini_handler(&name) {
-                let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
                 // Each rule under its own `zend_try`: what it bails out
                 // with leaves it, and the next entry is restored.
                 handler(self, original.as_deref()).ok();
@@ -868,9 +876,7 @@ impl Request {
             {
                 IniVerdict::Rejected
             }
-            _ if LongHandler::of(name) == Some(LongHandler::AtLeastZero)
-                && crate::ini_quantity::parse(value).0 < 0 =>
-            {
+            _ if LongHandler::of(name).is_some_and(|handler| handler.refuses(value)) => {
                 IniVerdict::Rejected
             }
             _ => IniVerdict::Accepted,
@@ -1002,7 +1008,7 @@ impl Request {
     /// 0
     /// ```
     pub(crate) fn ini_long(&self, name: &[u8]) -> i64 {
-        crate::ini_quantity::parse(self.ini_get(name).unwrap_or_default()).0
+        self.ini_get(name).map_or(0, Request::ini_parse_bytes)
     }
 
     /// `INI_INT(name)`, `zend_ini_long` (`Z/Zend/zend_ini.c:459`): an
@@ -1014,7 +1020,8 @@ impl Request {
     }
 
     /// `zend_ini_parse_quantity_warn` (`Z/Zend/zend_ini.c:859`) for the
-    /// entry `name` taking `value`: the quantity, and php's `Invalid
+    /// entry `name` taking `value`, whose quantity [`Request::ini_long`]
+    /// reads: php's `Invalid
     /// "name" setting.` warning before the rule's sentence where the rule
     /// interprets the value for backwards compatibility, at `Unknown` on
     /// line 0 while the engine starts and where the program stands after.
@@ -1043,14 +1050,12 @@ impl Request {
     /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
     /// 0
     /// ```
-    pub(crate) fn ini_quantity_warn(&mut self, name: &[u8], value: &[u8]) -> i64 {
-        let (quantity, sentence) = crate::ini_quantity::parse(value);
-        if let Some(sentence) = sentence {
+    pub(crate) fn ini_quantity_warn(&mut self, name: &[u8], value: &[u8]) {
+        if let (_, Some(sentence)) = crate::ini_quantity::parse(value) {
             let name = String::from_utf8_lossy(name);
             let message = format!("Invalid \"{name}\" setting. {sentence}");
             crate::api::raising::warning(self, &message);
         }
-        quantity
     }
 
     /// `cfg_get_entry` as `get_cfg_var()` hands it back

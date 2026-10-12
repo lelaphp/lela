@@ -38,8 +38,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, HandlePath, LongHandler, Placed, PropertyInfo, Request, Sink,
-    TypedIni, placed_of,
+    BuildDefs, Ending, ExtensionId, HandlePath, LongEntry, LongHandler, Placed, PropertyInfo,
+    Request, Sink, TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -2609,9 +2609,6 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     quantities_warn(req, after_limit);
     taken
 }
-
-/// One of [`LongHandler::ENTRIES`]: the entry's name and its handler.
-type LongEntry = (&'static [u8], LongHandler);
 
 /// `entries` up to and with the one named `name`, and the rest.
 fn split_after<'a>(entries: &'a [LongEntry], name: &[u8]) -> (&'a [LongEntry], &'a [LongEntry]) {
