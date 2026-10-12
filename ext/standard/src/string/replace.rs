@@ -227,7 +227,7 @@ fn in_subject(
                 Union::A(_) => b"",
             };
             let mut folded = None;
-            let step = searched(
+            let step = search_once(
                 req,
                 subject.as_bytes(),
                 (needle.as_bytes(), with),
@@ -277,7 +277,7 @@ fn in_subject(
             (None, Union::A(_)) => b"",
         };
         let now = current.as_deref().copied().unwrap_or(subject);
-        let step = searched(
+        let step = search_once(
             req,
             now.as_bytes(),
             (needle.as_bytes(), bytes),
@@ -328,7 +328,7 @@ fn in_subject(
 /// subject folded once into `folded`, which the caller keeps while no
 /// search replaces. `None` where nothing matched, and what matched is
 /// added to `count`.
-fn searched(
+fn search_once(
     req: &mut Request,
     subject: &[u8],
     (needle, with): (&[u8], &[u8]),
