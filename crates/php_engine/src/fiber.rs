@@ -129,6 +129,10 @@ pub struct Coroutine {
     /// chain: laid down, suspended, or waiting on a suspend that passed
     /// through it ([`run_on`]); the request holds it while it runs.
     execution: Option<Box<Execution>>,
+    /// Where php's `fiber->execute_data` was last written, which a read
+    /// of a coroutine waiting on a suspend that passed through it reads
+    /// ([`view`]).
+    execute_data: ExecuteData,
     /// `previous`: the coroutine a resume enters, the innermost one
     /// standing when this one suspended, where that was another one a
     /// suspend passed through.
@@ -139,6 +143,21 @@ pub struct Coroutine {
     /// The `emalloc` php makes for a laid-down stack beside its VM
     /// stack's pages, the stack record, counted by the heap as php's is.
     record: Option<Block>,
+}
+
+/// Where php's `fiber->execute_data` points, which `zend_fiber_execute`
+/// writes at the start, `zend_fiber_suspend_internal` at the fiber's own
+/// suspend, and `zend_fiber_resume_internal` when the fiber, active,
+/// resumes another (`Z/Zend/zend_fibers.c:590`, `:685`, `:707`). A
+/// suspend that passes through the fiber writes it nowhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ExecuteData {
+    /// The bottom frame the start laid down, written by nothing since.
+    #[default]
+    Bottom,
+    /// The frame standing innermost on the fiber's stack when its own
+    /// suspend or its resume of another fiber wrote it.
+    Innermost,
 }
 
 /// php's `zend_fiber_context *`: a coroutine reached through the object
@@ -755,12 +774,13 @@ pub(crate) enum Standing<'a> {
     /// The fiber runs innermost, `EG(active_fiber)`: the stack the
     /// request runs on is its.
     Active,
-    /// The fiber is suspended, or runs below a fiber it resumed: the
-    /// execution it left, which it holds, or that resume.
+    /// The fiber is suspended, runs below a fiber it resumed, or waits on
+    /// a suspend that passed through it with php's pointer last written
+    /// there: the execution it left, which it holds, or that resume.
     Held(&'a Execution),
     /// The fiber waits on a suspend of a coroutine below it that passed
-    /// through it, which writes no `fiber->execute_data`: the pointer
-    /// names the bottom frame
+    /// through it, and nothing has written php's `fiber->execute_data`
+    /// since its start: the pointer names the bottom frame
     /// `zend_fiber_execute` laid down, under which stands the resumer's
     /// frame, `stack_bottom->prev_execute_data`.
     Bottom {
@@ -788,8 +808,9 @@ impl<'a> Standing<'a> {
 /// before it starts and once it is dead. None for an object that is no
 /// fiber.
 ///
-/// A `Fiber` a suspend passed through stands at its bottom frame, as
-/// php's `fiber->execute_data` was left by its start
+/// A `Fiber` a suspend passed through stands where php's
+/// `fiber->execute_data` was last written ([`ExecuteData`]), at its
+/// bottom frame where nothing has written it since its start
 /// ([`Standing::Bottom`]); `_ZendTestFiber::suspend` is the witness.
 pub(crate) fn view(
     req: &Request,
@@ -808,13 +829,21 @@ pub(crate) fn view(
                     None => Standing::Active,
                 }),
                 // Waiting on a suspend that passed through it.
-                None => coroutine.execution.as_deref().map(|own| Standing::Bottom {
-                    own,
-                    resumer: match coroutine.caller {
-                        Some(Caller::Coroutine(resumer)) if !coroutine.destroyed => Some(resumer),
-                        _ => None,
-                    },
-                }),
+                None => coroutine
+                    .execution
+                    .as_deref()
+                    .map(|own| match coroutine.execute_data {
+                        ExecuteData::Innermost => Standing::Held(own),
+                        ExecuteData::Bottom => Standing::Bottom {
+                            own,
+                            resumer: match coroutine.caller {
+                                Some(Caller::Coroutine(resumer)) if !coroutine.destroyed => {
+                                    Some(resumer)
+                                }
+                                _ => None,
+                            },
+                        },
+                    }),
             }
         }
     };
@@ -1629,6 +1658,12 @@ fn switch_into<P: HoldsCoroutine>(
     let resumer = req.fibers().current();
     let active = req.fibers().active;
     coroutine_of::<P>(req, object)?.caller = Some(Caller::of(resumer));
+    if kind == Kind::Fiber
+        && let Some(previous) = active.and_then(|active| active.native_mut::<ZendFiber>(req))
+    {
+        // `zend_fiber_resume_internal`: `previous->execute_data`.
+        previous.coroutine.execute_data = ExecuteData::Innermost;
+    }
     let resumer = resumer.map(Context::object);
     let left = observed(req, resumer, FiberStatus::Running);
     let entering = observed(req, Some(entering), entered);
@@ -1790,6 +1825,8 @@ fn suspend_into<P: HoldsCoroutine>(
     coroutine.previous = innermost
         .filter(|innermost| !innermost.is(object))
         .map(Context::object);
+    // `fiber->execute_data = EG(current_execute_data)`.
+    coroutine.execute_data = ExecuteData::Innermost;
     let back = php_heap::suspend(req, transfer);
     req.fatal_of(back)
 }
@@ -2094,6 +2131,7 @@ fn lay_down<P: HoldsCoroutine>(
     coroutine.record = Some(record);
     coroutine.stack = Some(stack);
     coroutine.execution = Some(Box::new(execution));
+    coroutine.execute_data = ExecuteData::Bottom;
     let created = observed(req, Some(object), FiberStatus::Init);
     crate::observer::fiber_initialized(req, created);
     Ok(())

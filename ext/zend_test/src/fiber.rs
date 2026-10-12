@@ -394,6 +394,34 @@ impl _ZendTestFiber {
     /// bool(true)
     /// back
     /// ```
+    ///
+    /// A `Fiber` that resumed another before the suspend passed through
+    /// both stands where that resume wrote php's pointer, its `start`
+    /// call, which still stands, and is read from there:
+    ///
+    /// ```php
+    /// $test = new _ZendTestFiber(function (): void {
+    ///     $a = new Fiber(function (): void {
+    ///         $b = new Fiber(function (): void {
+    ///             _ZendTestFiber::suspend(10);
+    ///         });
+    ///         $GLOBALS['b'] = $b;
+    ///         $b->start();
+    ///     });
+    ///     $GLOBALS['a'] = $a;
+    ///     $a->start();
+    /// });
+    /// $test->start();
+    /// foreach (['a', 'b'] as $n) {
+    ///     $r = new ReflectionFiber($GLOBALS[$n]);
+    ///     echo $n, ": ", $r->getExecutingLine(), " ", count($r->getTrace()), "\n";
+    /// }
+    /// $test->resume();
+    /// ```
+    /// ```expect
+    /// a: 8 2
+    /// b: 8 0
+    /// ```
     fn suspend(
         req: &mut Request,
         #[php(default = null)] value: Value,
