@@ -1739,7 +1739,10 @@ fn implode_frameless(
     }
     let glue = coerce_param(req, &separator.value(), &Type::String, 1)?;
     let Some(glue) = glue.as_php_string().copied() else {
-        return Err(not_an_array(req));
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a separator held as a string is no string",
+        ));
     };
     let Some(pieces) = array.hold(req)? else {
         return Err(not_an_array(req));
