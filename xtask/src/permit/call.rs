@@ -48,6 +48,11 @@ pub struct Call {
     /// began during it began no earlier than this before the hook.
     #[serde(default)]
     pub(super) duration_ms: Option<u64>,
+    /// The hook event the call came in on, which the hook's answer names
+    /// again: `PostToolUse`, or `PostToolUseFailure` for a `Bash` call that
+    /// exited non-zero, which gets no `PostToolUse` (#2762).
+    #[serde(default)]
+    pub(super) hook_event_name: Option<String>,
     /// The answered `AskUserQuestion` calls the function hook read from
     /// the engine, read only by that adapter ([`Evidence`]).
     #[serde(default)]
