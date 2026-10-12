@@ -308,19 +308,65 @@ fn both(
     line: &Line,
 ) -> Result<(String, String)> {
     let dir = Tree::new("line")?;
-    let port = TcpListener::bind("127.0.0.1:0")
-        .and_then(|probe| probe.local_addr())
-        .context("finding a free loopback port")?
-        .port();
     let masks = line.masks()?;
     let masked = |text: String| {
         masks.iter().fold(text, |text, (re, with)| {
             re.replace_all(&text, *with).into_owned()
         })
     };
-    let theirs = ran(oracle, pinned, line, dir.path(), port)?;
-    let ours = ran(oracle, engine, line, dir.path(), port)?;
-    Ok((masked(theirs), masked(ours)))
+    let mut taken = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|probe| probe.local_addr())
+            .context("finding a free loopback port")?
+            .port();
+        let renderings = ran(oracle, pinned, line, dir.path(), port)
+            .and_then(|theirs| Ok((theirs, ran(oracle, engine, line, dir.path(), port)?)));
+        match renderings {
+            Err(err) if err.is::<InUse>() => taken.push(port.to_string()),
+            renderings => {
+                let (theirs, ours) = renderings?;
+                return Ok((masked(theirs), masked(ours)));
+            }
+        }
+    }
+    bail!(
+        "line {:?}: each of the ports {} was found free and taken before a host bound it",
+        line.name,
+        taken.join(", ")
+    )
+}
+
+/// How many ports a server's line is offered: a port found free can be
+/// taken by another process before the host binds it, which then says so
+/// and serves nothing (#2653).
+const ATTEMPTS: usize = 3;
+
+/// A server's line whose host could not bind `{port}` because something
+/// else had it: the line is run again, both hosts, on another port.
+#[derive(Debug)]
+struct InUse(u16);
+
+impl std::fmt::Display for InUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "port {} was taken before the host bound it", self.0)
+    }
+}
+
+impl std::error::Error for InUse {}
+
+/// Whether a server's run said, on a stream or in a file of `dir`, that
+/// `port` was in use when it bound it: php -S's `Failed to listen on
+/// 127.0.0.1:<port> (reason: Address already in use)`, php-fpm's `unable
+/// to bind listening socket for address '127.0.0.1:<port>': Address
+/// already in use (48)`.
+fn in_use(port: u16, streams: [&[u8]; 2], dir: &Path) -> Result<bool> {
+    let (address, said) = (format!(":{port}"), "Address already in use");
+    let names = |text: &str| text.contains(&address) && text.contains(said);
+    Ok(streams
+        .into_iter()
+        .any(|bytes| names(&String::from_utf8_lossy(bytes)))
+        || files(dir)?.values().any(|text| names(text)))
 }
 
 /// `{dir}` and `{port}` in `text` as this line's run has them.
@@ -363,6 +409,9 @@ fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -
                 (None, None) => Ok(Vec::new()),
             }
         })?;
+        if serve.is_some() && in_use(port, [&ended.stdout, &ended.stderr], dir)? {
+            return Err(InUse(port).into());
+        }
         let Some(exit) = ended.exit else {
             bail!(
                 "{} ran past the recipe's limit of {} s on line {:?}",
@@ -713,6 +762,32 @@ mod tests {
         let (judgement, note) = judged(text, &pin, &engine);
         assert_eq!(judgement, Judgement::Fail, "{note}");
         assert!(note.contains("+y\n+y\n+y\n+y"), "{note}");
+    }
+
+    /// A server's port taken by another process between the probe and the
+    /// host's bind is not the line's miss (#2653): the pinned host here
+    /// says, once, what php -S says of a port in use and serves nothing,
+    /// and the line is run again, both hosts, on another port, and passes.
+    #[test]
+    fn a_port_taken_before_the_host_binds_it_is_tried_again_on_another() {
+        let hosts = Tree::new("host-line-taken").unwrap();
+        let once = hosts.join("refused-once");
+        let serve = "echo up > up; exec sleep 30";
+        let pinned = host(
+            &hosts,
+            "php-cgi",
+            &format!(
+                "if [ ! -e '{0}' ]; then : > '{0}'; echo \"Failed to listen on 127.0.0.1:$1 \
+                 (reason: Address already in use)\" >&2; exit 1; fi; {serve}",
+                once.display()
+            ),
+        );
+        let engine = host(&hosts, "engine", serve);
+        let text = "[[line]]\nname = \"one\"\nargs = [\"{port}\"]\n[line.serve]\n\
+                    listen = \"127.0.0.1:{port}\"\nready = [\"up\", \"up\"]\nstop = \"SIGTERM\"\n";
+        let (judgement, note) = judged(text, &pin(&pinned, None), &engine);
+        assert!(once.exists(), "the first port was refused");
+        assert_eq!(judgement, Judgement::Pass, "{note}");
     }
 
     /// A file of lines is refused whole for a name given twice, a mask

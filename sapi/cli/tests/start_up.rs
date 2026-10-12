@@ -5,10 +5,13 @@
 //! `-m` lists the modules in a request of its own (`php_cli.c:643-655`),
 //! whose `rinit` does (#1967).
 
-use std::io::{BufRead, BufReader};
+mod server;
+
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use server::Server;
 
 /// A directory of its own for `name`, empty.
 fn save_path(name: &str) -> PathBuf {
@@ -68,20 +71,35 @@ fn the_module_listing_starts_its_request_s_session() {
 #[test]
 fn the_server_starts_no_session_before_its_first_client() {
     let dir = save_path("server");
-    let port = TcpListener::bind("127.0.0.1:0")
-        .and_then(|probe| probe.local_addr())
-        .map_or_else(|e| panic!("finding a free port: {e}"), |bound| bound.port());
-    let mut child = php(&dir, &["-S", &format!("127.0.0.1:{port}"), "-t"])
-        .arg(&dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("running php -S: {e}"));
-    let stderr = child.stderr.take().unwrap_or_else(|| panic!("no stderr"));
-    let first = BufReader::new(stderr).lines().next();
-    child.kill().ok();
-    child.wait().ok();
-    let first = first.and_then(Result::ok).unwrap_or_default();
+    let save_path = format!("session.save_path={}", dir.display());
+    let server = Server::start_on(
+        std::iter::repeat_with(server::free_port),
+        "start-up",
+        &[],
+        &[],
+        &["-d", "session.auto_start=1", "-d", &save_path],
+    );
+    let first = server.log().into_iter().next().unwrap_or_default();
+    drop(server);
     assert!(first.ends_with(") started"), "{first}");
     assert_eq!(sessions(&dir), Vec::<String>::new());
+}
+
+/// A port another process holds when php -S binds it is given up for a
+/// fresh one (#2653): php says it is in use and exits, and the server is
+/// started again on the next port offered.
+#[test]
+fn a_server_whose_port_is_taken_starts_on_a_fresh_one() {
+    let held = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("{e}"));
+    let taken = held.local_addr().map_or(0, |bound| bound.port());
+    let ports = std::iter::once(taken).chain(std::iter::repeat_with(server::free_port));
+    let server = Server::start_on(
+        ports,
+        "taken",
+        &[("i.php", "<?php echo 'served';")],
+        &[],
+        &[],
+    );
+    assert_ne!(server.address, format!("127.0.0.1:{taken}"));
+    assert_eq!(server.get("/i.php"), "served");
 }

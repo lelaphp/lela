@@ -24,57 +24,97 @@ pub struct Server {
     log: Arc<Mutex<Vec<String>>>,
 }
 
+/// How many ports a server is offered: a port found free can be taken by
+/// another process before php binds it, which php then says and exits
+/// (#2653). php -S cannot be handed a socket already bound.
+const ATTEMPTS: usize = 3;
+
+/// What php -S says, and exits on, where another process holds its port.
+const IN_USE: &str = "(reason: Address already in use)";
+
+/// A loopback port free when asked: bound and let go again, so it is
+/// free only until another process binds it.
+pub fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|probe| probe.local_addr())
+        .map_or_else(|e| panic!("finding a free port: {e}"), |bound| bound.port())
+}
+
 impl Server {
     /// `php -n -S 127.0.0.1:<free port> -t <root>` with `files` written
     /// under a root named for `name`, and `env` set, once its first
     /// "started" line is written.
     pub fn start(name: &str, files: &[(&str, &str)], env: &[(&str, &str)]) -> Server {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .and_then(|probe| probe.local_addr())
-            .map_or_else(|e| panic!("finding a free port: {e}"), |bound| bound.port());
+        Server::start_on(std::iter::repeat_with(free_port), name, files, env, &[])
+    }
+
+    /// [`Server::start`] with `args` before `-S`, on the first of `ports`
+    /// php binds: a port php says is in use is given up for the next,
+    /// [`ATTEMPTS`] at most.
+    pub fn start_on(
+        ports: impl IntoIterator<Item = u16>,
+        name: &str,
+        files: &[(&str, &str)],
+        env: &[(&str, &str)],
+        args: &[&str],
+    ) -> Server {
         let root = std::env::temp_dir().join(format!("php-server-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
-        for (file, text) in files {
-            std::fs::write(root.join(file), text).unwrap_or_else(|e| panic!("writing {file}: {e}"));
-        }
-        let mut child = Command::new(env!("CARGO_BIN_EXE_php"))
-            .arg("-n")
-            .arg("-S")
-            .arg(format!("127.0.0.1:{port}"))
-            .arg("-t")
-            .arg(&root)
-            .envs(env.iter().copied())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("running php -S: {e}"));
-        let stderr = child.stderr.take().unwrap_or_else(|| panic!("no stderr"));
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let kept = Arc::clone(&log);
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                kept.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(line);
+        let mut refused = Vec::new();
+        for port in ports.into_iter().take(ATTEMPTS) {
+            std::fs::remove_dir_all(&root).ok();
+            std::fs::create_dir_all(&root)
+                .unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
+            for (file, text) in files {
+                std::fs::write(root.join(file), text)
+                    .unwrap_or_else(|e| panic!("writing {file}: {e}"));
             }
-        });
-        let server = Server {
-            child,
-            address: format!("127.0.0.1:{port}"),
-            root,
-            log,
-        };
-        let started = server.wait_for(Duration::from_secs(30), |lines| {
-            lines.iter().any(|line| line.ends_with("started"))
-        });
-        assert!(
-            started,
-            "the server never said it started: {:?}",
-            server.log()
-        );
-        server
+            let mut child = Command::new(env!("CARGO_BIN_EXE_php"))
+                .arg("-n")
+                .args(args)
+                .arg("-S")
+                .arg(format!("127.0.0.1:{port}"))
+                .arg("-t")
+                .arg(&root)
+                .envs(env.iter().copied())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| panic!("running php -S: {e}"));
+            let stderr = child.stderr.take().unwrap_or_else(|| panic!("no stderr"));
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let kept = Arc::clone(&log);
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    kept.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(line);
+                }
+            });
+            let server = Server {
+                child,
+                address: format!("127.0.0.1:{port}"),
+                root: root.clone(),
+                log,
+            };
+            server.wait_for(Duration::from_secs(30), |lines| {
+                lines
+                    .iter()
+                    .any(|line| line.ends_with("started") || line.ends_with(IN_USE))
+            });
+            let log = server.log();
+            if log.iter().any(|line| line.ends_with("started")) {
+                return server;
+            }
+            assert!(
+                log.iter().any(|line| line.ends_with(IN_USE)),
+                "the server never said it started: {log:?}"
+            );
+            // Dropped, the child is killed and reaped and the root taken
+            // away, to be laid again for the next port.
+            refused.extend(log);
+        }
+        panic!("php -S found each port it was offered in use: {refused:?}")
     }
 
     /// The log so far.
