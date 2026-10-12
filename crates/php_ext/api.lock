@@ -339,6 +339,7 @@ abi::chain::PostStartup
 abi::chain::ResolvePath
 abi::chain::Throw
 abi::chain::Upload
+attr::mirrors
 attr::php_class
 attr::php_const
 attr::php_function

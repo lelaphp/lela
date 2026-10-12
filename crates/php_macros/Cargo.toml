@@ -2,7 +2,8 @@
 # Each derives a native's declaration from its Rust types and identifiers
 # and emits its entry as php's ZPP, naming `::php_ext` paths, or
 # `crate::api` inside php_engine. Depends on no workspace crate: a macro
-# emits paths and never links what they name.
+# emits paths and never links what they name. Beside them `mirrors`, a
+# marker on a surface item that expands to the item (#2353).
 [package]
 name = "php_macros"
 version = "0.0.0"
@@ -10,7 +11,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "The native attributes: php_function, php_class, php_const"
+description = "The native attributes: php_function, php_class, php_const; and mirrors"
 
 [lib]
 proc-macro = true

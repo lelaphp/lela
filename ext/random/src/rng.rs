@@ -8,6 +8,7 @@
 //! here the edge runs one way, `standard` on `random` (ADR-0004), so the
 //! walks live with the RNG they draw from.
 
+use php_ext::attr::mirrors;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject};
@@ -30,10 +31,13 @@ enum Source {
 pub struct Rng(Source);
 
 impl Rng {
-    /// `php_random_default_engine()`: the request's `Mt19937`, seeded
-    /// from the CSPRNG on the request's first draw unless `mt_srand`
-    /// seeded it.
+    /// `php_random_default_engine()`, `php_random.h`'s `static inline`
+    /// over the two `PHPAPI` declarations marked below: the request's
+    /// `Mt19937`, seeded from the CSPRNG on the request's first draw
+    /// unless `mt_srand` seeded it.
     #[must_use]
+    #[mirrors("ext/random/php_random.h", "php_random_default_algo")]
+    #[mirrors("ext/random/php_random.h", "php_random_default_status")]
     pub fn default_engine() -> Rng {
         Rng(Source::Default)
     }
@@ -66,6 +70,8 @@ impl Rng {
     /// ```expect
     /// ceadfbgh 1,3,2,4
     /// ```
+    #[mirrors("ext/standard/php_array.h", "php_array_data_shuffle")]
+    #[mirrors("ext/standard/php_string.h", "php_binary_string_shuffle")]
     pub fn shuffle<T>(self, req: &mut Request, items: &mut [T]) -> Result<(), Thrown> {
         let walked = self.with(req, |algo| walk(algo, items));
         walked.map_err(|failure| failure.raise(req))
@@ -83,6 +89,7 @@ impl Rng {
     /// ```expect
     /// a 1,6,8 8
     /// ```
+    #[mirrors("ext/standard/php_array.h", "php_array_pick_keys")]
     pub fn pick_keys(
         self,
         req: &mut Request,

@@ -3,7 +3,7 @@
 //! engine crate, so the "api only" rule is crate visibility, not a lint
 //! over the bodies. The ten groups of `php_engine::api`, the request
 //! group with the streams facet `php_streams` adds to it, `tier::Nop`
-//! for the bundle's alias, the three attributes under `attr` and
+//! for the bundle's alias, the three attributes and `mirrors` under `attr` and
 //! `__private` for what they expand to, and, behind the `test` feature,
 //! the `Capture` sink and `Engine::serve_capture` for an extension's own
 //! tests. `api.lock` lists every public item here.
@@ -33,9 +33,10 @@ pub mod request {
 pub use php_engine::api::__private;
 pub use php_engine::tier::Nop;
 
-/// The native attributes.
+/// The native attributes, and `mirrors`, the php-src declaration a
+/// surface item stands for (design §4.10).
 pub mod attr {
-    pub use php_macros::{php_class, php_const, php_function};
+    pub use php_macros::{mirrors, php_class, php_const, php_function};
 }
 
 /// The test face (design §4.3 seam 4, ADR-0002): a fresh engine with one
