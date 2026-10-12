@@ -13,7 +13,8 @@
 //! as one meets it (#1995), a table copied as php copies it (#2005),
 //! the callback walks as a native meets them (#1980), the owners the
 //! face takes for a native and gives up (#2059, #2080), and the frames
-//! a fatal leaves, whose annexes leave with them (#2554).
+//! a fatal leaves, whose annexes leave with them (#2554), and an
+//! extension's optimizer passes where the unit cache runs them (#2386).
 
 use crate::api;
 
@@ -36,6 +37,7 @@ mod observer_notices;
 mod observer_traits;
 mod op_arrays;
 mod opcodes;
+mod optimizer_passes;
 mod owners;
 mod periodic;
 mod pool;

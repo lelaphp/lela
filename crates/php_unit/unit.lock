@@ -48,6 +48,8 @@ UnitCell::unit
 decl::AliasModifier
 decl::Attribute
 decl::AttributeArgument
+decl::AttributeTarget
+decl::AttributeValidator
 decl::ClassConstDecl
 decl::ClassDecl
 decl::ClassFlags

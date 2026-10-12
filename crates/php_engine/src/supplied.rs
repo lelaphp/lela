@@ -42,8 +42,8 @@ use php_unit::decl::Name;
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
     Extension, FatalLoggedHook, FiberHandler, FiberSwitchHandler, GcCollectHook, InputFilterHook,
-    InterruptHook, ObserverInit, PostStartupHook, ResolvePathHook, Shell, ThrownHook, TicksHook,
-    TreatDataHook, UploadHook,
+    InterruptHook, ObserverInit, OptimizerPass, PostStartupHook, ResolvePathHook, Shell,
+    ThrownHook, TicksHook, TreatDataHook, UploadHook,
 };
 use crate::api::request::{ExtensionId, Request};
 use crate::layer::StreamHooks;
@@ -114,6 +114,7 @@ pub(crate) struct Supplies {
     pub(crate) upload: Option<UploadHook>,
     pub(crate) ticks: Option<TicksHook>,
     pub(crate) cached: Option<CachedHook>,
+    pub(crate) optimizer_passes: Vec<OptimizerPass>,
     pub(crate) program_ended: Option<fn(&mut Request)>,
     pub(crate) admission: Option<AdmissionHook>,
     pub(crate) fatal_logged: Option<FatalLoggedHook>,
@@ -252,6 +253,11 @@ pub(crate) struct Resolved {
     pub(crate) ticks: Listed<TicksHook>,
     /// Told of each file the unit cache holds.
     pub(crate) cached: Listed<CachedHook>,
+    /// `zend_optimizer_registered_passes`, as
+    /// `zend_optimizer_register_pass` appends to it and
+    /// `zend_optimizer_call_registered_passes` walks it
+    /// (`Z/Zend/Optimizer/zend_optimizer.c:1589-1597`, `:1762-1775`).
+    pub(crate) optimizer_passes: Listed<OptimizerPass>,
     /// `zend_observers_fcall_list`, as `zend_observer_fcall_register`
     /// (`Z/Zend/zend_observer.c:44`)
     /// appends to it at each `MINIT` and each Zend extension's startup,
@@ -346,6 +352,7 @@ impl Resolved {
             table.upload.install(own.upload);
             table.ticks.install(own.ticks);
             table.cached.install(own.cached);
+            table.optimizer_passes.install_all(own.optimizer_passes);
             table.observers.install_all(own.observers);
             table.error_observers.install_all(own.error_observers);
             table.functions_declared.install_all(own.functions_declared);

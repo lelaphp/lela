@@ -1351,6 +1351,7 @@ mod tests {
             end_line: 0,
             object_size: 0,
             object_beside: Box::default(),
+            attribute_validator: None,
         }
     }
 

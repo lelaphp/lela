@@ -5101,6 +5101,7 @@ impl Emit<'_> {
             end_line: class.end_line,
             object_size: 0,
             object_beside: Box::default(),
+            attribute_validator: None,
         };
         self.active_class = Some(ActiveClass {
             name: name.clone(),
@@ -6143,8 +6144,11 @@ impl Emit<'_> {
     /// `zend_compile_attributes`' second loop over the attribute of
     /// `out` at `at`: an internal one held to the target it stands on,
     /// unless `#[\DelayedTargetValidation]` defers that, and to standing
-    /// once, unless its class may repeat. What it is where it stands on
-    /// its target, for its validator.
+    /// once, unless its class may repeat, and then, where it stands on
+    /// its target, to the validator its extension declared, whose
+    /// sentence is the compile error unless `#[\DelayedTargetValidation]`
+    /// keeps it for `ReflectionAttribute::newInstance`. What it is where
+    /// it stands on its target, for Core's validators.
     fn attribute_held(
         &self,
         out: &[Attribute],
@@ -6186,6 +6190,23 @@ impl Emit<'_> {
             return Err(refused(format!(
                 "Attribute \"{shown}\" must not be repeated"
             )));
+        }
+        if on_target
+            && !delayed
+            && let Some(validator) = config.validator
+            && let Ok(target) = php_unit::decl::AttributeTarget::try_from(target)
+            && let Some(sentence) = (validator.0)(
+                attribute,
+                target,
+                self.active_class
+                    .as_ref()
+                    .map(|class| class.name.as_slice()),
+            )
+        {
+            return Err(CompileError {
+                level: Level::CompileError,
+                ..refused(sentence)
+            });
         }
         Ok(on_target.then_some(config))
     }
