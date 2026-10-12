@@ -4,7 +4,7 @@ description: Coordinate the builders, three slots kept full of specs cut from th
 disable-model-invocation: true
 ---
 
-The coordinator keeps the builder **slots** full and merges what they finish. A slot is one builder agent in its own worktree; three run at once, each building under `CARGO_BUILD_JOBS=3`, so the three and a merge's hook fit the machine's 12 cores; a builder's commit hook runs at `nice` 10 on its own, since its checkout is a linked worktree, and yields to the merge's (harness revision 140). A slot works one **spec**: a ticket of about 150–700 tests' worth of work, cut from where the corpus fails rather than from the design's fog, so every merge moves a measured count. The coordinator's own edits are merge resolutions. What it owns is the cut, the dispatch, the merge and the **merge check**, the proof that a merge regressed nothing.
+The coordinator keeps the builder **slots** full and merges what they finish. A slot is one builder agent in its own worktree; three run at once, each building under the `CARGO_BUILD_JOBS` `.claude/settings.json` sets, so the three and a merge's hook fit the machine's 12 cores; a builder's commit hook runs at `nice` 10 on its own, since its checkout is a linked worktree, and yields to the merge's (harness revision 140). A slot works one **spec**: a ticket of about 150–700 tests' worth of work, cut from where the corpus fails rather than from the design's fog, so every merge moves a measured count. The coordinator's own edits are merge resolutions. What it owns is the cut, the dispatch, the merge and the **merge check**, the proof that a merge regressed nothing.
 
 ## Where you stand
 
