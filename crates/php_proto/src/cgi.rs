@@ -41,11 +41,14 @@ impl Environment {
     /// The environment as php reads it through a `char *`: each value
     /// up to its first NUL ([`crate::c_str`]). A `FastCGI` parameter
     /// carries its length and may hold a NUL, which `init_request_info`
-    /// and the request loop (`FCGI_GETENV`, `sapi_cgibin_getenv`),
-    /// `getenv()` and `$_SERVER` (`cgi_php_load_env_var`'s `strlen`) all
-    /// stop at; `apache_request_headers` alone reads the whole value
-    /// (`sapi_add_request_header`), and a process's environment holds
-    /// none.
+    /// and the request loop (`FCGI_GETENV`,
+    /// `Z/sapi/fpm/fpm/fpm_main.c:974`), `getenv()` and `$_SERVER`
+    /// (`cgi_php_load_env_var`'s `strlen`, `:512`) all stop at;
+    /// `apache_request_headers` alone reads the whole value
+    /// (`sapi_add_request_header`'s `add_assoc_stringl_ex`,
+    /// `Z/main/SAPI.c:1172`), and a process's environment holds none. A
+    /// name stays whole, as `fcgi_getenv` finds a parameter by its name
+    /// and length.
     #[must_use]
     pub fn cut_at_nul(mut self) -> Environment {
         for (_, value) in &mut self.0 {
