@@ -151,13 +151,23 @@ pub fn resolve_property<'a>(
     })
 }
 
+/// What `zend_verify_property_hook_variance` comes to over a `set`
+/// hook while the file compiles: the property's type a subtype of the
+/// parameter's, or a class it names not held yet, which
+/// `zend_compile_property_hooks` counts in
+/// `num_hooked_prop_variance_checks` for the link to check again, or
+/// the refusal php raises before the class is declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookVariance {
+    Holds,
+    Unresolved,
+    Refused(Refusal),
+}
+
 /// `zend_verify_property_hook_variance` as `zend_compile_property_hooks`
 /// runs it once a `set` hook has compiled, against the classes `lookup`
-/// holds while the file compiles and the class itself by its name: the
-/// refusal where the property's type is no subtype of the parameter's,
-/// which php raises before the class is declared, and nothing where it
-/// is or where a class it names is not held yet, which the link checks
-/// again once the class has taken its parent and its interfaces.
+/// holds while the file compiles and the class itself, in no table yet,
+/// from its own scope ([`Standing::Compiling`](super::Standing)).
 ///
 /// ```php
 /// echo "not reached\n";
@@ -175,18 +185,35 @@ pub fn resolve_property<'a>(
 /// ```expect exit=255
 /// Fatal error: Type of parameter $v of hook C::$x::set must be compatible with property type in %s on line 3
 /// ```
+///
+/// A class the check names that is declared later leaves it to the
+/// link, where the class is declared:
+///
+/// ```php
+/// echo "reached\n";
+/// class Test { public X $prop { set(Y $prop) {} } }
+/// interface X {}
+/// interface Y {}
+/// ```
+/// ```expect exit=255
+/// reached
+///
+/// Fatal error: Type of parameter $prop of hook Test::$prop::set must be compatible with property type in %s on line 3
+/// ```
 #[must_use]
-pub fn set_hook_refused<'a>(
+pub fn set_hook_variance<'a>(
     class: &'a ClassDecl,
     property: &[u8],
     ty: Option<&Type>,
     set: &MethodDecl,
     lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
-) -> Option<Refusal> {
-    let linker = Linker::over(lookup, &|()| None, Vec::new());
-    match linker.set_hook_variance(class, property, ty, set)? {
-        (Status::Error, refused) => Some(refused.refusal),
-        _ => None,
+) -> HookVariance {
+    let mut linker = Linker::over(lookup, &|()| None, Vec::new());
+    linker.standing = super::Standing::Compiling;
+    match linker.set_hook_variance(class, property, ty, set) {
+        Some((Status::Error, refused)) => HookVariance::Refused(refused.refusal),
+        Some((Status::Unresolved, _)) => HookVariance::Unresolved,
+        Some((Status::Success | Status::Warning, _)) | None => HookVariance::Holds,
     }
 }
 

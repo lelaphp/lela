@@ -63,7 +63,8 @@ pub use rows::{
 };
 
 pub use hooks::{
-    Resolved, ResolvedHook, Variance, resolve_property, set_hook_refused, verify_hooked_property,
+    HookVariance, Resolved, ResolvedHook, Variance, resolve_property, set_hook_variance,
+    verify_hooked_property,
 };
 
 const MAY_BE_OBJECT: u32 = 1 << 8;
@@ -278,6 +279,10 @@ pub enum Refusal {
     /// `Enum %s cannot include magic method %s`
     /// (`zend_verify_enum_magic_methods`).
     EnumMagic { class: String, method: &'static str },
+    /// `Cannot redeclare %s::%s()`, an enum that declares a method
+    /// `zend_enum_register_funcs` gives it, named as php's known string
+    /// spells it, `tryfrom` lowered.
+    EnumRedeclare { class: String, method: String },
     /// `Enum %s cannot implement the Serializable interface`
     /// (`zend_verify_enum_interfaces`).
     EnumSerializable { class: String },
@@ -758,6 +763,9 @@ impl fmt::Display for Refusal {
             Refusal::EnumMagic { class, method } => {
                 write!(f, "Enum {class} cannot include magic method {method}")
             }
+            Refusal::EnumRedeclare { class, method } => {
+                write!(f, "Cannot redeclare {class}::{method}()")
+            }
             Refusal::EnumSerializable { class } => {
                 write!(
                     f,
@@ -1105,6 +1113,21 @@ pub struct Linking<H = ()> {
     pub obligations: Vec<Obligation>,
     pub autoloads: Vec<Vec<u8>>,
     pub record: Option<LinkedClass<H>>,
+}
+
+impl<H> Linking<H> {
+    /// A link refused before any check left anything for later, with
+    /// what was raised before the refusal.
+    fn refused(refused: Refused, raised: Vec<Raised>) -> Linking<H> {
+        Linking {
+            outcome: Linked::Refused(refused),
+            raised,
+            composed: None,
+            obligations: Vec::new(),
+            autoloads: Vec::new(),
+            record: None,
+        }
+    }
 }
 
 /// What the checks left for later, `CG(delayed_autoloads)`'s names and
@@ -1513,8 +1536,24 @@ fn put<'a, M: ClassMember>(table: &mut Members<'a, M>, by: Option<&'a ClassDecl>
 struct Linker<'a, H = ()> {
     lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a, H>>,
     holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
+    standing: Standing,
     raised: Vec<Raised>,
     deferred: std::cell::RefCell<Deferred>,
+}
+
+/// Where the class being linked stands while it links, which is what
+/// `lookup_class` finds of it by its name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// In the table under its name, as `do_bind_class` put it before
+    /// `zend_do_link_class`: every lookup of the name finds it.
+    Declared,
+    /// In no table yet, as at `zend_try_early_bind` while the file
+    /// compiles, which `register_early_bound_ce` adds it to only once
+    /// `zend_can_early_bind` has passed: a type its own members write
+    /// finds it, by `lookup_class_ex`'s check of the scope's name, and
+    /// one its parent's write does not.
+    Compiling,
 }
 
 /// `zend_do_link_class` over `child` and the classes `lookup` finds by
@@ -1529,35 +1568,18 @@ pub fn link<'a, H: Copy + PartialEq>(
     holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
     values: &'a dyn Fn(&ConstExpr) -> Option<ConstExpr>,
 ) -> Linking<H> {
+    if let Some(refused) = enum_funcs_refused(child) {
+        return Linking::refused(refused, Vec::new());
+    }
     if child.traits.is_empty() {
-        let mut linker = Linker::over(lookup, holder, Vec::new());
-        let settled = linker.link_refused(child, &[]);
-        let record = (settled.outcome == Linked::Linked)
-            .then(|| linker.linked_class(child, 0))
-            .flatten();
-        let deferred = linker.deferred.into_inner();
-        return Linking {
-            outcome: settled.outcome,
-            raised: linker.raised,
-            composed: None,
-            obligations: deferred.obligations,
-            autoloads: deferred.autoloads,
-            record,
-        };
+        return Linker::over(lookup, holder, Vec::new()).link_plain(child);
     }
     let plain = |name: &[u8]| lookup(name).map(Held::plain);
     let composition = match traits::compose(child, &plain, values) {
         Ok(composition) => composition,
         Err(failed) => {
             let (refused, raised) = *failed;
-            return Linking {
-                outcome: Linked::Refused(refused),
-                raised,
-                composed: None,
-                obligations: Vec::new(),
-                autoloads: Vec::new(),
-                record: None,
-            };
+            return Linking::refused(refused, raised);
         }
     };
     let traits::Composition {
@@ -1599,6 +1621,85 @@ pub fn link<'a, H: Copy + PartialEq>(
         autoloads: deferred.autoloads,
         record,
     }
+}
+
+/// `zend_enum_register_funcs`, which `zend_do_link_class` runs over an
+/// enum once its parent, traits and interfaces are fetched and before
+/// it binds a trait: `cases`, and for a backed enum `from` and
+/// `tryfrom`, added to its function table, where a method of its own
+/// under the name is php's `Cannot redeclare`, raised as the enum
+/// links, at its declaration, the name spelled as php's known string
+/// spells it, lowered. The declaration holds the enum's own methods and
+/// after them the rows [`php_unit::enum_methods`] gives every enum, so
+/// a row's name held twice is `zend_hash_add_ptr` failing.
+///
+/// ```php
+/// echo "before\n";
+/// enum Foo: int {
+///     case Bar = 0;
+///     public static function tryFrom(int|string $v): ?self { return null; }
+/// }
+/// ```
+/// ```expect exit=255
+/// before
+///
+/// Fatal error: Cannot redeclare Foo::tryfrom() in %s on line 3
+/// ```
+///
+/// A pure enum is given no `from`, so one of its own is its own:
+///
+/// ```php
+/// enum Foo { case Bar; public function from() { return 1; } }
+/// var_dump(Foo::Bar->from());
+/// ```
+/// ```expect
+/// int(1)
+/// ```
+fn enum_funcs_refused(child: &ClassDecl) -> Option<Refused> {
+    if child.kind != ClassKind::Enum {
+        return None;
+    }
+    let held = |given: &MethodDecl| {
+        child
+            .methods
+            .iter()
+            .filter(|m| same_method(m, given))
+            .count()
+    };
+    let given = php_unit::enum_methods(child.backing);
+    let clash = given.iter().find(|given| held(given) > 1)?;
+    Some(at_class(
+        child,
+        Refusal::EnumRedeclare {
+            class: text(&child.name.0),
+            method: text(&clash.function.name.0.to_ascii_lowercase()),
+        },
+    ))
+}
+
+/// `zend_try_early_bind` over `child`, a class with no trait, while the
+/// file compiles: [`link`] against the classes `lookup` finds, with the
+/// class itself in no table yet ([`Standing::Compiling`]), so a check
+/// that needs it from a scope other than its own comes to
+/// `INHERITANCE_UNRESOLVED` and leaves an obligation, where php keeps
+/// the class for its `DECLARE_CLASS_DELAYED`.
+///
+/// ```php
+/// class A { public function m(B|string $a): A|string { return 'A'; } }
+/// class B extends A { public function m(A|string $a): B|string { return 'B'; } }
+/// echo (new B)->m(new B), "\n";
+/// ```
+/// ```expect
+/// B
+/// ```
+pub fn early_bind<'a>(
+    child: &'a ClassDecl,
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
+) -> Linking {
+    let lookup = |name: &[u8]| lookup(name);
+    let mut linker = Linker::over(&lookup, &|()| None, Vec::new());
+    linker.standing = Standing::Compiling;
+    linker.link_plain(child)
 }
 
 /// The record of `child` once linked, whose last `abstracts` methods
@@ -1703,6 +1804,25 @@ impl Settled {
     }
 }
 
+impl<'a, H: Copy + PartialEq> Linker<'a, H> {
+    /// [`link`] of `child`, which uses no trait, by this linker.
+    fn link_plain(mut self, child: &'a ClassDecl) -> Linking<H> {
+        let settled = self.link_refused(child, &[]);
+        let record = (settled.outcome == Linked::Linked)
+            .then(|| self.linked_class(child, 0))
+            .flatten();
+        let deferred = self.deferred.into_inner();
+        Linking {
+            outcome: settled.outcome,
+            raised: self.raised,
+            composed: None,
+            obligations: deferred.obligations,
+            autoloads: deferred.autoloads,
+            record,
+        }
+    }
+}
+
 impl<'a, H: Copy> Linker<'a, H> {
     fn over(
         lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a, H>>,
@@ -1712,6 +1832,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         Linker {
             lookup,
             holder,
+            standing: Standing::Declared,
             raised,
             deferred: std::cell::RefCell::default(),
         }
@@ -1749,7 +1870,7 @@ impl<'a, H: Copy> Linker<'a, H> {
             Member::Name(name) => vec![name],
             Member::Intersection(names) => names,
         }) {
-            if self.lookup(child, &name).is_some() {
+            if self.lookup(child, scope, &name).is_some() {
                 continue;
             }
             let mut deferred = self.deferred.borrow_mut();
@@ -2217,9 +2338,15 @@ impl<'a, H: Copy> Linker<'a, H> {
         Some(list.into_boxed_slice())
     }
 
-    /// `lookup_class` while `child` links.
-    fn lookup(&self, child: &'a ClassDecl, name: &[u8]) -> Option<Cls<'a>> {
-        if child.name.0.eq_ignore_ascii_case(name) {
+    /// `lookup_class(scope, name)` while `child` links: the class being
+    /// linked by its name where it stands in the table, and while the
+    /// file compiles, where it does not yet, only from its own scope,
+    /// `lookup_class_ex`'s `zend_string_equals_ci(scope->name, name)`
+    /// ([`Standing`]); else the class the table holds.
+    fn lookup(&self, child: &'a ClassDecl, scope: &Scope<'a>, name: &[u8]) -> Option<Cls<'a>> {
+        if child.name.0.eq_ignore_ascii_case(name)
+            && (self.standing == Standing::Declared || scope.class == Cls::Linking)
+        {
             return Some(Cls::Linking);
         }
         self.class_named(name).map(Cls::Linked)
@@ -2260,7 +2387,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         }
         proto.members.iter().any(|member| match member {
             Member::Name(name) => self
-                .lookup(child, name)
+                .lookup(child, fe_scope, name)
                 .is_some_and(|ce| self.subclass(child, fe_scope.class, ce)),
             Member::Intersection(_) => false,
         })
@@ -2272,10 +2399,11 @@ impl<'a, H: Copy> Linker<'a, H> {
         child: &'a ClassDecl,
         fe_scope: &Scope<'a>,
         fe_name: &[u8],
+        proto_scope: &Scope<'a>,
         proto: &Shape,
     ) -> Status {
         let mut unresolved = false;
-        let fe_ce = self.lookup(child, fe_name);
+        let fe_ce = self.lookup(child, fe_scope, fe_name);
         if proto.mask & MAY_BE_OBJECT != 0 {
             if fe_ce.is_some() {
                 return Status::Success;
@@ -2305,7 +2433,8 @@ impl<'a, H: Copy> Linker<'a, H> {
                         members: names.iter().cloned().map(Member::Name).collect(),
                         mask: 0,
                     };
-                    match self.class_subtype_of_type(child, fe_scope, fe_name, &inner) {
+                    match self.class_subtype_of_type(child, fe_scope, fe_name, proto_scope, &inner)
+                    {
                         Status::Error if is_intersection => return Status::Error,
                         Status::Unresolved => unresolved = true,
                         Status::Success if !is_intersection => return Status::Success,
@@ -2319,7 +2448,8 @@ impl<'a, H: Copy> Linker<'a, H> {
                         }
                         continue;
                     }
-                    let (Some(fe_ce), Some(proto_ce)) = (fe_ce, self.lookup(child, proto_name))
+                    let (Some(fe_ce), Some(proto_ce)) =
+                        (fe_ce, self.lookup(child, proto_scope, proto_name))
                     else {
                         unresolved = true;
                         continue;
@@ -2347,7 +2477,9 @@ impl<'a, H: Copy> Linker<'a, H> {
     fn intersection_subtype_of_class(
         &self,
         child: &'a ClassDecl,
+        fe_scope: &Scope<'a>,
         fe_names: &[Vec<u8>],
+        proto_scope: &Scope<'a>,
         proto_name: &[u8],
     ) -> Status {
         let mut unresolved = false;
@@ -2355,9 +2487,10 @@ impl<'a, H: Copy> Linker<'a, H> {
             if fe_name.eq_ignore_ascii_case(proto_name) {
                 return Status::Success;
             }
-            let (Some(fe_ce), Some(proto_ce)) =
-                (self.lookup(child, fe_name), self.lookup(child, proto_name))
-            else {
+            let (Some(fe_ce), Some(proto_ce)) = (
+                self.lookup(child, fe_scope, fe_name),
+                self.lookup(child, proto_scope, proto_name),
+            ) else {
                 unresolved = true;
                 continue;
             };
@@ -2376,13 +2509,15 @@ impl<'a, H: Copy> Linker<'a, H> {
     fn intersection_subtype_of_type(
         &self,
         child: &'a ClassDecl,
+        fe_scope: &Scope<'a>,
         fe_names: &[Vec<u8>],
+        proto_scope: &Scope<'a>,
         proto: &Shape,
     ) -> Status {
         let mut unresolved = false;
         if proto.mask & MAY_BE_OBJECT != 0 {
             for fe_name in fe_names {
-                if self.lookup(child, fe_name).is_some() {
+                if self.lookup(child, fe_scope, fe_name).is_some() {
                     return Status::Success;
                 }
                 unresolved = true;
@@ -2401,9 +2536,17 @@ impl<'a, H: Copy> Linker<'a, H> {
                         members: names.iter().cloned().map(Member::Name).collect(),
                         mask: 0,
                     };
-                    self.intersection_subtype_of_type(child, fe_names, &inner)
+                    self.intersection_subtype_of_type(
+                        child,
+                        fe_scope,
+                        fe_names,
+                        proto_scope,
+                        &inner,
+                    )
                 }
-                Member::Name(name) => self.intersection_subtype_of_class(child, fe_names, name),
+                Member::Name(name) => {
+                    self.intersection_subtype_of_class(child, fe_scope, fe_names, proto_scope, name)
+                }
             };
             if status == early {
                 return status;
@@ -2480,7 +2623,8 @@ impl<'a, H: Copy> Linker<'a, H> {
                     Member::Intersection(_) => None,
                 })
                 .collect();
-            let status = self.intersection_subtype_of_type(child, &names, &proto);
+            let status =
+                self.intersection_subtype_of_type(child, fe_scope, &names, proto_scope, &proto);
             if status == early {
                 return status;
             }
@@ -2499,9 +2643,11 @@ impl<'a, H: Copy> Linker<'a, H> {
         for member in &fe.members {
             let status = match member {
                 Member::Intersection(names) => {
-                    self.intersection_subtype_of_type(child, names, &proto)
+                    self.intersection_subtype_of_type(child, fe_scope, names, proto_scope, &proto)
                 }
-                Member::Name(name) => self.class_subtype_of_type(child, fe_scope, name, &proto),
+                Member::Name(name) => {
+                    self.class_subtype_of_type(child, fe_scope, name, proto_scope, &proto)
+                }
             };
             if status == Status::Error {
                 return Status::Error;
