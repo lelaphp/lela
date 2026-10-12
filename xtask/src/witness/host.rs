@@ -32,6 +32,7 @@
 //! listen = "{dir}/fpm.sock"            # a path is a Unix socket, else host:port
 //! ready = ["fpm.log", "ready to handle connections"]  # waited for in a file
 //! stop = "SIGQUIT"
+//! settled = ["fpm.log", '(?s)started.*started']  # matched once answered, before the stop
 //! [[line.serve.request]]
 //! http = "GET / HTTP/1.0\r\n\r\n"      # or `params` and `body`, as FastCGI records
 //! [[line.then]]                        # a command line run after it, in the same
@@ -140,7 +141,8 @@ impl From<Taken> for Streams {
 
 /// What makes a line a server's: where it listens, what it writes once it
 /// is ready, the requests it is sent, each on a connection of its own and
-/// answered before the next, and the signal that stops it.
+/// answered before the next, what a file of its matches once the server
+/// has done what the last answer set going, and the signal that stops it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Serve {
@@ -148,6 +150,11 @@ struct Serve {
     ready: Option<(String, String)>,
     #[serde(default)]
     request: Vec<Request>,
+    /// A file and a pattern its text is waited to match after the last
+    /// answer and before the stop: the event a stop would otherwise race,
+    /// such as php-fpm replacing a child that ended at its
+    /// `pm.max_requests` after answering (#2531).
+    settled: Option<(String, String)>,
     stop: String,
 }
 
@@ -204,6 +211,9 @@ impl Held {
             }
             if let Some(serve) = &line.serve {
                 Signal::from_str(&serve.stop).with_context(|| format!("{named}: stop"))?;
+                if let Some((_, pattern)) = &serve.settled {
+                    Regex::new(pattern).with_context(|| format!("{named}: settled"))?;
+                }
                 if serve
                     .request
                     .iter()
@@ -551,21 +561,12 @@ fn signalled(pid: u32, signal: Signal) -> Result<()> {
     kill(pid, signal).with_context(|| format!("sending {signal} to {pid}"))
 }
 
-/// What a server answered each of its requests, once it was ready.
+/// What a server answered each of its requests, once it was ready, and
+/// once its file says it has settled after them.
 fn asked(serve: &Serve, dir: &Path, port: u16) -> Result<Vec<String>> {
     let started = Instant::now();
     if let Some((file, text)) = &serve.ready {
-        let path = dir.join(file);
-        while !fs::read_to_string(&path).is_ok_and(|written| written.contains(text)) {
-            if started.elapsed() > PATIENCE {
-                bail!(
-                    "{} did not say {text:?} in {}s",
-                    path.display(),
-                    PATIENCE.as_secs()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        waited(&dir.join(file), text, |written| written.contains(text))?;
     }
     let listen = fill(&serve.listen, dir, port);
     let mut answers = Vec::new();
@@ -580,7 +581,30 @@ fn asked(serve: &Serve, dir: &Path, port: u16) -> Result<Vec<String>> {
         };
         answers.push(answer);
     }
+    if let Some((file, pattern)) = &serve.settled {
+        let pattern = Regex::new(pattern)?;
+        waited(&dir.join(file), pattern.as_str(), |written| {
+            pattern.is_match(written)
+        })?;
+    }
     Ok(answers)
+}
+
+/// Until the file at `path` holds what `said` describes, as `holds` reads
+/// it, [`PATIENCE`] at most.
+fn waited(path: &Path, said: &str, holds: impl Fn(&str) -> bool) -> Result<()> {
+    let started = Instant::now();
+    while !fs::read_to_string(path).is_ok_and(|written| holds(&written)) {
+        if started.elapsed() > PATIENCE {
+            bail!(
+                "{} did not say {said:?} in {}s",
+                path.display(),
+                PATIENCE.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
 }
 
 /// A connection the server did not take, which is tried again until it
@@ -787,6 +811,37 @@ mod tests {
                     listen = \"127.0.0.1:{port}\"\nready = [\"up\", \"up\"]\nstop = \"SIGTERM\"\n";
         let (judgement, note) = judged(text, &pin(&pinned, None), &engine);
         assert!(once.exists(), "the first port was refused");
+        assert_eq!(judgement, Judgement::Pass, "{note}");
+    }
+
+    /// A server's stop waits for what its `settled` file must match after
+    /// the last answer (#2531): here the pinned host writes its log line
+    /// three seconds after it is ready and the engine's at once, so a stop sent
+    /// at the answer finds the two files apart, and one sent once the line
+    /// is there finds them alike.
+    #[test]
+    fn a_server_is_stopped_once_its_file_matches_what_it_settles_on() {
+        let hosts = Tree::new("host-line-settled").unwrap();
+        let pinned = host(
+            &hosts,
+            "php-cgi",
+            "echo up > up; (/bin/sleep 3; echo done >> log) >/dev/null 2>&1 & exec /bin/sleep 30",
+        );
+        let pin = pin(&pinned, None);
+        let engine = host(
+            &hosts,
+            "engine",
+            "echo up > up; echo done >> log; exec /bin/sleep 30",
+        );
+        let line = |settled: &str| {
+            format!(
+                "[[line]]\nname = \"one\"\nargs = []\n[line.serve]\nlisten = \"127.0.0.1:1\"\n\
+                 ready = [\"up\", \"up\"]\n{settled}stop = \"SIGTERM\"\n"
+            )
+        };
+        assert_eq!(judged(&line(""), &pin, &engine).0, Judgement::Fail);
+        let settled = line("settled = [\"log\", \"^done\"]\n");
+        let (judgement, note) = judged(&settled, &pin, &engine);
         assert_eq!(judgement, Judgement::Pass, "{note}");
     }
 
