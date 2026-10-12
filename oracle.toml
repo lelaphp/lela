@@ -261,6 +261,16 @@ script_filename = "$document_root$fastcgi_script_name"
 # fastcgi.conf. `oracle::Pin::fastcgi` reads both.
 split_path_info = '^(.+?\.php)(/.*)$'
 path_info = "$fastcgi_path_info"
+# PATH_TRANSLATED (Mitchell on #2650, 2026-10-11): RFC 3875 §4.1.6's, the
+# document root and the path past the program, sent after PATH_INFO and
+# only where $fastcgi_path_info is not empty, so a request with no path
+# past the program carries none. nginx's one-line `fastcgi_param
+# PATH_TRANSLATED $document_root$fastcgi_path_info;` would send the bare
+# root on every such request, which the RFC forbids, so this is a key of
+# its own and not a line of `params`. php-fpm passes on the value it is
+# handed for a program found as named (fpm_main.c, init_request_info).
+# `oracle::Pin::fastcgi` reads it.
+path_translated = "$document_root$fastcgi_path_info"
 params = '''
 
 fastcgi_param  QUERY_STRING       $query_string;

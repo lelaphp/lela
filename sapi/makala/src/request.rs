@@ -316,10 +316,11 @@ fn look(info: &RequestInfo) -> HostServes {
 /// `SCRIPT_NAME` is the path as far as the program, with the index file
 /// where it named a directory, nginx's `$fastcgi_script_name`;
 /// `PATH_INFO` the rest, empty where there is none, as nginx sends
-/// `$fastcgi_path_info`; and `DOCUMENT_URI` the two, nginx's `$uri`
-/// after the internal redirect its `index` makes of a directory. No
-/// `PATH_TRANSLATED` is set: `php -S` sets none, nor does php-fpm for a
-/// program found as named.
+/// `$fastcgi_path_info`; `PATH_TRANSLATED` the document root and
+/// `PATH_INFO`, where that is not empty, as RFC 3875 §4.1.6 has it and the
+/// recipe hands it (#2650), which php-fpm passes on for a program found as
+/// named; and `DOCUMENT_URI` the two, nginx's `$uri` after the internal
+/// redirect its `index` makes of a directory.
 ///
 /// `$_SERVER` in php-fpm's order, held to the pinned php-fpm handed the
 /// same request under the recipe with its default `clear_env`: every row
@@ -375,8 +376,8 @@ fn look(info: &RequestInfo) -> HostServes {
 /// PHP_SELF=/witness.php
 /// ```
 ///
-/// The path past the program is its `PATH_INFO` under both, and php-fpm,
-/// finding the program as named, sets no `PATH_TRANSLATED`:
+/// The path past the program is its `PATH_INFO` under both, and its
+/// `PATH_TRANSLATED` the root and the path past it:
 ///
 /// ```php
 /// foreach (['SCRIPT_NAME', 'PATH_INFO', 'PHP_SELF', 'DOCUMENT_URI', 'PATH_TRANSLATED'] as $name) {
@@ -398,7 +399,7 @@ fn look(info: &RequestInfo) -> HostServes {
 /// PATH_INFO=/index.php
 /// PHP_SELF=/witness.php/index.php
 /// DOCUMENT_URI=/witness.php/index.php
-/// PATH_TRANSLATED=(none)
+/// PATH_TRANSLATED=%SCRATCH%/index.php
 /// ```
 fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> Environment {
     let field = |name: &[u8]| {
@@ -417,8 +418,13 @@ fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> 
     let path_info = program.path_info.clone().unwrap_or_default();
     let mut filename = root.to_vec();
     filename.extend_from_slice(&program.vpath);
-    let mut env = vec![
-        (b"PATH_INFO".to_vec(), path_info.clone()),
+    let mut env = vec![(b"PATH_INFO".to_vec(), path_info.clone())];
+    // RFC 3875 §4.1.6, as the recipe hands it (#2650): the root and the
+    // path's info, and none where the path has no info.
+    if !path_info.is_empty() {
+        env.push((b"PATH_TRANSLATED".to_vec(), [root, &path_info].concat()));
+    }
+    env.extend([
         (b"SCRIPT_FILENAME".to_vec(), filename),
         (b"QUERY_STRING".to_vec(), query.to_vec()),
         (b"REQUEST_METHOD".to_vec(), head.method.clone()),
@@ -445,7 +451,7 @@ fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> 
             b"REQUEST_SCHEME".to_vec(),
             head.scheme.name().as_bytes().to_vec(),
         ),
-    ];
+    ]);
     // nginx's `HTTPS $https if_not_empty`: `on` under TLS, else none.
     if head.scheme == Scheme::Https {
         env.push((b"HTTPS".to_vec(), b"on".to_vec()));

@@ -85,7 +85,8 @@ fn a_path_with_no_php_file_is_not_served_as_a_program() {
 /// The path past the program is its `PATH_INFO`, split by `php -S`'s
 /// walk (#2637): `SCRIPT_NAME` and `SCRIPT_FILENAME` the program's,
 /// `PHP_SELF` the two, an empty `PATH_INFO` where nothing is past it, and
-/// no `PATH_TRANSLATED`, which `php -S` sets none of. A program named
+/// `PATH_TRANSLATED` the root and `PATH_INFO`, none where that is empty
+/// (RFC 3875 §4.1.6, #2650). A program named
 /// past a file that is not one is not found, and nothing runs: the walk
 /// that routes is the walk that splits.
 #[test]
@@ -101,18 +102,16 @@ fn the_path_past_the_program_is_its_path_info() {
     std::fs::create_dir_all(root.join("upload")).unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(root.join("upload/x.jpg"), "<?php echo 'ran';")
         .unwrap_or_else(|e| panic!("{e}"));
-    let filename = root
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("{e}"))
-        .join("front.php");
-    let filename = filename.display();
+    let root = root.canonicalize().unwrap_or_else(|e| panic!("{e}"));
+    let filename = root.join("front.php");
+    let (root_shown, filename) = (root.display(), filename.display());
     let server = Server::start(&root);
     for (target, status, body) in [
         (
             "/front.php/index.php?x=1",
             "HTTP/1.1 200 OK",
             format!(
-                "SCRIPT_NAME=/front.php\nPATH_INFO=/index.php\nPHP_SELF=/front.php/index.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED=(none)\n"
+                "SCRIPT_NAME=/front.php\nPATH_INFO=/index.php\nPHP_SELF=/front.php/index.php\nSCRIPT_FILENAME={filename}\nPATH_TRANSLATED={root_shown}/index.php\n"
             ),
         ),
         (
