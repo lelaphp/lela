@@ -195,14 +195,10 @@ fn piped() -> FileHandles {
 }
 
 /// A request on a fresh engine, for a unit test of the face that needs
-/// one to allocate through: the CLI description and nothing served.
+/// one to allocate through: [`request_on`] a default engine.
 #[cfg(test)]
 pub(crate) fn request() -> crate::api::request::Request {
-    let engine = Engine::builder().build();
-    crate::api::request::Request::new(
-        std::sync::Arc::clone(&engine.shared),
-        RequestDescription::default(),
-    )
+    request_on(&Engine::builder().build())
 }
 
 /// A request on `engine`'s shared state under the CLI's name, nothing

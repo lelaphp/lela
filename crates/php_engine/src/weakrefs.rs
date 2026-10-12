@@ -50,6 +50,15 @@ pub(crate) struct Table {
 }
 
 impl Table {
+    /// The holders listed against the object `id`, none while nothing
+    /// weakly names it.
+    fn holders(&self, id: u32) -> Option<&[Holder]> {
+        self.rows
+            .iter()
+            .find(|(at, _)| *at == id)
+            .map(|(_, holders)| holders.as_slice())
+    }
+
     fn row(&mut self, id: u32) -> Option<&mut Vec<Holder>> {
         self.rows
             .iter_mut()
@@ -183,7 +192,7 @@ pub(crate) fn gc_entries(
 /// `WeakReference` names none.
 pub(crate) fn gc_keyed(req: &Request, key: Obj, visit: &mut dyn FnMut(php_heap::ZvalRef, Obj)) {
     let id = key.id().0;
-    let Some((_, holders)) = req.weakrefs().rows.iter().find(|(at, _)| *at == id) else {
+    let Some(holders) = req.weakrefs().holders(id) else {
         return;
     };
     for holder in holders {
@@ -850,8 +859,8 @@ impl WeakReference {
     ) -> Result<Owner<Instance<WeakReference>>, Thrown> {
         let referent = object;
         let existing = req
-            .weakrefs_mut()
-            .row(referent.index())
+            .weakrefs()
+            .holders(referent.index())
             .and_then(|holders| {
                 holders.iter().find_map(|holder| match holder {
                     Holder::Reference(at) => Some(*at),

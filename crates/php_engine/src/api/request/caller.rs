@@ -613,8 +613,9 @@ impl Request {
     }
 
     /// Whether a native is being served, [`Request::active_native_function`]
-    /// standing: what `php_verror` names before `(): ` then is the
-    /// native ([`Request::active_native`]), not the frame's function.
+    /// standing, which the raisers read before they ask
+    /// [`Request::active_native`] for the name `php_verror` puts before
+    /// `(): `.
     pub(crate) fn vm_serving_native(&self) -> bool {
         self.active_native_function().is_some()
     }

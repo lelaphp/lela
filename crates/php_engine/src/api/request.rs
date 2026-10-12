@@ -937,13 +937,13 @@ impl Request {
         &mut self.stream_thrown
     }
 
-    /// php's `EG(weakrefs)`, which `crate::weakrefs` alone reads and
-    /// writes through its own face.
+    /// php's `EG(weakrefs)`, whose rows only `crate::weakrefs` reads,
+    /// the table's methods being private to it.
     pub(crate) fn weakrefs(&self) -> &crate::weakrefs::Table {
         &self.weakrefs
     }
 
-    /// [`Request::weakrefs`], to register or unregister a holder.
+    /// [`Request::weakrefs`], to register a holder or take one off.
     pub(crate) fn weakrefs_mut(&mut self) -> &mut crate::weakrefs::Table {
         &mut self.weakrefs
     }

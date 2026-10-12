@@ -158,12 +158,8 @@ impl Default for Properties {
 impl Request {
     /// `EG(fake_scope) = scope` for the length of `f`, and the scope
     /// that stood put back after it, whatever `f` answers: the one form
-    /// every save of php's fake scope takes. A call stands in no fake
-    /// scope ([`Request::serve_call`]), `clone with` writes in the scope
-    /// `clone()` was called from ([`Request::clone_members_with`]),
-    /// `zend_update_property_ex` in the class it names
-    /// ([`Request::write_property_in`], [`Request::in_declared_scope`]),
-    /// and a native in the class it asks for ([`Request::with_fake_scope`]).
+    /// every save of php's fake scope takes, so `properties.fake_scope`
+    /// is written nowhere else.
     pub(super) fn in_fake_scope<R>(
         &mut self,
         scope: Option<ClassId>,

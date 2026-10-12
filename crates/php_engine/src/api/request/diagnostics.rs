@@ -1762,6 +1762,7 @@ pub(crate) fn append_escaped(out: &mut String, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::response::Aside;
     use super::{Charset, append_escaped, escape_html, level_name};
     use crate::api::raising::Level;
     use crate::engine::Engine;
@@ -1875,13 +1876,12 @@ mod tests {
     /// `(EG(error_reporting) & type) || (type & E_CORE)`: a core level
     /// is rendered under `error_reporting=0`, in the same word its
     /// family takes, and every other level is masked. The one raiser
-    /// that reaches `E_CORE_ERROR` is
-    /// [`crate::api::request::Request::save_pending`], which no PHP snippet reaches, and no
-    /// raiser reaches `E_CORE_WARNING`, so the mask is held here and not
-    /// by a witness. `E_CORE_ERROR` is in
-    /// `E_FATAL_ERRORS`, so under php's default `fatal_error_backtraces`
-    /// it fetches its trace, `#0 {main}` with no frame standing, and the
-    /// warning fetches none.
+    /// that reaches `E_CORE_ERROR` is [`super::Request::save_pending`],
+    /// which no PHP snippet reaches, and no raiser reaches
+    /// `E_CORE_WARNING`, so the mask is held here and not by a witness.
+    /// `E_CORE_ERROR` is in `E_FATAL_ERRORS`, so under php's default
+    /// `fatal_error_backtraces` it fetches its trace, `#0 {main}` with no
+    /// frame standing, and the warning fetches none.
     #[test]
     fn a_core_level_is_rendered_past_error_reporting() {
         let engine = Engine::cli_builder().ini("error_reporting", "0").build();
@@ -1952,7 +1952,7 @@ mod tests {
         req.note_error_in(Level::CompileError, "refused", file, 2);
         assert_eq!(
             req.take_aside(),
-            vec![crate::api::request::response::Aside::Log(
+            vec![Aside::Log(
                 b"PHP Fatal error:  refused in witness.php on line 2\nStack trace:\n#0 {main}"
                     .to_vec()
             )]
