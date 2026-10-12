@@ -668,6 +668,17 @@ pub(crate) enum GdFormat {
 #[derive(Clone, Copy)]
 pub(crate) struct Im(NonNull<GdImage>);
 
+/// The rotations of a palette image [`Im::rotate`] makes here from what
+/// libgd exports.
+#[derive(Clone, Copy)]
+enum PaletteSlip {
+    /// A turn of ±180 degrees, made as two quarter turns.
+    HalfTurn,
+    /// A rotation under `GD_NEAREST_NEIGHBOUR` at an angle no square case
+    /// takes, made over a truecolor clone of the image.
+    Nearest,
+}
+
 impl Im {
     fn at(self) -> Ptr {
         self.0.as_ptr()
@@ -1047,48 +1058,65 @@ impl Im {
         }
     }
 
-    /// `gdImageRotateInterpolated`: for a palette image under
-    /// `GD_NEAREST_NEIGHBOUR`, at an angle no square case takes, the
-    /// rotation is made here from what libgd exports, and every other
-    /// call is libgd's.
+    /// `gdImageRotateInterpolated`: on each [`PaletteSlip`] the rotation
+    /// is made here from what libgd exports, and every other call is
+    /// libgd's.
     pub(crate) fn rotate(self, angle: f32, bg: i32) -> Option<Image> {
-        if !self.rotates_palette_by_nearest(angle, bg) {
-            // SAFETY: a live image; libgd answers a new one or NULL.
-            return Image::of(unsafe { gdImageRotateInterpolated(self.at(), angle, bg) });
+        match self.palette_slip(angle, bg) {
+            None => self.rotate_by_libgd(angle, bg),
+            // `gdImageRotate180(src, 0)`, which libgd does not export, as
+            // two of the quarter turns its square case makes of a palette
+            // image (`gdImageRotate90`, `gd_rotate.c`): the first converts
+            // each pixel as `gdImageRotate180` converts it and carries the
+            // transparent index, the second copies the truecolor result.
+            Some(PaletteSlip::HalfTurn) => self
+                .rotate_by_libgd(90.0, bg)?
+                .im()
+                .rotate_by_libgd(90.0, bg),
+            Some(PaletteSlip::Nearest) => {
+                let bg = if usize::try_from(bg).is_ok_and(|i| i < MAX_COLORS) {
+                    let [r, g, b, a] = self.rgba(bg);
+                    // `gdTrueColorAlpha` of the palette entry, as libgd
+                    // composes it.
+                    (a << 24)
+                        .wrapping_add(r << 16)
+                        .wrapping_add(g << 8)
+                        .wrapping_add(b)
+                } else {
+                    bg
+                };
+                // SAFETY: a live image; libgd answers a new one or NULL.
+                let clone = Image::of(unsafe { gdImageClone(self.at()) })?;
+                if !clone.im().palette_to_true_color() {
+                    return None;
+                }
+                clone.im().rotate_by_libgd(angle, bg)
+            }
         }
-        let bg = if usize::try_from(bg).is_ok_and(|i| i < MAX_COLORS) {
-            let [r, g, b, a] = self.rgba(bg);
-            // `gdTrueColorAlpha` of the palette entry, as libgd composes it.
-            (a << 24)
-                .wrapping_add(r << 16)
-                .wrapping_add(g << 8)
-                .wrapping_add(b)
-        } else {
-            bg
-        };
-        // SAFETY: a live image; libgd answers a new one or NULL.
-        let clone = Image::of(unsafe { gdImageClone(self.at()) })?;
-        if !clone.im().palette_to_true_color() {
-            return None;
-        }
-        // SAFETY: the clone is a live truecolor image, which libgd
-        // rotates without the palette path; it answers a new one or NULL.
-        Image::of(unsafe { gdImageRotateInterpolated(clone.im().at(), angle, bg) })
     }
 
-    /// Whether this image and angle are the ones `rotate` makes here, as
+    fn rotate_by_libgd(self, angle: f32, bg: i32) -> Option<Image> {
+        // SAFETY: a live image; libgd answers a new one or NULL.
+        Image::of(unsafe { gdImageRotateInterpolated(self.at(), angle, bg) })
+    }
+
+    /// Which [`PaletteSlip`] this image and angle are, if either, as
     /// `gdImageRotateInterpolated` reads them: its checks, `angle_rounded`
     /// as it rounds it and its square cases as its `switch` lists them.
-    fn rotates_palette_by_nearest(self, angle: f32, bg: i32) -> bool {
+    fn palette_slip(self, angle: f32, bg: i32) -> Option<PaletteSlip> {
         /// `GD_NEAREST_NEIGHBOUR`.
         const NEAREST_NEIGHBOUR: c_int = 16;
+        if self.true_color() || bg < 0 {
+            return None;
+        }
         #[allow(clippy::cast_possible_truncation)]
         let hundredths = (angle * 100.0).floor() as i32;
-        let square = matches!(
-            hundredths % 36_000,
-            0 | 9_000 | -9_000 | 18_000 | -18_000 | 27_000 | -27_000
-        );
-        !self.true_color() && bg >= 0 && !square && self.interpolation_id() == NEAREST_NEIGHBOUR
+        match hundredths % 36_000 {
+            18_000 | -18_000 => Some(PaletteSlip::HalfTurn),
+            0 | 9_000 | -9_000 | 27_000 | -27_000 => None,
+            _ if self.interpolation_id() == NEAREST_NEIGHBOUR => Some(PaletteSlip::Nearest),
+            _ => None,
+        }
     }
 
     pub(crate) fn crop(self, rect: Rect) -> Option<Image> {
