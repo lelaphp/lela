@@ -91,7 +91,7 @@ pub use engine::LeakSensor;
 pub use engine::{
     Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostPage, HostServes, HostValue,
     IniOrigin, Method, NotAlone, Observables, OutputSink, Primary, ProcessTitle, ProgramFile,
-    RequestDescription, ResponseHead, Routed, Uncaught, WebRequest,
+    ProgramServed, RequestDescription, ResponseHead, Routed, Uncaught, WebRequest,
 };
 pub use fork::{Forked, HostThread, Pid, fork, host_thread};
 pub use ini_syntax::{IniEvent, IniValue};

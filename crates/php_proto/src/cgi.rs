@@ -39,7 +39,8 @@ impl Environment {
 
 /// What a file system answers about a path: `realpath(3)` succeeding and
 /// what `stat(2)` finds, the questions `init_request_info` and the
-/// built-in server's path rules (`crate::vpath`) ask.
+/// built-in server's path rules (`crate::vpath`) ask, each of the path
+/// as [`crate::c_str`] reads it.
 pub trait Files {
     /// Whether `realpath(3)` resolves the path.
     fn resolves(&self, path: &[u8]) -> bool;

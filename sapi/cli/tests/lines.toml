@@ -435,3 +435,55 @@ stop = "SIGINT"
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 [[line.serve.request]]
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# A path holding a NUL: the walk's `stat(2)` reads it up to the NUL and finds
+# the file there, and the translated path keeps the NUL, which php -S "can't
+# handle" (`Z/sapi/cli/php_cli_server.c:2127`, `:2155`). A static file's is
+# refused with 400; a program's request starts and the program never runs, so
+# the client is sent the request's head and no body, while the log has the
+# 400 of the page php built and never sent; a path past the file it found is
+# that file, sent, and one past a program is its path's info, which
+# `PATH_INFO` keeps whole and `PHP_SELF` reads up to the NUL; and nothing found
+# is 404 (#2695). The text after a 400's
+# ` - ` in the log is `strerror(errno)` of whatever call last set it, EINVAL's
+# under php and none under the engine, and is masked until #2758 finds the
+# call.
+[[line]]
+name = "the-built-in-server-refuses-a-path-holding-a-nul"
+args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "run.php" = "<?php echo 'ran ', json_encode([$_SERVER['SCRIPT_NAME'], $_SERVER['PHP_SELF'], $_SERVER['PATH_INFO'] ?? null, strlen($_SERVER['SCRIPT_FILENAME'])]), \"\\n\";", "a.txt" = "hello\n" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>'], ['(\[400\]: [^\n]*) - [^\n]*', '$1 - <errno>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /run.php%00 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt%00/b.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt/b%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /run.php/x%00y HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "HEAD /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /nope%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+# The same requests under a router that declines each: the router runs
+# first, and then the file is served or refused as without one (#2695).
+[[line]]
+name = "the-built-in-server-refuses-a-path-holding-a-nul-after-the-router"
+args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/router.php"]
+files = { "router.php" = "<?php echo 'routed ', strlen($_SERVER['SCRIPT_FILENAME'] ?? ''), \"\\n\"; return false;", "run.php" = "<?php echo 'ran ', json_encode([$_SERVER['SCRIPT_NAME'], $_SERVER['PHP_SELF'], $_SERVER['PATH_INFO'] ?? null, strlen($_SERVER['SCRIPT_FILENAME'])]), \"\\n\";", "a.txt" = "hello\n" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>'], ['(\[400\]: [^\n]*) - [^\n]*', '$1 - <errno>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
