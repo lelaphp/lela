@@ -128,6 +128,20 @@ pub(super) fn str_replace(
 ///   string(2) "xb"
 /// }
 /// ```
+///
+/// A search of more than one byte folds the subject once, on the
+/// request's heap as `zend_string_tolower` does, and gives the copy up
+/// before the call returns, so the peak moves by its size where the
+/// subject has an uppercase byte to fold.
+///
+/// ```php
+/// $s = str_repeat("Ab", 500000); $p = memory_get_peak_usage(); $r = str_ireplace("XY", "z", $s); $q = memory_get_peak_usage(); $t = str_ireplace(["x", "QQ", "yy"], "z", strtolower($s)); var_dump($q - $p, memory_get_peak_usage() - $q, $r === $s);
+/// ```
+/// ```expect
+/// int(1003552)
+/// int(0)
+/// bool(true)
+/// ```
 #[php_function]
 pub(super) fn str_ireplace(
     req: &mut Request,
@@ -217,6 +231,11 @@ fn in_subject(
         return Ok((PhpString::new(req, b"")?, 0));
     }
     let mut count = 0i64;
+    let mut subject = Subject {
+        given: subject,
+        current: None,
+        folded: None,
+    };
     let searches = match search {
         Union::A(searches) => *searches,
         Union::B(needle) => {
@@ -226,26 +245,15 @@ fn in_subject(
                 Union::B(s) => s.as_bytes(),
                 Union::A(_) => b"",
             };
-            let mut folded = None;
-            let step = search_once(
-                req,
-                subject.as_bytes(),
-                (needle.as_bytes(), with),
-                case_sensitive,
-                (&mut folded, &mut count),
-            )?;
-            let value = match step {
-                Some(replaced) => replaced,
-                None => Owner::take(req, subject),
-            };
+            let searched = subject.search(req, *needle, with, case_sensitive, &mut count);
+            let value = subject.into_current(req);
+            if let Err(thrown) = searched {
+                value.give_up(req);
+                return Err(thrown);
+            }
             return Ok((value, count));
         }
     };
-    // The subject as the searches so far left it, where one replaced
-    // anything, and its folded bytes while nothing has replaced since
-    // they were folded (`lc_subject_str`).
-    let mut current: Option<Owner<PhpString>> = None;
-    let mut folded: Option<Vec<u8>> = None;
     let mut replace_at = 0;
     // `ZEND_HASH_FOREACH_VAL(search_ht, search_entry)`
     // (`Z/ext/standard/string.c:4344`), no owner of the searches taken:
@@ -257,8 +265,8 @@ fn in_subject(
         let needle = to_string(req, &row.value().deref())?;
         let with = match replace {
             Union::A(all) => match all.live_from(replace_at) {
-                Some((found, _, value)) => {
-                    replace_at = found.saturating_add(1);
+                Some((at, _, value)) => {
+                    replace_at = at.saturating_add(1);
                     match to_string(req, &value) {
                         Ok(with) => Some(with),
                         Err(thrown) => {
@@ -276,75 +284,134 @@ fn in_subject(
             (None, Union::B(s)) => s.as_bytes(),
             (None, Union::A(_)) => b"",
         };
-        let now = current.as_deref().copied().unwrap_or(subject);
-        let step = search_once(
-            req,
-            now.as_bytes(),
-            (needle.as_bytes(), bytes),
-            case_sensitive,
-            (&mut folded, &mut count),
-        );
+        let replaced = subject.search(req, *needle, bytes, case_sensitive, &mut count);
         needle.give_up(req);
         if let Some(with) = with {
             with.give_up(req);
         }
-        let Some(replaced) = step? else {
-            return Ok(ControlFlow::Continue(()));
-        };
-        folded = None;
-        let emptied = replaced.is_empty();
-        if let Some(old) = current.replace(replaced) {
-            old.give_up(req);
-        }
-        Ok(if emptied {
+        // A search that left nothing ends the walk.
+        Ok(if replaced? && subject.now().is_empty() {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
         })
     });
-    let value = match (walked, current) {
-        (Err(thrown), current) => {
-            if let Some(current) = current {
-                current.give_up(req);
-            }
-            return Err(thrown);
+    let value = subject.into_current(req);
+    match walked {
+        Err(thrown) => {
+            value.give_up(req);
+            Err(thrown)
         }
-        // A search that left nothing ends the walk with php's empty string.
-        (Ok(Some(())), current) => {
-            if let Some(current) = current {
-                current.give_up(req);
-            }
-            PhpString::new(req, b"")?
+        // php's empty string, where a search left nothing.
+        Ok(Some(())) => {
+            value.give_up(req);
+            Ok((PhpString::new(req, b"")?, count))
         }
-        (Ok(None), Some(current)) => current,
-        (Ok(None), None) => Owner::take(req, subject),
-    };
-    Ok((value, count))
+        Ok(None) => Ok((value, count)),
+    }
 }
 
-/// One search of `php_str_replace_in_subject` over `subject`: an empty
-/// search is skipped, a one-byte search is `php_char_to_str_ex`, a
-/// longer one `php_str_to_str_ex`, or `php_str_to_str_i_ex` over the
-/// subject folded once into `folded`, which the caller keeps while no
-/// search replaces. `None` where nothing matched, and what matched is
-/// added to `count`.
-fn search_once(
-    req: &mut Request,
-    subject: &[u8],
-    (needle, with): (&[u8], &[u8]),
-    case_sensitive: bool,
-    (folded, count): (&mut Option<Vec<u8>>, &mut i64),
-) -> Result<Option<Owner<PhpString>>, Thrown> {
-    match needle {
-        [] => Ok(None),
-        &[byte] => char_to_str(req, subject, (byte, with), case_sensitive, count),
-        _ if case_sensitive => str_to_str(req, (subject, subject), (needle, with), count),
-        _ => {
-            let lowered = folded.get_or_insert_with(|| subject.to_ascii_lowercase());
-            let needle = needle.to_ascii_lowercase();
-            str_to_str(req, (subject, lowered), (&needle, with), count)
+/// The subject of `php_str_replace_in_subject` as the searches so far
+/// left it: the argument until a search replaces anything and the new
+/// string after, and its folded copy (`lc_subject_str`), made by the
+/// first folded search of more than one byte and given up when any
+/// search replaces, since it then folds a subject no longer current.
+struct Subject {
+    given: PhpString,
+    current: Option<Owner<PhpString>>,
+    folded: Option<Owner<PhpString>>,
+}
+
+impl Subject {
+    fn now(&self) -> PhpString {
+        self.current.as_deref().copied().unwrap_or(self.given)
+    }
+
+    /// One search of the subject as it stands, and whether it replaced
+    /// anything, what it replaced added to `count`: an empty search is
+    /// skipped, a one-byte search is `php_char_to_str_ex`, a longer one
+    /// `php_str_to_str_ex`, or `php_str_to_str_i_ex` over the folded
+    /// subject and the needle folded for the search, both on the
+    /// request's heap as `zend_string_tolower` makes them.
+    fn search(
+        &mut self,
+        req: &mut Request,
+        needle: PhpString,
+        with: &[u8],
+        case_sensitive: bool,
+        count: &mut i64,
+    ) -> Result<bool, Thrown> {
+        let now = self.now();
+        let step = match needle.as_bytes() {
+            [] => None,
+            &[byte] => char_to_str(req, now.as_bytes(), (byte, with), case_sensitive, count)?,
+            bytes if case_sensitive => {
+                str_to_str(req, (now.as_bytes(), now.as_bytes()), (bytes, with), count)?
+            }
+            bytes => {
+                let folded = if let Some(folded) = &self.folded {
+                    **folded
+                } else {
+                    let folded = lowered(req, now)?;
+                    let view = *folded;
+                    self.folded = Some(folded);
+                    view
+                };
+                // `php_str_to_str_i_ex` folds the needle only where it
+                // can match.
+                if bytes.len() > now.len() {
+                    None
+                } else {
+                    let needle = lowered(req, needle)?;
+                    let step = str_to_str(
+                        req,
+                        (now.as_bytes(), folded.as_bytes()),
+                        (needle.as_bytes(), with),
+                        count,
+                    );
+                    needle.give_up(req);
+                    step?
+                }
+            }
+        };
+        let Some(replaced) = step else {
+            return Ok(false);
+        };
+        if let Some(folded) = self.folded.take() {
+            folded.give_up(req);
+        }
+        if let Some(old) = self.current.replace(replaced) {
+            old.give_up(req);
+        }
+        Ok(true)
+    }
+
+    /// The subject as it stands, one owner of it, its folded copy given
+    /// up.
+    fn into_current(self, req: &mut Request) -> Owner<PhpString> {
+        if let Some(folded) = self.folded {
+            folded.give_up(req);
+        }
+        match self.current {
+            Some(current) => current,
+            None => Owner::take(req, self.given),
         }
     }
+}
+
+/// `zend_string_tolower`: `s` itself, one more owner, where it has no
+/// uppercase byte, and otherwise its bytes folded by
+/// `zend_tolower_ascii` into a new string of the request's.
+fn lowered(req: &mut Request, s: PhpString) -> Result<Owner<PhpString>, Thrown> {
+    let bytes = s.as_bytes();
+    if !bytes.iter().any(u8::is_ascii_uppercase) {
+        return Ok(Owner::take(req, s));
+    }
+    PhpString::filled(req, bytes.len(), |out| {
+        for (to, from) in out.iter_mut().zip(bytes) {
+            *to = lower(*from);
+        }
+    })
 }
 
 /// `php_char_to_str_ex` (`Z/ext/standard/string.c:3103`): every `from`
