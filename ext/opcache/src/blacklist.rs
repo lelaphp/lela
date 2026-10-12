@@ -10,6 +10,8 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use php_ext::request::MAXPATHLEN;
+
 /// The blacklist: each entry's path as `zend_accel_blacklist_loadone`
 /// expanded it, in the order the files and their lines gave them.
 #[derive(Debug, Default)]
@@ -103,14 +105,6 @@ fn fgets(text: &[u8]) -> impl Iterator<Item = &[u8]> {
         Some(&piece[..end])
     })
 }
-
-/// php's `MAXPATHLEN`, `PATH_MAX` from `<limits.h>`: the longest path
-/// `expand_filepath` hands back, with its terminating NUL.
-const MAXPATHLEN: usize = if cfg!(target_os = "macos") {
-    1024
-} else {
-    4096
-};
 
 /// How many links `tsrm_realpath_r` follows in one path before it gives
 /// the path up, php's `LINK_MAX`: Linux's 127. macOS's is 32767, and a

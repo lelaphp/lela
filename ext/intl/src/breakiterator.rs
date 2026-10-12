@@ -332,6 +332,7 @@ impl IntlBreakIterator {
         #[php(default = IntlPartsIterator::KEY_SEQUENTIAL)] r#type: Raw<PhpString>,
     ) -> Answer<Owner<Instance<IntlPartsIterator>>> {
         let object = this.object();
+        // `Z_PARAM_LONG`, where the stub declares `string $type`.
         let key = coerce_param(req, &r#type.value(), &Type::Int, 1)?
             .as_int()
             .unwrap_or(-1);

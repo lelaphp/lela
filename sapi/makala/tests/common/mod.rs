@@ -27,7 +27,10 @@ pub fn root(name: &str, files: &[(&str, &str)]) -> PathBuf {
 /// The server, killed when the test lets go of it.
 pub struct Server {
     child: Child,
+    /// The clear listener's address.
     pub addr: SocketAddr,
+    /// The TLS listener's address, where the line asked for one.
+    pub tls: Option<SocketAddr>,
 }
 
 impl Server {
@@ -38,7 +41,7 @@ impl Server {
     }
 
     /// `makala -n` over `root` with `args` after the address, once its
-    /// started line names the address.
+    /// started line names the addresses.
     pub fn with_args(root: &Path, args: &[&str]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_makala"))
             .args(["-n", "--listen", "127.0.0.1:0"])
@@ -56,15 +59,20 @@ impl Server {
             .next()
             .and_then(Result::ok)
             .unwrap_or_else(|| panic!("makala wrote no started line"));
-        let addr = line
-            .split_once("listening on http://")
-            .and_then(|(_, rest)| rest.split_once(',').map(|(addr, _)| addr.parse().ok()))
-            .flatten()
-            .unwrap_or_else(|| panic!("not a started line: {line}"));
+        let urls = line
+            .split_once("listening on ")
+            .and_then(|(_, rest)| rest.split_once(", document root "))
+            .map_or_else(|| panic!("not a started line: {line}"), |(urls, _)| urls);
+        let at = |scheme: &str| {
+            urls.split(", ")
+                .find_map(|url| url.strip_prefix(scheme)?.parse().ok())
+        };
+        let addr = at("http://").unwrap_or_else(|| panic!("no clear address: {line}"));
+        let tls = at("https://");
         // What the server writes later is drained, so it never blocks on
         // a full pipe.
         std::thread::spawn(move || for _ in lines {});
-        Server { child, addr }
+        Server { child, addr, tls }
     }
 
     /// SIGTERM sent to the server, as a service manager stops it, through

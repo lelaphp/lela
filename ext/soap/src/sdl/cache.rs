@@ -14,7 +14,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use php_ext::request::{Request, StreamCtx};
+use php_ext::coerce::{atoi, strtol};
+use php_ext::request::{MAXPATHLEN, Request, StreamCtx};
 use php_ext::values::{Owner, PhpObject, Value, ValueRef};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::php_get_current_user;
@@ -29,7 +30,6 @@ use crate::model::{
     SOAP_1_1_ENC_NAMESPACE, SOAP_1_2_ENC_NAMESPACE, Sdl, SoapBinding, SoapBindingFunction,
     SoapFaultBinding, Style, ToXml, ToZval, Type, TypeId, TypeKind, Use, XSD_NAMESPACE, builtin,
 };
-use crate::schema::{atoi, strtol};
 use crate::sdl::get_encoder_ex;
 use crate::sdl::wsdl::load_wsdl;
 use crate::shared::{ClientSlot, client_slot, instance_of};
@@ -44,11 +44,6 @@ pub(crate) const WSDL_CACHE_MEMORY: i64 = 0x2;
 const WSDL_CACHE_VERSION: u8 = 0x10;
 /// `WSDL_NO_STRING_MARKER`.
 const WSDL_NO_STRING_MARKER: u32 = 0x7fff_ffff;
-/// `MAXPATHLEN` of the host php is built on.
-#[cfg(target_os = "macos")]
-const MAXPATHLEN: usize = 1024;
-#[cfg(not(target_os = "macos"))]
-const MAXPATHLEN: usize = 4096;
 
 // ---- writing, `add_sdl_to_cache`
 

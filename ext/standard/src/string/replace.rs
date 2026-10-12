@@ -342,6 +342,7 @@ pub(super) fn strtr(
     if given <= 2 {
         arity(req, 2, Some(2))?;
         let string = string.hold(req)?;
+        // `Z_PARAM_ARRAY_HT`, where the stub declares `string|array $from`.
         let from = coerce_param(req, &from.value(), &Type::Array, 2)?;
         let Some(from) = from.as_array().copied() else {
             return PhpString::new(req, b"");
@@ -353,6 +354,7 @@ pub(super) fn strtr(
     }
     arity(req, 3, Some(3))?;
     let string = string.hold(req)?;
+    // `Z_PARAM_STR`, where the stub declares `string|array $from`.
     let from = coerce_param(req, &from.value(), &Type::String, 2)?;
     // `Z_PARAM_STRING`: a `null` is the deprecation, which names the
     // declared `?string`, and the empty string.

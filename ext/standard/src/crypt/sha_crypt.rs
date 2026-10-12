@@ -2,6 +2,8 @@
 //! (`Z/ext/standard/crypt_sha256.c:319`, `Z/ext/standard/crypt_sha512.c:358`),
 //! with the SHA-256 and SHA-512 digests of FIPS 180-4 it runs on.
 
+use php_ext::coerce::is_space;
+
 /// The SHA-256 round constants, FIPS 180-4 section 4.2.2.
 const K256: [u32; 64] = [
     0x428a_2f98,
@@ -483,18 +485,15 @@ pub(super) fn php_sha512_crypt_r(key: &[u8], salt: &[u8]) -> Option<Vec<u8>> {
     sha_crypt_r::<Sha512>(b"$6$", &ORDER_512, key, salt)
 }
 
-/// `isspace` as `strtoull` reads it in the oracle's `C.UTF-8` `LC_CTYPE`
-/// on macOS: the six ASCII spaces and 0xA0, which that locale's table
-/// counts as a space (glibc's `C.UTF-8` would not).
-fn is_space(c: u8) -> bool {
-    matches!(c, b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | b' ' | 0xa0)
-}
-
 /// `ZEND_STRTOUL(num, &endp, 10)`, which is `strtoull` on a 64-bit build
 /// (`Z/Zend/zend_long.h:79`), as FreeBSD's libc on macOS computes it: leading
 /// spaces, one sign, decimal digits; an overflow gives `u64::MAX` and ends
 /// after the digits; a minus negates modulo 2^64; no digits leaves `endp` at
-/// `num`. Returns the value and the offset of `endp` in `num`.
+/// `num`. Returns the value and the offset of `endp` in `num`. Kept beside
+/// the face's `strtol`, whose long saturates where this unsigned reading
+/// wraps a sign and answers its end; the spaces it skips are the face's
+/// `is_space`, C's `isspace` under the thread's `LC_CTYPE`, which under
+/// the oracle's `C.UTF-8` on macOS counts 0xA0 (glibc's does not).
 fn strtoull10(num: &[u8]) -> (u64, usize) {
     let at = |i: usize| num.get(i).copied().unwrap_or(0);
     let mut s = 0;

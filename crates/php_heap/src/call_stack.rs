@@ -424,7 +424,7 @@ mod platform {
     /// that address; php's arm at 8.5.9 takes `ss_sp - ss_size`, the
     /// bottom, so its limit lies a whole stack below the frames and
     /// never fires, a defect and not a behaviour to copy: the accepted
-    /// row `php-ub:heap-openbsd-stack-base` of `docs/divergence.toml`.
+    /// row `trace:heap-openbsd-stack-base` of `docs/divergence.toml`.
     fn pthread_bounds() -> Option<CallStack> {
         // SAFETY: `pthread_self` takes no argument and answers the
         // calling thread's own handle, live while the thread runs.

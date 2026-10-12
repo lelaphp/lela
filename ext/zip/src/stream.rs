@@ -5,7 +5,8 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
+    MAXPATHLEN, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper, Streams as _,
+    Whence,
 };
 use php_ext::values::Owner;
 
@@ -230,7 +231,7 @@ fn open(
     } else {
         path
     };
-    if path.len() >= 4096 || mode.first() != Some(&b'r') || path.len() < fragment_len {
+    if path.len() >= MAXPATHLEN || mode.first() != Some(&b'r') || path.len() < fragment_len {
         return Ok(None);
     }
     let dirname = &path[..path.len() - fragment_len];

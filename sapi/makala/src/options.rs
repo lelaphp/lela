@@ -1,6 +1,7 @@
-//! What the operator sets on the line: where the server listens, the
-//! document root, the request pool and its queue, the php ini the engine
-//! starts with, and the limits (#2337's Implementation Decisions, #2341):
+//! What the operator sets on the line: where the server listens, clear
+//! and under TLS with its certificates (#2343), the document root, the
+//! request pool and its queue, the php ini the engine starts with, and
+//! the limits (#2337's Implementation Decisions, #2341):
 //! one table of Kestrel's defaults, each overridden by `--limit
 //! <name>=<value>`, and each applied by the connection side, the
 //! connection cap by its accept loop (#2342) and the shutdown timeout by
@@ -22,9 +23,12 @@ pub use crate::log::Destination;
 /// limit `--limit` names, from [`LIMITS`].
 #[must_use]
 pub fn usage() -> String {
-    let mut usage = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --listen <addr>:<port> \
+    let mut usage = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... [--listen <addr>:<port>] \
+                     [--listen-tls <addr>:<port> --certificate [<host>=]<chain.pem>,<key.pem>...] \
                      --root <dir> [--threads <n>] [--queue <n>] [--serve-hidden] \
                      [--access-log <path>] [--error-log <path>] [--limit <name>=<value>]...\n\
+                     one of --listen and --listen-tls at least; a --certificate with a host is \
+                     that name's, through SNI, and one without is any other's\n\
                      limits, a time being <n>s or <n>ms and a rate <bytes a second>,<grace time> or off:\n"
         .to_owned();
     for (name, shape, _) in LIMITS {
@@ -73,9 +77,11 @@ pub const REQUEST_STACK: usize = 8 << 20;
 /// The server as the operator's line set it.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// The address the listening socket binds; port 0 takes one the
-    /// system picks, which the started line names.
-    pub listen: SocketAddr,
+    /// The address the clear listening socket binds, where one does; port
+    /// 0 takes one the system picks, which the started line names.
+    pub listen: Option<SocketAddr>,
+    /// The TLS listener, where one is.
+    pub tls: Option<Tls>,
     /// The document root, made absolute: what a request's path is found
     /// under, and never left (`php -S`'s `normalize_vpath`).
     pub document_root: PathBuf,
@@ -99,6 +105,33 @@ pub struct Options {
     /// Where the error log goes: stderr without `--error-log`.
     pub error_log: Destination,
     pub limits: Limits,
+}
+
+/// The TLS listener (#2343): TLS 1.2 and 1.3, ALPN `http/1.1`, and the
+/// certificate each handshake gets, chosen by the name it asks for
+/// (SNI). TLS is configured only with a certificate: a line that asks
+/// for the listener without one is refused, as Kestrel requires one
+/// explicitly (research/production-server.r2.md §1.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tls {
+    /// The address the TLS listening socket binds; port 0 as `listen`'s.
+    pub listen: SocketAddr,
+    /// The certificate a handshake gets that names no host, or a host
+    /// with none of its own; with none, such a handshake fails.
+    pub default: Option<CertificateFiles>,
+    /// The certificate each host gets, the host lowercase, as rustls
+    /// hands it over.
+    pub by_host: Vec<(String, CertificateFiles)>,
+}
+
+/// One certificate's files, PEM: its chain, the end entity first, and its
+/// private key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateFiles {
+    /// The certificates, the end entity first, then what signed it.
+    pub chain: PathBuf,
+    /// The end entity's private key.
+    pub key: PathBuf,
 }
 
 /// What the document root shows that `php -S` serves and a server facing
@@ -134,6 +167,9 @@ pub struct Limits {
     /// How long a request's head may take from its first byte, past which
     /// it is answered 408: 30 s.
     pub header_timeout: Duration,
+    /// How long a TLS handshake may take from the accept, past which the
+    /// connection is closed: 10 s, Kestrel's `HandshakeTimeout`.
+    pub handshake_timeout: Duration,
     /// How long a connection may wait for a request's first byte, from
     /// its accept or its last response, past which it is closed: 130 s.
     pub keep_alive_idle: Duration,
@@ -204,6 +240,7 @@ impl Default for Limits {
             header_bytes: 32 * 1024,
             body_bytes: 30_000_000,
             header_timeout: Duration::from_secs(30),
+            handshake_timeout: Duration::from_secs(10),
             keep_alive_idle: Duration::from_secs(130),
             min_body_rate: Some(MinDataRate::default()),
             min_response_rate: Some(MinDataRate::default()),
@@ -236,6 +273,9 @@ const LIMITS: &[(&str, &str, SetLimit)] = &[
     }),
     ("header-timeout", "<time>", |l, v| {
         set(&mut l.header_timeout, time(v))
+    }),
+    ("handshake-timeout", "<time>", |l, v| {
+        set(&mut l.handshake_timeout, time(v))
     }),
     ("keep-alive-idle", "<time>", |l, v| {
         set(&mut l.keep_alive_idle, time(v))
@@ -330,10 +370,13 @@ impl Options {
     /// # Errors
     ///
     /// What the line got wrong: an unknown option, a value missing or not
-    /// read, or no `--listen` or `--root`.
+    /// read, no `--listen` nor `--listen-tls`, a TLS listener without a
+    /// certificate or a certificate without one, or no `--root`.
     pub fn parse(argv: &[OsString]) -> Result<Options, String> {
         let mut words = argv.iter();
         let mut listen = None;
+        let mut listen_tls = None;
+        let mut certificates = Vec::new();
         let mut root = None;
         let mut threads = None;
         let mut queue = None;
@@ -355,6 +398,10 @@ impl Options {
                 b"-c" => ini_search.path = Some(value("-c")?),
                 b"-d" => ini.push(php_sapi::ini::define(&value("-d")?)),
                 b"--listen" => listen = Some(read::<SocketAddr>("--listen", &value("--listen")?)?),
+                b"--listen-tls" => {
+                    listen_tls = Some(read::<SocketAddr>("--listen-tls", &value("--listen-tls")?)?);
+                }
+                b"--certificate" => certificates.push(certificate(&value("--certificate")?)?),
                 b"--root" => root = Some(value("--root")?),
                 b"--threads" => {
                     threads = Some(option_count("--threads", &value("--threads")?)?);
@@ -371,7 +418,10 @@ impl Options {
                 }
             }
         }
-        let listen = listen.ok_or("no --listen address")?;
+        let tls = tls(listen_tls, certificates)?;
+        if listen.is_none() && tls.is_none() {
+            return Err("no --listen nor --listen-tls address".to_owned());
+        }
         let root = root.ok_or("no --root directory")?;
         let document_root = std::fs::canonicalize(php_sapi::cgi::path_of(&root))
             .map_err(|e| format!("--root {}: {e}", String::from_utf8_lossy(&root)))?;
@@ -380,6 +430,7 @@ impl Options {
         });
         Ok(Options {
             listen,
+            tls,
             document_root,
             request_threads,
             request_queue: queue.unwrap_or(request_threads.saturating_mul(4)),
@@ -392,6 +443,84 @@ impl Options {
             limits,
         })
     }
+}
+
+/// One `--certificate [<host>=]<chain.pem>,<key.pem>`: the host, where
+/// one names its own, and the files. A host holds no `/` nor `,`, so a
+/// path with `=` in it reads as no host.
+fn certificate(value: &[u8]) -> Result<(Option<String>, CertificateFiles), String> {
+    let refused = || {
+        format!(
+            "--certificate {} is not [<host>=]<chain.pem>,<key.pem>",
+            String::from_utf8_lossy(value)
+        )
+    };
+    let (host, files) = match value.iter().position(|b| *b == b'=') {
+        Some(at) if !value[..at].iter().any(|b| matches!(b, b'/' | b',')) => {
+            let host = std::str::from_utf8(&value[..at]).map_err(|_| refused())?;
+            // A name SNI can send: no wildcard, address or port, which no
+            // handshake would match.
+            if rustls::pki_types::DnsName::try_from(host).is_err() {
+                return Err(format!(
+                    "--certificate {host}=...: {host} is not a host name SNI sends"
+                ));
+            }
+            (Some(host.to_ascii_lowercase()), &value[at + 1..])
+        }
+        _ => (None, value),
+    };
+    let comma = files.iter().position(|b| *b == b',').ok_or_else(refused)?;
+    let (chain, key) = (&files[..comma], &files[comma + 1..]);
+    if chain.is_empty() || key.is_empty() {
+        return Err(refused());
+    }
+    Ok((
+        host,
+        CertificateFiles {
+            chain: path(chain),
+            key: path(key),
+        },
+    ))
+}
+
+/// The TLS listener the line asks for, with its certificates: one at
+/// least, a host named once and one default at most.
+fn tls(
+    listen: Option<SocketAddr>,
+    certificates: Vec<(Option<String>, CertificateFiles)>,
+) -> Result<Option<Tls>, String> {
+    let Some(listen) = listen else {
+        return if certificates.is_empty() {
+            Ok(None)
+        } else {
+            Err("--certificate without --listen-tls".to_owned())
+        };
+    };
+    if certificates.is_empty() {
+        return Err(
+            "--listen-tls without a certificate: TLS needs at least one \
+             --certificate [<host>=]<chain.pem>,<key.pem>"
+                .to_owned(),
+        );
+    }
+    let mut tls = Tls {
+        listen,
+        default: None,
+        by_host: Vec::new(),
+    };
+    for (host, files) in certificates {
+        match host {
+            None if tls.default.is_some() => {
+                return Err("a second --certificate without a host".to_owned());
+            }
+            None => tls.default = Some(files),
+            Some(host) if tls.by_host.iter().any(|(had, _)| *had == host) => {
+                return Err(format!("a second --certificate for {host}"));
+            }
+            Some(host) => tls.by_host.push((host, files)),
+        }
+    }
+    Ok(Some(tls))
 }
 
 /// A path the line names, as its bytes are.
@@ -466,6 +595,8 @@ mod tests {
             "--limit",
             "header-timeout=500ms",
             "--limit",
+            "handshake-timeout=700ms",
+            "--limit",
             "keep-alive-idle=2s",
             "--limit",
             "body-data-rate=1000,1s",
@@ -488,6 +619,7 @@ mod tests {
                 header_bytes: 200,
                 body_bytes: 10,
                 header_timeout: Duration::from_millis(500),
+                handshake_timeout: Duration::from_millis(700),
                 keep_alive_idle: Duration::from_secs(2),
                 min_body_rate: Some(MinDataRate {
                     bytes_per_second: NonZeroU64::new(1000).ok_or("1000")?,
@@ -554,7 +686,7 @@ mod tests {
     fn a_line_without_an_address_or_with_no_thread_is_refused() {
         assert_eq!(
             parse(&["--root", "/"]).err().as_deref(),
-            Some("no --listen address")
+            Some("no --listen nor --listen-tls address")
         );
         assert_eq!(
             parse(&["--listen", "127.0.0.1:0", "--root", "/", "--threads", "0"])
@@ -562,5 +694,77 @@ mod tests {
                 .as_deref(),
             Some("--threads must be at least 1")
         );
+    }
+
+    #[test]
+    fn tls_listens_with_its_certificates_or_not_at_all() -> Result<(), String> {
+        let tls = parse(&[
+            "--listen-tls",
+            "127.0.0.1:0",
+            "--root",
+            "/",
+            "--certificate",
+            "/c/default.pem,/c/default.key",
+            "--certificate",
+            "A.Test=/c/a.pem,/c/a.key",
+        ])?;
+        assert_eq!(tls.listen, None);
+        let files = |name: &str| CertificateFiles {
+            chain: PathBuf::from(format!("/c/{name}.pem")),
+            key: PathBuf::from(format!("/c/{name}.key")),
+        };
+        assert_eq!(
+            tls.tls,
+            Some(Tls {
+                listen: "127.0.0.1:0".parse().map_err(|_| "addr")?,
+                default: Some(files("default")),
+                by_host: vec![("a.test".to_owned(), files("a"))],
+            })
+        );
+        for (line, refusal) in [
+            (
+                &["--listen-tls", "127.0.0.1:0"][..],
+                "--listen-tls without a certificate: TLS needs at least one \
+                 --certificate [<host>=]<chain.pem>,<key.pem>",
+            ),
+            (
+                &[
+                    "--listen",
+                    "127.0.0.1:0",
+                    "--certificate",
+                    "/c/a.pem,/c/a.key",
+                ][..],
+                "--certificate without --listen-tls",
+            ),
+            (
+                &["--listen-tls", "127.0.0.1:0", "--certificate", "/c/a.pem"][..],
+                "--certificate /c/a.pem is not [<host>=]<chain.pem>,<key.pem>",
+            ),
+            (
+                &[
+                    "--listen-tls",
+                    "127.0.0.1:0",
+                    "--certificate",
+                    "a.test=/c/a.pem,/c/a.key",
+                    "--certificate",
+                    "A.TEST=/c/b.pem,/c/b.key",
+                ][..],
+                "a second --certificate for a.test",
+            ),
+            (
+                &[
+                    "--listen-tls",
+                    "127.0.0.1:0",
+                    "--certificate",
+                    "*.test=/c/a.pem,/c/a.key",
+                ][..],
+                "--certificate *.test=...: *.test is not a host name SNI sends",
+            ),
+        ] {
+            let mut words = line.to_vec();
+            words.extend(["--root", "/"]);
+            assert_eq!(parse(&words).err().as_deref(), Some(refusal), "{line:?}");
+        }
+        Ok(())
     }
 }

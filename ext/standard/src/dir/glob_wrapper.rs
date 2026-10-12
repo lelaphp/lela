@@ -12,7 +12,7 @@
 use std::os::unix::ffi::OsStrExt;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{DirListing, Request, StreamWrapper};
+use php_ext::request::{DirListing, MAXPATHLEN, Request, StreamWrapper};
 
 use super::php_glob;
 
@@ -80,7 +80,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
         prefixed.push(b'/');
         prefixed.extend_from_slice(&pattern);
         // `snprintf(work_pattern, MAXPATHLEN, ...)`.
-        prefixed.truncate(crate::virtual_cwd::MAXPATHLEN - 1);
+        prefixed.truncate(MAXPATHLEN - 1);
         pattern = prefixed;
     }
     let matches = match php_glob::php_glob(&pattern, 0) {

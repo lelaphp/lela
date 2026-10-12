@@ -6,7 +6,7 @@
 
 use php_ext::abi::{Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::coerce::{BinaryOp, binary_op, coerce_param};
+use php_ext::coerce::{BinaryOp, binary_op, coerce_param, is_space};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw, throw_error};
 use php_ext::request::Request;
@@ -867,11 +867,10 @@ fn rad2deg(num: f64) -> f64 {
 fn base_to_value(req: &mut Request, text: &[u8], base: u32) -> Number {
     let mut s = 0;
     let mut e = text.len();
-    let space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r');
-    while s < e && space(text[s]) {
+    while s < e && is_space(text[s]) {
         s += 1;
     }
-    while s < e && space(text[e - 1]) {
+    while s < e && is_space(text[e - 1]) {
         e -= 1;
     }
     if e - s >= 2 && text[s] == b'0' {
@@ -944,6 +943,16 @@ fn base_to_value(req: &mut Request, text: &[u8], base: u32) -> Number {
 ///
 /// Deprecated: Invalid characters passed for attempted conversion, these have been ignored in %s on line 3
 /// int(1)
+/// ```
+///
+/// The white space at either end is C's `isspace` under the request's
+/// `LC_CTYPE`, 0xA0 among it under macOS's `C.UTF-8`, php's default.
+///
+/// ```php
+/// var_dump(bindec("\xa0101\xa0"));
+/// ```
+/// ```expect
+/// int(5)
 /// ```
 #[php_function]
 fn bindec(req: &mut Request, binary_string: PhpString) -> Number {
