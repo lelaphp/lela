@@ -244,8 +244,9 @@ pub struct Host {
 
 impl Host {
     /// The binary's digest against the pin's; a mismatch refuses the run,
-    /// as [`Pin`]'s does for `php`.
-    pub(crate) fn assert_digest(&self) -> Result<()> {
+    /// as [`Pin`]'s does for `php`. Reached through
+    /// [`Oracle::host_asserted`], which holds the closure first.
+    fn assert_digest(&self) -> Result<()> {
         let bytes = fs::read(&self.path)
             .with_context(|| format!("reading the pinned host at {}", self.path.display()))?;
         let actual = format!("{:x}", md5::compute(bytes));
@@ -1682,6 +1683,14 @@ impl<'a> Oracle<'a> {
             wall,
             during,
         })
+    }
+
+    /// A `[sapi]` host held before a program runs through it: the pin's
+    /// digest and `[closure]` as [`Oracle::asserted`] holds them, the
+    /// host's loads among the closure's, then the host's own digest.
+    pub(crate) fn host_asserted(&self, host: &Host) -> Result<()> {
+        self.asserted()?;
+        host.assert_digest()
     }
 
     /// Assert the digest now rather than at the first program: what a

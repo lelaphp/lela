@@ -279,7 +279,7 @@ impl Held {
             .sapi
             .of(self.host)
             .ok_or_else(|| anyhow!("the pin's [sapi] names no {}", self.host.binary))?;
-        host.assert_digest()?;
+        oracle.host_asserted(host)?;
         Ok(host.path.clone())
     }
 }

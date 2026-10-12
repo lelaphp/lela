@@ -114,7 +114,7 @@ pub(crate) fn oracle_side(
     let pinned = |pinned: Option<&oracle::Host>, name: &str| {
         let pinned = pinned
             .ok_or_else(|| anyhow!("oracle.toml's [sapi] names no {name} to serve the module"))?;
-        pinned.assert_digest()?;
+        oracle.host_asserted(pinned)?;
         Ok::<_, anyhow::Error>(pinned.path.clone())
     };
     let served = match host {

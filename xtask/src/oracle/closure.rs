@@ -369,6 +369,32 @@ mod tests {
     }
 
     #[test]
+    fn a_run_is_refused_where_a_pinned_host_loads_a_keg_the_record_does_not_name() {
+        let tree = Tree::new("closure-pin").unwrap();
+        let (php, root) = prefix(&tree);
+        let fpm = root.join("Cellar/php/1/php-fpm");
+        let zstd = root.join("opt/zstd/lib/libzstd.dylib");
+        fs::write(&fpm, macho(&[zstd.to_str().unwrap()])).unwrap();
+        let md5 = |path: &Path| format!("{:x}", md5::compute(fs::read(path).unwrap()));
+        let mut pin = crate::oracle::Pin::default();
+        (pin.oracle.path, pin.oracle.md5) = (php.clone(), md5(&php));
+        pin.closure = Some(closure(&[RECORD[0], RECORD[1]]));
+        // php reaches zstd only through zip, so take that load away.
+        fs::write(root.join("Cellar/zip/1.12_1/lib/libzip.dylib"), macho(&[])).unwrap();
+        pin.oracle().asserted().unwrap();
+        let host = crate::oracle::Host {
+            md5: md5(&fpm),
+            path: fpm,
+        };
+        pin.sapi.fpm = Some(host.clone());
+        let err = pin.oracle().host_asserted(&host).unwrap_err().to_string();
+        assert!(
+            err.contains("zstd 1.5.7_1 is loaded and not recorded"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_binary_that_is_not_mach_o_loads_nothing() {
         let tree = Tree::new("closure-script").unwrap();
         let php = tree.path().join("php");
