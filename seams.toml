@@ -615,8 +615,16 @@ text = "Each clippy.toml the row names is generated from the manifest and commit
 id = "git.no-verify"
 tool = "Bash"
 deny_argv = ["--no-verify", "-n", "-c core.hooksPath", "--config-env core.hooksPath"]
-with = "git commit"
+with = ["git commit", "git merge"]   # git merge --no-verify skips pre-merge-commit as git commit's skips pre-commit (#2751); -n there is --no-stat, refused all the same
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
+
+[[rule]]
+id = "git.merge-commits-itself"
+tool = "Bash"
+where = "main"   # grammar: where, the repository's main checkout and never a linked worktree (#2751)
+deny_pattern = '(?m)(\A|[|;&(\n]\s*)git(\s+-[cC]\s+\S+|\s+--?[\w.-]+(=\S+)?)*\s+merge\b'   # git merge where it is run (first in the call, after a separator or a newline), never where it is cited
+unless_pattern = '\s--(no-commit|squash|ff-only|abort|continue|quit|help)\b|\s-h\b'   # a merge that leaves its commit to git commit, commits nothing, or ends one
+text = "A merge in the main checkout is finished by git commit, so pre-commit renders, tests and checks what it commits: merge with --no-commit, then commit (#2744, #2751)."
 
 [[rule]]
 id = "git.no-amend"

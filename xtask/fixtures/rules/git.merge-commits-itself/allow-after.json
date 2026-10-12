@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git merge t1234 --no-commit","description":"The no-commit option after the branch"}}
