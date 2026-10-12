@@ -11,7 +11,7 @@ use std::sync::Arc;
 use php_heap::{FrameRef, Intern};
 use php_link::LinkedClass;
 use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
-use php_unit::{FramelessEntry, Opcode, TopLevel, Unit};
+use php_unit::{Opcode, TopLevel, Unit};
 
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::{Level, Thrown, none_pending};
@@ -1911,12 +1911,17 @@ impl Request {
             || crate::classes::core_create_object(self.handlers_of(class))
     }
 
-    /// `ZEND_FLF_FUNC(opline)`: the native and the arity the engine's
-    /// frameless table holds at `at`, a `FRAMELESS_ICALL_*`'s
-    /// `extended_value`; none past the table, which a unit this engine
-    /// compiled never carries.
-    pub(crate) fn frameless_entry(&self, at: u32) -> Option<FramelessEntry> {
-        self.shared.frameless.get(at as usize).copied()
+    /// `ZEND_FLF_FUNC(opline)` and `ZEND_FLF_HANDLER(opline)`: the native
+    /// the engine's frameless table holds at `at`, a `FRAMELESS_ICALL_*`'s
+    /// `extended_value`, and its entry, the interception's where an
+    /// extension intercepts it: a frameless row names a native function,
+    /// never a method, a trampoline or an enum's, so its entry is its own
+    /// row of the entries, as [`Request::serve_native`] finds it; none
+    /// past the table, which a unit this engine compiled never carries.
+    pub(crate) fn frameless_entry(&self, at: u32) -> Option<(Function, crate::api::abi::Entry)> {
+        let row = self.shared.frameless.get(at as usize)?;
+        let entry = self.shared.entries.get(row.function as usize)?;
+        Some((Function(row.function), *entry))
     }
 
     /// `zend_flf_count`: how many rows the frameless table has.
