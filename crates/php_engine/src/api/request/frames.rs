@@ -686,16 +686,16 @@ impl Request {
             && !header.info.extra_args();
         let caller = header.caller.frame().filter(|_| plain)?;
         let returns_to = header.returns_to;
-        let mut strings = false;
-        for (at, z) in laid.slots().iter().enumerate() {
-            if !z.is_refcounted() || Some(at) == moved {
-                continue;
-            }
-            if z.kind() != ZvalType::String {
-                return None;
-            }
-            strings = true;
-        }
+        // Every slot's refcounted bit folded with no branch per slot,
+        // where php's `i_free_compiled_variables` tests each CV: a frame
+        // none of whose slots owns anything, nearly every one, is
+        // answered there, and only one that owns something is walked
+        // for what.
+        let owners = laid
+            .slots()
+            .iter()
+            .fold(false, |any, z| any | z.is_refcounted());
+        let strings = owners && owns_strings_alone(laid.slots(), moved)?;
         let taken = match returns_to {
             Some(slot) => self
                 .vm
@@ -1698,6 +1698,25 @@ fn quiet_receiver(header: &exec::Header) -> bool {
             php_heap::Heap::releases_quietly(object.as_value().to_zval())
         }
     }
+}
+
+/// What the slots of a frame that owns something own, but the one
+/// `moved` out of: whether any owns a string, where nothing but
+/// strings is owned; none where any owns anything else, which
+/// [`Request::leaves_plainly`] refuses.
+#[inline(never)]
+fn owns_strings_alone(slots: &[Zval], moved: Option<usize>) -> Option<bool> {
+    let mut strings = false;
+    for (at, z) in slots.iter().enumerate() {
+        if !z.is_refcounted() || Some(at) == moved {
+            continue;
+        }
+        if z.kind() != ZvalType::String {
+            return None;
+        }
+        strings = true;
+    }
+    Some(strings)
 }
 
 /// A frame [`Request::leaves_plainly`] found returns with no PHP code
