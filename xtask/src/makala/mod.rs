@@ -79,7 +79,31 @@ pub(crate) struct Entry {
     /// The `--SKIPIF--` the entry is compared only after, where it has one.
     pub(crate) skipif: Option<Vec<u8>>,
     pub(crate) http: Http,
+    /// With `{PWD}` kept, since each host serves the program from a
+    /// directory of its own: [`Entry::ini_in`] puts it there (#2705).
     pub(crate) ini: Vec<String>,
+}
+
+impl Entry {
+    /// The ini entries the entry is served under from `dir`, the
+    /// directory a host serves its program from, `{PWD}` there as the
+    /// phpt lane has the test's own directory there, where it writes the
+    /// program (`adapter::with_pwd`).
+    pub(crate) fn ini_in(&self, dir: &Path) -> Vec<String> {
+        adapter::with_pwd(&self.ini, dir)
+    }
+
+    /// `response` to the entry with what php makes at random for one
+    /// request read as one token each, so it is held to another response
+    /// to the same request without it: an uploaded file's temporary name
+    /// and a session id php made, the cookie the entry's `session.name`
+    /// names.
+    pub(crate) fn randoms_named_alike(&self, response: &[u8]) -> Vec<u8> {
+        let name = (self.ini.iter().rev())
+            .find_map(|line| line.strip_prefix("session.name="))
+            .unwrap_or("PHPSESSID");
+        sessions_named_alike(&uploads_named_alike(response), name)
+    }
 }
 
 /// The reading of the instrument `ask` names: `fpm-compare` or `soak`.
@@ -135,7 +159,7 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
         script: written.file_name()?.to_str()?.to_owned(),
         skipif: phpt.filled("SKIPIF").map(<[u8]>::to_vec),
         http: Http::described(&request),
-        ini: adapter::ini_of(phpt, path).ok()?,
+        ini: adapter::ini_before_pwd(phpt).ok()?,
     })
 }
 
@@ -173,7 +197,7 @@ pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
 /// php names one `php` and random characters in `upload_tmp_dir`
 /// (`php_open_temporary_fd`), a name no two requests share, so a response
 /// that prints one is held to another with the characters as one token.
-pub(crate) fn uploads_named_alike(response: &[u8]) -> Vec<u8> {
+fn uploads_named_alike(response: &[u8]) -> Vec<u8> {
     const NAME: &[u8] = b"/php";
     let (mut out, mut at) = (Vec::with_capacity(response.len()), 0);
     while at < response.len() {
@@ -191,6 +215,28 @@ pub(crate) fn uploads_named_alike(response: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// `response` with each session id php made read as one token wherever
+/// it stands: the value of a `set-cookie` line of the session's cookie,
+/// `name`, of the shape php makes one at random where a request names
+/// none it accepts, 32 characters of `0-9a-f` under the default
+/// `session.sid_length` and `session.sid_bits_per_character`
+/// (`php_session_create_id`). An id of another shape, one a request sent
+/// among them, is kept as it came, so a side that takes it is told.
+fn sessions_named_alike(response: &[u8], name: &str) -> Vec<u8> {
+    let field = format!("set-cookie: {name}=");
+    let head = response
+        .split(|b| *b == b'\n')
+        .take_while(|line| !line.is_empty());
+    let made = head
+        .filter_map(|line| line.strip_prefix(field.as_bytes()))
+        .filter_map(|value| value.split(|b| *b == b';').next())
+        .filter(|id| id.len() == 32 && id.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+    let ids: Vec<Vec<u8>> = made.map(<[u8]>::to_vec).collect();
+    ids.iter().fold(response.to_vec(), |out, id| {
+        crate::oracle::replace(&out, id, b"%SESSION%")
+    })
 }
 
 /// One test of a comparison held to the `makala:` rows.
@@ -322,6 +368,25 @@ mod tests {
         assert_eq!(entries[0].http.field("Cookie"), b"a=1; b=2");
     }
 
+    /// An entry whose `--INI--` names `{PWD}` is served under each host's
+    /// own directory there, the one the program is written in, and not
+    /// the test's directory in php-src (#2705).
+    #[test]
+    fn pwd_in_an_entry_s_ini_is_the_directory_each_host_serves() {
+        let tree = Tree::new("makala-pwd").unwrap();
+        std::fs::create_dir_all(tree.path().join("tests")).unwrap();
+        let test = "--TEST--\nt\n--INI--\nphar.cache_list={PWD}/fc21.php\n--GET--\nx=1\n--FILE--\n<?php\n--EXPECT--\n\n";
+        tree.write("tests/fc21.phpt", test).unwrap();
+        let (entries, _) = subset(tree.path()).unwrap();
+        let [entry] = &entries[..] else {
+            panic!("{entries:?}")
+        };
+        let side = |dir: &str| entry.ini_in(Path::new(dir));
+        assert_eq!(side("/srv/m"), ["phar.cache_list=/srv/m/fc21.php"]);
+        assert_eq!(side("/srv/f"), ["phar.cache_list=/srv/f/fc21.php"]);
+        assert_eq!(entry.script, "fc21.php", "the program the list names");
+    }
+
     /// A test whose program is `--FILE_EXTERNAL--` is an entry (#2651):
     /// its program the external file's bytes, written under the name the
     /// phpt lane writes it, the one its request names.
@@ -350,5 +415,41 @@ mod tests {
     fn an_uploaded_file_s_temporary_name_reads_as_one_token() {
         let named = uploads_named_alike(b"\"/tmp/phpAb12Cd9\" /php/x /phpinfo");
         assert_eq!(named, b"\"/tmp/php%UPLOAD%\" /php/x /phpinfo");
+    }
+
+    /// A session id php made reads as one token in its cookie and wherever
+    /// the page prints it, under the entry's `session.name` or php's
+    /// default; an id a request sent, another cookie of that shape and an
+    /// id in the body alone keep their bytes
+    /// (`ext/session/tests/rfc1867_sid_only_cookie_2.phpt`, #2706).
+    #[test]
+    fn a_session_id_php_made_reads_as_one_token() {
+        let entry = |ini: &[&str]| Entry {
+            id: "t.phpt".to_owned(),
+            program: Vec::new(),
+            script: "t.php".to_owned(),
+            skipif: None,
+            http: Http::get(),
+            ini: ini.iter().map(|line| (*line).to_owned()).collect(),
+        };
+        let id = "5a40ac74d9455590d2eda039bedc3cf2";
+        let made = format!("200\nset-cookie: PHPSESSID={id}; path=/\n\nstring(32) \"{id}\"");
+        let named = entry(&[]).randoms_named_alike(made.as_bytes());
+        let alike = "200\nset-cookie: PHPSESSID=%SESSION%; path=/\n\nstring(32) \"%SESSION%\"";
+        assert_eq!(String::from_utf8_lossy(&named), alike);
+        let other = made.replace("PHPSESSID", "s");
+        let named = entry(&["session.name=s"]).randoms_named_alike(other.as_bytes());
+        assert_eq!(
+            String::from_utf8_lossy(&named),
+            alike.replace("PHPSESSID", "s")
+        );
+        for kept in [
+            "200\nset-cookie: PHPSESSID=rfc1867-sid-only-cookie-2-post\n\nx".to_owned(),
+            made.replace("PHPSESSID", "other"),
+            format!("200\n\nPHPSESSID={id}"),
+        ] {
+            let named = entry(&[]).randoms_named_alike(kept.as_bytes());
+            assert_eq!(String::from_utf8_lossy(&named), kept);
+        }
     }
 }
