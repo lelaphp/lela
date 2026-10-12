@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=a4bd74045801ac5d06bd0b6284420a4d88335c1cc972fb0afc12bebd32d4b3ba out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=9fde7bb5920df055b5d315935a6ec3ffeae66a39e00a12e49b05cb9e6d532da7 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=4d637007722992db8cc0f4e5e1e5269e6202c03a77f03f60086c320e1e38a21b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=42d8f3ff319f76842c02e7e41e4f3bb3e6c849b071ad694c02f1814176c50cbd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 411 |  |
 
-<!-- /computed in=fcec648f71e91508a3d29134d806880378919e3e3c82ba82147ff24c312c85e5 out=3c31aa0c5be5f711eeaae291480a5cd9b3f87feccac3abc8fdc0620326362c88 -->
+<!-- /computed in=878d12d50fa34dc5d31c25b1a73784209b93eb9d7d3f492d4bdc63fda93093fb out=3c31aa0c5be5f711eeaae291480a5cd9b3f87feccac3abc8fdc0620326362c88 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -155,6 +155,7 @@ third-engine-design.md
 | vocab.harness |  | avoid_from |
 | generated.committed |  | generated |
 | git.no-verify |  | deny_argv |
+| git.merge-commits-itself |  | deny_pattern |
 | git.no-amend |  | deny_argv |
 | git.operation |  | deny_argv |
 | ticket.close |  | deny_argv |
@@ -170,7 +171,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern |
 | divergence.reason |  | check |
 
-<!-- /computed in=e5f4b94882fa0d3bfaac26001e1db1b26e675cce9c3343791426385096946ce3 out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
+<!-- /computed in=309e17732151fea3eacce659d60dca4a281e5ce3bceea4d47bbf4738e6fa34a8 out=cc17473e92cd43e7172ef14ba95e71078dba16ff979509b7e46c3b0bc5c5aa3b -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

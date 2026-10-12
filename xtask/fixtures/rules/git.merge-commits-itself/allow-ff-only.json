@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git merge --ff-only t1234","description":"Fast-forward, which commits nothing"}}

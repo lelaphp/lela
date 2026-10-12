@@ -233,6 +233,54 @@ fn a_shell_redirection_into_the_pin_is_put_back_and_denied() {
     assert_denied(&root, &out, "oracle.toml", "# redirected");
 }
 
+/// A `Bash` call that exits non-zero gets `PostToolUseFailure` in place
+/// of `PostToolUse` (#2762): its record is spent and its write to a
+/// harness file put back all the same, and the answer names the event it
+/// answers, with what was put back as context and no `decision`.
+#[test]
+fn a_call_that_exits_non_zero_is_settled_on_the_failure_event() {
+    let root = scratch("failure");
+    let was = read(&root, "oracle.toml");
+    let (id, command) = (
+        "toolu_failed",
+        "echo '# then failed' >> oracle.toml; exit 1",
+    );
+    let (code, _, err) = permit(
+        &root,
+        &stdin("PreToolUse", SESSION, id, &root, command),
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let ran = Command::new("sh")
+        .args(["-c", command])
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(!ran.success(), "the call fails");
+    let (code, out, err) = permit(
+        &root,
+        &stdin("PostToolUseFailure", SESSION, id, &root, command),
+        &["--after"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(!record(&root, SESSION, id).exists(), "the record is spent");
+    assert_eq!(read(&root, "oracle.toml"), was, "put back");
+    let hook: serde_json::Value =
+        serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(
+        hook["hookSpecificOutput"]["hookEventName"], "PostToolUseFailure",
+        "{out}"
+    );
+    assert!(hook.get("decision").is_none(), "{out}");
+    let said = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        said.contains("harness.self") && said.contains("oracle.toml"),
+        "{said}"
+    );
+}
+
 /// The note `--after` prints and the reading it keeps for a file that
 /// changed while the call ran and that the call's line cannot write
 /// (#1895): kept as it stands, the call not denied, the path named.

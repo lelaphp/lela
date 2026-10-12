@@ -560,6 +560,10 @@ pub enum Where {
     /// that the calling session did not start (#2476), read in
     /// `permit::operation`.
     Operating,
+    /// The repository's main checkout, the one whose `.git` is a
+    /// directory, and never a linked worktree: where merges into `main`
+    /// are made (#2751).
+    Main,
 }
 
 /// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]

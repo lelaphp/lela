@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git merge --no-ff --no-commit t1234","description":"Merge a branch, leaving the commit to git commit"}}

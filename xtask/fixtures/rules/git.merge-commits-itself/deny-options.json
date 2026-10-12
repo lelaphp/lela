@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git -c merge.log=true merge t1234","description":"Merge with a config option before the subcommand"}}

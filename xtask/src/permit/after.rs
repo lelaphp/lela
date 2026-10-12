@@ -187,7 +187,7 @@ pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
     reading::replace(&file, text.as_bytes())
 }
 
-/// `permit --after`, the `PostToolUse` hook's call: the call on stdin (or
+/// `permit --after`, the `PostToolUse` and `PostToolUseFailure` hooks' call: the call on stdin (or
 /// in `json`), its record taken again, each file whose blob moved put
 /// back and denied, the denials printed as the hook's block and recorded.
 /// The exit is 0 whatever it found; a call it cannot pair with a record
@@ -252,8 +252,12 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
         .map(|m| format!("{RULE}: {}", m.said))
         .collect::<Vec<_>>()
         .join("\n");
-    let context = serde_json::json!({"hookEventName": "PostToolUse", "additionalContext": said});
-    let hook = if moved.iter().any(|m| m.verdict == Verdict::PutBack) {
+    // The answer names the event it answers. A failed call's event takes
+    // no `decision`: the call has already failed, and what was put back is
+    // said as context (#2762).
+    let event = call.hook_event_name.as_deref().unwrap_or("PostToolUse");
+    let context = serde_json::json!({"hookEventName": event, "additionalContext": said});
+    let hook = if event == "PostToolUse" && moved.iter().any(|m| m.verdict == Verdict::PutBack) {
         serde_json::json!({"decision": "block", "reason": said, "hookSpecificOutput": context})
     } else {
         serde_json::json!({"hookSpecificOutput": context})

@@ -60,6 +60,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             Where::Anywhere => workspace(),
             Where::Ticketed => ticketed.path(),
             Where::Operating => merging.path(),
+            Where::Main => quiet.path(),
         };
         // Every control of the rule's directory: each `deny*.json` (or
         // `note*.json`) must fire, each `allow*.json` must not (#625).
@@ -309,12 +310,15 @@ fn git_no_verify_reads_git_commit_s_own_argv() {
         .iter_mut()
         .find(|r| r.id == "git.no-verify")
         .unwrap();
-    row.predicate.with = OneOrMany::One("git commit".to_owned());
+    row.predicate.with = OneOrMany::Many(vec!["git commit".to_owned(), "git merge".to_owned()]);
     row.predicate.deny_argv = Some(PROPOSED_NO_VERIFY.map(str::to_owned).to_vec());
     let tracked_reads_hooks_path = tracked
         .rule("git.no-verify")
         .and_then(|r| r.predicate.deny_argv.as_ref())
         .is_some_and(|d| d.iter().any(|e| e == "-c core.hooksPath"));
+    let tracked_reads_merge = tracked
+        .rule("git.no-verify")
+        .is_some_and(|r| r.predicate.with.iter().any(|w| w == "git merge"));
     let dir = fixtures().join("rules/git.no-verify");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -332,7 +336,9 @@ fn git_no_verify_reads_git_commit_s_own_argv() {
     for name in &names {
         let expect = name.starts_with("deny");
         assert_eq!(denied(&proposed, name), expect, "proposed row: {name}");
-        let tracked_expect = expect && (name != "deny-hooks-path.json" || tracked_reads_hooks_path);
+        let tracked_expect = expect
+            && (name != "deny-hooks-path.json" || tracked_reads_hooks_path)
+            && (name != "deny-merge.json" || tracked_reads_merge);
         assert_eq!(
             denied(&tracked, name),
             tracked_expect,
@@ -2995,6 +3001,63 @@ fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() 
     assert!(denied(&manifest, main.path(), line));
 }
 
+/// `where = "main"` (#2751): the rule judges a call in the repository's
+/// main checkout and not one in a linked worktree, wherever the line
+/// stands when a leading `cd` moves it; of a line's commands, the one the
+/// pattern hits is the one asked where it runs.
+#[test]
+fn a_rule_where_main_judges_only_the_main_checkout() {
+    let manifest = probe(|rule| rule.within = Where::Main);
+    let main = checkout("where-main-only", None);
+    let out = Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "own", "own"])
+        .current_dir(main.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git worktree add");
+    let linked = main.path().join("own");
+    let line = "cargo xtask phpt --census";
+    assert!(denied(&manifest, main.path(), line));
+    assert!(!denied(&manifest, &linked, line));
+    let moved = format!("cd {} && {line}", linked.display());
+    assert!(!denied(&manifest, main.path(), &moved));
+    let moved = format!("cd {} && {line}", main.path().display());
+    assert!(denied(&manifest, &linked, &moved));
+}
+
+/// `git.merge-commits-itself` as #2751 ruled it: a merge that commits
+/// itself is refused in the main checkout and let through in a linked
+/// worktree, where a builder merges `main` into its branch; a neighbour
+/// in main does not place a merge `-C` runs in the worktree there.
+#[test]
+fn a_merge_that_commits_itself_is_refused_in_main_alone() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let main = checkout("merge-commits-itself", None);
+    let out = Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "own", "own"])
+        .current_dir(main.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git worktree add");
+    let linked = main.path().join("own");
+    let refused = |root: &Path, line: &str| {
+        judge(&manifest, root, &bash(line))
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.rule == "git.merge-commits-itself" && f.kind == Kind::Deny)
+    };
+    assert!(refused(main.path(), "git merge --no-ff t1234"));
+    assert!(!refused(main.path(), "git merge --no-ff --no-commit t1234"));
+    assert!(!refused(&linked, "git merge main"));
+    let apart = format!(
+        "git -C {} merge --abort; git -C {} merge main",
+        main.path().display(),
+        linked.display()
+    );
+    assert!(!refused(main.path(), &apart));
+}
+
 /// `unless_pattern` (#1149): a hit of the `deny_pattern` whose own command
 /// also matches it is let through, and a hit in another command of the
 /// same line is not.
@@ -3156,6 +3219,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
                 Where::Ticketed => ticketed.path(),
                 Where::Anywhere => workspace(),
                 Where::Operating => merging.path(),
+                Where::Main => main.path(),
             };
             let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
             let fired = judged
