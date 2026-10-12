@@ -24,7 +24,7 @@ use php_macros::php_class;
 
 use crate::api::abi::{
     ClassIterator, CloneObj, DebugInfo, DimensionRead, GcTable, Instance, IteratorElement,
-    ObjectHandlers, This, Untyped,
+    ObjectHandlers, Refusals, This, Untyped,
 };
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
@@ -214,8 +214,8 @@ impl ObjectHandlers for WeakReferenceHandlers {
     }
 
     /// `zend_weakref_handlers.clone_obj = NULL`.
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 
     /// `zend_weakref_get_debug_info` (`Z/Zend/zend_weakrefs.c:283`):

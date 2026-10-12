@@ -25,7 +25,7 @@ use php_unit::decl::ClassKind;
 
 use crate::api::abi::{
     ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, GcTable, Instance, IteratorElement,
-    ObjectHandlers, This, Untyped,
+    ObjectHandlers, Refusals, This, Untyped,
 };
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
@@ -546,12 +546,8 @@ impl ObjectHandlers for WrapperHandlers {
         GcTable::Properties
     }
 
-    fn clone_obj(&self) -> Option<crate::api::abi::CloneObj> {
-        None
-    }
-
-    fn clone_obj_with(&self) -> Option<crate::api::abi::CloneObjWith> {
-        None
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 }
 
@@ -1010,8 +1006,8 @@ impl ObjectHandlers for InternalHandlers {
         GcTable::Properties
     }
 
-    fn clone_obj(&self) -> Option<crate::api::abi::CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 }
 

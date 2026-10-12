@@ -30,7 +30,7 @@ use php_heap::{Fatal, FrameRef};
 use php_macros::php_class;
 use php_unit::Opcode;
 
-use crate::api::abi::{CloneObj, DtorObj, GcTable, Instance, ObjectHandlers, This};
+use crate::api::abi::{DtorObj, GcTable, Instance, ObjectHandlers, Refusals, This};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
@@ -200,8 +200,9 @@ impl ObjectHandlers for GeneratorHandlers {
         }
     }
 
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    /// `zend_generator_handlers.clone_obj = NULL`.
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 
     /// `zend_generator_get_constructor`.
