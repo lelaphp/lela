@@ -17,7 +17,7 @@ use std::process::Command;
 use xtask::scratch::{self, Tree};
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn sh(root: &Path, args: &[&str]) -> String {

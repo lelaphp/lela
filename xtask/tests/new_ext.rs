@@ -17,17 +17,14 @@ use xtask::scratch::Tree;
 use xtask::{api_check, budget, new_ext, unsafe_audit, vocab};
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// A scratch copy of the fixture with one commit, since a reading's stamp
 /// names `HEAD`.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("new-ext-{name}")).unwrap();
-    copy(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/new-ext"),
-        &dir,
-    );
+    copy(&xtask::package_dir().join("fixtures/new-ext"), &dir);
     // The pin is referenced by a path relative to the fixture's place in the tree.
     let seams = std::fs::read_to_string(dir.join("seams.toml")).unwrap();
     let pin = workspace().join("oracle.toml");

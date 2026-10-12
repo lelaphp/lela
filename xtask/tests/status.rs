@@ -10,7 +10,7 @@ use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// A scratch workspace: the tracked manifest, pin and registry, and no store.
@@ -1283,7 +1283,7 @@ fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
 #[test]
 fn every_phpt_reading_of_a_log_handed_in_is_one_versioned_line() {
     let root = scratch("every-log");
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status-phpt");
+    let fixture = xtask::package_dir().join("fixtures/status-phpt");
     let log = fixture.join("log.jsonl");
     let expected = std::fs::read_to_string(fixture.join("expected.jsonl")).unwrap();
     let every = ["--section", "phpt", "--format", "jsonl", "--every", "--log"];
@@ -1321,8 +1321,7 @@ fn every_budget_api_check_and_witness_reading_of_a_log_handed_in_is_one_versione
         ("api-check", "api-check", 6),
         ("witness", "witness", 5),
     ] {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/status-{section}"));
+        let fixture = xtask::package_dir().join(format!("fixtures/status-{section}"));
         let log = fixture.join("log.jsonl");
         let expected = std::fs::read_to_string(fixture.join("expected.jsonl")).unwrap();
         let every = [
@@ -2290,7 +2289,7 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
 fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render() {
     let root = scratch("torn");
     std::fs::write(root.join("AGENTS.md"), "# The map\n").unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
+    let fixture = xtask::package_dir().join("fixtures/store/torn.jsonl");
     let store = Store::of_workspace(&root);
     std::fs::create_dir_all(store.root().join("log")).unwrap();
     std::fs::copy(&fixture, store.root().join("log/permit.jsonl")).unwrap();

@@ -29,7 +29,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn tracked_text() -> String {
@@ -37,9 +37,7 @@ fn tracked_text() -> String {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/oracle")
-        .join(name);
+    let dir = xtask::package_dir().join("fixtures/oracle").join(name);
     assert!(dir.is_dir(), "no fixture at {}", dir.display());
     dir
 }
@@ -453,7 +451,7 @@ fn witness_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it()
 fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
     let root = Tree::new("variant-crosscheck").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/crosscheck");
+    let fixtures = xtask::package_dir().join("fixtures/crosscheck");
     let body = format!(
         "for arg in \"$@\"; do\n  case \"$arg\" in\n    --re) exec cat '{}' ;;\n    --ri) exec cat '{}' ;;\n  esac\ndone\nexit 1",
         fixtures.join("oracle.re").display(),

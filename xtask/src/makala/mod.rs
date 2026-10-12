@@ -326,7 +326,7 @@ pub(crate) fn makala(root: &Path) -> Result<PathBuf> {
 /// control both comparisons are held to.
 #[cfg(test)]
 pub(crate) fn fixture() -> Registry {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/makala");
+    let dir = crate::package_dir().join("fixtures/makala");
     let text = std::fs::read_to_string(dir.join("divergence.toml")).unwrap_or_default();
     Registry::parse(&text).unwrap_or_default()
 }

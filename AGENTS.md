@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=09b89fb235829d73444da7936efa7992acb5901d45aa0f91cff25d59d8323129 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=3090e6e2d4b6001aa22a6bc2251f498b521ad43d87e57e9a1b5cba3794be2ccd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -130,9 +130,9 @@ third-engine-design.md
 | sapi | sapi.lock | 50 |  |
 | tier | tier.lock | 32 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 409 |  |
+| harness | xtask.lock | 410 |  |
 
-<!-- /computed in=cf2b376cf25b46d287061ff888fee7d30d074b454485acee2b5fe19d63207db1 out=41e68d789c5d59c62ff7ec603d97060feccf16f26c16b4ad4d2fda69b9b2d5e7 -->
+<!-- /computed in=9f98ee99f4d60fca2406ecfbf72a76fc00e940d74735918512b9e90f9c450bcd out=d7d2b5aede2a05de066e1f10c3769ef7141b417204b038b51404425bde588bfd -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -208,10 +208,10 @@ Commands:
   vocab              The glossary as a sensor: `_Avoid_` words in public item names and rustdoc prose, never in a lock; one reading per crate
 
 Options:
-      --root <DIR>  The workspace root; defaults to the workspace this binary was built in
+      --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=39190a4376fc397d39c881de84fc9341486a3d4d3baa3b9232516be333bb3d6e out=4e2f456144c5db93cafae3e5c76a2c53c43947b8bcdbaf092ed171daaa414359 -->
+<!-- /computed in=372e2ab6adbf7299d91cba550c8063732e17ec744bb9009bbe6c8222dce649b2 out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

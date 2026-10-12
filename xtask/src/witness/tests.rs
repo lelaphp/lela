@@ -1043,7 +1043,7 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
             .is_empty()
     );
 
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = crate::package_dir();
     let tracked = fs::read_to_string(workspace.join("../oracle.toml")).unwrap();
     let commented = Pin::parse(&format!("# a person's note\n{tracked}")).unwrap();
     assert_eq!(

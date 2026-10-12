@@ -22,11 +22,11 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/rules/harness.self")
+    xtask::package_dir().join("fixtures/rules/harness.self")
 }
 
 const SESSION: &str = "5d0c7a1e-2b4f-4e8a-9c61-0f3b8d2e7a45";
@@ -568,7 +568,7 @@ fn a_file_is_put_back_to_its_unstaged_edit_and_an_untracked_one_is_left() {
 /// same line with no approval is denied before it runs (#625).
 #[test]
 fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
-    let approval = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/approval");
+    let approval = xtask::package_dir().join("fixtures/approval");
     let transcript = approval.join("admit").join(format!("{SESSION}.jsonl"));
     let approved = "# The divergence registry of the approval fixture (#2247).\n[[divergence]]\n\
                     id = \"fixture-1\"\nstatus = \"accepted\"\nreason = \"Ruled by a person in the session.\"\n";

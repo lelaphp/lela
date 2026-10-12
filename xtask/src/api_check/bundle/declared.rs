@@ -274,16 +274,13 @@ impl<'ast> Visit<'ast> for Scan {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
 
     /// What the tracked `ext/<name>` declares `Required`, and where it
     /// declares what the instrument does not read.
     fn declared(name: &str) -> (Vec<String>, Vec<String>) {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../ext")
-            .join(name);
+        let dir = crate::package_dir().to_path_buf().join("../ext").join(name);
         let krate = Present {
             name: format!("ext/{name}"),
             dir,

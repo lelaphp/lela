@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     fn workspace() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
+        crate::package_dir()
             .parent()
             .expect("xtask sits in the workspace")
             .to_path_buf()

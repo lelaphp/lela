@@ -39,7 +39,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn manifest() -> Manifest {
@@ -79,7 +79,7 @@ fn source() -> Option<PathBuf> {
 }
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compile-identity")
+    xtask::package_dir().join("fixtures/compile-identity")
 }
 
 fn registry(text: &str) -> Registry {
@@ -130,8 +130,7 @@ impl Scratch {
         scratch_workspace(workspace(), &root).unwrap();
         let corpus = root.join("corpus");
         fs::create_dir_all(&corpus).unwrap();
-        let fixtures =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compile-identity/corpus");
+        let fixtures = xtask::package_dir().join("fixtures/compile-identity/corpus");
         for entry in fs::read_dir(&fixtures).unwrap() {
             let file = entry.unwrap().path();
             let name = file.file_name().unwrap().to_string_lossy().into_owned();

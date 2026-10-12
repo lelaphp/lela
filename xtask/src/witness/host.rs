@@ -670,7 +670,7 @@ mod tests {
     /// The tracked pin with `php-cgi` standing at `cgi`, pinned by the
     /// digest given, the file's own where none is.
     fn pin(cgi: &Path, md5: Option<&str>) -> Pin {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = crate::package_dir().join("..");
         let mut pin = Pin::parse(&fs::read_to_string(root.join("oracle.toml")).unwrap()).unwrap();
         let md5 = md5.map_or_else(
             || format!("{:x}", md5::compute(fs::read(cgi).unwrap_or_default())),

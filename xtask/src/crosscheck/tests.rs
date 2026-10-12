@@ -10,7 +10,7 @@ use super::*;
 use crate::manifest::Crate;
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/crosscheck")
+    crate::package_dir().join("fixtures/crosscheck")
 }
 
 fn registry(text: &str) -> Registry {
@@ -213,7 +213,7 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
             && engine.starts_with(b"Extension [ <persistent> extension #7 ctype"),
         "the fixture differs by its load number"
     );
-    let with_row = Manifest::load(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+    let with_row = Manifest::load(crate::package_dir().parent().unwrap())
         .unwrap()
         .pin
         .recipe

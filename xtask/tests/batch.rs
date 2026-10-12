@@ -17,11 +17,11 @@ use xtask::scratch::Tree;
 use xtask::{clippy, test};
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test/batch")
+    xtask::package_dir().join("fixtures/test/batch")
 }
 
 const CRATES: [&str; 9] = [
@@ -250,7 +250,7 @@ fn one_clippy_run_reads_each_crate_as_a_run_over_it_alone() {
 /// cannot see; a crate naming the word in a comment or a string is not.
 #[test]
 fn a_crate_whose_sources_name_debug_assertions_is_linted_again_in_release() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/clippy/release-cfg");
+    let fixture = xtask::package_dir().join("fixtures/clippy/release-cfg");
     let root = committed(&fixture, "clippy-release");
     let manifest = Manifest::load(&root).unwrap();
     let all = clippy::run(&root, &manifest, &[]).unwrap();
@@ -325,9 +325,7 @@ fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_a
             .iter()
             .find(|(id, _, _)| *id == rule.id)
             .unwrap_or_else(|| panic!("rule {} has no fixture this test reads", rule.id));
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/rules")
-            .join(&rule.id);
+        let fixture = xtask::package_dir().join("fixtures/rules").join(&rule.id);
         let root = committed(&fixture, &format!("deny-lints-{}", rule.id));
         let manifest = Manifest::load(&root).unwrap();
         let readings = clippy::run(&root, &manifest, &[]).unwrap();

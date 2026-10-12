@@ -16,11 +16,11 @@ use xtask::scratch::Tree;
 use xtask::test;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture() -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test/failing");
+    let dir = xtask::package_dir().join("fixtures/test/failing");
     assert!(dir.is_dir(), "no fixture at {}", dir.display());
     dir
 }

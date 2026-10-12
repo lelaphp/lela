@@ -284,7 +284,7 @@ mod tests {
     /// control, named by the workload's file.
     #[test]
     fn each_workload_is_a_series_against_php_fpm_and_its_a_a_control() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = crate::package_dir().join("..");
         let bars = declared(&root).unwrap();
         let named: Vec<(&str, Held)> = bars.iter().map(|bar| (bar.id.as_str(), bar.held)).collect();
         assert!(

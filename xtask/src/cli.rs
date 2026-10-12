@@ -14,7 +14,7 @@ use crate::phpt::Lane;
     disable_help_subcommand = true
 )]
 pub(crate) struct Cli {
-    /// The workspace root; defaults to the workspace this binary was built in.
+    /// The workspace root; defaults to the workspace this binary runs in.
     #[arg(long, global = true, value_name = "DIR")]
     pub root: Option<PathBuf>,
     #[command(subcommand)]
