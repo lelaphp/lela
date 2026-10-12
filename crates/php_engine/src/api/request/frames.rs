@@ -853,7 +853,7 @@ impl Request {
         if crate::observer::frameless_observed(self, function) {
             return self.push_room(room, header);
         }
-        Ok(self.vm.push_frameless(room, header))
+        self.vm.push_frameless(room, header)
     }
 
     /// The callee `header` names and the room its call takes
