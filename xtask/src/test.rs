@@ -49,6 +49,37 @@ use crate::sources;
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "test";
 
+pub use crate::batch::without_git;
+
+/// `path` as the index the commit's tree is written from holds it, `git
+/// show :<path>` in `root`: under pre-commit the one git handed the hook,
+/// which [`without_git`] keeps for a test as `XTASK_COMMIT_INDEX`, where
+/// it lies in `root`'s git directory, and the checkout's own elsewhere, a
+/// scratch repository's among them (#1416, #2747).
+pub fn committed(root: &Path, path: &str) -> Result<String> {
+    let mut git = Command::new("git");
+    git.args(["show", &format!(":{path}")]).current_dir(root);
+    if let Some(index) = std::env::var_os(batch::COMMIT_INDEX) {
+        let dir = crate::git::git(root, &["rev-parse", "--absolute-git-dir"], None)
+            .ok()
+            .and_then(|dir| fs::canonicalize(dir.trim()).ok());
+        let lies = Path::new(&index)
+            .parent()
+            .and_then(|p| fs::canonicalize(p).ok());
+        if dir.is_some() && lies == dir {
+            git.env("GIT_INDEX_FILE", index);
+        }
+    }
+    let out = git.output().with_context(|| format!("git show :{path}"))?;
+    if !out.status.success() {
+        bail!(
+            "git show :{path}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    String::from_utf8(out.stdout).with_context(|| format!("{path} is not UTF-8"))
+}
+
 /// Run the tests of every crate that exists, or of `only`; one reading
 /// each.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
