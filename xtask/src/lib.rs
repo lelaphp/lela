@@ -95,6 +95,11 @@ use sources::Standing;
 /// the one it was built in. Cargo reuses one compiled binary for every
 /// checkout sharing a target directory whose sources are no newer than it,
 /// so a path baked in at compile time can name another checkout (#2719).
+/// The working directory comes first, as it does for cargo finding a
+/// workspace, since every process a cargo-run one starts inherits its
+/// `CARGO_MANIFEST_DIR`, a session `track work` spawns and its hooks
+/// among them; so a run from inside a fixture workspace measures that
+/// fixture, as `cargo` run there would.
 pub(crate) fn built_root() -> PathBuf {
     let workspace = |from: PathBuf| {
         from.ancestors()
