@@ -5386,8 +5386,11 @@ impl Emit<'_> {
 
     /// What `zend_compile_params` and `zend_compile_attributes` left on
     /// the op array of the method whose body is compiling, read by a call
-    /// to it from its own body; a closure's prologue, one written in a
-    /// parameter's default among them, leaves nothing on it.
+    /// to it from its own body. The method's prologue is the first to
+    /// record it: a closure's, one written in a parameter's default
+    /// among them, records nothing, and a function declared in the body
+    /// or a member of a class declared there compiles under another
+    /// active class, or none.
     fn declared_signature(&mut self, parameters: &[Parameter], attributes: &[Attribute]) {
         if self.fn_flags.closure {
             return;
@@ -5411,12 +5414,12 @@ impl Emit<'_> {
     /// declared at `at` while it compiles: the methods compiled so far,
     /// and the one whose body is compiling where `at` is the active
     /// class, which `zend_begin_method_decl` added before its body.
-    fn table_method(&self, at: usize, lowered: &[u8]) -> Option<TableMethod> {
+    fn table_method(&self, at: usize, name: &[u8]) -> Option<TableMethod> {
         let decl = self.classes.get(at)?;
         if let Some(method) = decl
             .methods
             .iter()
-            .find(|m| m.function.name.0.eq_ignore_ascii_case(lowered))
+            .find(|m| m.function.name.0.eq_ignore_ascii_case(name))
         {
             return Some(TableMethod {
                 visibility: method.visibility,
@@ -5432,7 +5435,7 @@ impl Emit<'_> {
         let declaring = active
             .declaring
             .as_ref()
-            .filter(|declaring| declaring.name.eq_ignore_ascii_case(lowered))?;
+            .filter(|declaring| declaring.name.eq_ignore_ascii_case(name))?;
         let signature = declaring.signature.as_ref()?;
         Some(TableMethod {
             visibility: declaring.visibility,
@@ -16384,10 +16387,10 @@ impl Emit<'_> {
     /// `extended_value`, the arguments sent for a callee nothing is
     /// known of, and `DO_FCALL`, but for a method of `$this` the class
     /// being compiled pins down ([`Self::known_on_this`]). A method the
-    /// program names is `op2`'s
-    /// `CV` or temporary and takes no cache slot; the engine holds it to
-    /// be a string before it reads the receiver, so `Method name must be
-    /// a string` stands before what a receiver that is no object raises.
+    /// program names is `op2`'s `CV` or temporary and takes no cache
+    /// slot; the engine holds it to be a string before it reads the
+    /// receiver, so `Method name must be a string` stands before what a
+    /// receiver that is no object raises.
     ///
     /// ```php
     /// class C { function hi($x) { return "hi $x"; } }
@@ -17213,9 +17216,9 @@ impl Emit<'_> {
     /// of the name; a private or protected one is compatible only from
     /// the class itself while it compiles, `ce == CG(active_class_entry)`,
     /// which finds its own method too ([`Self::table_method`]). The
-    /// name is resolved as
-    /// the fetch resolves it ([`Self::class_name`]), which is the name a
-    /// declaration of the file took under the same namespace.
+    /// name is resolved as the fetch resolves it ([`Self::class_name`]),
+    /// which is the name a declaration of the file took under the same
+    /// namespace.
     #[cfg(test)]
     fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
         self.known_method_of(&self.class_name(class), method)
