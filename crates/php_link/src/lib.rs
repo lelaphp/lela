@@ -63,7 +63,8 @@ pub use rows::{
 };
 
 pub use hooks::{
-    Resolved, ResolvedHook, Variance, resolve_property, set_hook_refused, verify_hooked_property,
+    HookVariance, Resolved, ResolvedHook, Variance, resolve_property, set_hook_variance,
+    verify_hooked_property,
 };
 
 const MAY_BE_OBJECT: u32 = 1 << 8;

@@ -6321,6 +6321,32 @@ class D extends A { public function m(A|string $a): D|string {} }
         );
     }
 
+    /// `zend_compile_property_hooks`' `num_hooked_prop_variance_checks`
+    /// (#2688): a `set` hook whose parameter's type names a class not
+    /// declared yet keeps the class from the early bind and from
+    /// opcache's delayed one, so its opline is `DECLARE_CLASS` with no
+    /// parent operand, as
+    /// `Zend/tests/property_hooks/set_value_parameter_type_variance_003.phpt`
+    /// dumps.
+    #[test]
+    fn a_set_hook_unresolved_while_compiling_is_declare_class() {
+        let dump = dump_of(
+            b"<?php
+class Test {
+    public X $prop {
+        set(Y $prop) {}
+    }
+}
+interface X {}
+interface Y {}
+",
+        );
+        assert!(
+            dump.contains("0000 DECLARE_CLASS string(\"test\")\n0001 RETURN int(1)\n"),
+            "php's $_main, {dump}"
+        );
+    }
+
     /// `zend_delayed_compile_prop` under `zend_compile_encaps_list`
     /// (#2676): `"$this->p"` inside a method reads the property off the
     /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.

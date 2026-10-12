@@ -1064,6 +1064,34 @@ struct ActiveClass {
     /// put into the class's `function_table` before the body: none
     /// between methods.
     declaring: Option<Declaring>,
+    /// `ce->num_hooked_prop_variance_checks`: the `set` hooks whose
+    /// parameter's type could not be held to the property's while the
+    /// file compiles.
+    hooked_variance_checks: u32,
+}
+
+impl ActiveClass {
+    /// `CG(active_class_entry) = ce` as the class's body begins: no
+    /// method declaring yet and no hook counted.
+    fn entered(name: &[u8], kind: ClassKind, at: usize, anonymous: bool) -> ActiveClass {
+        ActiveClass {
+            name: name.to_vec(),
+            kind,
+            at,
+            anonymous,
+            declaring: None,
+            hooked_variance_checks: 0,
+        }
+    }
+}
+
+/// What `zend_compile_class_decl` leaves for its caller once the body
+/// has compiled: where the declaration stands in [`Emit::classes`], its
+/// parent resolved, and `ce->num_hooked_prop_variance_checks`.
+struct Entered {
+    at: usize,
+    parent: Option<Vec<u8>>,
+    hooked_variance_checks: u32,
 }
 
 /// The method `zend_begin_method_decl` has put into
@@ -5021,7 +5049,11 @@ impl Emit<'_> {
         let toplevel = self.depth == 1;
         let name = self.declare_symbol(Symbol::Class, &class.name)?;
         let line = self.line;
-        let (at, parent) = self.class_entry(class, &name, false)?;
+        let Entered {
+            at,
+            parent,
+            hooked_variance_checks,
+        } = self.class_entry(class, &name, false)?;
         if let Some(decl) = self.classes.get_mut(at) {
             decl.flags.is_top_level = toplevel;
         }
@@ -5037,12 +5069,16 @@ impl Emit<'_> {
         // already holds, the file's, the engine's or the request's, fails
         // `zend_hash_add_ptr` before any link is tried
         // (`register_early_bound_ce`), and the opline raises the
-        // redeclaration when it runs.
-        let early = toplevel
+        // redeclaration when it runs. Nor is one whose `set` hook's
+        // parameter type the file could not hold to its property's,
+        // which only the link holds it to.
+        let unlinked_free = hooked_variance_checks == 0
             && self
                 .classes
                 .get(at)
-                .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty())
+                .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty());
+        let early = toplevel
+            && unlinked_free
             && self.bound_class(&name).is_none()
             && !self.request_classes.holds(&name.to_ascii_lowercase())
             && match &parent {
@@ -5056,11 +5092,7 @@ impl Emit<'_> {
             self.bound.push(at);
             return Ok(());
         }
-        let delayed = toplevel
-            && self
-                .classes
-                .get(at)
-                .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty());
+        let delayed = toplevel && unlinked_free;
         self.declare_class(at, &name, parent.as_deref(), line, delayed)
     }
 
@@ -5098,7 +5130,7 @@ impl Emit<'_> {
         class: &Class,
         name: &[u8],
         anonymous: bool,
-    ) -> Result<(usize, Option<Vec<u8>>), CompileError> {
+    ) -> Result<Entered, CompileError> {
         let name = name.to_vec();
         let line = self.line;
         let parent = match &class.parent {
@@ -5129,13 +5161,8 @@ impl Emit<'_> {
         // so `self` in an attribute of the class is the class, an
         // anonymous one's inside a method among them.
         let at = self.classes.len();
-        let enclosing = self.active_class.replace(ActiveClass {
-            name: name.clone(),
-            kind: class.kind,
-            at,
-            anonymous,
-            declaring: None,
-        });
+        let enclosing =
+            (self.active_class).replace(ActiveClass::entered(&name, class.kind, at, anonymous));
         let enclosing_parent = std::mem::replace(&mut self.active_parent, parent.clone());
         let attributes = self.class_attributes(class, &name, class.line);
         self.active_class = enclosing;
@@ -5170,13 +5197,7 @@ impl Emit<'_> {
             object_beside: Box::default(),
             attribute_validator: None,
         };
-        self.active_class = Some(ActiveClass {
-            name: name.clone(),
-            kind: class.kind,
-            at,
-            anonymous,
-            declaring: None,
-        });
+        self.active_class = Some(ActiveClass::entered(&name, class.kind, at, anonymous));
         self.active_parent.clone_from(&parent);
         self.class_placed(decl, class, &name, at)?;
         if anonymous {
@@ -5192,6 +5213,29 @@ impl Emit<'_> {
                 self.foldable_constants(&self.classes[at].constants, method.constants_before);
             self.method_decl(at, method)?;
         }
+        self.own_bodies_last(mark, at);
+        self.active_constants.clear();
+        let hooked_variance_checks = self
+            .active_class
+            .take()
+            .map_or(0, |active| active.hooked_variance_checks);
+        self.active_parent = None;
+        self.member_statements(&class.statement_lines);
+        self.line = line;
+        if is_enum {
+            self.verify_enum(at, &name)?;
+        }
+        Ok(Entered {
+            at,
+            parent,
+            hooked_variance_checks,
+        })
+    }
+
+    /// The method bodies compiled since `mark` with those of the class
+    /// at `at` last, after those of every class one of them declared,
+    /// which `CG(class_table)` added as its declaration completed.
+    fn own_bodies_last(&mut self, mark: usize, at: usize) {
         let own = u32::try_from(at).unwrap_or(u32::MAX);
         let (mut bodies, nested): (Vec<_>, Vec<_>) = self
             .methods
@@ -5199,15 +5243,6 @@ impl Emit<'_> {
             .partition(|body| body.class == own);
         self.methods.extend(nested);
         self.methods.append(&mut bodies);
-        self.active_constants.clear();
-        self.active_class = None;
-        self.active_parent = None;
-        self.member_statements(&class.statement_lines);
-        self.line = line;
-        if is_enum {
-            self.verify_enum(at, &name)?;
-        }
-        Ok((at, parent))
     }
 
     /// The class's constants and properties laid down, its place `at`
@@ -5342,7 +5377,7 @@ impl Emit<'_> {
             self.active_property,
             self.active_hook,
         ) = enclosing;
-        let (_, parent) = entered?;
+        let parent = entered?.parent;
         // "Reset lineno for final opcodes and errors".
         self.line = class.line;
         let (op2_type, op2) = match parent {

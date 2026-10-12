@@ -139,8 +139,11 @@ impl Emit<'_> {
     /// `zend_compile_property_hooks`' check of a `set` hook as soon as
     /// it has compiled, before the next hook: its parameter's type held
     /// to the property's against the classes bound while the file
-    /// compiles ([`php_link::set_hook_refused`]), a refusal being
-    /// the compile error it is in php, raised before anything runs.
+    /// compiles ([`php_link::set_hook_variance`]), a refusal being the
+    /// compile error it is in php, raised before anything runs, and a
+    /// class it names not bound yet counted on the class as
+    /// `num_hooked_prop_variance_checks` counts it, which keeps the
+    /// class from the early bind and from the delayed one.
     ///
     /// ```php
     /// echo "not reached\n";
@@ -149,7 +152,11 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Type of parameter $v of hook C::$x::set must be compatible with property type in %s on line 3
     /// ```
-    fn set_hook_verified(&self, hooked: &Hooked<'_>, set: &MethodDecl) -> Result<(), CompileError> {
+    fn set_hook_verified(
+        &mut self,
+        hooked: &Hooked<'_>,
+        set: &MethodDecl,
+    ) -> Result<(), CompileError> {
         let Some(scope) = hooked
             .pending
             .or_else(|| self.classes.get(usize::try_from(hooked.class).ok()?))
@@ -164,10 +171,20 @@ impl Emit<'_> {
                 record: None,
             })
         };
-        match php_link::set_hook_refused(scope, hooked.name, hooked.declared, set, &lookup) {
-            Some(refusal) => Err(self.compile_error(refusal.to_string())),
-            None => Ok(()),
+        let variance =
+            php_link::set_hook_variance(scope, hooked.name, hooked.declared, set, &lookup);
+        match variance {
+            php_link::HookVariance::Refused(refusal) => {
+                return Err(self.compile_error(refusal.to_string()));
+            }
+            php_link::HookVariance::Unresolved => {
+                if let Some(active) = self.active_class.as_mut() {
+                    active.hooked_variance_checks += 1;
+                }
+            }
+            php_link::HookVariance::Holds => {}
         }
+        Ok(())
     }
 
     /// One hook held to its property, php's arms of the loop in their
