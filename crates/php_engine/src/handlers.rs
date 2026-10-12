@@ -11414,8 +11414,9 @@ fn frameless_call(
             None => req.release(value),
         }
     }
-    // An observed call is php's full call, which ends with the result
-    // whether the native threw or not (`Z/Zend/zend_execute.c:1597`).
+    // The call ends with the result whether the native threw or not, as
+    // php's frameless handler and its full call for an observed one do
+    // (`Z/Zend/zend_execute.c:1597`).
     let served = req.serve_native(Function(entry.function), OnThrow::ReturnValue);
     req.pop_call();
     let at = req.vm().opline(frame);

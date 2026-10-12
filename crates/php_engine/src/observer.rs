@@ -549,7 +549,7 @@ pub(crate) fn observing(req: &Request) -> bool {
 #[inline(always)] // as `call`
 #[allow(clippy::inline_always)]
 pub(crate) fn frameless_observed(req: &Request, function: Function) -> bool {
-    req.shared.observers != 0 && !req.native_unobserved(function)
+    observing(req) && !req.native_unobserved(function)
 }
 
 /// The call home: `frame` pushed, its prologue not yet served. One load and

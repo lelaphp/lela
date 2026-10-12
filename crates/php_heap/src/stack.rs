@@ -150,10 +150,10 @@ impl Placed {
 /// and not of the request's heap, so the frame opens no page, moves
 /// neither `memory_get_usage()` nor its peak, and meets no
 /// `memory_limit`, as php's call meets none. A room holds a header and
-/// three operands and never more, and the stack keeps the rooms its
-/// frames gave back for the next ([`VmStack::push_frameless`]), so it
-/// holds one room per such call in flight; a room is freed when it is
-/// dropped. The frame stands among the stack's frames, the chain a
+/// three operands and never more, one per such call in flight, and
+/// the stack keeps the last one given back for the next call
+/// ([`VmStack::push_frameless`]); a room is freed when it is dropped.
+/// The frame stands among the stack's frames, the chain a
 /// backtrace walks, as php's backtrace adds a frame for the call
 /// (`Z/Zend/zend_builtin_functions.c:1984`), and is never linked into
 /// the chain another process reads (design §5.6), which php's call is
@@ -194,7 +194,8 @@ impl Drop for Loose {
 /// it is dropped, as an uninitialised zval reads.
 #[derive(Debug)]
 pub struct Frame<H> {
-    /// The frame's first CV, on its page; the header stands in the
+    /// The frame's first CV, in the room its push gave it; the header
+    /// stands in the
     /// [`FRAME_HEADER_SLOTS`] slots before it.
     at: NonNull<Zval>,
     len: usize,
@@ -351,9 +352,9 @@ pub struct VmStack<H> {
     pages: Vec<Page>,
     frames: Vec<Frame<H>>,
     entries: Vec<FrameRef>,
-    /// The rooms off the pages the frameless calls' frames gave back,
-    /// for the next ones.
-    rooms: Vec<Loose>,
+    /// The room off the pages the last frameless call's frame gave
+    /// back, the next one's.
+    spare: Option<Loose>,
 }
 
 impl<H> Default for VmStack<H> {
@@ -363,7 +364,7 @@ impl<H> Default for VmStack<H> {
             pages: Vec::new(),
             frames: Vec::new(),
             entries: Vec::new(),
-            rooms: Vec::new(),
+            spare: None,
         }
     }
 }
@@ -400,7 +401,7 @@ impl<H> VmStack<H> {
 
     /// `zend_vm_stack_destroy`: every page given back to `heap`, the
     /// newest first, and every frame with them, the rooms off the pages
-    /// with those. The headers of the
+    /// and the spare one with those. The headers of the
     /// frames still standing are handed back, the newest first, so what
     /// each names beyond its words is given up where the engine keeps
     /// it; a stack every frame was popped off hands back none.
@@ -415,7 +416,7 @@ impl<H> VmStack<H> {
         for page in self.pages.drain(..).rev() {
             page.give_back(heap);
         }
-        self.rooms.clear();
+        self.spare = None;
         dropped
     }
 
@@ -518,13 +519,20 @@ impl<H> VmStack<H> {
         // `H` to fit, aligned, and nothing else names.
         unsafe { frame.header_at().write(header) };
         frame.cells_mut().fill(Zval::UNDEF);
-        self.resume_frame(frame)
+        self.stand(frame)
+    }
+
+    /// `frame` on top of the stack, its position the one it is named by.
+    fn stand(&mut self, frame: Frame<H>) -> FrameRef {
+        let at = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
+        self.frames.push(frame);
+        FrameRef(at)
     }
 
     /// Push the frame of a call php lays down nowhere, an unobserved
     /// frameless call's, of `slots` slots and the header's room before
     /// them: in a room off the pages and off `heap` ([`Loose`]), the
-    /// one the last such frame gave back where one was. php's
+    /// one the last such frame gave back where it stands spare. php's
     /// `ZEND_FRAMELESS_ICALL_*` pushes no frame unless an observer
     /// watches the function (`Z/Zend/zend_vm_def.h:9775`), so this one
     /// opens no page where the top page has no room for it, reads in
@@ -538,7 +546,7 @@ impl<H> VmStack<H> {
                 "InternalError: a frameless call's frame of {slots} slots, past the {LOOSE_OPERANDS} operands its room holds"
             )));
         }
-        let room = self.rooms.pop().unwrap_or_else(Loose::new);
+        let room = self.spare.take().unwrap_or_else(Loose::new);
         // SAFETY: the room holds `LOOSE_SLOTS` slots, so the first CV's
         // place, `FRAME_HEADER_SLOTS` slots in, is inside it.
         let at = unsafe { room.at().add(FRAME_HEADER_SLOTS) };
@@ -650,11 +658,16 @@ impl<H> VmStack<H> {
 
     /// Where a frame the stack let go of stood given back: its room on
     /// the page, the page it opened, the allocation of its own, or the
-    /// room off the pages, kept for the next frameless call.
+    /// room off the pages, kept for the next frameless call unless one
+    /// is kept already.
     fn leave(&mut self, heap: &mut Heap, frame: Frame<H>) {
         match frame.placed {
             Placed::Heap { .. } => frame.free(heap),
-            Placed::Loose(room) => self.rooms.push(room),
+            Placed::Loose(room) => {
+                if self.spare.is_none() {
+                    self.spare = Some(room);
+                }
+            }
             Placed::On { from } => {
                 if let Some(page) = self.pages.last_mut() {
                     page.top = from;
@@ -728,9 +741,7 @@ impl<H> VmStack<H> {
     /// which pushes the frame where the resumer stands, on a fiber's
     /// stack when a fiber resumes it (design §5.11).
     pub fn resume_frame(&mut self, frame: Frame<H>) -> FrameRef {
-        let at = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
-        self.frames.push(frame);
-        FrameRef(at)
+        self.stand(frame)
     }
 
     /// A frame [`VmStack::move_to_heap`] took, copied back onto this
@@ -1059,29 +1070,32 @@ mod tests {
         // frameless call it makes takes a room of its own.
         assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
         assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
-        assert!(stack.push_frameless(1, Head::default()).is_ok());
+        let inner = stack.push_frameless(1, Head::default());
         assert!(stack.push_frameless(4, Head::default()).is_err());
+        let room = |stack: &VmStack<Head>, f: Option<FrameRef>| {
+            f.and_then(|f| stack.frames.get(f.0 as usize)).map(|f| f.at)
+        };
+        let (outer_room, inner_room) = (room(&stack, Some(call)), room(&stack, inner.ok()));
         assert_eq!(stack.current().0, 1094);
+        assert!(outer_room.is_some() && inner_room.is_some() && outer_room != inner_room);
         stack.pop_frame(&mut heap);
         stack.pop_frame(&mut heap);
-        assert_eq!(stack.rooms.len(), 1);
+        assert!(stack.spare.is_some());
         assert_eq!(heap.memory_usage(false), full);
         stack.pop_frame(&mut heap);
         // On a page with room, as on a full one: the room is the one
-        // given back, and the page's top stands where it stood.
+        // kept spare, and the page's top stands where it stood; the
+        // outer call's room, given back with one kept, is freed.
         stack.pop_frame(&mut heap);
-        assert_eq!(stack.rooms.len(), 2);
-        let again = stack.push_frameless(2, Head::default());
+        let again = stack.push_frameless(2, Head::default()).ok();
+        assert_eq!(room(&stack, again), inner_room);
         assert_eq!(
-            again
-                .ok()
-                .and_then(|f| stack.frame(f))
-                .map(|f| f.slot(Slot(0))),
+            again.and_then(|f| stack.frame(f)).map(|f| f.slot(Slot(0))),
             Some(Zval::UNDEF)
         );
-        assert_eq!(stack.rooms.len(), 1);
+        assert!(stack.spare.is_none());
         stack.pop_frame(&mut heap);
-        assert_eq!(stack.rooms.len(), 2);
+        assert!(stack.spare.is_some());
         assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
         assert_eq!(heap.memory_usage(false), full);
         assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
