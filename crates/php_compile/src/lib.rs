@@ -6377,6 +6377,32 @@ class C {
         assert!(dump.contains(y), "php's C::$y::get, {dump}");
     }
 
+    /// `zend_compile_static_call`'s `self::` reads
+    /// `CG(active_class_entry)` itself, never the table's class of its
+    /// name: in a second `class A` declared under an `if`, `self::f($x)`
+    /// is the class being compiled's, which has no `f`, so `DO_FCALL`
+    /// with `$x` sent as to an unknown callee, though the `A` bound
+    /// early has `f(&$r)`; a hook's `self::h()` to its own private `h`
+    /// above is `DO_UCALL`.
+    #[test]
+    fn self_in_a_class_redeclaring_a_bound_name_is_the_class_compiling() {
+        let dump = dump_of(
+            b"<?php
+class A { public static function f(&$r) {} }
+if (true) {
+    class A { function g() { self::f($x); } private function h() {} public $p { get => self::h(); } }
+}
+",
+        );
+        let g = "0000 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"f\")\n\
+                 0001 SEND_VAR_EX CV0($x) 1\n\
+                 0002 DO_FCALL\n";
+        let p = "0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string(\"h\")\n\
+                 0001 V0 = DO_UCALL\n";
+        assert!(dump.contains(g), "php's A::g, {dump}");
+        assert!(dump.contains(p), "php's A::$p::get, {dump}");
+    }
+
     /// `zend_compile_static_call` over a class bound early (#2016):
     /// `zend_get_compatible_func_or_null` finds the method in the linked
     /// class's `function_table`, which holds what it inherited, so

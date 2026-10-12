@@ -16361,8 +16361,7 @@ impl Emit<'_> {
             _ if constructor => None,
             ClassRef::Named(name) => self.known_method_of(name, method),
             ClassRef::Scope(fetch) if fetch & 0x0f == FETCH_CLASS_SELF && self.scope_known() => {
-                let active = self.active_name().unwrap_or_default();
-                self.known_method_of(&active, method)
+                self.known_method_of_active(method)
             }
             ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
         };
@@ -17283,16 +17282,23 @@ impl Emit<'_> {
             let flagged = attributes::deprecated_or_no_discard(&found.function.attributes);
             return Some((Known::User { flagged }, callee));
         }
-        // Else `CG(active_class_entry)` by its name, the class whose
-        // body is compiling, which may call any method of its own.
+        // Else `CG(active_class_entry)` by its name.
         let active = self.active_class.as_ref()?;
         if !active.name.eq_ignore_ascii_case(class) {
             return None;
         }
-        // The methods `zend_enum_register_funcs` gives an enum are added
-        // at the link, so while the body compiles the table holds an
-        // enum's own `cases` alone, where it declares one.
-        self.table_method(active.at, method)
+        self.known_method_of_active(method)
+    }
+
+    /// [`Self::known_method_of`] over `CG(active_class_entry)`, the class
+    /// whose body is compiling, which `self::` names whatever the table
+    /// holds under its name, and which may call any method of its own.
+    /// The methods `zend_enum_register_funcs` gives an enum are added at
+    /// the link, so while the body compiles the table holds an enum's
+    /// own `cases` alone, where it declares one.
+    fn known_method_of_active(&self, method: &[u8]) -> Option<(Known, Callee)> {
+        let at = self.active_class.as_ref()?.at;
+        self.table_method(at, method)
             .map(|m| (Known::User { flagged: m.flagged }, m.callee))
     }
 
@@ -17302,7 +17308,9 @@ impl Emit<'_> {
     /// in its own, with the class that declared it. A class bound while
     /// the file compiles implements no interface and uses no trait, and
     /// one the engine declared declares what it implements, so the
-    /// parents' tables are the whole of it.
+    /// parents' tables are the whole of it. The walk stops at a depth
+    /// of 64, as the linker's own walks up a chain do, so a chain no
+    /// link has refused yet cannot loop it.
     fn linked_method<'d>(
         &'d self,
         mut class: &'d ClassDecl,
