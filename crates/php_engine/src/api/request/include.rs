@@ -314,6 +314,33 @@ impl Request {
 
     /// [`Request::include_file`] through a `zend_file_handle` of the kind
     /// `handle` names.
+    ///
+    /// A file that resolves and then does not read compiles to nothing,
+    /// and the include fails as one nothing opens; the reason the stream
+    /// warning gives is #2766's:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/locked.inc';
+    /// file_put_contents($f, '<?php return 1;'); chmod($f, 0);
+    /// var_dump(include $f, include_once $f);
+    /// try { require $f; } catch (Error $e) { echo get_class($e), "\n"; }
+    /// chmod($f, 0644); unlink($f);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: include(%s/locked.inc): Failed to open stream: %s in %s on line 4
+    ///
+    /// Warning: include(): Failed opening '%s/locked.inc' for inclusion (include_path='%s') in %s on line 4
+    ///
+    /// Warning: include_once(%s/locked.inc): Failed to open stream: %s in %s on line 4
+    ///
+    /// Warning: include_once(): Failed opening '%s/locked.inc' for inclusion (include_path='%s') in %s on line 4
+    /// bool(false)
+    /// bool(false)
+    ///
+    /// Warning: require(%s/locked.inc): Failed to open stream: %s in %s on line 5
+    /// Error
+    /// ```
     fn include_through(
         &mut self,
         kind: IncludeKind,
