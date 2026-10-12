@@ -905,13 +905,17 @@ fn with_fastcgi(params: &str, md5: Option<&str>) -> anyhow::Result<Pin> {
     with_split(
         params,
         md5,
-        [Some(r"^(.+?\.php)(/.*)$"), Some("$fastcgi_path_info")],
+        [
+            Some(r"^(.+?\.php)(/.*)$"),
+            Some("$fastcgi_path_info"),
+            Some("$document_root$fastcgi_path_info"),
+        ],
     )
 }
 
-/// [`with_fastcgi`] with `split_path_info` and `path_info` as `split`
-/// has them, a key left out for `None`.
-fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 2]) -> anyhow::Result<Pin> {
+/// [`with_fastcgi`] with `split_path_info`, `path_info` and
+/// `path_translated` as `split` has them, a key left out for `None`.
+fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 3]) -> anyhow::Result<Pin> {
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
     let mut pin: toml::Table = toml::from_str(&text).unwrap();
     let digest = md5.map_or_else(|| format!("{:x}", md5::compute(params)), str::to_owned);
@@ -924,7 +928,11 @@ fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 2]) -> anyh
     ]
     .into_iter()
     .map(|(key, value)| (key, Some(value)))
-    .chain([("split_path_info", split[0]), ("path_info", split[1])])
+    .chain([
+        ("split_path_info", split[0]),
+        ("path_info", split[1]),
+        ("path_translated", split[2]),
+    ])
     .filter_map(|(key, value)| Some((key.to_owned(), value?.into())))
     .collect();
     pin.insert("fastcgi".to_owned(), fastcgi.into());
@@ -939,14 +947,14 @@ fn with_split(params: &str, md5: Option<&str>, split: [Option<&str>; 2]) -> anyh
 /// table says so when asked for the mapping.
 #[test]
 fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
-    use oracle::{Param, Piece, Variable};
+    use oracle::{Param, Piece, Sent, Variable};
     let params = "\nfastcgi_param  QUERY_STRING  $query_string;\n\nfastcgi_param  HTTPS  $https if_not_empty;\n# PHP only\nfastcgi_param  SERVER_SOFTWARE  nginx/$nginx_version;\nfastcgi_param  REDIRECT_STATUS  200;\n";
     let pin = with_fastcgi(params, None).unwrap();
     let mapping = pin.fastcgi().unwrap();
-    let param = |name: &str, value: &[Piece], if_not_empty| Param {
+    let param = |name: &str, value: &[Piece], sent| Param {
         name: name.to_owned(),
         value: value.to_vec(),
-        if_not_empty,
+        sent,
     };
     let var = Piece::Variable;
     let text = |t: &str| Piece::Text(t.to_owned());
@@ -954,20 +962,25 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     assert_eq!(
         mapping.params,
         [
-            param("PATH_INFO", &[var(Variable::PathInfo)], false),
+            param("PATH_INFO", &[var(Variable::PathInfo)], Sent::Always),
+            param(
+                "PATH_TRANSLATED",
+                &[var(Variable::DocumentRoot), var(Variable::PathInfo)],
+                Sent::WithPathInfo
+            ),
             param(
                 "SCRIPT_FILENAME",
                 &[var(Variable::DocumentRoot), var(Variable::FastcgiUri)],
-                false
+                Sent::Always
             ),
-            param("QUERY_STRING", &[var(Variable::QueryString)], false),
-            param("HTTPS", &[var(Variable::Https)], true),
+            param("QUERY_STRING", &[var(Variable::QueryString)], Sent::Always),
+            param("HTTPS", &[var(Variable::Https)], Sent::IfNotEmpty),
             param(
                 "SERVER_SOFTWARE",
                 &[text("nginx/"), var(Variable::NginxVersion)],
-                false
+                Sent::Always
             ),
-            param("REDIRECT_STATUS", &[text("200")], false),
+            param("REDIRECT_STATUS", &[text("200")], Sent::Always),
         ]
     );
 
@@ -993,37 +1006,6 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     let err = refused("fastcgi_param  SCRIPT_FILENAME  $document_root;\n", None);
     assert!(err.contains("SCRIPT_FILENAME twice"), "{err}");
 
-    // The split (#2637): the pattern's two captures, or the whole path
-    // with no path info where it does not match; a pattern of other
-    // than two captures is refused.
-    assert_eq!(
-        mapping.split("/front.php/index.php"),
-        ("/front.php", "/index.php")
-    );
-    assert_eq!(
-        mapping.split("/a.php.jpg/b.php/c"),
-        ("/a.php.jpg/b.php", "/c")
-    );
-    assert_eq!(mapping.split("/front.php"), ("/front.php", ""));
-    for split in [
-        [Some(r"^(.+?\.php)$"), Some("$fastcgi_path_info")],
-        [Some("("), Some("$fastcgi_path_info")],
-        [Some(r"^(.+?\.php)(/.*)$"), None],
-        [None, Some("$fastcgi_path_info")],
-    ] {
-        let err = with_split(params, None, split).unwrap_err().to_string();
-        assert!(err.contains("split_path_info"), "{split:?}: {err}");
-    }
-    // A pin from before the split reads, splitting nothing and sending
-    // no PATH_INFO, so a binary built here reads an older worktree's pin.
-    let before = with_split(params, None, [None, None]).unwrap();
-    let before = before.fastcgi().unwrap();
-    assert_eq!(before.params[0].name, "SCRIPT_FILENAME");
-    assert_eq!(
-        before.split("/front.php/index.php"),
-        ("/front.php/index.php", "")
-    );
-
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
     let mut bare: toml::Table = toml::from_str(&text).unwrap();
     bare.remove("fastcgi");
@@ -1034,10 +1016,64 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     assert!(err.to_string().contains("[fastcgi]"), "{err}");
 }
 
+/// `[fastcgi]`'s split (#2637) and `PATH_TRANSLATED` (#2650): the
+/// pattern's two captures, or the whole path with no path info where it
+/// does not match; a pattern of other than two captures, half the split,
+/// or `path_translated` without it refused; and a pin from before either
+/// read, as an older worktree's is.
+#[test]
+fn the_fastcgi_split_reads_both_keys_or_neither() {
+    let params = "\nfastcgi_param  QUERY_STRING  $query_string;\n";
+    let pin = with_fastcgi(params, None).unwrap();
+    let mapping = pin.fastcgi().unwrap();
+    assert_eq!(
+        mapping.split("/front.php/index.php"),
+        ("/front.php", "/index.php")
+    );
+    assert_eq!(
+        mapping.split("/a.php.jpg/b.php/c"),
+        ("/a.php.jpg/b.php", "/c")
+    );
+    assert_eq!(mapping.split("/front.php"), ("/front.php", ""));
+    for split in [
+        [Some(r"^(.+?\.php)$"), Some("$fastcgi_path_info"), None],
+        [Some("("), Some("$fastcgi_path_info"), None],
+        [Some(r"^(.+?\.php)(/.*)$"), None, None],
+        [None, Some("$fastcgi_path_info"), None],
+        [None, None, Some("$document_root$fastcgi_path_info")],
+    ] {
+        let err = with_split(params, None, split).unwrap_err().to_string();
+        assert!(err.contains("split_path_info"), "{split:?}: {err}");
+    }
+    // A pin from before PATH_TRANSLATED (#2650) reads, sending none.
+    let split_only = [Some(r"^(.+?\.php)(/.*)$"), Some("$fastcgi_path_info"), None];
+    let split_only = with_split(params, None, split_only).unwrap();
+    let names = split_only
+        .fastcgi()
+        .unwrap()
+        .params
+        .iter()
+        .map(|p| &p.name[..]);
+    assert_eq!(
+        names.take(2).collect::<Vec<_>>(),
+        ["PATH_INFO", "SCRIPT_FILENAME"]
+    );
+    // A pin from before the split reads, splitting nothing and sending
+    // no PATH_INFO, so a binary built here reads an older worktree's pin.
+    let before = with_split(params, None, [None, None, None]).unwrap();
+    let before = before.fastcgi().unwrap();
+    assert_eq!(before.params[0].name, "SCRIPT_FILENAME");
+    assert_eq!(
+        before.split("/front.php/index.php"),
+        ("/front.php/index.php", "")
+    );
+}
+
 /// The tracked pin's mapping (#2334): nginx's stock `fastcgi_params` at
 /// the release it names, its source at that release's tag,
 /// `SCRIPT_FILENAME` before them as nginx's `fastcgi.conf` sets it, and
-/// first the documented split's `PATH_INFO` (#2637).
+/// first the documented split's `PATH_INFO` (#2637) and RFC 3875's
+/// `PATH_TRANSLATED` (#2650).
 #[test]
 fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
     let pin = Manifest::load(workspace()).unwrap().pin;
@@ -1057,6 +1093,7 @@ fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
         names,
         [
             "PATH_INFO",
+            "PATH_TRANSLATED",
             "SCRIPT_FILENAME",
             "QUERY_STRING",
             "REQUEST_METHOD",

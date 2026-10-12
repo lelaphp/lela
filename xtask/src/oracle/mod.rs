@@ -29,7 +29,7 @@ pub(crate) mod linked;
 pub(crate) mod profile;
 mod variant;
 
-pub use fastcgi::{Mapping, Param, Piece, Split, Variable};
+pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Variant};
 
 use std::collections::{BTreeMap, BTreeSet};

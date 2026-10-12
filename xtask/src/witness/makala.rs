@@ -33,7 +33,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 
 use super::fpm::{Pool, round, terminate};
-use crate::oracle::{Ended, Mapping, Observation, Oracle, Piece, Recipe, Variable, normalise_in};
+use crate::oracle::{
+    Ended, Mapping, Observation, Oracle, Piece, Recipe, Sent, Variable, normalise_in,
+};
 use crate::phpt::cgi;
 use crate::scratch::Tree;
 
@@ -488,7 +490,12 @@ fn mapped(
                 Piece::Variable(variable) => fill(*variable),
             })
             .collect();
-        if !(param.if_not_empty && value.is_empty()) {
+        let sent = match param.sent {
+            Sent::Always => true,
+            Sent::IfNotEmpty => !value.is_empty(),
+            Sent::WithPathInfo => !info.is_empty(),
+        };
+        if sent {
             params.push((param.name.clone(), value));
         }
     }
@@ -566,7 +573,8 @@ mod tests {
     /// Every parameter of the pinned mapping is filled for a request, in
     /// the order nginx sends them, `HTTPS` left out on a plain connection,
     /// and the header fields after them as `HTTP_` ones; the path past the
-    /// program is `PATH_INFO`, empty where there is none (#2637).
+    /// program is `PATH_INFO`, empty where there is none (#2637), and
+    /// `PATH_TRANSLATED` the root and it, none where there is none (#2650).
     #[test]
     fn the_pinned_mapping_is_filled_in_nginx_s_order_with_the_fields_after() {
         let workspace = crate::package_dir();
@@ -626,6 +634,7 @@ mod tests {
         assert_eq!(value("SCRIPT_NAME"), Some("/t.php"));
         assert_eq!(value("SCRIPT_FILENAME"), Some("/root/t.php"));
         assert_eq!(value("PATH_INFO"), Some("/x/y"));
+        assert_eq!(value("PATH_TRANSLATED"), Some("/root/x/y"));
         assert_eq!(value("DOCUMENT_URI"), Some("/t.php/x/y"));
     }
 

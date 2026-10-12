@@ -200,6 +200,7 @@ oracle::Runner::binary
 oracle::Runner::resolve
 oracle::Runner::stamp
 oracle::Sapi
+oracle::Sent
 oracle::Source
 oracle::Source::named
 oracle::Source::path

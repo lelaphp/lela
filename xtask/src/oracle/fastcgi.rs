@@ -10,7 +10,8 @@
 //! php-fpm comparison (#2349) read the same parameters in the same order.
 //! #2637 added nginx's documented split of the path past the program,
 //! `fastcgi_split_path_info` with `PATH_INFO` sent first, as Debian's
-//! `snippets/fastcgi-php.conf` sends it ahead of `fastcgi.conf`.
+//! `snippets/fastcgi-php.conf` sends it ahead of `fastcgi.conf`, and #2650
+//! `PATH_TRANSLATED` after it, sent only with a path past the program.
 
 use anyhow::{Result, anyhow, bail};
 use regex_lite::Regex;
@@ -68,10 +69,11 @@ impl Split {
 }
 
 /// `[fastcgi]` as the pin spells it: `params` the file's bytes whole,
-/// held to `md5`, `script_filename` and `path_info` the values nginx
-/// gives those two parameters, and `split_path_info` the split's pattern.
-/// The split's two keys are both there or neither, so a binary reads a
-/// pin from before them, as another worktree's binary may.
+/// held to `md5`, `script_filename`, `path_info` and `path_translated` the
+/// values nginx gives those parameters, and `split_path_info` the split's
+/// pattern. The split's two keys are both there or neither, and
+/// `path_translated` only beside them, so a binary reads a pin from
+/// before any of them, as another worktree's binary may.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
@@ -83,17 +85,32 @@ struct File {
     split_path_info: Option<String>,
     #[serde(default)]
     path_info: Option<String>,
+    #[serde(default)]
+    path_translated: Option<String>,
     params: String,
 }
 
 /// One `fastcgi_param`: the name php-fpm is handed, its value as text and
-/// nginx variables, and whether nginx leaves it out where the value is
-/// empty (`if_not_empty`, as it does `HTTPS` on a plain connection).
+/// nginx variables, and when nginx hands it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: String,
     pub value: Vec<Piece>,
-    pub if_not_empty: bool,
+    pub sent: Sent,
+}
+
+/// When a parameter is handed to php-fpm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// On every request.
+    Always,
+    /// Where its value is not empty (`if_not_empty`, as nginx leaves
+    /// `HTTPS` out on a plain connection).
+    IfNotEmpty,
+    /// Where `$fastcgi_path_info` is not empty: `PATH_TRANSLATED`, which
+    /// RFC 3875 §4.1.6 sets only for a path past the program (#2650), and
+    /// which nginx's one-line `fastcgi_param` cannot say.
+    WithPathInfo,
 }
 
 /// A stretch of a parameter's value: text as written, or a variable nginx
@@ -197,23 +214,30 @@ impl TryFrom<File> for Mapping {
         }
         let (split_path_info, path_info) = match (&file.split_path_info, &file.path_info) {
             (Some(split), Some(path_info)) => match Regex::new(split) {
-                Ok(pattern) if pattern.captures_len() == 3 => {
-                    (Some(Split(pattern)), Some(("PATH_INFO", path_info)))
-                }
+                Ok(pattern) if pattern.captures_len() == 3 => (
+                    Some(Split(pattern)),
+                    Some(("PATH_INFO", path_info, Sent::Always)),
+                ),
                 _ => bail!("[fastcgi] split_path_info is not a pattern of two captures"),
             },
             (None, None) => (None, None),
             _ => bail!("[fastcgi] split_path_info and path_info are both set or neither"),
         };
+        if file.path_translated.is_some() && split_path_info.is_none() {
+            bail!("[fastcgi] path_translated is set only beside split_path_info");
+        }
+        let path_translated = (file.path_translated.as_ref())
+            .map(|value| ("PATH_TRANSLATED", value, Sent::WithPathInfo));
         let mut params = Vec::new();
-        for (name, value) in path_info
-            .into_iter()
-            .chain([("SCRIPT_FILENAME", &file.script_filename)])
-        {
+        for (name, value, sent) in path_info.into_iter().chain(path_translated).chain([(
+            "SCRIPT_FILENAME",
+            &file.script_filename,
+            Sent::Always,
+        )]) {
             params.push(Param {
                 name: name.to_owned(),
                 value: pieces(value).map_err(|e| anyhow!("[fastcgi] {name}: {e}"))?,
-                if_not_empty: false,
+                sent,
             });
         }
         for (n, line) in file.params.lines().enumerate() {
@@ -250,15 +274,15 @@ fn param(line: &str) -> Result<Param> {
         .ok_or_else(|| anyhow!("{line:?} does not end in `;`"))?
         .split_whitespace()
         .collect();
-    let (name, value, if_not_empty) = match words[..] {
-        ["fastcgi_param", name, value] => (name, value, false),
-        ["fastcgi_param", name, value, "if_not_empty"] => (name, value, true),
+    let (name, value, sent) = match words[..] {
+        ["fastcgi_param", name, value] => (name, value, Sent::Always),
+        ["fastcgi_param", name, value, "if_not_empty"] => (name, value, Sent::IfNotEmpty),
         _ => bail!("{line:?} is not `fastcgi_param <name> <value> [if_not_empty];`"),
     };
     Ok(Param {
         name: name.to_owned(),
         value: pieces(value)?,
-        if_not_empty,
+        sent,
     })
 }
 

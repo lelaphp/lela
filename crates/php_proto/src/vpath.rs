@@ -1,6 +1,8 @@
 //! The built-in server's path rules (`Z/sapi/cli/php_cli_server.c`), which
-//! `php -S` finds a request's file by and the production server routes
-//! and splits a request by (#2346, #2588, #2637): the path, made
+//! `php -S` finds a request's file by and the production server routes a
+//! request by where no segment of its path ends in `.php` (#2346, #2588,
+//! #2637); where one does, the production server splits it as nginx's
+//! recipe does instead ([`split_at_program`], #2693). The path, made
 //! [`normalize_vpath`](crate::http::normalize_vpath)'s, translated under
 //! the document root as `php_cli_server_request_translate_vpath`
 //! translates it, its extension read as `php_cli_server_request_ctor`
@@ -13,17 +15,21 @@
 
 use crate::cgi::{Files, Stat};
 
-/// A path translated under the document root.
+/// A path translated under the document root, by [`translate`]'s walk or
+/// [`split_at_program`]'s split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Translated {
     /// `vpath`: the path as far as something was found under the root,
-    /// with the index file where that is a directory.
+    /// with the index file where that is a directory; or as far as the
+    /// split cut it.
     pub vpath: Vec<u8>,
     /// `path_translated`: the root and `vpath`.
     pub path_translated: Vec<u8>,
-    /// `path_info`: what was walked off the path to find it.
+    /// `path_info`: what was walked off the path to find it, or what the
+    /// split cut off; none where nothing was.
     pub path_info: Option<Vec<u8>>,
-    /// `sb.st_size` of what was found.
+    /// `sb.st_size` of what was found; 0 for a split, which asks no disk
+    /// and is a program's, whose request reads no size.
     pub size: u64,
 }
 
@@ -106,6 +112,34 @@ pub fn translate(vpath: &[u8], root: &[u8], files: &dyn Files) -> Option<Transla
     })
 }
 
+/// `vpath` under `root` split as nginx's documented split splits a
+/// request's path for php-fpm (`fastcgi_split_path_info
+/// ^(.+?\.php)(/.*)$`, `oracle.toml`'s `[fastcgi]`): the program's path
+/// as far as the first segment that ends in `.php`, in that case, with a
+/// `/` or the path's end after it, and the rest its path's info. `vpath`
+/// starts with a `/`, as [`normalize_vpath`](crate::http::normalize_vpath)
+/// leaves it, so the pattern's `.+?` has its one byte before the `.php`.
+/// The production server splits by it where `php -S` walks
+/// ([`translate`]), whatever is on the disk, so a directory named `*.php`
+/// is the program's path and no program is found in it (#2693). A path
+/// holding a NUL is not split: nginx refuses one before any location.
+#[must_use]
+pub fn split_at_program(vpath: &[u8], root: &[u8]) -> Option<Translated> {
+    if vpath.contains(&0) {
+        return None;
+    }
+    let end = (b"/.php".len()..=vpath.len()).find(|&end| {
+        vpath[..end].ends_with(b".php") && matches!(vpath.get(end), None | Some(b'/'))
+    })?;
+    let (name, info) = vpath.split_at(end);
+    Some(Translated {
+        vpath: name.to_vec(),
+        path_translated: [root, name].concat(),
+        path_info: (!info.is_empty()).then(|| info.to_vec()),
+        size: 0,
+    })
+}
+
 /// The request's extension, as `php_cli_server_request_ctor` reads it: what
 /// follows the last `.` of `vpath`, a `/` after it or not, and nothing
 /// where it has none.
@@ -152,6 +186,8 @@ mod tests {
         "/r/",
         "/r/a/",
         "/r/a/index.html",
+        "/r/d.php/",
+        "/r/d.php/index.php",
         "/r/empty/",
         "/r/t.php",
         "/r/up/",
@@ -178,6 +214,12 @@ mod tests {
         assert_eq!(past.and_then(|t| t.path_info), Some(b"/x/y".to_vec()));
         let index = translate(b"/a/", b"/r", &TREE);
         assert_eq!(index.map(|t| t.vpath), Some(b"/a/index.html".to_vec()));
+        // php -S's walk runs a directory named `*.php`'s index, which the
+        // production server's split does not (#2693).
+        for path in [&b"/d.php/"[..], b"/d.php", b"/d.php/index.php"] {
+            let found = translate(path, b"/r", &TREE);
+            assert_eq!(found.map(|t| t.vpath), Some(b"/d.php/index.php".to_vec()));
+        }
         assert_eq!(translate(b"/empty", b"/r", &TREE), None);
     }
 
@@ -196,6 +238,39 @@ mod tests {
             Some(&b"/y.php"[..])
         );
         assert_eq!(found.map(|t| t.is_program()), Some(false));
+    }
+
+    /// nginx's pattern's split: at the first `.php` that a `/` or the end
+    /// follows, in that case only, whatever is on the disk; nothing where
+    /// no segment ends so, or where the path holds a NUL.
+    #[test]
+    fn the_program_s_path_ends_at_the_first_php_segment() {
+        for (path, split) in [
+            ("/front.php/index.php", Some(("/front.php", "/index.php"))),
+            ("/d.php/index.php", Some(("/d.php", "/index.php"))),
+            ("/d.php/", Some(("/d.php", "/"))),
+            ("/d.php", Some(("/d.php", ""))),
+            ("/a.php.jpg/b.php/c", Some(("/a.php.jpg/b.php", "/c"))),
+            ("/up/x.jpg/y.php", Some(("/up/x.jpg/y.php", ""))),
+            ("/.php/x", Some(("/.php", "/x"))),
+            ("/x.PHP/a", None),
+            ("/a.php5/b", None),
+            ("/a/", None),
+            ("/x.php\0/y", None),
+            ("", None),
+        ] {
+            let split = split.map(|(name, info): (&str, &str)| (name.as_bytes(), info.as_bytes()));
+            let found = split_at_program(path.as_bytes(), b"/r");
+            let found = found.as_ref().map(|t| {
+                assert_eq!(
+                    t.path_translated,
+                    [&b"/r"[..], &t.vpath].concat(),
+                    "{path:?}"
+                );
+                (&t.vpath[..], t.path_info.as_deref().unwrap_or_default())
+            });
+            assert_eq!(found, split, "{path:?}");
+        }
     }
 
     /// [`TREE`] asked as `stat(2)` asks, of a C string: up to its NUL.

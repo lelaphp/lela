@@ -1,11 +1,12 @@
-//! Where a request goes under the document root: `php -S`'s path rules
-//! (`php_proto::vpath`, #2346, #2588), and over them the refusals of a server that
-//! faces the internet (#2586). The path is `normalize_vpath`'s, decoded and
-//! with every `..` taken, so no request names a file outside the root; a
-//! symlink under the root is followed wherever it leads, as `php -S` and
-//! nginx's `disable_symlinks off` follow one. What the operator's
-//! [`Hidden`] refuses is refused here and nowhere else: `php -S` keeps its
-//! rules.
+//! Where a request goes under the document root: a program's path split
+//! at its first `.php` segment as the recipe's nginx splits it (#2693),
+//! else `php -S`'s path rules (`php_proto::vpath`, #2346, #2588), and over
+//! them the refusals of a server that faces the internet (#2586). The
+//! path is `normalize_vpath`'s, decoded and with every `..` taken, so no
+//! request names a file outside the root; a symlink under the root is
+//! followed wherever it leads, as `php -S` and nginx's `disable_symlinks
+//! off` follow one. What the operator's [`Hidden`] refuses is refused here
+//! and nowhere else: `php -S` keeps its rules.
 
 use std::sync::Arc;
 
@@ -50,23 +51,30 @@ impl Router {
     }
 
     /// Where `method path` goes: a path [`Hidden`] refuses is not found,
-    /// before the disk is asked; else the path translated as `php -S`
-    /// translates it, a program's where `php_cli_server_dispatch` says so,
-    /// the path past it its path's info (#2637), and a static file's
-    /// otherwise, in `php_cli_server_begin_send_static`'s order: a method
-    /// that writes refused, then a path that translated to nothing, then,
-    /// under [`Hidden::Refused`], a path past the file it found or a file
-    /// of PHP's source, then a file that does not open. A path holding a
-    /// NUL (`vpath::holds_nul`) is answered under [`Hidden::Refused`] as a
-    /// path with nothing at it is; under [`Hidden::Served`] a static
-    /// file's is refused with 400 after a method that writes, and a
-    /// program's is routed as one, whose request serves nothing, as `php -S`
-    /// refuses them (#2695). The walk that
+    /// before the disk is asked; else a program's where a segment of the
+    /// path ends in `.php`, split there as the recipe's nginx splits it
+    /// (`vpath::split_at_program`, #2693), whatever is on the disk; else
+    /// the path translated as `php -S` translates it, a program's where
+    /// `php_cli_server_dispatch` says so, the path past it its path's info
+    /// (#2637), and a static file's otherwise, in
+    /// `php_cli_server_begin_send_static`'s order: a method that writes
+    /// refused, then a path that translated to nothing, then, under
+    /// [`Hidden::Refused`], a path past the file it found or a file of
+    /// PHP's source, then a file that does not open. A path holding a NUL
+    /// is never split, and `vpath::holds_nul` answers it under
+    /// [`Hidden::Refused`] as a path with nothing at it is; under
+    /// [`Hidden::Served`] a static file's is refused with 400 after a
+    /// method that writes, and a program's is routed as one, whose request
+    /// serves nothing, as `php -S` refuses them (#2695). The walk that
     /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
-    /// program (`cgi.fix_pathinfo`'s class of exploit needs a front end
-    /// that routes on the suffix while PHP finds a shorter path); `php -S`
-    /// sends `x.jpg` for it, and so does [`Hidden::Served`], where
-    /// [`Hidden::Refused`] serves a static file only as named (#2642).
+    /// program the walk finds; split at `y.php`, `cgi.fix_pathinfo`'s walk
+    /// in php-fpm's checks finds `x.jpg`, the exploit's shape, and
+    /// `security.limit_extensions`' default refuses it (`request::look`),
+    /// so no file whose name does not end in `.php` runs, and a directory
+    /// named `d.php` is answered 404, as php-fpm under the recipe answers.
+    /// `php -S` sends `x.jpg` for `/upload/x.jpg/`, and so does
+    /// [`Hidden::Served`], where [`Hidden::Refused`] serves a static file
+    /// only as named (#2642).
     pub(crate) fn route(&self, method: &[u8], path: &[u8]) -> Route {
         let hidden = self.hidden;
         let mut uri = php_proto::http::normalize_vpath(path);
@@ -75,6 +83,9 @@ impl Router {
         }
         if hidden == Hidden::Refused && has_dot_segment(&uri) {
             return Route::Refused(Refusal::NotFound);
+        }
+        if let Some(program) = vpath::split_at_program(&uri, &self.root) {
+            return Route::Program(program);
         }
         let writes = [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method);
         match vpath::translate(&uri, &self.root, &Disk) {
