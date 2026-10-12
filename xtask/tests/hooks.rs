@@ -1,4 +1,4 @@
-//! The two git hooks under `scripts/hooks` (harness-design.md §6 wiring,
+//! The git hooks under `scripts/hooks` (harness-design.md §6 wiring,
 //! ledger 11), run by git in a scratch repository: a stand-in `cargo` on
 //! `PATH` records each call and answers as the instruments would, and
 //! hands `xtask regions` to this crate's own binary against the scratch
@@ -53,6 +53,13 @@ enum Computed {
     HandEdited,
     /// `run` answers with an untrusted exec region; `check` finds it fresh.
     Untrusted,
+    /// A region whose command fails: `run` keeps the body and says so, and
+    /// `check` finds the region unrendered, as `computed` 0.3.0 answers.
+    Failing,
+    /// A region left as a bare closer, as `computed merge` leaves one both
+    /// sides re-rendered: `check` finds it unrendered until `run` renders
+    /// it, which rewrites `AGENTS.md` and says so.
+    Unrendered,
 }
 
 impl Computed {
@@ -66,6 +73,12 @@ impl Computed {
             }
             Computed::Untrusted => {
                 "if [ \"$1\" = run ]; then printf 'AGENTS.md:3 layout exec untrusted skipped; run `computed trust`\\n' >&2; exit 1; fi\nexit 0\n"
+            }
+            Computed::Failing => {
+                "if [ \"$1\" = run ]; then printf 'AGENTS.md:3 layout exec unrendered failed; body kept\\n    exit status 3\\n' >&2; exit 1; fi\nif [ \"$1\" = check ]; then printf 'AGENTS.md:3 layout exec unrendered\\n' >&2; exit 1; fi\nexit 0\n"
+            }
+            Computed::Unrendered => {
+                "if [ \"$1\" = run ] && ! grep -qx rendered AGENTS.md; then echo rendered >> AGENTS.md; printf 'AGENTS.md:3 layout exec unrendered written\\n' >&2; exit 1; fi\nif [ \"$1\" = check ] && ! grep -qx rendered AGENTS.md; then printf 'AGENTS.md:3 layout exec unrendered\\n' >&2; exit 1; fi\nexit 0\n"
             }
         }
     }
@@ -607,6 +620,21 @@ fn a_hand_edited_region_refuses_the_commit_naming_computed_check() {
     assert_eq!(staged.trim(), "crates/php_heap/src/lib.rs");
 }
 
+/// A region whose command fails is never committed unrendered: `xtask
+/// regions` passes on `computed run`'s exit 1, and the `computed check`
+/// after it refuses the commit naming the region (#2744).
+#[test]
+fn a_region_whose_command_fails_refuses_the_commit() {
+    let scratch = scratch("failing-render", &Computed::Failing);
+    let before = scratch.head();
+    let (code, out) = scratch.stage_and_commit();
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    assert!(out.contains("exec unrendered failed; body kept"), "{out}");
+    assert!(out.contains("could not be rendered"), "{out}");
+    assert!(out.contains("AGENTS.md:3 layout exec unrendered"), "{out}");
+}
+
 /// A root without a trust grant is refused with the `computed trust`
 /// line as a person's, through `xtask regions`, and nothing is re-staged.
 #[test]
@@ -739,6 +767,96 @@ fn a_merge_reaches_ticket_merged_and_a_plain_commit_does_not() {
             "xtask ticket merged --since HEAD^1"
         ]
     );
+}
+
+// ---------------------------------------------------------------- pre-merge-commit
+
+/// A merge `git merge` commits itself runs no pre-commit, only
+/// pre-merge-commit, and what that hook stages never reaches the merge's
+/// tree, which git wrote before it ran; so a region `computed merge` left
+/// unrendered, both sides having re-rendered it, was committed as a bare
+/// closer four times on `main` (#2744). Pre-merge-commit refuses that
+/// merge naming the region and the way through, and the merge stands
+/// uncommitted; `git commit` then renders it through pre-commit, and the
+/// merge commit carries the render.
+#[test]
+fn a_merge_that_leaves_a_region_unrendered_is_refused_until_committed_through_pre_commit() {
+    let scratch = scratch("unrendered", &Computed::Unrendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    scratch.git(&["checkout", "-q", "-b", "t9", &main], false);
+    scratch.git(
+        &["commit", "-q", "--allow-empty", "-m", "the work of #9"],
+        false,
+    );
+    scratch.git(&["checkout", "-q", &main], false);
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t9",
+            "-m",
+            "Merge t9: the work (#9)",
+        ],
+        true,
+    );
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(scratch.head(), before, "the merge was not committed: {out}");
+    assert!(out.contains("AGENTS.md:3 layout exec unrendered"), "{out}");
+    assert!(out.contains("git commit"), "{out}");
+    assert_eq!(
+        scratch.calls("computed"),
+        [format!("check {}", REGIONS.join(" "))]
+    );
+    scratch.git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], false);
+
+    scratch.git(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
+    let t9 = scratch.git(&["rev-parse", "t9"], false);
+    assert_eq!(scratch.git(&["rev-parse", "HEAD^2"], false), t9);
+    let agents = scratch.git(&["show", "HEAD:AGENTS.md"], false);
+    assert!(agents.ends_with("rendered\n"), "{agents}");
+}
+
+/// computed reads the working tree and the merge commits the index: a
+/// region file whose staged copy is unrendered and whose working copy is
+/// rendered would pass `computed check` and be committed unrendered, so
+/// pre-merge-commit refuses the merge naming the file, before `computed`.
+#[test]
+fn a_merge_whose_region_file_differs_from_its_working_copy_is_refused() {
+    let scratch = scratch("unstaged-render", &Computed::Unrendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    scratch.git(&["checkout", "-q", "-b", "t9", &main], false);
+    scratch.git(
+        &["commit", "-q", "--allow-empty", "-m", "the work of #9"],
+        false,
+    );
+    scratch.git(&["checkout", "-q", &main], false);
+    let agents = fs::read_to_string(scratch.root.join("AGENTS.md")).unwrap();
+    write(&scratch.root, "AGENTS.md", &format!("{agents}rendered\n"));
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t9",
+            "-m",
+            "Merge t9: the work (#9)",
+        ],
+        true,
+    );
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(scratch.head(), before, "the merge was not committed: {out}");
+    assert!(out.contains("AGENTS.md\n"), "{out}");
+    assert!(out.contains("not what the merge would commit"), "{out}");
+    assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
 // ---------------------------------------------------------------- pre-push
