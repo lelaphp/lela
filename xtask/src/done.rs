@@ -684,22 +684,38 @@ fn slack_porting(
     columns: &[Option<Reading>],
     key: &str,
     pin: &str,
-) -> Option<&'static str> {
+) -> Option<Slack> {
     if !krate.porting {
         return None;
     }
     if !krate.name.starts_with("ext/") {
-        return Some("no extension, so no `crosscheck` is asked of it");
+        return Some(Slack::NoExtension);
     }
     let passes = |column: &Option<Reading>| {
         column
             .as_ref()
             .is_some_and(|r| r.status == Status::Pass && r.fresh_for(key, pin))
     };
-    columns
-        .iter()
-        .all(passes)
-        .then_some("an extension whose two `crosscheck` columns are fresh and pass")
+    columns.iter().all(passes).then_some(Slack::Passing)
+}
+
+/// Why a `porting = true` key excuses nothing ([`slack_porting`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Slack {
+    /// The row is no extension, so no `crosscheck` is asked of it.
+    NoExtension,
+    /// The extension's two `crosscheck` columns are fresh and pass.
+    Passing,
+}
+
+impl Slack {
+    /// The cause as the note says it.
+    fn why(self) -> &'static str {
+        match self {
+            Slack::NoExtension => "no extension, so no `crosscheck` is asked of it",
+            Slack::Passing => "an extension whose two `crosscheck` columns are fresh and pass",
+        }
+    }
 }
 
 /// The note on every row whose `porting = true` excuses nothing
@@ -710,7 +726,7 @@ fn slack_porting_notes(
     store: &Store,
     notes: &mut Vec<String>,
 ) -> Result<()> {
-    let mut slack: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut slack: BTreeMap<Slack, Vec<&str>> = BTreeMap::new();
     for krate in manifest.crates.iter().filter(|k| k.porting) {
         let mut columns = Vec::new();
         let mut key = String::new();
@@ -726,8 +742,9 @@ fn slack_porting_notes(
     }
     for (why, rows) in slack {
         notes.push(format!(
-            "porting: `porting = true` excuses nothing on {} ({why}); dropping the key from seams.toml is a person's edit (harness.self)",
-            rows.join(", ")
+            "porting: `porting = true` excuses nothing on {} ({}); dropping the key from seams.toml is a person's edit (harness.self)",
+            rows.join(", "),
+            why.why()
         ));
     }
     Ok(())
@@ -1210,8 +1227,8 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        FRESH, instruments_of, met_without_passing, miri_unsupported, no_binary_yet, porting_meter,
-        slack_porting,
+        FRESH, Slack, instruments_of, met_without_passing, miri_unsupported, no_binary_yet,
+        porting_meter, slack_porting,
     };
     use crate::carried::Carried;
     use crate::manifest::Crate;
@@ -1517,10 +1534,15 @@ mod tests {
         let said = |krate: &Crate, columns: &[Option<Reading>], key: &str| {
             slack_porting(krate, columns, key, "pin")
         };
-        let no_extension = said(&porting("sapi/cli"), &[], "");
-        assert!(no_extension.is_some_and(|w| w.starts_with("no extension")));
+        assert_eq!(
+            said(&porting("sapi/cli"), &[], ""),
+            Some(Slack::NoExtension)
+        );
         let passing = [column(Status::Pass), column(Status::Pass)];
-        assert!(said(&porting("ext/zip"), &passing, "").is_some());
+        assert_eq!(
+            said(&porting("ext/zip"), &passing, ""),
+            Some(Slack::Passing)
+        );
         assert_eq!(said(&Crate::named("ext/zip"), &passing, ""), None);
         assert_eq!(said(&porting("ext/zip"), &passing, "moved"), None);
         for columns in [
