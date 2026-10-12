@@ -55,11 +55,17 @@ impl Recorded {
             })
             .unwrap_or_default();
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then cat '{0}/issues/'\"$3\".json; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\n{refusal}exit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then if rm '{0}/issues/'\"$3\".flaky 2>/dev/null; then echo \"Post: read: can't assign requested address\" >&2; exit 1; fi; cat '{0}/issues/'\"$3\".json; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\n{refusal}exit 0\n",
             self.dir.display()
         );
         fs::write(self.dir.join("gh"), script).unwrap();
         fs::set_permissions(self.dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The next `issue view <number>` fails as `gh` does when the machine
+    /// has run out of ports for a moment, and the one after answers (#2804).
+    fn flaky(&self, number: u64) {
+        fs::write(self.dir.join(format!("issues/{number}.flaky")), "").unwrap();
     }
 
     fn issue(&self, number: u64, state: &str, body: &str) {
@@ -615,6 +621,154 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
         unmet[0].contains("#15 is named") && unmet[1].contains("#17 is named"),
         "{unmet:?}"
     );
+}
+
+/// A merge of `branch` into `main` under `subject`, each ticket of
+/// `ready` readied on the branch with the successors it names, every
+/// ticket and successor open with its boxes ticked at `recorded`.
+fn merged_with_ready(
+    name: &str,
+    branch: &str,
+    subject: &str,
+    ready: &[(u64, &str)],
+) -> (Tree, Recorded) {
+    let root = repository(name);
+    git(&root, &["checkout", "-q", "-b", branch]);
+    git(&root, &["commit", "-q", "--allow-empty", "-m", "the work"]);
+    let recorded = Recorded::lay(name);
+    for &(n, successors) in ready {
+        git(
+            &root,
+            &["config", &format!("branch.{branch}.ready-{n}"), successors],
+        );
+        recorded.issue(n, "OPEN", TICKED);
+        for successor in successors.split(' ').filter_map(|s| s.parse().ok()) {
+            recorded.issue(successor, "OPEN", TICKED);
+        }
+    }
+    git(&root, &["checkout", "-q", "main"]);
+    git(&root, &["merge", "-q", "--no-ff", branch, "-m", subject]);
+    (root, recorded)
+}
+
+/// The two merges post-commit left half closed (#2804), replayed with the
+/// fault that left them so: under load `gh` fails a read for a moment
+/// ("can't assign requested address", the ports run out), which passed
+/// #2536 over as no issue at all, and after #2754 closed took the whole
+/// run down before one reading was written, so #2631, #2156 and #2621
+/// stayed open and #2754's close went unrecorded. A read is asked again,
+/// so every ticket the merge names closes, each with its own successors.
+#[test]
+fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_names() {
+    for (branch, subject, ready, flaky) in [
+        (
+            "t2754",
+            "Merge t2754: a user call enters and leaves inside the loop (#2754, #2631, #2156, #2621)",
+            &[
+                (2754, "2801"),
+                (2631, "nothing"),
+                (2156, "2802"),
+                (2621, "nothing"),
+            ][..],
+            2631,
+        ),
+        (
+            "t2536",
+            "Merge t2536: a resource's destructor is served as a release step (#2536)",
+            &[(2536, "2654")][..],
+            2536,
+        ),
+    ] {
+        let (root, recorded) =
+            merged_with_ready(&format!("replay-{branch}"), branch, subject, ready);
+        recorded.flaky(flaky);
+        let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+        let closed: Vec<(&str, Status)> = readings
+            .iter()
+            .map(|r| (r.scope.as_str(), r.status))
+            .collect();
+        let named: Vec<(String, Status)> = ready
+            .iter()
+            .map(|(n, _)| (n.to_string(), Status::Pass))
+            .collect();
+        assert_eq!(
+            closed,
+            named
+                .iter()
+                .map(|(n, s)| (n.as_str(), *s))
+                .collect::<Vec<_>>(),
+            "{readings:#?}"
+        );
+        let calls = recorded.calls();
+        for (n, _) in ready {
+            assert!(
+                calls
+                    .iter()
+                    .any(|c| c.starts_with(&format!("issue close {n} "))),
+                "#{n} not closed: {calls:?}"
+            );
+        }
+    }
+}
+
+/// A ticket the tracker will not answer for at all is not passed over and
+/// does not take the run down (#2804): the tickets around it close, each
+/// close is recorded, and it is a failed reading saying what to run again,
+/// which `done` names until the run, asked again, closes it.
+#[test]
+fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() {
+    let (root, recorded) = merged_with_ready(
+        "unreadable",
+        "t20",
+        "Merge t20: the bundle (#20, #21, #22)",
+        &[(20, "nothing"), (21, "nothing"), (22, "nothing")],
+    );
+    fs::remove_file(recorded.dir.join("issues/21.json")).unwrap();
+    let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    let verdicts: Vec<(&str, Status)> = readings
+        .iter()
+        .map(|r| (r.scope.as_str(), r.status))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            ("20", Status::Pass),
+            ("21", Status::Fail),
+            ("22", Status::Pass)
+        ],
+        "{readings:#?}"
+    );
+    let parent = git(&root, &["rev-parse", "--short", "HEAD^1"]);
+    assert!(
+        readings[1]
+            .message
+            .contains("#21 could not be read from the tracker")
+            && readings[1]
+                .message
+                .contains(&format!("xtask ticket merged --since {parent}")),
+        "{}",
+        readings[1].message
+    );
+
+    let dir = Tree::new("ticket-unreadable-store").unwrap();
+    let store = Store::at(dir.to_path_buf());
+    store.record(&readings).unwrap();
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let unmet = stranded(&root, &store, &head).unwrap();
+    assert_eq!(unmet.len(), 1, "{unmet:?}");
+    assert!(unmet[0].contains("#21 could not be read"), "{unmet:?}");
+
+    recorded.issue(21, "OPEN", TICKED);
+    recorded.issue(20, "CLOSED", TICKED);
+    recorded.issue(22, "CLOSED", TICKED);
+    let again = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    assert_eq!(again.len(), 1, "{again:#?}");
+    assert_eq!(
+        (again[0].scope.as_str(), again[0].status),
+        ("21", Status::Pass)
+    );
+    store.record(&again).unwrap();
+    assert!(stranded(&root, &store, &head).unwrap().is_empty());
 }
 
 /// Where a close's commit stands against `main` (#2249): `main`'s own
