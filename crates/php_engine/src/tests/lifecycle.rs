@@ -692,7 +692,7 @@ fn the_built_in_server_ends_a_request_whose_start_failed() {
     let (observed, dispatched) = engine.dispatch(piped("<?php echo 'ran';"), None, &mut sink);
     rec.mark("served");
     assert!(observed.start_failed);
-    assert_eq!(dispatched.code, None);
+    assert_eq!(dispatched.program, None);
     assert!(!String::from_utf8_lossy(&sink.stdout).contains("ran"));
     assert_eq!(
         rec.events()

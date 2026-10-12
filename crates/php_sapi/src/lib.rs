@@ -40,8 +40,8 @@ pub use php_engine::{
     FileHandles, Forked, HostPage, HostServes, HostThread, HostValue, IniEvent, IniFile, IniFiles,
     IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink, PHP_CONFIG_FILE_PATH,
     PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid,
-    Primary, ProcessTitle, ProgramFile, RequestDescription, ResponseHead, Routed, Uncaught,
-    WebRequest, fork, host_thread,
+    Primary, ProcessTitle, ProgramFile, ProgramServed, RequestDescription, ResponseHead, Routed,
+    Uncaught, WebRequest, fork, host_thread,
 };
 
 /// C's `strtol(s, NULL, 10)` and `atoi` as php's hosts call them on what

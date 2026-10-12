@@ -18,8 +18,8 @@ use php_proto::http::{self, Credentials, Events, Parser};
 use php_proto::vpath;
 use php_sapi::cgi::Disk;
 use php_sapi::{
-    Aborted, Chdir, Method, OutputSink, PHP_VERSION, ProgramFile, RequestDescription, ResponseHead,
-    Routed, WebRequest,
+    Aborted, Chdir, Method, OutputSink, PHP_VERSION, ProgramFile, ProgramServed,
+    RequestDescription, ResponseHead, Routed, WebRequest,
 };
 
 use super::Site;
@@ -363,14 +363,6 @@ fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
     if site.router.is_none() && is_static {
         return send_static(site, client);
     }
-    if !is_static
-        && request
-            .path_translated
-            .as_ref()
-            .is_some_and(|path| path.contains(&0))
-    {
-        return error_page(site, client, 400);
-    }
     let mut sink = WireSink {
         wire: Arc::new(Mutex::new(Wire {
             stream: client.stream.try_clone().ok(),
@@ -383,8 +375,18 @@ fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
     let (_, dispatched) = site
         .engine
         .dispatch(description, site.router.as_deref(), &mut sink);
-    if let Some(code) = dispatched.code {
-        log_response(site, &client, code, None, dispatched.fatal.as_ref());
+    match &dispatched.program {
+        Some(ProgramServed::Ran { code, fatal }) => {
+            log_response(site, &client, *code, None, fatal.as_ref());
+        }
+        // `php_cli_server_send_error_page`'s line for the 400 page that
+        // `php_request_shutdown`'s head and the connection's close leave
+        // unsent.
+        Some(ProgramServed::NulInPath) => {
+            let errno = super::strerror(&std::io::Error::last_os_error());
+            log_response(site, &client, 400, Some(&errno), None);
+        }
+        None => {}
     }
     if dispatched.routed == Routed::Declined && is_static {
         // The file, after what the router wrote under the head it did
@@ -473,8 +475,15 @@ fn server_variables(site: &Site, client: &Client) -> Vec<(Vec<u8>, Vec<u8>)> {
     if let Some(vpath) = &request.vpath {
         rows.push((b"SCRIPT_NAME".to_vec(), vpath.clone()));
     }
-    if let Some(file) = request.path_translated.as_ref().or(site.router.as_ref()) {
-        rows.push((b"SCRIPT_FILENAME".to_vec(), file.clone()));
+    // `SCRIPT_FILENAME` is registered through `strlen`, and `PHP_SELF`
+    // with the path's info through `%s%s`, so each stops at a NUL where
+    // `SCRIPT_NAME` and `PATH_INFO`, registered with their lengths, keep it.
+    let script_filename = match (&request.path_translated, &site.router) {
+        (Some(file), _) => Some(php_proto::c_str(file)),
+        (None, router) => router.as_deref(),
+    };
+    if let Some(file) = script_filename {
+        rows.push((b"SCRIPT_FILENAME".to_vec(), file.to_vec()));
     }
     if let Some(info) = &request.path_info {
         rows.push((b"PATH_INFO".to_vec(), info.clone()));
@@ -482,7 +491,10 @@ fn server_variables(site: &Site, client: &Client) -> Vec<(Vec<u8>, Vec<u8>)> {
     let vpath = request.vpath.clone().unwrap_or_default();
     match &request.path_info {
         Some(info) if !info.is_empty() => {
-            rows.push((b"PHP_SELF".to_vec(), [vpath, info.clone()].concat()));
+            rows.push((
+                b"PHP_SELF".to_vec(),
+                [php_proto::c_str(&vpath), php_proto::c_str(info)].concat(),
+            ));
         }
         _ if request.vpath.is_some() => rows.push((b"PHP_SELF".to_vec(), vpath)),
         _ => {}
@@ -705,8 +717,8 @@ fn send_static(site: &Site, client: Client) -> Connection {
     }
     if request
         .path_translated
-        .as_ref()
-        .is_some_and(|path| path.contains(&0))
+        .as_deref()
+        .is_some_and(vpath::holds_nul)
     {
         return error_page(site, client, 400);
     }

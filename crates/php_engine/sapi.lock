@@ -34,6 +34,7 @@ Pid
 Primary
 ProcessTitle
 ProgramFile
+ProgramServed
 RequestDescription
 ResponseHead
 Routed

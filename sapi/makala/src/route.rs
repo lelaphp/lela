@@ -56,7 +56,12 @@ impl Router {
     /// otherwise, in `php_cli_server_begin_send_static`'s order: a method
     /// that writes refused, then a path that translated to nothing, then,
     /// under [`Hidden::Refused`], a path past the file it found or a file
-    /// of PHP's source, then a file that does not open. The walk that
+    /// of PHP's source, then a file that does not open. A path holding a
+    /// NUL (`vpath::holds_nul`) is answered under [`Hidden::Refused`] as a
+    /// path with nothing at it is; under [`Hidden::Served`] a static
+    /// file's is refused with 400 after a method that writes, and a
+    /// program's is routed as one, whose request serves nothing, as `php -S`
+    /// refuses them (#2695). The walk that
     /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
     /// program (`cgi.fix_pathinfo`'s class of exploit needs a front end
     /// that routes on the suffix while PHP finds a shorter path); `php -S`
@@ -71,11 +76,16 @@ impl Router {
         if hidden == Hidden::Refused && has_dot_segment(&uri) {
             return Route::Refused(Refusal::NotFound);
         }
+        let writes = [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method);
         match vpath::translate(&uri, &self.root, &Disk) {
+            Some(found) if vpath::holds_nul(&found.path_translated) => match hidden {
+                Hidden::Served if found.is_program() => Route::Program(found),
+                _ if writes => Route::Refused(Refusal::MethodNotAllowed),
+                Hidden::Served => Route::Refused(Refusal::BadRequest),
+                Hidden::Refused => Route::Refused(Refusal::NotFound),
+            },
             Some(found) if found.is_program() => Route::Program(found),
-            _ if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method) => {
-                Route::Refused(Refusal::MethodNotAllowed)
-            }
+            _ if writes => Route::Refused(Refusal::MethodNotAllowed),
             Some(found)
                 if hidden == Hidden::Served
                     || (found.path_info.is_none()
@@ -108,6 +118,10 @@ pub(crate) enum Refusal {
     /// 405: a method that writes, of a static file, with the methods
     /// `php -S` allows.
     MethodNotAllowed,
+    /// 400: a static file's path holding a NUL, under
+    /// [`Hidden::Served`], as `php_cli_server_begin_send_static` refuses
+    /// one.
+    BadRequest,
 }
 
 impl Refusal {
@@ -117,6 +131,7 @@ impl Refusal {
         let (code, lines) = match self {
             Refusal::NotFound => (404, Vec::new()),
             Refusal::MethodNotAllowed => (405, vec![b"Allow: GET, HEAD, POST".to_vec()]),
+            Refusal::BadRequest => (400, Vec::new()),
         };
         ResponseHead {
             code,

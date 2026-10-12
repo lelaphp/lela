@@ -1249,7 +1249,7 @@ pub fn credentials(auth: &[u8]) -> Option<Credentials> {
         && auth[..6].eq_ignore_ascii_case(b"Basic ")
         && let Some(decoded) = base64(&auth[6..])
     {
-        let decoded = decoded.split(|b| *b == 0).next().unwrap_or_default();
+        let decoded = crate::c_str(&decoded);
         if let Some(colon) = decoded.iter().position(|b| *b == b':') {
             let password = &decoded[colon + 1..];
             return Some(Credentials::Basic {

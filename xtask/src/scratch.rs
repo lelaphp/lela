@@ -1,7 +1,8 @@
 //! A scratch tree that owns itself (#194): one directory under the
 //! system's temporary directory, or under `/tmp` for a program the oracle
-//! runs ([`Tree::short`]), made by the constructor and taken away
-//! again when the value goes out of scope, however it goes out of scope.
+//! runs and the phpt run's copy of the pinned tree ([`Tree::short`]),
+//! made by the constructor and taken away again when the value goes out
+//! of scope, however it goes out of scope.
 //!
 //! The harness makes scratch trees in two places that cannot see each
 //! other — the unit tests beside a module in `xtask/src/` and the
@@ -58,6 +59,10 @@ pub const KEEP: &str = "XTASK_KEEP_SCRATCH";
 /// the sweep reads the temporary directory for, and what tells a tree of
 /// this harness's from everything else living there.
 const PREFIX: &str = "xtask-";
+
+/// Where [`Tree::short`] lays a tree, whatever `TMPDIR` says: one
+/// directory every session's runs share.
+const SHORT: &str = "/tmp";
 
 /// What a tree's lock is named: the tree's own name and this, so the two
 /// are siblings and neither is inside the other. The lock is not in the
@@ -118,7 +123,7 @@ impl Tree {
     /// #2523): under the temporary directory, the count moved with the
     /// session's `TMPDIR`.
     pub(crate) fn short(name: &str) -> Result<Tree> {
-        Tree::under(Path::new("/tmp"), &unique(name))
+        Tree::under(Path::new(SHORT), &unique(name))
     }
 
     /// The tree `xtask-<name>` under `base`, swept as the temporary
@@ -618,19 +623,20 @@ fn stop_strays_in(name: &str, ours: impl Fn(&Path) -> bool) -> Vec<u32> {
     ours.iter().map(|stray| stray.pid).collect()
 }
 
-/// The strays dead runs left in their trees made as `name` in the
-/// temporary directory, stopped, and their pids: a tree whose lock comes,
-/// or that is gone with its lock, is a dead run's ([`reap`]); one whose
-/// lock will not come is a run's still going, whose strays are its own to
-/// stop ([`Tree::stop_strays`]); one standing with no lock was kept
-/// ([`KEEP`]) and is never a candidate; and one in another temporary
-/// directory is the next run's there, beside the System V claims of that
-/// directory, which stop their own programs first (`sysv::stop_cut_off`).
-/// What a run's start does before it makes its tree, so the files a
-/// killed run's programs hold open in a tree removed under them are let
-/// go (#2663).
+/// The strays dead runs left in their trees made as `name` by
+/// [`Tree::short`], stopped, and their pids: a tree whose lock comes, or
+/// that is gone with its lock, is a dead run's ([`reap`]); one whose lock
+/// will not come is a run's still going, whose strays are its own to stop
+/// ([`Tree::stop_strays`]); and one standing with no lock was kept
+/// ([`KEEP`]) and is never a candidate. Every session's runs lay their
+/// trees in that one directory (#2626), so the lock is the only guard: a
+/// dead run's strays are stopped by the next run of any session, and a
+/// live run's by none but itself. A cut-off System V run's programs are
+/// stopped by its own claims first (`sysv::stop_cut_off`). What a run's
+/// start does before it makes its tree, so the files a killed run's
+/// programs hold open in a tree removed under them are let go (#2663).
 pub(crate) fn stop_forsaken(name: &str) -> Vec<u32> {
-    let Ok(base) = std::fs::canonicalize(std::env::temp_dir()) else {
+    let Ok(base) = std::fs::canonicalize(SHORT) else {
         return Vec::new();
     };
     stop_strays_in(name, |tree| {
@@ -855,11 +861,11 @@ mod tests {
     #[test]
     fn a_dead_runs_stray_is_stopped_and_a_live_runs_or_a_childs_never() {
         let marks = Tree::new("strays-marks").unwrap();
-        let held = Tree::new("strays").unwrap();
-        let dead = Tree::new("strays").unwrap();
+        let held = Tree::short("strays").unwrap();
+        let dead = Tree::short("strays").unwrap();
         let dead_path = dead.path().to_path_buf();
         drop(dead);
-        let kept = Tree::new("strays").unwrap();
+        let kept = Tree::short("strays").unwrap();
         std::fs::remove_file(beside(&kept, LOCK)).unwrap();
         // perl forks, and the child takes a session of its own and writes
         // its pid before its parent exits and leaves it to init.
