@@ -978,7 +978,7 @@ impl Printed {
         out.extend(std::iter::repeat_n(b' ', indent + INDENT));
         out.push(b'[');
         match key {
-            Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
+            Key::Int(n) => out.extend_from_slice(Decimal::of(*n).as_bytes()),
             Key::Str(s) if self.is_object => unmangled(out, s.as_bytes()),
             Key::Str(s) => out.extend_from_slice(s.as_bytes()),
         }

@@ -7,6 +7,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::string::Decimal;
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{atoi, to_double, to_long, to_string, with_string};
@@ -745,7 +746,7 @@ fn unpack(
                     Key::from_string(req, name)
                 } else {
                     let mut numbered = name.clone();
-                    numbered.extend_from_slice((i + 1).to_string().as_bytes());
+                    numbered.extend_from_slice(Decimal::of(i + 1).as_bytes());
                     let numbered = PhpString::new(req, &numbered)?;
                     Key::from_string(req, numbered)
                 };
