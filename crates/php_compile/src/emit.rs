@@ -13178,11 +13178,23 @@ impl Emit<'_> {
     }
 
     /// `zend_is_assign_to_self`'s walk down a target to its first
-    /// child while `zend_is_variable` holds and the node is no
-    /// `ZEND_AST_VAR`: a dimension's base, a property's object, a
-    /// `static` property's class, a method call's receiver, a static
-    /// call's class and a call's callee. Where it stops is what the
-    /// value's name is held to.
+    /// child while `zend_is_variable` (`Z/Zend/zend_compile.c:2718`)
+    /// holds and the node is no `ZEND_AST_VAR`: a dimension's base, a
+    /// property's object and a `static` property's class. A call stops
+    /// it, so `$a->m()->x[0] = $a` assigns the CV itself. Where it stops
+    /// is what the value's name is held to.
+    ///
+    /// ```php
+    /// class C { public static $s = []; public $x = []; function m() { return $this; } }
+    /// $a = new C;
+    /// $a->m()->x[0] = $a;
+    /// $a::$s[0] = $a;
+    /// var_dump($a->x[0] === $a, C::$s[0] === $a);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// ```
     fn chain_base(&self, target: tree::Expr) -> tree::Expr {
         let mut node = self.peel(target);
         loop {
@@ -13192,13 +13204,6 @@ impl Emit<'_> {
                 tree::Expr::ScopedAccessExpr(id) if self.names_property(id) => {
                     self.parsed.tree[id].scope
                 }
-                // `ZEND_AST_METHOD_CALL` and `ZEND_AST_STATIC_CALL` are
-                // one `CallExpr` here, over the member they call.
-                tree::Expr::CallExpr(id) => match self.peel(self.parsed.tree[id].callee) {
-                    tree::Expr::MemberAccessExpr(member) => self.parsed.tree[member].obj,
-                    tree::Expr::ScopedAccessExpr(scoped) => self.parsed.tree[scoped].scope,
-                    callee => callee,
-                },
                 _ => return node,
             };
             node = self.peel(child);

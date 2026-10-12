@@ -6367,6 +6367,22 @@ $a[0]->p[1] = $a;
                     0011 OP_DATA T10\n\
                     0012 RETURN int(1)\n";
         assert!(dump.contains(main), "php's main, {dump}");
+        // `zend_is_variable` takes no call, so the walk stops at
+        // `$a->m()`, and a `static` property's class is walked into.
+        let dump = dump_of(b"<?php\n$a->m()->x[0] = $a;\n$a::$s[0] = $a;\n");
+        let main = "0000 INIT_METHOD_CALL 0 CV0($a) string(\"m\")\n\
+                    0001 V1 = DO_FCALL\n\
+                    0002 V1 = SEPARATE V1\n\
+                    0003 V2 = FETCH_OBJ_W (dim write) V1 string(\"x\")\n\
+                    0004 ASSIGN_DIM V2 int(0)\n\
+                    0005 OP_DATA CV0($a)\n\
+                    0006 V4 = FETCH_CLASS (exception) CV0($a)\n\
+                    0007 T7 = QM_ASSIGN CV0($a)\n\
+                    0008 V5 = FETCH_STATIC_PROP_W (dim write) string(\"s\") V4\n\
+                    0009 ASSIGN_DIM V5 int(0)\n\
+                    0010 OP_DATA T7\n\
+                    0011 RETURN int(1)\n";
+        assert!(dump.contains(main), "php's main, {dump}");
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
