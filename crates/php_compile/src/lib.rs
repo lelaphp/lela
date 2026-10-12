@@ -6316,6 +6316,33 @@ class C {
         assert!(dump.contains(m), "php's C::m, {dump}");
     }
 
+    /// `zend_compile_foreach` over `$this` (#2687): by reference the
+    /// subject is compiled under `BP_VAR_W`, `FETCH_THIS` into a `VAR`
+    /// and `FE_RESET_RW` over it; by value under `BP_VAR_R`, into a
+    /// temporary.
+    #[test]
+    fn foreach_over_this_by_reference_fetches_it_into_a_var() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    public function g() { foreach ($this as &$v) {} foreach ($this as $v) {} }
+}
+",
+        );
+        let g = "0000 V1 = FETCH_THIS\n\
+                 0001 V2 = FE_RESET_RW V1 0004\n\
+                 0002 FE_FETCH_RW V2 CV0($v) 0004\n\
+                 0003 JMP 0002\n\
+                 0004 FE_FREE V2\n\
+                 0005 T3 = FETCH_THIS\n\
+                 0006 V4 = FE_RESET_R T3 0009\n\
+                 0007 FE_FETCH_R V4 CV0($v) 0009\n\
+                 0008 JMP 0007\n\
+                 0009 FE_FREE V4\n\
+                 0010 RETURN null\n";
+        assert!(dump.contains(g), "php's C::g, {dump}");
+    }
+
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
     /// inside an array expression folds every key and value in place
     /// (`zend_try_ct_eval_array`'s first pass), so a cast over a

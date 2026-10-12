@@ -8862,6 +8862,21 @@ impl Emit<'_> {
     ///   string(1) "b"
     /// }
     /// ```
+    ///
+    /// `$this` is `FETCH_THIS` into a `VAR` there, and the loop writes
+    /// the object's properties through it:
+    ///
+    /// ```php
+    /// class P {
+    ///     public $a = 1;
+    ///     protected $b = 2;
+    ///     function double() { foreach ($this as $k => &$v) { $v *= 2; } unset($v); foreach ($this as $k => $v) { echo "$k=$v "; } echo "\n"; }
+    /// }
+    /// (new P)->double();
+    /// ```
+    /// ```expect
+    /// a=2 b=4
+    /// ```
     fn foreach_subject(&mut self, expr: tree::Expr, by_ref: bool) -> Result<Where, CompileError> {
         let node = self.peel(expr);
         // `zend_can_write_to_variable`: a chain a `?->` stands in is
@@ -8880,9 +8895,14 @@ impl Emit<'_> {
                 _ => Where::Returned(at),
             });
         }
-        // `$GLOBALS` under `BP_VAR_W`: `FETCH_GLOBALS` into a `VAR`.
+        // `$GLOBALS` under `BP_VAR_W`: `FETCH_GLOBALS` into a `VAR`, and
+        // `$this` `FETCH_THIS` into one, `zend_compile_simple_var`'s
+        // `is_this_fetch` arm outside `BP_VAR_R` and `BP_VAR_IS`.
         if by_ref && self.is_globals(node) {
             return Ok(self.fetch_globals(OperandKind::Var));
+        }
+        if by_ref && self.is_this(node) {
+            return Ok(self.fetch_this(OperandKind::Var));
         }
         let subject = self.expr(expr)?;
         if by_ref && self.is_call(expr) {
