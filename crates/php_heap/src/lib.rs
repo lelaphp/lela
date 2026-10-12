@@ -127,6 +127,11 @@ pub struct Heap {
     /// The walks' pins past the first over blocks other than objects
     /// ([`Heap::pin_block`]).
     nested: gc::Nested,
+    /// The room [`Heap::destroy`]'s walk keeps its frames in, empty
+    /// between walks and kept for the next, so a table's destruction
+    /// allocates nothing off the request's heap; a walk inside a
+    /// destructor a walk serves finds it taken and lays its own.
+    destroying: Vec<array::Emptying>,
     /// The constant arrays of the units this request alone serves, out of
     /// this heap and immutable, so no release frees them: kept in a
     /// debug build for its teardown to free by name before the request
@@ -159,6 +164,7 @@ impl Heap {
             iterators: iterators::Iterators::default(),
             gc,
             nested: gc::Nested::default(),
+            destroying: Vec::new(),
             #[cfg(debug_assertions)]
             constant_arrays: Vec::new(),
         }
