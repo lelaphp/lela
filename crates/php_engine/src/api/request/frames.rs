@@ -741,23 +741,33 @@ impl Request {
 
     /// `CACHED_PTR(num) == ce ? CACHED_PTR(num + sizeof(void *)) : NULL`
     /// for a method call's pair (`Z/Zend/zend_vm_def.h:3670`, `:3778`):
-    /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds where
-    /// it holds `class` and was written from `frame`'s scope, and none
-    /// otherwise, which is the pass that looks the method up.
+    /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds, with
+    /// whether it takes `$this`, where it holds `class` and was written
+    /// from `frame`'s scope: a frame of the function that wrote it, no
+    /// closure's, has that scope without asking it. None otherwise,
+    /// which is the pass that looks the method up.
+    #[inline]
     pub(crate) fn cached_callee(
         &self,
         frame: FrameRef,
         slot: CacheSlot,
         class: crate::api::values::ClassId,
-    ) -> Option<Function> {
-        match self.cached(frame, slot) {
-            exec::Cached::ClassAndCallee {
-                class: held,
-                scope,
-                function,
-            } if held == class && scope == self.frame_scope(frame) => Some(function),
-            _ => None,
-        }
+    ) -> Option<(Function, bool)> {
+        let header = self.vm.at(frame)?;
+        let exec::Cached::ClassAndCallee {
+            class: held,
+            scope,
+            from,
+            function,
+            instance,
+        } = self.map.get(header.runtime_cache())?.get(slot)
+        else {
+            return None;
+        };
+        let same = held == class
+            && (from.is_some() && header.closure.is_none() && header.function == from
+                || scope == self.frame_scope(frame));
+        same.then_some((function, instance))
     }
 
     /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3694`,
@@ -771,13 +781,23 @@ impl Request {
         function: Function,
     ) {
         let scope = self.frame_scope(frame);
+        let from = self
+            .vm
+            .at(frame)
+            .filter(|header| header.closure.is_none())
+            .and_then(|header| header.function);
+        let instance = self
+            .method_decl(function)
+            .is_some_and(|decl| decl.is_instance);
         self.prime(
             frame,
             slot,
             exec::Cached::ClassAndCallee {
                 class,
                 scope,
+                from,
                 function,
+                instance,
             },
         );
     }

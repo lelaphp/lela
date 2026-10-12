@@ -5157,9 +5157,9 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // The pair answers where it holds this pass's class and was written
     // from this frame's scope ([`Request::cached_callee`]).
     let cached_callee = match (op.op2_type, primed) {
-        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
-            req.cached_callee(frame, slot, class)
-        }
+        (OperandKind::Const, Cached::ClassAndCallee { .. }) => req
+            .cached_callee(frame, slot, class)
+            .map(|(function, _)| function),
         _ => None,
     };
     if let Some(function) = cached_callee {
@@ -5283,7 +5283,7 @@ fn static_call_named(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let this = req.vm().this(frame);
-    let found = static_method(req, class, &method.lowered, &method.written, this);
+    let found = static_method(req, class, &method.lowered(), &method.written, this);
     let edge = match found {
         Ok((function, _)) => static_call_frame(req, frame, op, class, function),
         Err(thrown) => threw(req, frame, &thrown),
@@ -5635,6 +5635,82 @@ pub(crate) fn init_method_call<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_init_method_call(req, frame, code, op) {
+        return edge;
+    }
+    method_call(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_INIT_METHOD_CALL` over a constant name
+/// (`ZEND_INIT_METHOD_CALL_SPEC_CV_CONST`, `_TMPVAR_CONST` and
+/// `_UNUSED_CONST`, `Z/Zend/zend_vm_def.h:3778`): the receiver an
+/// object a CV or a temporary holds, or the frame's `$this`; the callee
+/// off the cache slot `result.num` names where the slot holds the
+/// receiver's class and was written from this frame's scope
+/// (`CACHED_PTR(opline->result.num) == called_scope`), and takes
+/// `$this`; and the call pushed over the receiver with the class as its
+/// called scope, the CV's object with one more owner (`GC_ADDREF`), the
+/// temporary's moved, and `$this` lent. Nothing here raises but the
+/// memory limit on a page the push takes. `None`, with nothing touched,
+/// for a name the program computes, a slot not primed for the class
+/// and scope, a static callee, and a receiver that is no object or is
+/// one through a reference, which [`method_call`] serves. Out of the
+/// loop's own body, a call of its own, since inlined it costs every
+/// other opline of the loop registers.
+#[inline(never)]
+fn inline_init_method_call(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<Edge> {
+    if op.op2_type != OperandKind::Const {
+        return None;
+    }
+    let at = match op.op1_type {
+        OperandKind::Unused => None,
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => {
+            Some(ByKind(op.op1_type).slot(code, op.op1)?)
+        }
+        OperandKind::Const => return None,
+    };
+    let object = match at {
+        None => req.vm().this(frame)?,
+        Some(at) => PhpObject::of(req.slots_mut(frame).get(at)?.as_obj()?),
+    };
+    let class = object.class();
+    let (function, instance) = req.cached_callee(frame, CacheSlot(op.out), class)?;
+    if !instance {
+        return None;
+    }
+    let room = req.call_room(function, op.extended_value);
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.called_scope = Some(class);
+    header.set_receiver(Some(match at {
+        None => exec::Receiver::lent(object),
+        Some(_) => exec::Receiver::Owned(object),
+    }));
+    if let Err(fatal) = req.push_room(room, header) {
+        return Some(Err(fatal));
+    }
+    match (op.op1_type, at) {
+        (OperandKind::Cv, _) => req.addref(&object.as_value()),
+        (OperandKind::Tmp | OperandKind::Var, Some(at)) => {
+            if let Some(slot) = req.slots_mut(frame).get_mut(at) {
+                *slot = Zval::UNDEF;
+            }
+        }
+        _ => {}
+    }
+    Some(Ok(advanced()))
+}
+
+/// `INIT_METHOD_CALL` past its inline path: the name, the receiver and
+/// the callee looked up or read off the slot, and the call pushed. A
+/// call of its own, so that the inline path before it keeps to the
+/// registers it needs.
+#[inline(never)]
+fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     // A method the program names is held to be a string before the
     // receiver is read ([`exec::MethodName`]).
     let method = match exec::MethodName::of(req, frame, code, op) {
@@ -5659,7 +5735,7 @@ pub(crate) fn init_method_call<T: Tier>(
             ),
         )),
     };
-    let (object, (function, receiver)) = match found {
+    let (object, (function, receiver, instance)) = match found {
         Ok(found) => found,
         Err(thrown) => {
             method.release(req);
@@ -5697,10 +5773,7 @@ pub(crate) fn init_method_call<T: Tier>(
     // static method gives that owner up here, and the receiver it was
     // may go with it, its destructor served before the call.
     let called = object.class();
-    let this = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let this = if instance {
         Some(if lends {
             exec::Receiver::lent(object)
         } else {
@@ -5741,24 +5814,27 @@ fn method_of_call(
     op: &Opline,
     object: PhpObject,
     method: &exec::MethodName,
-) -> Result<(Function, Option<PhpObject>), Thrown> {
+) -> Result<(Function, Option<PhpObject>, bool), Thrown> {
     let slot = CacheSlot(op.out);
     let class = object.class();
     let named = op.op2_type == OperandKind::Const;
-    if named && let Some(function) = req.cached_callee(frame, slot, class) {
-        return Ok((function, None));
+    if named && let Some((function, instance)) = req.cached_callee(frame, slot, class) {
+        return Ok((function, None, instance));
     }
     let (function, receiver) = method_on(
         req,
         object,
-        &method.lowered,
+        &method.lowered(),
         &method.written,
         Undefined::OnCalled,
     )?;
     if named && receiver.is_none() && !req.never_cached(function) {
         req.prime_callee(frame, slot, class, function);
     }
-    Ok((function, receiver))
+    let instance = req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance);
+    Ok((function, receiver, instance))
 }
 
 /// Which object `Call to undefined method X::m()` names where no class
@@ -5823,8 +5899,8 @@ fn method_on(
     {
         req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
     }
-    let bytes = written.as_str_bytes().unwrap_or_default().to_vec();
-    let (found, receiver) = req.method_found(object, lowered, &bytes)?;
+    let bytes = written.as_str_bytes().unwrap_or_default();
+    let (found, receiver) = req.method_found(object, lowered, bytes)?;
     let Some(function) = found else {
         let named = match undefined {
             Undefined::OnCalled => object,
@@ -5838,10 +5914,10 @@ fn method_on(
     let function = if req.method_accessible(function) {
         function
     } else {
-        req.call_trampoline(object.class(), &bytes, false)
+        req.call_trampoline(object.class(), bytes, false)
             .unwrap_or(function)
     };
-    req.check_method_access(function, &bytes)?;
+    req.check_method_access(function, bytes)?;
     Ok((function, None))
 }
 
@@ -24039,7 +24115,7 @@ mod tests {
             assert!(
                 matches!(
                     req.cached(frame, CacheSlot(0)),
-                    Cached::ClassAndCallee { class, scope: None, function }
+                    Cached::ClassAndCallee { class, scope: None, function, .. }
                         if Some(class) == closure && Some(function) == callee
                 ),
                 "the class and the callee are in the slot after pass {pass}"
@@ -24169,7 +24245,7 @@ mod tests {
             assert!(
                 matches!(
                     req.cached(frame, CacheSlot(0)),
-                    Cached::ClassAndCallee { class: held, scope: None, function: callee }
+                    Cached::ClassAndCallee { class: held, scope: None, function: callee, .. }
                         if Some(held) == class && Some(callee) == function
                 ),
                 "the receiver's class and its callee are in the slot after pass {pass}"

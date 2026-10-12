@@ -1183,10 +1183,20 @@ pub(crate) enum Cached {
     /// opline take the slot in turn where php's keep one each. What the
     /// slot holds is what was asked and what answered, never how the
     /// answer was found.
+    ///
+    /// `from` is the function of the frame that wrote the pair where
+    /// that frame is no closure's, which fixes its scope, as
+    /// [`Cached::Property`]'s `function` does: a frame of that function
+    /// reads the pair back without its scope being asked. And `instance`
+    /// is whether the callee takes `$this`, the test of
+    /// `fbc->common.fn_flags` php makes, read where the pair is written,
+    /// as php reads it off the callee it holds.
     ClassAndCallee {
         class: ClassId,
         scope: Option<ClassId>,
+        from: Option<Function>,
         function: Function,
+        instance: bool,
     },
     /// The declared slot a property fetch or assignment over a constant
     /// name placed on its first pass, `CACHE_POLYMORPHIC_PTR_EX(cache_slot,
@@ -2037,12 +2047,65 @@ impl Member {
 /// A method's name as `INIT_METHOD_CALL` and `INIT_STATIC_METHOD_CALL`
 /// carry it in `op2`: the constant pair the compiler wrote, the name as
 /// written and lowered, or the string a `CV` or a temporary holds, which
-/// the handler takes an owner of, lowers itself as `get_method` does
-/// with no key, and gives up with [`MethodName::release`].
+/// the handler takes an owner of, lowers as `get_method` does with no
+/// key ([`MethodName::lowered`]), and gives up with
+/// [`MethodName::release`].
 pub(crate) struct MethodName {
     pub(crate) written: Value,
-    pub(crate) lowered: Vec<u8>,
+    /// The second constant of a constant name's pair, the name lowered,
+    /// `RT_CONSTANT(opline, opline->op2) + 1`, which the unit holds;
+    /// none for a name the program computed.
+    lowered_constant: Option<Value>,
     owned: bool,
+}
+
+/// A name lowered for a table keyed by the lowered name, as php has
+/// one: the compiler's lowered constant, or a name with no upper-case
+/// byte, borrowed (`zend_string_tolower` answers such a name itself);
+/// otherwise lowered into a buffer on the stack where it fits, as
+/// `zend_std_get_method` lowers a name it was given no key for
+/// (`ZSTR_ALLOCA_ALLOC`, `zend_str_tolower_copy`), and allocated only
+/// past [`INLINE_NAME`] bytes, where php's `do_alloca` goes to the
+/// heap too.
+pub(crate) enum Lowered<'a> {
+    Borrowed(&'a [u8]),
+    Inline { bytes: [u8; INLINE_NAME], len: u8 },
+    Allocated(Vec<u8>),
+}
+
+/// How many bytes a name [`Lowered`] lowers on the stack holds at most.
+const INLINE_NAME: usize = 64;
+
+impl<'a> Lowered<'a> {
+    /// `name` lowered, borrowed where it has no upper-case byte.
+    #[inline]
+    pub(crate) fn of(name: &'a [u8]) -> Lowered<'a> {
+        if !name.iter().any(u8::is_ascii_uppercase) {
+            return Lowered::Borrowed(name);
+        }
+        match u8::try_from(name.len()) {
+            Ok(len) if name.len() <= INLINE_NAME => {
+                let mut bytes = [0; INLINE_NAME];
+                for (into, byte) in bytes.iter_mut().zip(name) {
+                    *into = byte.to_ascii_lowercase();
+                }
+                Lowered::Inline { bytes, len }
+            }
+            _ => Lowered::Allocated(name.to_ascii_lowercase()),
+        }
+    }
+}
+
+impl std::ops::Deref for Lowered<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Lowered::Borrowed(name) => name,
+            Lowered::Inline { bytes, len } => bytes.get(..usize::from(*len)).unwrap_or_default(),
+            Lowered::Allocated(name) => name,
+        }
+    }
 }
 
 impl MethodName {
@@ -2059,21 +2122,19 @@ impl MethodName {
         op: &Opline,
     ) -> Result<MethodName, Thrown> {
         if op.op2_type == OperandKind::Const {
-            let lowered = constant(code, ConstIdx(op.op2.saturating_add(1)));
             return Ok(MethodName {
                 written: constant(code, ConstIdx(op.op2)),
-                lowered: lowered.as_str_bytes().unwrap_or_default().to_vec(),
+                lowered_constant: Some(constant(code, ConstIdx(op.op2.saturating_add(1)))),
                 owned: false,
             });
         }
         let value = operand_undef(req, frame, code, op.op2_type, op.op2);
         let held = value.deref();
-        let name = if let Some(bytes) = held.as_str_bytes() {
-            let lowered = bytes.to_ascii_lowercase();
+        let name = if held.as_str_bytes().is_some() {
             req.addref(&held);
             Ok(MethodName {
                 written: held,
-                lowered,
+                lowered_constant: None,
                 owned: true,
             })
         } else {
@@ -2088,6 +2149,15 @@ impl MethodName {
         };
         free_operand(req, frame, code, op.op2_type, op.op2);
         name
+    }
+
+    /// The name lowered: the pair's lowered constant, borrowed, or the
+    /// computed name lowered as [`Lowered::of`] lowers it.
+    pub(crate) fn lowered(&self) -> Lowered<'_> {
+        match &self.lowered_constant {
+            Some(lowered) => Lowered::Borrowed(lowered.as_str_bytes().unwrap_or_default()),
+            None => Lowered::of(self.written.as_str_bytes().unwrap_or_default()),
+        }
     }
 
     /// The owner of a name the program computed given up.
