@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use php_heap::FrameRef;
 
-use php_unit::decl::{ConstExpr, HookKind, MethodDecl, Name, ParameterDefault};
+use php_unit::decl::{Bare, ConstExpr, HookKind, MethodDecl, Name, ParameterDefault};
 use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
@@ -1515,7 +1515,7 @@ pub fn class_unserialize(
         return Ok(true);
     }
     let serializable = req
-        .class_named(b"serializable")
+        .class_named(Bare::resolved(b"serializable"))
         .is_some_and(|interface| req.instance_of(object.class(), interface));
     if !serializable {
         return Ok(false);
@@ -1727,13 +1727,32 @@ pub fn passthrough(req: &mut Request, first: Option<Owner<Value>>) -> Result<Own
 /// bool(false)
 /// ```
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    Ok(req.class_named(name.strip_prefix(b"\\").unwrap_or(name)))
+    Ok(req.class_named(Bare::of(name)))
 }
 
-/// The linked function named, without autoloading.
+/// The linked function named, without autoloading: `function_exists`'s
+/// lookup, a leading `\` skipped and the case folded, as php's
+/// `zend_hash_find(EG(function_table), lcname)` past the `\`.
+///
+/// ```php
+/// function g() {}
+/// var_dump(function_exists('\\G'), function_exists('\\\\g'), function_exists('\\STRLEN'));
+/// $f = function () {};
+/// var_dump(function_exists((new ReflectionFunction($f))->getName()));
+/// echo (new ReflectionFunction('\\G'))->getName(), "\n";
+/// try { new ReflectionFunction('\\\\g'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// g
+/// Function \\g() does not exist
+/// ```
 #[must_use]
 pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
-    req.function_named(name)
+    req.function_named(Bare::of(name))
 }
 
 /// The `static` variables of what `callable` names, name and value in the
@@ -1827,21 +1846,24 @@ pub fn bound_variables(
 /// 32
 /// ```
 pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let key = Bare::of(name);
+    let bare = key.bytes();
     // The table first, which holds an anonymous class under its name
-    // with the NUL, and `zend_is_valid_class_name` only before the
-    // autoloaders.
-    if let Some(class) = req.class_named(bare) {
+    // with the NUL, and `zend_is_valid_class_name` of the name as
+    // written only before the autoloaders.
+    if let Some(class) = req.class_named(key) {
         return Ok(Some(class));
     }
-    let valid = !bare.is_empty()
-        && bare
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'\\' || *b >= 0x80);
+    let valid = name
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'\\' || *b >= 0x80);
     if !valid {
         return Ok(None);
     }
-    if req.link_under_way(bare) {
+    if req.link_under_way(key) {
         return Ok(None);
     }
     let Some(lowered) = req.autoload_enter(&bare.to_ascii_lowercase())? else {
@@ -1862,7 +1884,7 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
             let returned = serve(req, loader.target(), &[Value::string(class)], &[]);
             req.release(Value::string(class));
             req.release(returned?);
-            if let Some(class) = req.class_named(bare) {
+            if let Some(class) = req.class_named(key) {
                 return Ok(Some(class));
             }
             at += 1;
@@ -1906,6 +1928,10 @@ pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Owner<Value>, Th
 
 /// What [`fetch_constant`] makes, its one owner not yet named.
 pub(crate) fn fetch_constant_made(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
+    // `zend_get_constant_ex`'s own strip; the class part is then handed
+    // to the class lookup as written, which strips a `\` of its own, as
+    // `zend_fetch_class` does: `constant("\\\\ArrayObject::STD_PROP_LIST")`
+    // is `int(1)` under php.
     let name = name.strip_prefix(b"\\").unwrap_or(name);
     if let Some(colon) = name.iter().rposition(|b| *b == b':')
         && colon > 0
@@ -2020,12 +2046,7 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
             )
         });
     }
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    let found = match req.class_named(bare) {
-        Some(class) => Some(class),
-        None => autoload(req, bare)?,
-    };
-    found.ok_or_else(|| {
+    autoload(req, name)?.ok_or_else(|| {
         throw_error(
             req,
             "Error",
@@ -2967,13 +2988,12 @@ fn function_callable(
         };
         return crate::classes::closure_from_frame(req, frame).map(|made| made.as_value());
     }
-    let lowered = name.0.to_ascii_lowercase();
-    let found = req.function_named(&lowered).or_else(|| {
+    let found = req.function_named(name.into()).or_else(|| {
         if name_kind == php_unit::decl::NameKind::FullyQualified {
             return None;
         }
-        let at = lowered.iter().rposition(|b| *b == b'\\')?;
-        req.function_named(&lowered[at + 1..])
+        let at = name.0.iter().rposition(|b| *b == b'\\')?;
+        req.function_named(Bare::resolved(name.0.get(at + 1..)?))
     });
     let Some(function) = found else {
         return Err(throw_error(

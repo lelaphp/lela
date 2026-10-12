@@ -17,6 +17,7 @@
 //! access goes on with, the ghost itself or the proxy's instance.
 
 use php_heap::{Heap, Laziness, Obj};
+use php_unit::decl::Bare;
 
 use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
@@ -250,7 +251,7 @@ impl Request {
     /// raises for a class that cannot: an internal class other than
     /// `stdClass`, or one whose chain has such a class above it.
     pub(crate) fn lazy_refusal(&mut self, class: ClassId) -> Option<Thrown> {
-        let std_class = self.class_named(b"stdClass");
+        let std_class = self.class_named(Bare::resolved(b"stdClass"));
         let internal =
             |req: &Request, at: ClassId| req.class_is_internal(at) && Some(at) != std_class;
         let name = self.class_name(class);

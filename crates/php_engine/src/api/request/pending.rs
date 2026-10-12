@@ -10,6 +10,7 @@
 use crate::api::call::{Function, write_prop};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
+use php_unit::decl::Bare;
 
 use super::Request;
 
@@ -386,7 +387,7 @@ impl Request {
         let trace_as_string = self.trace_as_string_of(this);
         let mut at = Some(this);
         while let Some(exception) = at {
-            let Some(throwable) = self.class_named(b"Throwable") else {
+            let Some(throwable) = self.class_named(Bare::resolved(b"Throwable")) else {
                 break;
             };
             if !self.instance_of(exception.class(), throwable) {
@@ -465,11 +466,11 @@ impl Request {
     /// `Error` (`i_get_exception_base`), which is also the scope it is
     /// called in.
     fn trace_as_string_of(&self, this: PhpObject) -> Option<(Function, ClassId)> {
-        let exception = self.class_named(b"Exception")?;
+        let exception = self.class_named(Bare::resolved(b"Exception"))?;
         let base = if self.instance_of(this.class(), exception) {
             exception
         } else {
-            self.class_named(b"Error")?
+            self.class_named(Bare::resolved(b"Error"))?
         };
         Some((self.method_named(base, b"gettraceasstring")?, base))
     }

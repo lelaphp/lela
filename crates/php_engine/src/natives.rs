@@ -1129,10 +1129,7 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
         let class = if scoped {
             Some(crate::api::call::fetch_class(req, class_name)?)
         } else {
-            match req.class_named(class_name) {
-                Some(class) => Some(class),
-                None => crate::api::call::autoload(req, class_name)?,
-            }
+            crate::api::call::autoload(req, class_name)?
         };
         return Ok(class.is_some_and(|class| req.class_constant_defined(class, constant)));
     }

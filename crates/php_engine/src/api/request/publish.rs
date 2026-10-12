@@ -82,10 +82,9 @@ impl Request {
                 continue;
             }
             let named = |name: &[u8]| {
-                let lowered = name.to_ascii_lowercase();
-                self.shared.class_keys.get(&*lowered).copied().or_else(|| {
+                self.shared.class_at(name).or_else(|| {
                     own.iter()
-                        .find(|(name, _)| *name == lowered)
+                        .find(|(held, _)| held.eq_ignore_ascii_case(name))
                         .map(|(_, class)| *class)
                 })
             };
@@ -114,7 +113,7 @@ impl Request {
             {
                 *slot = Some(class);
             }
-            own.push((decl.name.0.to_ascii_lowercase(), class));
+            own.push((decl.name.0.to_vec(), class));
         }
         published.into()
     }
@@ -148,9 +147,9 @@ mod tests {
             let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
             assert!(req.eval_stringl(code.as_bytes(), b"loader").is_ok());
             let (p, c, d) = (
-                req.class_named(b"p"),
-                req.class_named(b"c"),
-                req.class_named(b"d"),
+                req.class_named(php_unit::decl::Bare::resolved(b"p")),
+                req.class_named(php_unit::decl::Bare::resolved(b"c")),
+                req.class_named(php_unit::decl::Bare::resolved(b"d")),
             );
             assert!(p.is_some_and(ClassId::is_published), "P is published");
             assert!(c.is_some_and(ClassId::is_published), "C is published");

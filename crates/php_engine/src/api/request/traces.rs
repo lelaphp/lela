@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 
 use php_heap::Slot;
 use php_unit::Opcode;
-use php_unit::decl::ClassKind;
+use php_unit::decl::{Bare, ClassKind};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -540,14 +540,10 @@ impl Request {
     /// variadic's for every argument past them and every extra named one.
     fn sensitive_parameters(&self, function: Function) -> Sensitive {
         let marked = |parameter: &php_unit::decl::Parameter| {
-            parameter.attributes.iter().any(|attribute| {
-                let name = attribute
-                    .name
-                    .0
-                    .strip_prefix(b"\\")
-                    .unwrap_or(&attribute.name.0);
-                name.eq_ignore_ascii_case(b"SensitiveParameter")
-            })
+            parameter
+                .attributes
+                .iter()
+                .any(|attribute| attribute.name.0.eq_ignore_ascii_case(b"SensitiveParameter"))
         };
         let Some(decl) = self.function_decl(function) else {
             return Sensitive::default();
@@ -600,7 +596,7 @@ impl Request {
     ///   thrown in %s on line 5
     /// ```
     fn sensitive_value(&mut self, argument: Value) -> Result<Value, Thrown> {
-        let Some(class) = self.class_named(b"SensitiveParameterValue") else {
+        let Some(class) = self.class_named(Bare::resolved(b"SensitiveParameterValue")) else {
             return Err(crate::api::raising::fatal(
                 self,
                 "InternalError: SensitiveParameterValue is not linked",

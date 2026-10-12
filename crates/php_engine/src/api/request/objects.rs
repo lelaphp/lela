@@ -11,7 +11,7 @@ use std::any::Any;
 
 use php_heap::{Fatal, Heap, Obj, Zval};
 use php_link::{LinkedClass, Row};
-use php_unit::decl::{ClassDecl, ClassKind, PropertyDecl, Visibility};
+use php_unit::decl::{Bare, ClassDecl, ClassKind, PropertyDecl, Visibility};
 
 use crate::api::abi::{DimensionRead, DtorObj, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
@@ -375,7 +375,7 @@ impl Request {
     /// itself; here a name the bundle does not link is the
     /// `InternalError` fatal that says which, and no object is made.
     pub(crate) fn new_object_of(&mut self, class_name: &str) -> Result<PhpObject, Thrown> {
-        let Some(class) = self.class_named(class_name.as_bytes()) else {
+        let Some(class) = self.class_named(Bare::resolved(class_name.as_bytes())) else {
             return Err(crate::api::raising::fatal(
                 self,
                 &format!("InternalError: the class {class_name} is not linked into this engine"),
@@ -909,7 +909,7 @@ impl Request {
     /// array.
     fn array_access(&mut self, object: PhpObject) -> Result<(), Thrown> {
         let implements = self
-            .class_named(b"ArrayAccess")
+            .class_named(Bare::resolved(b"ArrayAccess"))
             .is_some_and(|interface| self.instance_of(object.class(), interface));
         if implements {
             return Ok(());

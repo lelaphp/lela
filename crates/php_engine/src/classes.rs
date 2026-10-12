@@ -19,7 +19,7 @@
 use std::cmp::Ordering;
 
 use php_unit::Level;
-use php_unit::decl::{FunctionDecl, MethodDecl, Name, Type};
+use php_unit::decl::{Bare, FunctionDecl, MethodDecl, Name, Type};
 
 use php_macros::php_class;
 
@@ -2139,7 +2139,7 @@ fn do_closure_bind(
         NewScope::Object(object) => Some(object.class()),
         NewScope::Named(name) if name == b"static" => info.scope,
         NewScope::Named(name) => {
-            let Some(class) = req.class_named(name.strip_prefix(b"\\").unwrap_or(&name)) else {
+            let Some(class) = req.class_named(Bare::of(&name)) else {
                 warning(
                     req,
                     &format!("Class \"{}\" not found", String::from_utf8_lossy(&name)),
@@ -2156,7 +2156,7 @@ fn do_closure_bind(
     // `called_scope = newthis ? Z_OBJCE_P(newthis) : ce`, the new scope
     // before a receiver with none takes `Closure` as its dummy one.
     let called_scope = scope;
-    let scope = scope.or_else(|| this.and_then(|_| req.class_named(b"Closure")));
+    let scope = scope.or_else(|| this.and_then(|_| req.class_named(Bare::resolved(b"Closure"))));
     create_closure(req, &info, scope, called_scope, this).map(|made| Some(Instance::of(made)))
 }
 
@@ -2173,7 +2173,7 @@ fn create_closure(
     called_scope: Option<ClassId>,
     this: Option<PhpObject>,
 ) -> Result<PhpObject, Thrown> {
-    let Some(class) = req.class_named(b"Closure") else {
+    let Some(class) = req.class_named(Bare::resolved(b"Closure")) else {
         return Err(throw_error(req, "Error", "Class \"Closure\" not found"));
     };
     let bound = info

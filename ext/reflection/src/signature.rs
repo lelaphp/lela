@@ -558,8 +558,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
         }
         ValueRef::Str(_) => {
             let name = first.as_str_bytes().unwrap_or_default().to_vec();
-            let bare = name.strip_prefix(b"\\").unwrap_or(&name);
-            let Some(found) = lookup_function(req, bare) else {
+            let Some(found) = lookup_function(req, &name) else {
                 return Err(throw(
                     req,
                     "ReflectionException",

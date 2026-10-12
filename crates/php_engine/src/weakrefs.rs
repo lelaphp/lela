@@ -21,6 +21,7 @@
 
 use php_heap::Obj;
 use php_macros::php_class;
+use php_unit::decl::Bare;
 
 use crate::api::abi::{
     ClassIterator, CloneObj, DebugInfo, DimensionRead, GcTable, Instance, IteratorElement,
@@ -860,7 +861,7 @@ impl WeakReference {
         {
             return Ok(Owner::take(req, reference).into_instance());
         }
-        let Some(class) = req.class_named(b"WeakReference") else {
+        let Some(class) = req.class_named(Bare::resolved(b"WeakReference")) else {
             return Err(throw_error(
                 req,
                 "Error",

@@ -7,6 +7,7 @@
 //! XML-RPC fault form; and the assertion callback. Their state is
 //! [`Diagnostics`]'s, whose fields no file but this one reads.
 
+use php_unit::decl::Bare;
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
@@ -583,7 +584,7 @@ impl Request {
         // leaves there, stays where it is.
         if let Some(Raised::Throwable(pending)) = self.raised {
             let throwable = self
-                .class_named(b"Throwable")
+                .class_named(Bare::resolved(b"Throwable"))
                 .is_some_and(|throwable| self.instance_of(pending.class(), throwable));
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();

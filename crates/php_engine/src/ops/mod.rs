@@ -9,6 +9,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_unit::decl::Bare;
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
 
@@ -811,7 +812,7 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             req.addref(&value);
             Ok(*a)
         }
-        ValueRef::Object(&o) if req.class_named(b"Closure") != Some(o.class()) => {
+        ValueRef::Object(&o) if req.class_named(Bare::resolved(b"Closure")) != Some(o.class()) => {
             // `zend_std_build_object_properties_array`, the cast's walk
             // that rebuilds no table (`Z/Zend/zend_execute.h:267`).
             if let Some(slots) = o.slots_without_table(req)? {
@@ -3982,7 +3983,7 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
             return Ok(count);
         }
         let class = object.class();
-        if let Some(countable) = req.class_named(b"Countable")
+        if let Some(countable) = req.class_named(Bare::resolved(b"Countable"))
             && req.instance_of(class, countable)
             && let Some(method) = req.method_named(class, b"count")
         {

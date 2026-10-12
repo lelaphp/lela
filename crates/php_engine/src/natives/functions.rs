@@ -5,6 +5,7 @@
 //! reads off the one chain a backtrace walks.
 
 use php_macros::php_function;
+use php_unit::decl::Bare;
 
 use crate::api::abi::{OrFalse, Passed};
 use crate::api::raising::{Thrown, arg_value_error, deprecated, throw_error};
@@ -362,9 +363,7 @@ fn strncasecmp(
 /// ```
 #[php_function]
 fn function_exists(req: &mut Request, function: PhpString) -> bool {
-    let bytes = function.as_bytes();
-    let bytes = bytes.strip_prefix(b"\\").unwrap_or(bytes);
-    req.function_named(bytes).is_some()
+    req.function_named(Bare::of(function.as_bytes())).is_some()
 }
 
 /// `get_included_files(): array`, php's
@@ -713,7 +712,7 @@ fn get_extension_funcs(
             super::core()
                 .into_iter()
                 .map(|(decl, _)| decl.name.0.to_vec())
-                .filter(|name| req.function_named(name).is_some())
+                .filter(|name| req.function_named(Bare::resolved(name)).is_some())
                 .collect()
         } else {
             let Some(extension) = req.extension_named(&name) else {

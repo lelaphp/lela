@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use php_unit::decl::{Visibility, shown};
+use php_unit::decl::{Bare, Visibility, shown};
 
 use super::{Request, visibility_string};
 use crate::api::abi::Callable;
@@ -774,12 +774,11 @@ impl Request {
         deprecations: Deprecations,
     ) -> Result<(), Refusal> {
         let ce_org = fcc.calling.take();
-        if ce_org.is_none() {
-            let bare = callable.strip_prefix(b"\\").unwrap_or(callable);
-            if let Some(function) = self.function_named(bare) {
-                fcc.function = Some(Callee::Function(function));
-                return Ok(());
-            }
+        if ce_org.is_none()
+            && let Some(function) = self.function_named(Bare::of(callable))
+        {
+            fcc.function = Some(Callee::Function(function));
+            return Ok(());
         }
         let split = compound_split(callable);
         let method: Vec<u8> = match split {
@@ -931,7 +930,11 @@ impl Request {
             }
             let class = object.class();
             let (callee, via, scope) = if lowered == b"__invoke" && object.closure(self).is_some() {
-                (Callee::Invoke(object), true, self.class_named(b"Closure"))
+                (
+                    Callee::Invoke(object),
+                    true,
+                    self.class_named(Bare::resolved(b"Closure")),
+                )
             } else if let Some(function) = self
                 .method_named(class, lowered)
                 .filter(|function| self.method_accessible_from(*function, frame.scope))

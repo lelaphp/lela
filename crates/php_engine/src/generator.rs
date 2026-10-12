@@ -29,6 +29,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_macros::php_class;
 use php_unit::Opcode;
+use php_unit::decl::Bare;
 
 use crate::api::abi::{CloneObj, DtorObj, GcTable, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
@@ -830,7 +831,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
         req.vm_mut().advance(caller);
         return Ok(crate::tier::Stepped::Popped(caller));
     }
-    let Some(class) = req.class_named(b"generator") else {
+    let Some(class) = req.class_named(Bare::resolved(b"generator")) else {
         return Err(Fatal::Error(String::from(
             "InternalError: no Generator class is linked",
         )));
