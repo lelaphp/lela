@@ -535,10 +535,19 @@ args = ["-n", "-d", "auto_prepend_file={dir}/gz.phar.tar.gz", "-d", "auto_append
 # 400 of the page php built and never sent; a path past the file it found is
 # that file, sent, and one past a program is its path's info, which
 # `PATH_INFO` keeps whole and `PHP_SELF` reads up to the NUL; and nothing found
-# is 404 (#2695). The text after a 400's
-# ` - ` in the log is `strerror(errno)` of whatever call last set it, EINVAL's
-# under php and none under the engine, and is masked until #2758 finds the
-# call.
+# is 404 (#2695). The text after a 400's ` - ` in the log is masked: it is
+# `get_last_error()`, `strerror(errno)` (`Z/sapi/cli/php_cli_server.c:286`),
+# and nothing on the request's path fails, so errno is what the server's last
+# failing call left on its thread, no call of the request's. That is
+# `zend_signal_init`'s scan of every signal, `sigaction(signo, NULL, &sa)`
+# (`Z/Zend/zend_signal.c:398`), which `do_cli_server` runs once the socket
+# listens (`php_cli_server.c:2907`) and which libc answers EINVAL for SIGKILL
+# and SIGSTOP on macOS and for glibc's own two signals on Linux; or, once a
+# client has closed its end before the server, that connection's
+# `shutdown(2)` (`:2419`), ENOTCONN, so the text follows how an earlier
+# client closed (measured under lldb on the pinned php -S, #2758). The
+# engine's server keeps no such stale errno, and a NUL path's 400 says
+# nothing of its own cause either way.
 [[line]]
 name = "the-built-in-server-refuses-a-path-holding-a-nul"
 args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
