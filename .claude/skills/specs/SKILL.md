@@ -1,10 +1,10 @@
 ---
 name: specs
-description: Coordinate the builders, three or four slots kept full of specs cut from the corpus, and merge what they finish into main through the merge check. `/specs`, from main's checkout.
+description: Coordinate the builders, three slots kept full of specs cut from the corpus, and merge what they finish into main through the merge check. `/specs`, from main's checkout.
 disable-model-invocation: true
 ---
 
-The coordinator keeps the builder **slots** full and merges what they finish. A slot is one builder agent in its own worktree; three or four run at once, as many as the disk and the machine's 12 cores carry. A slot works one **spec**: a ticket of about 150–700 tests' worth of work, cut from where the corpus fails rather than from the design's fog, so every merge moves a measured count. The coordinator's own edits are merge resolutions. What it owns is the cut, the dispatch, the merge and the **merge check**, the proof that a merge regressed nothing.
+The coordinator keeps the builder **slots** full and merges what they finish. A slot is one builder agent in its own worktree; three run at once, each building under `CARGO_BUILD_JOBS=3`, so the three and a merge's hook fit the machine's 12 cores; a builder's commit hook runs at `nice` 10 on its own, since its checkout is a linked worktree, and yields to the merge's (harness revision 140). A slot works one **spec**: a ticket of about 150–700 tests' worth of work, cut from where the corpus fails rather than from the design's fog, so every merge moves a measured count. The coordinator's own edits are merge resolutions. What it owns is the cut, the dispatch, the merge and the **merge check**, the proof that a merge regressed nothing.
 
 ## Where you stand
 
@@ -81,18 +81,20 @@ The merge is in when its commit exists and `git status` is clean. Every branch a
 After the last merge of a batch, before any push, and never while a merge commit's hook is running: the check and the hook share the target directory and the cores, and a hook starved of either is what fails witnesses and tests under load (#1312).
 
 1. `cargo xtask port-map` when `crates/php_ext` changed.
-2. `cargo xtask witness --unmeasured`: every crate without a passing reading over its tree now. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733; the ones it measured over the tree that landed stand and are not run again (#1312).
+2. `cargo xtask witness --unmeasured`: every crate without a passing reading over its tree now. The hook runs no witness on a merge commit and no crosscheck at all (harness revision 140), so this is where the batch's merged tree is witnessed, and `cargo xtask crosscheck` beside it renders every extension the binary carries over that tree once per batch, the two sharing the one build of the linked engine; a `fail crosscheck` on an extension the batch touched is what `done` refuses at the push. The ones measured over the tree that landed stand and are not run again (#1312), and before revision 140 the hook ran only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733.
 3. On a fresh `release-da` build, the profile CI's lanes run (harness revision 82), the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). `xtask phpt` runs `target/release-da/php` ahead of a fresh `release` one, so a base kept on `release` compares across profiles: a test met there and missed here is an overflow check or a debug assertion firing, a bug to file and not the batch's regression. `target/release/xtask` is the command hook's harness, not a lane's, and stays a release build. The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
    ```
    cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi
    cargo build --release -p xtask
    cargo xtask witness --unmeasured > $S/witness-<head>.out 2>&1 &
+   cargo xtask crosscheck > $S/crosscheck-<head>.out 2>&1 &
    cargo xtask phpt --census --against <base> > $S/lane-<head>.out &
    cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out &
    cargo xtask phpt --subset tests --against <base> > $S/tests-<head>.out &
    cargo xtask phpt --subset sapi/cli --against <base> > $S/cli-<head>.out &
    wait
    grep -E '^(fail|skip) witness' $S/witness-<head>.out
+   grep -E '^fail crosscheck' $S/crosscheck-<head>.out
    grep -E '^regressed |@against' $S/lane-<head>.out $S/zend-<head>.out $S/tests-<head>.out $S/cli-<head>.out
    git fetch origin && cargo xtask done --base origin/main
    ```
