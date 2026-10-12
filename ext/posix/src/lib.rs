@@ -474,11 +474,16 @@ fn posix_setegid(req: &mut Request, group_id: i64) -> bool {
 /// the engine's (`php_ext::process`); `false` with the errno kept where
 /// the OS refuses.
 ///
+/// The witness asks in a child and prints what the child printed: the
+/// fence holds what both hosts print and leaves the child's ending
+/// unread.
+///
 /// ```php
-/// $g = posix_getgroups();
-/// var_dump(array_is_list($g), in_array(posix_getegid(), $g, true));
+/// $child = '$g = posix_getgroups(); var_dump(array_is_list($g), in_array(posix_getegid(), $g, true));';
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $child], [1 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// ```

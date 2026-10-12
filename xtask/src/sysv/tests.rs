@@ -742,3 +742,50 @@ fn a_claim_left_unsettled_takes_what_its_journaled_programs_left() {
     }
     assert_eq!(taken, [journaled], "the journaled queue alone");
 }
+
+/// A held claim's journal keeps every other run's sweep from what its
+/// processes are named on (#2750): a phpt subset's test made a segment
+/// and ended, and another run's reclaim took it as [`abandoned`] before
+/// the subset's own sweep, which counted two of the three objects. The
+/// subset's claim of its processes alone holds no window, so a segment
+/// another process left is still taken; let go, it goes, and its
+/// process's segment is any run's to take again.
+#[test]
+fn what_a_held_claims_processes_are_named_on_is_no_other_runs_to_take() {
+    use std::io::Write as _;
+
+    let dir = Tree::new("sysv-own").unwrap();
+    let own = Claim::laid(&dir, "phpt", false).unwrap();
+    writeln!(own.journal().unwrap(), "{STARTED} 0 4242").unwrap();
+    let standing = Standing(vec![
+        made(Kind::Memory, 1, &[4242], 0, "mitchell", "23:30:00"),
+        made(Kind::Memory, 2, &[4243], 0, "mitchell", "23:30:00"),
+    ]);
+    let grace = Duration::from_secs(1);
+    let taken = |claims: &Claims| -> Vec<u64> {
+        let mut ids: Vec<u64> = claims
+            .taken(&standing, grace, (&runner(), &clock()), |_| false)
+            .iter()
+            .map(|o| o.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    let held = Claims::read(&dir, None);
+    assert_eq!(
+        held.held.since, None,
+        "a claim of its processes alone has no window"
+    );
+    assert_eq!(
+        taken(&held),
+        [2],
+        "taken while the run that made it held its claim"
+    );
+    let path = own.path().to_path_buf();
+    drop((held, own));
+    assert_eq!(taken(&ended(&dir, 0)), [1, 2]);
+    assert!(
+        !path.exists(),
+        "a claim of its processes alone goes once let go"
+    );
+}

@@ -1064,11 +1064,6 @@ impl Breakpoints {
         }
         (!text.is_empty()).then_some(text)
     }
-
-    /// Whether a line waits on a file not compiled yet.
-    pub fn has_pending(&self) -> bool {
-        self.has(|k| matches!(k, Kind::PendingFile { .. }))
-    }
 }
 
 impl At<'_> {

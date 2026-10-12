@@ -484,12 +484,23 @@ fn dir_of(package_id: &str) -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
+/// Where [`without_git`] keeps the index git handed a hook, as an absolute
+/// path: the one a commit's tree is written from, which in a commit by
+/// pathspec is a second index and not the checkout's (#2747).
+pub(crate) const COMMIT_INDEX: &str = "XTASK_COMMIT_INDEX";
+
 /// `command` with every `GIT_` variable taken out. Pre-commit runs the
 /// instruments, and git exports `GIT_DIR`, `GIT_INDEX_FILE` and their kin
 /// to a hook; a test that lays a scratch repository down would otherwise
-/// write into the repository being committed to.
-pub(crate) fn without_git(command: &mut Command) {
-    for (key, _) in std::env::vars_os() {
+/// write into the repository being committed to. `GIT_INDEX_FILE` is kept
+/// as [`COMMIT_INDEX`], which only a reader of the commit's index reads
+/// ([`crate::test::committed`]).
+pub fn without_git(command: &mut Command) {
+    for (key, value) in std::env::vars_os() {
+        if key == "GIT_INDEX_FILE" {
+            let index = std::path::absolute(&value).unwrap_or_else(|_| value.into());
+            command.env(COMMIT_INDEX, index);
+        }
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(&key);
         }

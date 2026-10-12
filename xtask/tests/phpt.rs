@@ -620,7 +620,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         .collect();
     fs::write(&pin, text.join("\n")).unwrap();
     let tree = fixture_tree();
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&root)
         .args(["phpt", "--subset", "Zend/tests"])
@@ -633,7 +633,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         stdout.contains("Zend/tests") && !stderr.contains("neither place"),
         "the subset resolved under the fixture:\n{stdout}\n{stderr}"
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&root)
         .args(["phpt", "--subset", "Zend/tests"])
@@ -688,7 +688,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let run = |given: &Path| {
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(given)
             .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
@@ -1528,16 +1528,56 @@ fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
 /// each run passes every test; the waits are on a reading. The control: a
 /// run that holds its keys within itself alone binds the port while the
 /// other run's test holds it, and that test misses.
+///
+/// The port is found free and let go before the tests bind it, so another
+/// process on the machine can take it first (#2773). Then every test of
+/// both runs misses, which keys held apart never cause, since one test
+/// of each run binds the port; the exchange is run again on a fresh port,
+/// three at most.
 #[test]
 fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
     if oracle().is_none() {
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let free = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let readings = std::iter::repeat_with(free)
+        .take(3)
+        .find_map(|port| {
+            let readings = over_a_fixed_port(port);
+            let bound =
+                |r: &Reading| !matches!(r.numbers.get("passed"), None | Some(Number::Int(0)));
+            readings.iter().any(bound).then_some(readings)
+        })
+        .expect("another process took each of three ports before the tests bound it");
+    for reading in &readings {
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
+    }
+    let waited: i64 = readings
+        .iter()
+        .map(|r| match r.numbers.get("waited") {
+            Some(Number::Int(n)) => *n,
+            _ => 0,
+        })
+        .sum();
+    assert!(waited > 0, "one run waited for the other: {readings:#?}");
+    assert!(
+        readings.iter().any(|r| {
+            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
+            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
+        }),
+        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
+    );
+}
+
+/// The two runs of the test above, at once, over `port`.
+fn over_a_fixed_port(port: u16) -> [Reading; 2] {
     let binds = |name: &str| {
         (
             format!("{name}.phpt"),
@@ -1558,31 +1598,12 @@ fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
     );
     let locks = Tree::new("phpt-across-locks").unwrap();
     let locks = locks.path();
-    let readings = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let runs = [&first, &second].map(|scratch| {
             scope.spawn(move || scratch.run_among(&registry(""), &scratch.engine, locks))
         });
         runs.map(|run| run.join().unwrap())
-    });
-    for reading in &readings {
-        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
-    }
-    let waited: i64 = readings
-        .iter()
-        .map(|r| match r.numbers.get("waited") {
-            Some(Number::Int(n)) => *n,
-            _ => 0,
-        })
-        .sum();
-    assert!(waited > 0, "one run waited for the other: {readings:#?}");
-    assert!(
-        readings.iter().any(|r| {
-            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
-            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
-        }),
-        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
-    );
+    })
 }
 
 /// A test naming `all` in one run runs beside no test of another key in a
@@ -1873,7 +1894,7 @@ impl OneTree {
     /// The command [`OneTree::run`] spawns, for a run that needs one more
     /// variable set.
     fn command(&self, root: &Tree, subset: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
         command
             .arg("--root")
             .arg(root.path())
@@ -2013,6 +2034,10 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
 /// sleeps until the run is killed, and the tree holds only what it held
 /// before. The copy it leaves, which a killed run drops nothing of, is the
 /// next run's sweep's: that run passes, and the dead one's copy is gone.
+/// The test's php, sleeping past the recipe's limit, outlives the killed
+/// run and the other process's run, and the next run in the killed one's
+/// temporary directory stops it as it starts (#2663); one still running
+/// then is killed by this test, which fails.
 ///
 /// Once the run is dead its copy is a dead run's, and the first scratch
 /// tree any process on the machine makes sweeps it from the temporary
@@ -2039,7 +2064,7 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         dir.join("a-held.phpt"),
         format!(
             "--TEST--\nheld\n--FILE--\n<?php\nfile_put_contents(__DIR__ . '/beside', 1);\n\
-             file_put_contents({:?}, getmypid());\nsleep(60);\n--EXPECT--\n",
+             file_put_contents({:?}, getmypid());\nsleep(120);\n--EXPECT--\n",
             held.display().to_string()
         ),
     )
@@ -2073,7 +2098,9 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     first.kill().unwrap();
     first.wait().unwrap();
     let pid = fs::read_to_string(&held).unwrap();
-    Command::new("kill").args(["-9", pid.trim()]).status().ok();
+    let pid = pid.trim();
+    let php = started_at(pid);
+    assert!(!php.is_empty(), "the killed run's php runs on");
 
     // Another process's run, in the machine's temporary directory, whose
     // first scratch tree sweeps every dead run's standing there.
@@ -2085,6 +2112,9 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     )
     .unwrap();
     let swept = other.run(&one, "Zend/tests").wait_with_output().unwrap();
+    // A run in another temporary directory leaves the killed one's php to
+    // the next run in its own.
+    let outlived_other = started_at(pid) == php;
     assert!(swept.status.success(), "{swept:?}");
 
     assert_eq!(listing(tree.corpus.path()), before, "the pinned tree moved");
@@ -2103,6 +2133,19 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         .spawn()
         .unwrap();
     let run = kept(&two, second);
+    // Killed by this test only where it is still the same process.
+    let orphan = started_at(pid) == php;
+    if orphan {
+        Command::new("kill").args(["-9", pid]).status().unwrap();
+    }
+    assert!(
+        outlived_other,
+        "a run in another temporary directory stopped {pid}"
+    );
+    assert!(
+        !orphan,
+        "the next run left the killed run's php {pid} running"
+    );
     assert_eq!(
         run["verdicts"]
             .as_object()
@@ -2113,6 +2156,59 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         "{run}"
     );
     assert!(!copy.exists(), "the next run's sweep left {copy:?}");
+}
+
+/// A process a test started that leaves its program's group, as a
+/// php-fpm master a test starts with `$daemonize = true` calls `setsid()`
+/// (#2663), is stopped as its subset ends: the test's `perl` forks, its
+/// parent exits, and the child takes a session of its own, writes its pid
+/// and sleeps past the recipe's limit with the test's directory, in the
+/// run's copy of the pinned tree, on its command line, as the fpm master's
+/// title names its ini there. The run ends, and that process is gone; one
+/// still running is killed by this test, which fails.
+#[test]
+fn a_process_a_test_started_that_left_its_group_is_stopped_as_the_run_ends() {
+    if oracle().is_none() {
+        return;
+    }
+    let tree = OneTree::new("left-group");
+    let dir = tree.corpus.join("Zend/tests");
+    fs::create_dir_all(&dir).unwrap();
+    let marks = Tree::new("phpt-left-group-marks").unwrap();
+    let started = marks.join("started");
+    // The parent waits for the child's mark, so the child has its own
+    // session before the program ends and its group is killed.
+    let test = r"--TEST--
+leaves its group
+--FILE--
+<?php
+$perl = <<<'PERL'
+my $m = $ARGV[1];
+if (fork) { select(undef, undef, undef, 0.05) until -s $m; exit }
+POSIX::setsid();
+open my $f, '>', $m; print $f $$; close $f;
+sleep 120;
+PERL;
+exec('perl -MPOSIX -e ' . escapeshellarg($perl) . ' ' . escapeshellarg(__DIR__) . ' MARK > /dev/null 2>&1');
+echo 'left';
+--EXPECT--
+left
+";
+    let test = test.replace("MARK", &started.display().to_string());
+    fs::write(dir.join("leaves.phpt"), test).unwrap();
+    let checkout = OneTree::checkout("left-group");
+    let out = tree.command(&checkout, "Zend/tests").output().unwrap();
+    let pid = printed(&started);
+    assert!(!pid.is_empty(), "the test's process never started: {out:?}");
+    let left = !started_at(&pid).is_empty();
+    if left {
+        Command::new("kill").args(["-9", &pid]).status().unwrap();
+    }
+    assert!(
+        !left,
+        "the run left {pid}, which left its group, running: {out:?}"
+    );
+    assert!(out.status.success(), "{out:?}");
 }
 
 /// Every path under `dir` with its bytes, a directory's as none, sorted:

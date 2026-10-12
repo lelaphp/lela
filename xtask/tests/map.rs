@@ -25,18 +25,9 @@ fn read(path: &str) -> String {
 /// working copy: another session's `SessionStart` hook or pre-commit
 /// rewrites a region in place while these tests run, and a read in the
 /// middle of that write saw a bare closer that no commit held (#1322).
+/// Under pre-commit it is the index the commit is written from (#2747).
 fn staged(root: &Path, path: &str) -> String {
-    let out = Command::new("git")
-        .args(["show", &format!(":{path}")])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|e| panic!("git show :{path}: {e}"));
-    assert!(
-        out.status.success(),
-        "git show :{path}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("{path}: {e}"))
+    xtask::test::committed(root, path).unwrap_or_else(|e| panic!("{e:#}"))
 }
 
 /// The map as committed, which a render in flight does not tear.
@@ -68,6 +59,48 @@ fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
     let read = staged(&root, "AGENTS.md");
     assert_eq!(read, rendered);
     assert!(read.lines().all(|l| l != "<!-- /computed -->"), "{read}");
+}
+
+/// A test under pre-commit inherits the commit's index and reads scratch
+/// repositories as well: that index is read for its own repository alone,
+/// and a scratch one is read from its own index (#2747).
+#[test]
+fn the_commit_s_index_is_read_for_its_own_repository_alone() {
+    if let Some(root) = std::env::var_os("MAP_SCRATCH") {
+        assert_eq!(staged(Path::new(&root), "only-here"), "x\n");
+        return;
+    }
+    let root = Tree::new("map-foreign-index").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    std::fs::write(root.join("only-here"), "x\n").unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&root, &["add", "--", "only-here"]);
+    let ours = git(
+        workspace(),
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    );
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "the_commit_s_index_is_read_for_its_own_repository_alone",
+        ])
+        .env("MAP_SCRATCH", &*root)
+        .env("XTASK_COMMIT_INDEX", ours.trim())
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stdout)
+    );
 }
 
 /// The opener of a region by name, if the file has one.
@@ -327,7 +360,7 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
         regions
             .iter()
             .map(|(_, opener)| {
-                let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+                let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
                     .arg("--root")
                     .arg(&*root)
                     .args(xtask_args(opener))
@@ -468,7 +501,7 @@ fn the_invocation_region_is_the_types_and_a_field_it_gains_stales_it() {
         !stale.status.success() && said.contains("invocation") && said.contains("stale"),
         "a field the type gains stales the region until it is rendered: {said}"
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&*root)
         .args(xtask_args(opener))
@@ -641,7 +674,7 @@ fn block_cap() -> usize {
 
 /// `xtask status --session --format json` over a root: the two blocks.
 fn session_blocks(root: &Path) -> (String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .args(["--root"])
         .arg(root)
         .args(["status", "--session", "--format", "json"])
@@ -663,7 +696,7 @@ fn session_blocks(root: &Path) -> (String, String) {
 /// The section of the local file rendered from this workspace's store,
 /// as `computed run` renders it into the local file.
 fn section(name: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .args(["--root"])
         .arg(workspace())
         .args(["status", "--section", name])

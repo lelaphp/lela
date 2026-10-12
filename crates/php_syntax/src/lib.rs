@@ -84,8 +84,10 @@ pub struct Parsed {
     /// The source as given; tokens are offsets into it.
     pub source: Box<[u8]>,
     /// Every token of the source in order, whitespace and comments
-    /// included: the texts concatenate to `source`.
-    pub tokens: Box<[Token]>,
+    /// included: the texts concatenate to `source`. Kept as the lexer
+    /// grew it: a parse lives as long as its compile, and shrinking the
+    /// stream to its length would copy it.
+    pub tokens: Vec<Token>,
     /// The line table over `source`, which every diagnostic's line was
     /// read from.
     pub lines: LineIndex,
@@ -136,7 +138,7 @@ pub fn parse(source: &[u8], options: &Options) -> Parsed {
     let diagnostics = in_php_order(&lexed.tokens, lexed.diagnostics, built.diagnostics);
     Parsed {
         source: source.into(),
-        tokens: lexed.tokens.into_boxed_slice(),
+        tokens: lexed.tokens,
         lines,
         tree: built.tree,
         diagnostics,

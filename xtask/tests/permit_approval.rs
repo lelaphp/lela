@@ -109,7 +109,7 @@ fn scratch(name: &str) -> Tree {
 
 /// `xtask --root <root> permit <args>` over `input`; the hook's stdout.
 fn permit(root: &Path, input: &Value, args: &[&str]) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .arg("permit")

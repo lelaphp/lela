@@ -6,7 +6,7 @@
 //! (`phar_create_or_parse_filename`, `phar_open_or_create_filename`).
 //! An error is php's message, `None` where php sets none.
 
-use php_ext::abi::{Beneath, chain};
+use php_ext::abi::{Beneath, Compiled, chain};
 use php_ext::raising::Thrown;
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, Value};
@@ -706,9 +706,10 @@ pub(crate) fn open_executed(
 
 /// `phar_compile_file`, phar's `zend_compile_file`: a file whose name
 /// says `.phar`, and no `://`, opened as an archive; a tar or zip one
-/// compiles from its `.phar/stub.php`, a whole-file compressed one from
-/// its decompressed bytes, under the file's own name, and any other
-/// file left to the one it saved, `phar_orig_compile_file`. The witness includes a tar-based archive built by
+/// hands the one it saved, `phar_orig_compile_file`, its
+/// `.phar/stub.php`, a whole-file compressed one its decompressed bytes,
+/// to compile under the file's own name, and any other file is left to
+/// it as it is. The witness includes a tar-based archive built by
 /// hand, which the recipe's `phar.readonly` forbids `Phar` to write.
 ///
 /// ```php
@@ -730,16 +731,37 @@ pub(crate) fn open_executed(
 pub(crate) fn compile_file(
     req: &mut Request,
     beneath: Beneath<'_, chain::CompileFile>,
-) -> Result<Option<Vec<u8>>, Thrown> {
-    match archive_source(req, beneath.path())? {
-        Some(source) => Ok(Some(source)),
+) -> Result<Option<Compiled>, Thrown> {
+    let path = beneath.path();
+    match archive_source(req, path)? {
+        Some(Stub {
+            source,
+            over_archive,
+        }) => {
+            let beneath = beneath.with_source(&source);
+            if over_archive {
+                beneath.opened(path).serve(req)
+            } else {
+                beneath.serve(req)
+            }
+        }
         None => beneath.serve(req),
     }
 }
 
-/// The source [`compile_file`] compiles the archive at `path` from, or
+/// What [`compile_file`] hands the one beneath for an archive: the source
+/// to compile, and whether the stream it read stands over the archive
+/// file itself, an uncompressed tar or zip one's `phar->fp`, which the
+/// `zend_file_handle` it replaces then holds open; a compressed one's
+/// reads a decompressed copy.
+struct Stub {
+    source: Vec<u8>,
+    over_archive: bool,
+}
+
+/// The stub [`compile_file`] compiles the archive at `path` from, or
 /// `None` where it is no archive phar serves.
-fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Stub>, Thrown> {
     if path::find(path, b".phar").is_none() || path::find(path, b"://").is_some() {
         return Ok(None);
     }
@@ -749,6 +771,7 @@ fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thr
     let Some(a) = archives(req).get(id) else {
         return Ok(None);
     };
+    let compressed = a.flags & FILE_COMPRESSION_MASK != 0;
     if a.is_tar() || a.is_zip() {
         let url = [b"phar://".as_slice(), path, b"/.phar/stub.php"].concat();
         let opening = php_ext::request::Opening {
@@ -762,10 +785,17 @@ fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thr
         };
         let source = archive::copy_all(req, *stream);
         stream.free(req);
-        return Ok(Some(source?));
+        return Ok(Some(Stub {
+            source: source?,
+            over_archive: !compressed,
+        }));
     }
-    if a.flags & FILE_COMPRESSION_MASK != 0 {
-        return Ok(a.fp.as_ref().map(|fp| fp.bytes.to_vec()));
+    if compressed {
+        let source = a.fp.as_ref().map(|fp| fp.bytes.to_vec());
+        return Ok(source.map(|source| Stub {
+            source,
+            over_archive: false,
+        }));
     }
     Ok(None)
 }

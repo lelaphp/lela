@@ -302,7 +302,7 @@ fn a_narrowed_run_writes_no_reading() {
     )
     .unwrap();
     let xtask = |item: &str| {
-        Command::new(env!("CARGO_BIN_EXE_xtask"))
+        Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(root.path())
             .args(["witness", "--crate", "ext/fixture", "--item", item])
@@ -1504,7 +1504,7 @@ fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     for file in ["ext/pcre/Cargo.toml", "ext/pcre/src/lib.rs"] {
         fs::copy(fixture.join(file), root.join(file)).unwrap();
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root.path())
         .args(["witness", "--crate", "ext/pcre"])

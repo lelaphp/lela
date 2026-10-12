@@ -548,15 +548,27 @@ fn emit_from_keyword(buf: &mut String, kinds: &Kinds) {
     buf.push_str(
         "    /// The keyword kind of an identifier, if it is one. PHP keywords\n    \
          /// match case-insensitively (`php.ungram`'s header: \"the lexer is\n    \
-         /// case-insensitive\"). Allocates one lowercase copy.\n",
+         /// case-insensitive\"). The lowercase copy is on the stack, as\n    \
+         /// long as the longest keyword: the lexer asks once per name.\n",
     );
     buf.push_str("    pub fn from_keyword(ident: &str) -> Option<Self> {\n");
     if kinds.keywords.is_empty() {
         buf.push_str("        let _ = ident;\n        None\n    }\n");
         return;
     }
-    buf.push_str("        let lower = ident.to_ascii_lowercase();\n");
-    buf.push_str("        let kind = match lower.as_str() {\n");
+    let longest = kinds
+        .keywords
+        .iter()
+        .map(|(t, _)| t.len())
+        .max()
+        .unwrap_or(0);
+    writeln!(buf, "        let mut lower = [0_u8; {longest}];").ok();
+    buf.push_str(
+        "        let lower = lower.get_mut(..ident.len())?;\n        \
+         lower.copy_from_slice(ident.as_bytes());\n        \
+         lower.make_ascii_lowercase();\n",
+    );
+    buf.push_str("        let kind = match &*lower {\n");
     let mut by_text: Vec<(&str, &str)> = kinds
         .keywords
         .iter()
@@ -564,7 +576,7 @@ fn emit_from_keyword(buf: &mut String, kinds: &Kinds) {
         .collect();
     by_text.sort_by(|a, b| a.0.cmp(b.0));
     for (text, variant) in by_text {
-        writeln!(buf, "            \"{text}\" => Self::{variant},").ok();
+        writeln!(buf, "            b\"{text}\" => Self::{variant},").ok();
     }
     buf.push_str("            _ => return None,\n        };\n        Some(kind)\n    }\n");
 }

@@ -204,7 +204,8 @@ pub(crate) struct Resolved {
     pub(crate) interrupt: Chain<InterruptHook>,
     /// `zend_compile_file` ([`chain::CompileFile`]): phar's link falls
     /// through to `phar_orig_compile_file` for a file it does not serve
-    /// (`Z/ext/phar/phar.c:3248-3256`).
+    /// and hands it an archive's stub (`Z/ext/phar/phar.c:3248-3310`),
+    /// and phpdbg's keeps what was compiled (`phpdbg_compile_file`).
     pub(crate) compile_file: Chain<CompileFileHook>,
     /// `zend_compile_string` ([`chain::CompileString`]): the tracers' and
     /// the profilers' links do their work on both sides of the one they
@@ -394,10 +395,25 @@ impl<H: Copy> Chain<H> {
     }
 }
 
-/// What a string's compile answered: the unit, or the compiler's
-/// refusal, which the engine raises where the string was to compile. A
-/// link of `zend_compile_string` answers what the one beneath answered.
+/// What a compile answered, php's `zend_op_array *`: the unit, or the
+/// compiler's refusal, which the engine raises where the string or the
+/// file was to compile. A link of `zend_compile_string` or
+/// `zend_compile_file` answers what the one beneath answered, and reads
+/// what it compiled to.
 pub struct Compiled(pub(crate) Result<Arc<Unit>, CompileError>);
+
+impl Compiled {
+    /// The main op array of what compiled, `op_array` as php's
+    /// `zend_compile_file` returns it; none for a refusal.
+    #[must_use]
+    pub fn op_array(&self) -> Option<crate::api::request::OpArrayView<'_>> {
+        let unit = self.0.as_ref().ok()?;
+        Some(crate::api::request::OpArrayView::of(
+            unit,
+            crate::exec::code_of(unit),
+        ))
+    }
+}
 
 /// Whether `php_error_cb` bails out of a level it cannot recover from,
 /// php's `E_DONT_BAIL` bit on the type it is handed: set by
@@ -677,7 +693,7 @@ mod tests {
             builder = builder.additional_extension(host);
         }
         let mut sink = crate::test::Capture::default();
-        builder.build().serve(
+        builder.build().serve_into(
             RequestDescription {
                 web: Some(WebRequest {
                     query: Some(b"ab".to_vec()),
