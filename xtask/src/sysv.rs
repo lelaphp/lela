@@ -1195,6 +1195,15 @@ pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
     Ok(swept)
 }
 
+/// Each program a cut-off run's claim started and never saw end stopped,
+/// as [`reclaim`] stops them first (#2522): what every phpt run does
+/// before it stops what runs cut off left in their copies of the pinned
+/// tree (#2663), so a System V program is stopped by its claim, whose
+/// window then reaches the kill.
+pub(crate) fn stop_cut_off() {
+    Claims::read(&claims(), None).stop();
+}
+
 /// The subsets whose tests make System V objects, the four extensions of
 /// System V IPC.
 pub(crate) const SUBSETS: [&str; 4] = ["ext/shmop", "ext/sysvmsg", "ext/sysvsem", "ext/sysvshm"];

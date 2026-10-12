@@ -37,7 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request, TypedIni, placed_of,
+    BuildDefs, Ending, ExtensionId, HandlePath, LongEntry, LongHandler, Placed, PropertyInfo,
+    Request, TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -2528,8 +2529,7 @@ const BEFORE_OPTIMIZER: i64 = 0x1_0000;
 
 /// `zend_ini_parse_quantity`, which `OnUpdateLong` reads every
 /// whole-number ini entry by: `crate::ini_quantity`, the one reading
-/// of it, whose sentence for a shape php interprets for backwards
-/// compatibility no entry of this engine raises yet.
+/// of it, here without the sentence `Request::ini_quantity_warn` raises.
 fn ini_quantity(value: &[u8]) -> i64 {
     crate::ini_quantity::parse(value).0
 }
@@ -2611,11 +2611,18 @@ fn startup_directives(req: &mut Request, shared: &Shared) {
 }
 
 /// The core entries' handlers over what the host set, in the order
-/// `main.c` declares them (`Z/main/main.c:814-866`): `report_memleaks`
-/// off is `OnUpdateReportMemleaks`'s deprecation, and `memory_limit`
-/// past `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
+/// `main.c` declares them (`Z/main/main.c:807-885`): each whole-number
+/// entry's `zend_ini_parse_quantity_warn` over the value the host set,
+/// one `OnUpdateLongGEZero` refused among them, `report_memleaks` off is
+/// `OnUpdateReportMemleaks`'s deprecation, and `memory_limit` past
+/// `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
 /// maximum's text in its place. What an entry takes is the answer.
 fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    // `main.c` declares `report_memleaks` after `max_input_time` and
+    // `memory_limit` after `max_input_vars`.
+    let (before_memleaks, rest) = split_after(&LongHandler::ENTRIES, b"max_input_time");
+    let (before_limit, after_limit) = split_after(rest, b"max_input_vars");
+    quantities_warn(req, before_memleaks);
     if req
         .ini_get(b"report_memleaks")
         .is_some_and(|v| !Request::ini_parse_bool(v))
@@ -2623,16 +2630,38 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         let message = "Directive 'report_memleaks' is deprecated";
         crate::api::raising::docref(req, Level::Deprecated, message);
     }
+    quantities_warn(req, before_limit);
     let limit = req
         .ini_get(b"memory_limit")
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
-    match req.memory_limit_verdict(&limit) {
+    let taken = match req.memory_limit_verdict(&limit) {
         Some(taken) if taken != limit => {
             req.take_startup_value(b"memory_limit", &taken);
             vec![(b"memory_limit".to_vec(), Some(taken))]
         }
         _ => Vec::new(),
+    };
+    quantities_warn(req, after_limit);
+    taken
+}
+
+/// `entries` up to and with the one named `name`, and the rest.
+fn split_after<'a>(entries: &'a [LongEntry], name: &[u8]) -> (&'a [LongEntry], &'a [LongEntry]) {
+    let at = (entries.iter().position(|(n, _)| *n == name)).map_or(0, |at| at + 1);
+    entries.split_at(at)
+}
+
+/// `zend_register_ini_entries_ex`'s handler over each of `entries` the
+/// host set a value for, as [`Request::ini_quantity_warn`] reads it.
+/// The value comes from the configuration, not the entry, since a
+/// value an `OnUpdateLongGEZero` refused was warned about before the
+/// refusal, and never reached the entry ([`Request::ini_verdict`]).
+fn quantities_warn(req: &mut Request, entries: &[LongEntry]) {
+    for (name, _) in entries {
+        if let Some(value) = req.shared.directive(name).map(<[u8]>::to_vec) {
+            req.ini_quantity_warn(name, &value);
+        }
     }
 }
 
@@ -7652,9 +7681,9 @@ mod tests {
         let frame = req.pushed(unit.published());
         assert_eq!(
             crate::tier::execute::<Nop, Untold>(&mut req, frame),
-            Err(Fatal::Error(String::from(
+            Err(Fatal::error(
                 "InternalError: ZEND_USER_OPCODE has no handler in this engine yet"
-            )))
+            ))
         );
     }
 

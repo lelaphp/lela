@@ -4,6 +4,7 @@
 //! (`Z/ext/standard/math.c:62-252`), which `round`, `number_format` and
 //! `range` round with.
 
+use crate::string::Decimal;
 use php_ext::abi::{Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{BinaryOp, binary_op, coerce_param, is_space};
@@ -1267,12 +1268,12 @@ fn format_long(num: i64, dec: i64, point: &[u8], thousands: &[u8]) -> Vec<u8> {
             negative = false;
         }
     }
-    let digits = magnitude.to_string().into_bytes();
+    let digits = Decimal::unsigned(magnitude);
     let mut out = Vec::new();
     if negative {
         out.push(b'-');
     }
-    out.extend(grouped(&digits, thousands));
+    out.extend(grouped(digits.as_bytes(), thousands));
     if dec > 0 {
         out.extend_from_slice(point);
         out.extend(std::iter::repeat_n(b'0', usize::try_from(dec).unwrap_or(0)));

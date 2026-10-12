@@ -29,6 +29,7 @@ use php_ext::request::{
 use php_ext::values::{PhpString, SmartStr};
 
 use crate::State;
+use crate::string::Decimal;
 
 /// The four entries `url_scanner_ex.re` registers, `PHP_INI_ALL` each.
 ///
@@ -300,7 +301,7 @@ fn append_modified_url(url: &[u8], dest: &mut Vec<u8>, url_app: &[u8], settings:
     }
     if let Some(port) = parts.port.filter(|port| *port != 0) {
         dest.push(b':');
-        dest.extend_from_slice(port.to_string().as_bytes());
+        dest.extend_from_slice(Decimal::unsigned(u64::from(port)).as_bytes());
     }
     if let Some(path) = &parts.path {
         dest.extend_from_slice(path);

@@ -28,16 +28,19 @@ use std::sync::atomic::AtomicU32;
 use crate::api::abi::Extension;
 use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
 use crate::{exec, interrupt};
+use php_unit::OpArray;
 
 pub use crate::api::request::Request;
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
 mod frames;
+mod held;
 pub use frames::{
     Argument, Aside, Called, Evaluated, Under, begin, below, call, catches, entry, evaluate,
     evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
+use held::{Kept, Units};
 
 /// The number of a safepoint within its op array; zero is the entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -174,8 +177,17 @@ pub enum Stepped {
 /// throw or a return, and wherever a step hands the frame to a tier.
 /// Every other edge is a [`Stepped`] with every frame's position
 /// written where the handler left it.
+///
+/// One word, so that a handler's answer, `Result<Next, Fatal>`, is two
+/// registers and never a slot in memory the loop reads back: the way in
+/// the high half and the opline or the frame in the low, which
+/// [`Next::way`] reads back as a [`Way`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Next {
+pub(crate) struct Next(u64);
+
+/// What a [`Next`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Way {
     /// `ZEND_VM_NEXT_OPCODE`: the opline after this one.
     Advance,
     /// `ZEND_VM_SET_OPCODE`: this opline of the same frame.
@@ -184,9 +196,59 @@ pub(crate) enum Next {
     Left(Stepped),
 }
 
+impl Next {
+    /// The high half of each way, written by the constructors below and
+    /// read by [`Next::way`] and nowhere else.
+    const ADVANCE_WAY: u64 = 0;
+    const JUMP_WAY: u64 = 1;
+    const SAME_WAY: u64 = 2;
+    const PUSHED_WAY: u64 = 3;
+    const POPPED_WAY: u64 = 4;
+    const MOVED_WAY: u64 = 5;
+    const THREW_WAY: u64 = 6;
+    const DONE_WAY: u64 = 7;
+
+    /// `ZEND_VM_NEXT_OPCODE`.
+    pub(crate) const ADVANCE: Next = Next(Next::ADVANCE_WAY << 32);
+
+    /// `ZEND_VM_SET_OPCODE(to)`.
+    pub(crate) const fn jump(to: u32) -> Next {
+        Next(Next::JUMP_WAY << 32 | to as u64)
+    }
+
+    /// Where the handler sends the loop.
+    #[inline(always)] // read once per opline by the loop: a shift and a compare
+    #[allow(clippy::inline_always)]
+    pub(crate) const fn way(self) -> Way {
+        // The low half is the opline or the frame, as the high half says.
+        #[allow(clippy::cast_possible_truncation)]
+        let low = self.0 as u32;
+        match self.0 >> 32 {
+            Next::ADVANCE_WAY => Way::Advance,
+            Next::JUMP_WAY => Way::Jump(low),
+            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
+            Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
+            Next::POPPED_WAY => Way::Left(Stepped::Popped(FrameRef(low))),
+            Next::MOVED_WAY => Way::Left(Stepped::Moved(FrameRef(low))),
+            Next::THREW_WAY => Way::Left(Stepped::Threw(FrameRef(low))),
+            // `DONE_WAY`, the one high half left: the fields are private,
+            // so no other is ever written.
+            _ => Way::Left(Stepped::Done),
+        }
+    }
+}
+
 impl From<Stepped> for Next {
     fn from(stepped: Stepped) -> Next {
-        Next::Left(stepped)
+        let (way, frame) = match stepped {
+            Stepped::Same(at) => (Next::SAME_WAY, at.0),
+            Stepped::Pushed(at) => (Next::PUSHED_WAY, at.0),
+            Stepped::Popped(at) => (Next::POPPED_WAY, at.0),
+            Stepped::Moved(at) => (Next::MOVED_WAY, at.0),
+            Stepped::Threw(at) => (Next::THREW_WAY, at.0),
+            Stepped::Done => (Next::DONE_WAY, 0),
+        };
+        Next(way << 32 | u64::from(frame))
     }
 }
 
@@ -196,10 +258,10 @@ impl From<Stepped> for Next {
 /// written to `frame`, the opline at `at` being the one the handler
 /// served.
 pub(crate) fn settled(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Stepped {
-    let to = match next {
-        Next::Left(stepped) => return stepped,
-        Next::Advance => at.saturating_add(1),
-        Next::Jump(to) => to,
+    let to = match next.way() {
+        Way::Left(stepped) => return stepped,
+        Way::Advance => at.saturating_add(1),
+        Way::Jump(to) => to,
     };
     req.vm_mut().stand(frame, to);
     Stepped::Same(frame)
@@ -230,9 +292,9 @@ pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
     match flow {
         Flow::Continue => Ok(()),
         Flow::Bail(fatal) => Err(fatal),
-        Flow::Resume(_) | Flow::Returned => Err(Fatal::Error(String::from(
+        Flow::Resume(_) | Flow::Returned => Err(Fatal::error(
             "InternalError: a tier served code and this loop has no resumption for it yet",
-        ))),
+        )),
     }
 }
 
@@ -243,6 +305,7 @@ pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
 /// and the pending test it performs after a `throw`-effect op. The two
 /// are in that order, and an interrupt the tier found raised is raised
 /// still, because consuming it is the loop's.
+#[inline]
 fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, Fatal> {
     let at = match flow {
         Flow::Continue => return Ok(Stepped::Same(frame)),
@@ -259,6 +322,7 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
 /// The activation of a frame, its prologue having raised nothing
 /// (design §5.6, §4.3 seam 8): the interrupt check, then `Site::Entry`,
 /// then the frame the loop goes on in.
+#[inline]
 fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     if interrupt::check(req)? {
         return Ok(Stepped::Threw(frame));
@@ -455,30 +519,40 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// opline the loop stands at is held in hand across the handlers, as
 /// php's `execute_ex` keeps `opline` in a register, and read off a frame
 /// only where an edge enters it; it is written back only where
-/// something outside the loop can read it ([`Next`]). The units the
-/// frames serve are held across the frames, one share each for the last
-/// [`HELD`] the loop entered, so a call and a return between them take
-/// none and only a crossing into a unit past those takes one: php's
-/// `EX(func)` is a pointer the function table keeps, and the function
-/// table holds the unit here too.
+/// something outside the loop can read it ([`Next`]). The op array is
+/// held in hand the same way ([`held`]): taken up where an edge enters a
+/// frame afresh, through a share of its unit the loop keeps across the
+/// frames, and, on a call to a function the loop called before and on a
+/// return to a frame it entered, the one it kept for that function or
+/// frame, with no lookup, without leaving the inner loop. A callee
+/// pushed has what is left of its `RECV*` prologue served here, where its
+/// op array is in hand and the loop's choice of telling is known (design
+/// §5.6), and is then activated.
 /// The observers of declared opcodes are told as `D` says: [`Untold`]
 /// has nothing to tell and no test, so the loop of an engine where none
-/// is declared pays nothing for them (design §5.8, §7.1).
+/// is declared pays nothing for them (design §5.8, §7.1), in a callee's
+/// prologue too.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let declared = D::of(req);
-    let mut held: [Option<std::sync::Arc<php_unit::Unit>>; HELD] = Default::default();
-    let mut oldest = 0;
+    let mut units = Units::default();
+    let mut kept = Kept::default();
     let mut stepped = first;
     loop {
-        let frame = match stepped {
-            Stepped::Same(at) | Stepped::Moved(at) | Stepped::Popped(at) => at,
-            Stepped::Pushed(at) => {
-                stepped = activated::<T>(req, at)?;
-                continue;
+        // An edge the loop takes up the frame of afresh, through the
+        // function table or the frame's annex.
+        let (mut frame, pushed) = match stepped {
+            Stepped::Same(frame) => {
+                kept.forget();
+                (frame, false)
             }
-            Stepped::Threw(at) => {
-                let unwound = unwind_frame::<T>(req, at)?;
-                if unwound == Stepped::Threw(at) {
+            Stepped::Popped(frame) | Stepped::Moved(frame) => (frame, false),
+            Stepped::Pushed(callee) => (callee, true),
+            Stepped::Threw(frame) => {
+                // A tier's `Resume` with something raised answers here,
+                // and it may have entered frames the loop did not.
+                kept.forget();
+                let unwound = unwind_frame::<T>(req, frame)?;
+                if unwound == Stepped::Threw(frame) {
                     // The entry frame caught nothing: the throwable stays
                     // pending for the caller, the native that re-entered
                     // the loop or `serve` once the main frame is popped.
@@ -489,57 +563,96 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             }
             Stepped::Done => return Ok(()),
         };
-        let Some(header) = req.vm().at(frame) else {
-            return Err(no_frame(frame));
-        };
-        let mut at = header.opline;
-        let Some((unit, body)) = req.unit_of(header) else {
-            return Err(no_frame(frame));
-        };
-        let found = held.iter().position(|held| {
-            held.as_ref()
-                .is_some_and(|held| std::sync::Arc::ptr_eq(held, unit))
-        });
-        let place = found.unwrap_or_else(|| {
-            let place = oldest;
-            oldest = (oldest + 1) % HELD;
-            if let Some(slot) = held.get_mut(place) {
-                *slot = Some(std::sync::Arc::clone(unit));
+        let mut body = units
+            .enter(req, &mut kept, frame)
+            .and_then(|code| units.code(code))
+            .ok_or_else(|| no_frame(frame))?;
+        if pushed {
+            match entered::<T, D>(req, frame, body, declared)? {
+                Stepped::Same(at) if at == frame => {}
+                other => {
+                    stepped = other;
+                    continue;
+                }
             }
-            place
-        });
-        let Some(code) = held
-            .get(place)
-            .and_then(Option::as_deref)
-            .and_then(|unit| exec::body_of(unit, body))
-        else {
-            return Err(no_frame(frame));
-        };
+        }
+        let mut oplines = &*body.oplines;
+        let mut at = req.vm().opline(frame);
         stepped = loop {
-            let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
-            declared.before(req, frame, at, op.opcode);
-            let next = dispatch::dispatch::<T>(req, frame, code, op, at)?;
-            #[cfg(debug_assertions)]
-            req.sensed_after(code, op)?;
-            at = match next {
-                Next::Advance => at.saturating_add(1),
-                Next::Jump(to) => to,
-                Next::Left(stepped) => break stepped,
+            let Some(op) = oplines.get(at as usize) else {
+                return Err(past_the_end(frame, at));
             };
+            declared.before(req, frame, at, op.opcode);
+            let next = dispatch::dispatch::<T>(req, frame, body, op, at)?;
+            #[cfg(debug_assertions)]
+            req.sensed_after(body, op)?;
+            match next.way() {
+                // `at` is the index of an opline that stands, so it is
+                // under the length of an op array, which no 24-byte opline
+                // count brings to `u32::MAX`: the add does not wrap.
+                Way::Advance => at = at.wrapping_add(1),
+                Way::Jump(to) => at = to,
+                // A return to a frame the loop entered: its op array as
+                // the loop left it for the call.
+                Way::Left(stepped @ (Stepped::Popped(to) | Stepped::Moved(to))) => {
+                    let Some(code) = kept.returned(to).and_then(|code| units.code(code)) else {
+                        break stepped;
+                    };
+                    frame = to;
+                    body = code;
+                    oplines = &*body.oplines;
+                    at = req.vm().opline(frame);
+                }
+                // A call to a function the loop called before: its op
+                // array as the loop entered it then.
+                Way::Left(stepped @ Stepped::Pushed(callee)) => {
+                    let Some(code) = kept.called(req, callee) else {
+                        break stepped;
+                    };
+                    let Some(callee_body) = units.code(code) else {
+                        break stepped;
+                    };
+                    kept.keep(callee, code);
+                    match entered::<T, D>(req, callee, callee_body, declared)? {
+                        Stepped::Same(at) if at == callee => {}
+                        other => break other,
+                    }
+                    frame = callee;
+                    body = callee_body;
+                    oplines = &*body.oplines;
+                    at = req.vm().opline(frame);
+                }
+                Way::Left(stepped) => break stepped,
+            }
         };
     }
 }
 
-/// How many units the loop holds a share of at once ([`serve_frame`]):
-/// enough for a program's main file and the files of the functions it
-/// calls in turn to take no share per call.
-const HELD: usize = 4;
+/// A callee just pushed taken up by the loop: what is left of its
+/// `RECV*` prologue served over `code`, the op array the loop holds for it
+/// (design §5.6), and then its activation, the interrupt check and
+/// `Site::Entry`. `Threw` of the callee where a `RECV` raised.
+#[inline(always)] // once per call edge, in the loop
+#[allow(clippy::inline_always)]
+fn entered<T: Tier, D: Telling>(
+    req: &mut Request,
+    callee: FrameRef,
+    code: &OpArray,
+    told: D,
+) -> Result<Stepped, Fatal> {
+    if req.vm().opline(callee) < exec::entry_of(code)
+        && let Some(threw) = exec::prologue(req, callee, code, told)?
+    {
+        return Ok(Stepped::Threw(threw));
+    }
+    activated::<T>(req, callee)
+}
 
 /// The internal error for a frame the loop was sent into that serves no
 /// op array, which no unit the compiler wrote reaches.
 #[cold]
 fn no_frame(frame: FrameRef) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "InternalError: frame {} is serving no op array",
         frame.0
     ))
@@ -588,10 +701,15 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     #[cfg(debug_assertions)]
     req.sensed_after(code, op)?;
     match settled(req, frame, at, next) {
-        Stepped::Pushed(callee) => match activated::<Nop>(req, callee)? {
-            Stepped::Threw(at) => Ok(Stepped::Threw(at)),
-            _ => Ok(Stepped::Pushed(callee)),
-        },
+        Stepped::Pushed(callee) => {
+            let serving = exec::standing(req, callee)?;
+            let told = Declared::of(req);
+            let code = exec::serving_code(&serving, callee)?;
+            match entered::<Nop, Declared>(req, callee, code, told)? {
+                Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+                _ => Ok(Stepped::Pushed(callee)),
+            }
+        }
         stepped => Ok(stepped),
     }
 }
@@ -621,7 +739,7 @@ pub fn unwind(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// its op array, which no unit the compiler wrote reaches.
 #[cold]
 fn past_the_end(frame: FrameRef, at: u32) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "InternalError: frame {} stands at opline {at}, past the end of its op array",
         frame.0
     ))

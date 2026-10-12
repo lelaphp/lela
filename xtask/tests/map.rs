@@ -25,18 +25,9 @@ fn read(path: &str) -> String {
 /// working copy: another session's `SessionStart` hook or pre-commit
 /// rewrites a region in place while these tests run, and a read in the
 /// middle of that write saw a bare closer that no commit held (#1322).
+/// Under pre-commit it is the index the commit is written from (#2747).
 fn staged(root: &Path, path: &str) -> String {
-    let out = Command::new("git")
-        .args(["show", &format!(":{path}")])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|e| panic!("git show :{path}: {e}"));
-    assert!(
-        out.status.success(),
-        "git show :{path}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("{path}: {e}"))
+    xtask::test::committed(root, path).unwrap_or_else(|e| panic!("{e:#}"))
 }
 
 /// The map as committed, which a render in flight does not tear.
@@ -68,6 +59,48 @@ fn the_map_is_read_from_the_index_and_not_from_a_render_in_flight() {
     let read = staged(&root, "AGENTS.md");
     assert_eq!(read, rendered);
     assert!(read.lines().all(|l| l != "<!-- /computed -->"), "{read}");
+}
+
+/// A test under pre-commit inherits the commit's index and reads scratch
+/// repositories as well: that index is read for its own repository alone,
+/// and a scratch one is read from its own index (#2747).
+#[test]
+fn the_commit_s_index_is_read_for_its_own_repository_alone() {
+    if let Some(root) = std::env::var_os("MAP_SCRATCH") {
+        assert_eq!(staged(Path::new(&root), "only-here"), "x\n");
+        return;
+    }
+    let root = Tree::new("map-foreign-index").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    std::fs::write(root.join("only-here"), "x\n").unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&root, &["add", "--", "only-here"]);
+    let ours = git(
+        workspace(),
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    );
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "the_commit_s_index_is_read_for_its_own_repository_alone",
+        ])
+        .env("MAP_SCRATCH", &*root)
+        .env("XTASK_COMMIT_INDEX", ours.trim())
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stdout)
+    );
 }
 
 /// The opener of a region by name, if the file has one.

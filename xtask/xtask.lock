@@ -313,8 +313,10 @@ steer::Verdict
 steer::Verdict::additions
 steer::judge
 steer::run
+test::committed
 test::run
 test::run_staged
+test::without_git
 ticket::Act
 ticket::BlockedBy
 ticket::Blocker

@@ -199,6 +199,16 @@ fn an_extern_class_takes_the_constants_of_its_impl() {
     assert_eq!(out, "int(42)\nint(42)\n");
 }
 
+/// A native's frameless arities are its own name's and never its
+/// alias's: php registers `join` as a `ZEND_RAW_FENTRY` with no
+/// frameless infos, so `zend_flf_functions` holds `implode`'s two rows
+/// and none for `join`, and a call of `join` is `INIT_FCALL`.
+#[test]
+fn an_alias_declares_no_frameless_entry() {
+    assert_eq!(extension::implode::declared().0.frameless, vec![1, 2]);
+    assert!(extension::join::declared().0.frameless.is_empty());
+}
+
 /// The oracle's binary, from the one file that pins it.
 fn oracle() -> PathBuf {
     let pin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../oracle.toml");

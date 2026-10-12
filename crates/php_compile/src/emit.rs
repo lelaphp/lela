@@ -1592,6 +1592,11 @@ impl Emit<'_> {
         number
     }
 
+    /// [`Emit::fatal`] over what the heap refused the compile.
+    fn fatal_of(&self, fatal: Fatal) -> CompileError {
+        self.fatal(crate::fatal_message(fatal))
+    }
+
     /// The compile-time fatal for what stands on the statement's line:
     /// this compiler's sentence for what it cannot read yet, which the
     /// engine renders as the parse error #163 framed it as.
@@ -1648,8 +1653,7 @@ impl Emit<'_> {
     pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
         match self.strings.intern(bytes) {
             Ok(s) => Ok(Zval::string(s)),
-            Err(Fatal::Error(message)) => Err(self.fatal(message)),
-            Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
+            Err(fatal) => Err(self.fatal_of(fatal)),
         }
     }
 
@@ -9945,8 +9949,7 @@ impl Emit<'_> {
         };
         let array = match self.strings.constant_array(&table.entries) {
             Ok(array) => array,
-            Err(Fatal::Error(message)) => return Err(self.fatal(message)),
-            Err(Fatal::OutOfMemory(_)) => return Err(self.fatal("Out of memory")),
+            Err(fatal) => return Err(self.fatal_of(fatal)),
         };
         if let Some(held) = self.constants.get_mut(table.slot as usize) {
             *held = Zval::array(array);
@@ -13790,8 +13793,7 @@ impl Emit<'_> {
         };
         match self.strings.constant_array(entries) {
             Ok(array) => Ok(Some(Zval::array(array))),
-            Err(Fatal::Error(message)) => Err(self.fatal(message)),
-            Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
+            Err(fatal) => Err(self.fatal_of(fatal)),
         }
     }
 
@@ -15339,8 +15341,7 @@ impl Emit<'_> {
     pub(crate) fn lay_array(&mut self, entries: &[(Key, Zval)]) -> Result<Zval, CompileError> {
         match self.strings.constant_array(entries) {
             Ok(array) => Ok(Zval::array(array)),
-            Err(Fatal::Error(message)) => Err(self.fatal(message)),
-            Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
+            Err(fatal) => Err(self.fatal_of(fatal)),
         }
     }
 

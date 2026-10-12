@@ -201,7 +201,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          ) -> Result<Next, Fatal> {{\n\
          \x20   match op.opcode {{\n\
          {arms}\
-         \x20       other => Err(Fatal::Error(format!(\n\
+         \x20       other => Err(Fatal::error(format!(\n\
          \x20           \"InternalError: {{}} has no handler in this engine yet\",\n\
          \x20           other.name()\n\
          \x20       ))),\n\
@@ -298,7 +298,7 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
     }
     writeln!(
         out,
-        "            _ => Err(Fatal::Error(format!(\n\
+        "            _ => Err(Fatal::error(format!(\n\
          \x20               \"InternalError: {{}} over operand kinds ops.toml does not list\",\n\
          \x20               op.opcode.name()\n\
          \x20           ))),\n\

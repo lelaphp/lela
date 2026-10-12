@@ -21,6 +21,7 @@ use super::constants::{
     SORT_REGULAR, SORT_STRING,
 };
 use super::{array_by_reference, compared, strnatcmp, user_compare};
+use crate::string::KeyBytes;
 
 /// `sort(array &$array, int $flags = SORT_REGULAR): true`, php's
 /// `PHP_FUNCTION(sort)` (`Z/ext/standard/array.c:780`): the array the
@@ -639,14 +640,6 @@ pub(super) fn key_value(key: &Key) -> Value {
     }
 }
 
-/// A key's text, as `zend_print_long_to_buf` prints an integer key.
-fn key_text(key: &Key) -> Vec<u8> {
-    match key {
-        Key::Int(n) => n.to_string().into_bytes(),
-        Key::Str(s) => s.as_bytes().to_vec(),
-    }
-}
-
 /// `php_get_key_compare_func` applied, reversed where `reverse` says as
 /// `DEFINE_SORT_VARIANTS` reverses: the answer negated, or for the
 /// natural comparisons the operands swapped.
@@ -667,7 +660,7 @@ pub(super) fn key_compare(
             }
         }
         SORT_STRING => {
-            let (x, y) = (key_text(a), key_text(b));
+            let (x, y) = (KeyBytes::of(a), KeyBytes::of(b));
             if fold {
                 x.iter()
                     .map(u8::to_ascii_lowercase)
@@ -677,7 +670,7 @@ pub(super) fn key_compare(
             }
         }
         SORT_NATURAL => {
-            let (x, y) = (key_text(a), key_text(b));
+            let (x, y) = (KeyBytes::of(a), KeyBytes::of(b));
             return Ok(if reverse {
                 strnatcmp(&y, &x, fold)
             } else {
@@ -685,7 +678,7 @@ pub(super) fn key_compare(
             });
         }
         SORT_LOCALE_STRING => {
-            let (x, y) = (key_text(a), key_text(b));
+            let (x, y) = (KeyBytes::of(a), KeyBytes::of(b));
             crate::string::locale::collate(&x, &y)
         }
         _ => match (a, b) {

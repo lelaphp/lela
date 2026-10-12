@@ -24,12 +24,13 @@ pub(super) mod strip_tags;
 pub use strip_tags::strip_tags_ex;
 
 use constants::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
-use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
+use php_ext::abi::{OrFalse, Passed, Raw, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
-use php_ext::coerce::with_string;
+use php_ext::coerce::{coerce_param, with_string};
+use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Charset, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Charset, Key, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
@@ -884,19 +885,34 @@ const fn lower(byte: u8) -> u8 {
     byte.to_ascii_lowercase()
 }
 
-/// `zend_memnstr`: the first offset of `needle` in `haystack` at or
-/// after `from`, the empty needle found where the search starts.
+/// `zend_memnstr` (`Z/Zend/zend_operators.h:221`): the first offset of
+/// `needle` in `haystack` at or after `from`, the empty needle found
+/// where the search starts. A one-byte needle is `memchr`; a longer one
+/// is each `memchr` of its first byte that has its last byte where the
+/// needle would end, compared whole. php hands a haystack of a kilobyte
+/// or more and a needle of nine bytes or more to `zend_memnstr_ex`'s
+/// Sunday search, which finds the same offset.
 fn memnstr(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     let rest = haystack.get(from..)?;
-    if needle.is_empty() {
-        return Some(from);
-    }
-    if needle.len() > rest.len() {
-        return None;
-    }
-    rest.windows(needle.len())
-        .position(|window| window == needle)
-        .map(|at| at + from)
+    let found = match needle {
+        [] => Some(0),
+        &[byte] => crate::ffi::memchr(rest, byte),
+        &[first, .., last] => {
+            // The last offset a match can start at.
+            let end = rest.len().checked_sub(needle.len())?;
+            let mut at = 0;
+            loop {
+                let candidate = at + crate::ffi::memchr(rest.get(at..=end)?, first)?;
+                if rest.get(candidate + needle.len() - 1) == Some(&last)
+                    && rest.get(candidate..candidate + needle.len()) == Some(needle)
+                {
+                    break Some(candidate);
+                }
+                at = candidate + 1;
+            }
+        }
+    };
+    found.map(|at| at + from)
 }
 
 /// The `zend_long` php returns for a length or an offset.
@@ -904,20 +920,48 @@ fn long(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// A `zend_long` in decimal, the digits on the stack:
+/// An integer in decimal, the digits on the stack:
 /// `zend_print_long_to_buf` (`Z/Zend/zend_operators.h:993`) into its
 /// `char buf[MAX_LENGTH_OF_LONG + 1]`, what `zend_long_to_str` and
-/// `smart_str_append_long` write without a string of their own.
+/// `smart_str_append_long` write without a string of their own, and
+/// `zend_print_ulong_to_buf` for an unsigned one, what
+/// `smart_str_append_unsigned` writes a length with. The one way
+/// ext/standard appends an integer's digits to text it builds; what php
+/// writes through a printf format (`php_printf`, `spprintf`,
+/// `zend_error`) is written with `format!`.
 pub(crate) struct Decimal {
     buf: [u8; 20],
     start: usize,
 }
 
 impl Decimal {
+    /// A `zend_long`, its sign before its digits.
     pub(crate) fn of(n: i64) -> Decimal {
+        let mut decimal = Decimal::unsigned(n.unsigned_abs());
+        if n < 0 {
+            // A magnitude of 19 digits at most leaves room for the sign.
+            decimal.start -= 1;
+            decimal.buf[decimal.start] = b'-';
+        }
+        decimal
+    }
+
+    /// A `zend_long` with its sign whatever it is, `+` before zero or
+    /// more, as `php_sprintf_appendint` writes one under `%+d`.
+    pub(crate) fn plus(n: i64) -> Decimal {
+        let mut decimal = Decimal::of(n);
+        if n >= 0 {
+            decimal.start -= 1;
+            decimal.buf[decimal.start] = b'+';
+        }
+        decimal
+    }
+
+    /// A `zend_ulong`, the 20 digits of `u64::MAX` at most.
+    pub(crate) fn unsigned(n: u64) -> Decimal {
         let mut buf = [0u8; 20];
         let mut start = buf.len();
-        let mut rest = n.unsigned_abs();
+        let mut rest = n;
         loop {
             start -= 1;
             buf[start] = b'0' + u8::try_from(rest % 10).unwrap_or(0);
@@ -926,15 +970,50 @@ impl Decimal {
                 break;
             }
         }
-        if n < 0 {
-            start -= 1;
-            buf[start] = b'-';
-        }
         Decimal { buf, start }
+    }
+
+    /// A `size_t`, a length or a count, as `%zu` prints one.
+    pub(crate) fn size(n: usize) -> Decimal {
+        Decimal::unsigned(u64::try_from(n).unwrap_or(u64::MAX))
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.buf[self.start..]
+    }
+
+    /// The digits as text, for a native that writes a Rust `String`.
+    pub(crate) fn as_str(&self) -> &str {
+        // Every byte is an ASCII digit or sign.
+        std::str::from_utf8(self.as_bytes()).unwrap_or_default()
+    }
+}
+
+/// A key's text with no string of its own: a string key's bytes as they
+/// stand, an integer key's digits on the stack as
+/// `zend_print_long_to_buf` writes them.
+pub(crate) enum KeyBytes<'a> {
+    Str(&'a [u8]),
+    Int(Decimal),
+}
+
+impl<'a> KeyBytes<'a> {
+    pub(crate) fn of(key: &'a Key) -> KeyBytes<'a> {
+        match key {
+            Key::Str(s) => KeyBytes::Str(s.as_bytes()),
+            Key::Int(n) => KeyBytes::Int(Decimal::of(*n)),
+        }
+    }
+}
+
+impl std::ops::Deref for KeyBytes<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            KeyBytes::Str(bytes) => bytes,
+            KeyBytes::Int(digits) => digits.as_bytes(),
+        }
     }
 }
 
@@ -1599,34 +1678,19 @@ fn explode(
 /// string(2) "xy"
 /// join(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
 /// ```
-#[php_function(aliases(join))]
+#[php_function(frameless(1, 2), aliases(join))]
 fn implode(
     req: &mut Request,
-    separator: Union<PhpArray, PhpString>,
-    #[php(default = null)] array: Option<PhpArray>,
+    separator: Raw<Union<PhpArray, PhpString>>,
+    #[php(default = null)] array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    imploded(req, separator, array)
-}
-
-/// `PHP_FUNCTION(implode)` under the name it was called by, which
-/// php's `get_active_function_name()` puts in the first `TypeError`.
-fn imploded(
-    req: &mut Request,
-    separator: Union<PhpArray, PhpString>,
-    array: Option<PhpArray>,
-) -> Result<Owner<PhpString>, Thrown> {
-    let name = req.active_function_name();
+    if req.frameless() {
+        return implode_frameless(req, separator, array);
+    }
+    let (separator, array) = (separator.hold(req)?, array.hold(req)?);
     let (glue, pieces) = match (separator, array) {
         (Union::A(array), None) => (None, array),
-        (_, None) => {
-            return Err(throw_error(
-                req,
-                "TypeError",
-                &format!(
-                    "{name}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given"
-                ),
-            ));
-        }
+        (_, None) => return Err(not_an_array(req)),
         (Union::B(glue), Some(pieces)) => (Some(glue), pieces),
         (_, Some(_)) => {
             return Err(php_ext::raising::arg_type_error(
@@ -1638,6 +1702,65 @@ fn imploded(
     };
     let glue = glue.as_ref().map_or(&b""[..], PhpString::as_bytes);
     implode_array(req, glue, pieces)
+}
+
+/// `ZEND_FRAMELESS_FUNCTION(implode, 1)` and `(implode, 2)`
+/// (`Z/ext/standard/string.c:1077`), which parse their own arguments:
+/// one is the array as it stands, never converted, and anything else
+/// php's second `TypeError` with no deprecation first; of two, the
+/// separator is a string (`Z_FLF_PARAM_STR`), so an array there is
+/// refused before the array is read, and the array a `?array`.
+///
+/// ```php
+/// foreach ([fn() => implode([1, 2], null), fn() => implode(null), fn() => implode(5), fn() => implode([1], "x"), fn() => implode(new ArrayObject([1]))] as $f) { try { var_dump($f()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; } }
+/// var_dump(call_user_func('implode', [1, 2], null), implode(["a", 2]), implode(1.5, ["a", "b"]));
+/// ```
+/// ```expect
+/// implode(): Argument #1 ($separator) must be of type string, array given
+/// implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
+/// implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
+/// implode(): Argument #1 ($separator) must be of type string, array given
+/// implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
+/// string(2) "12"
+/// string(2) "a2"
+/// string(5) "a1.5b"
+/// ```
+fn implode_frameless(
+    req: &mut Request,
+    separator: Raw<Union<PhpArray, PhpString>>,
+    array: Raw<Option<PhpArray>>,
+) -> Result<Owner<PhpString>, Thrown> {
+    if req.argument_count() < 2 {
+        // `zend_parse_arg_array(arg1, &pieces, false, false)`.
+        let Some(pieces) = separator.value().as_array().copied() else {
+            return Err(not_an_array(req));
+        };
+        return implode_array(req, b"", pieces);
+    }
+    let glue = coerce_param(req, &separator.value(), &Type::String, 1)?;
+    let Some(glue) = glue.as_php_string().copied() else {
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a separator held as a string is no string",
+        ));
+    };
+    let Some(pieces) = array.hold(req)? else {
+        return Err(not_an_array(req));
+    };
+    implode_array(req, glue.as_bytes(), pieces)
+}
+
+/// php's `TypeError` for a separator with no array, under the name the
+/// call was made by, which `get_active_function_name()` puts in it.
+fn not_an_array(req: &mut Request) -> Thrown {
+    let name = req.active_function_name();
+    throw_error(
+        req,
+        "TypeError",
+        &format!(
+            "{name}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given"
+        ),
+    )
 }
 
 /// `php_implode(glue, pieces)`.
@@ -1663,7 +1786,7 @@ fn implode_array(
         if let Some(s) = element.as_str_bytes() {
             out.extend_from_slice(s);
         } else if let Some(n) = element.as_int() {
-            out.extend_from_slice(n.to_string().as_bytes());
+            out.extend_from_slice(Decimal::of(n).as_bytes());
         } else {
             with_string(req, &element, |s| out.extend_from_slice(s))?;
         }

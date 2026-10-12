@@ -792,6 +792,9 @@ mod tests {
         assert!(runs_steer(
             "cargo run -q -p xtask -- steer seams.toml --from p"
         ));
+        assert!(runs_steer(
+            "timeout 1800 cargo xtask steer seams.toml --from p"
+        ));
         assert!(!runs_steer("echo 'cargo xtask steer' > seams.toml"));
         assert!(!runs_steer("python3 steer.py"));
         assert!(!runs_steer("grep steer xtask/src/steer.rs"));

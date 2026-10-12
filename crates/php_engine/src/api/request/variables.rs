@@ -20,7 +20,7 @@ use php_unit::AutoGlobal;
 use super::{Overwrite, Request};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
-use crate::c_number::{is_space, strtol};
+use crate::c_number::is_space;
 use crate::exec::TableId;
 
 /// Where a variable php registers came from, php's `PARSE_*` as
@@ -948,11 +948,6 @@ impl Request {
             Some(hook) => hook(self, input, name, value),
             None => Ok(Some(PhpString::new(self, value)?.into_value())),
         }
-    }
-
-    /// An ini entry read as `OnUpdateLong` reads it, C's `atol`, which is [`strtol`].
-    pub(crate) fn ini_long(&self, name: &[u8]) -> i64 {
-        strtol(self.ini_get(name).unwrap_or_default())
     }
 
     /// `php_register_variable_ex` into `track`, with `cookie` saying the

@@ -717,10 +717,20 @@ fn trimmed(pin: &Pin, body: &[u8]) -> Vec<u8> {
 /// `input_encoding = ISO-8859-1` is the entry and not a name php knows
 /// nothing of.
 pub(crate) fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
+    let beside = test.parent().unwrap_or(Path::new(""));
+    Ok(with_pwd(&ini_before_pwd(phpt)?, beside))
+}
+
+/// A test's `--INI--` as [`ini_of`] reads it, with `{PWD}` kept for the
+/// directory its program is served from: a host that serves the program
+/// elsewhere than beside the test puts its own there by [`with_pwd`]
+/// (`fpm-compare`, #2705).
+pub(crate) fn ini_before_pwd(phpt: &Phpt) -> Result<Vec<String>, String> {
     let Some(body) = phpt.text("INI") else {
         return Ok(Vec::new());
     };
-    let body = substituted(&body, test);
+    let scratch = std::env::temp_dir().to_string_lossy().into_owned();
+    let body = body.replace("{TMP}", &scratch);
     let mail = Regex::new(r"\{MAIL:(\S+)\}").map_err(|e| e.to_string())?;
     let body = mail.replace_all(&body, "tee $1 >/dev/null").into_owned();
     let env = Regex::new(r"\{ENV:(\S+)\}").map_err(|e| e.to_string())?;
@@ -787,15 +797,12 @@ fn addslashes(value: &str) -> String {
     out
 }
 
-/// `{PWD}` and `{TMP}`, which stand for the test's own directory and the
-/// scratch one.
-fn substituted(body: &str, test: &Path) -> String {
-    let beside = test
-        .parent()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let scratch = std::env::temp_dir().to_string_lossy().into_owned();
-    body.replace("{PWD}", &beside).replace("{TMP}", &scratch)
+/// `ini` with each `{PWD}` as `dir`, the directory the program runs in,
+/// which upstream puts there as the test's own (`dirname($file)`,
+/// run-tests.php), where it writes the program.
+pub(crate) fn with_pwd(ini: &[String], dir: &Path) -> Vec<String> {
+    let dir = dir.to_string_lossy();
+    ini.iter().map(|line| line.replace("{PWD}", &dir)).collect()
 }
 
 /// `Regex::replace_all` with a closure over the one capture, which

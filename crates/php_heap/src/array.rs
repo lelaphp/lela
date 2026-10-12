@@ -151,8 +151,8 @@ const PREFIX: usize = 16;
 
 impl System {
     fn layout(size: usize) -> Result<Layout, Fatal> {
-        let whole = size.checked_add(PREFIX).ok_or(Fatal::OutOfMemory(size))?;
-        Layout::from_size_align(whole, PREFIX).map_err(|_| Fatal::OutOfMemory(size))
+        let whole = size.checked_add(PREFIX).ok_or(Fatal::out_of_memory(size))?;
+        Layout::from_size_align(whole, PREFIX).map_err(|_| Fatal::out_of_memory(size))
     }
 }
 
@@ -163,7 +163,7 @@ impl Allocate for System {
         // zero.
         let at = unsafe { std::alloc::alloc(layout) };
         let Some(at) = NonNull::new(at) else {
-            return Err(Fatal::OutOfMemory(size));
+            return Err(Fatal::out_of_memory(size));
         };
         // SAFETY: the allocation is at least the prefix, which holds the
         // size for `free` to read.
@@ -1561,7 +1561,7 @@ fn check_size(size: u32) -> Result<u32, Fatal> {
 /// php's `Possible integer overflow in memory allocation (%u * %zu +
 /// %zu)`, the fatal the table's growth raises at `HT_MAX_SIZE`.
 fn overflow(size: u32, each: usize) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "Possible integer overflow in memory allocation ({size} * {each} + {BUCKET})"
     ))
 }
@@ -2645,7 +2645,7 @@ mod tests {
         }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-            Fatal::OutOfMemory(bytes)
+            Fatal::out_of_memory(bytes)
         }
     }
 

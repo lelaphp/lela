@@ -481,17 +481,17 @@ pub(crate) fn post_handler(
 ) -> Result<(), Thrown> {
     let upload_cnt = limits
         .max_file_uploads
-        .unwrap_or_else(|| req.ini_long(b"max_file_uploads"));
+        .unwrap_or_else(|| req.ini_int(b"max_file_uploads"));
     let mut body_parts_cnt = limits
         .max_multipart_body_parts
-        .unwrap_or_else(|| req.ini_long(b"max_multipart_body_parts"));
+        .unwrap_or_else(|| req.ini_int(b"max_multipart_body_parts"));
     let post_max_size = req.post_max_size(limits);
     let max_input_vars = limits
         .max_input_vars
         .unwrap_or_else(|| req.ini_long(b"max_input_vars"));
-    let upload_max_filesize = limits.upload_max_filesize.unwrap_or_else(|| {
-        crate::ini_quantity::parse(req.ini_get(b"upload_max_filesize").unwrap_or_default()).0
-    });
+    let upload_max_filesize = limits
+        .upload_max_filesize
+        .unwrap_or_else(|| req.ini_long(b"upload_max_filesize"));
     let throwing = req.post_throwing();
     let content_length = req.content_length();
     let files = if let Some(files) = req.files_track() {

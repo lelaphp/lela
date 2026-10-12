@@ -49,6 +49,18 @@ pub(super) fn access(path: &Path, mode: i32) -> bool {
     unsafe { libc::access(path.as_ptr(), mode) == 0 }
 }
 
+/// `memchr(3)`: the offset of the first `byte` in `haystack`, the C
+/// library's search, which `zend_memnstr` and `php_char_to_str_ex` call
+/// as they are.
+pub(super) fn memchr(haystack: &[u8], byte: u8) -> Option<usize> {
+    // SAFETY: the pointer and the length are `haystack`'s, which the call
+    // reads within and nothing else; the answer is null or a pointer into
+    // it.
+    let found =
+        unsafe { libc::memchr(haystack.as_ptr().cast(), c_int::from(byte), haystack.len()) };
+    (!found.is_null()).then(|| found.addr() - haystack.as_ptr().addr())
+}
+
 /// `php_get_uid_by_name` (`Z/ext/standard/filestat.c:416`) as ZTS builds
 /// it, over `getpwnam_r(3)` with its buffer grown while it is too small.
 pub(super) fn uid_by_name(name: &[u8]) -> Option<u32> {

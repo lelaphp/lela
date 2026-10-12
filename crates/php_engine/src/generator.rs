@@ -685,9 +685,9 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
 /// and suspended: what `YIELD` and `YIELD_FROM` leave.
 pub(crate) fn suspend(req: &mut Request, generator: PhpObject) -> Result<(), Fatal> {
     let Some((frame, calls)) = req.suspend_frame()? else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a generator suspended with no frame on the stack",
-        )));
+        ));
     };
     with(req, generator, |g| {
         g.execution = Execution::Suspended(Box::new(Suspended { frame, calls }));
@@ -833,9 +833,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
         return Ok(crate::tier::Stepped::Popped(caller));
     }
     let Some(class) = req.class_named(Bare::resolved(b"generator")) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: no Generator class is linked",
-        )));
+        return Err(Fatal::error("InternalError: no Generator class is linked"));
     };
     let object = match req.new_object(class) {
         Ok(object) => object,
@@ -887,9 +885,7 @@ pub(crate) fn running(req: &Request, frame: FrameRef) -> Result<PhpObject, Fatal
     req.frame_at(frame)
         .and_then(FrameAt::generator)
         .ok_or_else(|| {
-            Fatal::Error(String::from(
-                "InternalError: a generator opcode on a frame that is no generator's",
-            ))
+            Fatal::error("InternalError: a generator opcode on a frame that is no generator's")
         })
 }
 
