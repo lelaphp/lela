@@ -147,6 +147,42 @@ fn long2ip(req: &mut Request, ip: i64) -> Result<Owner<PhpString>, Thrown> {
 /// string(0) ""
 /// ```
 ///
+/// A name asks the host's `sapi_getenv` first, the request's own
+/// variables, and the process's environment after; `$local_only` skips
+/// the host and reads the process's environment alone
+/// (`Z/ext/standard/basic_functions.c:724`). Under a host whose request
+/// variables are not the process's environment the two forms part:
+///
+/// ```php
+/// putenv("DAX_T=on");
+/// var_dump(getenv("HTTP_HOST"), getenv("HTTP_HOST", true), getenv("REQUEST_METHOD", true), getenv("DAX_T", true));
+/// ```
+/// ```request makala
+/// --GET--
+/// q=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// string(9) "localhost"
+/// bool(false)
+/// bool(false)
+/// string(2) "on"
+/// ```
+///
+/// A named value is `zend_string_init`'s, an allocation however short:
+///
+/// ```php
+/// putenv("DAX_V=a"); putenv("DAX_W=");
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// pk(function () { $a = getenv("DAX_V"); $b = getenv("DAX_W", true); });
+/// ```
+/// ```expect
+/// 64
+/// ```
+///
 /// The declarations Reflection is asked for most.
 ///
 /// ```php
@@ -177,7 +213,6 @@ fn getenv(
     #[php(default = null)] name: Option<PhpString>,
     #[php(default = false)] local_only: bool,
 ) -> Result<Union<Owner<PhpArray>, OrFalse<Owner<PhpString>>>, Thrown> {
-    let _ = local_only;
     let Some(name) = name else {
         let pairs = req.loaded_env();
         let mut array = PhpArray::new(req)?;
@@ -193,8 +228,20 @@ fn getenv(
         return Ok(Union::A(array));
     };
     let name = c_string(name.as_bytes());
-    match req.env(name).map(<[u8]>::to_vec) {
-        Some(value) => Ok(Union::B(OrFalse::Value(PhpString::new(req, &value)?))),
+    let value = if local_only {
+        (req.env_pairs().iter())
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, value)| value.clone())
+    } else {
+        req.env(name).map(<[u8]>::to_vec)
+    };
+    match value {
+        // `RETVAL_STRING` and `php_getenv`'s `zend_string_init`: an
+        // allocation whatever the length, never the interned string.
+        Some(value) => {
+            let value = PhpString::filled(req, value.len(), |bytes| bytes.copy_from_slice(&value))?;
+            Ok(Union::B(OrFalse::Value(value)))
+        }
         None => Ok(Union::B(OrFalse::False)),
     }
 }
