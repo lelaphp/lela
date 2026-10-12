@@ -325,9 +325,23 @@ fn first_after<T: Child>(
     None
 }
 
-/// Every child the field admits, in order.
+/// Every child the field admits, in order. Counted first, so the slice
+/// is one allocation of its own length and none where the list is empty.
 fn all<T: Child>(children: &[Element]) -> Box<[T]> {
-    children.iter().filter_map(T::of).collect()
+    exact(children.iter().filter_map(T::of))
+}
+
+/// What `items` yields, in one allocation of exactly its length: walked
+/// once to count and once to fill, which costs less than growing a vector
+/// and shrinking it into a slice.
+fn exact<T>(items: impl Iterator<Item = T> + Clone) -> Box<[T]> {
+    let count = items.clone().count();
+    if count == 0 {
+        return Box::default();
+    }
+    let mut out = Vec::with_capacity(count);
+    out.extend(items);
+    out.into_boxed_slice()
 }
 
 /// The first token whose kind is in `kinds`, after a token in `anchors`
@@ -348,13 +362,10 @@ fn token(children: &[Element], anchors: &[SyntaxKind], kinds: &[SyntaxKind]) -> 
 
 /// Every token whose kind is in `kinds`, in order.
 fn tokens(children: &[Element], kinds: &[SyntaxKind]) -> Box<[TokenId]> {
-    children
-        .iter()
-        .filter_map(|element| match element {
-            Element::Token { kind, id } if kinds.contains(kind) => Some(*id),
-            _ => None,
-        })
-        .collect()
+    exact(children.iter().filter_map(|element| match element {
+        Element::Token { kind, id } if kinds.contains(kind) => Some(*id),
+        _ => None,
+    }))
 }
 
 /// Is this token a member name: an `IDENT`, or, since the parser remaps a

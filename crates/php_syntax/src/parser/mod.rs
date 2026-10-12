@@ -161,6 +161,10 @@ pub struct CompletedMarker {
     pub kind: SyntaxKind,
 }
 
+/// Room for the expected set before it grows: what a statement's start
+/// records in one position.
+const EXPECTED: usize = 32;
+
 impl<'t> Parser<'t> {
     /// A parser at the start of `input`, `lines` being the table over the
     /// same source.
@@ -174,8 +178,11 @@ impl<'t> Parser<'t> {
             pos: 0,
             file,
             lines,
-            events: Vec::new(),
-            expected: Vec::new(),
+            // A token's event and about a node's two per token: room
+            // for what a parse of this many tokens emits, so the stream
+            // seldom grows.
+            events: Vec::with_capacity(input.len().saturating_mul(3).saturating_add(4)),
+            expected: Vec::with_capacity(EXPECTED),
             fuel: FUEL,
             burst: 0,
             burst_cap,

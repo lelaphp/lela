@@ -253,7 +253,10 @@ impl<'a> Lexer<'a> {
                     heredoc: None,
                 },
             }],
-            tokens: Vec::new(),
+            // php source runs four to six bytes a token: room for a
+            // token every four, so a small source never grows the stream
+            // and a large one seldom does.
+            tokens: Vec::with_capacity(text.len() / 4 + 4),
             diags: Vec::new(),
             halt: HaltStage::Off,
             emitted: 0,
