@@ -248,7 +248,7 @@ fn a_relative_upload_tmp_dir_is_under_the_process_s_working_directory() {
         "upload",
         &[(
             "up.php",
-            "<?php echo dirname($_FILES['f']['tmp_name']), ' ', $_FILES['f']['error'], ' ',              getcwd() === __DIR__ ? 'in its own' : 'elsewhere';",
+            "<?php echo dirname($_FILES['f']['tmp_name']), ' ', $_FILES['f']['error'], ' ', getcwd() === __DIR__ ? 'in its own' : 'elsewhere';",
         )],
     );
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("makala-upload-cwd");
@@ -381,17 +381,10 @@ fn forwarded_fields_are_trusted_from_no_proxy() {
 
 /// What one `GET` of `path` on a connection of its own reads back, whole.
 fn get(server: &Server, path: &str) -> Vec<u8> {
-    let mut stream = server.connect();
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    let mut bytes = Vec::new();
-    stream
-        .read_to_end(&mut bytes)
-        .unwrap_or_else(|e| panic!("reading the response: {e}"));
-    bytes
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    server
+        .exchange(request.as_bytes(), Duration::from_secs(30))
+        .bytes
 }
 
 /// The status line carries the reason phrase PHP set, as php-fpm hands it
@@ -486,4 +479,24 @@ fn a_response_s_header_names_go_out_lowercase_in_php_s_order() {
         ],
         "{head}"
     );
+}
+
+/// `include_path`'s default is the build's `PHP_INCLUDE_PATH`, the CLI's
+/// too: `.:` and the PEAR directory the build was handed, where it was
+/// handed one (`php_engine`'s `build_defs/layout.rs`, #1371), and never
+/// another installed php's (#2704). The witness on makala's `engine`
+/// holds it to `DEFAULT_INCLUDE_PATH` beside the pinned php-fpm.
+#[test]
+fn include_path_defaults_to_the_build_s() {
+    let root = root(
+        "include-path",
+        &[("index.php", "<?php echo get_include_path();")],
+    );
+    let server = Server::start(&root);
+    let response = common::parse_response(&get(&server, "/index.php"));
+    let build = option_env!("PHP_INCLUDE_PATH").map_or_else(
+        || format!(".:{}", option_env!("PEAR_INSTALL_DIR").unwrap_or("")),
+        str::to_owned,
+    );
+    assert_eq!(String::from_utf8_lossy(&response.body), build);
 }
