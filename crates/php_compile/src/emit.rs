@@ -1060,6 +1060,43 @@ struct ActiveClass {
     /// `ZEND_ACC_ANON_CLASS`, whose `self` and `parent` a type keeps as
     /// written.
     anonymous: bool,
+    /// The method whose body is compiling, which `zend_begin_method_decl`
+    /// put into the class's `function_table` before the body: none
+    /// between methods.
+    declaring: Option<Declaring>,
+}
+
+/// The method `zend_begin_method_decl` has put into
+/// `CG(active_class_entry)->function_table` and whose body is compiling,
+/// so a call in that body to the method itself is a call to a method the
+/// table has: `DestructableObject::__destruct()` written inside
+/// `DestructableObject::__destruct`.
+struct Declaring {
+    name: Vec<u8>,
+    visibility: Visibility,
+    is_final: bool,
+    /// What a call site reads of it, none until `zend_compile_attributes`
+    /// and `zend_compile_params` have read its attributes and its
+    /// parameters, which no call in the body precedes.
+    signature: Option<Signature>,
+}
+
+/// A user method's parameters, and whether its `fn_flags` carry
+/// `ZEND_ACC_DEPRECATED` or `ZEND_ACC_NODISCARD`: what a call site whose
+/// callee the table has reads of it.
+struct Signature {
+    parameters: Vec<Parameter>,
+    flagged: bool,
+}
+
+/// One method `CG(active_class_entry)->function_table` holds while the
+/// class compiles: a method compiled before the call, or the one whose
+/// body the call stands in.
+struct TableMethod {
+    visibility: Visibility,
+    is_final: bool,
+    flagged: bool,
+    callee: Callee,
 }
 
 /// The set visibility `zend_declare_typed_property` gives a public
@@ -3781,7 +3818,13 @@ impl Emit<'_> {
                 String::from_utf8_lossy(&name)
             )));
         }
-        let (function, body) = self.body(
+        self.set_declaring(Some(Declaring {
+            name: name.clone(),
+            visibility: method.visibility,
+            is_final: method.is_final,
+            signature: None,
+        }));
+        let compiled = self.body(
             &method.function,
             &name,
             Some(&class_name),
@@ -3790,7 +3833,9 @@ impl Emit<'_> {
                 is_abstract,
                 ..FnFlags::default()
             },
-        )?;
+        );
+        self.set_declaring(None);
+        let (function, body) = compiled?;
         let declared = MethodDecl {
             function,
             visibility: method.visibility,
@@ -4172,6 +4217,7 @@ impl Emit<'_> {
         }
         let parameters = self.recv_prologue(function, is_ctor, &shown)?;
         self.no_discard_refused(&attributes)?;
+        self.declared_signature(&parameters, &attributes);
         // The entry safepoint is the opline after the prologue (design
         // §5.7), which `begin_body` numbered zero at opline zero; the
         // assignments a promoted parameter makes stand after it, as
@@ -5072,6 +5118,7 @@ impl Emit<'_> {
             kind: class.kind,
             at,
             anonymous,
+            declaring: None,
         });
         let enclosing_parent = std::mem::replace(&mut self.active_parent, parent.clone());
         let attributes = self.class_attributes(class, &name, class.line);
@@ -5112,6 +5159,7 @@ impl Emit<'_> {
             kind: class.kind,
             at,
             anonymous,
+            declaring: None,
         });
         self.active_parent.clone_from(&parent);
         self.class_placed(decl, class, &name, at)?;
@@ -5310,6 +5358,72 @@ impl Emit<'_> {
     /// body.
     fn active_name(&self) -> Option<Vec<u8>> {
         self.active_class.as_ref().map(|class| class.name.clone())
+    }
+
+    /// `zend_begin_method_decl`'s `zend_hash_add_ptr` into the active
+    /// class's `function_table`, or the method's body done.
+    fn set_declaring(&mut self, declaring: Option<Declaring>) {
+        if let Some(active) = self.active_class.as_mut() {
+            active.declaring = declaring;
+        }
+    }
+
+    /// What `zend_compile_params` and `zend_compile_attributes` left on
+    /// the op array of the method whose body is compiling, read by a call
+    /// to it from its own body; a closure's prologue, one written in a
+    /// parameter's default among them, leaves nothing on it.
+    fn declared_signature(&mut self, parameters: &[Parameter], attributes: &[Attribute]) {
+        if self.fn_flags.closure {
+            return;
+        }
+        let Some(declaring) = self
+            .active_class
+            .as_mut()
+            .and_then(|active| active.declaring.as_mut())
+        else {
+            return;
+        };
+        if declaring.signature.is_none() {
+            declaring.signature = Some(Signature {
+                parameters: parameters.to_vec(),
+                flagged: attributes::deprecated_or_no_discard(attributes),
+            });
+        }
+    }
+
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the class
+    /// declared at `at` while it compiles: the methods compiled so far,
+    /// and the one whose body is compiling where `at` is the active
+    /// class, which `zend_begin_method_decl` added before its body.
+    fn table_method(&self, at: usize, lowered: &[u8]) -> Option<TableMethod> {
+        let decl = self.classes.get(at)?;
+        if let Some(method) = decl
+            .methods
+            .iter()
+            .find(|m| m.function.name.0.eq_ignore_ascii_case(lowered))
+        {
+            return Some(TableMethod {
+                visibility: method.visibility,
+                is_final: method.is_final,
+                flagged: attributes::deprecated_or_no_discard(&method.function.attributes),
+                callee: Callee::of(&method.function.parameters),
+            });
+        }
+        let active = self
+            .active_class
+            .as_ref()
+            .filter(|active| active.at == at)?;
+        let declaring = active
+            .declaring
+            .as_ref()
+            .filter(|declaring| declaring.name.eq_ignore_ascii_case(lowered))?;
+        let signature = declaring.signature.as_ref()?;
+        Some(TableMethod {
+            visibility: declaring.visibility,
+            is_final: declaring.is_final,
+            flagged: signature.flagged,
+            callee: Callee::of(&signature.parameters),
+        })
     }
 
     /// `CG(rtd_key_counter)`: the keys made before this source and by it
@@ -16167,7 +16281,9 @@ impl Emit<'_> {
     /// `INIT_METHOD_CALL` over it with the method's constant pair in
     /// `op2`, two cache slots in `result` and the number of arguments in
     /// `extended_value`, the arguments sent for a callee nothing is
-    /// known of, and `DO_FCALL`. A method the program names is `op2`'s
+    /// known of, and `DO_FCALL`, but for a method of `$this` the class
+    /// being compiled pins down ([`Self::known_on_this`]). A method the
+    /// program names is `op2`'s
     /// `CV` or temporary and takes no cache slot; the engine holds it to
     /// be a string before it reads the receiver, so `Method name must be
     /// a string` stands before what a receiver that is no object raises.
@@ -16209,14 +16325,22 @@ impl Emit<'_> {
         if nullsafe && !self.is_this(object) {
             self.jmp_null((op1_type, op1), false);
         }
-        let (op2_type, op2, out) = match self.method_name(method)? {
+        let (op2_type, op2, out, known) = match self.method_name(method)? {
             MethodName::Constant(method) => {
                 let at = self.func_name_literal(&method)?;
-                (OperandKind::Const, at, self.cache_slots(2))
+                let known = self.known_on_this(op1_type, &method);
+                (OperandKind::Const, at, self.cache_slots(2), known)
             }
-            MethodName::Computed((kind, at)) => (kind, at, 0),
+            MethodName::Computed((kind, at)) => (kind, at, 0, None),
         };
-        let plan = Plan::of(arguments, None);
+        let (call_op, callee) = match known {
+            Some(method) => (
+                self.get_call_op(Fbc::User, method.flagged),
+                Some(method.callee),
+            ),
+            None => (Opcode::DoFcall, None),
+        };
+        let plan = Plan::of(arguments, callee.as_ref());
         self.push(Opline {
             opcode: Opcode::InitMethodCall,
             op1_type,
@@ -16227,7 +16351,7 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        let served = self.call_common(&plan, arguments, None, Opcode::DoFcall, line)?;
+        let served = self.call_common(&plan, arguments, callee.as_ref(), call_op, line)?;
         // `short_circuiting_checkpoint != zend_short_circuiting_checkpoint()`
         // once `zend_compile_call_common` made a closure: a `?->` the
         // receiver stands on would leave it null.
@@ -16239,6 +16363,38 @@ impl Emit<'_> {
             );
         }
         Ok(served)
+    }
+
+    /// `zend_compile_method_call`'s "known method on `$this`": where the
+    /// receiver is the `IS_UNUSED` `$this` of a method whose scope is
+    /// known, the method of the name the class being compiled has
+    /// declared so far, its own among them, is the callee where it is
+    /// private or final, since no class extending it can put another in
+    /// its place. Then the call is `DO_UCALL` and its arguments are sent
+    /// by the parameters it declares.
+    ///
+    /// ```php
+    /// class A {
+    ///     private function p(&$r, $n) { $r .= "A::p$n "; return $n ? $this->p($r, $n - 1) : $r; }
+    ///     final function f(array $a) { return count($a); }
+    ///     function run() { $s = ''; $this->p($s, 2); return $s . $this->f([1, 2]) . ' ' . self::d(); }
+    ///     static function d() { return 'd'; }
+    /// }
+    /// class B extends A {
+    ///     function p() { return 'B::p'; }
+    /// }
+    /// echo (new B)->run(), "\n";
+    /// ```
+    /// ```expect
+    /// A::p2 A::p1 A::p0 2 d
+    /// ```
+    fn known_on_this(&self, receiver: OperandKind, method: &[u8]) -> Option<TableMethod> {
+        if receiver != OperandKind::Unused || !self.scope_known() {
+            return None;
+        }
+        let at = self.active_class.as_ref()?.at;
+        self.table_method(at, method)
+            .filter(|m| m.visibility == Visibility::Private || m.is_final)
     }
 
     /// The receiver of a method call or a property fetch: `$this` is
@@ -16954,7 +17110,9 @@ impl Emit<'_> {
     /// the class named, one the engine declared ([`Options::classes`])
     /// or one this file has bound before the call, has a public method
     /// of the name; a private or protected one is compatible only from
-    /// inside the class, which nothing here is. The name is resolved as
+    /// the class itself while it compiles, `ce == CG(active_class_entry)`,
+    /// which finds its own method too ([`Self::table_method`]). The
+    /// name is resolved as
     /// the fetch resolves it ([`Self::class_name`]), which is the name a
     /// declaration of the file took under the same namespace.
     #[cfg(test)]
@@ -16968,10 +17126,6 @@ impl Emit<'_> {
     fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<(Known, Callee)> {
         let class = class.to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
-        let own = self
-            .active_class
-            .as_ref()
-            .is_some_and(|active| active.name.to_ascii_lowercase() == class);
         if let Some((_, decl)) = self.known_classes.find(&class) {
             return decl
                 .methods
@@ -16986,36 +17140,26 @@ impl Emit<'_> {
         // `CG(active_class_entry)`: a class of the file bound early, or
         // the one whose body is compiling, and never one a
         // `DECLARE_CLASS` binds, which the table holds under its key.
-        let active = self.active_class.as_ref().and_then(|active| {
+        let active = self.active_class.as_ref().map(|active| active.at);
+        let at = self.bound.iter().copied().chain(active).find(|at| {
             self.classes
-                .iter()
-                .rev()
-                .find(|decl| *decl.name.0 == *active.name)
-        });
-        let decl = self
-            .bound
-            .iter()
-            .filter_map(|at| self.classes.get(*at))
-            .chain(active)
-            .find(|decl| decl.name.0.to_ascii_lowercase() == class)?;
+                .get(*at)
+                .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(&class))
+        })?;
         // The methods `zend_enum_register_funcs` gives an enum are the
         // engine's, added at the link: php's compile-time table has none
         // of them, so a call to one is compiled as to a method unknown.
-        if decl.kind == ClassKind::Enum
+        if self.classes.get(at)?.kind == ClassKind::Enum
             && matches!(method.as_slice(), b"cases" | b"from" | b"tryfrom")
         {
             return None;
         }
-        decl.methods
-            .iter()
-            .find(|m| {
-                m.function.name.0.to_ascii_lowercase() == method
-                    && (m.visibility == Visibility::Public || own)
-            })
-            .map(|m| {
-                let flagged = attributes::deprecated_or_no_discard(&m.function.attributes);
-                (Known::User { flagged }, Callee::of(&m.function.parameters))
-            })
+        // `ce == CG(active_class_entry)`: the class compiling may call
+        // any method of its own.
+        let own = active == Some(at);
+        self.table_method(at, &method)
+            .filter(|m| m.visibility == Visibility::Public || own)
+            .map(|m| (Known::User { flagged: m.flagged }, m.callee))
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered

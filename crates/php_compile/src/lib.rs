@@ -6238,6 +6238,62 @@ echo f(1), C::s(), $o->m(1), $o->p;
         assert_eq!(unit.methods.len(), 3);
     }
 
+    /// `zend_compile_method_call` and `zend_compile_static_call` against
+    /// the class being compiled (#2675): `$this->p()` to a private and
+    /// `$this->f()` to a final method the class declared before the call
+    /// are `DO_UCALL` with the arguments sent by the parameters, by
+    /// reference to `&$a`, where a public one stays `DO_FCALL` and so
+    /// does the method calling itself, which is public; `self::s()` and
+    /// `C::s()` inside `class C` are `DO_UCALL` too, the second in `s`'s
+    /// own body, which `zend_begin_method_decl` put in the table before
+    /// it compiled.
+    #[test]
+    fn a_call_the_class_being_compiled_pins_down_is_do_ucall() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    private function p($a) {}
+    final public function f(&$a) {}
+    public function g($a) {}
+    public static function s($a) { return C::s($a); }
+    public function m($a) {
+        $this->p($a);
+        $this->f($a);
+        $this->g($a);
+        self::s(1);
+        return $this->m($a);
+    }
+}
+",
+        );
+        let s = "0000 CV0($a) = RECV 1\n\
+                 0001 INIT_STATIC_METHOD_CALL 1 string(\"C\") string(\"s\")\n\
+                 0002 SEND_VAR CV0($a) 1\n\
+                 0003 V1 = DO_UCALL\n\
+                 0004 RETURN V1\n\
+                 0005 RETURN null\n";
+        let m = "0000 CV0($a) = RECV 1\n\
+                 0001 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
+                 0002 SEND_VAR CV0($a) 1\n\
+                 0003 DO_UCALL\n\
+                 0004 INIT_METHOD_CALL 1 THIS string(\"f\")\n\
+                 0005 SEND_REF CV0($a) 1\n\
+                 0006 DO_UCALL\n\
+                 0007 INIT_METHOD_CALL 1 THIS string(\"g\")\n\
+                 0008 SEND_VAR_EX CV0($a) 1\n\
+                 0009 DO_FCALL\n\
+                 0010 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"s\")\n\
+                 0011 SEND_VAL int(1) 1\n\
+                 0012 DO_UCALL\n\
+                 0013 INIT_METHOD_CALL 1 THIS string(\"m\")\n\
+                 0014 SEND_VAR_EX CV0($a) 1\n\
+                 0015 V5 = DO_FCALL\n\
+                 0016 RETURN V5\n\
+                 0017 RETURN null\n";
+        assert!(dump.contains(s), "php's C::s, {dump}");
+        assert!(dump.contains(m), "php's C::m, {dump}");
+    }
+
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
     /// inside an array expression folds every key and value in place
     /// (`zend_try_ct_eval_array`'s first pass), so a cast over a
