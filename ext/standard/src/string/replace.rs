@@ -14,6 +14,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use super::{Decimal, long, lower, memnstr};
+use crate::ffi::memchr;
 
 /// `str_replace(array|string $search, array|string $replace,
 /// string|array $subject, &$count = null): string|array`: each search
@@ -49,6 +50,34 @@ use super::{Decimal, long, lower, memnstr};
 /// string(4) "all0"
 /// string(6) "x--y--"
 /// str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string
+/// ```
+///
+/// A subject no search matches is handed back as it stands, so nothing
+/// is allocated; a replacement as long as its search, a shorter one and
+/// a longer one each write the new string once, and a subject no longer
+/// than the search is the replacement where the two are equal. A search
+/// that leaves the subject empty ends the walk of the searches.
+///
+/// ```php
+/// $s = str_repeat("ab", 20); $m = memory_get_usage(); $r = str_replace("x", "y", $s); $t = str_replace("xy", "z", $s); $u = str_ireplace(["Q", "QR"], "z", $s); var_dump(memory_get_usage() - $m);
+/// var_dump(str_replace("ab", "xy", "abcab"), str_replace("ab", "x", "abcab"), str_replace("ab", "xyz", "abcab", $n), $n, str_replace("abc", "Z", "abc"), str_replace("abcd", "Z", "abc"), str_replace("aa", "b", "aaa"));
+/// var_dump(str_replace(["a", "b"], "", "abab", $e), $e, str_ireplace("A", "xx", "aAb"), str_ireplace("AB", "c", "xaBAbab"), str_ireplace("aBc", "q", "ABC"), str_ireplace(["B", "bc"], ["c", "D"], "aBc"));
+/// ```
+/// ```expect
+/// int(0)
+/// string(5) "xycxy"
+/// string(3) "xcx"
+/// string(7) "xyzcxyz"
+/// int(2)
+/// string(1) "Z"
+/// string(3) "abc"
+/// string(2) "ba"
+/// string(0) ""
+/// int(4)
+/// string(5) "xxxxb"
+/// string(4) "xccc"
+/// string(1) "q"
+/// string(3) "acc"
 /// ```
 #[php_function]
 pub(super) fn str_replace(
@@ -150,8 +179,12 @@ fn replace_common(
     Ok(result)
 }
 
-/// `php_str_replace_in_subject`: the subject after every search, and
-/// the count of replacements.
+/// `php_str_replace_in_subject` (`Z/ext/standard/string.c:4313`): the
+/// subject after every search, and the count of replacements. The
+/// subject stands as it is until a search finds something, so a subject
+/// nothing matches is handed back with one more owner and no byte
+/// copied; each search that does match writes the next subject once, at
+/// its length.
 fn in_subject(
     req: &mut Request,
     search: &Union<PhpArray, PhpString>,
@@ -163,96 +196,283 @@ fn in_subject(
         return Ok((PhpString::new(req, b"")?, 0));
     }
     let mut count = 0i64;
-    let mut current: Option<Vec<u8>> = None;
-    match search {
-        Union::A(searches) => {
-            let mut replace_at = 0;
-            // `ZEND_HASH_FOREACH_VAL(search_ht, search_entry)`
-            // (`Z/ext/standard/string.c:4344`), no owner of the searches
-            // taken: the argument holds them while `zval_get_tmp_string`
-            // runs `__toString`. The replacement is read at the next bucket
-            // of its table that holds one, as it stands at the step.
-            let emptied = walk::foreach(req, *searches, Hold::None, |req, row| -> walk::Step {
-                let needle = with_string(req, row.value(), <[u8]>::to_vec)?;
-                let with: Vec<u8> = match replace {
-                    Union::A(all) => match all.live_from(replace_at) {
-                        Some((found, _, value)) => {
-                            replace_at = found.saturating_add(1);
-                            with_string(req, &value, <[u8]>::to_vec)?
-                        }
-                        None => Vec::new(),
-                    },
-                    Union::B(s) => s.as_bytes().to_vec(),
-                };
-                if needle.is_empty() {
-                    return Ok(ControlFlow::Continue(()));
-                }
-                let haystack = current.as_deref().unwrap_or(subject.as_bytes());
-                let (replaced, n) = replace_bytes(haystack, &needle, &with, case_sensitive);
-                count += n;
-                if n > 0 {
-                    current = Some(replaced);
-                }
-                if current.as_ref().is_some_and(Vec::is_empty) {
-                    return Ok(ControlFlow::Break(()));
-                }
-                Ok(ControlFlow::Continue(()))
-            })?;
-            if emptied.is_some() {
-                return Ok((PhpString::new(req, b"")?, count));
-            }
-        }
+    let searches = match search {
+        Union::A(searches) => *searches,
         Union::B(needle) => {
+            // A string search with an array replacement was refused before
+            // any subject was read.
             let with: &[u8] = match replace {
                 Union::B(s) => s.as_bytes(),
                 Union::A(_) => b"",
             };
-            if !needle.is_empty() {
-                let (replaced, n) =
-                    replace_bytes(subject.as_bytes(), needle.as_bytes(), with, case_sensitive);
-                count = n;
-                if n > 0 {
-                    current = Some(replaced);
-                }
-            }
+            let mut folded = None;
+            let step = searched(
+                req,
+                subject.as_bytes(),
+                (needle.as_bytes(), with),
+                case_sensitive,
+                (&mut folded, &mut count),
+            )?;
+            let value = match step {
+                Some(replaced) => replaced,
+                None => Owner::take(req, subject),
+            };
+            return Ok((value, count));
         }
-    }
-    let value = match current {
-        Some(bytes) => PhpString::new(req, &bytes)?,
-        None => Owner::take(req, subject),
+    };
+    // The subject as the searches so far left it, where one replaced
+    // anything, and its folded bytes while nothing has replaced since
+    // they were folded (`lc_subject_str`).
+    let mut current: Option<Owner<PhpString>> = None;
+    let mut folded: Option<Vec<u8>> = None;
+    let mut replace_at = 0;
+    // `ZEND_HASH_FOREACH_VAL(search_ht, search_entry)`
+    // (`Z/ext/standard/string.c:4344`), no owner of the searches taken:
+    // the argument holds them while `zval_get_tmp_string` runs
+    // `__toString`. The replacement is read at the next bucket of its
+    // table that holds one, as it stands at the step, before the search
+    // is looked at.
+    let walked = walk::foreach(req, searches, Hold::None, |req, row| -> walk::Step {
+        let needle = to_string(req, &row.value().deref())?;
+        let with = match replace {
+            Union::A(all) => match all.live_from(replace_at) {
+                Some((found, _, value)) => {
+                    replace_at = found.saturating_add(1);
+                    match to_string(req, &value) {
+                        Ok(with) => Some(with),
+                        Err(thrown) => {
+                            needle.give_up(req);
+                            return Err(thrown);
+                        }
+                    }
+                }
+                None => None,
+            },
+            Union::B(_) => None,
+        };
+        let bytes: &[u8] = match (&with, replace) {
+            (Some(with), _) => with.as_bytes(),
+            (None, Union::B(s)) => s.as_bytes(),
+            (None, Union::A(_)) => b"",
+        };
+        let now = current.as_deref().copied().unwrap_or(subject);
+        let step = searched(
+            req,
+            now.as_bytes(),
+            (needle.as_bytes(), bytes),
+            case_sensitive,
+            (&mut folded, &mut count),
+        );
+        needle.give_up(req);
+        if let Some(with) = with {
+            with.give_up(req);
+        }
+        let Some(replaced) = step? else {
+            return Ok(ControlFlow::Continue(()));
+        };
+        folded = None;
+        let emptied = replaced.is_empty();
+        if let Some(old) = current.replace(replaced) {
+            old.give_up(req);
+        }
+        Ok(if emptied {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        })
+    });
+    let value = match (walked, current) {
+        (Err(thrown), current) => {
+            if let Some(current) = current {
+                current.give_up(req);
+            }
+            return Err(thrown);
+        }
+        // A search that left nothing ends the walk with php's empty string.
+        (Ok(Some(())), current) => {
+            if let Some(current) = current {
+                current.give_up(req);
+            }
+            PhpString::new(req, b"")?
+        }
+        (Ok(None), Some(current)) => current,
+        (Ok(None), None) => Owner::take(req, subject),
     };
     Ok((value, count))
 }
 
-/// `php_char_to_str_ex`, `php_str_to_str_ex` and `php_str_to_str_i_ex`
-/// as one: every non-overlapping occurrence of `needle` left to right
-/// replaced by `with`, folding both sides when not `case_sensitive`.
-fn replace_bytes(
-    haystack: &[u8],
-    needle: &[u8],
-    with: &[u8],
+/// One search of `php_str_replace_in_subject` over `subject`: an empty
+/// search is skipped, a one-byte search is `php_char_to_str_ex`, a
+/// longer one `php_str_to_str_ex`, or `php_str_to_str_i_ex` over the
+/// subject folded once into `folded`, which the caller keeps while no
+/// search replaces. `None` where nothing matched, and what matched is
+/// added to `count`.
+fn searched(
+    req: &mut Request,
+    subject: &[u8],
+    (needle, with): (&[u8], &[u8]),
     case_sensitive: bool,
-) -> (Vec<u8>, i64) {
-    let folded: Vec<u8>;
-    let lowered_needle: Vec<u8>;
-    let (h, n) = if case_sensitive {
-        (haystack, needle)
-    } else {
-        folded = haystack.iter().map(|c| lower(*c)).collect();
-        lowered_needle = needle.iter().map(|c| lower(*c)).collect();
-        (folded.as_slice(), lowered_needle.as_slice())
-    };
-    let mut out = Vec::with_capacity(haystack.len());
-    let mut count = 0;
-    let mut at = 0;
-    while let Some(found) = memnstr(h, n, at) {
-        out.extend_from_slice(&haystack[at..found]);
-        out.extend_from_slice(with);
-        at = found + n.len();
-        count += 1;
+    (folded, count): (&mut Option<Vec<u8>>, &mut i64),
+) -> Result<Option<Owner<PhpString>>, Thrown> {
+    match needle {
+        [] => Ok(None),
+        &[byte] => char_to_str(req, subject, (byte, with), case_sensitive, count),
+        _ if case_sensitive => str_to_str(req, (subject, subject), (needle, with), count),
+        _ => {
+            let lowered = folded.get_or_insert_with(|| subject.to_ascii_lowercase());
+            let needle = needle.to_ascii_lowercase();
+            str_to_str(req, (subject, lowered), (&needle, with), count)
+        }
     }
-    out.extend_from_slice(&haystack[at..]);
-    (out, count)
+}
+
+/// `php_char_to_str_ex` (`Z/ext/standard/string.c:3103`): every `from`
+/// in `subject` replaced by `to`, folded by `zend_tolower_ascii` where
+/// not `case_sensitive`. The bytes are counted first (`count_chars`), so
+/// a subject without one is `None` and allocates nothing, and the new string
+/// is allocated once at its length, `zend_string_safe_alloc` where it
+/// grows.
+#[allow(clippy::naive_bytecount)] // `count_chars` is one loop, not a crate
+fn char_to_str(
+    req: &mut Request,
+    subject: &[u8],
+    (from, to): (u8, &[u8]),
+    case_sensitive: bool,
+    count: &mut i64,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
+    let folded = lower(from);
+    let n = if case_sensitive {
+        // `count_chars`' SSE2 count, which the compiler vectorises as it is.
+        subject.iter().filter(|&&c| c == from).count()
+    } else {
+        subject.iter().filter(|&&c| lower(c) == folded).count()
+    };
+    if n == 0 {
+        return Ok(None);
+    }
+    *count += long(n);
+    let fill = |out: &mut [u8]| {
+        let mut pen = Pen { out, at: 0 };
+        if case_sensitive {
+            let mut rest = subject;
+            while let Some(at) = memchr(rest, from) {
+                pen.put(&rest[..at]);
+                pen.put(to);
+                rest = &rest[at + 1..];
+            }
+            pen.put(rest);
+        } else {
+            for &c in subject {
+                if lower(c) == folded {
+                    pen.put(to);
+                } else {
+                    pen.put(&[c]);
+                }
+            }
+        }
+    };
+    let replaced = match to.len().checked_sub(1) {
+        Some(grows) => PhpString::product(req, n, grows, subject.len(), fill)?,
+        None => PhpString::filled(req, subject.len() - n, fill)?,
+    };
+    Ok(Some(replaced))
+}
+
+/// `php_str_to_str_ex` (`Z/ext/standard/string.c:3169`) where `searched`
+/// is `subject`, and `php_str_to_str_i_ex` where it is the subject
+/// folded and `needle` is folded too: every non-overlapping `needle` in
+/// `searched`, left to right, replaced by `with`, the bytes between
+/// copied from `subject`. A replacement as long as the search copies
+/// the subject at its first match and writes each match over it; any
+/// other counts the matches first and writes the new string once at its
+/// length, `zend_string_safe_alloc` where it grows. A subject no longer
+/// than the search is the replacement where the two are equal. `None`
+/// where nothing matched.
+fn str_to_str(
+    req: &mut Request,
+    (subject, searched): (&[u8], &[u8]),
+    (needle, with): (&[u8], &[u8]),
+    count: &mut i64,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
+    let len = subject.len();
+    if needle.len() >= len {
+        if searched != needle {
+            return Ok(None);
+        }
+        *count += 1;
+        // `zend_string_init_fast`.
+        return PhpString::new(req, with).map(Some);
+    }
+    if needle.len() == with.len() {
+        let Some(first) = memnstr(searched, needle, 0) else {
+            return Ok(None);
+        };
+        let mut n = 0;
+        let replaced = PhpString::filled(req, len, |out| {
+            out.copy_from_slice(subject);
+            for at in found(searched, needle, first) {
+                if let Some(place) = out.get_mut(at..at + with.len()) {
+                    place.copy_from_slice(with);
+                }
+                n += 1;
+            }
+        })?;
+        *count += n;
+        return Ok(Some(replaced));
+    }
+    let Some(first) = memnstr(searched, needle, 0) else {
+        return Ok(None);
+    };
+    let n = found(searched, needle, first).count();
+    *count += long(n);
+    let fill = |out: &mut [u8]| {
+        let mut pen = Pen { out, at: 0 };
+        let mut copied = 0;
+        for at in found(searched, needle, first) {
+            pen.put(&subject[copied..at]);
+            pen.put(with);
+            copied = at + needle.len();
+        }
+        pen.put(&subject[copied..]);
+    };
+    let replaced = if with.len() > needle.len() {
+        PhpString::product(req, n, with.len() - needle.len(), len, fill)?
+    } else {
+        PhpString::filled(req, len - n * (needle.len() - with.len()), fill)?
+    };
+    Ok(Some(replaced))
+}
+
+/// Each offset of a non-empty `needle` in `haystack` from the match at
+/// `first` on, the next search starting past the last match, as
+/// `php_str_to_str_ex`'s loop over `php_memnstr` steps.
+fn found<'a>(
+    haystack: &'a [u8],
+    needle: &'a [u8],
+    first: usize,
+) -> impl Iterator<Item = usize> + 'a {
+    let mut next = Some(first);
+    std::iter::from_fn(move || {
+        let at = next?;
+        next = memnstr(haystack, needle, at + needle.len().max(1));
+        Some(at)
+    })
+}
+
+/// A string being written front to back, `zend_mempcpy`'s target.
+struct Pen<'a> {
+    out: &'a mut [u8],
+    at: usize,
+}
+
+impl Pen<'_> {
+    fn put(&mut self, bytes: &[u8]) {
+        let end = self.at + bytes.len();
+        if let Some(place) = self.out.get_mut(self.at..end) {
+            place.copy_from_slice(bytes);
+        }
+        self.at = end;
+    }
 }
 
 /// `strtr(string $string, string|array $from, ?string $to = null):
@@ -406,17 +626,21 @@ fn strtr_array(
         Key::Str(k) => k.as_bytes(),
     };
     let s = string.as_bytes();
-    let replaced = with_string(req, &value, |with| {
-        (!k.is_empty()).then(|| replace_bytes(s, k, with, true))
-    })?;
-    let Some((out, n)) = replaced else {
-        docref(req, Level::Warning, "Ignoring replacement of empty string");
-        return Ok(Owner::take(req, string));
+    let with = to_string(req, &value)?;
+    let mut ignored = 0;
+    let replaced = match k {
+        [] => {
+            docref(req, Level::Warning, "Ignoring replacement of empty string");
+            Ok(None)
+        }
+        &[byte] => char_to_str(req, s, (byte, with.as_bytes()), true, &mut ignored),
+        _ => str_to_str(req, (s, s), (k, with.as_bytes()), &mut ignored),
     };
-    if n == 0 {
-        return Ok(Owner::take(req, string));
+    with.give_up(req);
+    match replaced? {
+        Some(replaced) => Ok(replaced),
+        None => Ok(Owner::take(req, string)),
     }
-    PhpString::new(req, &out)
 }
 
 /// `php_strtr_array_ex` (`Z/ext/standard/string.c:2919`): one walk of

@@ -884,19 +884,34 @@ const fn lower(byte: u8) -> u8 {
     byte.to_ascii_lowercase()
 }
 
-/// `zend_memnstr`: the first offset of `needle` in `haystack` at or
-/// after `from`, the empty needle found where the search starts.
+/// `zend_memnstr` (`Z/Zend/zend_operators.h:221`): the first offset of
+/// `needle` in `haystack` at or after `from`, the empty needle found
+/// where the search starts. A one-byte needle is `memchr`; a longer one
+/// is each `memchr` of its first byte that has its last byte where the
+/// needle would end, compared whole. php hands a haystack of a kilobyte
+/// or more and a needle of nine bytes or more to `zend_memnstr_ex`'s
+/// Sunday search, which finds the same offset.
 fn memnstr(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     let rest = haystack.get(from..)?;
-    if needle.is_empty() {
-        return Some(from);
-    }
-    if needle.len() > rest.len() {
-        return None;
-    }
-    rest.windows(needle.len())
-        .position(|window| window == needle)
-        .map(|at| at + from)
+    let found = match needle {
+        [] => Some(0),
+        &[byte] => crate::ffi::memchr(rest, byte),
+        &[first, .., last] => {
+            // The last offset a match can start at.
+            let end = rest.len().checked_sub(needle.len())?;
+            let mut at = 0;
+            loop {
+                let candidate = at + crate::ffi::memchr(rest.get(at..=end)?, first)?;
+                if rest.get(candidate + needle.len() - 1) == Some(&last)
+                    && rest.get(candidate..candidate + needle.len()) == Some(needle)
+                {
+                    break Some(candidate);
+                }
+                at = candidate + 1;
+            }
+        }
+    };
+    found.map(|at| at + from)
 }
 
 /// The `zend_long` php returns for a length or an offset.
