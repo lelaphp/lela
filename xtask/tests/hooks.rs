@@ -127,7 +127,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
             refuse = dir.join("refuse").display(),
             tested = dir.join("tested-AGENTS.md").display(),
             probe = std::env::current_exe().unwrap().display(),
-            xtask = env!("CARGO_BIN_EXE_xtask"),
+            xtask = xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
         ),
     );
     executable(

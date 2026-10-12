@@ -471,7 +471,7 @@ fn a_workspace_without_the_facade_refuses() {
 #[test]
 fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
     let root = scratch("binary");
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .args(["--root", root.to_str().unwrap(), "new-ext", "demo"])
         .output()
         .unwrap();
@@ -491,7 +491,7 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
         stdout.contains("crates/php_bundle/src/lib.rs: enabled() gains php_ext_demo::extension"),
         "the two edits are printed: {stdout}"
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .args(["--root", root.to_str().unwrap(), "new-ext", "demo"])
         .output()
         .unwrap();

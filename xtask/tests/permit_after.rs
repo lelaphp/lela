@@ -47,7 +47,7 @@ fn stdin(event: &str, session: &str, id: &str, cwd: &Path, command: &str) -> Str
 
 /// `xtask --root <root> permit <args>` with `input` on stdin.
 fn permit(root: &Path, input: &str, args: &[&str]) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .arg("permit")
@@ -412,7 +412,7 @@ fn proposal(root: &Path) -> String {
 fn steer_command(root: &Path) -> String {
     format!(
         "{} --root {} steer oracle.toml --from proposal.toml",
-        env!("CARGO_BIN_EXE_xtask"),
+        xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
         root.display()
     )
 }
