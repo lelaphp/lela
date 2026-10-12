@@ -30,6 +30,10 @@
 //! answers `100 Continue` when the body is first read, which is after
 //! the head has passed its limits.
 //!
+//! A connection to the TLS listener is served once its handshake has
+//! ended ([`open_connection`], #2343), within
+//! [`Limits::handshake_timeout`].
+//!
 //! SIGTERM ends the accept loop and begins the drain
 //! ([`serve_until_drained`], #2344),
 //! bounded by [`Limits::shutdown_timeout`].
@@ -51,14 +55,16 @@ use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use php_sapi::ResponseHead;
 use tokio::signal::unix::{Signal, SignalKind, signal};
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio_rustls::TlsAcceptor;
 
+use crate::boundary::BodyLength;
 use crate::framing;
 use crate::log::Access;
 use crate::options::Limits;
-use crate::request::{Head, Job, Sink, Written};
+use crate::request::{Head, Job, Scheme, Sink, Written};
 use crate::route::{Route, Router};
-use crate::socket::{Socket, Watch};
+use crate::socket::{Socket, Watch, Wire};
 use crate::static_file::Sending;
 
 /// How many pieces of a request's body wait for the request to read them.
@@ -69,6 +75,34 @@ const RESPONSE_PIECES: usize = 8;
 
 /// The least hyper's read buffer may hold, which its builder asserts.
 const LEAST_BUFFER: usize = 8192;
+
+/// A listening socket, and the TLS its connections speak where they do.
+pub(crate) struct Listener {
+    /// The bound socket.
+    pub(crate) socket: std::net::TcpListener,
+    /// The handshakes its connections make, where they speak TLS.
+    pub(crate) tls: Option<TlsAcceptor>,
+}
+
+impl Listener {
+    /// What the started line names it by: its scheme and address.
+    pub(crate) fn url(&self) -> std::io::Result<String> {
+        Ok(format!(
+            "{}://{}",
+            scheme(self.tls.as_ref()).name(),
+            self.socket.local_addr()?
+        ))
+    }
+}
+
+/// Whether a listener's connections come clear or under `tls`.
+fn scheme(tls: Option<&TlsAcceptor>) -> Scheme {
+    if tls.is_some() {
+        Scheme::Https
+    } else {
+        Scheme::Http
+    }
+}
 
 /// The connection side: its runtime, and SIGTERM, which begins the drain.
 pub(crate) struct ConnectionSide {
@@ -107,7 +141,7 @@ impl ConnectionSide {
     }
 
     /// The connection side on this thread for as long as the process
-    /// serves: every connection accepted on `listener` served on its own
+    /// serves: every connection accepted on `listeners` served on its own
     /// task, its requests put on `queue`, until SIGTERM, and then the
     /// drain ([`serve_until_drained`]). What is left at the deadline is aborted here,
     /// as the runtime is dropped with every connection's task, which
@@ -121,7 +155,7 @@ impl ConnectionSide {
         self,
         limits: Limits,
         router: Arc<Router>,
-        listener: std::net::TcpListener,
+        listeners: Vec<Listener>,
         queue: mpsc::Sender<Job>,
     ) -> std::io::Result<Drained> {
         let ConnectionSide {
@@ -131,17 +165,17 @@ impl ConnectionSide {
         runtime.block_on(serve_until_drained(
             limits,
             router,
-            listener,
+            listeners,
             queue,
             &mut terminate,
         ))
     }
 }
 
-/// The accept loop until SIGTERM, then the drain, Ranch's and Kestrel's
-/// (research/production-server.r2.md M8, M10), in the order a supervisor
-/// stops what it started, the last started first: the listener is
-/// closed, so no connection is accepted after the signal and a client
+/// The accept loops until SIGTERM, one a listener, then the drain,
+/// Ranch's and Kestrel's (research/production-server.r2.md M8, M10), in
+/// the order a supervisor stops what it started, the last started first:
+/// the listeners are closed, so no connection is accepted after the signal and a client
 /// that tries is refused by the kernel; every connection is told to end
 /// ([`drive`]), an idle keep-alive one at once and a busy one once its
 /// response has ended; and the connections are waited for until the
@@ -155,27 +189,58 @@ impl ConnectionSide {
 async fn serve_until_drained(
     limits: Limits,
     router: Arc<Router>,
-    listener: std::net::TcpListener,
+    listeners: Vec<Listener>,
     queue: mpsc::Sender<Job>,
     terminate: &mut Signal,
 ) -> std::io::Result<Drained> {
-    listener.set_nonblocking(true)?;
-    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let listeners = listeners
+        .into_iter()
+        .map(|Listener { socket, tls }| {
+            socket.set_nonblocking(true)?;
+            Ok((tokio::net::TcpListener::from_std(socket)?, tls))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
     let slots = Arc::new(Semaphore::new(
         usize::try_from(limits.connections)
             .map_or(Semaphore::MAX_PERMITS, |n| n.min(Semaphore::MAX_PERMITS)),
     ));
     let (drain, draining) = watch::channel(false);
     let (open, mut all_ended) = mpsc::channel::<Infallible>(1);
-    let accepting = accept(&listener, limits, &router, &slots, queue, draining, open);
+    let mut loops: Vec<Pin<Box<dyn Future<Output = std::io::Error> + '_>>> = listeners
+        .iter()
+        .map(|(listener, tls)| {
+            let accepting = Accepting {
+                limits,
+                router: &router,
+                slots: &slots,
+                queue: queue.clone(),
+                draining: draining.clone(),
+                open: open.clone(),
+                tls: tls.clone(),
+            };
+            Box::pin(accept(listener, accepting)) as Pin<Box<dyn Future<Output = _>>>
+        })
+        .collect();
+    drop((queue, draining, open));
+    // The first loop to fail, which none does but with the slots closed.
+    let accepting = std::future::poll_fn(|cx| {
+        loops
+            .iter_mut()
+            .find_map(|accepting| match accepting.as_mut().poll(cx) {
+                Poll::Ready(failed) => Some(failed),
+                Poll::Pending => None,
+            })
+            .map_or(Poll::Pending, Poll::Ready)
+    });
     if let Some(failed) = first_of(accepting, terminate.recv()).await {
         return Err(failed);
     }
     let deadline = tokio::time::Instant::now() + limits.shutdown_timeout;
-    drop(listener);
+    drop(loops);
+    drop(listeners);
     crate::log::error(
         format!(
-            "makala: SIGTERM: the listener is closed, and the connections drain for at most {:?}",
+            "makala: SIGTERM: the listeners are closed, and the connections drain for at most {:?}",
             limits.shutdown_timeout
         )
         .as_bytes(),
@@ -197,22 +262,35 @@ async fn serve_until_drained(
     })
 }
 
-/// The accept loop: each connection on a task of its own, its requests
-/// served in order, as HTTP/1.1 keeps them. A connection holds one of
+/// What an accept loop hands each connection it accepts.
+struct Accepting<'a> {
+    limits: Limits,
+    router: &'a Arc<Router>,
+    slots: &'a Arc<Semaphore>,
+    queue: mpsc::Sender<Job>,
+    draining: watch::Receiver<bool>,
+    open: mpsc::Sender<Infallible>,
+    /// The TLS the listener's connections speak, where they do.
+    tls: Option<TlsAcceptor>,
+}
+
+/// One listener's accept loop: each connection on a task of its own, its
+/// requests served in order, as HTTP/1.1 keeps them. A connection holds one of
 /// [`Limits::connections`] slots until its socket has lingered and
 /// closed; with none free the loop waits for one before it accepts
 /// again, as Ranch's acceptor sleeps at its cap, and the kernel's listen
 /// queue holds the clients that come meanwhile. It returns only with the
 /// slots closed, which nothing does; the drain drops it unfinished.
-async fn accept(
-    listener: &tokio::net::TcpListener,
-    limits: Limits,
-    router: &Arc<Router>,
-    slots: &Arc<Semaphore>,
-    queue: mpsc::Sender<Job>,
-    draining: watch::Receiver<bool>,
-    open: mpsc::Sender<Infallible>,
-) -> std::io::Error {
+async fn accept(listener: &tokio::net::TcpListener, accepting: Accepting<'_>) -> std::io::Error {
+    let Accepting {
+        limits,
+        router,
+        slots,
+        queue,
+        draining,
+        open,
+        tls,
+    } = accepting;
     let local = match listener.local_addr() {
         Ok(local) => local,
         Err(e) => return e,
@@ -232,6 +310,7 @@ async fn accept(
         let connection = Arc::new(Connection {
             peer,
             local,
+            scheme: scheme(tls.as_ref()),
             limits,
             router: Arc::clone(router),
             queue: queue.clone(),
@@ -239,15 +318,69 @@ async fn accept(
             begun: AtomicU32::new(0),
             cut: Notify::new(),
         });
-        let socket = Socket::new(stream, Arc::clone(&connection.watch), limits, slot);
-        tokio::spawn(drive(connection, socket, draining.clone(), open.clone()));
+        tokio::spawn(open_connection(
+            connection,
+            stream,
+            slot,
+            tls.clone(),
+            draining.clone(),
+            open.clone(),
+        ));
     }
+}
+
+/// A connection accepted, its TLS handshake made where its listener
+/// speaks TLS, then served ([`drive`]); one whose handshake fails, or does
+/// not end within the handshake timeout or before the drain begins, is
+/// closed, the failure in the error log.
+async fn open_connection(
+    connection: Arc<Connection>,
+    stream: tokio::net::TcpStream,
+    slot: OwnedSemaphorePermit,
+    tls: Option<TlsAcceptor>,
+    mut draining: watch::Receiver<bool>,
+    open: mpsc::Sender<Infallible>,
+) {
+    let wire = match tls {
+        None => Wire::Clear(stream),
+        Some(tls) => {
+            let shaken =
+                tokio::time::timeout(connection.limits.handshake_timeout, tls.accept(stream));
+            match first_of(shaken, draining.wait_for(|draining| *draining)).await {
+                Some(Ok(Ok(stream))) => Wire::Tls(Box::new(stream)),
+                Some(Ok(Err(failed))) => {
+                    handshake_failed(connection.peer, &failed);
+                    return;
+                }
+                Some(Err(_)) => {
+                    handshake_failed(connection.peer, &"it passed the handshake timeout");
+                    return;
+                }
+                None => return,
+            }
+        }
+    };
+    let socket = Socket::new(
+        wire,
+        connection.peer,
+        Arc::clone(&connection.watch),
+        connection.limits,
+        slot,
+    );
+    drive(connection, socket, draining, open).await;
+}
+
+/// A TLS handshake's failure in the error log.
+fn handshake_failed(peer: SocketAddr, why: &dyn std::fmt::Display) {
+    crate::log::error(format!("makala: {peer}: the TLS handshake failed: {why}").as_bytes());
 }
 
 /// What one connection's requests share.
 struct Connection {
     peer: SocketAddr,
     local: SocketAddr,
+    /// Whether it speaks TLS, which `$_SERVER` says.
+    scheme: Scheme,
     limits: Limits,
     router: Arc<Router>,
     queue: mpsc::Sender<Job>,
@@ -348,7 +481,14 @@ async fn respond(
     connection: Arc<Connection>,
     request: Request<Incoming>,
 ) -> Result<Response<Reply>, Infallible> {
-    connection.watch.request_began();
+    // The body's length as hyper frames it: exact where it is sized, or
+    // none, and chunked where it is not.
+    connection
+        .watch
+        .request_began(match request.body().size_hint().exact() {
+            Some(length) => BodyLength::Exact(length),
+            None => BodyLength::Chunked,
+        });
     let begun = connection.begun.fetch_add(1, Ordering::Relaxed) + 1;
     let mut access = Access::begun(connection.peer, &request);
     let body_in = access.as_ref().map(|access| Arc::clone(&access.body_in));
@@ -406,6 +546,7 @@ async fn hand_over(
             .collect(),
         peer: connection.peer,
         local: connection.local,
+        scheme: connection.scheme,
     };
     let router = Arc::clone(&connection.router);
     let asked = tokio::task::spawn_blocking(move || {
