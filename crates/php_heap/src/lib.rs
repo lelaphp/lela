@@ -636,6 +636,25 @@ impl Heap {
         counted_header(z).is_some_and(|header| header.refcount() > 1 && !header.may_leak())
     }
 
+    /// One owner of `z` given up where [`Heap::releases_quietly`] holds,
+    /// `GC_DELREF` and nothing after it, since `gc_check_possible_root`
+    /// would take nothing; whether it held. Where it does not, nothing
+    /// is touched and the owner is the caller's to give up through
+    /// [`Heap::release`]. What a frame's leave does with the receiver it
+    /// owns once it has asked.
+    #[must_use]
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn release_quietly(z: Zval) -> bool {
+        let Some(header) =
+            counted_header(z).filter(|header| header.refcount() > 1 && !header.may_leak())
+        else {
+            return false;
+        };
+        header.delref();
+        true
+    }
+
     /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
     /// and at zero a string, an object or a resource freed here, while a
     /// table or a reference cell is handed back undestroyed, since what

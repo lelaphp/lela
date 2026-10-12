@@ -677,10 +677,10 @@ impl Request {
             return None;
         }
         let header = laid.header();
-        let receiver = header.this().is_some();
+        let receiver = header.receiver();
         let plain = header.function.is_some()
             && header.annex.is_none()
-            && (!receiver || quiet_receiver(header))
+            && (receiver.is_none() || quiet_receiver(receiver))
             && header.closure.is_none()
             && !header.info.call()
             && !header.info.extra_args();
@@ -731,8 +731,13 @@ impl Request {
         if leave.strings {
             self.give_up_strings(leave.moved);
         }
-        if leave.receiver {
-            self.give_up_top_receiver();
+        match leave.receiver {
+            // `OBJ_RELEASE` of an object another owner of stands and the
+            // collector has no use for: the decrement alone.
+            Some(exec::Receiver::Owned(object))
+                if php_heap::Heap::release_quietly(object.as_value().to_zval()) => {}
+            Some(receiver) => self.give_up_receiver(receiver),
+            None => {}
         }
         self.vm.stack.pop_frame(&mut self.heap);
         if let Some(caller) = self.vm.stack.frame_mut(leave.caller) {
@@ -743,19 +748,6 @@ impl Request {
             }
             let header = caller.header_mut();
             header.opline = header.opline.saturating_add(1);
-        }
-    }
-
-    /// The receiver of the top frame given up ([`Request::leave_plainly`]).
-    #[inline(never)]
-    fn give_up_top_receiver(&mut self) {
-        if let Some(receiver) = self
-            .vm
-            .stack
-            .top()
-            .and_then(|(_, top)| top.header().receiver())
-        {
-            self.give_up_receiver(receiver);
         }
     }
 
@@ -1691,8 +1683,8 @@ impl Request {
 /// or owned with another owner standing and nothing for the collector
 /// to take ([`php_heap::Heap::releases_quietly`]).
 #[inline(never)]
-fn quiet_receiver(header: &exec::Header) -> bool {
-    match header.receiver() {
+fn quiet_receiver(receiver: Option<exec::Receiver>) -> bool {
+    match receiver {
         None | Some(exec::Receiver::Lent(_)) => true,
         Some(exec::Receiver::Owned(object)) => {
             php_heap::Heap::releases_quietly(object.as_value().to_zval())
@@ -1723,12 +1715,12 @@ fn owns_strings_alone(slots: &[Zval], moved: Option<usize>) -> Option<bool> {
 /// served: the frame it returns into and the slot of it that takes the
 /// value, where the call reads one, the slot the returned value was
 /// moved out of, whether any other slot owns a string to give up, and
-/// whether the frame has a receiver to give up.
-#[derive(Debug, Clone, Copy)]
+/// the receiver the frame gives up, where it has one.
+#[derive(Clone, Copy)]
 pub(crate) struct PlainLeave {
     pub(crate) caller: FrameRef,
     pub(crate) returns_to: Option<u32>,
     moved: Option<usize>,
     strings: bool,
-    receiver: bool,
+    receiver: Option<exec::Receiver>,
 }
