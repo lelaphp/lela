@@ -197,11 +197,12 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
                 print(sentence);
                 status = 1;
             }
-            let mut sink = Process;
+            let mut sink: Box<dyn OutputSink + Send> = Box::new(Process);
             for program in programs {
-                match request::lint(engine, program, &mut sink) {
-                    0 => {}
-                    ended => status = ended,
+                let (linted, back) = request::lint(engine, program, sink);
+                sink = back;
+                if linted != 0 {
+                    status = linted;
                 }
             }
             status

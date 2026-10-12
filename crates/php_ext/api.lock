@@ -1131,7 +1131,6 @@ test::Engine::serve_capture
 test::Engine::serve_capture_as
 test::Engine::serve_capture_in
 test::Engine::serve_capture_traced_in
-test::Engine::serve_started
 test::Engine::start_up
 test::Engine::startup_errors
 test::Engine::strip

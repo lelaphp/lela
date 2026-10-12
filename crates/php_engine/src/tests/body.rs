@@ -114,7 +114,7 @@ fn posted(engine: &Engine, content_type: &str, body: &[u8], program: &str) -> (S
                 rest = after;
             }
         });
-        engine.serve(description, &mut sink);
+        engine.serve_into(description, &mut sink);
     });
     (
         String::from_utf8_lossy(&sink.stdout).into_owned(),
