@@ -295,8 +295,8 @@ fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
     if !verdict.is_empty() {
         verdicts.insert(format!("phpt:php-src/{scope}/tests/a.phpt"), verdict.into());
     }
-    let run =
-        serde_json::json!({"commit": "0", "corpus": "c", "engine": "e", "verdicts": verdicts});
+    let recipe = Manifest::load(root).unwrap().pin.digest().to_owned();
+    let run = serde_json::json!({"commit": "0", "corpus": "c", "engine": "e", "recipe": recipe, "verdicts": verdicts});
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, run.to_string()).unwrap();
 }
@@ -843,9 +843,10 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
 /// A reading taken under the oracle's recipe is stale once the pin's values
 /// move, as one taken over a crate is once its tree does (#1387): an entry
 /// laid under `oracle.toml`'s `[recipe.env]` stales the touched crate's
-/// `witness` and `crosscheck` readings and nothing else, each naming the
-/// pin as what changed; the subset's runs are kept by the engine's tree,
-/// which the pin is not part of (#725).
+/// `witness` and `crosscheck` readings and its kept phpt run, which
+/// carries the pin's digest (#2725), and nothing else, each naming the pin
+/// as what changed. Before the change all are fresh; after it, a run taken
+/// again here leaves the base's stale, naming the call that takes it.
 #[test]
 fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
     let root = scratch("recipe");
@@ -866,15 +867,28 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
         .filter(|l| l.ends_with("is stale; oracle.toml changed since it was taken"))
         .map(|l| l.split(':').next().unwrap())
         .collect();
+    stale.sort_unstable();
     stale.dedup();
     let mut under: Vec<&str> = asked_of(&root, "ext/pcre")
         .iter()
         .map(|(i, _)| *i)
-        .filter(|i| UNDER_RECIPE.contains(i) && *i != "phpt")
+        .filter(|i| UNDER_RECIPE.contains(i))
         .collect();
+    under.sort_unstable();
     under.dedup();
     assert_eq!(stale, under, "{verdict:#?}");
-    assert!(!under.is_empty());
+    assert!(under.contains(&"phpt"));
+
+    // The run here taken again under the new recipe, and the base's still
+    // under the old: the base's is stale and names the call that takes it
+    // again (#2725).
+    keep_run(&root, None, "ext/pcre", "pass");
+    let base = sh(&root, &["git", "rev-parse", "--short", "HEAD"]);
+    let base = base.trim();
+    let line = format!(
+        "phpt: the run of ext/pcre kept at {base} is stale; oracle.toml changed since it was taken; take one with `cargo xtask phpt --base {base} --subset ext/pcre`"
+    );
+    assert!(judge(&root).unmet.contains(&line), "{:#?}", judge(&root));
 }
 
 #[test]

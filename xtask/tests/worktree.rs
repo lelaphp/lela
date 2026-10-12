@@ -795,9 +795,10 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
         .and_then(|(_, rest)| rest.split_once(')'))
         .map_or_else(|| panic!("{unkept}"), |(tree, _)| tree.to_owned());
 
+    let recipe = Manifest::load(&root).unwrap().pin.digest().to_owned();
     let run = |engine: &str| {
         format!(
-            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"{engine}\", \"verdicts\": {{}}}}\n"
+            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"{engine}\", \"recipe\": \"{recipe}\", \"verdicts\": {{}}}}\n"
         )
     };
     let runs = format!("target/harness/phpt-runs/{tree}");
@@ -872,7 +873,10 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     write(
         &upload,
         &format!("{tree}/ext/pcre.json"),
-        "{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"CI's\", \"verdicts\": {}}\n",
+        &format!(
+            "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"CI's\", \"recipe\": \"{}\", \"verdicts\": {{}}}}\n",
+            Manifest::load(&root).unwrap().pin.digest()
+        ),
     );
     let bin = Tree::new("worktree-ci-runs-gh").unwrap();
     write(
