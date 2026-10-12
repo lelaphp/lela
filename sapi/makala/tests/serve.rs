@@ -451,3 +451,39 @@ fn a_304_carries_no_content_type() {
     assert_eq!(response.header("location"), Some("/elsewhere"));
     assert_eq!(response.header("x-powered-by"), Some("PHP/8.5.9"));
 }
+
+/// A response's header names go out lowercase, in the order PHP set them,
+/// with PHP's values (`trace:makala-lowercase-header-names`, #2600): the
+/// head read as the bytes on the wire, where `Response::header` folds a
+/// name's case.
+#[test]
+fn a_response_s_header_names_go_out_lowercase_in_php_s_order() {
+    let root = root(
+        "lowercase",
+        &[("index.php", "<?php header('X-Test: yes'); echo 'body';")],
+    );
+    let server = Server::start(&root);
+    let bytes = get(&server, "/index.php");
+    let end = bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("no head in {:?}", String::from_utf8_lossy(&bytes)));
+    let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    let php: Vec<&str> = head
+        .split("\r\n")
+        .skip(1)
+        .filter(|line| {
+            let name = line.split(':').next().unwrap_or_default();
+            ["x-powered-by", "x-test", "content-type"].contains(&name.to_ascii_lowercase().as_str())
+        })
+        .collect();
+    assert_eq!(
+        php,
+        [
+            "x-powered-by: PHP/8.5.9",
+            "x-test: yes",
+            "content-type: text/html; charset=UTF-8"
+        ],
+        "{head}"
+    );
+}
