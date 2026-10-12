@@ -15,7 +15,7 @@ use super::hash_bytes::HashBytes;
 use super::{
     DISPLAY_ERRORS_STDERR, ExtensionId, InfoRow, IniFiles, Request, display_errors_mode_of,
 };
-use crate::api::abi::{IniStage, IniVerdict, OnModify};
+use crate::api::abi::{IniHandler, IniStage, IniVerdict, LongHandler};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpString, Value, adopted_some};
 use crate::c_number::{atoi, strtol, strtol_prefixed};
@@ -195,7 +195,8 @@ impl TypedIni {
 /// `OnChangeMaxMemoryLimit`, `OnChangeMemoryLimit` and
 /// `OnUpdateReservedStackSize` read first. The warning is
 /// [`Request::ini_parse_quantity_warn`]'s, raised at startup, at
-/// `ini_set()` and as the request ends.
+/// `ini_set()` and as the request ends; an extension's entry declared
+/// with [`LongHandler`] is served the same rule through its handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoreQuantity {
     /// `zend_ini_parse_quantity_warn`, a negative refused where the
@@ -203,24 +204,6 @@ pub(crate) enum CoreQuantity {
     Signed(LongHandler),
     /// `zend_ini_parse_uquantity_warn`.
     Unsigned,
-}
-
-/// php's standard handler of a whole-number entry, `OnUpdateLong` or
-/// `OnUpdateLongGEZero` (`Z/Zend/zend_ini.c:972-993`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LongHandler {
-    /// `OnUpdateLong`: any value is taken.
-    Any,
-    /// `OnUpdateLongGEZero`: a negative value is refused, and the entry
-    /// keeps what it held.
-    AtLeastZero,
-}
-
-impl LongHandler {
-    /// Whether the handler takes the quantity `value` read as.
-    fn takes(self, value: i64) -> bool {
-        self == LongHandler::Any || value >= 0
-    }
 }
 
 /// One of [`CoreQuantity::ENTRIES`]: the entry's name and its reading.
@@ -569,7 +552,7 @@ impl Request {
         }
         let value = new_value.map(|_| value);
         if let Some(handler) = self.ini_handler(name)
-            && !handler(self, value)?
+            && !handler.serve(self, name, value)?
         {
             return Ok(None);
         }
@@ -649,7 +632,7 @@ impl Request {
     }
 
     /// The handler an extension gave the entry `name`.
-    fn ini_handler(&self, name: &[u8]) -> Option<OnModify> {
+    fn ini_handler(&self, name: &[u8]) -> Option<IniHandler> {
         self.shared.extensions.iter().find_map(|e| {
             e.on_modify
                 .iter()
@@ -745,7 +728,7 @@ impl Request {
             if let Some(handler) = self.ini_handler(&name) {
                 // Each rule under its own `zend_try`: what it bails out
                 // with leaves it, and the next entry is restored.
-                handler(self, original.as_deref()).ok();
+                handler.serve(self, &name, original.as_deref()).ok();
                 self.catch_bailout();
             }
             if let Some(at) = self.ini.changed.iter().position(|(n, ..)| *n == name) {
@@ -1034,6 +1017,8 @@ impl Request {
     /// rule interprets for backwards compatibility was raised when the
     /// value was set ([`Request::ini_parse_quantity_warn`]), and a
     /// negative an `OnUpdateLongGEZero` entry refused never reached it.
+    /// What an extension reads an entry it declared with
+    /// [`LongHandler`] by, where php's reads the field the handler wrote.
     ///
     /// ```php
     /// $run = function (string ...$ini) {
@@ -1068,7 +1053,8 @@ impl Request {
     /// 0 1000 3q
     /// 0
     /// ```
-    pub(crate) fn ini_long(&self, name: &[u8]) -> i64 {
+    #[must_use]
+    pub fn ini_long(&self, name: &[u8]) -> i64 {
         self.ini_get(name).map_or(0, Request::ini_parse_bytes)
     }
 
@@ -1085,7 +1071,10 @@ impl Request {
     /// reads, and php's `Invalid "name" setting.` warning before the
     /// rule's sentence where the rule interprets the value for backwards
     /// compatibility, at `Unknown` on line 0 while the engine starts and
-    /// as the request ends, and where the program stands between.
+    /// as the request ends, and where the program stands between. What
+    /// an entry declared with [`LongHandler`] is read by, and what a
+    /// handler an extension wrote reads its whole-number entry by, as
+    /// `OnUpdateSessionGcProbability` and `OnUpdateBacktrackLimit` do.
     ///
     /// ```php
     /// var_dump(ini_set('error_log_mode', '0600 '), ini_set('error_log_mode', '7x'), ini_get('error_log_mode'));
@@ -1111,7 +1100,7 @@ impl Request {
     /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
     /// 0
     /// ```
-    pub(crate) fn ini_parse_quantity_warn(&mut self, name: &[u8], value: &[u8]) -> i64 {
+    pub fn ini_parse_quantity_warn(&mut self, name: &[u8], value: &[u8]) -> i64 {
         let (quantity, sentence) = crate::ini_quantity::parse(value);
         self.ini_setting_warn(name, sentence);
         quantity
@@ -2161,6 +2150,49 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&taken.stdout),
             "string(1) \"2\"\nstring(1) \"2\"\n"
+        );
+    }
+
+    /// An extension's entries declared with `OnUpdateLong` and
+    /// `OnUpdateLongGEZero` ([`crate::api::abi::LongHandler`]), served by
+    /// the engine as php serves them: the quantity's warning at startup,
+    /// in declaration order, at `ini_set()` and as the request ends, and
+    /// a negative the second refuses, at startup keeping the default and
+    /// at `ini_set()` answering `false`. No witness holds it, because the
+    /// entries are no entries of the oracle's; the extensions' own
+    /// witnesses hold php's (`session.cache_expire`,
+    /// `mysqli.default_port`).
+    #[test]
+    fn an_extension_entry_declared_on_update_long_is_read_by_the_quantity_rule() {
+        use crate::api::abi::LongHandler;
+        let entry = |name: &[u8], default: &[u8]| php_unit::decl::IniDecl {
+            name: php_unit::decl::Name(name.into()),
+            default: Some(default.into()),
+            user: true,
+            per_dir: true,
+            system: true,
+        };
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![entry(b"t.any", b"1"), entry(b"t.positive", b"2")])
+            .on_update_long(b"t.positive", LongHandler::AtLeastZero)
+            .on_update_long(b"t.any", LongHandler::Any)
+            .build("longs");
+        let served = Engine::cli_builder()
+            .extensions(&[extension])
+            .ini("t.positive", "-1x")
+            .ini("t.any", "3q")
+            .build()
+            .serve_capture(
+                "<?php var_dump(ini_get('t.positive'), ini_set('t.positive', '-1'), ini_set('t.any', '1K'), ini_set('t.positive', '0x'), ini_get('t.positive'));",
+                crate::test::Capture::default(),
+            );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "\nWarning: Invalid \"t.any\" setting. Invalid quantity \"3q\": unknown multiplier \"q\", interpreting as \"3\" for backwards compatibility in Unknown on line 0\n\
+             \nWarning: Invalid \"t.positive\" setting. Invalid quantity \"-1x\": unknown multiplier \"x\", interpreting as \"-1\" for backwards compatibility in Unknown on line 0\n\
+             \nWarning: Invalid \"t.positive\" setting. Invalid quantity \"0x\": no digits after base prefix, interpreting as \"0\" for backwards compatibility in Standard input code on line 1\n\
+             string(1) \"2\"\nbool(false)\nstring(2) \"3q\"\nstring(1) \"2\"\nstring(2) \"0x\"\n\
+             \nWarning: Invalid \"t.any\" setting. Invalid quantity \"3q\": unknown multiplier \"q\", interpreting as \"3\" for backwards compatibility in Unknown on line 0\n"
         );
     }
 }

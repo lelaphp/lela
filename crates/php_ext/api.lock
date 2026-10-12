@@ -133,6 +133,7 @@ abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::observer
 abi::ExtensionBuilder::on_modify
+abi::ExtensionBuilder::on_update_long
 abi::ExtensionBuilder::opcodes
 abi::ExtensionBuilder::optimizer_pass
 abi::ExtensionBuilder::post_deactivate
@@ -194,6 +195,7 @@ abi::Lent::drain
 abi::Lent::find
 abi::Lent::get_mut
 abi::Lent::hold
+abi::LongHandler
 abi::Lookup
 abi::Members
 abi::Members::members
@@ -784,9 +786,11 @@ request::Request::info_table
 request::Request::ini_entries
 request::Request::ini_files
 request::Request::ini_get
+request::Request::ini_long
 request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
 request::Request::ini_parse_quantity
+request::Request::ini_parse_quantity_warn
 request::Request::ini_parse_uquantity
 request::Request::ini_restore
 request::Request::ini_set

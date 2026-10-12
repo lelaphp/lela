@@ -31,8 +31,8 @@ use php_unit::decl::{
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
-    Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, IniStage,
-    NativeNew, ObjectHandlers, OnModify, Refusal, Start, StartupIni, States, Validation,
+    Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, IniHandler,
+    IniStage, NativeNew, ObjectHandlers, Refusal, Start, StartupIni, States, Validation,
 };
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
@@ -3900,7 +3900,7 @@ fn modules_startup(
         refuse_until(req, &mut marks, owner);
         marks.push((owner, req.startup_raised_len()));
         let accepted = on_modify(extensions, &name)
-            .is_some_and(|handler| matches!(handler(req, Some(&value)), Ok(true)));
+            .is_some_and(|handler| matches!(handler.serve(req, &name, Some(&value)), Ok(true)));
         if accepted {
             req.take_startup_value(&name, &value);
             taken.push((name, Some(value)));
@@ -3911,7 +3911,7 @@ fn modules_startup(
 }
 
 /// The handler an extension of `extensions` gave the entry `name`.
-fn on_modify(extensions: &[ExtensionEntry], name: &[u8]) -> Option<OnModify> {
+fn on_modify(extensions: &[ExtensionEntry], name: &[u8]) -> Option<IniHandler> {
     extensions.iter().find_map(|e| {
         e.on_modify
             .iter()
@@ -4287,8 +4287,9 @@ impl Engine {
             if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
-            let took = on_modify(&shared.extensions, &name)
-                .is_none_or(|handler| matches!(handler(&mut req, Some(&value)), Ok(true)));
+            let took = on_modify(&shared.extensions, &name).is_none_or(|handler| {
+                matches!(handler.serve(&mut req, &name, Some(&value)), Ok(true))
+            });
             if !took {
                 continue;
             }
@@ -5749,6 +5750,7 @@ mod tests {
     use super::*;
     use php_heap::{Fatal, FrameRef};
 
+    use crate::api::abi::OnModify;
     use crate::observer::Untold;
     use crate::probe::{Asked, Probe};
     use crate::tier::Site;
