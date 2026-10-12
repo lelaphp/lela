@@ -27,6 +27,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::api::coerce::c_str;
 use crate::api::raising::{Level, Thrown, docref, warning};
 use crate::api::request::{OwnedStream, Request, UrlStat, WrapperOp};
 use crate::state::Layer;
@@ -124,12 +125,6 @@ fn at_seconds(seconds: i64) -> SystemTime {
 /// the low bits, two's complement, so `-1` is every bit set.
 fn low_bits(value: i64, mask: i64) -> u32 {
     u32::try_from(value & mask).unwrap_or(u32::MAX)
-}
-
-/// The bytes before the first NUL, a C string's.
-fn c_string(buf: &[u8]) -> &[u8] {
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    &buf[..end]
 }
 
 /// A path of bytes as the host's.
@@ -648,7 +643,7 @@ impl PlainFiles for Request {
         let offset = p.map_or(0, |at| at + 1);
         if !(p.is_some() && dir_len == 1) {
             loop {
-                let len = c_string(&buf).len();
+                let len = c_str(&buf).len();
                 let found = buf
                     .get(offset..len)
                     .and_then(|s| s.iter().rposition(|b| *b == b'/'))
@@ -669,7 +664,7 @@ impl PlainFiles for Request {
                     at -= 1;
                     buf[at] = 0;
                 }
-                if std::fs::metadata(host_bytes(c_string(&buf))).is_ok() {
+                if std::fs::metadata(host_bytes(c_str(&buf))).is_ok() {
                     loop {
                         buf[at] = b'/';
                         if n == 0 {
@@ -685,7 +680,7 @@ impl PlainFiles for Request {
         }
         let mut p = p.unwrap_or(0);
         loop {
-            let created = self.make_dir(&host_bytes(c_string(&buf)), mode);
+            let created = self.make_dir(&host_bytes(c_str(&buf)), mode);
             if let Err(error) = &created
                 && error.kind() != std::io::ErrorKind::AlreadyExists
             {

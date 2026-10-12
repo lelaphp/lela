@@ -190,7 +190,7 @@ fn socket_addrinfo_lookup(
         Ok(want) => want,
         Err(refused) => return Err(refused.raise(req)),
     };
-    let cut = |bytes: &[u8]| CString::new(crate::addr::c_str(bytes)).unwrap_or_default();
+    let cut = |bytes: &[u8]| CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default();
     let host = cut(host.as_bytes());
     let service = service.map(|s| cut(s.as_bytes()));
     let Ok(list) = ffi::getaddrinfo(&host, service.as_deref(), want) else {

@@ -27,7 +27,9 @@ pub mod vpath;
 
 /// `bytes` as php reads a `char *` through `strlen`: the bytes before the
 /// first NUL. A file system call reads a path so, and so does every value
-/// php registers without its length.
+/// php registers without its length. A copy of `php_engine`'s
+/// `c_number::c_str`, the one every extension and the engine read: this
+/// crate names no engine crate (design §4.8), and the hosts read it here.
 #[must_use]
 pub fn c_str(bytes: &[u8]) -> &[u8] {
     bytes.split(|&b| b == 0).next().unwrap_or(bytes)

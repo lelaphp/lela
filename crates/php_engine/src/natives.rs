@@ -42,6 +42,7 @@ use crate::api::values::walk::{self, GiveUp, Hold, Unwritten};
 use crate::api::values::{
     Key, Laziness, Owner, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
 };
+use crate::c_number::c_str;
 use php_unit::decl::FunctionDecl;
 
 mod backtrace;
@@ -1891,12 +1892,12 @@ fn dump_property_name(req: &mut Request, level: usize, name: &[u8]) {
     match unmangled {
         Unmangled::Mangled { class, prop } => {
             let mut shown = b"\"".to_vec();
-            shown.extend_from_slice(c_string(prop));
+            shown.extend_from_slice(c_str(prop));
             if class.first() == Some(&b'*') {
                 shown.extend_from_slice(b"\":protected");
             } else {
                 shown.extend_from_slice(b"\":\"");
-                shown.extend_from_slice(c_string(class));
+                shown.extend_from_slice(c_str(class));
                 shown.extend_from_slice(b"\":private");
             }
             req.write(&shown);
@@ -1949,14 +1950,6 @@ pub(crate) fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
         },
         None => Unmangled::Mangled { class, prop },
     }
-}
-
-/// What `%s` prints of `bytes`: up to its first `\0`.
-fn c_string(bytes: &[u8]) -> &[u8] {
-    bytes
-        .iter()
-        .position(|&b| b == 0)
-        .map_or(bytes, |at| &bytes[..at])
 }
 
 /// `memory_get_usage(bool $real_usage = false): int`, php's

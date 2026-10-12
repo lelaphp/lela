@@ -12,13 +12,13 @@ use std::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use std::ops::ControlFlow;
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use php_ext::coerce::{float_to_long, numeric_string, with_string};
+use php_ext::coerce::{c_str, float_to_long, numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, Value, ValueRef};
 
-use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
+use crate::addr::{inet_addr, inet6_addr, ntop};
 use crate::ffi::{self, Addr, SUN_PATH, cmsg};
 use crate::natives::string;
 use crate::socket::{Sock, Socket, new_socket, socket_error};

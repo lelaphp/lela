@@ -5,19 +5,12 @@
 //! touches on through php's temporary streams. Every string the C reads
 //! is a C string, so a line and a key end at their first NUL.
 
+use php_ext::coerce::c_str;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::Owner;
 
 use crate::flatfile::gets;
-
-/// The bytes before the first NUL, as a C string reads them.
-fn c_str(bytes: &[u8]) -> &[u8] {
-    bytes
-        .iter()
-        .position(|&b| b == 0)
-        .map_or(bytes, |at| &bytes[..at])
-}
 
 /// `etrim`: the bytes without the blanks `" \t\r\n"` at either end.
 fn etrim(bytes: &[u8]) -> Vec<u8> {

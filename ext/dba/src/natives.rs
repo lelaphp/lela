@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{False, Instance, OrFalse, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::coerce_param;
+use php_ext::coerce::{c_str, coerce_param};
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, arity, deprecated, docref, pending, throw,
@@ -145,8 +145,7 @@ struct Asked {
 
 /// A C string's bytes as `%s` prints them.
 fn c_text(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    String::from_utf8_lossy(c_str(bytes)).into_owned()
 }
 
 /// `object_init_ex(return_value, dba_connection_ce)`.

@@ -17,9 +17,11 @@ use crate::addr::{addr4_to_if_index, if_index_named, if_index_to_addr4, inet46_a
 use crate::conv::{Conv, find, put};
 use crate::ffi::{self, Addr};
 use crate::natives::c_int;
+#[cfg(target_os = "linux")]
+use crate::natives::string;
 use crate::socket::{Socket, sock, socket_error, valid};
 #[cfg(target_os = "linux")]
-use crate::{addr::c_str, natives::string};
+use php_ext::coerce::c_str;
 #[cfg(target_os = "linux")]
 use php_ext::raising::{Level, docref};
 
