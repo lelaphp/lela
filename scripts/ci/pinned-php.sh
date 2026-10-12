@@ -58,7 +58,10 @@ pour() {
     curl -sSfL -o "$formula" "https://raw.githubusercontent.com/Homebrew/homebrew-core/$sha/Formula/$shard/$name.rb"
     # A tap's bottles are the tap's own packages by default; these are homebrew/core's.
     sed -i '' 's|^  bottle do$|  bottle do\n    root_url "https://ghcr.io/v2/homebrew/core"|' "$formula"
-    brew install "dax/pin/$name"
+    # Every keg php loads is poured here at its record, so none is brew's to
+    # resolve: --ignore-dependencies keeps brew from upgrading one to its
+    # newest, and from refusing a pour over a pinned one it would call old.
+    brew install --ignore-dependencies "dax/pin/$name"
 }
 
 # The version Homebrew's `opt` link points a keg at, empty where none is.
