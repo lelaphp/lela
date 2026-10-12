@@ -34,14 +34,14 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::value_name;
+use php_ext::coerce::{c_str, value_name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, throw, throw_error,
 };
 use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::ftp::{Ftp, Kind, Progress, Verb, cstr};
+use crate::ftp::{Ftp, Kind, Progress, Verb};
 
 /// The constants `register_ftp_symbols` registers.
 ///
@@ -313,7 +313,7 @@ fn autoseek(req: &mut Request, ftp: Instance<Connection>) -> Result<bool, Thrown
 /// `php_error_docref(NULL, E_WARNING, "%s", ftp->inbuf)` where the last
 /// reply left text.
 fn warn_reply(req: &mut Request, ftp: &Ftp) {
-    let text = cstr(&ftp.inbuf);
+    let text = c_str(&ftp.inbuf);
     if !text.is_empty() {
         let text = String::from_utf8_lossy(text).into_owned();
         docref(req, Level::Warning, &text);
@@ -1135,7 +1135,7 @@ fn local_out(
         req.open_stream(path, write, false)?
     };
     let Some(stream) = stream else {
-        let text = format!("Error opening {}", String::from_utf8_lossy(cstr(path)));
+        let text = format!("Error opening {}", String::from_utf8_lossy(c_str(path)));
         docref(req, Level::Warning, &text);
         return Ok(None);
     };
@@ -1145,7 +1145,7 @@ fn local_out(
 
 /// `VCWD_UNLINK(local)` after a download failed.
 fn unlink(req: &mut Request, path: &[u8]) {
-    let path = String::from_utf8_lossy(cstr(path)).into_owned();
+    let path = String::from_utf8_lossy(c_str(path)).into_owned();
     std::fs::remove_file(req.cwd().join(path)).ok();
 }
 
@@ -1304,7 +1304,7 @@ fn ftp_nb_continue(req: &mut Request, ftp: Instance<Connection>) -> Result<i64, 
         }
         let progress = session.nb_continue(req)?;
         if progress == Progress::Failed {
-            let text = String::from_utf8_lossy(cstr(&session.inbuf)).into_owned();
+            let text = String::from_utf8_lossy(c_str(&session.inbuf)).into_owned();
             docref(req, Level::Warning, &text);
         }
         Ok(progress)
@@ -1578,7 +1578,7 @@ fn ftp_nb_put(
         };
         let progress = session.nb_put(req, remote, input, true, kind, offset)?;
         if progress == Progress::Failed {
-            let text = String::from_utf8_lossy(cstr(&session.inbuf)).into_owned();
+            let text = String::from_utf8_lossy(c_str(&session.inbuf)).into_owned();
             docref(req, Level::Warning, &text);
         }
         Ok(progress)

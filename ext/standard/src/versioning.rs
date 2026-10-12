@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 
 use php_ext::abi::Union;
 use php_ext::attr::php_function;
+use php_ext::coerce::c_str;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::PhpString;
@@ -219,8 +220,7 @@ fn version_compare(
     #[php(default = null)] operator: Option<PhpString>,
 ) -> Result<Union<i64, bool>, Thrown> {
     // Both are C strings to php: each ends at its first NUL.
-    let c_str = |s: &[u8]| s.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
-    let compare = version_cmp(&c_str(version1.as_bytes()), &c_str(version2.as_bytes()));
+    let compare = version_cmp(c_str(version1.as_bytes()), c_str(version2.as_bytes()));
     let Some(op) = operator else {
         return Ok(Union::A(compare));
     };

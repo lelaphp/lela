@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use php_ext::call::{call, lookup_function, new_object};
-use php_ext::coerce::{atoi, is_space, numeric_string, strtol, to_callable};
+use php_ext::coerce::{atoi, c_str, is_space, numeric_string, strtol, to_callable};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{
     Handshake, OwnedStream as _, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx,
@@ -195,12 +195,6 @@ const HEADER_BUF: usize = 8192;
 /// for read a block at a time.
 const READ_BLOCK: usize = 8192;
 
-/// The bytes before the first NUL, what `%s`, `strlen` and
-/// `smart_str_appends` see of a string.
-fn cstr(b: &[u8]) -> &[u8] {
-    b.split(|c| *c == 0).next().unwrap_or_default()
-}
-
 /// The byte at `i` of a NUL-terminated string, its NUL past the end.
 fn at(b: &[u8], i: usize) -> u8 {
     b.get(i).copied().unwrap_or(0)
@@ -219,7 +213,7 @@ fn strncasecmp_eq(left: &[u8], right: &[u8], n: usize) -> bool {
 /// The first `n` bytes of two NUL-terminated strings equal, up to the
 /// first NUL, ASCII case folded where `fold` asks.
 fn compare_n(left: &[u8], right: &[u8], n: usize, fold: bool) -> bool {
-    let (left, right) = (cstr(left), cstr(right));
+    let (left, right) = (c_str(left), c_str(right));
     for i in 0..n {
         let (mut x, mut y) = (at(left, i), at(right, i));
         if fold {
@@ -265,7 +259,7 @@ fn unsigned_of(n: i64) -> u64 {
 /// a chunk's size line, its blanks, a sign and a `0x` read past, into an
 /// `int`; none where no digit stands there.
 fn scan_hex(line: &[u8]) -> Option<i32> {
-    let b = cstr(line);
+    let b = c_str(line);
     let mut i = 0;
     while i < b.len() && is_space(b[i]) {
         i += 1;
@@ -363,16 +357,16 @@ fn uri_parser(name: Option<&[u8]>) -> Option<UriParser> {
 /// fragment, as the request line and the digest's `uri` write it.
 fn target(uri: &UriStruct, out: &mut Vec<u8>) {
     match &uri.path {
-        Some(path) => out.extend_from_slice(cstr(path)),
+        Some(path) => out.extend_from_slice(c_str(path)),
         None => out.push(b'/'),
     }
     if let Some(query) = &uri.query {
         out.push(b'?');
-        out.extend_from_slice(cstr(query));
+        out.extend_from_slice(c_str(query));
     }
     if let Some(fragment) = &uri.fragment {
         out.push(b'#');
-        out.extend_from_slice(cstr(fragment));
+        out.extend_from_slice(c_str(fragment));
     }
 }
 
@@ -421,7 +415,7 @@ fn get_http_headers(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
         }
         response
             .get_or_insert_with(Vec::new)
-            .extend_from_slice(cstr(&line));
+            .extend_from_slice(c_str(&line));
     }
     Ok(None)
 }
@@ -431,7 +425,7 @@ fn get_http_headers(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
 /// it is, its leading blanks left out, and its `\r` and trailing blanks
 /// where a `\n` ends it.
 fn header_value_at(headers: &[u8], name: &[u8]) -> Option<(usize, usize)> {
-    let headers = cstr(headers);
+    let headers = c_str(headers);
     let mut pos = 0;
     loop {
         if strncasecmp_eq(&headers[pos..], name, name.len()) {
@@ -672,9 +666,9 @@ fn connect(
     let (host, port) = match (proxy_host.as_str_bytes(), proxy_port.as_int()) {
         (Some(host), Some(port)) => {
             *use_proxy = true;
-            (cstr(host).to_vec(), int_of(port))
+            (c_str(host).to_vec(), int_of(port))
         }
-        _ => (cstr(host_of(uri)).to_vec(), int_of(port_of(uri))),
+        _ => (c_str(host_of(uri)).to_vec(), int_of(port_of(uri))),
     };
     let timeout = match client_slot(this, ClientSlot::ConnectionTimeout).as_int() {
         Some(secs) if secs > 0 => Some(Duration::from_secs(secs.unsigned_abs())),
@@ -726,9 +720,9 @@ fn connect(
     }
     let target_port = port_of(uri);
     let mut head = b"CONNECT ".to_vec();
-    head.extend_from_slice(cstr(host_of(uri)));
+    head.extend_from_slice(c_str(host_of(uri)));
     head.extend_from_slice(format!(":{} HTTP/1.1\r\nHost: ", unsigned_of(target_port)).as_bytes());
-    head.extend_from_slice(cstr(host_of(uri)));
+    head.extend_from_slice(c_str(host_of(uri)));
     if target_port != 80 {
         head.extend_from_slice(format!(":{}", unsigned_of(target_port)).as_bytes());
     }
@@ -771,7 +765,7 @@ fn connect(
 /// `.` matching the host's tail and any other only the host itself.
 fn in_domain(host: &[u8], domain: &[u8]) -> bool {
     if domain.first() == Some(&b'.') {
-        host.len() > domain.len() && cstr(&host[host.len() - domain.len()..]) == cstr(domain)
+        host.len() > domain.len() && c_str(&host[host.len() - domain.len()..]) == c_str(domain)
     } else {
         host == domain
     }
@@ -1123,7 +1117,7 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
                         let rest = &version[sp + 1..];
                         http_status = atoi(rest);
                         if let Some(sp) = find(rest, b' ') {
-                            http_msg = Some(cstr(&rest[sp + 1..]).to_vec());
+                            http_msg = Some(c_str(&rest[sp + 1..]).to_vec());
                         }
                     }
                 }
@@ -1177,7 +1171,7 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
                 let Some(parser) = uri_parser(call.uri_parser_class) else {
                     return Err(arg_value_error(req, 6, "be a valid URI parser name").into());
                 };
-                if let Some(new_uri) = parser.parse(req, cstr(&location))? {
+                if let Some(new_uri) = parser.parse(req, c_str(&location))? {
                     uri = Some(redirected(new_uri, &uri_now));
                     redirect_max -= 1;
                     if redirect_max < 1 {
@@ -1252,9 +1246,9 @@ fn request_headers(
     let port = port_of(uri);
     let mut h = b"POST ".to_vec();
     if head.use_proxy && !head.use_ssl {
-        h.extend_from_slice(cstr(uri.scheme.as_deref().unwrap_or_default()));
+        h.extend_from_slice(c_str(uri.scheme.as_deref().unwrap_or_default()));
         h.extend_from_slice(b"://");
-        h.extend_from_slice(cstr(host_of(uri)));
+        h.extend_from_slice(c_str(host_of(uri)));
         h.extend_from_slice(format!(":{}", unsigned_of(port)).as_bytes());
     }
     target(uri, &mut h);
@@ -1264,7 +1258,7 @@ fn request_headers(
         b" HTTP/1.0\r\n"
     });
     h.extend_from_slice(b"Host: ");
-    h.extend_from_slice(cstr(host_of(uri)));
+    h.extend_from_slice(c_str(host_of(uri)));
     if port != if head.use_ssl { 443 } else { 80 } {
         h.extend_from_slice(format!(":{}", unsigned_of(port)).as_bytes());
     }
@@ -1293,7 +1287,7 @@ fn request_headers(
         }
         if let Some(action) = call.soapaction {
             h.extend_from_slice(b"; action=\"");
-            h.extend_from_slice(cstr(action));
+            h.extend_from_slice(c_str(action));
             h.push(b'"');
         }
         h.extend_from_slice(b"\r\n");
@@ -1308,7 +1302,7 @@ fn request_headers(
         }
         if let Some(action) = call.soapaction {
             h.extend_from_slice(b"SOAPAction: \"");
-            h.extend_from_slice(cstr(action));
+            h.extend_from_slice(c_str(action));
             h.extend_from_slice(b"\"\r\n");
         }
     }
@@ -1369,7 +1363,7 @@ fn user_agent(req: &Request, this: PhpObject, context: Option<StreamCtx>, h: &mu
         return;
     }
     match req.ini_value(b"user_agent") {
-        Some(agent) => line(h, cstr(agent)),
+        Some(agent) => line(h, c_str(agent)),
         None => line(h, format!("PHP-SOAP/{PHP_VERSION}").as_bytes()),
     }
 }
@@ -1557,7 +1551,7 @@ fn cookie_header(
 /// host. A value with no `=` before any `;` is dropped.
 fn set_cookie(req: &mut Request, this: PhpObject, cookie: &[u8], uri: &UriStruct) -> R<()> {
     let mut cookies = slot_array(req, this, ClientSlot::Cookies)?;
-    let cookie = cstr(cookie);
+    let cookie = c_str(cookie);
     let eqpos = find(cookie, b'=');
     let sempos = find(cookie, b';');
     let stored = match eqpos {
@@ -1608,7 +1602,7 @@ fn store_cookie(
         }
     }
     if !zcookie.contains(&Key::Int(1)) {
-        let t = cstr(uri.path.as_deref().unwrap_or(b"/"));
+        let t = c_str(uri.path.as_deref().unwrap_or(b"/"));
         if let Some(c) = t.iter().rposition(|c| *c == b'/') {
             let value = string(req, &t[..c])?;
             zcookie.set(req, Owner::index(1), value)?;
@@ -1643,12 +1637,12 @@ fn redirected(mut new_uri: UriStruct, uri: &UriStruct) -> UriStruct {
     }
     if new_path.first() != Some(&b'/') {
         let base = uri.path.as_deref().map_or(Some(&b"/"[..]), |path| {
-            let t = cstr(path);
+            let t = c_str(path);
             t.iter().rposition(|c| *c == b'/').map(|p| &t[..=p])
         });
         let joined = base.map(|base| {
             let mut s = base.to_vec();
-            s.extend_from_slice(cstr(&new_path));
+            s.extend_from_slice(c_str(&new_path));
             s
         });
         if let Some(mut joined) = joined {
@@ -1667,7 +1661,7 @@ fn digest_challenge(req: &mut Request, this: PhpObject, headers: &[u8]) -> R<boo
     let Some(auth) = get_http_header_value(headers, b"WWW-Authenticate:") else {
         return Ok(false);
     };
-    let auth = cstr(&auth);
+    let auth = c_str(&auth);
     if !auth.starts_with(b"Digest")
         || client_slot(this, ClientSlot::Digest).as_array().is_some()
         || client_slot(this, ClientSlot::Login)
@@ -1751,14 +1745,14 @@ fn answer(
     // Check and see if the server even sent a xml document.
     let content_type_xml =
         get_http_header_value(http_headers, b"Content-Type:").is_some_and(|ct| {
-            let ct = cstr(&ct);
+            let ct = c_str(&ct);
             let cmplen = find(ct, b';').unwrap_or(ct.len());
             strncmp_eq(ct, b"text/xml", cmplen) || strncmp_eq(ct, b"application/soap+xml", cmplen)
         });
     // Decompress response.
     let body = match get_http_header_value(http_headers, b"Content-Encoding:") {
         Some(encoding) => {
-            let encoding = cstr(&encoding);
+            let encoding = c_str(&encoding);
             let function: &[u8] = if matches!(encoding, b"gzip" | b"x-gzip")
                 && lookup_function(req, b"gzdecode").is_some()
             {
@@ -1791,7 +1785,7 @@ fn answer(
 /// `char`, which is signed where the pinned php runs, so bytes past
 /// `0x7f` are passed over too.
 fn starts_xml(body: &[u8]) -> bool {
-    let s = cstr(body);
+    let s = c_str(body);
     #[expect(
         clippy::cast_possible_wrap,
         reason = "C's signed `char`, as `*s < ' '` reads a byte"

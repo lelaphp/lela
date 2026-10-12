@@ -59,9 +59,9 @@ pub use xpath::{Answer, Called, Function, Handler, Item, Object, Operand, Return
 /// A copy of `bytes` up to its first NUL with the NUL after, which is
 /// what a C function handed a `zend_string`'s `char *` reads.
 fn cstr(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    let mut out = Vec::with_capacity(end + 1);
-    out.extend_from_slice(&bytes[..end]);
+    let head = c_str(bytes);
+    let mut out = Vec::with_capacity(head.len() + 1);
+    out.extend_from_slice(head);
     out.push(0);
     out
 }
@@ -69,6 +69,7 @@ fn cstr(bytes: &[u8]) -> Vec<u8> {
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 
+use php_ext::coerce::c_str;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Emalloc, PhpObject};

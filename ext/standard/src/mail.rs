@@ -17,13 +17,11 @@ use std::process::Stdio;
 
 use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
-use php_ext::coerce::{is_space, value_name};
+use php_ext::coerce::{c_str, is_space, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{FormatDate, OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
-
-use crate::basic_functions::c_string;
 
 /// `EX_TEMPFAIL`, the one non-zero exit `php_mail` takes as sent.
 const EX_TEMPFAIL: i32 = 75;
@@ -75,7 +73,7 @@ fn build_elem(
     value: &Value,
 ) -> Result<(), Thrown> {
     // Each message prints the name as `ZSTR_VAL(key)`, a C string.
-    let name = String::from_utf8_lossy(c_string(key)).into_owned();
+    let name = String::from_utf8_lossy(c_str(key)).into_owned();
     match value.deref().as_ref() {
         ValueRef::Str(text) => {
             if key.iter().any(|&c| !(33..=126).contains(&c) || c == b':') {
@@ -110,7 +108,7 @@ fn build_elems(
     key: &[u8],
     array: PhpArray,
 ) -> Result<(), Thrown> {
-    let name = String::from_utf8_lossy(c_string(key)).into_owned();
+    let name = String::from_utf8_lossy(c_str(key)).into_owned();
     // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(val), …)`
     // (`Z/ext/standard/mail.c:182`), no owner of the table taken: the
     // argument holds it while a `TypeError` reaches the program.
@@ -118,7 +116,7 @@ fn build_elems(
         let element_key = row.key().clone();
         let element = row.value().deref();
         if let Key::Str(found) = element_key {
-            let found = String::from_utf8_lossy(c_string(found.as_bytes())).into_owned();
+            let found = String::from_utf8_lossy(c_str(found.as_bytes())).into_owned();
             let message =
                 format!("Header \"{name}\" must only contain numeric keys, \"{found}\" found");
             return Err(throw_error(req, "TypeError", &message));

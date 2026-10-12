@@ -6,7 +6,7 @@ use std::ffi::CString;
 
 use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Refusals};
 use php_ext::attr::{php_class, php_function};
-use php_ext::coerce::{float_to_long, numeric_string, type_name};
+use php_ext::coerce::{c_str, float_to_long, numeric_string, type_name};
 use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
@@ -190,7 +190,7 @@ fn socket_addrinfo_lookup(
         Ok(want) => want,
         Err(refused) => return Err(refused.raise(req)),
     };
-    let cut = |bytes: &[u8]| CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default();
+    let cut = |bytes: &[u8]| CString::new(c_str(bytes)).unwrap_or_default();
     let host = cut(host.as_bytes());
     let service = service.map(|s| cut(s.as_bytes()));
     let Ok(list) = ffi::getaddrinfo(&host, service.as_deref(), want) else {

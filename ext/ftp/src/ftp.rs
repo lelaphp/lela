@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use php_ext::coerce::strtol;
+use php_ext::coerce::{c_str, strtol};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     Handshake, OptionAnswer, OwnedStream as _, Request, SocketOptions, Stream, StreamCtx,
@@ -215,11 +215,6 @@ const fn port16(n: i64) -> u16 {
     n as u16
 }
 
-/// A C string: the bytes before the first NUL.
-pub(crate) fn cstr(bytes: &[u8]) -> &[u8] {
-    bytes.split(|&b| b == 0).next().unwrap_or_default()
-}
-
 /// The host of `ip:port` or `[ip]:port`, as `php_network_populate_name_from_sockaddr` writes it.
 fn host_of(name: &[u8]) -> String {
     let text = String::from_utf8_lossy(name);
@@ -327,7 +322,7 @@ impl Ftp {
         };
         let context = if tls { Some(unverified(req)?) } else { None };
         let mut name = b"tcp://".to_vec();
-        name.extend_from_slice(cstr(host));
+        name.extend_from_slice(c_str(host));
         let target = String::from_utf8_lossy(&name[6..]).into_owned();
         let mut name = if target.contains(':') {
             transport(&target, port)
@@ -507,7 +502,7 @@ impl Ftp {
         if !self.command(req, b"SYST", None, |c| c == Code::System)? {
             return Ok(None);
         }
-        let text = cstr(&self.inbuf);
+        let text = c_str(&self.inbuf);
         let text = &text[text.iter().take_while(|&&b| b == b' ').count()..];
         let word = text
             .split(|&b| b == b' ')
@@ -526,7 +521,7 @@ impl Ftp {
         if !self.command(req, b"PWD", None, |c| c == Code::Path)? {
             return Ok(None);
         }
-        let Some(pwd) = quoted(cstr(&self.inbuf)) else {
+        let Some(pwd) = quoted(c_str(&self.inbuf)) else {
             return Ok(None);
         };
         self.pwd = Some(pwd.clone());
@@ -569,7 +564,7 @@ impl Ftp {
         }
         let mut lines = Vec::new();
         while self.readline(req)? {
-            let line = cstr(&self.inbuf).to_vec();
+            let line = c_str(&self.inbuf).to_vec();
             let last = is_end(&line);
             lines.push(line);
             if last {
@@ -589,7 +584,7 @@ impl Ftp {
         if !self.command(req, b"MKD", Some(dir), |c| c == Code::Path)? {
             return Ok(None);
         }
-        let text = cstr(&self.inbuf);
+        let text = c_str(&self.inbuf);
         if !text.contains(&b'"') {
             return Ok(Some(dir.to_vec()));
         }
@@ -608,7 +603,7 @@ impl Ftp {
             return Ok(false);
         }
         let mut arg = format!("CHMOD {:o} ", (mode as i32).cast_unsigned()).into_bytes();
-        arg.extend_from_slice(cstr(file));
+        arg.extend_from_slice(c_str(file));
         self.command(req, b"SITE", Some(&arg), |c| c == Code::Okay)
     }
 
@@ -624,7 +619,7 @@ impl Ftp {
         if !self.putcmd(req, b"ALLO", Some(size.to_string().as_bytes())) || !self.getresp(req)? {
             return Ok((false, None));
         }
-        let text = cstr(&self.inbuf).to_vec();
+        let text = c_str(&self.inbuf).to_vec();
         Ok((self.resp.is_some_and(Code::completed), Some(text)))
     }
 
@@ -635,7 +630,7 @@ impl Ftp {
         {
             return Ok(-1);
         }
-        Ok(strtol(cstr(&self.inbuf)))
+        Ok(strtol(c_str(&self.inbuf)))
     }
 
     /// `ftp_mdtm`: `MDTM`'s `YYYYMMDDhhmmss`, read as UTC, `-1` where it
@@ -644,7 +639,7 @@ impl Ftp {
         if !self.command(req, b"MDTM", Some(path), |c| c == Code::FileStatus)? {
             return Ok(-1);
         }
-        Ok(mdtm_stamp(cstr(&self.inbuf)).unwrap_or(-1))
+        Ok(mdtm_stamp(c_str(&self.inbuf)).unwrap_or(-1))
     }
 
     /// `ftp_rename`: `RNFR`, `350`, then `RNTO`, `250`.
@@ -696,7 +691,7 @@ impl Ftp {
                 return Ok(false);
             }
             if self.resp == Some(Code::ExtendedPassive) {
-                let Some(port) = epsv_port(cstr(&self.inbuf)) else {
+                let Some(port) = epsv_port(c_str(&self.inbuf)) else {
                     return Ok(false);
                 };
                 self.pasv =
@@ -707,7 +702,7 @@ impl Ftp {
         if !self.command(req, b"PASV", None, |c| c == Code::Passive)? {
             return Ok(false);
         }
-        let Some((ip, port)) = pasv_address(cstr(&self.inbuf)) else {
+        let Some((ip, port)) = pasv_address(c_str(&self.inbuf)) else {
             return Ok(false);
         };
         let host = if self.usepasvaddress && !peer_host.contains(':') {
@@ -724,12 +719,12 @@ impl Ftp {
     /// than the buffer; the last reply's text and the unread bytes let
     /// go.
     fn putcmd(&mut self, req: &mut Request, cmd: &[u8], args: Option<&[u8]>) -> bool {
-        let cmd = cstr(cmd);
+        let cmd = c_str(cmd);
         if cmd.iter().any(|&b| b == b'\r' || b == b'\n') {
             return false;
         }
         let mut line = cmd.to_vec();
-        match args.map(cstr).filter(|a| !a.is_empty()) {
+        match args.map(c_str).filter(|a| !a.is_empty()) {
             Some(args) => {
                 if cmd.len() + args.len() + 4 > BUFSIZE
                     || args.iter().any(|&b| b == b'\r' || b == b'\n')
@@ -787,7 +782,7 @@ impl Ftp {
             if !self.readline(req)? {
                 return Ok(false);
             }
-            if is_end(cstr(&self.inbuf)) {
+            if is_end(c_str(&self.inbuf)) {
                 break;
             }
         }
@@ -1056,7 +1051,7 @@ impl Ftp {
         for &b in &all {
             if b == b'\n' && last == b'\r' {
                 line.pop();
-                lines.push(cstr(&line).to_vec());
+                lines.push(c_str(&line).to_vec());
                 line.clear();
             } else {
                 line.push(b);

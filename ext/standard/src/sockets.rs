@@ -430,7 +430,7 @@ fn fsockopen_stream(
             // php prints the host as the C string it holds.
             let shown = format!(
                 "Unable to connect to {}:{port} ({})",
-                String::from_utf8_lossy(crate::basic_functions::c_string(&host)),
+                String::from_utf8_lossy(php_ext::coerce::c_str(&host)),
                 text.as_deref().unwrap_or("Unknown error")
             );
             docref(req, Level::Warning, &shown);
@@ -697,7 +697,7 @@ fn stream_socket_server(
         Err(XportFailure { code, text, .. }) => {
             let shown = format!(
                 "Unable to connect to {} ({})",
-                String::from_utf8_lossy(crate::basic_functions::c_string(&host)),
+                String::from_utf8_lossy(php_ext::coerce::c_str(&host)),
                 text.as_deref().unwrap_or("Unknown error")
             );
             docref(req, Level::Warning, &shown);

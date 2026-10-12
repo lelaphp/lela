@@ -14,7 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
-use php_ext::coerce::{numeric_string, with_string};
+use php_ext::coerce::{c_str, numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
 use php_ext::request::{OwnedStream as _, Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
@@ -227,7 +227,7 @@ fn getenv(
         }
         return Ok(Union::A(array));
     };
-    let name = c_string(name.as_bytes());
+    let name = c_str(name.as_bytes());
     let value = if local_only {
         (req.env_pairs().iter())
             .find(|(n, _)| n.as_slice() == name)
@@ -322,11 +322,6 @@ pub(crate) fn minfo(req: &mut Request) {
     req.info_ini_table(&rows);
 }
 
-/// The bytes before the first NUL, what a C string holds.
-pub(crate) fn c_string(bytes: &[u8]) -> &[u8] {
-    bytes.split(|c| *c == 0).next().unwrap_or_default()
-}
-
 /// `putenv(string $assignment): bool`: `NAME=value` sets the variable
 /// and `NAME` alone unsets it.
 ///
@@ -354,7 +349,7 @@ fn putenv(req: &mut Request, assignment: PhpString) -> Result<bool, Thrown> {
     if bytes.first().is_none_or(|c| *c == b'=') {
         return Err(arg_value_error(req, 1, "have a valid syntax"));
     }
-    let text = c_string(bytes).to_vec();
+    let text = c_str(bytes).to_vec();
     match text.iter().position(|c| *c == b'=') {
         Some(at) => req.set_env(&text[..at], Some(&text[at + 1..])),
         None => req.set_env(&text, None),
@@ -396,7 +391,7 @@ fn getopt(
     rest_index.set(req, Untyped(Value::int(1)))?;
     // `$_SERVER['argv']` as `php_build_argv` wrote it, each argument a C
     // string; the one place `getopt` reads the host's `argv`.
-    let argv: Vec<Vec<u8>> = req.argv().iter().map(|a| c_string(a).to_vec()).collect();
+    let argv: Vec<Vec<u8>> = req.argv().iter().map(|a| c_str(a).to_vec()).collect();
     if argv.is_empty() {
         return Ok(OrFalse::False);
     }
@@ -406,12 +401,12 @@ fn getopt(
     let mut longs = Vec::new();
     walk::foreach(req, long_options, Hold::None, |req, row| -> walk::Step {
         let option = with_string(req, row.value(), |text| {
-            crate::getopt::long_option(c_string(text))
+            crate::getopt::long_option(c_str(text))
         })?;
         longs.push(option);
         Ok(ControlFlow::Continue(()))
     })?;
-    let mut opts: Vec<Opt<'_>> = crate::getopt::short_options(c_string(spec.as_bytes()));
+    let mut opts: Vec<Opt<'_>> = crate::getopt::short_options(c_str(spec.as_bytes()));
     opts.extend(longs.iter().map(|(name, need)| Opt {
         code: 0,
         need: *need,
@@ -860,7 +855,7 @@ fn parse_ini_string(
     let parsed = parse_ini(
         req,
         into,
-        c_string(&string.bytes()[..len]),
+        c_str(&string.bytes()[..len]),
         b"Unknown",
         sections,
         mode,

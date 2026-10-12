@@ -6,6 +6,7 @@
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object, write_prop};
+use php_ext::coerce::c_str;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
@@ -271,7 +272,7 @@ fn transliterator_transliterate(
     };
     let Some(made) = create(req, id.as_bytes(), FORWARD)? else {
         let message = String::from_utf8_lossy(&error::message(req)).into_owned();
-        let id = String::from_utf8_lossy(until_nul(id.as_bytes())).into_owned();
+        let id = String::from_utf8_lossy(c_str(id.as_bytes())).into_owned();
         let text = format!("Could not create transliterator with ID \"{id}\" ({message})");
         docref(req, Level::Warning, &text);
         return Ok(OrFalse::False);
@@ -334,11 +335,6 @@ pub(crate) fn functions(b: php_ext::abi::ExtensionBuilder) -> php_ext::abi::Exte
     ])
 }
 
-/// The bytes before the first NUL, as `%s` prints a C string.
-fn until_nul(bytes: &[u8]) -> &[u8] {
-    bytes.split(|&b| b == 0).next().unwrap_or_default()
-}
-
 /// The direction held to the two php names.
 fn direction(req: &mut Request, direction: i64) -> Answer<i32> {
     match direction {
@@ -373,7 +369,7 @@ fn create(
         Ok(utrans) => made(req, utrans),
         Err(code) => {
             error::set_code(req, code);
-            let id = String::from_utf8_lossy(until_nul(id));
+            let id = String::from_utf8_lossy(c_str(id));
             let message = format!("unable to open ICU transliterator with id \"{id}\"");
             error::set_custom_msg(req, &message)?;
             Ok(None)
