@@ -423,9 +423,11 @@ pub(crate) enum Filed {
     Held,
     /// Held nowhere: read back from the file cache, or not read.
     Unheld,
-    /// Compiled and kept in the file cache alone, or held nowhere since
-    /// a restart is pending or memory is short:
-    /// `cache_script_in_file_cache`, `file_cache_compile_file`.
+    /// Compiled and kept in the file cache alone: under
+    /// `opcache.file_cache_only`, or where a file cache is set and a
+    /// restart is pending or memory is short (`cache_script_in_file_cache`,
+    /// `file_cache_compile_file`); with no file cache those are
+    /// [`Filed::Compiled`].
     Kept,
     /// Compiled and held nowhere, by `accelerator_orig_compile_file` as
     /// php without opcache compiles, whose classes bind early in place.

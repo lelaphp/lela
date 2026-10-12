@@ -6195,7 +6195,13 @@ impl Emit<'_> {
             && !delayed
             && let Some(validator) = config.validator
             && let Ok(target) = php_unit::decl::AttributeTarget::try_from(target)
-            && let Some(sentence) = (validator.0)(attribute, target)
+            && let Some(sentence) = (validator.0)(
+                attribute,
+                target,
+                self.active_class
+                    .as_ref()
+                    .map(|class| class.name.as_slice()),
+            )
         {
             return Err(CompileError {
                 level: Level::CompileError,

@@ -466,7 +466,7 @@ impl Request {
         );
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
         if matches!(cached, Some(Ok(_))) {
-            self.stored(&full, validation, filed);
+            self.tell_compiled(&full, validation, filed);
         }
         let served = AccelServed::of(validation, filed);
         self.accel_loaded = (cached.clone().and_then(Result::ok)).zip(served);
@@ -591,7 +591,7 @@ impl Request {
     /// opcache logs cached. A file validated on every hit is one no
     /// accelerator admitted, held as php without opcache compiles it,
     /// which optimizes nothing.
-    fn stored(&mut self, full: &[u8], validation: Validation, filed: Filed) {
+    fn tell_compiled(&mut self, full: &[u8], validation: Validation, filed: Filed) {
         if validation != Validation::EveryHit && matches!(filed, Filed::Held | Filed::Kept) {
             self.run_optimizer_passes(full);
         }

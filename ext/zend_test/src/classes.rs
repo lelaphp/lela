@@ -574,7 +574,7 @@ impl ZendTestAttribute {}
 /// string(17) "ZendTestAttribute"
 /// string(17) "ZendTestAttribute"
 /// ```
-fn only_classes(_: &Attribute, target: AttributeTarget) -> Option<String> {
+fn only_classes(_: &Attribute, target: AttributeTarget, _: Option<&[u8]>) -> Option<String> {
     (target != AttributeTarget::Class)
         .then(|| "Only classes can be marked with #[ZendTestAttribute]".to_owned())
 }

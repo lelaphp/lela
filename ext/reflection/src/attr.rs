@@ -730,7 +730,11 @@ impl ReflectionAttribute {
             && let Some(target) = u32::try_from(kept.target)
                 .ok()
                 .and_then(|bit| AttributeTarget::try_from(bit).ok())
-            && let Some(refused) = (validator.0)(&kept.attribute, target)
+            && let Some(refused) = (validator.0)(
+                &kept.attribute,
+                target,
+                kept.scope.map(|scope| class_name_of(req, scope)).as_deref(),
+            )
         {
             return Err(throw(req, "Error", &refused));
         }
