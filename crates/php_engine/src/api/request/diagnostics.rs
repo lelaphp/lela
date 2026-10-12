@@ -1765,6 +1765,7 @@ mod tests {
     use super::{Charset, append_escaped, escape_html, level_name};
     use crate::api::raising::Level;
     use crate::engine::Engine;
+    use crate::test::request_on;
 
     /// A refusal php's compiler throws, uncaught in the program, is
     /// rendered by `zend_exception_error` with no fatal's trace after it
@@ -1869,5 +1870,96 @@ mod tests {
             b"\x82\xA0&#xFFFD;&lt;"
         );
         assert_eq!(escaped(b"", Charset::Utf8), b"");
+    }
+
+    /// `(EG(error_reporting) & type) || (type & E_CORE)`: a core level
+    /// is rendered under `error_reporting=0`, in the same word its
+    /// family takes, and every other level is masked. The one raiser
+    /// that reaches `E_CORE_ERROR` is
+    /// [`crate::api::request::Request::save_pending`], which no PHP snippet reaches, and no
+    /// raiser reaches `E_CORE_WARNING`, so the mask is held here and not
+    /// by a witness. `E_CORE_ERROR` is in
+    /// `E_FATAL_ERRORS`, so under php's default `fatal_error_backtraces`
+    /// it fetches its trace, `#0 {main}` with no frame standing, and the
+    /// warning fetches none.
+    #[test]
+    fn a_core_level_is_rendered_past_error_reporting() {
+        let engine = Engine::cli_builder().ini("error_reporting", "0").build();
+        let file = b"witness.php";
+        let mut request = request_on(&engine);
+        request.note_error_in(Level::CoreWarning, "core", file, 2);
+        request.note_error_in(Level::CoreError, "core", file, 3);
+        request.note_error_in(Level::Warning, "masked", file, 4);
+        request.note_error_in(Level::Error, "masked", file, 5);
+        assert_eq!(
+            String::from_utf8_lossy(&request.take_body()),
+            "\nWarning: core in witness.php on line 2\n\nFatal error: core in witness.php on line 3\nStack trace:\n#0 {main}\n"
+        );
+    }
+
+    /// php's second html format (`Z/main/main.c:1475`), the one every
+    /// fatal level but `E_ERROR` and `E_PARSE` takes: the message as it
+    /// is, and the trace between the `<br />` and the newline. What the
+    /// pinned oracle writes for `-d html_errors=1` over
+    /// `<?php\nini_set('fatal_error_backtraces', '1'); trigger_error('b<o>om', E_USER_ERROR);`
+    /// is the 8.4 deprecation and then
+    /// `<br />\n<b>Fatal error</b>:  b<o>om in <b>%s</b> on line <b>2</b><br />\nStack trace:\n#0 %s(2): trigger_error('b<o>om', 256)\n#1 {main}\n`;
+    /// no native here raises `E_USER_ERROR`, so the request has no frame
+    /// and the trace is `{main}` alone. The same level under
+    /// `fatal_error_backtraces=0` fetches none, and the two formats then
+    /// write the same bytes but for the escaping.
+    #[test]
+    fn the_second_html_format_carries_the_trace_after_the_line() {
+        let file = b"witness.php";
+        let engine = Engine::cli_builder().ini("html_errors", "1").build();
+        let mut req = request_on(&engine);
+        req.note_error_in(Level::UserError, "b<o>om", file, 2);
+        req.note_error_in(Level::Error, "b<o>om", file, 3);
+        assert_eq!(
+            String::from_utf8_lossy(&req.take_body()),
+            "<br />\n<b>Fatal error</b>:  b<o>om in <b>witness.php</b> on line <b>2</b><br />\nStack trace:\n#0 {main}\n\
+             <br />\n<b>Fatal error</b>:  b&lt;o&gt;om in <b>witness.php</b> on line <b>3</b><br />\n"
+        );
+
+        let engine = Engine::cli_builder()
+            .ini("html_errors", "1")
+            .ini("fatal_error_backtraces", "0")
+            .build();
+        let mut req = request_on(&engine);
+        req.note_error_in(Level::UserError, "b<o>om", file, 2);
+        assert_eq!(
+            String::from_utf8_lossy(&req.take_body()),
+            "<br />\n<b>Fatal error</b>:  b<o>om in <b>witness.php</b> on line <b>2</b><br />\n"
+        );
+    }
+
+    /// The log form and the xml fault carry the trace after the site as
+    /// the plain form does, `ZSTR_LEN(backtrace) ? "\nStack trace:\n" : ""`
+    /// in each of `php_error_cb`'s `spprintf` calls. What the pinned
+    /// oracle writes for `-d log_errors=1 -d display_errors=0` over
+    /// `<?php\n(unset)$x;` is
+    /// `PHP Fatal error:  The (unset) cast is no longer supported in %s on line 2\nStack trace:\n#0 {main}`,
+    /// and for `-d xmlrpc_errors=1` the fault's string is
+    /// `Fatal error:The (unset) cast … on line 2\nStack trace:\n#0 {main}`.
+    #[test]
+    fn the_log_form_and_the_xml_fault_carry_the_trace() {
+        let file = b"witness.php";
+        let engine = Engine::cli_builder()
+            .ini("log_errors", "1")
+            .ini("xmlrpc_errors", "1")
+            .build();
+        let mut req = request_on(&engine);
+        req.note_error_in(Level::CompileError, "refused", file, 2);
+        assert_eq!(
+            req.take_aside(),
+            vec![crate::api::request::response::Aside::Log(
+                b"PHP Fatal error:  refused in witness.php on line 2\nStack trace:\n#0 {main}"
+                    .to_vec()
+            )]
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&req.take_body()),
+            "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>0</int></value></member><member><name>faultString</name><value><string>Fatal error:refused in witness.php on line 2\nStack trace:\n#0 {main}</string></value></member></struct></value></fault></methodResponse>"
+        );
     }
 }

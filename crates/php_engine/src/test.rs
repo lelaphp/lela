@@ -204,3 +204,19 @@ pub(crate) fn request() -> crate::api::request::Request {
         RequestDescription::default(),
     )
 }
+
+/// A request on `engine`'s shared state under the CLI's name, nothing
+/// served: for a unit test that builds the engine with the ini it holds
+/// the request to, and hands the request a state no snippet reaches, a
+/// level no raiser raises or a throwable pending where php's release
+/// would be.
+#[cfg(test)]
+pub(crate) fn request_on(engine: &Engine) -> crate::api::request::Request {
+    crate::api::request::Request::new(
+        std::sync::Arc::clone(&engine.shared),
+        RequestDescription {
+            sapi_name: String::from("cli"),
+            ..RequestDescription::default()
+        },
+    )
+}
