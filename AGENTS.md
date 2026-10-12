@@ -90,7 +90,7 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 ## The facts, computed
 
-The regions below are rendered by `computed run AGENTS.md` and held by `computed check` in CI. The volatile readings (budget, phpt, witness, mutants, port-map, divergence, permits, git) live in `.claude/harness.local.md`, which the SessionStart hook renders and prints after this file.
+The regions below are rendered by `computed run AGENTS.md` and held by `computed check` in CI. The volatile readings (budget, phpt, witness, mutants, port-map, divergence, permits, git) live in `.claude/harness.local.md`, which the SessionStart hook renders and prints after this file. Every manifest rule, with its ADR and predicate: `cargo xtask status --section rules`.
 
 <!-- computed exec cmd="ls third-engine-design*.md jit-design*.md harness-design.md | sort -V" inputs=third-engine-design*.md,jit-design*.md,harness-design.md name=design-of-record | do not edit; run computed -->
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=42d8f3ff319f76842c02e7e41e4f3bb3e6c849b071ad694c02f1814176c50cbd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=6f92ef86f8515b7f089c38dc6c73aa1570cde6ba66f8aa4577cbaeb879ca85f3 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -133,45 +133,6 @@ third-engine-design.md
 | harness | xtask.lock | 411 |  |
 
 <!-- /computed in=878d12d50fa34dc5d31c25b1a73784209b93eb9d7d3f492d4bdc63fda93093fb out=3c31aa0c5be5f711eeaae291480a5cd9b3f87feccac3abc8fdc0620326362c88 -->
-<!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
-
-| rule | adr | predicate |
-|---|---|---|
-| ext.no-locks | ADR-0005 | deny_types |
-| unsafe.homes | ADR-0006 | allow |
-| unsafe.one-op |  | deny_lints |
-| fork.home |  | deny_pattern |
-| fork.threads | ADR-0010 | deny_methods |
-| lints.no-panic |  | deny_lints |
-| api.no-hot |  | deny_pattern |
-| ext.no-private |  | deny_pattern |
-| api.lock-line |  | on |
-| xtask.lock-line |  | on |
-| ext.pub-beyond-extension |  | on |
-| witness.exit-authored |  | deny_pattern |
-| witness.capture-authored |  | deny_pattern |
-| witness.coverage |  | check |
-| vocab.avoid |  | avoid_from |
-| vocab.harness |  | avoid_from |
-| generated.committed |  | generated |
-| git.no-verify |  | deny_argv |
-| git.merge-commits-itself |  | deny_pattern |
-| git.no-amend |  | deny_argv |
-| git.operation |  | deny_argv |
-| ticket.close |  | deny_argv |
-| ticket.close-api |  | deny_pattern |
-| ticket.reply-unfiled |  | deny_pattern |
-| lanes.nightly |  | deny_pattern |
-| lanes.nightly-flags |  | deny_argv |
-| lanes.nightly-soak |  | deny_argv |
-| lanes.builder-subset |  | require_argv |
-| computed.force |  | deny_pattern |
-| harness.self |  | deny |
-| harness.self-shell |  | deny_pattern |
-| harness.transcript |  | deny_pattern |
-| divergence.reason |  | check |
-
-<!-- /computed in=309e17732151fea3eacce659d60dca4a281e5ce3bceea4d47bbf4738e6fa34a8 out=cc17473e92cd43e7172ef14ba95e71078dba16ff979509b7e46c3b0bc5c5aa3b -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
