@@ -13,7 +13,7 @@ use php_syntax::tree;
 use php_unit::{Opcode, OperandKind, Opline};
 
 use super::args::{Arg, Args};
-use super::{Emit, Source, Where};
+use super::{ClassSpec, Emit, Source, Where};
 use crate::CompileError;
 
 impl Emit<'_> {
@@ -121,7 +121,7 @@ impl Emit<'_> {
                     return self.call_var(Source::Expr(callee), &arguments);
                 }
                 tree::Expr::ScopedAccessExpr(scoped) => {
-                    let class = self.class_spec(self.parsed.tree[scoped].scope);
+                    let class = ClassSpec::of(self.parsed.tree[scoped].scope);
                     let method = self.scoped_method_of(scoped)?;
                     self.ext_stmt_over(Some(compiled));
                     return self.static_call(class, method, &arguments);

@@ -266,6 +266,35 @@ enum ClassSpec {
     Expr(tree::Expr),
 }
 
+impl ClassSpec {
+    /// The class a `::`, a `new` or an `instanceof` stands on: a name
+    /// written out, php's `ZEND_AST_ZVAL` that `zend_compile_class_ref`
+    /// reads without compiling, or an expression it compiles. A name in
+    /// parentheses is an expression, `'(' expr ')'` in
+    /// `class_name_reference` and `fully_dereferenceable`, so `new (FOO)`
+    /// names the class the constant `FOO` holds.
+    ///
+    /// ```php
+    /// class B {} class C {}
+    /// const C = 'B';
+    /// $o = new B;
+    /// var_dump(new (C), new C, $o instanceof (C));
+    /// ```
+    /// ```expect
+    /// object(B)#2 (0) {
+    /// }
+    /// object(C)#3 (0) {
+    /// }
+    /// bool(true)
+    /// ```
+    fn of(expr: tree::Expr) -> ClassSpec {
+        match expr {
+            tree::Expr::NameRef(name) => ClassSpec::Name(name),
+            other => ClassSpec::Expr(other),
+        }
+    }
+}
+
 /// What `zend_compile_class_ref` (`Z/Zend/zend_compile.c:2819`) leaves
 /// in its `znode`: a class named at compile time, its name resolved
 /// (`IS_CONST`); `self`, `parent` or `static`, the fetch type and its
@@ -2369,7 +2398,7 @@ impl Emit<'_> {
                 if let Some(called) = self.parent_hook_call(scoped, args, line)? {
                     return Ok(called);
                 }
-                let class = self.class_spec(self.parsed.tree[scoped].scope);
+                let class = ClassSpec::of(self.parsed.tree[scoped].scope);
                 let method = self.scoped_method_of(scoped)?;
                 let arguments = self.arguments(args, line)?;
                 self.static_call(class, method, &arguments)
@@ -2461,14 +2490,47 @@ impl Emit<'_> {
         self.const_name(&name)
     }
 
-    /// The class a `::`, a `new` or an `instanceof` stands on: a name
-    /// written out, php's `ZEND_AST_ZVAL` that `zend_compile_class_ref`
-    /// reads without compiling, or an expression it compiles.
-    fn class_spec(&self, expr: tree::Expr) -> ClassSpec {
-        match self.peel(expr) {
-            tree::Expr::NameRef(name) => ClassSpec::Name(name),
-            other => ClassSpec::Expr(other),
+    /// A class operand php's tree holds as a value that is no name
+    /// written out, `ZEND_AST_ZVAL` with `ZEND_NAME_FQ` in its `attr`:
+    /// a string or a number written where the class goes, which the
+    /// parser made a value ([`Self::written`]). Nothing for any other
+    /// expression.
+    fn class_value(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
+        self.written(expr)
+    }
+
+    /// `zend_resolve_class_name_ast` over a class operand that is a value
+    /// ([`Self::class_value`]), resolved as `ZEND_NAME_FQ`: a string,
+    /// else php's `Illegal class name`, with one leading `\` dropped and
+    /// `self`, `parent` or `static` php's `'\self' is an invalid class
+    /// name`.
+    ///
+    /// ```php
+    /// echo ("self")::X;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: '\self' is an invalid class name in %s on line 2
+    /// ```
+    fn fq_class_name(&self, value: Zval) -> Result<Vec<u8>, CompileError> {
+        let Some(name) = value.as_str() else {
+            return Err(self.compile_error("Illegal class name"));
+        };
+        self.fq_name(name.bytes())
+    }
+
+    /// `zend_resolve_class_name` under `ZEND_NAME_FQ` over a name whose
+    /// fetch type is the default one or that begins with `\`: the name
+    /// with that `\` dropped, and php's compile error where what is left
+    /// is `self`, `parent` or `static`.
+    fn fq_name(&self, name: &[u8]) -> Result<Vec<u8>, CompileError> {
+        let bare = name.strip_prefix(b"\\").unwrap_or(name);
+        if class_fetch_type(bare) != FETCH_CLASS_DEFAULT {
+            return Err(self.compile_error(format!(
+                "'\\{}' is an invalid class name",
+                String::from_utf8_lossy(bare)
+            )));
         }
+        Ok(bare.to_vec())
     }
 
     /// The type a cast is to, php's `attr` on `ZEND_AST_CAST`: the
@@ -2537,7 +2599,7 @@ impl Emit<'_> {
 
     /// `C::NAME` and `C::$name`: a class constant or a class's
     /// property (`ZEND_AST_STATIC_PROP`), over the class a name written
-    /// out or an expression names ([`Self::class_spec`]), or its name;
+    /// out or an expression names ([`ClassSpec::of`]), or its name;
     /// a member the program names is refused as not read yet.
     fn scoped_of(
         &self,
@@ -2545,7 +2607,7 @@ impl Emit<'_> {
         line: u32,
     ) -> Result<Scoped, CompileError> {
         let node = &self.parsed.tree[id];
-        let class = self.class_spec(node.scope);
+        let class = ClassSpec::of(node.scope);
         let tree = &self.parsed.tree;
         let computed = |inner: Option<tree::Expr>, what| {
             inner
@@ -7824,7 +7886,7 @@ impl Emit<'_> {
         let Some(ctor) = ctor else {
             return Err(self.unread("a `new`"));
         };
-        let ClassSpec::Name(token) = self.class_spec(ctor) else {
+        let ClassSpec::Name(token) = ClassSpec::of(ctor) else {
             return Err(self.compile_error("Cannot use dynamic class name in constant expression"));
         };
         let class_line = self.line_of(ctor);
@@ -11116,7 +11178,7 @@ impl Emit<'_> {
     /// `ZEND_AST_INSTANCEOF`.
     fn instanceof_expr(&mut self, id: NodeId<tree::InstanceofExpr>) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
-        let Some(class) = node.rhs.map(|rhs| self.class_spec(rhs)) else {
+        let Some(class) = node.rhs.map(ClassSpec::of) else {
             return Err(self.unread("an `instanceof`"));
         };
         self.instance_of(node.lhs, class)
@@ -11148,7 +11210,7 @@ impl Emit<'_> {
             };
             return self.new_of(&class, &arguments, line);
         }
-        let Some(class) = node.ctor.map(|ctor| self.class_spec(ctor)) else {
+        let Some(class) = node.ctor.map(ClassSpec::of) else {
             return Err(self.unread("a `new`"));
         };
         let arguments = match node.args {
@@ -16630,13 +16692,20 @@ impl Emit<'_> {
     /// class the program computes. `self`, `parent` and `static` are
     /// held to [`Self::ensure_valid_class_fetch_type`] first.
     fn resolved_class_name(&mut self, class: ClassSpec) -> Result<Option<Zval>, CompileError> {
-        let ClassSpec::Name(token) = class else {
-            return Ok(None);
+        let (written, value) = match class {
+            ClassSpec::Name(token) => (self.text(token).to_vec(), false),
+            ClassSpec::Expr(expr) => match self.class_value(expr)? {
+                Some(value) => match value.as_str() {
+                    Some(name) => (name.bytes().to_vec(), true),
+                    None => return Err(self.compile_error("Illegal class name")),
+                },
+                None => return Ok(None),
+            },
         };
-        let written = self.text(token).to_vec();
         let fetch = class_fetch_type(&written);
         self.ensure_valid_class_fetch_type(fetch)?;
         let name = match fetch {
+            FETCH_CLASS_DEFAULT if value => self.fq_name(&written)?,
             FETCH_CLASS_DEFAULT => self.class_name(&written),
             FETCH_CLASS_SELF if self.scope_known() => match self.active_name() {
                 Some(active) => active,
@@ -16714,19 +16783,20 @@ impl Emit<'_> {
         if let Some(value) = self.resolved_class_name(class)? {
             return Ok(Where::Constant(value));
         }
-        if let ClassSpec::Expr(expr) = class
-            && let tree::Expr::LiteralExpr(id) = self.peel(expr)
-            && let Some(value) = self.parsed.tree[id].value
-            && matches!(
-                TokenValue::of(self.parsed, Holder::Scalar(&self.parsed.tree[id]), value),
-                Some(TokenValue::Int(_) | TokenValue::Float(_))
-            )
-        {
-            return Err(self.compile_error("Illegal class name"));
-        }
-        let (op1_type, op1) = match class {
-            ClassSpec::Name(token) => (OperandKind::Unused, class_fetch_type(self.text(token))),
-            ClassSpec::Expr(expr) => match self.expr(expr)? {
+        // `class_ast->kind == ZEND_AST_ZVAL`: a value that is no string
+        // was refused above, so what stands is the fetch type of a name.
+        let value = match class {
+            ClassSpec::Name(_) => None,
+            ClassSpec::Expr(expr) => self.class_value(expr)?,
+        };
+        let (op1_type, op1) = match (class, value.as_ref().and_then(|value| value.as_str())) {
+            (ClassSpec::Name(token), _) => {
+                (OperandKind::Unused, class_fetch_type(self.text(token)))
+            }
+            (ClassSpec::Expr(_), Some(name)) => {
+                (OperandKind::Unused, class_fetch_type(name.bytes()))
+            }
+            (ClassSpec::Expr(expr), None) => match self.expr(expr)? {
                 Where::Constant(value) => {
                     let shown = match value.kind() {
                         ZvalType::Null => "null",
@@ -17231,52 +17301,65 @@ impl Emit<'_> {
     /// written with a leading `\` is the class of that name; `self`,
     /// `parent` and `static` are their fetch type and `flags` in an
     /// unused operand, held to [`Self::ensure_valid_class_fetch_type`];
-    /// any other name is the class it resolves to. An expression is
-    /// compiled: a constant string is read as a name written with its
-    /// leading `\`, a constant of another type is php's `Illegal class
-    /// name`, and anything else is `FETCH_CLASS` over the value into a
-    /// `VAR`, `ZEND_FETCH_CLASS_DEFAULT` and `flags` in its `op1`.
+    /// any other name is the class it resolves to. A value written where
+    /// the class goes is the class it names as `ZEND_NAME_FQ`
+    /// ([`Self::fq_class_name`]); any other expression is
+    /// [`Self::computed_class_ref`]'s.
     fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef, CompileError> {
         let written = match class {
             ClassSpec::Name(token) => self.text(token).to_vec(),
-            ClassSpec::Expr(expr) => match self.expr(expr)? {
-                Where::Constant(value) => {
-                    let Some(name) = value.as_str() else {
-                        return Err(self.compile_error("Illegal class name"));
-                    };
-                    let name = name.bytes().to_vec();
-                    match class_fetch_type(&name) {
-                        FETCH_CLASS_DEFAULT => {
-                            let bare = name.strip_prefix(b"\\").unwrap_or(&name).to_vec();
-                            return Ok(ClassRef::Named(bare));
-                        }
-                        fetch => {
-                            self.ensure_valid_class_fetch_type(fetch)?;
-                            return Ok(ClassRef::Scope(fetch | flags));
-                        }
-                    }
+            ClassSpec::Expr(expr) => {
+                if let Some(value) = self.class_value(expr)? {
+                    return Ok(ClassRef::Named(self.fq_class_name(value)?));
                 }
-                value => {
-                    let (op2_type, op2) = self.operand(value);
-                    let out = self.temporary();
-                    self.push(Opline {
-                        opcode: Opcode::FetchClass,
-                        op1: FETCH_CLASS_DEFAULT | flags,
-                        op2_type,
-                        op2,
-                        out_type: OperandKind::Var,
-                        out,
-                        ..Opline::default()
-                    });
-                    return Ok(ClassRef::Fetched(out));
-                }
-            },
+                return self.computed_class_ref(expr, flags);
+            }
         };
         if written.starts_with(b"\\") {
             return Ok(ClassRef::Named(self.class_name(&written)));
         }
         match class_fetch_type(&written) {
             FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.class_name(&written))),
+            fetch => {
+                self.ensure_valid_class_fetch_type(fetch)?;
+                Ok(ClassRef::Scope(fetch | flags))
+            }
+        }
+    }
+
+    /// [`Self::class_ref`] over a class operand that is no value: the
+    /// expression compiled, where a constant string is read by its fetch
+    /// type, a name of the default one resolved as `ZEND_NAME_FQ`
+    /// ([`Self::fq_name`]), a constant of another type is php's `Illegal
+    /// class name`, and anything else is `FETCH_CLASS` over the value
+    /// into a `VAR`, `ZEND_FETCH_CLASS_DEFAULT` and `flags` in its `op1`.
+    fn computed_class_ref(
+        &mut self,
+        expr: tree::Expr,
+        flags: u32,
+    ) -> Result<ClassRef, CompileError> {
+        let value = match self.expr(expr)? {
+            Where::Constant(value) => value,
+            value => {
+                let (op2_type, op2) = self.operand(value);
+                let out = self.temporary();
+                self.push(Opline {
+                    opcode: Opcode::FetchClass,
+                    op1: FETCH_CLASS_DEFAULT | flags,
+                    op2_type,
+                    op2,
+                    out_type: OperandKind::Var,
+                    out,
+                    ..Opline::default()
+                });
+                return Ok(ClassRef::Fetched(out));
+            }
+        };
+        let Some(name) = value.as_str() else {
+            return Err(self.compile_error("Illegal class name"));
+        };
+        match class_fetch_type(name.bytes()) {
+            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.fq_name(name.bytes())?)),
             fetch => {
                 self.ensure_valid_class_fetch_type(fetch)?;
                 Ok(ClassRef::Scope(fetch | flags))

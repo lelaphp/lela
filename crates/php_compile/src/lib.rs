@@ -4560,6 +4560,54 @@ mod tests {
         );
     }
 
+    /// A class written in parentheses is an expression, `'(' expr ')'` in
+    /// `class_name_reference` and `fully_dereferenceable`, so `new (C)`,
+    /// `(C)::X` and `instanceof (C)` read the constant `C` and fetch the
+    /// class it names (`FETCH_CONSTANT`, `FETCH_CLASS`) where `new C` names
+    /// the class `C`; a string written where the class goes, folded by the
+    /// parser from `"A" . "B"` too, is the class it names as written
+    /// (`ZEND_NAME_FQ`). The dump is the oracle's under `[regime.dump]` at
+    /// 8.5.9 (#2680).
+    #[test]
+    fn a_class_in_parentheses_is_the_expression_and_a_string_the_class_it_names() {
+        assert_eq!(
+            dump_of(b"<?php new (C); new C; echo (C)::X, (\"A\" . \"B\")::class, \"Foo\"::X, (\"\\\\Foo\")::X; var_dump($a instanceof (C));"),
+            "\n$_main:\n\
+             \x20    ; (lines=24, args=0, vars=1, tmps=15)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T1 = FETCH_CONSTANT string(\"C\")\n\
+             0001 V2 = FETCH_CLASS (exception) T1\n\
+             0002 V3 = NEW 0 V2\n\
+             0003 DO_FCALL\n\
+             0004 FREE V3\n\
+             0005 V5 = NEW 0 string(\"C\")\n\
+             0006 DO_FCALL\n\
+             0007 FREE V5\n\
+             0008 T7 = FETCH_CONSTANT string(\"C\")\n\
+             0009 V8 = FETCH_CLASS (exception) T7\n\
+             0010 T9 = FETCH_CLASS_CONSTANT V8 string(\"X\")\n\
+             0011 ECHO T9\n\
+             0012 ECHO string(\"AB\")\n\
+             0013 T10 = FETCH_CLASS_CONSTANT string(\"Foo\") string(\"X\")\n\
+             0014 ECHO T10\n\
+             0015 T11 = FETCH_CLASS_CONSTANT string(\"Foo\") string(\"X\")\n\
+             0016 ECHO T11\n\
+             0017 INIT_FCALL 1 96 string(\"var_dump\")\n\
+             0018 T12 = FETCH_CONSTANT string(\"C\")\n\
+             0019 V13 = FETCH_CLASS (no-autoload) (silent) (exception) T12\n\
+             0020 T14 = INSTANCEOF CV0($a) V13\n\
+             0021 SEND_VAL T14 1\n\
+             0022 DO_ICALL\n\
+             0023 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0003 - 0004 (new)\n\
+             \x20    5: 0006 - 0007 (new)\n\
+             "
+        );
+    }
+
     /// `C::class`, which was refused as not read, as the oracle's
     /// `[regime.dump]` has it: a name written out folds to its resolved
     /// spelling, `self` in a known scope to the class being compiled,
