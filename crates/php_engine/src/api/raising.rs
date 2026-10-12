@@ -1331,6 +1331,7 @@ pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Th
 
 /// [`arity`] over a count the caller read off the call already, as the
 /// entry reads it with the arguments.
+#[cold]
 pub(crate) fn arity_of(
     req: &mut Request,
     given: usize,

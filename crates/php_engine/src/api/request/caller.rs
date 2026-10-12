@@ -234,15 +234,16 @@ impl Request {
     /// `UNDEF` past the count; none given and all `UNDEF` outside a
     /// native's body.
     pub(crate) fn arguments_given<const N: usize>(&self) -> (usize, [Value; N]) {
-        let mut out = [Value::undef(); N];
         let Some(call) = self.serving_call() else {
-            return (0, out);
+            return (0, [Value::undef(); N]);
         };
         let given = call.num_args() as usize;
-        for (cell, zval) in out.iter_mut().zip(call.frame.slots().iter().take(given)) {
-            *cell = Value::of_zval(*zval);
-        }
-        (given, out)
+        let slots = call.frame.slots();
+        let arguments = std::array::from_fn(|at| match slots.get(at) {
+            Some(zval) if at < given => Value::of_zval(*zval),
+            _ => Value::undef(),
+        });
+        (given, arguments)
     }
 
     /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`

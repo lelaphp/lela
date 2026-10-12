@@ -152,7 +152,9 @@ pub fn arguments<const N: usize>(
     max: Option<usize>,
 ) -> Result<[Value; N], Thrown> {
     let (given, arguments) = req.arguments_given::<N>();
-    crate::api::raising::arity_of(req, given, min, max)?;
+    if given < min || max.is_some_and(|max| given > max) {
+        crate::api::raising::arity_of(req, given, min, max)?;
+    }
     Ok(arguments)
 }
 
