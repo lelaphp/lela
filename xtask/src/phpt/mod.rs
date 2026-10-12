@@ -460,6 +460,15 @@ impl Subset {
         }
     }
 
+    /// Whether the subset's tests make System V objects naming no process,
+    /// so its run holds a windowed claim ([`sysv::makes_unnamed`], #2811).
+    fn makes_unnamed(&self) -> bool {
+        sysv::makes_unnamed(
+            &self.scope,
+            self.dirs.iter().map(|place| place.under.as_path()),
+        )
+    }
+
     /// The directories the subset names that the pinned tree does not
     /// have, by their place in it.
     pub(crate) fn absent(&self) -> Vec<&Path> {
@@ -1077,7 +1086,7 @@ pub fn run(
         let beside = own.pin.as_ref().map(|pin| side.oracle.beside(pin));
         let oracle = beside.as_ref().unwrap_or(side.oracle);
         let under = side.under(ask.lane, jobs, own.served.as_deref(), &locks);
-        let claims = sysv::SUBSETS.contains(&subset.scope.as_str());
+        let claims = subset.makes_unnamed();
         let ((tally, waited), removed) = swept_around(oracle, (scope, claims), copy, || {
             let within = copy.map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)

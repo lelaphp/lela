@@ -1470,6 +1470,69 @@ fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a
     drop(held);
 }
 
+/// The queues a test outside the four System V subsets leaves, removed
+/// after it (#2811): `Zend/tests/arginfo_zpp_mismatch.phpt` calls every
+/// function with nulls, and `msg_get_queue(null)`, `msg_get_queue(null,
+/// null)` and `msg_queue_exists(null)` each make a private queue of mode 0
+/// that nobody sends to, naming no process, three per php that runs it,
+/// which filled the machine's 40 on #2808. A test of that name here makes
+/// the three and writes their ids; once the subset's run ends none of them
+/// stands, as `ipcs -q` reads them.
+#[test]
+fn the_private_queues_the_zend_arginfo_test_leaves_are_removed_after_its_run() {
+    if oracle().is_none() {
+        return;
+    }
+    let _alone = alone();
+    if let Some(why) = ipcs_readable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let tree = OneTree::new("sysv-arginfo");
+    let dir = tree.corpus.join("Zend/tests");
+    fs::create_dir_all(&dir).unwrap();
+    let marks = Tree::new("phpt-sysv-arginfo-marks").unwrap();
+    let made = marks.join("made");
+    fs::write(
+        dir.join("arginfo_zpp_mismatch.phpt"),
+        format!(
+            "--TEST--\nmakes three private queues\n--FILE--\n<?php\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\nforeach ([fn() => msg_get_queue(null), fn() => msg_get_queue(null, null), fn() => msg_queue_exists(null)] as $f) {{ try {{ @$f(); }} catch (Throwable) {{}} }}\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', implode(' ', $new) . ' ', FILE_APPEND);\necho \"===DONE===\";\n--EXPECT--\n===DONE===\n",
+            made.display()
+        ),
+    )
+    .unwrap();
+    let tmp = Tree::new("phpt-sysv-arginfo-tmp").unwrap();
+    let checkout = OneTree::checkout("sysv-arginfo");
+    let out = tree
+        .command(&checkout, "Zend/tests")
+        .env("TMPDIR", tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let said = String::from_utf8_lossy(&out.stdout);
+    let queues: Vec<String> = fs::read_to_string(&made)
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        queues.len() >= 3,
+        "the test made its three queues: {queues:?} {said}"
+    );
+    let standing: Vec<String> = ipcs()
+        .into_iter()
+        .filter(|o| o.kind == "q" && queues.contains(&o.id))
+        .map(|o| o.id)
+        .collect();
+    for queue in &standing {
+        Command::new("ipcrm").args(["-q", queue]).status().ok();
+    }
+    assert!(
+        standing.is_empty(),
+        "the run left {standing:?} of {queues:?}: {said}"
+    );
+}
+
 /// On Linux, a run where no private IPC namespace is in play still removes
 /// what its test leaves (#1643): the fixture's subset is no System V
 /// subset, so its program runs in the machine's own namespace, as every
