@@ -275,3 +275,22 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
+# php-fpm's `php_fopen_primary_script` leaves the program's handle an
+# `opened_path`, so `php_execute_script_ex` does not put it in
+# `EG(included_files)` before `auto_prepend_file`; `zend_execute_script`
+# does once the program has compiled (`Z/Zend/zend.c:1971-1974`), after the
+# prepend file (#2558). The prepend file and the program each print the
+# table's names, in each of two requests.
+[[line]]
+name = "the-program-is-noted-as-it-compiles-after-the-prepend-file"
+args = ["-R", "-n", "-F", "-d", "auto_prepend_file={dir}/pre.php", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]

@@ -209,8 +209,13 @@ impl Request {
     /// (`Z/main/main.c:2610-2619`), before `auto_prepend_file` runs: the
     /// file the request names made whole against its working directory
     /// with its links resolved, which is the name the unit compiles under
-    /// and the page `php_statpage` stats, put in `EG(included_files)`;
-    /// the name as given where it expands to nothing. A source the host
+    /// and the page `php_statpage` stats, and put in `EG(included_files)`
+    /// there only where the host opened it as a `FILE *`, the CLI's
+    /// [`ProgramFile::Opened`]; php-cgi's and php-fpm's
+    /// `zend_file_handle` carries an `opened_path` and the built-in server's is a bare name, so the
+    /// table takes theirs as it compiles, after the prepend file has been
+    /// served ([`Request::note_compiled_program`]); the name as given
+    /// where it expands to nothing. A source the host
     /// `served` under a name is the file php would have opened by it, its
     /// name expanded into the table and compiled under, so `__FILE__` and
     /// a diagnostic's file are the table's path (#1569); one named
@@ -237,8 +242,50 @@ impl Request {
         }
         let script = script.unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
-        self.note_included(&expanded).ok();
+        if self.description.program_file == ProgramFile::Opened {
+            self.note_included(&expanded).ok();
+        }
         self.description.script_name = Some(expanded);
+    }
+
+    /// `zend_execute_script`'s `zend_hash_add_empty_element` of the
+    /// `zend_file_handle`'s `opened_path` once the program has compiled
+    /// (`Z/Zend/zend.c:1971-1974`): the program's file in
+    /// `EG(included_files)` under its expanded name, after what
+    /// `auto_prepend_file` included, for every host but the CLI, whose
+    /// `FILE *` put it there before ([`Request::expand_primary_file`]).
+    /// From the prepend file and from the program, `pre.php` and `t.php`
+    /// each print the table's names, under the CLI and under the built-in
+    /// server:
+    ///
+    /// ```php
+    /// $d = realpath(sys_get_temp_dir()) . '/noted' . getmypid(); @mkdir($d);
+    /// $list = '<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";';
+    /// file_put_contents("$d/pre.php", $list); file_put_contents("$d/t.php", $list);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', "auto_prepend_file=$d/pre.php", "$d/t.php"], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', "auto_prepend_file=$d/pre.php", '-S', '127.0.0.1:0', '-t', $d], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// echo file_get_contents("http://127.0.0.1:$port/t.php");
+    /// proc_terminate($p); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect process
+    /// pre.php t.php,pre.php
+    /// t.php t.php,pre.php
+    /// pre.php pre.php
+    /// t.php pre.php,t.php
+    /// ```
+    pub(crate) fn note_compiled_program(&mut self) {
+        if self.description.program_file == ProgramFile::Opened {
+            return;
+        }
+        if let Some(script) = self.description.script_name.clone() {
+            // The memory limit's fatal is recorded and ends the request.
+            self.note_included(&script).ok();
+        }
     }
 
     /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four

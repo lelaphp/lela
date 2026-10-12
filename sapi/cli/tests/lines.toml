@@ -435,3 +435,26 @@ stop = "SIGINT"
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 [[line.serve.request]]
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# The program's file enters `EG(included_files)` before `auto_prepend_file`
+# only where the host opened it as a `FILE *`, the CLI's, which
+# `php_execute_script_ex` expands into the table (`Z/main/main.c:2610-2619`);
+# the built-in server hands a bare name (`zend_stream_init_filename`), which
+# `zend_execute_script` puts in the table once the program has compiled
+# (`Z/Zend/zend.c:1971-1974`), after the prepend file (#2558). The prepend
+# file and the program each print the table's names.
+[[line]]
+name = "the-cli-notes-its-program-before-the-prepend-file"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "t.php"]
+files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
+
+[[line]]
+name = "the-built-in-server-notes-its-program-as-it-compiles"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"

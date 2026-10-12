@@ -4879,7 +4879,11 @@ impl Engine {
         if script && !auto_file(req, b"auto_prepend_file", self.shared.loops.entry) {
             return false;
         }
-        let ran = match self.primary(req, source, written) {
+        let compiled = self.primary(req, source, written);
+        if script && source.is_none() && compiled.is_some() {
+            req.note_compiled_program();
+        }
+        let ran = match compiled {
             Some(Ok(unit)) => serve_unit(req, &unit, self.shared.loops.entry),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
