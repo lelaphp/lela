@@ -791,7 +791,14 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     if let Some(this) = this {
         req.addref(&this.as_value());
     }
-    let made = match req.new_object_with(class, closure) {
+    // `zend_create_closure_ex` over the op array: its cache, laid down
+    // for the scope here where no closure laid it down yet.
+    let cache = crate::classes::closure_cache(req, function, scope, None);
+    let payload = crate::classes::ClosureObject {
+        info: closure,
+        cache,
+    };
+    let made = match req.new_object_with(class, payload) {
         Ok(made) => made,
         Err(thrown) => return threw(req, frame, &thrown),
     };

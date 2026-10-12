@@ -109,16 +109,23 @@ impl ObjectHandlers for ClosureHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         req.free_members(object);
         if let Some(bound) = object
-            .native_mut::<ClosureInfo>(req)
-            .and_then(|closure| closure.bound.take())
+            .native_mut::<ClosureObject>(req)
+            .and_then(|closure| closure.info.bound.take())
         {
             req.release(Value::array(bound));
         }
         if let Some(this) = object
-            .native_mut::<ClosureInfo>(req)
-            .and_then(|closure| closure.this.take())
+            .native_mut::<ClosureObject>(req)
+            .and_then(|closure| closure.info.this.take())
         {
             req.release(this.as_value());
+        }
+        // `efree` of a `ZEND_ACC_HEAP_RT_CACHE` cache with the closure.
+        if let Some(ClosureCache::Own(at)) = object
+            .native_mut::<ClosureObject>(req)
+            .map(|closure| std::mem::take(&mut closure.cache))
+        {
+            req.give_back_cache(at);
         }
     }
 
@@ -529,7 +536,11 @@ static CLOSURE: ClosureHandlers = ClosureHandlers;
 /// the new object's slot, with one more owner of the receiver taken
 /// first, as `zend_create_closure` takes it.
 fn closure_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
-    let Some(mut closure) = object.closure(req).cloned() else {
+    let Some(ClosureObject {
+        info: mut closure,
+        cache: from,
+    }) = object.native::<ClosureObject>(req).cloned()
+    else {
         return req.clone_members(object);
     };
     // `zend_array_dup` of the bound variables in
@@ -543,8 +554,90 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
     if let Some(this) = closure.this {
         req.addref(&this.as_value());
     }
-    let made = req.clone_with_payload(object, closure);
+    let cache = closure_cache(req, closure.function, closure.scope, Some(from));
+    let made = req.clone_with_payload(
+        object,
+        ClosureObject {
+            info: closure,
+            cache,
+        },
+    );
     adopted(made)
+}
+
+/// A `Closure` object's payload, php's `zend_closure`: what a call
+/// through it is handed ([`ClosureInfo`], the face's view), and the
+/// runtime cache its copy of the function reads,
+/// `closure->func.op_array.run_time_cache`.
+#[derive(Clone)]
+pub(crate) struct ClosureObject {
+    pub(crate) info: ClosureInfo,
+    pub(crate) cache: ClosureCache,
+}
+
+/// The runtime cache a closure's function reads: the function's own,
+/// which every closure made over it in the scope it was laid down for
+/// shares, or one of the closure's own, `ZEND_ACC_HEAP_RT_CACHE`, which
+/// a closure in another scope takes since its slots hold what the
+/// scope decides, and which is given back with the closure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ClosureCache {
+    #[default]
+    Function,
+    Own(crate::exec::CacheAt),
+}
+
+/// `zend_create_closure_ex`'s choice of runtime cache
+/// (`Z/Zend/zend_closures.c:794-819`) for a closure over `function` in
+/// `scope`, made from a closure whose cache is `from`, or from the
+/// function itself where `from` is none. A closure made from one with a
+/// cache of its own takes another (`ZEND_ACC_HEAP_RT_CACHE`). A real
+/// closure's op array whose cache no closure has laid down yet has it
+/// laid down now for `scope`, which php writes onto the op array as
+/// `func->common.scope`, and shares it. Otherwise the function's cache
+/// is shared where it is laid down and was laid down for `scope`: a
+/// real closure's for the scope its first closure was made in, a
+/// method's for its class, a function's for none. Any other closure
+/// takes a cache of its own, laid down at its first call. A native's
+/// closure has no cache to choose.
+///
+/// So a closure rebound to another scope is asked of again by an
+/// observer, as its fresh cache's observer slot is unresolved
+/// (`zend_observer_fcall_init`), while one bound to the scope its op
+/// array's cache was laid for, or the same scope once more, is not:
+/// [`crate::tests::observer`] holds the order `zend_test`'s observer
+/// prints.
+pub(crate) fn closure_cache(
+    req: &mut Request,
+    function: Function,
+    scope: Option<ClassId>,
+    from: Option<ClosureCache>,
+) -> ClosureCache {
+    let Some(user) = req.user_function(function) else {
+        return ClosureCache::Function;
+    };
+    let (cache, size) = (user.shape.cache, user.shape.cache_size);
+    let real = matches!(user.body, crate::exec::Body::Dynamic(_));
+    if let Some(ClosureCache::Own(_)) = from {
+        return ClosureCache::Own(req.own_cache());
+    }
+    if !req.cache_laid(cache) {
+        if real {
+            req.lay_closure_cache(cache, size, scope);
+            return ClosureCache::Function;
+        }
+        return ClosureCache::Own(req.own_cache());
+    }
+    let function_scope = if real {
+        req.laid_for(cache)
+    } else {
+        req.method_class(function)
+    };
+    if function_scope == scope {
+        ClosureCache::Function
+    } else {
+        ClosureCache::Own(req.own_cache())
+    }
 }
 
 /// `interface UnitEnum` as `zend_enum.stub.php` declares it and
@@ -1180,7 +1273,7 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
         bound: None,
         fake: true,
     };
-    create_closure(req, &fake, scope, called_scope, this)
+    create_closure(req, (&fake, None), scope, called_scope, this)
 }
 
 /// `zend_ast_evaluate`'s `ZEND_AST_OP_ARRAY` arm: a closure of a
@@ -1238,7 +1331,7 @@ pub(crate) fn const_expr_closure(
         bound,
         fake: false,
     };
-    let made = create_closure(req, &info, scope, scope, None);
+    let made = create_closure(req, (&info, None), scope, scope, None);
     if let Some(bound) = info.bound {
         req.release(Value::array(bound));
     }
@@ -2124,7 +2217,8 @@ fn do_closure_bind(
     this: Option<PhpObject>,
     scope: NewScope,
 ) -> Result<Option<Instance<Closure>>, Thrown> {
-    let Some(info) = closure.closure(req).cloned() else {
+    let Some(ClosureObject { info, cache: from }) = closure.native::<ClosureObject>(req).cloned()
+    else {
         return Ok(None);
     };
     let scope = match scope {
@@ -2149,7 +2243,8 @@ fn do_closure_bind(
     // before a receiver with none takes `Closure` as its dummy one.
     let called_scope = scope;
     let scope = scope.or_else(|| this.and_then(|_| req.class_named(Bare::resolved(b"Closure"))));
-    create_closure(req, &info, scope, called_scope, this).map(|made| Some(Instance::of(made)))
+    create_closure(req, (&info, Some(from)), scope, called_scope, this)
+        .map(|made| Some(Instance::of(made)))
 }
 
 /// `zend_create_closure` (`Z/Zend/zend_closures.c:855`) over the
@@ -2160,7 +2255,7 @@ fn do_closure_bind(
 /// `called_scope`, as `zend_create_closure_ex` stores it.
 fn create_closure(
     req: &mut Request,
-    info: &ClosureInfo,
+    (info, from): (&ClosureInfo, Option<ClosureCache>),
     scope: Option<ClassId>,
     called_scope: Option<ClassId>,
     this: Option<PhpObject>,
@@ -2175,15 +2270,19 @@ fn create_closure(
     if let Some(this) = this {
         req.addref(&this.as_value());
     }
+    let cache = closure_cache(req, info.function, scope, from);
     req.new_object_with(
         class,
-        ClosureInfo {
-            function: info.function,
-            this,
-            scope,
-            called_scope: this.map(|object| object.class()).or(called_scope),
-            bound,
-            fake: info.fake,
+        ClosureObject {
+            info: ClosureInfo {
+                function: info.function,
+                this,
+                scope,
+                called_scope: this.map(|object| object.class()).or(called_scope),
+                bound,
+                fake: info.fake,
+            },
+            cache,
         },
     )
 }

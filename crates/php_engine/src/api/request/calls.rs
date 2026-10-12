@@ -143,6 +143,12 @@ impl Request {
     /// and puts no object in the store for it; here the closure's own
     /// payload carries the scope for the length of the call and has its
     /// own back after, so no object id is spent where php spends none.
+    /// The copy reads a runtime cache of its own for the call where the
+    /// scope is not the closure's or the closure has one of its own, as
+    /// php's `emalloc`s one beside the copy and frees it after, since the
+    /// slots hold what the scope decides; a generator's frame outlives
+    /// the call, and php makes it a closure of its own, so its function
+    /// keeps the closure's cache.
     pub(crate) fn serve_closure_as(
         &mut self,
         object: PhpObject,
@@ -151,12 +157,33 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        use crate::classes::{ClosureCache, ClosureObject};
         let Some(closure) = object.closure(self).cloned() else {
             return Ok(Value::null());
         };
-        let held = object
-            .native_mut::<ClosureInfo>(self)
-            .map(|payload| payload.scope.replace(scope));
+        let generator = self
+            .function_decl(closure.function)
+            .is_some_and(|decl| decl.is_generator);
+        let own_cache = self
+            .user_function(closure.function)
+            .is_some()
+            .then(|| {
+                object
+                    .native::<ClosureObject>(self)
+                    .map(|payload| payload.cache)
+            })
+            .flatten()
+            .filter(|cache| {
+                !generator && (closure.scope != Some(scope) || *cache != ClosureCache::Function)
+            })
+            .map(|_| self.own_cache());
+        let held = object.native_mut::<ClosureObject>(self).map(|payload| {
+            let cache = match own_cache {
+                Some(at) => std::mem::replace(&mut payload.cache, ClosureCache::Own(at)),
+                None => payload.cache,
+            };
+            (payload.info.scope.replace(scope), cache)
+        });
         let served = self.serve_call(
             closure.function,
             Some(this),
@@ -165,10 +192,14 @@ impl Request {
             arguments,
             extra_named,
         );
-        if let Some(held) = held
-            && let Some(payload) = object.native_mut::<ClosureInfo>(self)
+        if let Some((scope, cache)) = held
+            && let Some(payload) = object.native_mut::<ClosureObject>(self)
         {
-            payload.scope = held;
+            payload.info.scope = scope;
+            payload.cache = cache;
+        }
+        if let Some(at) = own_cache {
+            self.give_back_cache(at);
         }
         served
     }

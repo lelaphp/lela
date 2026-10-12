@@ -119,6 +119,18 @@ impl RuntimeCaches {
         CacheAt::Request(MapPtr::new(self.next_number()))
     }
 
+    /// The cache at `at`, which was the request's own
+    /// ([`RuntimeCaches::own_cache`]), given back: emptied, as php's
+    /// `efree` of a closure's `ZEND_ACC_HEAP_RT_CACHE` cache frees it,
+    /// and its number handed out again. A pointer of the engine's is
+    /// never given back.
+    pub(crate) fn give_back(&mut self, at: CacheAt) {
+        if let CacheAt::Request(ptr) = at {
+            *self.request.map(ptr) = RuntimeCache::default();
+            self.free.push(ptr.offset());
+        }
+    }
+
     /// The next number of the request's: one a unit nothing holds any
     /// longer gave back first, else a new one.
     fn next_number(&mut self) -> u32 {
