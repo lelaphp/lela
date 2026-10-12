@@ -1528,16 +1528,56 @@ fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
 /// each run passes every test; the waits are on a reading. The control: a
 /// run that holds its keys within itself alone binds the port while the
 /// other run's test holds it, and that test misses.
+///
+/// The port is found free and let go before the tests bind it, so another
+/// process on the machine can take it first (#2773). Then every test of
+/// both runs misses, which keys held apart never cause, since one test
+/// of each run binds the port; the exchange is run again on a fresh port,
+/// three at most.
 #[test]
 fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
     if oracle().is_none() {
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let free = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let readings = std::iter::repeat_with(free)
+        .take(3)
+        .find_map(|port| {
+            let readings = over_a_fixed_port(port);
+            let bound =
+                |r: &Reading| !matches!(r.numbers.get("passed"), None | Some(Number::Int(0)));
+            readings.iter().any(bound).then_some(readings)
+        })
+        .expect("another process took each of three ports before the tests bound it");
+    for reading in &readings {
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
+    }
+    let waited: i64 = readings
+        .iter()
+        .map(|r| match r.numbers.get("waited") {
+            Some(Number::Int(n)) => *n,
+            _ => 0,
+        })
+        .sum();
+    assert!(waited > 0, "one run waited for the other: {readings:#?}");
+    assert!(
+        readings.iter().any(|r| {
+            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
+            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
+        }),
+        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
+    );
+}
+
+/// The two runs of the test above, at once, over `port`.
+fn over_a_fixed_port(port: u16) -> [Reading; 2] {
     let binds = |name: &str| {
         (
             format!("{name}.phpt"),
@@ -1558,31 +1598,12 @@ fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
     );
     let locks = Tree::new("phpt-across-locks").unwrap();
     let locks = locks.path();
-    let readings = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let runs = [&first, &second].map(|scratch| {
             scope.spawn(move || scratch.run_among(&registry(""), &scratch.engine, locks))
         });
         runs.map(|run| run.join().unwrap())
-    });
-    for reading in &readings {
-        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
-    }
-    let waited: i64 = readings
-        .iter()
-        .map(|r| match r.numbers.get("waited") {
-            Some(Number::Int(n)) => *n,
-            _ => 0,
-        })
-        .sum();
-    assert!(waited > 0, "one run waited for the other: {readings:#?}");
-    assert!(
-        readings.iter().any(|r| {
-            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
-            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
-        }),
-        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
-    );
+    })
 }
 
 /// A test naming `all` in one run runs beside no test of another key in a
