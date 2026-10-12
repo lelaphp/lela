@@ -183,6 +183,17 @@ impl Request {
         self.hold_file(&script, until);
     }
 
+    /// The file at the full path `path`, which a `zend_compile_file`
+    /// link's stream holds open in the place of a `zend_file_handle` of
+    /// the kind `handle` names, held as long as that `zend_file_handle`
+    /// stands: until the program has been served for one php keeps
+    /// ([`HandlePath::Kept`]), and not past the compile for any other.
+    pub(crate) fn hold_opened(&mut self, path: &[u8], handle: HandlePath) {
+        if handle == HandlePath::Kept {
+            self.hold_file(path, Until::Served);
+        }
+    }
+
     /// The file at the full path `path` opened and held, inherited by a
     /// process the request execs, until `until` ([`Held`]); a file that
     /// does not open is not held, as the read that compiled it has

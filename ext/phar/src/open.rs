@@ -732,15 +732,36 @@ pub(crate) fn compile_file(
     req: &mut Request,
     beneath: Beneath<'_, chain::CompileFile>,
 ) -> Result<Option<Compiled>, Thrown> {
-    match archive_source(req, beneath.path())? {
-        Some(source) => beneath.with_source(&source).serve(req),
+    let path = beneath.path();
+    match archive_source(req, path)? {
+        Some(Stub {
+            source,
+            over_archive,
+        }) => {
+            let beneath = beneath.with_source(&source);
+            if over_archive {
+                beneath.opened(path).serve(req)
+            } else {
+                beneath.serve(req)
+            }
+        }
         None => beneath.serve(req),
     }
 }
 
-/// The source [`compile_file`] compiles the archive at `path` from, or
+/// What [`compile_file`] hands the one beneath for an archive: the source
+/// to compile, and whether the stream it read stands over the archive
+/// file itself, an uncompressed tar or zip one's `phar->fp`, which the
+/// `zend_file_handle` it replaces then holds open; a compressed one's
+/// reads a decompressed copy.
+struct Stub {
+    source: Vec<u8>,
+    over_archive: bool,
+}
+
+/// The stub [`compile_file`] compiles the archive at `path` from, or
 /// `None` where it is no archive phar serves.
-fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Stub>, Thrown> {
     if path::find(path, b".phar").is_none() || path::find(path, b"://").is_some() {
         return Ok(None);
     }
@@ -761,12 +782,22 @@ fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thr
         let Some(stream) = req.open_stream_with(&url, b"rb", opening)? else {
             return Ok(None);
         };
+        let over_archive = archives(req)
+            .get(id)
+            .is_some_and(|a| a.flags & FILE_COMPRESSION_MASK == 0);
         let source = archive::copy_all(req, *stream);
         stream.free(req);
-        return Ok(Some(source?));
+        return Ok(Some(Stub {
+            source: source?,
+            over_archive,
+        }));
     }
     if a.flags & FILE_COMPRESSION_MASK != 0 {
-        return Ok(a.fp.as_ref().map(|fp| fp.bytes.to_vec()));
+        let source = a.fp.as_ref().map(|fp| fp.bytes.to_vec());
+        return Ok(source.map(|source| Stub {
+            source,
+            over_archive: false,
+        }));
     }
     Ok(None)
 }

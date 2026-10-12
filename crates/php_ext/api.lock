@@ -25,6 +25,7 @@ abi::Beneath::line
 abi::Beneath::message
 abi::Beneath::name
 abi::Beneath::opcode
+abi::Beneath::opened
 abi::Beneath::path
 abi::Beneath::serve
 abi::Beneath::source

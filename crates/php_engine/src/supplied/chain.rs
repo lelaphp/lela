@@ -189,14 +189,15 @@ impl sealed::Kind for Interrupt {
 /// What a link of `zend_compile_file` is handed, the `zend_file_handle`
 /// as the engine holds it: the file's full path, the name it was written
 /// by, which opcache files a key of, the kind of `zend_file_handle` it is
-/// compiled through, and the source a link above handed down in place of the
-/// file's own.
+/// compiled through, the source a link above handed down in place of the
+/// file's own, and the file the stream that link opened holds.
 #[derive(Clone, Copy)]
 pub struct FileArgs<'a> {
     path: &'a [u8],
     written: Option<&'a [u8]>,
     handle: HandlePath,
     source: Option<&'a [u8]>,
+    opened: Option<&'a [u8]>,
 }
 
 impl<'a> FileArgs<'a> {
@@ -206,6 +207,7 @@ impl<'a> FileArgs<'a> {
             written,
             handle,
             source: None,
+            opened: None,
         }
     }
 }
@@ -227,6 +229,9 @@ impl sealed::Kind for CompileFile {
     }
 
     fn own(req: &mut Request, args: FileArgs<'_>) -> <Self as ChainKind>::Answer {
+        if let Some(opened) = args.opened {
+            req.hold_opened(opened, args.handle);
+        }
         let cached = req.cached_source(args.path, args.written, args.handle, args.source);
         Ok(cached.map(Compiled))
     }
@@ -253,6 +258,27 @@ impl<'a> Beneath<'a, CompileFile> {
             links: self.links,
             args: FileArgs {
                 source: Some(source),
+                ..self.args
+            },
+        }
+    }
+
+    /// The ones beneath told that the stream the link put in the
+    /// `zend_file_handle`'s place holds the file at the full path `path`
+    /// open, as phar's stub stream over an uncompressed archive holds the
+    /// archive: a `zend_file_handle` php destroys only once the program
+    /// has been served, `auto_prepend_file`'s, `auto_append_file`'s or the built-in
+    /// server's router's and program's, holds it until then, inherited by
+    /// a process the request execs ([`HandlePath::Kept`], #2561).
+    #[must_use]
+    pub fn opened<'b>(self, path: &'b [u8]) -> Beneath<'b, CompileFile>
+    where
+        'a: 'b,
+    {
+        Beneath {
+            links: self.links,
+            args: FileArgs {
+                opened: Some(path),
                 ..self.args
             },
         }
