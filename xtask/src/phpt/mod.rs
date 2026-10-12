@@ -1071,15 +1071,15 @@ pub fn run(
     // before and after it wrote with it (#1612).
     let mut taken = |subset: &Subset, side: &Side, held_as: &Scope| -> Result<Vec<Reading>> {
         let scope = &held_as.to_string();
-        let running = tree.is_some() && side.runs();
+        let copy = tree.filter(|_| side.runs());
         let runner = side.runner;
-        let own = Own::of(side.oracle, subset, scope, running)?;
+        let own = Own::of(side.oracle, subset, scope, copy.is_some())?;
         let beside = own.pin.as_ref().map(|pin| side.oracle.beside(pin));
         let oracle = beside.as_ref().unwrap_or(side.oracle);
         let under = side.under(ask.lane, jobs, own.served.as_deref(), &locks);
         let claims = sysv::SUBSETS.contains(&subset.scope.as_str());
-        let ((tally, waited), removed) = swept_around(oracle, (scope, claims), running, || {
-            let within = tree.filter(|_| running).map(|copy| subset.rooted(copy));
+        let ((tally, waited), removed) = swept_around(oracle, (scope, claims), copy, || {
+            let within = copy.map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
         let mut reading = reading(&tally, runs.snapshot(), manifest, &source, subset, under)?;
@@ -1550,17 +1550,20 @@ impl<'o> Own<'o> {
 /// claim for its length, written to as each program starts and ends, and
 /// takes what subsets and witness runs cut off left before it starts, so
 /// a run killed before its sweep leaves nothing the next one does not
-/// remove (#2448); its own sweep settles the claim.
+/// remove (#2448); its own sweep settles the claim. A subset runs where
+/// there is a `copy` of the pinned tree, and what its tests left standing
+/// there outside their programs' groups is stopped before the sweep
+/// (`scratch::Stray`, #2663).
 fn swept_around<T>(
     oracle: &Oracle<'_>,
     (scope, claims): (&str, bool),
-    runs: bool,
+    copy: Option<&Tree>,
     run: impl FnOnce() -> Result<T>,
 ) -> Result<(T, sysv::Removed)> {
     let mut removed = sysv::Removed::new(format!("{INSTRUMENT}: {scope}"));
-    if !runs {
+    let Some(copy) = copy else {
         return Ok((run()?, removed));
-    }
+    };
     let grace = Duration::from_secs(oracle.pin().recipe.limits.timeout_s);
     let claim = claims
         .then(|| sysv::Claim::taken(INSTRUMENT, grace, &mut removed))
@@ -1570,6 +1573,7 @@ fn swept_around<T>(
     let before = sysv::Standing::now();
     let ran = run();
     oracle.journal(None);
+    said_stopped(&format!("{scope}: its tests"), &copy.stop_strays());
     let tally = ran?;
     let swept = before.and_then(|before| match claim {
         Some(claim) => claim.swept(&before, &oracle.take_spawned()),
@@ -1619,7 +1623,9 @@ fn around(
 /// [`Source::files`]: crate::oracle::Source::files
 fn copy_of(source: &Path, jobs: NonZeroUsize) -> Result<Tree> {
     let files = Source::files(source)?;
-    let copy = Tree::new("phpt-tree")?;
+    sysv::stop_cut_off();
+    said_stopped("runs cut off", &scratch::stop_forsaken(COPY));
+    let copy = Tree::new(COPY)?;
     let each = files.len().div_ceil(jobs.get()).max(1);
     thread::scope(|scope| {
         let copying: Vec<_> = files
@@ -1646,6 +1652,24 @@ fn copy_of(source: &Path, jobs: NonZeroUsize) -> Result<Tree> {
         copy.display()
     );
     Ok(copy)
+}
+
+/// What the run's copy of the pinned tree is named for ([`copy_of`]).
+const COPY: &str = "phpt-tree";
+
+/// The processes `who` left standing in a copy of the pinned tree once
+/// their programs ended, stopped (`scratch::Stray`, #2663), said on a line
+/// where there were any.
+fn said_stopped(who: &str, pids: &[u32]) {
+    if !pids.is_empty() {
+        let words: Vec<String> = pids.iter().map(u32::to_string).collect();
+        println!(
+            "phpt: {who} left {} process{} standing in a copy of the pinned tree, stopped: {}",
+            pids.len(),
+            if pids.len() == 1 { "" } else { "es" },
+            words.join(", ")
+        );
+    }
 }
 
 /// One file of the pinned tree into the run's copy: a link as a link, a
