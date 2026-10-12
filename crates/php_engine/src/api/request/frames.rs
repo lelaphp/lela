@@ -1226,6 +1226,14 @@ impl Request {
     /// the frame for all of them (design §5.8). Empty for a frame that
     /// is not live, where every operand reads as `UNDEF` and the inline
     /// path stands aside for the kernel.
+    ///
+    /// The lookup is the frame table's bounds check on `frame`, the
+    /// table's base and the frame's slot base and count: eight
+    /// instructions of an inline `JMPZ` over a CV, before the operand's
+    /// own bounds check, where php indexes off `execute_data` in a
+    /// register (#2516). A frame cursor the loop keeps valid across
+    /// handlers would be an `unsafe` contract across the heap seam,
+    /// which #2540 ruled out for this term.
     pub(crate) fn slots_mut(&mut self, frame: FrameRef) -> &mut [Zval] {
         self.vm
             .stack
