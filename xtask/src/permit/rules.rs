@@ -373,20 +373,24 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The commands of `line` whose place is read, each with where it runs:
-/// those past the leading directory changes, at where the line stands
-/// ([`runs_in`]) moved by each later `cd`, `pushd` and `popd` as
-/// [`standing`] reads one, and, for git, by each `-C` among the options
-/// before its subcommand ([`moved`]); none past a change the line does not
-/// say where it goes. What records whose operation stands in a checkout
+/// `root` moved by each `cd`, `pushd` and `popd` before it as [`change`]
+/// reads one, and, for git, by each `-C` among the options before its
+/// subcommand ([`moved`]); none past a change the line does not say where
+/// it goes, in the shell that change was made in. What records whose operation stands in a checkout
 /// reads a command past a later change where that change took the shell,
 /// never where the shell started (#2720): an orchestrator's `cat $S/owner; cd <main>;
 /// git merge --no-commit t1955` started a merge no record named (#2723).
 /// A change inside a subshell, a substitution or a child shell moves the
 /// commands in it alone, and the one after it is read where the shell
-/// stood before it ([`Line::shells`], #2764).
+/// stood before it ([`Line::shells`], #2764). [`standing`] does not read
+/// scopes yet, so [`runs_in`], [`fired_in`] and [`acts_in`] read a leading
+/// change inside a subshell as the whole line's (#2787).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
     let (mut dir, mut pushed) = (root.to_path_buf(), Vec::new());
     let mut entered: Vec<(u32, PathBuf, Vec<PathBuf>)> = Vec::new();
+    // How many shells were open at a change the line does not say where
+    // it goes: nothing is placed until that shell has closed.
+    let mut lost: Option<usize> = None;
     let mut placed = Vec::new();
     for (argv, shells) in line.commands().iter().zip(line.shells()) {
         let kept = entered
@@ -395,33 +399,44 @@ pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)
             .take_while(|((id, ..), s)| id == *s)
             .count();
         while entered.len() > kept {
-            (_, dir, pushed) = entered.pop().unwrap_or_default();
+            if let Some((_, back, stack)) = entered.pop() {
+                (dir, pushed) = (back, stack);
+            }
         }
+        lost = lost.filter(|depth| entered.len() >= *depth);
         let left = shells.get(kept..).unwrap_or_default();
         entered.extend(left.iter().map(|id| (*id, dir.clone(), pushed.clone())));
-        if change(&mut dir, &mut pushed, argv) {
+        if lost.is_some() || change(&mut dir, &mut pushed, argv) {
             continue;
         }
         if matches!(argv.program(), "cd" | "pushd" | "popd") {
-            break;
+            lost = Some(entered.len());
+            continue;
         }
         placed.push((argv, moved(dir.clone(), argv)));
     }
     placed
 }
 
-/// Where each command of `line` that `fires` runs, read as [`placed`]
-/// reads it and, past a later directory change, where the line stands
-/// all the same, the side that judges: a rule scoped by `where` judges
-/// the commands it fires on there, so `git -C /wt commit` is judged in
-/// `/wt`.
+/// Where each command of `line` that `fires` runs: where the line stands
+/// moved by its `-C`, and where [`placed`] reads it too, past a later
+/// directory change or after a subshell's, the side that judges in both:
+/// a rule scoped by `where` judges the commands it fires on there, so
+/// `git -C /wt commit` is judged in `/wt` and `(cd /wt && ls); git add x`
+/// where the shell stands as well (#2764).
 pub(super) fn fired_in(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Vec<PathBuf> {
     let dir = runs_in(root, Some(line));
-    line.commands()
-        .iter()
-        .filter(|argv| fires(argv))
-        .map(|argv| moved(dir.clone(), argv))
-        .collect()
+    let placed = placed(root, line);
+    let mut checkouts = Vec::new();
+    for argv in line.commands().iter().filter(|argv| fires(argv)) {
+        checkouts.push(moved(dir.clone(), argv));
+        let at = placed
+            .iter()
+            .find(|(placed, _)| std::ptr::eq(*placed, argv));
+        checkouts.extend(at.map(|(_, at)| at.clone()));
+    }
+    checkouts.dedup();
+    checkouts
 }
 
 /// Where the call acts: where the line stands ([`runs_in`]), or, where
@@ -447,9 +462,10 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The one reading of where a shell line stands, from which [`runs_in`],
-/// [`placed`], [`fired_in`] and [`acts_in`] are read, so `where =
-/// "ticketed"`, `where = "operating"`, the checkout `permit --after` holds
-/// and the approvals it reads move together (#2597, #2607): the call's
+/// [`fired_in`] and [`acts_in`] are read, so `where = "ticketed"`, `where
+/// = "operating"`, the checkout `permit --after` holds and the approvals
+/// it reads move together (#2597, #2607); [`placed`] reads the same
+/// changes with the subshells that hold them (#2764): the call's
 /// `root`, moved by each `cd` and `pushd` before the first command that
 /// does anything else and back by each `popd` to where its `pushd` left;
 /// and the commands past those changes.

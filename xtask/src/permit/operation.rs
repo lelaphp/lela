@@ -46,9 +46,11 @@
 //! contested and names no one: the operation is foreign to both until the
 //! `--after` of the start whose words name its identity takes it, so one
 //! that stops non-zero is refused to both, and two starts naming the same
-//! commit give it to the first to end (#2764). A
+//! commit give it to the first to end (#2764); a contested sequence or
+//! rebase, whose identity no start's words name, stays no one's. A
 //! session's own git line run beside its start, before the marker, drops
-//! the start's record, which its `PostToolUse` takes again. A
+//! the start's record, which its `PostToolUse` takes again, unless the
+//! record is contested. A
 //! rebase whose `orig-head` is not the `HEAD` it was started on (`git
 //! rebase <upstream> <branch>`) is refused to its own starter, the safe
 //! side. A start no command hook judges, its every candidate failing to
@@ -450,7 +452,7 @@ fn tend<'a>(
                 Some(operation) => !starter.names(operation, &git_dir, &checkout),
                 None => {
                     starter.identity.is_some()
-                        || caller == Some(&starter.session)
+                        || (caller == Some(&starter.session) && !starter.contested)
                         || head(&checkout).as_ref() != Some(&starter.base)
                 }
             };
@@ -901,11 +903,12 @@ mod tests {
     }
 
     /// #2764: of two starts admitted in one checkout before either's
-    /// marker, the record names neither, so the merge that runs is
-    /// foreign to both until the call that ran it ends: its `--after`
-    /// takes it, the start whose target the merge took, and the other
-    /// start's, ending without error behind a pipe, does not. Neither
-    /// ending first decides it.
+    /// marker, the record names neither, and the first starter's own line
+    /// before the marker leaves it so, so the merge that runs is foreign
+    /// to both until the call that ran it ends: its `--after` takes it,
+    /// the start whose target the merge took, and the other start's,
+    /// ending without error behind a pipe, does not. Neither ending first
+    /// decides it.
     #[test]
     fn of_two_starts_before_a_marker_the_merge_is_the_one_its_target_names() {
         let dir = repository("operation-two-starts");
@@ -921,6 +924,7 @@ mod tests {
         for (ran, first, second) in [(&a, "a", "b"), (&b, "b", "a"), (&a, "b", "a")] {
             record(&dir, &call("s1", Some("a")), &start("topic-a")).unwrap();
             record(&dir, &call("s2", Some("b")), &start("topic-b")).unwrap();
+            record(&dir, &call("s1", Some("a")), &Line::read("git log -1")).unwrap();
             merging_in(&dir, ran);
             assert_eq!(
                 standing(&dir, commit, "s1", Some("a")),
@@ -972,25 +976,29 @@ mod tests {
 
     /// #2764: a `cd` inside a subshell moves that subshell alone, so a
     /// merge the line starts after it is recorded where the shell stands
-    /// and nothing is recorded where the subshell went.
+    /// and nothing is recorded where the subshell went; one the line does
+    /// not say where it goes leaves the rest of that subshell unread.
     #[test]
     fn a_start_after_a_subshell_s_cd_is_recorded_where_the_shell_stands() {
-        let (dir, other) = (
-            repository("operation-subshell"),
-            repository("operation-subshell-other"),
-        );
-        let line = format!(
-            "(cd {} && git status); git merge --no-commit x",
-            other.display()
-        );
-        record(&dir, &call("s1", None), &Line::read(&line)).unwrap();
-        merging(&dir);
+        let other = repository("operation-subshell-other");
+        let lines = [
+            format!(
+                "(cd {} && git status); git merge --no-commit x",
+                other.display()
+            ),
+            "(cd \"$UNSET\" && git status); git merge --no-commit x".to_owned(),
+        ];
+        for (n, line) in lines.iter().enumerate() {
+            let dir = repository(&format!("operation-subshell-{n}"));
+            record(&dir, &call("s1", None), &Line::read(line)).unwrap();
+            merging(&dir);
+            assert_eq!(standing(&dir, "git add -- a", "s1", None), None, "{line}");
+            let after = format!("(cd {} && ls); git add -- a", other.display());
+            assert_eq!(standing(&dir, &after, "s2", None), Some(Operation::Merge));
+        }
         merging(&other);
-        assert_eq!(standing(&dir, "git add -- a", "s1", None), None);
-        assert_eq!(
-            standing(&other, "git add -- a", "s1", None),
-            Some(Operation::Merge)
-        );
+        let elsewhere = standing(&other, "git add -- a", "s1", None);
+        assert_eq!(elsewhere, Some(Operation::Merge));
     }
 
     /// A record outlives the operation it named, and the next operation
