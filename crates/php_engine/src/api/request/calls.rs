@@ -1164,18 +1164,13 @@ impl Request {
     }
 
     /// The extension whose code a native is, for a debug build's heap to
-    /// tag what it allocates while the native runs: the extension that
-    /// declared the function, php's `internal_function.module`, or the
-    /// class of the method; none for a closure's or a trampoline's entry
-    /// that no extension declares, which allocates as its caller.
+    /// tag what it allocates while the native runs: php's
+    /// `internal_function.module` ([`Request::function_extension`]);
+    /// none for a closure's or a trampoline's entry that no extension
+    /// declares, which allocates as its caller.
     #[cfg(debug_assertions)]
     fn function_origin(&self, function: Function) -> Option<ExtensionId> {
-        let function = self.served_native(function);
-        self.function_extension(function).or_else(|| {
-            self.native_method(function)
-                .and_then(|method| method.at.class())
-                .and_then(|class| self.class_extension(class))
-        })
+        self.function_extension(function)
     }
 
     /// Record the natives this request enters from here on, for the

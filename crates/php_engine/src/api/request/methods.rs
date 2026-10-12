@@ -254,6 +254,26 @@ impl Request {
             .map(|(_, method)| method)
     }
 
+    /// The function a row of a function table is, the `zend_function *`
+    /// the bucket holds: the declaring class's method at the row's place,
+    /// a native trait's method copied into a class among them, which is
+    /// the class's own function ([`Request::function_extension`] reads
+    /// the trait's extension off it).
+    ///
+    /// ```php
+    /// class E extends Exception { function own() {} }
+    /// foreach (['getMessage', 'own'] as $m) {
+    ///     var_dump((new ReflectionMethod('E', $m))->getExtensionName());
+    /// }
+    /// ```
+    /// ```expect
+    /// string(4) "Core"
+    /// bool(false)
+    /// ```
+    pub fn row_function(&self, row: MethodRow) -> Option<Function> {
+        self.method_function(row.scope(), row.row.at)
+    }
+
     /// The name of the method a row of `class`'s function table is.
     fn row_method_name(&self, class: ClassId, row: Row<ClassId>) -> &[u8] {
         self.row_method_at(class, row)
@@ -314,9 +334,9 @@ impl Request {
     /// The native a function number serves by: the trait's own for a
     /// native trait's method copied into a class, the function itself
     /// for any other. What php's copy shares with the trait's, its
-    /// handler, its flags and its runtime cache, is read through this
-    /// alone (`entry_of`, `function_flags`, `native_place`); its scope
-    /// is the class's
+    /// handler, its flags, its extension and its runtime cache, is read
+    /// through this alone (`entry_of`, `function_flags`,
+    /// `function_extension`, `native_place`); its scope is the class's
     /// (`method_class`), and its declaration, the name and the
     /// visibility an alias gave it, the class's own row
     /// ([`Request::method_decl`]).

@@ -126,8 +126,9 @@ fn tentative_return(req: &mut Request, function: &FunctionRef) -> bool {
 }
 
 /// The extension that declared the function, `internal->module`: for a
-/// method it is the class's, `ce->info.internal.module`, as php reads
-/// it off the same entry.
+/// method the one named by the function its method row holds, the
+/// declaring class's, or for a native trait's method copied into a
+/// class the trait's.
 fn function_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<String>, Thrown> {
     let (function, decl) = this_function(req, this)?;
     if !is_internal(&decl) {
@@ -138,7 +139,12 @@ fn function_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
         // for above, so nothing reaches here.
         // A closure's `__invoke` is made with a null `module`.
         FunctionRef::Closure(_) | FunctionRef::Invoke(_) => Ok(None),
-        FunctionRef::Method(class, _) => Ok(req.class_extension_name(class).map(str::to_owned)),
+        FunctionRef::Method(class, name) => Ok(req
+            .method_row(class, &name)
+            .and_then(|row| req.row_function(row))
+            .and_then(|found| req.function_extension(found))
+            .and_then(|e| req.extension_name(e))
+            .map(str::to_owned)),
         FunctionRef::Global(name) => {
             let found = super::lookup_function(req, &name);
             Ok(found

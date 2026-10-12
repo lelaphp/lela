@@ -523,6 +523,24 @@ impl ZendAttributeTest {
 /// Call to protected method Foo::prot() from global scope
 /// Foo::aliased() expects exactly 0 arguments, 2 given
 /// ```
+///
+/// The copy keeps the trait's extension, `internal_function.module`, which
+/// reflection names though its scope is a user class:
+///
+/// ```php
+/// class Bar { use _ZendTestTrait; }
+/// echo new ReflectionMethod('Bar', 'testMethod');
+/// var_dump((new ReflectionMethod('Bar', 'testMethod'))->getExtensionName());
+/// ```
+/// ```expect
+/// Method [ <internal:zend_test> public method testMethod ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ bool ]
+/// }
+/// string(9) "zend_test"
+/// ```
 #[php_class]
 pub(crate) struct _ZendTestTrait;
 

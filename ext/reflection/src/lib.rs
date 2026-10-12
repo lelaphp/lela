@@ -7090,11 +7090,15 @@ impl ArgInfo {
 /// method of the same name when the method is `ce`'s own and the
 /// parent's is not private; `prototype` names the prototype's scope.
 fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> String {
-    let module = if method.via_handler() {
-        None
-    } else {
-        req.class_extension_name(method.scope).map(str::to_owned)
-    };
+    // `fptr->internal_function.module`: the function the row is names
+    // it, so a native trait's method copied into a user class prints
+    // the trait's extension; a function made on the lookup has none.
+    let module = method
+        .row()
+        .and_then(|row| req.row_function(row))
+        .and_then(|function| req.function_extension(function))
+        .and_then(|extension| req.extension_name(extension))
+        .map(str::to_owned);
     let mut words: Vec<String> = Vec::new();
     if method.scope != ce {
         let scope = class_name_of(req, method.scope);

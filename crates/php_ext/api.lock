@@ -852,6 +852,7 @@ request::Request::resources
 request::Request::response_code
 request::Request::response_headers
 request::Request::return_value_used
+request::Request::row_function
 request::Request::row_method
 request::Request::row_prototype
 request::Request::running_handler_flags
