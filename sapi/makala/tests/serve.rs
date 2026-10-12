@@ -393,3 +393,23 @@ fn the_status_line_carries_the_reason_php_set() {
         );
     }
 }
+
+/// A 304 the program sets carries no `content-type`, as php-fpm's
+/// `sapi_cgi_send_headers` drops PHP's under a 304 (#2608), and keeps the
+/// rest of PHP's lines.
+#[test]
+fn a_304_carries_no_content_type() {
+    let root = root(
+        "not-modified",
+        &[(
+            "index.php",
+            "<?php header('HTTP/1.1 304 Not Modified'); header('Location: /elsewhere');",
+        )],
+    );
+    let server = Server::start(&root);
+    let response = common::parse_response(&get(&server, "/index.php"));
+    assert_eq!(response.status, "HTTP/1.1 304 Not Modified");
+    assert_eq!(response.header("content-type"), None, "{response:?}");
+    assert_eq!(response.header("location"), Some("/elsewhere"));
+    assert_eq!(response.header("x-powered-by"), Some("PHP/8.5.9"));
+}
