@@ -1067,7 +1067,7 @@ fn append_int(req: &mut Request, out: &mut Buffer, number: i64, spec: &Spec) -> 
     let (text, sign) = if number < 0 {
         (Decimal::of(number), Sign::Negative)
     } else if spec.always_sign {
-        (Decimal::signed(number), Sign::Positive)
+        (Decimal::plus(number), Sign::Positive)
     } else {
         (Decimal::of(number), Sign::None)
     };

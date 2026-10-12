@@ -926,7 +926,9 @@ fn long(n: usize) -> i64 {
 /// `smart_str_append_long` write without a string of their own, and
 /// `zend_print_ulong_to_buf` for an unsigned one, what
 /// `smart_str_append_unsigned` writes a length with. The one way
-/// ext/standard prints an integer as text.
+/// ext/standard appends an integer's digits to text it builds; what php
+/// writes through a printf format (`php_printf`, `spprintf`,
+/// `zend_error`) is written with `format!`.
 pub(crate) struct Decimal {
     buf: [u8; 20],
     start: usize,
@@ -946,7 +948,7 @@ impl Decimal {
 
     /// A `zend_long` with its sign whatever it is, `+` before zero or
     /// more, as `php_sprintf_appendint` writes one under `%+d`.
-    pub(crate) fn signed(n: i64) -> Decimal {
+    pub(crate) fn plus(n: i64) -> Decimal {
         let mut decimal = Decimal::of(n);
         if n >= 0 {
             decimal.start -= 1;
