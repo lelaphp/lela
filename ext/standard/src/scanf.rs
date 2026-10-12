@@ -6,6 +6,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::string::Decimal;
 use php_ext::abi::{Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::is_space;
@@ -736,7 +737,7 @@ fn scan(
                 if !suppress {
                     let value = strtol(&buf, base, unsigned);
                     let value = if unsigned && value < 0 {
-                        let text = u64::from_ne_bytes(value.to_ne_bytes()).to_string();
+                        let text = Decimal::unsigned(u64::from_ne_bytes(value.to_ne_bytes()));
                         PhpString::new(req, text.as_bytes())?.into_value()
                     } else {
                         Owner::int(value)

@@ -49,6 +49,7 @@ use php_ext::values::walk;
 use php_ext::values::walk::Hold;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
+use crate::string::Decimal;
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
 
 /// The limits `$options` may name, `REQUEST_PARSE_BODY_OPTION_*`, each
@@ -239,7 +240,7 @@ impl Query<'_> {
             KeyText::Name(name) => url_encode(name, self.raw, &mut self.out),
             KeyText::Index(index) => {
                 self.out.extend_from_slice(num_prefix);
-                self.out.extend_from_slice(index.to_string().as_bytes());
+                self.out.extend_from_slice(Decimal::of(*index).as_bytes());
             }
         }
         if key_prefix.is_some() {
@@ -247,7 +248,7 @@ impl Query<'_> {
         }
         self.out.push(b'=');
         match value.deref().as_ref() {
-            ValueRef::Int(n) => self.out.extend_from_slice(n.to_string().as_bytes()),
+            ValueRef::Int(n) => self.out.extend_from_slice(Decimal::of(n).as_bytes()),
             ValueRef::Bool(b) => self.out.push(if b { b'1' } else { b'0' }),
             _ => {
                 with_string(req, &value, |s| url_encode(s, self.raw, &mut self.out))?;
@@ -383,7 +384,7 @@ impl Query<'_> {
                     }
                 }
                 KeyText::Index(index) => {
-                    let digits = index.to_string();
+                    let digits = Decimal::of(*index);
                     if let Some(outer) = key_prefix {
                         prefix.extend_from_slice(outer);
                         prefix.extend_from_slice(num_prefix);

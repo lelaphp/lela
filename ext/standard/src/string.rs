@@ -29,7 +29,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Charset, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Charset, Key, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
@@ -919,20 +919,46 @@ fn long(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// A `zend_long` in decimal, the digits on the stack:
+/// An integer in decimal, the digits on the stack:
 /// `zend_print_long_to_buf` (`Z/Zend/zend_operators.h:993`) into its
 /// `char buf[MAX_LENGTH_OF_LONG + 1]`, what `zend_long_to_str` and
-/// `smart_str_append_long` write without a string of their own.
+/// `smart_str_append_long` write without a string of their own, and
+/// `zend_print_ulong_to_buf` for an unsigned one, what
+/// `smart_str_append_unsigned` writes a length with. The one way
+/// ext/standard prints an integer as text.
 pub(crate) struct Decimal {
     buf: [u8; 20],
     start: usize,
 }
 
 impl Decimal {
+    /// A `zend_long`, its sign before its digits.
     pub(crate) fn of(n: i64) -> Decimal {
+        let mut decimal = Decimal::unsigned(n.unsigned_abs());
+        if n < 0 {
+            // A magnitude of 19 digits at most leaves room for the sign.
+            decimal.start -= 1;
+            decimal.buf[decimal.start] = b'-';
+        }
+        decimal
+    }
+
+    /// A `zend_long` with its sign whatever it is, `+` before zero or
+    /// more, as `php_sprintf_appendint` writes one under `%+d`.
+    pub(crate) fn signed(n: i64) -> Decimal {
+        let mut decimal = Decimal::of(n);
+        if n >= 0 {
+            decimal.start -= 1;
+            decimal.buf[decimal.start] = b'+';
+        }
+        decimal
+    }
+
+    /// A `zend_ulong`, the 20 digits of `u64::MAX` at most.
+    pub(crate) fn unsigned(n: u64) -> Decimal {
         let mut buf = [0u8; 20];
         let mut start = buf.len();
-        let mut rest = n.unsigned_abs();
+        let mut rest = n;
         loop {
             start -= 1;
             buf[start] = b'0' + u8::try_from(rest % 10).unwrap_or(0);
@@ -941,15 +967,50 @@ impl Decimal {
                 break;
             }
         }
-        if n < 0 {
-            start -= 1;
-            buf[start] = b'-';
-        }
         Decimal { buf, start }
+    }
+
+    /// A `size_t`, a length or a count, as `%zu` prints one.
+    pub(crate) fn size(n: usize) -> Decimal {
+        Decimal::unsigned(u64::try_from(n).unwrap_or(u64::MAX))
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.buf[self.start..]
+    }
+
+    /// The digits as text, for a native that writes a Rust `String`.
+    pub(crate) fn as_str(&self) -> &str {
+        // Every byte is an ASCII digit or sign.
+        std::str::from_utf8(self.as_bytes()).unwrap_or_default()
+    }
+}
+
+/// A key's text with no string of its own: a string key's bytes as they
+/// stand, an integer key's digits on the stack as
+/// `zend_print_long_to_buf` writes them.
+pub(crate) enum KeyBytes<'a> {
+    Str(&'a [u8]),
+    Int(Decimal),
+}
+
+impl<'a> KeyBytes<'a> {
+    pub(crate) fn of(key: &'a Key) -> KeyBytes<'a> {
+        match key {
+            Key::Str(s) => KeyBytes::Str(s.as_bytes()),
+            Key::Int(n) => KeyBytes::Int(Decimal::of(*n)),
+        }
+    }
+}
+
+impl std::ops::Deref for KeyBytes<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            KeyBytes::Str(bytes) => bytes,
+            KeyBytes::Int(digits) => digits.as_bytes(),
+        }
     }
 }
 
@@ -1678,7 +1739,7 @@ fn implode_array(
         if let Some(s) = element.as_str_bytes() {
             out.extend_from_slice(s);
         } else if let Some(n) = element.as_int() {
-            out.extend_from_slice(n.to_string().as_bytes());
+            out.extend_from_slice(Decimal::of(n).as_bytes());
         } else {
             with_string(req, &element, |s| out.extend_from_slice(s))?;
         }

@@ -13,7 +13,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
-use super::{Decimal, long, lower, memnstr};
+use super::{KeyBytes, long, lower, memnstr};
 use crate::ffi::memchr;
 
 /// `str_replace(array|string $search, array|string $replace,
@@ -617,14 +617,7 @@ fn strtr_array(
     let Some((key, value)) = walk::rows(req, from).next() else {
         return Ok(Owner::take(req, string));
     };
-    let digits;
-    let k = match &key {
-        Key::Int(n) => {
-            digits = Decimal::of(*n);
-            digits.as_bytes()
-        }
-        Key::Str(k) => k.as_bytes(),
-    };
+    let k: &[u8] = &KeyBytes::of(&key);
     let s = string.as_bytes();
     let with = to_string(req, &value)?;
     let mut ignored = 0;
@@ -663,15 +656,8 @@ fn strtr_pairs(
     let (mut minlen, mut maxlen) = (128 * 1024usize, 0usize);
     let (mut numeric, mut empty) = (false, false);
     for (key, _) in walk::rows(req, from) {
-        let digits;
-        let k = match &key {
-            Key::Int(n) => {
-                numeric = true;
-                digits = Decimal::of(*n);
-                digits.as_bytes()
-            }
-            Key::Str(k) => k.as_bytes(),
-        };
+        numeric |= matches!(key, Key::Int(_));
+        let k: &[u8] = &KeyBytes::of(&key);
         let Some(&first) = k.first() else {
             empty = true;
             continue;
