@@ -2070,22 +2070,11 @@ fn coerce_property(
 /// The dom class a class is or extends: the one whose property handlers
 /// an object of it reads, `dom_objects_set_class_ex`'s walk.
 fn base_name(req: &mut Request, class: ClassId) -> Option<Vec<u8>> {
-    let mut at = Some(class);
-    let mut depth = 0;
-    while let Some(c) = at {
-        let decl = req.class_decl(c)?;
-        let name = decl.name.0.to_vec();
-        if table(&name).is_some() {
-            return Some(name);
-        }
-        let parent = decl.parent.clone();
-        depth += 1;
-        if depth > 64 {
-            return None;
-        }
-        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
-    }
-    None
+    req.lineage(class)
+        .map_while(|c| req.class_decl(c))
+        .map(|decl| &decl.name.0)
+        .find(|name| table(name).is_some())
+        .map(|name| name.to_vec())
 }
 
 /// The class a node answers as, `php_dom_create_object`'s switch, before
@@ -2246,8 +2235,7 @@ fn declared_type(req: &mut Request, object: PhpObject, name: &[u8]) -> (Vec<u8>,
             };
             return (decl.name.0.to_vec(), declared);
         }
-        let parent = decl.parent.clone();
-        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
+        at = req.class_parent(c);
     }
     (
         class_name(req, object.class()).into_bytes(),
@@ -2258,16 +2246,7 @@ fn declared_type(req: &mut Request, object: PhpObject, name: &[u8]) -> (Vec<u8>,
 /// `instanceof_function` over two classes: whether `class` is `of` or
 /// extends it.
 fn class_extends(req: &mut Request, class: ClassId, of: ClassId) -> bool {
-    let mut at = Some(class);
-    for _ in 0..256 {
-        let Some(c) = at else { return false };
-        if c == of {
-            return true;
-        }
-        let parent = req.class_decl(c).and_then(|d| d.parent.clone());
-        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
-    }
-    false
+    req.lineage(class).any(|c| c == of)
 }
 
 /// `PHP_DOM_DEPRECATED_PROPERTY`: the deprecation, unless a dumper is

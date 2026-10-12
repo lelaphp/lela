@@ -5179,20 +5179,7 @@ fn class_name_of(req: &Request, class: ClassId) -> Vec<u8> {
 /// class entry after `zend_do_inheritance` copied the parent's tables
 /// into the child's, and what every walk below reads instead.
 fn class_chain(req: &mut Request, class: ClassId) -> Vec<ClassId> {
-    let mut chain = vec![class];
-    let mut at = class;
-    while chain.len() <= 64 {
-        let Some(parent) = req
-            .class_decl(at)
-            .and_then(|decl| decl.parent.clone())
-            .and_then(|name| lookup_class(req, &name.0).ok().flatten())
-        else {
-            break;
-        };
-        chain.push(parent);
-        at = parent;
-    }
-    chain
+    req.lineage(class).collect()
 }
 
 /// `zend_memrchr(name, '\\')`: where the namespace ends, if the name
@@ -5855,7 +5842,17 @@ fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -
 /// one, `Object of class` for an object reflector and the kind
 /// otherwise, `<internal:ext>` or `<user>`, the modifiers, the name,
 /// `extends`, an enum's backing type and the interface list, then a
-/// user class's `@@ file start-end` line.
+/// user class's `@@ file start-end` line. `extends` names the parent as
+/// it was declared, `ce->parent->name`, whatever case the child's
+/// `extends` spelled it in:
+///
+/// ```php
+/// class Par {} class C extends par {}
+/// echo explode("\n", (string) new ReflectionClass('C'))[0], "\n";
+/// ```
+/// ```expect
+/// Class [ <user> class C extends Par ] {
+/// ```
 fn class_header(
     req: &mut Request,
     out: &mut String,
@@ -5923,8 +5920,11 @@ fn class_header(
         }
     }
     out.push_str(&String::from_utf8_lossy(&decl.name.0));
-    if let Some(parent) = &decl.parent {
-        write!(out, " extends {}", String::from_utf8_lossy(&parent.0)).ok();
+    // `ce->parent->name`: the parent as it was declared, not as the
+    // child's `extends` spelled it.
+    if let Some(parent) = req.class_parent(class) {
+        let name = class_name_of(req, parent);
+        write!(out, " extends {}", String::from_utf8_lossy(&name)).ok();
     }
     if decl.kind == ClassKind::Enum {
         match decl.backing {
@@ -6935,11 +6935,8 @@ fn linked_properties_at(
     let Some(decl) = req.class_decl(class).cloned() else {
         return Vec::new();
     };
-    let inherited = match decl.parent.as_ref() {
-        Some(name) if depth <= 64 => match lookup_class(req, &name.0).ok().flatten() {
-            Some(parent) => linked_properties_at(req, parent, depth + 1),
-            None => Vec::new(),
-        },
+    let inherited = match req.class_parent(class) {
+        Some(parent) if depth <= 64 => linked_properties_at(req, parent, depth + 1),
         _ => Vec::new(),
     };
     if decl.file.0.is_empty() {

@@ -709,6 +709,7 @@ request::Request::class_has_create_object
 request::Request::class_keys
 request::Request::class_name
 request::Request::class_own_iterator
+request::Request::class_parent
 request::Request::clear_last_error
 request::Request::closure_refuses_receiver
 request::Request::connection_status
@@ -800,6 +801,7 @@ request::Request::interrupt
 request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::lend_heap
+request::Request::lineage
 request::Request::loaded_env
 request::Request::loaded_extensions
 request::Request::locale_name

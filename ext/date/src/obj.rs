@@ -176,12 +176,6 @@ pub(super) fn class_name(req: &Request, class: ClassId) -> String {
         .unwrap_or_default()
 }
 
-/// The class's parent, linked.
-pub(super) fn parent_of(req: &mut Request, class: ClassId) -> Option<ClassId> {
-    let parent = req.class_decl(class)?.parent.clone()?;
-    lookup_class(req, &parent.0).ok().flatten()
-}
-
 /// Whether the class is an internal one, php's `ZEND_INTERNAL_CLASS`.
 fn is_internal(req: &Request, class: ClassId) -> bool {
     req.class_extension(class).is_some()
@@ -196,14 +190,8 @@ pub(super) fn uninitialized(req: &mut Request, class: ClassId) -> Thrown {
     let message = if is_internal(req, class) {
         format!("Object of type {name} has not been {tail}")
     } else {
-        let mut at = class;
-        while !is_internal(req, at) {
-            match parent_of(req, at) {
-                Some(parent) => at = parent,
-                None => break,
-            }
-        }
-        if is_internal(req, at) {
+        let base = req.lineage(class).find(|&at| is_internal(req, at));
+        if let Some(at) = base {
             let base = class_name(req, at);
             format!("Object of type {name} (inheriting {base}) has not been {tail}")
         } else {

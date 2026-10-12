@@ -180,11 +180,7 @@ fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8])
         {
             return true;
         }
-        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
-        at = match parent {
-            Some(parent) => php_ext::call::lookup_class(req, &parent).ok().flatten(),
-            None => None,
-        };
+        at = req.class_parent(here);
     }
     false
 }
@@ -211,32 +207,10 @@ fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8])
 /// bool(true)
 /// ```
 fn is_serializable(req: &mut Request, class: php_ext::values::ClassId) -> bool {
-    let mut pending = vec![class];
-    let mut seen = 0;
-    while let Some(here) = pending.pop() {
-        seen += 1;
-        if seen > 256 {
-            return false;
-        }
-        let Some(decl) = req.class_decl(here) else {
-            continue;
-        };
-        if decl.name.0.eq_ignore_ascii_case(b"Serializable") {
-            return true;
-        }
-        let names: Vec<Vec<u8>> = decl
-            .parent
-            .iter()
-            .chain(decl.interfaces.iter())
-            .map(|name| name.0.to_vec())
-            .collect();
-        for name in names {
-            if let Ok(Some(up)) = php_ext::call::lookup_class(req, &name) {
-                pending.push(up);
-            }
-        }
-    }
-    false
+    php_ext::call::lookup_class(req, b"Serializable")
+        .ok()
+        .flatten()
+        .is_some_and(|serializable| req.instance_of(class, serializable))
 }
 
 /// `ce->ce_flags & ZEND_ACC_NOT_SERIALIZABLE`, the refusal

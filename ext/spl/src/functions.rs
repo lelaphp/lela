@@ -139,15 +139,7 @@ fn class_parents(
     let Some(class) = subject(req, object_or_class.0, autoload)? else {
         return Ok(OrFalse::False);
     };
-    let mut parents = Vec::new();
-    let mut at = crate::parent_of(req, class);
-    while let Some(parent) = at {
-        if parents.contains(&parent) {
-            break;
-        }
-        parents.push(parent);
-        at = crate::parent_of(req, parent);
-    }
+    let parents: Vec<ClassId> = req.lineage(class).skip(1).collect();
     class_names(req, &parents)
 }
 

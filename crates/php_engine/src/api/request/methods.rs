@@ -489,8 +489,25 @@ impl Request {
 
     /// The class and its parents up from it, `ce` then `ce->parent` and
     /// on, as php's walks up a chain go, held to 64 classes so a chain
-    /// that loops cannot hold the request.
-    pub(crate) fn lineage(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
+    /// that loops cannot hold the request. Each step is
+    /// [`Request::class_parent`], read by number and never by name, so a
+    /// parent an `extends` spelled in another case is the class as it
+    /// was declared:
+    ///
+    /// ```php
+    /// class A {} class B extends a {} class C extends b {}
+    /// var_dump(class_parents('C'), get_parent_class('C'));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["B"]=>
+    ///   string(1) "B"
+    ///   ["A"]=>
+    ///   string(1) "A"
+    /// }
+    /// string(1) "B"
+    /// ```
+    pub fn lineage(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
         std::iter::successors(Some(class), move |&at| self.class_parent(at)).take(64)
     }
 
@@ -516,7 +533,8 @@ impl Request {
     /// bool(false)
     /// bool(true)
     /// ```
-    pub(crate) fn class_parent(&self, class: ClassId) -> Option<ClassId> {
+    #[must_use]
+    pub fn class_parent(&self, class: ClassId) -> Option<ClassId> {
         match self.native_class_at(class) {
             Some(at) => self.shared.parents.get(at).copied().flatten(),
             None => self.declared_row(class)?.bound.parent,
