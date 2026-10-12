@@ -80,8 +80,17 @@ fn sources(dir: &Path, into: &mut String) {
     }
 }
 
+/// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
+/// the test, never the path `env!` compiled in: cargo reuses a test binary
+/// across two checkouts that share a target directory (#2790).
+fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .expect("cargo sets CARGO_MANIFEST_DIR for a test it runs")
+}
+
 fn crates() -> Vec<Crate> {
-    let ext = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ext");
+    let ext = manifest_dir().join("../../ext");
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&ext)
         .expect("ext/ is read")
         .flatten()
