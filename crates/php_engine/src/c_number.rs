@@ -19,16 +19,35 @@ pub(crate) fn is_space(byte: u8) -> bool {
 /// zero where there are none, and `LONG_MAX` or `LONG_MIN` by the sign
 /// where the digits spell a number past the long.
 pub(crate) fn strtol(bytes: &[u8]) -> i64 {
+    strtol_in(bytes, Some(10))
+}
+
+/// C's `strtol(s, NULL, 0)`, `zend_ini_long`'s `ZEND_STRTOL(value, NULL,
+/// 0)` (`Z/Zend/zend_ini.c:469`): [`strtol`] with the base read from the
+/// digits, `0x` or `0X` before a hex digit sixteen, a leading `0` eight,
+/// and ten otherwise.
+pub(crate) fn strtol_prefixed(bytes: &[u8]) -> i64 {
+    strtol_in(bytes, None)
+}
+
+/// C's `strtol` in `base`, `None` for base zero.
+fn strtol_in(bytes: &[u8], base: Option<u32>) -> i64 {
     let bytes = &bytes[bytes.iter().take_while(|b| is_space(**b)).count()..];
     let (negative, digits) = match bytes.first() {
         Some(b'-') => (true, &bytes[1..]),
         Some(b'+') => (false, &bytes[1..]),
         _ => (false, bytes),
     };
+    let (radix, digits) = match (base, digits) {
+        (Some(radix), _) => (radix, digits),
+        (None, [b'0', b'x' | b'X', hex, ..]) if hex.is_ascii_hexdigit() => (16, &digits[2..]),
+        (None, [b'0', ..]) => (8, digits),
+        (None, _) => (10, digits),
+    };
     let mut n: i64 = 0;
-    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        let digit = i64::from(digit - b'0');
-        let next = n.checked_mul(10).and_then(|n| {
+    for digit in digits.iter().map_while(|b| char::from(*b).to_digit(radix)) {
+        let digit = i64::from(digit);
+        let next = n.checked_mul(i64::from(radix)).and_then(|n| {
             if negative {
                 n.checked_sub(digit)
             } else {
@@ -56,7 +75,7 @@ pub(crate) fn atoi(bytes: &[u8]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{atoi, strtol};
+    use super::{atoi, strtol, strtol_prefixed};
 
     /// The edges C's library reads: white space and one sign before the
     /// digits, nothing after the first byte that is not one, a long's
@@ -75,5 +94,21 @@ mod tests {
         assert_eq!(atoi(b"4294967296"), 0);
         assert_eq!(atoi(b"99999999999999999999"), -1);
         assert_eq!(atoi(b"-2147483649"), 2_147_483_647);
+    }
+
+    /// Base zero reads its base from the digits: `0x` before a hex digit,
+    /// a leading `0`, or ten; a `0x` with no hex digit after it is the
+    /// zero before the `x`.
+    #[test]
+    fn strtol_prefixed_reads_the_base_c_reads() {
+        assert_eq!(strtol_prefixed(b" 0x1f"), 31);
+        assert_eq!(strtol_prefixed(b"-0X10"), -16);
+        assert_eq!(strtol_prefixed(b"010"), 8);
+        assert_eq!(strtol_prefixed(b"09"), 0);
+        assert_eq!(strtol_prefixed(b"0xg"), 0);
+        assert_eq!(strtol_prefixed(b"20k"), 20);
+        assert_eq!(strtol_prefixed(b"0x8000000000000000"), i64::MAX);
+        assert_eq!(strtol_prefixed(b"-0x8000000000000000"), i64::MIN);
+        assert_eq!(strtol(b"0x10"), 0);
     }
 }

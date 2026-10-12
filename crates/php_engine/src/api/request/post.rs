@@ -158,9 +158,9 @@ impl Request {
 
     /// `post_max_size`, or what `request_parse_body()` was handed.
     pub(crate) fn post_max_size(&self, limits: &BodyLimits) -> i64 {
-        limits.post_max_size.unwrap_or_else(|| {
-            crate::ini_quantity::parse(self.ini_get(b"post_max_size").unwrap_or_default()).0
-        })
+        limits
+            .post_max_size
+            .unwrap_or_else(|| self.ini_long(b"post_max_size"))
     }
 
     /// `SG(request_info).content_length`.

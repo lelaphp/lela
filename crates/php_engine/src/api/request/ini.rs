@@ -18,7 +18,7 @@ use super::{
 use crate::api::abi::{IniStage, IniVerdict, OnModify};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpString, Value, adopted_some};
-use crate::c_number::{atoi, strtol};
+use crate::c_number::{atoi, strtol, strtol_prefixed};
 use crate::engine::{Configured, ConfiguredKey};
 
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
@@ -184,6 +184,47 @@ impl TypedIni {
             b"zend.multibyte" => self.multibyte = Request::ini_parse_bool(text),
             _ => {}
         }
+    }
+}
+
+/// The handler `main.c` declares a whole-number entry with, each of
+/// which reads the value by `zend_ini_parse_quantity_warn`
+/// ([`Request::ini_quantity_warn`]) and stores it for
+/// [`Request::ini_long`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LongHandler {
+    /// `OnUpdateLong` (`Z/Zend/zend_ini.c:972`): any value.
+    Any,
+    /// `OnUpdateLongGEZero` (`Z/Zend/zend_ini.c:980`): a negative value
+    /// is refused, and the entry keeps what it held.
+    AtLeastZero,
+}
+
+impl LongHandler {
+    /// `main.c`'s entries under the two handlers, in the order
+    /// `PHP_INI_BEGIN()` declares them (`Z/main/main.c:807-885`), which
+    /// is the order their startup warnings are raised in.
+    pub(crate) const ENTRIES: [(&'static [u8], LongHandler); 12] = [
+        (b"xmlrpc_error_number", LongHandler::Any),
+        (b"max_input_time", LongHandler::Any),
+        (b"output_buffering", LongHandler::Any),
+        (b"error_log_mode", LongHandler::Any),
+        (b"upload_max_filesize", LongHandler::Any),
+        (b"post_max_size", LongHandler::Any),
+        (b"max_input_nesting_level", LongHandler::AtLeastZero),
+        (b"max_input_vars", LongHandler::AtLeastZero),
+        (b"realpath_cache_size", LongHandler::Any),
+        (b"realpath_cache_ttl", LongHandler::Any),
+        (b"user_ini.cache_ttl", LongHandler::Any),
+        (b"hard_timeout", LongHandler::Any),
+    ];
+
+    /// The handler of the core entry `name`, `None` where it has
+    /// neither.
+    pub(crate) fn of(name: &[u8]) -> Option<LongHandler> {
+        (LongHandler::ENTRIES.iter())
+            .find(|(entry, _)| *entry == name)
+            .map(|(_, handler)| *handler)
     }
 }
 
@@ -407,6 +448,9 @@ impl Request {
         // The core table's other rules read `NULL` as the empty string,
         // as php's do.
         let value = new_value.unwrap_or_default();
+        if LongHandler::of(name).is_some() {
+            self.ini_quantity_warn(name, value);
+        }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
             return Ok(None);
         }
@@ -818,6 +862,11 @@ impl Request {
             {
                 IniVerdict::Rejected
             }
+            _ if LongHandler::of(name) == Some(LongHandler::AtLeastZero)
+                && crate::ini_quantity::parse(value).0 < 0 =>
+            {
+                IniVerdict::Rejected
+            }
             _ => IniVerdict::Accepted,
         }
     }
@@ -904,6 +953,83 @@ impl Request {
     /// is not registered is off.
     pub(crate) fn ini_flag(&self, name: &[u8]) -> bool {
         self.ini_get(name).is_some_and(Request::ini_parse_bool)
+    }
+
+    /// The entry `name` as its `OnUpdateLong` or `OnUpdateLongGEZero`
+    /// stored it in `PG`, `SG` or `EG`, `zend_ini_parse_quantity`'s value
+    /// ([`crate::ini_quantity`]): `1K` is 1024 and `0x10` is 16. What the
+    /// rule interprets for backwards compatibility was raised when the
+    /// value was set ([`Request::ini_quantity_warn`]), and a negative an
+    /// `OnUpdateLongGEZero` entry refused never reached it.
+    ///
+    /// ```php
+    /// $run = function (string ...$ini) {
+    ///     $args = [PHP_BINARY, '-n'];
+    ///     foreach ($ini as $set) { $args[] = '-d'; $args[] = $set; }
+    ///     $args[] = '-r';
+    ///     $args[] = '$s = ob_get_status(); echo $s["chunk_size"] ?? "none", " ", ini_get("max_input_vars"), " ", ini_get("max_input_nesting_level"), "\n";';
+    ///     $p = proc_open($args, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// };
+    /// $run('output_buffering=1K');
+    /// $run('output_buffering=0x10', 'max_input_vars=-5x', 'max_input_nesting_level=-0x1');
+    /// $run('report_memleaks=0', 'max_input_nesting_level=3q', 'output_buffering=1Kx', 'max_input_time=2x', 'hard_timeout=-');
+    /// ```
+    /// ```expect process
+    /// 1024 1000 64
+    /// 0
+    ///
+    /// Warning: Invalid "max_input_vars" setting. Invalid quantity "-5x": unknown multiplier "x", interpreting as "-5" for backwards compatibility in Unknown on line 0
+    /// 16 1000 64
+    /// 0
+    ///
+    /// Warning: Invalid "max_input_time" setting. Invalid quantity "2x": unknown multiplier "x", interpreting as "2" for backwards compatibility in Unknown on line 0
+    ///
+    /// Deprecated: PHP Startup: Directive 'report_memleaks' is deprecated in Unknown on line 0
+    ///
+    /// Warning: Invalid "output_buffering" setting. Invalid quantity "1Kx": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
+    ///
+    /// Warning: Invalid "max_input_nesting_level" setting. Invalid quantity "3q": unknown multiplier "q", interpreting as "3" for backwards compatibility in Unknown on line 0
+    ///
+    /// Warning: Invalid "hard_timeout" setting. Invalid quantity "-": no valid leading digits, interpreting as "0" for backwards compatibility in Unknown on line 0
+    /// 0 1000 3q
+    /// 0
+    /// ```
+    pub(crate) fn ini_long(&self, name: &[u8]) -> i64 {
+        crate::ini_quantity::parse(self.ini_get(name).unwrap_or_default()).0
+    }
+
+    /// `INI_INT(name)`, `zend_ini_long` (`Z/Zend/zend_ini.c:459`): an
+    /// entry with no handler, `max_file_uploads` and
+    /// `max_multipart_body_parts`, read where it is used with
+    /// `ZEND_STRTOL(value, NULL, 0)`, so `0x10` is 16 and `010` is 8.
+    pub(crate) fn ini_int(&self, name: &[u8]) -> i64 {
+        strtol_prefixed(self.ini_get(name).unwrap_or_default())
+    }
+
+    /// `zend_ini_parse_quantity_warn` (`Z/Zend/zend_ini.c:859`) for the
+    /// entry `name` taking `value`: the quantity, and php's `Invalid
+    /// "name" setting.` warning before the rule's sentence where the rule
+    /// interprets the value for backwards compatibility, at `Unknown` on
+    /// line 0 while the engine starts and where the program stands after.
+    ///
+    /// ```php
+    /// var_dump(ini_set('error_log_mode', '0600 '), ini_set('error_log_mode', '7x'), ini_get('error_log_mode'));
+    /// ```
+    /// ```expect
+    /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in %s on line 2
+    /// string(4) "0644"
+    /// string(5) "0600 "
+    /// string(2) "7x"
+    /// ```
+    pub(crate) fn ini_quantity_warn(&mut self, name: &[u8], value: &[u8]) -> i64 {
+        let (quantity, sentence) = crate::ini_quantity::parse(value);
+        if let Some(sentence) = sentence {
+            let name = String::from_utf8_lossy(name);
+            let message = format!("Invalid \"{name}\" setting. {sentence}");
+            crate::api::raising::warning(self, &message);
+        }
+        quantity
     }
 
     /// `cfg_get_entry` as `get_cfg_var()` hands it back
