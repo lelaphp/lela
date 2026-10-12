@@ -10,7 +10,9 @@
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
-use php_sapi::{Engine, FileHandles, Observables, OutputSink, Primary, RequestDescription};
+use php_sapi::{
+    Engine, FileHandles, HostServes, Observables, OutputSink, Primary, RequestDescription,
+};
 
 use crate::cmd::Command;
 use crate::out::{self, Sink};
@@ -107,15 +109,19 @@ pub fn serve(engine: &Engine) -> i32 {
         s.thrown_into = None;
         let description = describe(&s, plan);
         session::put(s);
-        let observed = engine.serve(description, &mut Sink);
+        let (observed, mut sink) =
+            engine.serve(description, Box::new(Sink), || HostServes::Program);
         if observed.start_failed {
-            return start_failed(&mut Sink);
+            return start_failed(sink.as_mut());
         }
         let Some(mut s) = session::take() else {
             return status;
         };
         s.exit_status = s.status.take().unwrap_or(observed.exit_code);
         status = s.exit_status;
+        // `php_sapi_phpdbg_deactivate`: what the request compiled goes
+        // with it.
+        s.sources.clear();
         ended(&mut s, plan, &observed);
         session::put(s);
     }
@@ -361,9 +367,13 @@ fn refused(engine: &Engine, s: &Session) -> Option<Vec<out::Written>> {
     let mut description = describe(s, Plan::Hold);
     description.file_handles = None;
     description.exit_status = 0;
-    let mut kept = out::Kept::default();
-    let linted = engine.lint(description, &mut kept);
-    (linted.exit_code != 0).then_some(kept.written)
+    let (linted, kept) = engine.lint(description, Box::new(out::Kept::default()));
+    let kept: Box<dyn std::any::Any> = kept;
+    let written = kept
+        .downcast::<out::Kept>()
+        .map(|kept| kept.written)
+        .unwrap_or_default();
+    (linted.exit_code != 0).then_some(written)
 }
 
 /// `run`'s arguments, split as php's `run` splits them
@@ -502,11 +512,17 @@ pub fn real_path(path: &[u8]) -> Vec<u8> {
 }
 
 /// Where a breakpoint on `name:line` goes (`phpdbg_set_breakpoint_file`):
-/// the real path of a file that exists, and else, for a relative name,
-/// the compiled file it is the tail of; none leaves it pending. An
-/// absolute name that exists nowhere is refused with php's error, and
-/// the breakpoint is not set.
+/// a file the request compiled under that name, `stdin`'s code among
+/// them, as php finds it in `file_sources`; the real path of a file that
+/// exists, and else, for a relative name, the compiled file it is the
+/// tail of; none leaves it pending. An absolute name that exists nowhere
+/// is refused with php's error, and the breakpoint is not set.
 pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
+    let stdin = name == b"Standard input code" && s.stdin_code.is_some();
+    if stdin || s.sources.iter().any(|kept| kept.file == name) {
+        s.breaks.set_file(Some(name.to_vec()), name, line);
+        return;
+    }
     let os = Path::new(std::ffi::OsStr::from_bytes(name));
     match std::fs::metadata(os) {
         Ok(meta) if !meta.is_file() => {
@@ -535,12 +551,19 @@ pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
             );
         }
         Err(_) => {
-            let compiled = s.exec.clone().filter(|exec| {
-                exec.len() > name.len()
-                    && exec.ends_with(name)
-                    && exec[exec.len() - name.len() - 1] == b'/'
-            });
-            s.breaks.set_file(compiled, name, line);
+            let tail = |file: &[u8]| {
+                file.len() > name.len()
+                    && file.ends_with(name)
+                    && file[file.len() - name.len() - 1] == b'/'
+            };
+            let kept = s.sources.iter().map(|kept| kept.file.as_slice());
+            let compiled = s
+                .exec
+                .as_deref()
+                .into_iter()
+                .chain(kept)
+                .find(|file| tail(file));
+            s.breaks.set_file(compiled.map(<[u8]>::to_vec), name, line);
         }
     }
 }
@@ -590,10 +613,13 @@ mod tests {
         session::install(Session::new());
         assert_eq!(serve(&engine), 1);
         let s = session::take().unwrap_or_default();
-        let mut sink = Capture::default();
-        let observed = engine.serve(describe(&s, Plan::Idle), &mut sink);
+        let sink = Box::new(Capture::default());
+        let (observed, mut sink) =
+            engine.serve(describe(&s, Plan::Idle), sink, || HostServes::Program);
         assert!(observed.start_failed);
-        assert_eq!(start_failed(&mut sink), 1);
+        assert_eq!(start_failed(sink.as_mut()), 1);
+        let sink: Box<dyn std::any::Any> = sink;
+        let sink = sink.downcast::<Capture>().unwrap_or_default();
         assert_eq!(
             String::from_utf8_lossy(&sink.0),
             "\nFatal error: Uncaught Error: rinit threw in [no active file]:0\nStack trace:\n#0 {main}\n  thrown in [no active file] on line 0\nCould not startup"

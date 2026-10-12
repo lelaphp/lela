@@ -12,7 +12,7 @@ use crate::api::request::Request;
 use crate::engine::{
     Engine, HostPage, HostServes, IniOrigin, Method, NotAlone, RequestDescription, WebRequest,
 };
-use crate::test::Capture;
+use crate::test::{Capture, handed_back};
 
 use Event::{Ext, Mark};
 use Phase::{
@@ -478,7 +478,7 @@ fn an_error_from_rinit_fails_the_request_start_with_no_request_end_phase() {
         .build();
     rec.mark("built");
     let mut sink = Capture::default();
-    let observed = engine.serve(piped("<?php echo 'ran';"), &mut sink);
+    let observed = engine.serve_into(piped("<?php echo 'ran';"), &mut sink);
     rec.mark("served");
     assert_eq!(
         String::from_utf8_lossy(&sink.stdout),
@@ -540,9 +540,9 @@ fn a_host_looks_at_its_request_after_every_rinit() {
             .rinit(sets_header::<0>)
             .build("test_ext_0")])
         .build();
-    let mut sink = Capture::default();
+    let sink = Box::new(Capture::default());
     rec.mark("built");
-    let observed = engine.serve_started(fetched("<?php echo 'ran';"), &mut sink, || {
+    let (observed, sink) = engine.serve(fetched("<?php echo 'ran';"), sink, || {
         rec.mark("looked");
         HostServes::Page(HostPage {
             code: 404,
@@ -551,6 +551,7 @@ fn a_host_looks_at_its_request_after_every_rinit() {
         })
     });
     rec.mark("served");
+    let sink: Capture = handed_back(sink).unwrap_or_default();
     assert!(!observed.start_failed);
     assert_eq!(
         rec.events().between("built", "looked").0,
@@ -575,9 +576,9 @@ fn a_request_whose_start_failed_is_not_looked_at() {
             .rinit(throws::<0>)
             .build("test_ext_0")])
         .build();
-    let mut sink = Capture::default();
+    let sink = Box::new(Capture::default());
     let mut looked = false;
-    let observed = engine.serve_started(fetched("<?php echo 'ran';"), &mut sink, || {
+    let (observed, _) = engine.serve(fetched("<?php echo 'ran';"), sink, || {
         looked = true;
         HostServes::Nothing
     });
@@ -688,9 +689,10 @@ fn the_built_in_server_ends_a_request_whose_start_failed() {
         ])
         .build();
     rec.mark("built");
-    let mut sink = Capture::default();
-    let (observed, dispatched) = engine.dispatch(piped("<?php echo 'ran';"), None, &mut sink);
+    let sink = Box::new(Capture::default());
+    let (observed, dispatched, sink) = engine.dispatch(piped("<?php echo 'ran';"), None, sink);
     rec.mark("served");
+    let sink: Capture = handed_back(sink).unwrap_or_default();
     assert!(observed.start_failed);
     assert_eq!(dispatched.program, None);
     assert!(!String::from_utf8_lossy(&sink.stdout).contains("ran"));

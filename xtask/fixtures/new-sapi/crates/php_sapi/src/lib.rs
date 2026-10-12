@@ -43,6 +43,12 @@ pub struct RequestDescription {
     pub script_name: Option<Vec<u8>>,
 }
 
+/// What a host serves in a request it has started.
+pub enum HostServes {
+    /// The program the description names.
+    Program,
+}
+
 /// Where what the request writes goes.
 pub trait OutputSink {
     /// The body.
@@ -63,13 +69,14 @@ impl Engine {
         EngineBuilder
     }
 
-    /// One request served, here none.
+    /// One request served, here none, and the sink handed back.
     pub fn serve(
         &self,
         _description: RequestDescription,
-        _sink: &mut dyn OutputSink,
-    ) -> Observables {
-        Observables { exit_code: 0 }
+        sink: Box<dyn OutputSink + Send>,
+        _look: impl FnOnce() -> HostServes,
+    ) -> (Observables, Box<dyn OutputSink + Send>) {
+        (Observables { exit_code: 0 }, sink)
     }
 }
 

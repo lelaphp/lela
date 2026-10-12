@@ -4,10 +4,11 @@
 //! what it wrote. Re-exported by `php_ext::test`; its items are `api.lock`
 //! lines in the `test` group.
 
+use std::any::Any;
 use std::path::Path;
 
 pub use crate::engine::Engine;
-use crate::engine::{FileHandles, OutputSink, RequestDescription, ResponseHead};
+use crate::engine::{FileHandles, HostServes, OutputSink, RequestDescription, ResponseHead};
 
 /// An in-process sink: everything the request wrote, kept, the way
 /// php's CLI has it. `stderr` is the CLI's second stream whole: each
@@ -163,11 +164,14 @@ impl Engine {
         if let Some(arrays) = self.dump_before_optimizer(&description) {
             sink.write_stderr(&arrays);
         }
-        let (observables, entered) = if traced {
-            self.serve_traced(description, &mut sink)
+        let sink = Box::new(sink);
+        let (observables, entered, sink) = if traced {
+            self.serve_traced(description, sink)
         } else {
-            (self.serve(description, &mut sink), Vec::new())
+            let (observables, sink) = self.serve(description, sink, || HostServes::Program);
+            (observables, Vec::new(), sink)
         };
+        let sink: Capture = handed_back(sink).unwrap_or_default();
         Served {
             stdout: sink.stdout,
             stderr: sink.stderr,
@@ -178,6 +182,31 @@ impl Engine {
             entered,
         }
     }
+}
+
+impl Engine {
+    /// [`Engine::serve`] of the program with `sink` lent and taken back
+    /// into place, for a test that reads its own sink after.
+    #[cfg(test)]
+    pub(crate) fn serve_into<S: OutputSink + Send + Default>(
+        &self,
+        description: RequestDescription,
+        sink: &mut S,
+    ) -> crate::engine::Observables {
+        let lent = Box::new(std::mem::take(sink));
+        let (observed, back) = self.serve(description, lent, || HostServes::Program);
+        if let Some(back) = handed_back(back) {
+            *sink = back;
+        }
+        observed
+    }
+}
+
+/// The sink a request handed back, as the type it was lent as; `None`
+/// where it is another.
+pub(crate) fn handed_back<S: OutputSink>(sink: Box<dyn OutputSink + Send>) -> Option<S> {
+    let sink: Box<dyn Any> = sink;
+    sink.downcast().ok().map(|sink| *sink)
 }
 
 /// The CLI's standard handles as a test runner hands php its fds, one

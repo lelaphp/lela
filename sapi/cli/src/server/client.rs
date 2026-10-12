@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use php_proto::http::{self, Credentials, Events, Parser};
 use php_proto::vpath;
@@ -363,18 +363,18 @@ fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
     if site.router.is_none() && is_static {
         return send_static(site, client);
     }
-    let mut sink = WireSink {
-        wire: Arc::new(Mutex::new(Wire {
+    let sink = Box::new(WireSink {
+        wire: Wire {
             stream: client.stream.try_clone().ok(),
             version: request.version,
             host: request.header(b"host").map(<[u8]>::to_vec),
-        })),
+        },
         site: Arc::clone(site),
-    };
+    });
     let description = describe(site, &client, is_static);
-    let (_, dispatched) = site
+    let (_, dispatched, _) = site
         .engine
-        .dispatch(description, site.router.as_deref(), &mut sink);
+        .dispatch(description, site.router.as_deref(), sink);
     match &dispatched.program {
         Some(ProgramServed::Ran { code, fatal }) => {
             log_response(site, &client, *code, None, fatal.as_ref());
@@ -594,18 +594,12 @@ impl Wire {
 /// in milliseconds: `send_through`'s `tv` of ten seconds.
 const SEND_WAIT: i32 = 10_000;
 
-/// The sink a PHP request holds, `sapi_cli_server_ub_write` and
+/// The sink a PHP request owns, `sapi_cli_server_ub_write` and
 /// `sapi_cli_server_send_headers`: the body and the head onto the
 /// [`Wire`] as the request writes them, the log onto the server's.
 struct WireSink {
-    wire: Arc<Mutex<Wire>>,
+    wire: Wire,
     site: Arc<Site>,
-}
-
-impl WireSink {
-    fn wire(&self) -> std::sync::MutexGuard<'_, Wire> {
-        self.wire.lock().unwrap_or_else(PoisonError::into_inner)
-    }
 }
 
 impl OutputSink for WireSink {
@@ -634,7 +628,7 @@ impl OutputSink for WireSink {
     /// 11 early
     /// ```
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        if self.wire().send(bytes) {
+        if self.wire.send(bytes) {
             Ok(())
         } else {
             Err(Aborted { exit_status: None })
@@ -644,9 +638,8 @@ impl OutputSink for WireSink {
     fn flush(&mut self) {}
 
     fn send_headers(&mut self, head: &ResponseHead) {
-        let mut wire = self.wire();
-        let bytes = wire.render(head);
-        let _ = wire.send(&bytes);
+        let bytes = self.wire.render(head);
+        let _ = self.wire.send(&bytes);
     }
 
     /// `sapi_cli_server_log_message`: the entry on the server's log.
@@ -658,13 +651,6 @@ impl OutputSink for WireSink {
 
     fn write_stderr(&mut self, bytes: &[u8]) {
         std::io::stderr().lock().write_all(bytes).ok();
-    }
-
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(WireSink {
-            wire: Arc::clone(&self.wire),
-            site: Arc::clone(&self.site),
-        }))
     }
 }
 

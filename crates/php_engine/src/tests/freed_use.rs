@@ -256,7 +256,7 @@ fn an_addref_of_a_freed_block_before_a_failed_start_is_raised_where_it_ends() {
             .build("freed_use_at_start")])
         .build();
     let mut sink = Capture::default();
-    let observed = engine.serve(
+    let observed = engine.serve_into(
         RequestDescription {
             sapi_name: String::from("cli"),
             script_name: Some(b"Standard input code".to_vec()),

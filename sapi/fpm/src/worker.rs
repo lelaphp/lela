@@ -128,8 +128,7 @@ impl Wire {
     }
 }
 
-/// The request's sink, which the request holds while it runs.
-#[derive(Clone)]
+/// The request's sink, which the request owns while it runs.
 struct Response {
     wire: Arc<Mutex<Wire>>,
     board: Option<Scoreboard>,
@@ -236,10 +235,6 @@ impl OutputSink for Response {
         std::io::stdout().lock().write_all(bytes).ok();
         std::io::stdout().lock().flush().ok();
         true
-    }
-
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(self.clone()))
     }
 
     /// `sapi_cgibin_flush` sends the head before it flushes.
@@ -789,14 +784,14 @@ impl Worker {
         }
         let head_only = info.method.as_deref() == Some(b"HEAD");
         let description = self.describe(&env, &info, wire);
-        let mut response = Response {
+        let response = Box::new(Response {
             wire: Arc::clone(wire),
             board: Some(self.board()),
-        };
-        let query = env.get(b"QUERY_STRING");
-        let served = self.engine.serve_started(description, &mut response, || {
-            self.look(&info, head_only, query)
         });
+        let query = env.get(b"QUERY_STRING");
+        let (served, _) = self
+            .engine
+            .serve(description, response, || self.look(&info, head_only, query));
         if served.start_failed {
             return Served::StartFailed;
         }

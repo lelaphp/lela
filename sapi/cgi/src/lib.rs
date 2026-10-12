@@ -437,10 +437,6 @@ impl OutputSink for Process {
     fn write_stderr(&mut self, bytes: &[u8]) {
         std::io::stderr().lock().write_all(bytes).ok();
     }
-
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(Process))
-    }
 }
 
 /// What `main` refuses a request with before it starts, as it writes it.
@@ -735,24 +731,22 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
             return 255;
         }
     };
-    let mut sink = Process;
+    let sink = Box::new(Process);
     let mut refused = false;
-    let served: Observables = match (&primary, invocation.behavior) {
-        (Primary::Path(path), Behavior::Standard) => {
-            engine.serve_started(description, &mut sink, || {
-                refusal(path.as_deref()).map_or(HostServes::Program, |page| {
-                    refused = true;
-                    HostServes::Page(page)
-                })
+    let (served, _): (Observables, _) = match (&primary, invocation.behavior) {
+        (Primary::Path(path), Behavior::Standard) => engine.serve(description, sink, || {
+            refusal(path.as_deref()).map_or(HostServes::Program, |page| {
+                refused = true;
+                HostServes::Page(page)
             })
-        }
+        }),
         (Primary::Path(path), _) if let Some(page) = refusal(path.as_deref()) => {
             refused = true;
-            engine.serve_started(description, &mut sink, || HostServes::Page(page))
+            engine.serve(description, sink, || HostServes::Page(page))
         }
-        (_, Behavior::Highlight) => engine.highlight(description, &mut sink),
-        (_, Behavior::Strip) => engine.strip(description, &mut sink),
-        _ => engine.serve(description, &mut sink),
+        (_, Behavior::Highlight) => engine.highlight(description, sink),
+        (_, Behavior::Strip) => engine.strip(description, sink),
+        _ => engine.serve(description, sink, || HostServes::Program),
     };
     // `main` returns `FAILURE` where `php_request_startup` failed, an
     // extension's `rinit` having raised (#1775), and php-cgi ends there
@@ -783,11 +777,11 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
         if let Primary::Path(path) = &primary
             && let Some(page) = refusal(path.as_deref())
         {
-            engine.serve_started(description, &mut Process, || HostServes::Page(page));
+            engine.serve(description, Box::new(Process), || HostServes::Page(page));
             return 255;
         }
         let name = description.script_name.clone().unwrap_or_default();
-        let served = engine.lint(description, &mut Process);
+        let (served, _) = engine.lint(description, Box::new(Process));
         // Each file's request is started at `do_repeat`, and one whose
         // start fails ends the process with `FAILURE`, no verdict written.
         if served.start_failed {
