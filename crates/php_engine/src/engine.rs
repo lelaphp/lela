@@ -37,8 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, HandlePath, LongEntry, LongHandler, Placed, PropertyInfo,
-    Request, TypedIni, placed_of,
+    BuildDefs, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request,
+    TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -2649,58 +2649,54 @@ fn startup_directives(req: &mut Request, shared: &Shared) {
 }
 
 /// The core entries' handlers over what the host set, in the order
-/// `main.c` declares them (`Z/main/main.c:807-885`): each whole-number
-/// entry's `zend_ini_parse_quantity_warn` over the value the host set,
-/// one `OnUpdateLongGEZero` refused among them, `report_memleaks` off is
-/// `OnUpdateReportMemleaks`'s deprecation, and `memory_limit` past
-/// `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
-/// maximum's text in its place. What an entry takes is the answer.
+/// `php_module_startup` registers them ([`CoreQuantity::ENTRIES`]):
+/// each quantity entry's `zend_ini_parse_quantity_warn` or
+/// `zend_ini_parse_uquantity_warn` over the value the host set, which
+/// comes from the configuration and not the entry, since a value an
+/// `OnUpdateLongGEZero` refused was warned about before the refusal and
+/// never reached the entry ([`Request::ini_verdict`]). `report_memleaks`
+/// off is `OnUpdateReportMemleaks`' deprecation, after `max_input_time`,
+/// and `memory_limit` past `max_memory_limit` is `OnChangeMemoryLimit`'s
+/// warning with the maximum's text in its place, one under what the heap
+/// holds its other warning and the default kept. What an entry takes is
+/// the answer.
 fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-    // `main.c` declares `report_memleaks` after `max_input_time` and
-    // `memory_limit` after `max_input_vars`.
-    let (before_memleaks, rest) = split_after(&LongHandler::ENTRIES, b"max_input_time");
-    let (before_limit, after_limit) = split_after(rest, b"max_input_vars");
-    quantities_warn(req, before_memleaks);
-    if req
-        .ini_get(b"report_memleaks")
-        .is_some_and(|v| !Request::ini_parse_bool(v))
-    {
-        let message = "Directive 'report_memleaks' is deprecated";
-        crate::api::raising::docref(req, Level::Deprecated, message);
-    }
-    quantities_warn(req, before_limit);
-    let limit = req
-        .ini_get(b"memory_limit")
-        .map(<[u8]>::to_vec)
-        .unwrap_or_default();
-    let taken = match req.memory_limit_verdict(&limit) {
-        Some(taken) if taken != limit => {
-            req.take_startup_value(b"memory_limit", &taken);
-            vec![(b"memory_limit".to_vec(), Some(taken))]
+    let mut taken = Vec::new();
+    for (name, reading) in CoreQuantity::ENTRIES {
+        if let Some(value) = req.shared.directive(name).map(<[u8]>::to_vec) {
+            req.core_quantity_warn(name, reading, &value);
         }
-        _ => Vec::new(),
-    };
-    quantities_warn(req, after_limit);
+        match name {
+            // `main.c` declares `report_memleaks` after `max_input_time`.
+            b"max_input_time"
+                if req
+                    .ini_get(b"report_memleaks")
+                    .is_some_and(|v| !Request::ini_parse_bool(v)) =>
+            {
+                let message = "Directive 'report_memleaks' is deprecated";
+                crate::api::raising::docref(req, Level::Deprecated, message);
+            }
+            b"memory_limit" => {
+                let limit = req.ini_get(name).map(<[u8]>::to_vec).unwrap_or_default();
+                let held = match req.memory_limit_verdict(&limit) {
+                    Some(held) if held == limit => continue,
+                    Some(held) => held,
+                    None => core_default(name).unwrap_or_default(),
+                };
+                req.take_startup_value(name, &held);
+                taken.push((name.to_vec(), Some(held)));
+            }
+            _ => {}
+        }
+    }
     taken
 }
 
-/// `entries` up to and with the one named `name`, and the rest.
-fn split_after<'a>(entries: &'a [LongEntry], name: &[u8]) -> (&'a [LongEntry], &'a [LongEntry]) {
-    let at = (entries.iter().position(|(n, _)| *n == name)).map_or(0, |at| at + 1);
-    entries.split_at(at)
-}
-
-/// `zend_register_ini_entries_ex`'s handler over each of `entries` the
-/// host set a value for, as [`Request::ini_quantity_warn`] reads it.
-/// The value comes from the configuration, not the entry, since a
-/// value an `OnUpdateLongGEZero` refused was warned about before the
-/// refusal, and never reached the entry ([`Request::ini_verdict`]).
-fn quantities_warn(req: &mut Request, entries: &[LongEntry]) {
-    for (name, _) in entries {
-        if let Some(value) = req.shared.directive(name).map(<[u8]>::to_vec) {
-            req.ini_quantity_warn(name, &value);
-        }
-    }
+/// The default `CORE_INI` declares for the entry `name`.
+fn core_default(name: &[u8]) -> Option<Vec<u8>> {
+    (CORE_INI.iter())
+        .find(|(n, _)| n.as_bytes() == name)
+        .and_then(|(_, value)| value.map(|v| v.as_bytes().to_vec()))
 }
 
 /// `php_ini_register_extensions` (`Z/main/php_ini.c:741-749`) with no
@@ -3914,7 +3910,7 @@ fn modules_startup(
     marks
 }
 
-/// The `on_modify` an extension of `extensions` gave the entry `name`.
+/// The handler an extension of `extensions` gave the entry `name`.
 fn on_modify(extensions: &[ExtensionEntry], name: &[u8]) -> Option<OnModify> {
     extensions.iter().find_map(|e| {
         e.on_modify
@@ -4280,8 +4276,15 @@ impl Engine {
             };
             if shared.ini.iter().all(|(n, _)| *n != name)
                 || (mode == IniOrigin::PerDir && !per_dir())
-                || Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected
             {
+                continue;
+            }
+            // A core handler reads its quantity, with its warning, before
+            // it refuses anything.
+            if let Some(reading) = CoreQuantity::of(&name) {
+                req.core_quantity_warn(&name, reading, &value);
+            }
+            if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
             let took = on_modify(&shared.extensions, &name)

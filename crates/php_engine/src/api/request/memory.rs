@@ -432,8 +432,13 @@ impl Request {
 
     /// An entry `zend_ini_parse_uquantity` reads, `-1` the largest size.
     fn limit_bytes(&self, name: &[u8]) -> usize {
-        let bytes = self.ini_get(name).map_or(0, Request::ini_parse_bytes);
-        usize::try_from(bytes.cast_unsigned()).unwrap_or(usize::MAX)
+        Request::limit_of(self.ini_get(name).unwrap_or_default())
+    }
+
+    /// `value` as `zend_ini_parse_uquantity` reads a limit, as `size_t`.
+    fn limit_of(value: &[u8]) -> usize {
+        let (bytes, _) = Request::ini_parse_uquantity(value);
+        usize::try_from(bytes).unwrap_or(usize::MAX)
     }
 
     /// `OnChangeMemoryLimit` (`Z/main/main.c:333-367`) over `value` at
@@ -454,8 +459,7 @@ impl Request {
     /// string(4) "128M"
     /// ```
     pub(crate) fn memory_limit_verdict(&mut self, value: &[u8]) -> Option<Vec<u8>> {
-        let wanted =
-            usize::try_from(Request::ini_parse_bytes(value).cast_unsigned()).unwrap_or(usize::MAX);
+        let wanted = Request::limit_of(value);
         let max = self.limit_bytes(b"max_memory_limit");
         if wanted > max {
             if wanted != usize::MAX {
