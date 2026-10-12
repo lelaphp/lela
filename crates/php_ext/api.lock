@@ -25,7 +25,9 @@ abi::Beneath::line
 abi::Beneath::message
 abi::Beneath::name
 abi::Beneath::opcode
+abi::Beneath::opened
 abi::Beneath::path
+abi::Beneath::read
 abi::Beneath::serve
 abi::Beneath::source
 abi::Beneath::throwable
@@ -59,6 +61,7 @@ abi::ClassUnserialize
 abi::CloneObj
 abi::CloneObjWith
 abi::Compiled
+abi::Compiled::op_array
 abi::ConstArray
 abi::ConstValue
 abi::Coroutine
