@@ -7057,8 +7057,9 @@ impl Emit<'_> {
             })
         };
         // A class that uses traits is never bound early, so nothing
-        // here composes one, and no value is evaluated.
-        let linking = php_link::link(child, &lookup, &|()| None, &|_| None);
+        // here composes one, and no value is evaluated; the class is in
+        // no table yet, so a type its parent writes does not find it.
+        let linking = php_link::early_bind(child, &lookup);
         // `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, silent: the
         // class is left to its opline.
         if !linking.obligations.is_empty() {

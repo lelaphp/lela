@@ -6295,6 +6295,32 @@ class C {
         assert!(dump.contains(m), "php's C::m, {dump}");
     }
 
+    /// `zend_try_early_bind` while the file compiles (#2689): the class
+    /// being bound is in no table yet, so a type its parent's method
+    /// writes naming it finds nothing, `zend_can_early_bind` comes to
+    /// `INHERITANCE_UNRESOLVED`, and the class keeps its
+    /// `DECLARE_CLASS_DELAYED`, as
+    /// `Zend/tests/type_declarations/union_types/variance/valid.phpt`
+    /// dumps; `D`, which `A`'s `B` names neither, is left the same.
+    #[test]
+    fn a_parent_naming_the_class_being_bound_leaves_it_delayed() {
+        let dump = dump_of(
+            b"<?php
+class A { public function m(B|string $a): A|string {} }
+class B extends A { public function m(A|string $a): B|string {} }
+class D extends A { public function m(A|string $a): D|string {} }
+",
+        );
+        assert!(
+            dump.contains(
+                "0000 DECLARE_CLASS_DELAYED string(\"b\") string(\"a\")\n\
+                 0001 DECLARE_CLASS_DELAYED string(\"d\") string(\"a\")\n\
+                 0002 RETURN int(1)\n"
+            ),
+            "php's $_main, {dump}"
+        );
+    }
+
     /// `zend_delayed_compile_prop` under `zend_compile_encaps_list`
     /// (#2676): `"$this->p"` inside a method reads the property off the
     /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.
