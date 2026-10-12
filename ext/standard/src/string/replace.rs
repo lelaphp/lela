@@ -79,7 +79,28 @@ use crate::ffi::memchr;
 /// string(1) "q"
 /// string(3) "acc"
 /// ```
-#[php_function]
+///
+/// Declared frameless for three arguments
+/// (`frameless_function_infos_str_replace`), so a call without `$count`
+/// is a `FRAMELESS_ICALL_3` over this body, with the `OP_DATA` after it
+/// carrying the subject, and one with it the framed call.
+///
+/// ```php
+/// var_dump(str_replace("a", "b", "aaa"), str_replace(["a"], ["b"], ["x" => "a"]), str_replace(search: "a", replace: "b", subject: "a"), call_user_func('str_replace', "a", "b", "ab"), str_replace(1, 2, 121));
+/// try { str_replace("a", [], "a"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(3) "bbb"
+/// array(1) {
+///   ["x"]=>
+///   string(1) "b"
+/// }
+/// string(1) "b"
+/// string(2) "bb"
+/// string(3) "222"
+/// str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string
+/// ```
+#[php_function(frameless(3))]
 pub(super) fn str_replace(
     req: &mut Request,
     search: Union<PhpArray, PhpString>,
@@ -549,7 +570,25 @@ impl Pen<'_> {
 /// TypeError: strtr(): Argument #2 ($from) must be of type array, int given
 /// TypeError: strtr(): Argument #2 ($from) must be of type string, array given
 /// ```
-#[php_function(arity = manual)]
+///
+/// Declared frameless for two arguments and for three
+/// (`frameless_function_infos_strtr`), whose bodies parse as the count
+/// chooses here, so a `FRAMELESS_ICALL_2` or `_3` and the framed call
+/// agree, the deprecation for a `null` third argument included.
+///
+/// ```php
+/// var_dump(strtr("abc", ["a" => "x"]), strtr("abc", "ab", "xy"), strtr(string: "abc", from: "a", to: "z"), strtr("", "a", "b"), call_user_func('strtr', "abc", "c", "C"), strtr("abc", "a", null));
+/// ```
+/// ```expect
+/// Deprecated: strtr(): Passing null to parameter #3 ($to) of type ?string is deprecated in %s on line 2
+/// string(3) "xbc"
+/// string(3) "xyc"
+/// string(3) "zbc"
+/// string(0) ""
+/// string(3) "abC"
+/// string(3) "abc"
+/// ```
+#[php_function(arity = manual, frameless(2, 3))]
 pub(super) fn strtr(
     req: &mut Request,
     string: Raw<PhpString>,

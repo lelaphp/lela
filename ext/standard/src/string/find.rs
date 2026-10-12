@@ -58,7 +58,26 @@ fn outside(req: &mut Request) -> Thrown {
 /// strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
-#[php_function]
+///
+/// Declared frameless for two arguments and for three
+/// (`frameless_function_infos_strpos`), so those calls are a
+/// `FRAMELESS_ICALL_2` or `_3` over this body, and a call by name or
+/// through a callable the framed call; the two agree.
+///
+/// ```php
+/// var_dump(strpos("abcabc", "c"), strpos("abcabc", "c", 3), strpos(haystack: "abc", needle: "c"), strpos("abc", "x", 1), call_user_func('strpos', "abc", "c", -1), strpos(123, 2));
+/// try { strpos("abc", "a", 9); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(2)
+/// int(5)
+/// int(2)
+/// bool(false)
+/// int(2)
+/// int(1)
+/// strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
+/// ```
+#[php_function(frameless(2, 3))]
 pub(super) fn strpos(
     req: &mut Request,
     haystack: PhpString,
@@ -250,7 +269,24 @@ pub(super) fn strripos(
 /// string(2) "US"
 /// bool(false)
 /// ```
-#[php_function(aliases(strchr))]
+///
+/// Declared frameless for two arguments and for three
+/// (`frameless_function_infos_strstr`), so those calls are a
+/// `FRAMELESS_ICALL_2` or `_3` over this body; `strchr`, the alias,
+/// declares none, as php's `ZEND_RAW_FENTRY` passes none for it.
+///
+/// ```php
+/// var_dump(strstr("user@host", "@"), strstr("user@host", "@", true), strstr("abc", "b", before_needle: true), strstr("abc", "x"), strchr("abc", "b"), call_user_func('strstr', "abc", "b", true));
+/// ```
+/// ```expect
+/// string(5) "@host"
+/// string(4) "user"
+/// string(1) "a"
+/// bool(false)
+/// string(2) "bc"
+/// string(1) "a"
+/// ```
+#[php_function(frameless(2, 3), aliases(strchr))]
 pub(super) fn strstr(
     req: &mut Request,
     haystack: PhpString,
@@ -347,7 +383,23 @@ pub(super) fn strrchr(
 /// bool(true)
 /// bool(false)
 /// ```
-#[php_function]
+///
+/// Declared frameless for its two arguments
+/// (`frameless_function_infos_str_starts_with`), so such a call is a
+/// `FRAMELESS_ICALL_2` over this body, and a call by name or through a
+/// callable the framed call; the two agree.
+///
+/// ```php
+/// var_dump(str_starts_with("abc", "ab"), str_starts_with("abc", ""), str_starts_with(haystack: "abc", needle: "b"), str_starts_with(12, 1), call_user_func('str_starts_with', "abc", "abcd"));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+#[php_function(frameless(2))]
 pub(super) fn str_starts_with(haystack: PhpString, needle: PhpString) -> bool {
     haystack.as_bytes().starts_with(needle.as_bytes())
 }

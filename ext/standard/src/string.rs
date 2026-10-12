@@ -24,9 +24,10 @@ pub(super) mod strip_tags;
 pub use strip_tags::strip_tags_ex;
 
 use constants::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
-use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
+use php_ext::abi::{OrFalse, Passed, Raw, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
-use php_ext::coerce::with_string;
+use php_ext::coerce::{coerce_param, with_string};
+use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Charset, Key, Owner, PhpArray, PhpString, Value};
@@ -1675,34 +1676,19 @@ fn explode(
 /// string(2) "xy"
 /// join(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
 /// ```
-#[php_function(aliases(join))]
+#[php_function(frameless(1, 2), aliases(join))]
 fn implode(
     req: &mut Request,
-    separator: Union<PhpArray, PhpString>,
-    #[php(default = null)] array: Option<PhpArray>,
+    separator: Raw<Union<PhpArray, PhpString>>,
+    #[php(default = null)] array: Raw<Option<PhpArray>>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    imploded(req, separator, array)
-}
-
-/// `PHP_FUNCTION(implode)` under the name it was called by, which
-/// php's `get_active_function_name()` puts in the first `TypeError`.
-fn imploded(
-    req: &mut Request,
-    separator: Union<PhpArray, PhpString>,
-    array: Option<PhpArray>,
-) -> Result<Owner<PhpString>, Thrown> {
-    let name = req.active_function_name();
+    if req.frameless() {
+        return implode_frameless(req, separator, array);
+    }
+    let (separator, array) = (separator.hold(req)?, array.hold(req)?);
     let (glue, pieces) = match (separator, array) {
         (Union::A(array), None) => (None, array),
-        (_, None) => {
-            return Err(throw_error(
-                req,
-                "TypeError",
-                &format!(
-                    "{name}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given"
-                ),
-            ));
-        }
+        (_, None) => return Err(not_an_array(req)),
         (Union::B(glue), Some(pieces)) => (Some(glue), pieces),
         (_, Some(_)) => {
             return Err(php_ext::raising::arg_type_error(
@@ -1714,6 +1700,62 @@ fn imploded(
     };
     let glue = glue.as_ref().map_or(&b""[..], PhpString::as_bytes);
     implode_array(req, glue, pieces)
+}
+
+/// `ZEND_FRAMELESS_FUNCTION(implode, 1)` and `(implode, 2)`
+/// (`Z/ext/standard/string.c:1077`), which parse their own arguments:
+/// one is the array as it stands, never converted, and anything else
+/// php's second `TypeError` with no deprecation first; of two, the
+/// separator is a string (`Z_FLF_PARAM_STR`), so an array there is
+/// refused before the array is read, and the array a `?array`.
+///
+/// ```php
+/// foreach ([fn() => implode([1, 2], null), fn() => implode(null), fn() => implode(5), fn() => implode([1], "x"), fn() => implode(new ArrayObject([1]))] as $f) { try { var_dump($f()); } catch (TypeError $e) { echo $e->getMessage(), "\n"; } }
+/// var_dump(call_user_func('implode', [1, 2], null), implode(["a", 2]), implode(1.5, ["a", "b"]));
+/// ```
+/// ```expect
+/// implode(): Argument #1 ($separator) must be of type string, array given
+/// implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
+/// implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
+/// implode(): Argument #1 ($separator) must be of type string, array given
+/// implode(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
+/// string(2) "12"
+/// string(2) "a2"
+/// string(5) "a1.5b"
+/// ```
+fn implode_frameless(
+    req: &mut Request,
+    separator: Raw<Union<PhpArray, PhpString>>,
+    array: Raw<Option<PhpArray>>,
+) -> Result<Owner<PhpString>, Thrown> {
+    if req.argument_count() < 2 {
+        // `zend_parse_arg_array(arg1, &pieces, false, false)`.
+        let Some(pieces) = separator.value().as_array().copied() else {
+            return Err(not_an_array(req));
+        };
+        return implode_array(req, b"", pieces);
+    }
+    let glue = coerce_param(req, &separator.value(), &Type::String, 1)?;
+    let Some(glue) = glue.as_php_string().copied() else {
+        return Err(not_an_array(req));
+    };
+    let Some(pieces) = array.hold(req)? else {
+        return Err(not_an_array(req));
+    };
+    implode_array(req, glue.as_bytes(), pieces)
+}
+
+/// php's `TypeError` for a separator with no array, under the name the
+/// call was made by, which `get_active_function_name()` puts in it.
+fn not_an_array(req: &mut Request) -> Thrown {
+    let name = req.active_function_name();
+    throw_error(
+        req,
+        "TypeError",
+        &format!(
+            "{name}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given"
+        ),
+    )
 }
 
 /// `php_implode(glue, pieces)`.
