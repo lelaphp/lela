@@ -53,6 +53,10 @@ enum Computed {
     HandEdited,
     /// `run` answers with an untrusted exec region; `check` finds it fresh.
     Untrusted,
+    /// A region left as a bare closer, as `computed merge` leaves one both
+    /// sides re-rendered: `check` finds it unrendered until `run` renders
+    /// it, which rewrites `AGENTS.md` and says so.
+    Unrendered,
 }
 
 impl Computed {
@@ -66,6 +70,9 @@ impl Computed {
             }
             Computed::Untrusted => {
                 "if [ \"$1\" = run ]; then printf 'AGENTS.md:3 layout exec untrusted skipped; run `computed trust`\\n' >&2; exit 1; fi\nexit 0\n"
+            }
+            Computed::Unrendered => {
+                "if [ \"$1\" = run ] && ! grep -qx rendered AGENTS.md; then echo rendered >> AGENTS.md; printf 'AGENTS.md:3 layout exec unrendered written\\n' >&2; exit 1; fi\nif [ \"$1\" = check ] && ! grep -qx rendered AGENTS.md; then printf 'AGENTS.md:3 layout exec unrendered\\n' >&2; exit 1; fi\nexit 0\n"
             }
         }
     }
@@ -739,6 +746,54 @@ fn a_merge_reaches_ticket_merged_and_a_plain_commit_does_not() {
             "xtask ticket merged --since HEAD^1"
         ]
     );
+}
+
+/// A merge `git merge` commits itself runs no pre-commit, only
+/// pre-merge-commit, and what that hook stages never reaches the merge's
+/// tree, which git wrote before it ran; so a region `computed merge` left
+/// unrendered, both sides having re-rendered it, was committed as a bare
+/// closer four times on `main` (#2744). Pre-merge-commit refuses that
+/// merge naming the region and the way through, and the merge stands
+/// uncommitted; `git commit` then renders it through pre-commit, and the
+/// merge commit carries the render.
+#[test]
+fn a_merge_that_leaves_a_region_unrendered_is_refused_until_committed_through_pre_commit() {
+    let scratch = scratch("unrendered", &Computed::Unrendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    scratch.git(&["checkout", "-q", "-b", "t9", &main], false);
+    scratch.git(
+        &["commit", "-q", "--allow-empty", "-m", "the work of #9"],
+        false,
+    );
+    scratch.git(&["checkout", "-q", &main], false);
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t9",
+            "-m",
+            "Merge t9: the work (#9)",
+        ],
+        true,
+    );
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(scratch.head(), before, "the merge was not committed: {out}");
+    assert!(out.contains("AGENTS.md:3 layout exec unrendered"), "{out}");
+    assert!(out.contains("git commit"), "{out}");
+    let checked = format!("check {}", REGIONS.join(" "));
+    assert_eq!(scratch.calls("computed"), [checked.as_str(), &checked]);
+    scratch.git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], false);
+
+    scratch.git(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
+    let t9 = scratch.git(&["rev-parse", "t9"], false);
+    assert_eq!(scratch.git(&["rev-parse", "HEAD^2"], false), t9);
+    let agents = scratch.git(&["show", "HEAD:AGENTS.md"], false);
+    assert!(agents.ends_with("rendered\n"), "{agents}");
 }
 
 // ---------------------------------------------------------------- pre-push
