@@ -106,12 +106,21 @@ impl Request {
     /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`, the
     /// table laid down first where this is the request's first lookup
     /// that may autoload (`ALLOC_HASHTABLE`, `zend_hash_init(8)`): the
-    /// lowered name as the request string php's `lc_name` is, which the
-    /// caller hands back to [`Request::autoload_leave`], or `None` for a
-    /// name an autoloader is loading already. The `Err` is the memory
-    /// limit.
-    pub(crate) fn autoload_enter(&mut self, lowered: &[u8]) -> Result<Option<PhpString>, Thrown> {
-        let name = self.string(lowered)?;
+    /// lowered name as the request string php's `lc_name` is, the one
+    /// standing where the caller says one does (`standing`, the interned
+    /// string of the bytes) and a new one otherwise, which the caller
+    /// hands back to [`Request::autoload_leave`], or `None` for a name an
+    /// autoloader is loading already. The `Err` is the memory limit.
+    pub(crate) fn autoload_enter(
+        &mut self,
+        lowered: &[u8],
+        standing: bool,
+    ) -> Result<Option<PhpString>, Thrown> {
+        let name = if standing {
+            self.existing_interned(lowered)?
+        } else {
+            self.string(lowered)?
+        };
         let made = match self.autoload.in_autoload {
             Some(table) => Ok(table),
             None => self

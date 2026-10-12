@@ -649,34 +649,43 @@ impl Request {
         }
     }
 
-    /// How `frame`, the top of the stack, returns with no PHP code
-    /// served, `zend_leave_helper`'s first arm with
+    /// How `frame`, the top of the stack, returns `returned` with no PHP
+    /// code served, `zend_leave_helper`'s first arm with
     /// `i_free_compiled_variables` giving up only strings: a user
-    /// function's frame its caller pushed, with no annex, no receiver,
-    /// no closure and no argument past its parameters, none of whose
+    /// function's frame its caller pushed, with no annex, no closure and
+    /// no argument past its parameters, whose receiver, where it has
+    /// one, is lent or owned with another owner standing and nothing for
+    /// the collector to take ([`php_heap::Heap::releases_quietly`]), none of whose
     /// slots but `moved`, which the caller has taken the value out of,
-    /// owns anything but a string. A string given up serves no
-    /// destructor and is offered to no collector, so such a frame is
-    /// left by [`Request::leave_plainly`] and [`Request::pop_frame`]
-    /// alike, and nothing is pending after it. None for every other
-    /// frame.
+    /// owns anything but a string, returning into a caller's slot that
+    /// owns nothing, or, where the call reads no value, returning a
+    /// value that owns nothing. A string given up serves no destructor
+    /// and is offered to no collector, so such a frame is left by
+    /// [`Request::leave_plainly`] and [`Request::pop_frame`] alike, and
+    /// nothing is pending after it. The frame and its caller are each
+    /// read once. None for every other frame.
+    #[inline(always)] // once per return, in the loop's RETURN arms
+    #[allow(clippy::inline_always)]
     pub(crate) fn leaves_plainly(
         &self,
         frame: FrameRef,
         moved: Option<usize>,
+        returned: Zval,
     ) -> Option<PlainLeave> {
-        if frame != self.vm.stack.current() {
+        let (top, laid) = self.vm.stack.top()?;
+        if top != frame {
             return None;
         }
-        let laid = self.vm.stack.frame(frame)?;
         let header = laid.header();
+        let receiver = header.this().is_some();
         let plain = header.function.is_some()
             && header.annex.is_none()
-            && header.this().is_none()
+            && (!receiver || quiet_receiver(header))
             && header.closure.is_none()
             && !header.info.call()
             && !header.info.extra_args();
         let caller = header.caller.frame().filter(|_| plain)?;
+        let returns_to = header.returns_to;
         let mut strings = false;
         for (at, z) in laid.slots().iter().enumerate() {
             if !z.is_refcounted() || Some(at) == moved {
@@ -687,30 +696,81 @@ impl Request {
             }
             strings = true;
         }
+        let taken = match returns_to {
+            Some(slot) => self
+                .vm
+                .stack
+                .frame(caller)?
+                .slots()
+                .get(slot as usize)?
+                .is_refcounted(),
+            None => returned.is_refcounted(),
+        };
+        if taken {
+            return None;
+        }
         Some(PlainLeave {
             caller,
-            returns_to: header.returns_to,
+            returns_to,
             moved,
             strings,
+            receiver,
         })
     }
 
     /// The top frame left, as [`Request::leaves_plainly`] found it: each
     /// string its slots but the moved one own given up, in slot order as
-    /// `i_free_compiled_variables` gives them up, then
-    /// `zend_vm_stack_free_call_frame`.
-    pub(crate) fn leave_plainly(&mut self, leave: PlainLeave) {
+    /// `i_free_compiled_variables` gives them up, the receiver after
+    /// them (`OBJ_RELEASE` under `ZEND_CALL_RELEASE_THIS`, a lent one's
+    /// pin let go), then `zend_vm_stack_free_call_frame`; `returned` written into the
+    /// caller's slot where the call reads it, and the caller on past its
+    /// call opline, `LOAD_NEXT_OPLINE()`, the caller read once for both.
+    #[inline(always)] // as `leaves_plainly`
+    #[allow(clippy::inline_always)]
+    pub(crate) fn leave_plainly(&mut self, leave: PlainLeave, returned: Zval) {
+        if leave.strings {
+            self.give_up_strings(leave.moved);
+        }
+        if leave.receiver {
+            self.give_up_top_receiver();
+        }
+        self.vm.stack.pop_frame(&mut self.heap);
+        if let Some(caller) = self.vm.stack.frame_mut(leave.caller) {
+            if let Some(slot) = leave.returns_to
+                && let Some(into) = caller.slots_mut().get_mut(slot as usize)
+            {
+                *into = returned;
+            }
+            let header = caller.header_mut();
+            header.opline = header.opline.saturating_add(1);
+        }
+    }
+
+    /// The receiver of the top frame given up ([`Request::leave_plainly`]).
+    #[inline(never)]
+    fn give_up_top_receiver(&mut self) {
+        if let Some(receiver) = self
+            .vm
+            .stack
+            .top()
+            .and_then(|(_, top)| top.header().receiver())
+        {
+            self.give_up_receiver(receiver);
+        }
+    }
+
+    /// The strings the top frame's slots own, but the one `moved` out
+    /// of, given up in slot order ([`Request::leave_plainly`]).
+    #[inline(never)]
+    fn give_up_strings(&mut self, moved: Option<usize>) {
         let frame = self.vm.stack.current();
         let mut from = 0;
-        while leave.strings
-            && let Some((at, value)) = self.take_next_owner(frame, from, usize::MAX)
-        {
-            if Some(at) != leave.moved {
+        while let Some((at, value)) = self.take_next_owner(frame, from, usize::MAX) {
+            if Some(at) != moved {
                 self.release_nogc(value);
             }
             from = at.saturating_add(1);
         }
-        self.vm.stack.pop_frame(&mut self.heap);
     }
 
     /// `EX(func)`: the function `frame` serves, `None` for an included,
@@ -722,6 +782,7 @@ impl Request {
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, in this request's map table
     /// ([`exec::Vm::cached`]).
+    #[inline]
     pub(crate) fn cached(&self, frame: FrameRef, slot: CacheSlot) -> exec::Cached {
         self.vm.cached(&self.map, frame, slot)
     }
@@ -735,23 +796,33 @@ impl Request {
 
     /// `CACHED_PTR(num) == ce ? CACHED_PTR(num + sizeof(void *)) : NULL`
     /// for a method call's pair (`Z/Zend/zend_vm_def.h:3670`, `:3778`):
-    /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds where
-    /// it holds `class` and was written from `frame`'s scope, and none
-    /// otherwise, which is the pass that looks the method up.
+    /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds, with
+    /// whether it takes `$this`, where it holds `class` and was written
+    /// from `frame`'s scope: a frame of the function that wrote it, no
+    /// closure's, has that scope without asking it. None otherwise,
+    /// which is the pass that looks the method up.
+    #[inline]
     pub(crate) fn cached_callee(
         &self,
         frame: FrameRef,
         slot: CacheSlot,
         class: crate::api::values::ClassId,
-    ) -> Option<Function> {
-        match self.cached(frame, slot) {
-            exec::Cached::ClassAndCallee {
-                class: held,
-                scope,
-                function,
-            } if held == class && scope == self.frame_scope(frame) => Some(function),
-            _ => None,
-        }
+    ) -> Option<(Function, bool)> {
+        let header = self.vm.at(frame)?;
+        let exec::Cached::ClassAndCallee {
+            class: held,
+            scope,
+            from,
+            function,
+            instance,
+        } = self.map.get(header.runtime_cache())?.get(slot)
+        else {
+            return None;
+        };
+        let same = held == class
+            && (from.is_some() && header.closure.is_none() && header.function == from
+                || scope == self.frame_scope(frame));
+        same.then_some((function, instance))
     }
 
     /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3694`,
@@ -765,13 +836,23 @@ impl Request {
         function: Function,
     ) {
         let scope = self.frame_scope(frame);
+        let from = self
+            .vm
+            .at(frame)
+            .filter(|header| header.closure.is_none())
+            .and_then(|header| header.function);
+        let instance = self
+            .method_decl(function)
+            .is_some_and(|decl| decl.is_instance);
         self.prime(
             frame,
             slot,
             exec::Cached::ClassAndCallee {
                 class,
                 scope,
+                from,
                 function,
+                instance,
             },
         );
     }
@@ -939,6 +1020,7 @@ impl Request {
     /// A call pushed with `room` slots past its header, which the caller
     /// sized for its callee ([`Request::call_room`]), `header` laid
     /// down whole; the fatal is the memory limit, as [`Request::push_call`]'s.
+    #[inline]
     pub(crate) fn push_room(
         &mut self,
         room: usize,
@@ -1018,6 +1100,59 @@ impl Request {
         header.info.set_serving();
         header.info.set_return_used(return_used);
         Some((call, header.function?))
+    }
+
+    /// `DO_UCALL`, and `DO_FCALL` or `DO_FCALL_BY_NAME` where `flagged`,
+    /// over a call that `i_init_func_execute_data` makes a frame of by
+    /// writing words alone: the call on top of the stack and being
+    /// built, to a user function passed no more arguments than it
+    /// declares, in the room its `INIT` laid for it, whose runtime cache
+    /// an earlier activation laid down, and which, where `flagged`,
+    /// raises neither a deprecation nor a discarded value's warning
+    /// ([`Request::function_flags`]). The call is made the callee's
+    /// frame as [`Request::activate_call`] and [`Request::activate_user`]
+    /// make it, the top of the stack read once, and its observer begin
+    /// raised; `returns_to` is the slot of `caller`'s that takes what it
+    /// returns, none where the call opline reads nothing. None, with
+    /// nothing touched, for every other call, which those two serve.
+    #[inline(always)] // once per call, in the loop's DO_*CALL arms
+    #[allow(clippy::inline_always)]
+    pub(crate) fn enter_call(
+        &mut self,
+        returns_to: Option<u32>,
+        caller: FrameRef,
+        flagged: bool,
+    ) -> Option<FrameRef> {
+        let (call, top) = self.vm.stack.top()?;
+        let header = top.header();
+        if !header.info.building() {
+            return None;
+        }
+        let function = header.function?;
+        let passed = header.num_args;
+        let len = top.len();
+        let user = self.user_function(function)?;
+        let shape = user.shape;
+        let refused =
+            flagged && (user.flags.deprecated || user.flags.no_discard && returns_to.is_none());
+        if refused
+            || passed > shape.parameters
+            || len < shape.slots as usize
+            || !self.map.laid(shape.cache)
+        {
+            return None;
+        }
+        let opline =
+            exec::skipped_recv(passed, shape.parameters, shape.typed, shape.entry).unwrap_or(0);
+        let (_, top) = self.vm.stack.top_mut()?;
+        let laid = top.header_mut();
+        laid.info.set_serving();
+        laid.info.set_return_used(returns_to.is_some());
+        laid.activate(shape.cache, opline, false);
+        laid.returns_to = returns_to;
+        laid.caller = exec::Caller::Opline(caller);
+        crate::observer::call(self, call);
+        Some(call)
     }
 
     /// The call `call` made the frame of the user function it names,
@@ -1552,14 +1687,29 @@ impl Request {
     }
 }
 
+/// Whether a frame's receiver is given up with no PHP code served: lent,
+/// or owned with another owner standing and nothing for the collector
+/// to take ([`php_heap::Heap::releases_quietly`]).
+#[inline(never)]
+fn quiet_receiver(header: &exec::Header) -> bool {
+    match header.receiver() {
+        None | Some(exec::Receiver::Lent(_)) => true,
+        Some(exec::Receiver::Owned(object)) => {
+            php_heap::Heap::releases_quietly(object.as_value().to_zval())
+        }
+    }
+}
+
 /// A frame [`Request::leaves_plainly`] found returns with no PHP code
 /// served: the frame it returns into and the slot of it that takes the
 /// value, where the call reads one, the slot the returned value was
-/// moved out of, and whether any other slot owns a string to give up.
+/// moved out of, whether any other slot owns a string to give up, and
+/// whether the frame has a receiver to give up.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlainLeave {
     pub(crate) caller: FrameRef,
     pub(crate) returns_to: Option<u32>,
     moved: Option<usize>,
     strings: bool,
+    receiver: bool,
 }

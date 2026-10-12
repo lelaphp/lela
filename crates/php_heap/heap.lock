@@ -167,6 +167,7 @@ Heap::release
 Heap::release_held
 Heap::release_nogc
 Heap::release_string
+Heap::releases_quietly
 Heap::reset_peak
 Heap::resource
 Heap::resource_at
@@ -346,6 +347,8 @@ VmStack::put_back
 VmStack::restore_frame
 VmStack::resume_frame
 VmStack::set_aside
+VmStack::top
+VmStack::top_mut
 Zval
 Zval::UNDEF
 Zval::array

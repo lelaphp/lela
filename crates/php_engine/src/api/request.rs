@@ -607,6 +607,12 @@ pub(crate) struct FrameShape {
     pub(crate) cache: exec::CacheAt,
     /// `op_array.cache_size`.
     pub(crate) cache_size: u32,
+    /// Whether a parameter, the variadic's included, takes its argument
+    /// by reference: a call to a function none of whose parameters does
+    /// sends every argument by value, which the `SEND_*_EX` oplines read
+    /// off the shape and not off the declaration
+    /// ([`Request::arg_send_mode`]).
+    pub(crate) by_ref: bool,
 }
 
 impl FrameShape {
@@ -631,6 +637,7 @@ impl FrameShape {
                 exec::CacheAt::of(code.runtime_cache)
             }),
             cache_size: code.map_or(0, |code| code.cache_size),
+            by_ref: decl.parameters.iter().any(|p| p.by_ref),
         }
     }
 }

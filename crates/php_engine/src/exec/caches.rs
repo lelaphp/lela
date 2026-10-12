@@ -85,11 +85,20 @@ pub(crate) struct RuntimeCaches {
 impl RuntimeCaches {
     /// `ZEND_MAP_PTR_GET`: the cache at `at`, none where the request has
     /// not reached it.
+    #[inline]
     pub(crate) fn get(&self, at: CacheAt) -> Option<&RuntimeCache> {
         match at {
             CacheAt::Engine(ptr) => self.engine.get(ptr),
             CacheAt::Request(ptr) => self.request.get(ptr),
         }
+    }
+
+    /// `RUN_TIME_CACHE(op_array)` not `NULL`: whether the cache at `at`
+    /// was laid down ([`super::lay_runtime_cache`]), which an activation
+    /// finds it is after the function's first.
+    #[inline]
+    pub(crate) fn laid(&self, at: CacheAt) -> bool {
+        self.get(at).is_some_and(|cache| cache.slots.is_some())
     }
 
     /// The cache at `at`, an empty one laid in where the request had

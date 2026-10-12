@@ -568,7 +568,8 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             .and_then(|code| units.code(code))
             .ok_or_else(|| no_frame(frame))?;
         if pushed {
-            match entered::<T, D>(req, frame, body, declared)? {
+            let start = req.vm().opline(frame);
+            match entered::<T, D>(req, frame, body, start, declared)? {
                 Stepped::Same(at) if at == frame => {}
                 other => {
                     stepped = other;
@@ -606,21 +607,34 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
                 // A call to a function the loop called before: its op
                 // array as the loop entered it then.
                 Way::Left(stepped @ Stepped::Pushed(callee)) => {
-                    let Some(code) = kept.called(req, callee) else {
+                    let Some((function, start)) = req
+                        .vm()
+                        .at(callee)
+                        .and_then(|header| Some((header.function?, header.opline)))
+                    else {
+                        break stepped;
+                    };
+                    let Some(code) = kept.called(function) else {
                         break stepped;
                     };
                     let Some(callee_body) = units.code(code) else {
                         break stepped;
                     };
                     kept.keep(callee, code);
-                    match entered::<T, D>(req, callee, callee_body, declared)? {
+                    match entered::<T, D>(req, callee, callee_body, start, declared)? {
                         Stepped::Same(at) if at == callee => {}
                         other => break other,
                     }
                     frame = callee;
                     body = callee_body;
                     oplines = &*body.oplines;
-                    at = req.vm().opline(frame);
+                    // A prologue served moved the callee on; with none, it
+                    // stands where its activation put it.
+                    at = if start < exec::entry_of(body) {
+                        req.vm().opline(frame)
+                    } else {
+                        start
+                    };
                 }
                 Way::Left(stepped) => break stepped,
             }
@@ -628,22 +642,37 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
     }
 }
 
-/// A callee just pushed taken up by the loop: what is left of its
-/// `RECV*` prologue served over `code`, the op array the loop holds for it
-/// (design §5.6), and then its activation, the interrupt check and
-/// `Site::Entry`. `Threw` of the callee where a `RECV` raised.
+/// A callee just pushed taken up by the loop, standing at `start`: what
+/// is left of its `RECV*` prologue served over `code`, the op array the
+/// loop holds for it (design §5.6), and then its activation, the
+/// interrupt check and `Site::Entry`. `Threw` of the callee where a
+/// `RECV` raised.
 #[inline(always)] // once per call edge, in the loop
 #[allow(clippy::inline_always)]
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
     callee: FrameRef,
     code: &OpArray,
+    start: u32,
     told: D,
 ) -> Result<Stepped, Fatal> {
-    if req.vm().opline(callee) < exec::entry_of(code)
-        && let Some(threw) = exec::prologue(req, callee, code, told)?
-    {
-        return Ok(Stepped::Threw(threw));
+    if start < exec::entry_of(code) {
+        // The parameters php's `RECV` passes on its first test, read off
+        // the frame in one run where nothing observes the opcode; the
+        // handlers serve the rest from the first that does not pass.
+        let at = if told.tells(php_unit::Opcode::Recv) {
+            start
+        } else {
+            exec::recv_passed(req, callee, code, start)
+        };
+        if at != start {
+            req.vm_mut().stand(callee, at);
+        }
+        if at < exec::entry_of(code)
+            && let Some(threw) = exec::prologue(req, callee, code, told)?
+        {
+            return Ok(Stepped::Threw(threw));
+        }
     }
     activated::<T>(req, callee)
 }
@@ -705,7 +734,8 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
             let serving = exec::standing(req, callee)?;
             let told = Declared::of(req);
             let code = exec::serving_code(&serving, callee)?;
-            match entered::<Nop, Declared>(req, callee, code, told)? {
+            let start = req.vm().opline(callee);
+            match entered::<Nop, Declared>(req, callee, code, start, told)? {
                 Stepped::Threw(at) => Ok(Stepped::Threw(at)),
                 _ => Ok(Stepped::Pushed(callee)),
             }

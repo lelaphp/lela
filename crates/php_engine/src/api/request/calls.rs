@@ -572,7 +572,19 @@ impl Request {
     /// argument by reference, and whether only where it can
     /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past
     /// the declared ones.
+    #[inline]
     pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
+        if self
+            .user_function(function)
+            .is_some_and(|user| !user.shape.by_ref)
+        {
+            return (false, false);
+        }
+        self.declared_send_mode(function, number)
+    }
+
+    /// [`Request::arg_send_mode`] read off the declaration.
+    fn declared_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
         let Some(decl) = self.function_decl(function) else {
             return (false, false);
         };
@@ -859,6 +871,7 @@ impl Request {
     /// The user function or method `function` is, if it is one: one of
     /// the request's own rows, or the published arena's, which are
     /// numbered past the natives and the native methods (design §5.14).
+    #[inline]
     pub(crate) fn user_function(&self, function: Function) -> Option<&UserFunction> {
         match function.local_at() {
             Some(at) => self.user_functions.get(at),
