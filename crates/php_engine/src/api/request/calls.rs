@@ -572,7 +572,19 @@ impl Request {
     /// argument by reference, and whether only where it can
     /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past
     /// the declared ones.
+    #[inline]
     pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
+        if self
+            .user_function(function)
+            .is_some_and(|user| !user.shape.by_ref)
+        {
+            return (false, false);
+        }
+        self.declared_send_mode(function, number)
+    }
+
+    /// [`Request::arg_send_mode`] read off the declaration.
+    fn declared_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
         let Some(decl) = self.function_decl(function) else {
             return (false, false);
         };

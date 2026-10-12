@@ -1711,6 +1711,8 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn init_fcall_by_name<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -1827,7 +1829,7 @@ pub(crate) fn send_val<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default()) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -1857,7 +1859,7 @@ pub(crate) fn send_var<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default()) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -1892,7 +1894,8 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// warning is [`send`]'s. `SEND_VAL_EX` and `SEND_VAR_EX` take it too
 /// where the callee's parameter at the number takes its argument by
 /// value, as php's `_EX` handlers go to the same arm once
-/// `ARG_SHOULD_BE_SENT_BY_REF` is clear.
+/// `ARG_SHOULD_BE_SENT_BY_REF` is clear, which `ex` asks of the callee
+/// ([`Request::arg_send_mode`]).
 ///
 /// ```php
 /// function f($a, $b, $c) { return "$a|$b|$c"; }
@@ -1919,14 +1922,19 @@ fn inline_send(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
+    ex: bool,
 ) -> Option<Edge> {
     if op.op2_type == OperandKind::Const {
         return None;
     }
     let to = (op.op2 as usize).checked_sub(1)?;
-    let call = req.vm().building_at()?;
-    let callee = req.vm().stack.frame(call)?;
-    if to >= callee.header().num_args as usize || !callee.slots().get(to)?.is_undef() {
+    let (call, callee) = req.vm().stack.top()?;
+    let header = callee.header();
+    if !header.info.building()
+        || to >= header.num_args as usize
+        || !callee.slots().get(to)?.is_undef()
+        || ex && req.arg_send_mode(header.function?, op.op2).0
+    {
         return None;
     }
     let slots = req.slots_mut(frame);
@@ -2158,16 +2166,15 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
 /// Unknown named parameter $y
 /// C::r(): Argument #1 ($x) could not be passed by reference
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn send_val_ex<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op2_type != OperandKind::Const
-        && !should_be_sent_by_ref(req, op.op2)
-        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
-    {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
         return edge;
     }
     let reserved = match reserve_arg(req, frame, code, op) {
@@ -2229,16 +2236,15 @@ pub(crate) fn send_val_ex<T: Tier>(
 /// string(5) "bound"
 /// string(1) "v"
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn send_var_ex<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op2_type != OperandKind::Const
-        && !should_be_sent_by_ref(req, op.op2)
-        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
-    {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
         return edge;
     }
     let reserved = match reserve_arg(req, frame, code, op) {
@@ -11136,6 +11142,8 @@ fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
 /// #0 {main}
 ///   thrown in %s on line 4
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
