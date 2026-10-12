@@ -7,6 +7,8 @@
 //! plain values: the one question asked of the file system, whether a
 //! path names a file, is the caller's to answer.
 
+use std::borrow::Cow;
+
 /// An environment, as `environ` holds it: names and values in order, a
 /// name set again keeping its place, as `setenv(3)` keeps it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -573,19 +575,103 @@ impl Shape {
     }
 }
 
-/// `sapi_cgi_send_headers` (`Z/sapi/cgi/cgi_main.c:370`) in `shape`: a
-/// response code other than 200, or any under `cgi.nph`, writes a status
-/// line first; under `cgi.rfc2616_headers` the status line `header()` was
+/// One line of the head `sapi_cgi_send_headers` writes ([`lines`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line<'a> {
+    /// The response's status line.
+    Status(Status<'a>),
+    /// A header line the request set, as it set it.
+    Field(&'a [u8]),
+}
+
+impl Line<'_> {
+    /// The line as it goes on the wire, without its line end.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Line::Status(status) => status.bytes(),
+            Line::Field(line) => line,
+        }
+    }
+}
+
+/// The response's status as `sapi_cgi_send_headers` writes it, whole:
+/// `Status: 404 Not Found`, or under `cgi.rfc2616_headers` the `HTTP/`
+/// status line `header()` was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status<'a>(Cow<'a, [u8]>);
+
+impl Status<'_> {
+    /// The line as it goes on the wire, without its line end.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The status a web server in front of php reads off the line, as
+    /// nginx's `ngx_http_fastcgi_process_header` reads `Status:`
+    /// (`src/http/modules/ngx_http_fastcgi_module.c:2067-2083` at the
+    /// release `oracle.toml`'s `[fastcgi]` names): the code, its first
+    /// three bytes as digits, as `ngx_atoi(value, 3)` reads them, and the
+    /// text past the space after them, which the server's status line
+    /// carries as its reason phrase; `None` for a code that is not three
+    /// digits, which nginx refuses as an invalid status. An `HTTP/` line
+    /// is read past its first space.
+    #[must_use]
+    pub fn read(&self) -> Option<(u16, &[u8])> {
+        let line = self.bytes();
+        let value = if is_named(line, b"Status:") {
+            line[b"Status:".len()..].trim_ascii_start()
+        } else {
+            let space = line.iter().position(|b| *b == b' ')?;
+            &line[space + 1..]
+        };
+        let digits = value
+            .get(..3)
+            .filter(|d| d.iter().all(u8::is_ascii_digit))?;
+        let code = digits
+            .iter()
+            .fold(0u16, |code, d| code * 10 + u16::from(d - b'0'));
+        let reason = value[3..].strip_prefix(b" ").unwrap_or(&value[3..]);
+        Some((code, reason))
+    }
+}
+
+/// Whether a header line is the header `name` names, its colon included,
+/// with a value after it: `sapi_cgi_send_headers`' `strncasecmp`.
+fn is_named(line: &[u8], name: &[u8]) -> bool {
+    line.len() > name.len() && line[..name.len()].eq_ignore_ascii_case(name)
+}
+
+/// `sapi_cgi_send_headers` ([`lines`]) on the wire: each line and its CRLF,
+/// then the blank line.
+#[must_use]
+pub fn head(shape: Shape, code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in self::lines(shape, code, status_line, lines) {
+        out.extend_from_slice(line.bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// `sapi_cgi_send_headers` (`Z/sapi/cgi/cgi_main.c:370`,
+/// `Z/sapi/fpm/fpm/fpm_main.c:308`) in `shape`, line by line: a response
+/// code other than 200, or any under `cgi.nph`, writes a status line
+/// first; under `cgi.rfc2616_headers` the status line `header()` was
 /// given whole where it was, else `Status:` and an `HTTP/` status line's
 /// text past its first space where one was given, else the code and php's
 /// reason for it, unless a `Status:` header stands in the lines; then each
 /// line, the first `Status:` line alone of its kind, a `Content-Type`
-/// dropped under a 304; then the blank line.
+/// dropped under a 304.
 #[must_use]
-pub fn head(shape: Shape, code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8>]) -> Vec<u8> {
-    let is = |line: &[u8], name: &[u8]| {
-        line.len() > name.len() && line[..name.len()].eq_ignore_ascii_case(name)
-    };
+pub fn lines<'a>(
+    shape: Shape,
+    code: i64,
+    status_line: Option<&'a [u8]>,
+    lines: &'a [Vec<u8>],
+) -> Vec<Line<'a>> {
     let mut out = Vec::new();
     let mut ignore_status = false;
     let mut response_status = code;
@@ -603,7 +689,7 @@ pub fn head(shape: Shape, code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8
             let mut built = b"Status:".to_vec();
             built.extend_from_slice(rest);
             Some(built)
-        } else if lines.iter().any(|line| is(line, b"Status:")) {
+        } else if lines.iter().any(|line| is_named(line, b"Status:")) {
             None
         } else {
             Some(match reason(code) {
@@ -613,24 +699,20 @@ pub fn head(shape: Shape, code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8
         };
         if let Some(mut status) = status {
             status.truncate(MAX_HEADER_LENGTH - 1);
-            out.extend_from_slice(&status);
-            out.extend_from_slice(b"\r\n");
+            out.push(Line::Status(Status(status.into())));
             ignore_status = true;
         }
     }
     for line in lines.iter().filter(|line| !line.is_empty()) {
-        if is(line, b"Status:") {
+        if is_named(line, b"Status:") {
             if !ignore_status {
                 ignore_status = true;
-                out.extend_from_slice(line);
-                out.extend_from_slice(b"\r\n");
+                out.push(Line::Status(Status(line.as_slice().into())));
             }
-        } else if response_status != 304 || !is(line, b"Content-Type:") {
-            out.extend_from_slice(line);
-            out.extend_from_slice(b"\r\n");
+        } else if response_status != 304 || !is_named(line, b"Content-Type:") {
+            out.push(Line::Field(line));
         }
     }
-    out.extend_from_slice(b"\r\n");
     out
 }
 
@@ -734,6 +816,39 @@ mod tests {
                 &[b"Status: 299 Mine".to_vec(), b"Status: 1".to_vec()]
             ),
             b"Status: 299 Mine\r\n\r\n"
+        );
+    }
+
+    /// A web server reads a status line's code and the reason after it,
+    /// and refuses a code that is not three digits.
+    #[test]
+    fn a_status_line_is_read_as_a_web_server_reads_it() {
+        let status = |line: &'static [u8]| {
+            let status = Status(line.into());
+            status.read().map(|(code, reason)| (code, reason.to_vec()))
+        };
+        assert_eq!(
+            status(b"Status: 403 Access Denied"),
+            Some((403, b"Access Denied".to_vec()))
+        );
+        assert_eq!(status(b"status:399"), Some((399, Vec::new())));
+        assert_eq!(
+            status(b"HTTP/1.1 201 A long one"),
+            Some((201, b"A long one".to_vec()))
+        );
+        assert_eq!(status(b"Status: 1"), None);
+        let lines = [b"Content-Type: text/html".to_vec(), b"X: 1".to_vec()];
+        assert_eq!(
+            super::lines(
+                Shape::default(),
+                304,
+                Some(b"HTTP/1.1 304 Not Modified"),
+                &lines
+            ),
+            [
+                Line::Status(Status(b"Status: 304 Not Modified".as_slice().into())),
+                Line::Field(b"X: 1")
+            ]
         );
     }
 
