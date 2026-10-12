@@ -1271,7 +1271,7 @@ fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label(
             bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(&*root)
             .arg("permit")
@@ -1310,7 +1310,7 @@ fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label(
 }
 
 fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .arg("permit")
@@ -2816,7 +2816,7 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
 
 /// The binary over the scratch root, with no stdin.
 fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(args)

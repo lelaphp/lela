@@ -109,6 +109,11 @@ pub enum Event {
     DocCommentRestore,
 }
 
+/// How many nodes the builder makes room for open at once, and for the
+/// children pending under them, before it grows: what a small source
+/// nests, and under the size the allocator serves fastest.
+const OPEN: usize = 4;
+
 /// The kind of an abandoned `Start`, which the builder skips. `EOF` is
 /// never a node, so it is free to mean this.
 pub const TOMBSTONE: SyntaxKind = SyntaxKind::EOF;
@@ -170,6 +175,9 @@ struct Builder<'a> {
     /// The direct children of every open frame, innermost last.
     pending: Vec<Element>,
     frames: Vec<Frame>,
+    /// The kinds of one forward-parent chain while it is opened, kept
+    /// between chains so a chain costs no allocation of its own.
+    chain: Vec<SyntaxKind>,
     nodes: Nodes,
     missing: Vec<Missing>,
 }
@@ -181,15 +189,27 @@ struct Builder<'a> {
 /// still open at the end is finished.
 #[must_use]
 pub fn build(tokens: &[Token], lines: &LineIndex, mut events: Vec<Event>) -> Built {
+    // The shape holds an element per `Start` and per `Token`, so it is
+    // laid down once at that length, and grows only where the root takes
+    // tokens the parser left unconsumed.
+    let shaped = events
+        .iter()
+        .filter(|event| match event {
+            Event::Start { kind, .. } => *kind != TOMBSTONE,
+            Event::Token { .. } => true,
+            _ => false,
+        })
+        .count();
     let mut builder = Builder {
         tokens,
         lines,
         raw: 0,
         prev: None,
         doc_comment: None,
-        elements: Vec::new(),
-        pending: Vec::new(),
-        frames: Vec::new(),
+        elements: Vec::with_capacity(shaped),
+        pending: Vec::with_capacity(shaped.min(2 * OPEN)),
+        frames: Vec::with_capacity(OPEN),
+        chain: Vec::new(),
         nodes: Nodes::default(),
         missing: Vec::new(),
     };
@@ -205,12 +225,17 @@ pub fn build(tokens: &[Token], lines: &LineIndex, mut events: Vec<Event>) -> Bui
             Event::Start { kind, .. } if kind == TOMBSTONE => {}
             Event::Start {
                 kind,
+                forward_parent: None,
+            } => builder.start(kind),
+            Event::Start {
+                kind,
                 forward_parent,
             } => {
                 // The forward-parent chain: the innermost first, so the
                 // chain is opened in reverse, and each later `Start` is
                 // tombstoned so it is not opened twice.
-                let mut chain = vec![kind];
+                let mut chain = std::mem::take(&mut builder.chain);
+                chain.push(kind);
                 let mut next = forward_parent;
                 let mut at = i;
                 while let Some(delta) = next {
@@ -229,7 +254,11 @@ pub fn build(tokens: &[Token], lines: &LineIndex, mut events: Vec<Event>) -> Bui
                         _ => next = None,
                     }
                 }
-                builder.start(chain.into_iter().rev());
+                for &kind in chain.iter().rev() {
+                    builder.start(kind);
+                }
+                chain.clear();
+                builder.chain = chain;
             }
             Event::Finish => builder.finish(),
             Event::Token { remap } => builder.token(remap),
@@ -275,34 +304,33 @@ impl Builder<'_> {
         }
     }
 
-    /// Open the nodes of one chain, outermost first.
-    fn start(&mut self, chain: impl Iterator<Item = SyntaxKind>) {
+    /// Open one node; a chain opens its nodes outermost first, each at
+    /// the same token.
+    fn start(&mut self, kind: SyntaxKind) {
         self.skip_insignificant();
         let before = self.prev;
-        for kind in chain {
-            let enclosing = self.frames.last().and_then(|below| {
-                if below.before == before {
-                    below.enclosing
-                } else {
-                    Some(below.kind)
-                }
-            });
-            self.frames.push(Frame {
-                kind,
-                at: self.elements.len(),
-                children_from: self.pending.len(),
-                doc_comment: None,
-                before,
-                enclosing,
-            });
-            self.elements.push(Element::Node {
-                kind,
-                range: TextRange::new(0, 0),
-                line: 0,
-                index: 0,
-                descendants: 0,
-            });
-        }
+        let enclosing = self.frames.last().and_then(|below| {
+            if below.before == before {
+                below.enclosing
+            } else {
+                Some(below.kind)
+            }
+        });
+        self.frames.push(Frame {
+            kind,
+            at: self.elements.len(),
+            children_from: self.pending.len(),
+            doc_comment: None,
+            before,
+            enclosing,
+        });
+        self.elements.push(Element::Node {
+            kind,
+            range: TextRange::new(0, 0),
+            line: 0,
+            index: 0,
+            descendants: 0,
+        });
     }
 
     /// php's `backup_doc_comment`: the innermost open node takes the

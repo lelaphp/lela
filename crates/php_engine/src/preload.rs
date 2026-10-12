@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use crate::api::abi::{Beneath, PostStartup, chain};
-use crate::api::request::{Phase, Request, Sink};
-use crate::engine::{Engine, OutputSink, RequestDescription, refused_program, serve_unit};
+use crate::api::request::{Phase, Request};
+use crate::engine::{Engine, Lent, OutputSink, RequestDescription, refused_program, serve_unit};
 use crate::unit_cache::PRELOAD_SCRIPT;
 
 /// Whether the engine serves, decided once as it finishes starting up.
@@ -33,37 +33,35 @@ impl Engine {
     /// (`accel_finish_startup_preload`). No extension's `rinit` runs. The
     /// status the process ends with where the startup failed, 1 where an
     /// `E_CORE_ERROR` bailed out of it, or the chain's refusal; `None`
-    /// where it started.
+    /// where it started; and `sink`, handed back.
     pub fn start_up(
         &self,
         env: Vec<(Vec<u8>, Vec<u8>)>,
         cwd: std::path::PathBuf,
-        sink: &mut dyn OutputSink,
-    ) -> Option<i32> {
+        sink: Box<dyn OutputSink + Send>,
+    ) -> (Option<i32>, Box<dyn OutputSink + Send>) {
         let host = RequestDescription {
             env,
             cwd,
             sapi_name: self.shared.host.to_owned(),
             ..RequestDescription::default()
         };
-        let mut req = Request::new(
+        let mut req = Request::lent(
             Arc::clone(&self.shared),
             RequestDescription {
                 sapi_name: host.sapi_name.clone(),
                 ..RequestDescription::default()
             },
+            sink,
         );
-        if let Some(held) = sink.held() {
-            req.hold(held);
-        }
         let failed = self.show_startup_raised(&mut req);
-        hand_over(&mut req, sink);
+        let sink = req.release_sink();
         if failed {
-            return Some(1);
+            return (Some(1), sink);
         }
         match self.started(&host, sink) {
-            Started::Serving => None,
-            Started::Refused(status) => Some(status),
+            (Started::Serving, sink) => (None, sink),
+            (Started::Refused(status), sink) => (Some(status), sink),
         }
     }
 
@@ -72,18 +70,27 @@ impl Engine {
     /// entered from the top ([`crate::api::abi::chain::PostStartup`]),
     /// whose answer serves, refuses or names a file to preload. What the
     /// extensions wrote goes to
-    /// `sink` before anything the first request writes.
-    pub(crate) fn started(&self, first: &RequestDescription, sink: &mut dyn OutputSink) -> Started {
-        *self
-            .shared
-            .started
-            .get_or_init(|| self.finish_startup(first, sink))
+    /// `sink` before anything the first request writes, and `sink` is
+    /// handed back. One thread finishes it, and a thread that asks while
+    /// it does waits for its answer.
+    pub(crate) fn started(&self, first: &RequestDescription, sink: Lent) -> (Started, Lent) {
+        if let Some(started) = self.shared.started.get() {
+            return (*started, sink);
+        }
+        let _finishing =
+            (self.shared.starting.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(started) = self.shared.started.get() {
+            return (*started, sink);
+        }
+        let (started, sink) = self.finish_startup(first, sink);
+        self.shared.started.set(started).ok();
+        (started, sink)
     }
 
-    fn finish_startup(&self, first: &RequestDescription, sink: &mut dyn OutputSink) -> Started {
+    fn finish_startup(&self, first: &RequestDescription, sink: Lent) -> (Started, Lent) {
         let links = self.shared.supplied.post_startup.links();
         if links.is_empty() {
-            return Started::Serving;
+            return (Started::Serving, sink);
         }
         // `accel_finish_startup_preload`'s request: the host's, with no
         // program, no arguments and no server variables of its own
@@ -94,21 +101,12 @@ impl Engine {
             sapi_name: first.sapi_name.clone(),
             ..RequestDescription::default()
         };
-        let mut req = Request::new(Arc::clone(&self.shared), description);
-        if let Some(held) = sink.held() {
-            req.hold(held);
-        }
+        let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
         let answer = Beneath::<chain::PostStartup>::top(links, ()).serve(&mut req);
         match answer {
-            PostStartup::Serve => {
-                hand_over(&mut req, sink);
-                Started::Serving
-            }
-            PostStartup::Refuse { status } => {
-                hand_over(&mut req, sink);
-                Started::Refused(status)
-            }
-            PostStartup::Preload(script) => self.preload(req, &script, sink),
+            PostStartup::Serve => (Started::Serving, req.release_sink()),
+            PostStartup::Refuse { status } => (Started::Refused(status), req.release_sink()),
+            PostStartup::Preload(script) => self.preload(req, &script),
         }
     }
 
@@ -119,7 +117,7 @@ impl Engine {
     /// left published for every request, each file it compiled told as
     /// cached; then the request shut down. A file that fails fails the
     /// startup, and the process ends with status 1, as php's does.
-    fn preload(&self, mut req: Request, script: &[u8], sink: &mut dyn OutputSink) -> Started {
+    fn preload(&self, mut req: Request, script: &[u8]) -> (Started, Lent) {
         req.hash_environment().ok();
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
@@ -187,19 +185,11 @@ impl Engine {
         }
         // The preload's request reports to no host: what it observed
         // and the natives it entered end with it.
-        drop(self.shutdown_request(&mut req, sink));
+        let (_, _, sink) = self.shutdown_request(&mut req);
         if failed {
-            Started::Refused(1)
+            (Started::Refused(1), sink)
         } else {
-            Started::Serving
+            (Started::Serving, sink)
         }
-    }
-}
-
-/// What a request that served no program wrote, handed to the host.
-pub(crate) fn hand_over(req: &mut Request, sink: &mut dyn OutputSink) {
-    match req.release_sink() {
-        Sink::Held(mut held) => held.flush(),
-        Sink::Kept(kept) => kept.hand_to(sink),
     }
 }

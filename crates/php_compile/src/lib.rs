@@ -48,15 +48,16 @@ pub mod syntax {
 use php_heap::{Fatal, FatalReason, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
-use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name, Visibility};
+use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Visibility};
 use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
 #[allow(clippy::struct_excessive_bools)] // php's compile-time ini entries and compiler options, each one fact
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
-    /// The file name the unit and its errors carry.
-    pub filename: Name,
+    /// The file name the unit and its errors carry, borrowed: the unit
+    /// takes its own copy where an op array or a declaration records it.
+    pub filename: &'a [u8],
     /// Whether the source is a file or the string an `eval` hands over.
     pub kind: SourceKind,
     /// The working directory of the request the unit compiles for,
@@ -65,7 +66,7 @@ pub struct Options<'a> {
     /// `.` (`zend_try_ct_eval_magic_const`). The host that described the
     /// request is what knows it; the compiler reads no directory of the
     /// process's own.
-    pub cwd: Vec<u8>,
+    pub cwd: &'a [u8],
     /// Whether the caller's `declare(strict_types=1)` is in force.
     pub strict_types: bool,
     /// php's `precision` ini entry as it stands while the file compiles,
@@ -164,9 +165,9 @@ pub struct Options<'a> {
 impl Default for Options<'_> {
     fn default() -> Self {
         Options {
-            filename: Name::default(),
+            filename: &[],
             kind: SourceKind::File,
-            cwd: Vec::new(),
+            cwd: &[],
             strict_types: false,
             precision: 14,
             short_open_tag: true,
@@ -685,7 +686,7 @@ pub(crate) fn fatal_message(fatal: Fatal) -> String {
 mod tests {
     use super::*;
     use php_link::Names;
-    use php_unit::decl::{ConstExpr, ConstantName, NameKind, Parameter, Type, Visibility};
+    use php_unit::decl::{ConstExpr, ConstantName, Name, NameKind, Parameter, Type, Visibility};
     use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
 
     /// A dump read as text by the tests below, which hold it to php's
@@ -1290,8 +1291,8 @@ mod tests {
         fn dir(filename: &[u8], cwd: &[u8]) -> Option<Vec<u8>> {
             let mut strings = php_heap::Strings::new();
             let options = Options {
-                filename: Name(filename.into()),
-                cwd: cwd.to_vec(),
+                filename,
+                cwd,
                 ..Options::default()
             };
             let unit = compile(

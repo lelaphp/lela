@@ -305,6 +305,7 @@ scratch::Tree::new
 scratch::Tree::path
 scratch::cargo
 scratch::repository
+scratch::xtask
 status::Against
 status::render
 status::session

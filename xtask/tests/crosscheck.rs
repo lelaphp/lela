@@ -549,7 +549,7 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
         .status()
         .unwrap();
     assert!(add.success());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&*root)
         .args(["crosscheck", "--staged"])

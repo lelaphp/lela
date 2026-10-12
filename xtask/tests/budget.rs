@@ -660,7 +660,7 @@ fn a_clippy_rule_clippy_cannot_hold_is_refused_naming_why() {
 #[test]
 fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/budget/ceiling");
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&fixture)
         .arg("budget")
@@ -682,7 +682,7 @@ fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
 #[test]
 fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/budget/lock-packages");
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&fixture)
         .arg("budget")

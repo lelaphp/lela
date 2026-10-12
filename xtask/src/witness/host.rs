@@ -32,6 +32,7 @@
 //! listen = "{dir}/fpm.sock"            # a path is a Unix socket, else host:port
 //! ready = ["fpm.log", "ready to handle connections"]  # waited for in a file
 //! stop = "SIGQUIT"
+//! settled = ["fpm.log", '(?s)started.*started']  # matched once answered, before the stop
 //! [[line.serve.request]]
 //! http = "GET / HTTP/1.0\r\n\r\n"      # or `params` and `body`, as FastCGI records
 //! [[line.then]]                        # a command line run after it, in the same
@@ -140,7 +141,8 @@ impl From<Taken> for Streams {
 
 /// What makes a line a server's: where it listens, what it writes once it
 /// is ready, the requests it is sent, each on a connection of its own and
-/// answered before the next, and the signal that stops it.
+/// answered before the next, what a file of its matches once the server
+/// has done what the last answer set going, and the signal that stops it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Serve {
@@ -148,6 +150,11 @@ struct Serve {
     ready: Option<(String, String)>,
     #[serde(default)]
     request: Vec<Request>,
+    /// A file and a pattern its text is waited to match after the last
+    /// answer and before the stop: the event a stop would otherwise race,
+    /// such as php-fpm replacing a child that ended at its
+    /// `pm.max_requests` after answering (#2531).
+    settled: Option<(String, String)>,
     stop: String,
 }
 
@@ -204,6 +211,9 @@ impl Held {
             }
             if let Some(serve) = &line.serve {
                 Signal::from_str(&serve.stop).with_context(|| format!("{named}: stop"))?;
+                if let Some((_, pattern)) = &serve.settled {
+                    Regex::new(pattern).with_context(|| format!("{named}: settled"))?;
+                }
                 if serve
                     .request
                     .iter()
@@ -308,19 +318,70 @@ fn both(
     line: &Line,
 ) -> Result<(String, String)> {
     let dir = Tree::new("line")?;
-    let port = TcpListener::bind("127.0.0.1:0")
-        .and_then(|probe| probe.local_addr())
-        .context("finding a free loopback port")?
-        .port();
     let masks = line.masks()?;
     let masked = |text: String| {
         masks.iter().fold(text, |text, (re, with)| {
             re.replace_all(&text, *with).into_owned()
         })
     };
-    let theirs = ran(oracle, pinned, line, dir.path(), port)?;
-    let ours = ran(oracle, engine, line, dir.path(), port)?;
-    Ok((masked(theirs), masked(ours)))
+    let mut taken = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|probe| probe.local_addr())
+            .context("finding a free loopback port")?
+            .port();
+        let renderings = ran(oracle, pinned, line, dir.path(), port)
+            .and_then(|theirs| Ok((theirs, ran(oracle, engine, line, dir.path(), port)?)));
+        match renderings {
+            Err(err) if err.is::<InUse>() => taken.push(port.to_string()),
+            renderings => {
+                let (theirs, ours) = renderings?;
+                return Ok((masked(theirs), masked(ours)));
+            }
+        }
+    }
+    bail!(
+        "line {:?}: each of the ports {} was found free and taken before a host bound it",
+        line.name,
+        taken.join(", ")
+    )
+}
+
+/// How many ports a server's line is offered: a port found free can be
+/// taken by another process before the host binds it, which then says so
+/// and serves nothing (#2653).
+const ATTEMPTS: usize = 3;
+
+/// A server's line whose host could not bind `{port}` because something
+/// else had it: the line is run again, both hosts, on another port.
+#[derive(Debug)]
+struct InUse(u16);
+
+impl std::fmt::Display for InUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "port {} was taken before the host bound it", self.0)
+    }
+}
+
+impl std::error::Error for InUse {}
+
+/// Whether a server's run said, on a stream or in a file of `dir`, that
+/// `port` was in use when it bound it: php -S's `Failed to listen on
+/// 127.0.0.1:<port> (reason: Address already in use)`, php-fpm's `unable
+/// to bind listening socket for address '127.0.0.1:<port>': Address
+/// already in use (48)`.
+fn in_use(port: u16, streams: [&[u8]; 2], dir: &Path) -> Result<bool> {
+    let (address, said) = (format!(":{port}"), "Address already in use");
+    // `:5000` is not `:50001`: the port is followed by no other digit.
+    let port_named = |text: &str| {
+        text.match_indices(&address)
+            .any(|(at, _)| !text[at + address.len()..].starts_with(|c: char| c.is_ascii_digit()))
+    };
+    let names = |text: &str| port_named(text) && text.contains(said);
+    Ok(streams
+        .into_iter()
+        .any(|bytes| names(&String::from_utf8_lossy(bytes)))
+        || files(dir)?.values().any(|text| names(text)))
 }
 
 /// `{dir}` and `{port}` in `text` as this line's run has them.
@@ -363,6 +424,9 @@ fn ran(oracle: &Oracle<'_>, binary: &Path, line: &Line, dir: &Path, port: u16) -
                 (None, None) => Ok(Vec::new()),
             }
         })?;
+        if serve.is_some() && in_use(port, [&ended.stdout, &ended.stderr], dir)? {
+            return Err(InUse(port).into());
+        }
         let Some(exit) = ended.exit else {
             bail!(
                 "{} ran past the recipe's limit of {} s on line {:?}",
@@ -502,21 +566,12 @@ fn signalled(pid: u32, signal: Signal) -> Result<()> {
     kill(pid, signal).with_context(|| format!("sending {signal} to {pid}"))
 }
 
-/// What a server answered each of its requests, once it was ready.
+/// What a server answered each of its requests, once it was ready, and
+/// once its file says it has settled after them.
 fn asked(serve: &Serve, dir: &Path, port: u16) -> Result<Vec<String>> {
     let started = Instant::now();
     if let Some((file, text)) = &serve.ready {
-        let path = dir.join(file);
-        while !fs::read_to_string(&path).is_ok_and(|written| written.contains(text)) {
-            if started.elapsed() > PATIENCE {
-                bail!(
-                    "{} did not say {text:?} in {}s",
-                    path.display(),
-                    PATIENCE.as_secs()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        waited(&dir.join(file), text, |written| written.contains(text))?;
     }
     let listen = fill(&serve.listen, dir, port);
     let mut answers = Vec::new();
@@ -531,7 +586,30 @@ fn asked(serve: &Serve, dir: &Path, port: u16) -> Result<Vec<String>> {
         };
         answers.push(answer);
     }
+    if let Some((file, pattern)) = &serve.settled {
+        let pattern = Regex::new(pattern)?;
+        waited(&dir.join(file), pattern.as_str(), |written| {
+            pattern.is_match(written)
+        })?;
+    }
     Ok(answers)
+}
+
+/// Until the file at `path` holds what `said` describes, as `holds` reads
+/// it, [`PATIENCE`] at most.
+fn waited(path: &Path, said: &str, holds: impl Fn(&str) -> bool) -> Result<()> {
+    let started = Instant::now();
+    while !fs::read_to_string(path).is_ok_and(|written| holds(&written)) {
+        if started.elapsed() > PATIENCE {
+            bail!(
+                "{} did not say {said:?} in {}s",
+                path.display(),
+                PATIENCE.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
 }
 
 /// A connection the server did not take, which is tried again until it
@@ -713,6 +791,80 @@ mod tests {
         let (judgement, note) = judged(text, &pin, &engine);
         assert_eq!(judgement, Judgement::Fail, "{note}");
         assert!(note.contains("+y\n+y\n+y\n+y"), "{note}");
+    }
+
+    /// A server's port taken by another process between the probe and the
+    /// host's bind is not the line's miss (#2653): the pinned host here
+    /// says, once, what php -S says of a port in use and serves nothing,
+    /// and the line is run again, both hosts, on another port, and passes.
+    #[test]
+    fn a_port_taken_before_the_host_binds_it_is_tried_again_on_another() {
+        let hosts = Tree::new("host-line-taken").unwrap();
+        let once = hosts.join("refused-once");
+        let serve = "echo up > up; exec sleep 30";
+        let pinned = host(
+            &hosts,
+            "php-cgi",
+            &format!(
+                "if [ ! -e '{0}' ]; then : > '{0}'; echo \"Failed to listen on 127.0.0.1:$1 \
+                 (reason: Address already in use)\" >&2; exit 1; fi; {serve}",
+                once.display()
+            ),
+        );
+        let engine = host(&hosts, "engine", serve);
+        let text = "[[line]]\nname = \"one\"\nargs = [\"{port}\"]\n[line.serve]\n\
+                    listen = \"127.0.0.1:{port}\"\nready = [\"up\", \"up\"]\nstop = \"SIGTERM\"\n";
+        let (judgement, note) = judged(text, &pin(&pinned, None), &engine);
+        assert!(once.exists(), "the first port was refused");
+        assert_eq!(judgement, Judgement::Pass, "{note}");
+    }
+
+    /// A port is in use where a host names that port, and not a longer
+    /// one that begins with its digits, beside the words it is refused with.
+    #[test]
+    fn a_port_in_use_is_the_port_named_and_no_longer_one() {
+        let dir = Tree::new("host-line-in-use").unwrap();
+        let said = |port: u16| {
+            format!("Failed to listen on 127.0.0.1:{port} (reason: Address already in use)")
+        };
+        let in_use = |port, text: &str| super::in_use(port, [text.as_bytes(), b""], &dir).unwrap();
+        assert!(in_use(5000, &said(5000)));
+        assert!(!in_use(5000, &said(50001)));
+        assert!(!in_use(
+            5000,
+            "Failed to listen on 127.0.0.1:5000 (reason: Permission denied)"
+        ));
+    }
+
+    /// A server's stop waits for what its `settled` file must match after
+    /// the last answer (#2531): here the pinned host writes its log line
+    /// three seconds after it is ready and the engine's at once, so a stop sent
+    /// at the answer finds the two files apart, and one sent once the line
+    /// is there finds them alike.
+    #[test]
+    fn a_server_is_stopped_once_its_file_matches_what_it_settles_on() {
+        let hosts = Tree::new("host-line-settled").unwrap();
+        let pinned = host(
+            &hosts,
+            "php-cgi",
+            "echo up > up; (/bin/sleep 3; echo done >> log) >/dev/null 2>&1 & exec /bin/sleep 30",
+        );
+        let pin = pin(&pinned, None);
+        let engine = host(
+            &hosts,
+            "engine",
+            "echo up > up; echo done >> log; exec /bin/sleep 30",
+        );
+        let line = |settled: &str| {
+            format!(
+                "[[line]]\nname = \"one\"\nargs = []\n[line.serve]\nlisten = \"127.0.0.1:1\"\n\
+                 ready = [\"up\", \"up\"]\n{settled}stop = \"SIGTERM\"\n"
+            )
+        };
+        assert_eq!(judged(&line(""), &pin, &engine).0, Judgement::Fail);
+        let settled = line("settled = [\"log\", \"^done\"]\n");
+        let (judgement, note) = judged(&settled, &pin, &engine);
+        assert_eq!(judgement, Judgement::Pass, "{note}");
     }
 
     /// A file of lines is refused whole for a name given twice, a mask

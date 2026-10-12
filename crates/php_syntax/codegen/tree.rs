@@ -25,8 +25,8 @@
 //! sits behind a reliable anchor token, as a schema error at build time.
 //! The anchors are what the resolution reads against: beside each struct
 //! is its `resolve`, one read per field over the node's children, the
-//! `Nodes` arena holds one vector per kind, the dispatcher `resolve`
-//! pushes a finished node into its vector by kind, and each alternation
+//! `Nodes` arena holds one vector per kind present, the dispatcher
+//! `resolve` pushes a finished node into its vector by kind, and each alternation
 //! enum reads one child as its variant through `Child`. The reads
 //! themselves, `first`, `first_after`, `all`, `token`, `tokens` and
 //! `member`, are written by hand in `src/tree/mod.rs`.
@@ -419,6 +419,20 @@ impl<'a> Model<'a> {
 
     fn class_of(&self, name: &str) -> Option<DefClass> {
         self.info(name).map(|info| info.class)
+    }
+
+    /// The struct node kinds, in the schema's order: a kind's position
+    /// here is its slot in `Nodes`.
+    fn structs(&self) -> impl Iterator<Item = &DefInfo<'a>> {
+        self.defs
+            .iter()
+            .filter(|info| info.class == DefClass::StructNode)
+    }
+
+    /// The slot of the struct node `name` in `Nodes`, none where `name`
+    /// is no struct node.
+    fn slot_of(&self, name: &str) -> Option<usize> {
+        self.structs().position(|info| info.def.name == name)
     }
 
     /// Transitive kind set of a definition.
@@ -933,9 +947,17 @@ fn emit_struct(
              const KIND: SyntaxKind = SyntaxKind::{kind};\n    \
              fn range(&self) -> TextRange {{\n        self.range\n    }}\n    \
              fn line(&self) -> u32 {{\n        self.line\n    }}\n    \
-             fn all(nodes: &Nodes) -> &[Self] {{\n        &nodes.{field}\n    }}\n\
+             fn all(nodes: &Nodes) -> &[Self] {{\n        \
+                 match nodes.store({slot}) {{\n            \
+                     Some(Store::{name}(nodes)) => nodes,\n            \
+                     _ => &[],\n        \
+                 }}\n    \
+             }}\n\
          }}\n",
-        field = snake_case(name)
+        slot = model.slot_of(name).unwrap_or_else(|| {
+            errors.push(Error::global(format!("{name} has no slot in `Nodes`")));
+            0
+        })
     )
     .ok();
     emit_resolver(buf, model, def, fields, errors);
@@ -1103,27 +1125,46 @@ fn has_required(fields: &[Field]) -> bool {
 
 /// `Nodes`, the arena: one vector per struct node kind, so a
 /// `NodeId<ClassDecl>` indexes the class declarations and nothing else,
-/// and no node pays for the width of another kind's struct.
+/// and no node pays for the width of another kind's struct. A kind's
+/// vector is made when its first node is, so a tree pays for the kinds
+/// it holds and not for every kind the schema names: `Store` is one
+/// kind's vector, and a slot per kind says where in `stores` it stands.
 fn emit_nodes(buf: &mut String, model: &Model<'_>) {
     buf.push_str(
-        "/// The arena (design §4.9, ADR-0003): every node of the tree, one vector per kind,\n\
-         /// each addressed by its `NodeId`. Filled by the builder, read through `Tree`.\n\
-         #[derive(Clone, Debug, Default, PartialEq, Eq)]\n\
-         pub struct Nodes {\n",
+        "/// One kind's vector in the arena, by the kind's struct.\n\
+         #[derive(Clone, Debug, PartialEq, Eq)]\n\
+         enum Store {\n",
     );
-    for info in &model.defs {
-        if info.class != DefClass::StructNode {
-            continue;
-        }
-        writeln!(
-            buf,
-            "    {}: Vec<{}>,",
-            snake_case(&info.def.name),
-            info.def.name
-        )
-        .ok();
+    for info in model.structs() {
+        let name = &info.def.name;
+        writeln!(buf, "    {name}(Vec<{name}>),").ok();
     }
     buf.push_str("}\n\n");
+    write!(
+        buf,
+        "/// The arena (design §4.9, ADR-0003): every node of the tree, one vector per kind,\n\
+         /// each addressed by its `NodeId`. Filled by the builder, read through `Tree`. A\n\
+         /// kind's vector is made with its first node, so an arena holds the kinds its\n\
+         /// tree has and nothing for the rest.\n\
+         #[derive(Clone, Debug, PartialEq, Eq)]\n\
+         pub struct Nodes {{\n    \
+             /// Where each struct kind's vector stands in `stores`, by the kind's slot,\n    \
+             /// and none while no node of the kind is built.\n    \
+             slots: [Option<StoreAt>; {count}],\n    \
+             /// The vectors, in the order their kinds' first nodes were built.\n    \
+             stores: Vec<Store>,\n\
+         }}\n\n\
+         impl Default for Nodes {{\n    \
+             fn default() -> Self {{\n        \
+                 Nodes {{\n            \
+                     slots: [None; {count}],\n            \
+                     stores: Vec::new(),\n        \
+                 }}\n    \
+             }}\n\
+         }}\n\n",
+        count = model.structs().count()
+    )
+    .ok();
 }
 
 /// `resolve`, the builder's one call per finished node: the struct of
@@ -1146,10 +1187,7 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
          ) -> Resolved {\n    \
              match kind {\n",
     );
-    for info in &model.defs {
-        if info.class != DefClass::StructNode {
-            continue;
-        }
+    for (slot, info) in model.structs().enumerate() {
         let name = &info.def.name;
         // The fields were derived, and their errors reported, when the
         // struct was emitted.
@@ -1157,7 +1195,10 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
         let (open, close) = if fallible { ("", "") } else { ("Ok(", ")") };
         writeln!(
             buf,
-            "        SyntaxKind::{} => push(&mut nodes.{}, {open}{name}::resolve(range, line, children, doc_comment){close}),",
+            "        SyntaxKind::{} => match nodes.open({slot}, Store::{name}) {{\n            \
+                 Some(Store::{name}(nodes)) => push(nodes, {open}{name}::resolve(range, line, children, doc_comment){close}),\n            \
+                 _ => Resolved::Missing(\"Nodes.{}\"),\n        \
+             }},",
             screaming_snake(name),
             snake_case(name)
         ).ok();
@@ -1475,6 +1516,11 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
     }
 
     emit_traits(&mut buf, &model, &mut errors);
+    if model.structs().count() >= usize::from(u8::MAX) {
+        errors.push(Error::global(
+            "more struct node kinds than a `Nodes` slot (a u8) counts",
+        ));
+    }
     emit_nodes(&mut buf, &model);
     emit_resolve(&mut buf, &model);
 
@@ -1782,8 +1828,9 @@ mod tests {
              Member = '->' name:<member_ident>\n",
         );
         for needle in [
-            "pub struct Nodes {\n    root: Vec<Root>,\n    decl: Vec<Decl>,",
-            "fn all(nodes: &Nodes) -> &[Self] {\n        &nodes.decl\n    }",
+            "enum Store {\n    Root(Vec<Root>),\n    Decl(Vec<Decl>),",
+            "    slots: [Option<StoreAt>; 6],",
+            "fn all(nodes: &Nodes) -> &[Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes,\n            _ => &[],\n        }\n    }",
             "impl Decl {",
             "    ) -> Result<Self, &'static str> {",
             "        let Some(name) = token(children, &[], &[SyntaxKind::IDENT]) else {\n            \
@@ -1802,8 +1849,8 @@ mod tests {
             "        if let Element::Token { kind: SyntaxKind::IDENT, id } = *element {\n            \
                  return Some(Self::Ident(id));",
             "pub(crate) fn resolve(",
-            "        SyntaxKind::DECL => push(&mut nodes.decl, Decl::resolve(range, line, children, doc_comment)),",
-            "        SyntaxKind::ROOT => push(&mut nodes.root, Ok(Root::resolve(range, line, children, doc_comment))),",
+            "        SyntaxKind::DECL => match nodes.open(1, Store::Decl) {\n            Some(Store::Decl(nodes)) => push(nodes, Decl::resolve(range, line, children, doc_comment)),\n            _ => Resolved::Missing(\"Nodes.decl\"),\n        },",
+            "        SyntaxKind::ROOT => match nodes.open(0, Store::Root) {\n            Some(Store::Root(nodes)) => push(nodes, Ok(Root::resolve(range, line, children, doc_comment))),\n            _ => Resolved::Missing(\"Nodes.root\"),\n        },",
             "        _ => Resolved::Untyped,",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");

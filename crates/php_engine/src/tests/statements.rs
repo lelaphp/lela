@@ -24,7 +24,7 @@ use crate::api::abi::Statement;
 use crate::api::raising::Thrown;
 use crate::engine::{Engine, EngineBuilder, RequestDescription};
 use crate::probe::Probe;
-use crate::test::Capture;
+use crate::test::{Capture, handed_back};
 use crate::{CommandLine, tier::Tier};
 
 /// The stepped program: a loop that calls a function, an include, and
@@ -300,17 +300,17 @@ fn what_a_statement_handler_throws_is_raised_where_the_statement_stands() {
 #[test]
 fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
     fn command_line(engine: &Engine, dir: &Path, code: &str) -> String {
-        let mut sink = Capture::default();
         let description = RequestDescription {
             cwd: dir.to_path_buf(),
             sapi_name: String::from("cli"),
             ..RequestDescription::default()
         };
-        engine.command_line(
+        let (_, sink) = engine.command_line(
             description,
             CommandLine::Direct(code.as_bytes().to_vec()),
-            &mut sink,
+            Box::new(Capture::default()),
         );
+        let sink: Capture = handed_back(sink).unwrap_or_default();
         String::from_utf8_lossy(&sink.stdout).into_owned()
     }
     let rec = Recording::start();

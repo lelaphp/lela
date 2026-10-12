@@ -342,6 +342,79 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
     std::env::join_paths(paths).context("joining the stand-in's directory onto PATH")
 }
 
+/// A program copied into a scratch tree of its own and held there for as
+/// long as the value lives, so a call through [`Binary::path`] runs the
+/// program as it stood when it was held, whatever has since happened at
+/// the path it was copied from (#2756).
+///
+/// `CARGO_BIN_EXE_xtask` is `target/debug/xtask`, and cargo relinks that
+/// path by removing it and linking the new build in its place: the permit
+/// hook's `cargo build -p xtask` does so whenever a checkout's tip moves,
+/// and between the removal and the link the path names nothing, so an
+/// integration test spawning it then failed `NotFound`. On macOS the copy
+/// is an APFS clone, which costs no space and is not touched by a later
+/// write to the original; elsewhere it is a hard link to the build's file,
+/// which the relink unlinks and leaves standing, and a whole copy only
+/// where no link can be made.
+pub(crate) struct Binary {
+    _tree: Tree,
+    path: PathBuf,
+}
+
+impl Binary {
+    /// `bin` copied into a tree of its own. A `bin` that names nothing is
+    /// waited for, a second at most, since the one moment that happens is
+    /// a relink between its removal and its link.
+    pub(crate) fn hold(bin: &Path) -> Result<Binary> {
+        let name = bin
+            .file_name()
+            .context("a program path with no file name")?;
+        let tree = Tree::new("binary")?;
+        let path = tree.join(name);
+        let take = || {
+            if !cfg!(target_os = "macos") && std::fs::hard_link(bin, &path).is_ok() {
+                return Ok(());
+            }
+            std::fs::copy(bin, &path).map(drop)
+        };
+        let mut waited = 0;
+        loop {
+            match take() {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound && waited < 200 => {
+                    waited += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                copied => {
+                    copied.map_err(|err| made(err, &path, "holding a copy of the program"))?;
+                    return Ok(Binary { _tree: tree, path });
+                }
+            }
+        }
+    }
+
+    /// Where the held copy stands.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// The binary under test, `env!("CARGO_BIN_EXE_xtask")`, held once for the
+/// whole test process ([`Binary`]): what every integration test spawns.
+/// The first `bin` asked for is the one held; every caller names the same.
+/// The held tree stands until the process ends, a static is never dropped,
+/// and the next run's sweep takes it. Where it cannot be held, `bin`
+/// itself, with the reason on stderr.
+pub fn xtask(bin: &'static str) -> &'static Path {
+    static HELD: std::sync::OnceLock<Option<Binary>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        Binary::hold(Path::new(bin))
+            .inspect_err(|err| eprintln!("running {bin} itself, not a held copy: {err:#}"))
+            .ok()
+    })
+    .as_ref()
+    .map_or(Path::new(bin), Binary::path)
+}
+
 /// A scratch repository at `to` holding `workspace`'s files, tracked or
 /// not yet but not ignored and standing in the working tree
 /// ([`crate::git::files`]), as the one commit on `main`, with the hooks
@@ -709,8 +782,39 @@ mod tests {
 
     use std::os::unix::fs::MetadataExt;
 
-    use super::{Full, LOCK, Stray, Tree, beside, hold, made, reap, stop_forsaken};
+    use super::{Binary, Full, LOCK, Stray, Tree, beside, hold, made, reap, stop_forsaken};
     use crate::reading::{Reading, Status};
+
+    /// A held program runs as it stood when it was held (#2756): the path
+    /// it was copied from is removed after one spawn, as cargo's relink
+    /// removes `target/debug/xtask`, and the next spawn still runs; then
+    /// another program is laid at that path, and the held one is still
+    /// what runs.
+    #[test]
+    fn a_held_program_runs_after_its_path_is_removed_and_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Tree::new("binary-source").unwrap();
+        let bin = dir.join("program");
+        let lay = |text: &str| {
+            std::fs::write(&bin, format!("#!/bin/sh\necho {text}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let run = |held: &Binary| {
+            let out = std::process::Command::new(held.path()).output().unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        lay("first");
+        let held = Binary::hold(&bin).unwrap();
+        assert_eq!(run(&held), "first\n");
+        std::fs::remove_file(&bin).unwrap();
+        assert_eq!(run(&held), "first\n", "the path removed between two spawns");
+        lay("second");
+        assert_eq!(
+            run(&held),
+            "first\n",
+            "the path replaced between two spawns"
+        );
+    }
 
     /// A sweep never meets a lock before it is held (#1252): one thread
     /// takes lock after lock in a directory of its own while another sweeps

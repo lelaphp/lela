@@ -565,10 +565,10 @@ pub(crate) struct Emit<'a> {
     hooks: Vec<HookBody>,
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
-    filename: Name,
+    filename: &'a [u8],
     /// The request's working directory, [`Options::cwd`], what `__DIR__`
     /// is where the file's name has no directory.
-    cwd: Vec<u8>,
+    cwd: &'a [u8],
     /// `CG(context).brk_cont_array`: every loop and `switch` of the op
     /// array, in the order begun, and `current_brk_cont`, the innermost
     /// one open.
@@ -1232,7 +1232,7 @@ impl<'a> Emit<'a> {
     #[allow(clippy::too_many_lines)] // the emitter laid down a field a line
     fn new(
         parsed: &'a Parsed,
-        options: &Options<'a>,
+        options: &'a Options<'a>,
         strings: &'a mut dyn Intern,
         halt: Option<i64>,
     ) -> Emit<'a> {
@@ -1277,7 +1277,7 @@ impl<'a> Emit<'a> {
             const_exprs: Vec::new(),
             vars: Vec::new(),
             http_response_header: ResponseHeader::Predefined,
-            safepoints: vec![OplineIdx(0)],
+            safepoints: entry_safepoints(),
             temporaries: 0,
             cache_slots: 0,
             line: 1,
@@ -1299,8 +1299,8 @@ impl<'a> Emit<'a> {
             numeric_dims: Vec::new(),
             methods: Vec::new(),
             hooks: Vec::new(),
-            filename: options.filename.clone(),
-            cwd: options.cwd.clone(),
+            filename: options.filename,
+            cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,
             jumps: Vec::new(),
@@ -1426,6 +1426,14 @@ struct Saved {
     numeric_dims: Vec<ConstIdx>,
     active_property: Option<Vec<u8>>,
     active_hook: Option<HookKind>,
+}
+
+/// An op array's safepoints as it begins: the entry, number zero, with
+/// room for its returns, since every op array has one at least.
+fn entry_safepoints() -> Vec<OplineIdx> {
+    let mut safepoints = Vec::with_capacity(4);
+    safepoints.push(OplineIdx(0));
+    safepoints
 }
 
 /// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
@@ -3405,7 +3413,7 @@ impl Emit<'_> {
                 name.extend_from_slice(enclosing);
                 name.extend_from_slice(b"()");
             }
-            None => name.extend_from_slice(&self.filename.0),
+            None => name.extend_from_slice(self.filename),
         }
         name.extend_from_slice(format!(":{line}}}").as_bytes());
         name
@@ -4287,7 +4295,7 @@ impl Emit<'_> {
                 is_generator: function.generator,
                 attributes,
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
-                file: self.filename.clone(),
+                file: Name(self.filename.into()),
                 line,
                 end_line: function.end_line,
                 frameless: Vec::new(),
@@ -4783,7 +4791,7 @@ impl Emit<'_> {
             const_exprs: std::mem::take(&mut self.const_exprs),
             vars: std::mem::take(&mut self.vars),
             http_response_header: std::mem::take(&mut self.http_response_header),
-            safepoints: std::mem::replace(&mut self.safepoints, vec![OplineIdx(0)]),
+            safepoints: std::mem::replace(&mut self.safepoints, entry_safepoints()),
             temporaries: std::mem::take(&mut self.temporaries),
             cache_slots: std::mem::take(&mut self.cache_slots),
             loops: std::mem::take(&mut self.loops),
@@ -4882,7 +4890,7 @@ impl Emit<'_> {
             try_catch: std::mem::take(&mut self.try_catch).into_boxed_slice(),
             live_ranges,
             safepoints: std::mem::take(&mut self.safepoints).into_boxed_slice(),
-            filename: self.filename.clone(),
+            filename: Name(self.filename.into()),
             line_start,
             line_end,
             cache_size: self.cache_slots,
@@ -5155,7 +5163,7 @@ impl Emit<'_> {
             methods: Vec::new(),
             attributes,
             doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
-            file: self.filename.clone(),
+            file: Name(self.filename.into()),
             line,
             end_line: class.end_line,
             object_size: 0,
@@ -5313,7 +5321,7 @@ impl Emit<'_> {
         };
         let mut name = prefix;
         name.extend_from_slice(b"@anonymous\0");
-        name.extend_from_slice(&self.filename.0);
+        name.extend_from_slice(self.filename);
         name.extend_from_slice(format!(":{}${:x}", class.line, self.keys_made()).as_bytes());
         // `CG(active_class_entry)` is the anonymous class while its body
         // compiles and the enclosing one's again after, and so is the
@@ -7120,10 +7128,10 @@ impl Emit<'_> {
             None => (OperandKind::Unused, 0),
         };
         let lowered = name.to_ascii_lowercase();
-        let mut key = Vec::with_capacity(lowered.len() + self.filename.0.len() + 16);
+        let mut key = Vec::with_capacity(lowered.len() + self.filename.len() + 16);
         key.push(0);
         key.extend_from_slice(&lowered);
-        key.extend_from_slice(&self.filename.0);
+        key.extend_from_slice(self.filename);
         key.extend_from_slice(format!(":{line}${:x}", self.keys_made()).as_bytes());
         let lowered = self.string(&lowered)?;
         let op1 = self.literal(lowered);
@@ -17511,11 +17519,11 @@ impl Emit<'_> {
     fn magic_const(&self, which: Magic, line: u32) -> Folded {
         let text = match which {
             Magic::Line => return Folded::Line(i64::from(line)),
-            Magic::File => self.filename.0.to_vec(),
+            Magic::File => self.filename.to_vec(),
             Magic::Dir => {
-                let dirname = dirname(&self.filename.0);
+                let dirname = dirname(self.filename);
                 if dirname == b"." {
-                    self.cwd.clone()
+                    self.cwd.to_vec()
                 } else {
                     dirname
                 }
@@ -19342,8 +19350,8 @@ mod tests {
             numeric_dims: Vec::new(),
             methods: Vec::new(),
             hooks: Vec::new(),
-            filename: options.filename.clone(),
-            cwd: options.cwd.clone(),
+            filename: options.filename,
+            cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,
             jumps: Vec::new(),

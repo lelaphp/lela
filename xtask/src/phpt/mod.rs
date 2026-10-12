@@ -1550,10 +1550,12 @@ impl<'o> Own<'o> {
 /// claim for its length, written to as each program starts and ends, and
 /// takes what subsets and witness runs cut off left before it starts, so
 /// a run killed before its sweep leaves nothing the next one does not
-/// remove (#2448); its own sweep settles the claim. A subset runs where
-/// there is a `copy` of the pinned tree, and what its tests left standing
-/// there outside their programs' groups is stopped before the sweep
-/// (`scratch::Stray`, #2663).
+/// remove (#2448); its own sweep settles the claim. Any other subset
+/// holds a claim of its processes alone, written to the same way, so no
+/// other run's sweep takes what they left before this one's does (#2750).
+/// A subset runs where there is a `copy` of the pinned tree, and what its
+/// tests left standing there outside their programs' groups is stopped
+/// before the sweep (`scratch::Stray`, #2663).
 fn swept_around<T>(
     oracle: &Oracle<'_>,
     (scope, claims): (&str, bool),
@@ -1565,20 +1567,19 @@ fn swept_around<T>(
         return Ok((run()?, removed));
     };
     let grace = Duration::from_secs(oracle.pin().recipe.limits.timeout_s);
-    let claim = claims
-        .then(|| sysv::Claim::taken(INSTRUMENT, grace, &mut removed))
-        .transpose()?;
-    oracle.journal(claim.as_ref().map(sysv::Claim::journal).transpose()?);
+    let claim = if claims {
+        sysv::Claim::taken(INSTRUMENT, grace, &mut removed)?
+    } else {
+        sysv::Claim::own(INSTRUMENT)?
+    };
+    oracle.journal(Some(claim.journal()?));
     oracle.take_spawned();
     let before = sysv::Standing::now();
     let ran = run();
     oracle.journal(None);
     said_stopped(&format!("{scope}: its tests"), &copy.stop_strays());
     let tally = ran?;
-    let swept = before.and_then(|before| match claim {
-        Some(claim) => claim.swept(&before, &oracle.take_spawned()),
-        None => sysv::sweep(&before, &oracle.take_spawned()),
-    });
+    let swept = before.and_then(|before| claim.swept(&before, &oracle.take_spawned()));
     removed.add("of what its tests left", swept);
     Ok((tally, removed))
 }

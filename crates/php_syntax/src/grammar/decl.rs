@@ -16,7 +16,7 @@ use super::{block, ckw, expr, semicolon, types};
 /// $2; }`, so what a closure's `}` or a comment inside the group did to
 /// it is undone for the declaration after.
 pub(crate) fn attribute_groups(p: &mut Parser<'_>) {
-    while p.peek_at(K::ATTRIBUTE_OPEN) {
+    while p.at(K::ATTRIBUTE_OPEN) {
         let g = p.start();
         p.doc_comment();
         p.bump(K::ATTRIBUTE_OPEN);
@@ -36,7 +36,7 @@ pub(crate) fn attribute_groups(p: &mut Parser<'_>) {
                 a.abandon(p);
                 break;
             }
-            if p.peek_at(K::L_PAREN) {
+            if p.at(K::L_PAREN) {
                 arg_list(p);
             }
             a.complete(p, K::ATTRIBUTE);
@@ -44,7 +44,7 @@ pub(crate) fn attribute_groups(p: &mut Parser<'_>) {
                 break;
             }
             after_comma = true;
-            if p.peek_at(K::R_BRACK) {
+            if p.at(K::R_BRACK) {
                 break; // a trailing comma
             }
         }
@@ -107,7 +107,7 @@ pub(crate) fn function_decl(p: &mut Parser<'_>, m: Marker) {
 /// spells after the head (`function f();` and `$f = function()
 /// use ($x);` are `expecting "{"`, probed 8.5.9).
 fn body_block(p: &mut Parser<'_>) {
-    if p.peek_at(K::L_CURLY) {
+    if p.at(K::L_CURLY) {
         block(p);
     } else {
         let d = p.unexpected_here_expecting("\"{\"");
@@ -141,7 +141,7 @@ fn name_token(p: &mut Parser<'_>, slot: NameSlot) {
     if p.at(K::IDENT) && !callable {
         p.bump(K::IDENT);
     } else if ckw::is_contextual_only(p.current())
-        || (matches!(slot, NameSlot::Function) && p.peek_at(K::READONLY_KW))
+        || (matches!(slot, NameSlot::Function) && p.at(K::READONLY_KW))
     {
         p.bump_remap(K::IDENT);
     } else {
@@ -161,7 +161,7 @@ fn name_token(p: &mut Parser<'_>, slot: NameSlot) {
 /// `abstract`, `final` or `readonly` modifiers, then a class declaration.
 pub(crate) fn modifiers_then_class(p: &mut Parser<'_>, m: Marker) {
     modifiers(p);
-    if p.peek_at(K::CLASS_KW) {
+    if p.at(K::CLASS_KW) {
         class_decl(p, m);
     } else {
         // After a class modifier php expects another modifier or `class`;
@@ -217,7 +217,7 @@ pub(crate) fn trait_decl(p: &mut Parser<'_>, m: Marker) {
 pub(crate) fn enum_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::ENUM_KW);
     name_token(p, NameSlot::ClassLike);
-    if p.peek_at(K::COLON) {
+    if p.at(K::COLON) {
         let b = p.start();
         p.bump(K::COLON);
         types::type_expr(p, TypeSite::WithStatic);
@@ -240,7 +240,7 @@ pub(crate) fn anon_class_decl(p: &mut Parser<'_>) -> CompletedMarker {
     if !p.eat(K::CLASS_KW) {
         p.error_unexpected();
     }
-    if p.peek_at(K::L_PAREN) {
+    if p.at(K::L_PAREN) {
         arg_list(p);
     }
     extends_clause(p, false);
@@ -254,7 +254,7 @@ pub(crate) fn anon_class_decl(p: &mut Parser<'_>) -> CompletedMarker {
 /// second name after a class's is the body's `expecting "{"` (probed
 /// 8.5.9: `class A extends B, C`).
 fn extends_clause(p: &mut Parser<'_>, several: bool) {
-    if p.peek_at(K::EXTENDS_KW) {
+    if p.at(K::EXTENDS_KW) {
         let m = p.start();
         p.bump(K::EXTENDS_KW);
         loop {
@@ -271,7 +271,7 @@ fn extends_clause(p: &mut Parser<'_>, several: bool) {
 }
 
 fn implements_clause(p: &mut Parser<'_>) {
-    if p.peek_at(K::IMPLEMENTS_KW) {
+    if p.at(K::IMPLEMENTS_KW) {
         let m = p.start();
         p.bump(K::IMPLEMENTS_KW);
         loop {
@@ -307,7 +307,7 @@ fn class_body(p: &mut Parser<'_>) {
         m.complete(p, K::CLASS_BODY);
         return;
     }
-    while !p.at_eof() && !p.peek_at(K::R_CURLY) {
+    while !p.at_eof() && !p.at(K::R_CURLY) {
         if p.is_stuck() {
             let e = p.start();
             p.bump_any();
@@ -333,11 +333,11 @@ fn class_member(p: &mut Parser<'_>) {
     let m = p.start();
     attribute_groups(p);
     // A trait use first: `use` takes no modifiers.
-    if p.peek_at(K::USE_KW) {
+    if p.at(K::USE_KW) {
         trait_use(p, m);
         return;
     }
-    if p.peek_at(K::CASE_KW) {
+    if p.at(K::CASE_KW) {
         enum_case(p, m);
         return;
     }
@@ -364,7 +364,7 @@ fn class_member(p: &mut Parser<'_>) {
             member_name(p);
             param_list(p);
             ret_type(p);
-            if p.peek_at(K::L_CURLY) {
+            if p.at(K::L_CURLY) {
                 block(p);
             } else {
                 // `method_body: ';' | '{' …`: php lists both where the
@@ -400,8 +400,8 @@ fn class_member(p: &mut Parser<'_>) {
             m.abandon(p);
             let e = p.start();
             while !p.at_eof()
-                && !p.peek_at(K::R_CURLY)
-                && !p.peek_at(K::SEMICOLON)
+                && !p.at(K::R_CURLY)
+                && !p.at(K::SEMICOLON)
                 && !matches!(
                     p.current(),
                     K::FUNCTION_KW | K::CONST_KW | K::USE_KW | K::CASE_KW | K::VARIABLE
@@ -461,7 +461,7 @@ fn property_tail(p: &mut Parser<'_>, m: Marker) {
             break;
         }
     }
-    if p.peek_at(K::L_CURLY) {
+    if p.at(K::L_CURLY) {
         property_hook_list(p);
     } else {
         // Another declarator may follow (`public $x }` is `expecting ","
@@ -475,7 +475,7 @@ fn property_tail(p: &mut Parser<'_>, m: Marker) {
 pub(crate) fn property_hook_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::L_CURLY);
-    while !p.at_eof() && !p.peek_at(K::R_CURLY) {
+    while !p.at_eof() && !p.at(K::R_CURLY) {
         let h = p.start();
         attribute_groups(p);
         modifiers(p);
@@ -486,7 +486,7 @@ pub(crate) fn property_hook_list(p: &mut Parser<'_>) {
         // property).
         p.doc_comment();
         if ckw::is_hook_name(p.current()) || p.current().is_keyword() {
-            if p.peek_at(K::IDENT) {
+            if p.at(K::IDENT) {
                 p.bump(K::IDENT);
             } else {
                 // `set` lexes as SET_KW; another keyword arrives only in
@@ -505,12 +505,12 @@ pub(crate) fn property_hook_list(p: &mut Parser<'_>) {
             e.complete(p, K::ERROR);
             continue;
         }
-        if p.peek_at(K::L_PAREN) {
+        if p.at(K::L_PAREN) {
             param_list(p);
         }
-        if p.peek_at(K::L_CURLY) {
+        if p.at(K::L_CURLY) {
             block(p);
-        } else if p.peek_at(K::FAT_ARROW) {
+        } else if p.at(K::FAT_ARROW) {
             let b = p.start();
             p.bump(K::FAT_ARROW);
             expr::expr(p);
@@ -553,15 +553,15 @@ fn trait_use(p: &mut Parser<'_>, m: Marker) {
             break;
         }
     }
-    if p.peek_at(K::L_CURLY) {
+    if p.at(K::L_CURLY) {
         let list = p.start();
         p.bump(K::L_CURLY);
-        while !p.at_eof() && !p.peek_at(K::R_CURLY) {
+        while !p.at_eof() && !p.at(K::R_CURLY) {
             // Zend maps `?>` to `;` everywhere in scripting, so a close
             // tag is a legal adaptation terminator (`x as y?><?= as z;`,
             // the short_echo_as_identifier shape): consumed as glue, and
             // the next entry begins at the reopened tag.
-            if p.peek_at(K::CLOSE_TAG) || p.peek_at(K::INLINE_HTML) || p.peek_at(K::OPEN_TAG) {
+            if p.at(K::CLOSE_TAG) || p.at(K::INLINE_HTML) || p.at(K::OPEN_TAG) {
                 p.bump_any();
                 continue;
             }
@@ -582,15 +582,15 @@ fn trait_adaptation(p: &mut Parser<'_>) {
     // `TraitMethodRef`: `(Name '::')? member`.
     let r = p.start();
     let r_start = p.current_span().start;
-    if (p.peek_at(K::IDENT)
-        || p.peek_at(K::NAME_QUALIFIED)
-        || p.peek_at(K::NAME_FULLY_QUALIFIED)
-        || p.peek_at(K::NAME_RELATIVE)
+    if (p.at(K::IDENT)
+        || p.at(K::NAME_QUALIFIED)
+        || p.at(K::NAME_FULLY_QUALIFIED)
+        || p.at(K::NAME_RELATIVE)
         // `static::m`: `static` is a keyword, not an IDENT (`self` and
         // `parent` already match as IDENT). Accepting it lets the
         // compiler reject the reserved trait name with php's wording
         // rather than a stray `unexpected "::"` here.
-        || p.peek_at(K::STATIC_KW))
+        || p.at(K::STATIC_KW))
         && p.nth(1) == K::COLON_COLON
     {
         p.bump_any();
@@ -599,13 +599,13 @@ fn trait_adaptation(p: &mut Parser<'_>) {
     let qualified = p.current_span().start != r_start;
     member_name(p);
     r.complete(p, K::TRAIT_METHOD_REF);
-    if p.peek_at(K::INSTEADOF_KW) && !qualified {
+    if p.at(K::INSTEADOF_KW) && !qualified {
         // `insteadof` takes a qualified method (`f insteadof B` is
         // `unexpected token "insteadof", expecting "::"`, probed 8.5.9).
         let diag = p.unexpected_here_expecting("\"::\"");
         p.error(diag);
     }
-    if p.peek_at(K::INSTEADOF_KW) {
+    if p.at(K::INSTEADOF_KW) {
         p.bump(K::INSTEADOF_KW);
         loop {
             if !types::name_ref(p) {
@@ -618,7 +618,7 @@ fn trait_adaptation(p: &mut Parser<'_>) {
         }
         super::semicolon_expecting(p, Some("\";\""));
         m.complete(p, K::INSTEADOF_ADAPTATION);
-    } else if p.peek_at(K::AS_KW) {
+    } else if p.at(K::AS_KW) {
         p.bump(K::AS_KW);
         // php-src `member_modifier`: a visibility, or `static`, `abstract`,
         // `final` or `readonly` (`m as final;` changes the modifier, no
@@ -662,7 +662,7 @@ fn trait_adaptation(p: &mut Parser<'_>) {
         }
         // Consumed to `;` or `}` for progress.
         let e = p.start();
-        while !p.at_eof() && !p.peek_at(K::SEMICOLON) && !p.peek_at(K::R_CURLY) {
+        while !p.at_eof() && !p.at(K::SEMICOLON) && !p.at(K::R_CURLY) {
             p.bump_any();
         }
         p.eat(K::SEMICOLON);
@@ -684,7 +684,7 @@ pub(crate) fn member_name(p: &mut Parser<'_>) {
         // ParseError rendered verbatim (probed 8.5.7,
         // short_echo_as_identifier). Everything else keeps the
         // unexpected-token wording.
-        let d = if p.peek_at(K::OPEN_TAG_ECHO) {
+        let d = if p.at(K::OPEN_TAG_ECHO) {
             let (span, line) = (p.current_span(), p.line_here());
             Diagnostic::new(span, line, "Cannot use \"<?=\" as an identifier")
         } else {
@@ -715,7 +715,7 @@ pub(crate) fn const_declarators(p: &mut Parser<'_>, semi_reserved: bool) {
         let acceptable = if semi_reserved {
             ckw::is_member_name(p.current())
         } else {
-            (p.peek_at(K::IDENT) && !ckw::is_callable_text(K::IDENT, p.current_text()))
+            (p.at(K::IDENT) && !ckw::is_callable_text(K::IDENT, p.current_text()))
                 || ckw::is_contextual_only(p.current())
         };
         if acceptable {
@@ -771,11 +771,11 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
         m.complete(p, K::PARAM_LIST);
         return;
     }
-    if p.peek_at(K::CLOSE_TAG) {
+    if p.at(K::CLOSE_TAG) {
         let d = p.unexpected_here_expecting("variable");
         p.error(d);
     }
-    while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
+    while !p.at_eof() && !p.at(K::R_PAREN) && !p.at(K::CLOSE_TAG) {
         let param = p.start();
         attribute_groups(p);
         modifiers(p); // promotion (8.0), set-visibility (8.4)
@@ -788,7 +788,7 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
         // that no variable or `...` follows is itself the unexpected
         // token (`function f(& ;` is `unexpected token "&", expecting
         // variable`, probed 8.5.9).
-        if p.peek_at(K::AMP) && matches!(p.nth(1), K::VARIABLE | K::DOT_DOT_DOT) {
+        if p.at(K::AMP) && matches!(p.nth(1), K::VARIABLE | K::DOT_DOT_DOT) {
             p.bump(K::AMP);
         }
         p.eat(K::DOT_DOT_DOT);
@@ -808,7 +808,7 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
             p.error(d);
             param.abandon(p);
             // Progress: one token consumed unless at a list boundary.
-            if !p.peek_at(K::R_PAREN) && !p.peek_at(K::COMMA) && !p.at_eof() {
+            if !p.at(K::R_PAREN) && !p.at(K::COMMA) && !p.at_eof() {
                 let e = p.start();
                 p.bump_any();
                 e.complete(p, K::ERROR);
@@ -821,7 +821,7 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
         if p.eat(K::EQ) && !expr::expr(p) {
             p.error_unexpected();
         }
-        if p.peek_at(K::L_CURLY) {
+        if p.at(K::L_CURLY) {
             // The accessors of a promoted parameter's property (8.4).
             property_hook_list(p);
         }
@@ -833,7 +833,7 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
             // The clause is pinned at the close position; it stands
             // beside the `expect_closer` or body-open diagnostic at the
             // same token, so the first carries php's clause.
-            if !p.peek_at(K::R_PAREN) && !p.at_eof() && !p.peek_at(K::CLOSE_TAG) {
+            if !p.at(K::R_PAREN) && !p.at_eof() && !p.at(K::CLOSE_TAG) {
                 let d = p.unexpected_here_expecting("\")\"");
                 p.error(d);
             }
@@ -845,7 +845,7 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
 }
 
 pub(crate) fn ret_type(p: &mut Parser<'_>) {
-    if p.peek_at(K::COLON) {
+    if p.at(K::COLON) {
         let m = p.start();
         p.bump(K::COLON);
         types::type_expr(p, TypeSite::WithStatic);
@@ -864,12 +864,12 @@ pub(crate) fn closure_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMa
     // {}` reads F, `function () /** G */ {}` false).
     p.doc_comment();
     param_list(p);
-    if p.peek_at(K::USE_KW) {
+    if p.at(K::USE_KW) {
         let u = p.start();
         p.bump(K::USE_KW);
         if p.eat(K::L_PAREN) {
             let mut after_comma = false;
-            while !p.at_eof() && !p.peek_at(K::R_PAREN) {
+            while !p.at_eof() && !p.at(K::R_PAREN) {
                 let v = p.start();
                 let by_ref = p.eat(K::AMP);
                 if p.at(K::VARIABLE) {
@@ -961,11 +961,11 @@ pub(crate) fn arg_list(p: &mut Parser<'_>) {
     // `?>` is never consumed as an argument: it is the `;` php's scanner
     // makes of it, and at the first argument's position php spells no
     // clause (`f( ?>`, probed 8.5.9).
-    if p.peek_at(K::CLOSE_TAG) {
+    if p.at(K::CLOSE_TAG) {
         p.error_unexpected();
     }
-    while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
-        if p.peek_at(K::DOT_DOT_DOT) {
+    while !p.at_eof() && !p.at(K::R_PAREN) && !p.at(K::CLOSE_TAG) {
+        if p.at(K::DOT_DOT_DOT) {
             if p.nth(1) == K::R_PAREN && !after_comma {
                 // The first-class callable `f(...)` (8.1), which is the
                 // whole list or nothing: `f($a, ...)` is php's `T_ELLIPSIS
@@ -985,7 +985,7 @@ pub(crate) fn arg_list(p: &mut Parser<'_>) {
             // A named argument `name: expr` (the `name::` case is a scoped
             // access, excluded by the third-token test above).
             let a = p.start();
-            if p.peek_at(K::IDENT) {
+            if p.at(K::IDENT) {
                 p.bump(K::IDENT);
             } else {
                 p.bump_remap(K::IDENT);
@@ -1005,7 +1005,7 @@ pub(crate) fn arg_list(p: &mut Parser<'_>) {
                 p.error_unexpected();
             }
             // Progress, then resynchronised at `,` or `)`.
-            if !p.peek_at(K::R_PAREN) && !p.peek_at(K::COMMA) && !p.at_eof() {
+            if !p.at(K::R_PAREN) && !p.at(K::COMMA) && !p.at_eof() {
                 let e = p.start();
                 p.bump_any();
                 e.complete(p, K::ERROR);
@@ -1014,7 +1014,7 @@ pub(crate) fn arg_list(p: &mut Parser<'_>) {
         if !p.eat(K::COMMA) {
             // A missing `,` between arguments: the repair, when the next
             // token can begin another argument.
-            if !p.peek_at(K::R_PAREN) && !p.at_eof() && expr::at_expr_start(p) {
+            if !p.at(K::R_PAREN) && !p.at_eof() && expr::at_expr_start(p) {
                 super::missing_comma(p, "\")\"");
                 after_comma = true;
                 continue;

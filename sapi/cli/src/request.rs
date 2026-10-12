@@ -11,8 +11,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use php_sapi::{
-    Aborted, CommandLine, EachLine, Engine, FileHandles, Observables, OutputSink, ProgramFile,
-    RequestDescription, ResponseHead,
+    Aborted, CommandLine, EachLine, Engine, FileHandles, HostServes, Observables, OutputSink,
+    ProgramFile, RequestDescription, ResponseHead,
 };
 
 use crate::NAME;
@@ -21,7 +21,7 @@ use crate::options::{Each, Lines, Program, Report};
 /// The sink on the process's streams, php's CLI: body bytes on stdout,
 /// the header block nowhere, since `sapi_cli_send_headers` sends none,
 /// and both the log and the error stream on stderr, each log entry with
-/// `\n` after it (`sapi_cli_log_message`). The request holds it and each
+/// `\n` after it (`sapi_cli_log_message`). The request owns it and each
 /// call reaches the fd as it is made, as `sapi_cli_ub_write` writes each
 /// chunk to fd 1, so what a child process the request starts writes to
 /// the stdout it inherits stands where php's would (#741). A stream that
@@ -56,10 +56,6 @@ impl OutputSink for Process {
 
     fn write_stderr(&mut self, bytes: &[u8]) {
         std::io::stderr().lock().write_all(bytes).ok();
-    }
-
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(Process))
     }
 }
 
@@ -180,17 +176,17 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
         Ok(description) => description,
         Err(code) => return code,
     };
-    let mut sink = Process;
-    let served = match program {
+    let mut sink: Box<dyn OutputSink + Send> = Box::new(Process);
+    let (served, mut sink) = match program {
         Program::Direct(code) => {
-            engine.command_line(description, CommandLine::Direct(code.clone()), &mut sink)
+            engine.command_line(description, CommandLine::Direct(code.clone()), sink)
         }
         Program::File(_) | Program::Stdin => {
-            dump(engine, &description, &mut sink);
-            engine.serve(description, &mut sink)
+            dump(engine, &description, sink.as_mut());
+            engine.serve(description, sink, || HostServes::Program)
         }
     };
-    ended(&served, &mut sink)
+    ended(&served, sink.as_mut())
 }
 
 /// The status `do_cli` ends a request with: where `php_request_startup`
@@ -215,8 +211,9 @@ pub fn shell(engine: &Engine, file: Option<&Path>, arguments: &[OsString]) -> i3
         Ok(description) => description,
         Err(code) => return code,
     };
-    let served = engine.command_line(description, CommandLine::Shell, &mut Process);
-    ended(&served, &mut Process)
+    let (served, mut sink) =
+        engine.command_line(description, CommandLine::Shell, Box::new(Process));
+    ended(&served, sink.as_mut())
 }
 
 /// `PHP_CLI_MODE_PROCESS_STDIN` (`php_cli.c:996-1034`): `-B`, `-R` or
@@ -239,8 +236,8 @@ pub fn process_stdin(engine: &Engine, lines: &Lines, arguments: &[OsString]) -> 
         }),
         end: lines.end.clone(),
     };
-    let served = engine.command_line(description, command, &mut Process);
-    ended(&served, &mut Process)
+    let (served, mut sink) = engine.command_line(description, command, Box::new(Process));
+    ended(&served, sink.as_mut())
 }
 
 /// php's op arrays as the compiler left them, on the second stream,
@@ -280,13 +277,16 @@ pub fn strip(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
 fn view(
     program: &Program,
     arguments: &[OsString],
-    write: impl FnOnce(RequestDescription, &mut dyn OutputSink) -> Observables,
+    write: impl FnOnce(
+        RequestDescription,
+        Box<dyn OutputSink + Send>,
+    ) -> (Observables, Box<dyn OutputSink + Send>),
 ) -> i32 {
     match describe(file_of(program), arguments, *program == Program::Stdin) {
         Ok(mut description) => {
             description.file_handles = None;
-            let served = write(description, &mut Process);
-            ended(&served, &mut Process)
+            let (served, mut sink) = write(description, Box::new(Process));
+            ended(&served, sink.as_mut())
         }
         Err(code) => code,
     }
@@ -298,20 +298,24 @@ fn view(
 /// parsing %s` and 255, on the sink after what the compiler rendered.
 /// A file that cannot be opened is exit 1 before a request begins. What
 /// [`dump`] prints stands on the second stream before the sentence, as
-/// php's does.
-pub fn lint(engine: &Engine, program: &Program, sink: &mut dyn OutputSink) -> i32 {
+/// php's does. `sink` is handed back.
+pub fn lint(
+    engine: &Engine,
+    program: &Program,
+    mut sink: Box<dyn OutputSink + Send>,
+) -> (i32, Box<dyn OutputSink + Send>) {
     let mut description = match describe(file_of(program), &[], *program == Program::Stdin) {
         Ok(description) => description,
-        Err(code) => return code,
+        Err(code) => return (code, sink),
     };
     // `do_cli`'s `PHP_CLI_MODE_LINT` arm calls no
     // `cli_register_file_handles`.
     description.file_handles = None;
     let name = description.argv.first().cloned().unwrap_or_default();
-    dump(engine, &description, sink);
-    let served = engine.lint(description, sink);
+    dump(engine, &description, sink.as_mut());
+    let (served, mut sink) = engine.lint(description, sink);
     if served.start_failed {
-        return ended(&served, sink);
+        return (ended(&served, sink.as_mut()), sink);
     }
     let mut line = if served.exit_code == 0 {
         b"No syntax errors detected in ".to_vec()
@@ -322,7 +326,7 @@ pub fn lint(engine: &Engine, program: &Program, sink: &mut dyn OutputSink) -> i3
     line.push(b'\n');
     sink.write(&line).ok();
     sink.flush();
-    if served.exit_code == 0 { 0 } else { 255 }
+    (if served.exit_code == 0 { 0 } else { 255 }, sink)
 }
 
 /// A report `do_cli` prints in a request of its own
@@ -437,7 +441,9 @@ fn quoted(bytes: &[u8]) -> Vec<u8> {
 /// `code` served in `description`'s request with no program, as `do_cli`
 /// serves its reports after `php_request_startup`; what it observed.
 fn in_request(engine: &Engine, description: RequestDescription, code: Vec<u8>) -> Observables {
-    engine.command_line(description, CommandLine::Direct(code), &mut Process)
+    engine
+        .command_line(description, CommandLine::Direct(code), Box::new(Process))
+        .0
 }
 
 #[cfg(test)]
@@ -498,8 +504,12 @@ mod tests {
         let Ok(description) = describe(None, arguments, false) else {
             return (String::from("not described"), String::new());
         };
-        let mut sink = Capture::default();
-        engine.command_line(description, CommandLine::Direct(code.clone()), &mut sink);
+        let (_, sink) = engine.command_line(
+            description,
+            CommandLine::Direct(code.clone()),
+            Box::new(Capture::default()),
+        );
+        let sink = captured(sink);
         (
             String::from_utf8_lossy(&sink.0).into_owned(),
             String::from_utf8_lossy(engine.startup_errors()).into_owned(),
@@ -561,6 +571,18 @@ mod tests {
         );
     }
 
+    /// What a [`Capture`] lent to a request was handed back as.
+    fn captured(sink: Box<dyn OutputSink + Send>) -> Capture {
+        let sink: Box<dyn std::any::Any> = sink;
+        sink.downcast().map(|sink| *sink).unwrap_or_default()
+    }
+
+    /// [`lint`] into a fresh [`Capture`]: its status, and what it wrote.
+    fn linted(engine: &Engine, program: &Program) -> (i32, Capture) {
+        let (status, sink) = lint(engine, program, Box::new(Capture::default()));
+        (status, captured(sink))
+    }
+
     fn scratch(name: &str, source: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("php_sapi-lint-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
@@ -578,14 +600,14 @@ mod tests {
         let ok = scratch("ok.php", "<?php\necho 1;\n");
         let bad = scratch("bad.php", "<?php\necho 1 +;\n");
         let deprecated = scratch("dep.php", "<?php\n(integer)1;\n");
-        let mut sink = Capture::default();
-        assert_eq!(lint(&engine, &Program::File(ok.clone()), &mut sink), 0);
+        let (status, sink) = linted(&engine, &Program::File(ok.clone()));
+        assert_eq!(status, 0);
         assert_eq!(
             String::from_utf8_lossy(&sink.0),
             format!("No syntax errors detected in {}\n", ok.display())
         );
-        let mut sink = Capture::default();
-        assert_eq!(lint(&engine, &Program::File(bad.clone()), &mut sink), 255);
+        let (status, sink) = linted(&engine, &Program::File(bad.clone()));
+        assert_eq!(status, 255);
         assert_eq!(
             String::from_utf8_lossy(&sink.0),
             format!(
@@ -593,11 +615,8 @@ mod tests {
                 bad.display()
             )
         );
-        let mut sink = Capture::default();
-        assert_eq!(
-            lint(&engine, &Program::File(deprecated.clone()), &mut sink),
-            0
-        );
+        let (status, sink) = linted(&engine, &Program::File(deprecated.clone()));
+        assert_eq!(status, 0);
         assert_eq!(
             String::from_utf8_lossy(&sink.0),
             format!(
@@ -605,15 +624,8 @@ mod tests {
                 deprecated.display()
             )
         );
-        let mut sink = Capture::default();
-        assert_eq!(
-            lint(
-                &engine,
-                &Program::File(PathBuf::from("nope.php")),
-                &mut sink
-            ),
-            1
-        );
+        let (status, sink) = linted(&engine, &Program::File(PathBuf::from("nope.php")));
+        assert_eq!(status, 1);
         assert_eq!(sink.0, b"");
     }
 
@@ -647,14 +659,14 @@ mod tests {
         let Ok(description) = described else {
             return;
         };
-        let mut sink = Capture::default();
-        let served = engine.command_line(
+        let (served, mut sink) = engine.command_line(
             description,
             CommandLine::Direct(b"echo 'ran';".to_vec()),
-            &mut sink,
+            Box::new(Capture::default()),
         );
         assert!(served.start_failed);
-        assert_eq!(ended(&served, &mut sink), 1);
+        assert_eq!(ended(&served, sink.as_mut()), 1);
+        let sink = captured(sink);
         assert_eq!(
             String::from_utf8_lossy(&sink.0),
             format!("{FAILED}Could not startup.\n")
@@ -667,8 +679,8 @@ mod tests {
     fn a_failed_start_under_lint_writes_no_verdict() {
         let engine = failing_start();
         let ok = scratch("start-failed.php", "<?php\necho 1;\n");
-        let mut sink = Capture::default();
-        assert_eq!(lint(&engine, &Program::File(ok), &mut sink), 1);
+        let (status, sink) = linted(&engine, &Program::File(ok));
+        assert_eq!(status, 1);
         assert_eq!(
             String::from_utf8_lossy(&sink.0),
             format!("{FAILED}Could not startup.\n")

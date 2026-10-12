@@ -1,6 +1,6 @@
 //! The response of a request: what leaves it through the `php_output`
-//! layer (`main/output.c`), the sink the host handed over or the calls
-//! kept for it, the header block `sapi_send_headers` commits, the
+//! layer (`main/output.c`), the sink the host lent the request, the
+//! header block `sapi_send_headers` commits, the
 //! response code, `connection_status()` and `fastcgi_finish_request()`.
 //! The sink, the `php_output` state, the header callback, the
 //! connection's status and whether the host closed the response are
@@ -161,52 +161,16 @@ pub(crate) enum Aside {
     Stderr(Vec<u8>),
 }
 
-/// Where what leaves a request goes while it runs, decided once when
-/// `serve` starts it: the host's sink, held, where the host hands one
-/// over ([`OutputSink::held`]), and otherwise the calls kept for the sink
-/// the host lent `serve`.
-pub(crate) enum Sink {
-    Held(Box<dyn OutputSink + Send>),
-    Kept(Kept),
-}
-
-impl Sink {
-    /// The one sink every call of the request goes to.
-    fn get(&mut self) -> &mut dyn OutputSink {
-        match self {
-            Sink::Held(held) => held.as_mut(),
-            Sink::Kept(kept) => kept,
-        }
-    }
-}
-
-/// A request's calls kept until it ends, for a host whose sink stays in
-/// its hands: the log's entries and the error stream's bytes in the
-/// order written, the header block once committed, and the body.
+/// The sink of a request no host lent one ([`Request::new`]): the log's
+/// entries and the error stream's bytes in the order written, and the
+/// body, kept; the head dropped, since no host sends it. The engine's
+/// startup reads its error stream back as what it hands its hosts in
+/// [`Engine::startup_errors`](crate::engine::Engine::startup_errors), and
+/// a unit test reads the rest.
 #[derive(Default)]
 pub(crate) struct Kept {
     aside: Vec<Aside>,
-    headers: Option<ResponseHead>,
     body: Vec<u8>,
-}
-
-impl Kept {
-    /// Every call handed to `sink`, one each: the log and the error
-    /// stream in the order written, then the header block, then the body.
-    pub(crate) fn hand_to(self, sink: &mut dyn OutputSink) {
-        for aside in self.aside {
-            match aside {
-                Aside::Log(entry) => sink.log(&entry),
-                Aside::Stderr(bytes) => sink.write_stderr(&bytes),
-            }
-        }
-        if let Some(headers) = self.headers {
-            sink.send_headers(&headers);
-        }
-        // The request has ended; a refusal now has no request to abort.
-        sink.write(&self.body).ok();
-        sink.flush();
-    }
 }
 
 impl OutputSink for Kept {
@@ -217,9 +181,7 @@ impl OutputSink for Kept {
 
     fn flush(&mut self) {}
 
-    fn send_headers(&mut self, head: &ResponseHead) {
-        self.headers = Some(head.clone());
-    }
+    fn send_headers(&mut self, _: &ResponseHead) {}
 
     fn log(&mut self, entry: &[u8]) {
         self.aside.push(Aside::Log(entry.to_vec()));
@@ -236,8 +198,11 @@ impl OutputSink for Kept {
 pub(super) struct Response {
     /// Where what passed the `php_output` layer goes, php's
     /// `sapi_module.ub_write`, and the header block, the log and the
-    /// error stream beside it: the host's sink, or the calls kept for it.
-    sink: Sink,
+    /// error stream beside it, each call as the request makes it: the
+    /// sink the host lent the request, which it hands back at the end
+    /// ([`Request::release_sink`]), or the request's own [`Kept`] where no
+    /// host serves it.
+    sink: Box<dyn OutputSink + Send>,
     /// The `php_output` layer, `main/output.c`'s `OG` and the header state
     /// `sapi_send_headers` keeps beside it (`crate::output`).
     output: Output,
@@ -252,12 +217,12 @@ pub(super) struct Response {
 }
 
 impl Response {
-    /// The response as the request starts: its calls kept, the
+    /// The response as the request starts: its calls to `sink`, the
     /// `php_output` layer `output` as `php_output_activate` laid it, no
     /// header callback, the connection normal and the response open.
-    pub(super) fn new(output: Output) -> Response {
+    pub(super) fn new(sink: Box<dyn OutputSink + Send>, output: Output) -> Response {
         Response {
-            sink: Sink::Kept(Kept::default()),
+            sink,
             output,
             header_callback: None,
             connection: Connection::Normal,
@@ -270,39 +235,40 @@ impl Request {
     /// An entry handed to the host's log, past the `php_output` layer,
     /// as `php_log_err` hands it to `sapi_module.log_message`.
     pub(super) fn log_to_host(&mut self, entry: &[u8]) {
-        self.response.sink.get().log(entry);
+        self.response.sink.log(entry);
     }
 
-    /// The host's sink, held from here to the request's end, so each
-    /// call reaches the host as the request makes it.
-    pub(crate) fn hold(&mut self, held: Box<dyn OutputSink + Send>) {
-        self.response.sink = Sink::Held(held);
+    /// The sink the request wrote to, flushed and handed back at its
+    /// end; what the request writes after goes to a [`Kept`] of its own,
+    /// which no host reads.
+    pub(crate) fn release_sink(&mut self) -> Box<dyn OutputSink + Send> {
+        let mut sink = std::mem::replace(&mut self.response.sink, Box::new(Kept::default()));
+        sink.flush();
+        sink
     }
 
-    /// The sink the request wrote to, given back at its end: the held
-    /// one to flush, or the calls kept for the host's.
-    pub(crate) fn release_sink(&mut self) -> Sink {
-        std::mem::replace(&mut self.response.sink, Sink::Kept(Kept::default()))
+    /// The request's own sink, where no host lent it one.
+    fn kept(&mut self) -> Option<&mut Kept> {
+        let sink: &mut dyn std::any::Any = self.response.sink.as_mut();
+        sink.downcast_mut()
     }
 
     /// The body the request's own sink kept, for a test that serves no
     /// host.
     #[cfg(test)]
     pub(crate) fn take_body(&mut self) -> Vec<u8> {
-        match &mut self.response.sink {
-            Sink::Kept(kept) => std::mem::take(&mut kept.body),
-            Sink::Held(_) => Vec::new(),
-        }
+        self.kept()
+            .map(|kept| std::mem::take(&mut kept.body))
+            .unwrap_or_default()
     }
 
     /// The log's entries and the error stream's bytes the request's own
     /// sink kept, in the order written, for a test that serves no host.
     #[cfg(test)]
     pub(crate) fn take_aside(&mut self) -> Vec<Aside> {
-        match &mut self.response.sink {
-            Sink::Kept(kept) => std::mem::take(&mut kept.aside),
-            Sink::Held(_) => Vec::new(),
-        }
+        self.kept()
+            .map(|kept| std::mem::take(&mut kept.aside))
+            .unwrap_or_default()
     }
 
     /// `fastcgi_finish_request()` (`Z/sapi/fpm/fpm/fpm_main.c:1494`):
@@ -315,7 +281,7 @@ impl Request {
         }
         crate::output::end_all(self);
         crate::output::header(self);
-        self.response.closed = self.response.sink.get().finish();
+        self.response.closed = self.response.sink.finish();
         true
     }
 
@@ -332,7 +298,7 @@ impl Request {
 
     /// What [`host_status`](Self::host_status) makes, its one owner not yet named.
     pub(crate) fn host_status_made(&mut self) -> Result<Option<PhpArray>, Thrown> {
-        match self.response.sink.get().status() {
+        match self.response.sink.status() {
             Some(status) => host_value(self, status).map(Some),
             None => Ok(None),
         }
@@ -371,7 +337,7 @@ impl Request {
             lines: self.response.output.headers().to_vec(),
             ini,
         };
-        self.response.sink.get().send_headers(&head);
+        self.response.sink.send_headers(&head);
     }
 
     /// `sapi_module.send_headers` made one that sends nothing, for the
@@ -399,7 +365,7 @@ impl Request {
     /// What the startup's handlers wrote to the error stream, php's
     /// `fprintf(stderr)` before the first request, in order.
     pub(crate) fn startup_stderr(&mut self) -> Vec<u8> {
-        let Sink::Kept(kept) = &mut self.response.sink else {
+        let Some(kept) = self.kept() else {
             return Vec::new();
         };
         let mut written = Vec::new();
@@ -431,7 +397,7 @@ impl Request {
         {
             (shell.write)(self, bytes);
         }
-        if let Err(aborted) = self.response.sink.get().write(bytes) {
+        if let Err(aborted) = self.response.sink.write(bytes) {
             self.handle_aborted_connection(aborted);
         }
     }
@@ -506,13 +472,13 @@ impl Request {
     /// [`Request::error_log`]'s; whether the host puts the two on one fd
     /// is the host's, as it is php's CLI's (#216).
     pub fn write_stderr(&mut self, bytes: &[u8]) {
-        self.response.sink.get().write_stderr(bytes);
+        self.response.sink.write_stderr(bytes);
     }
 
     /// `php://stdout`'s write: the host's own fd 1 where it has one apart
     /// from the response, else the body past the `php_output` layer.
     pub fn write_stdout(&mut self, bytes: &[u8]) {
-        if !self.response.sink.get().write_stdout(bytes) {
+        if !self.response.sink.write_stdout(bytes) {
             self.ub_write(bytes);
         }
     }
@@ -521,10 +487,10 @@ impl Request {
     /// sent first where the host's flush sends it; the handler stack is
     /// `ob_flush`'s, not this.
     pub fn flush(&mut self) {
-        if self.response.sink.get().flush_sends_head() {
+        if self.response.sink.flush_sends_head() {
             crate::output::header(self);
         }
-        self.response.sink.get().flush();
+        self.response.sink.flush();
     }
 
     /// One `ob_*` operation on the handler stack, the `PHP_FUNCTION`
