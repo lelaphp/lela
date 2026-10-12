@@ -1125,13 +1125,17 @@ impl Registration {
     }
 
     /// Its connection closed: its handlers kept, its data freed where
-    /// `freed` says the library let go of it.
+    /// `freed` says the library let go of it; one closed already keeps
+    /// the handlers it holds.
     fn close(&mut self, freed: Freed) {
-        let State::Registered(kind) = std::mem::replace(&mut self.state, State::Closed(Vec::new()))
+        let State::Registered(kind) = &self.state else {
+            return;
+        };
+        let handlers = kind.take_handlers();
+        let State::Registered(kind) = std::mem::replace(&mut self.state, State::Closed(handlers))
         else {
             return;
         };
-        self.state = State::Closed(kind.take_handlers());
         if let Freed::Now = freed {
             kind.free();
         }
