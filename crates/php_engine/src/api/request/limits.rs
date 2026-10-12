@@ -537,6 +537,6 @@ impl Request {
     /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
     /// seconds past a timeout the timer gives the loop to take it.
     fn hard_timeout(&self) -> i64 {
-        crate::ini_quantity::parse(self.ini_get(b"hard_timeout").unwrap_or_default()).0
+        self.ini_long(b"hard_timeout")
     }
 }

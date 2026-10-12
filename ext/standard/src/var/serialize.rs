@@ -21,6 +21,7 @@ use super::{
     Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, class_name, has_method, is_enum,
     is_serializable, locked, not_serializable,
 };
+use crate::string::Decimal;
 
 /// What the var hash keys an entry by: the object's identity, or the
 /// reference's.
@@ -279,13 +280,13 @@ impl Serializer {
 
 fn write_long(out: &mut Vec<u8>, n: i64) {
     out.extend_from_slice(b"i:");
-    out.extend_from_slice(n.to_string().as_bytes());
+    out.extend_from_slice(Decimal::of(n).as_bytes());
     out.push(b';');
 }
 
 fn write_string(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(b"s:");
-    out.extend_from_slice(bytes.len().to_string().as_bytes());
+    out.extend_from_slice(Decimal::size(bytes.len()).as_bytes());
     out.extend_from_slice(b":\"");
     out.extend_from_slice(bytes);
     out.extend_from_slice(b"\";");
@@ -304,7 +305,7 @@ fn write_class_name(req: &mut Request, out: &mut Vec<u8>, object: PhpObject) -> 
         name = stored;
     }
     out.extend_from_slice(b"O:");
-    out.extend_from_slice(name.len().to_string().as_bytes());
+    out.extend_from_slice(Decimal::size(name.len()).as_bytes());
     out.extend_from_slice(b":\"");
     out.extend_from_slice(&name);
     out.extend_from_slice(b"\":");
@@ -348,11 +349,15 @@ fn write(
             return Ok(());
         }
         if value.as_php_ref().is_some() {
-            out.extend_from_slice(format!("R:{already};").as_bytes());
+            out.extend_from_slice(b"R:");
+            out.extend_from_slice(Decimal::of(already).as_bytes());
+            out.push(b';');
             return Ok(());
         }
         if value.as_object().is_some() {
-            out.extend_from_slice(format!("r:{already};").as_bytes());
+            out.extend_from_slice(b"r:");
+            out.extend_from_slice(Decimal::of(already).as_bytes());
+            out.push(b';');
             return Ok(());
         }
     }
@@ -473,7 +478,7 @@ fn nested(
 ) -> Result<(), Thrown> {
     let magic = incomplete && walk::rows(req, table).any(|(k, _)| is_magic(&k));
     let count = table.len() - usize::from(magic);
-    out.extend_from_slice(count.to_string().as_bytes());
+    out.extend_from_slice(Decimal::size(count).as_bytes());
     out.extend_from_slice(b":{");
     let mut skip_magic = incomplete;
     // `ZEND_HASH_FOREACH_KEY_VAL_IND(ht, ...)` (`Z/ext/standard/var.c:991`),
@@ -584,7 +589,7 @@ fn object_value(
             .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
             .unwrap_or_default();
         out.extend_from_slice(b"E:");
-        out.extend_from_slice((name.len() + 1 + case.len()).to_string().as_bytes());
+        out.extend_from_slice(Decimal::size(name.len() + 1 + case.len()).as_bytes());
         out.extend_from_slice(b":\"");
         out.extend_from_slice(&name);
         out.push(b':');
@@ -799,11 +804,11 @@ fn custom(
     if let Some(payload) = answered.as_str_bytes().map(<[u8]>::to_vec) {
         answered.give_up(req);
         out.extend_from_slice(b"C:");
-        out.extend_from_slice(name.len().to_string().as_bytes());
+        out.extend_from_slice(Decimal::size(name.len()).as_bytes());
         out.extend_from_slice(b":\"");
         out.extend_from_slice(name);
         out.extend_from_slice(b"\":");
-        out.extend_from_slice(payload.len().to_string().as_bytes());
+        out.extend_from_slice(Decimal::size(payload.len()).as_bytes());
         out.extend_from_slice(b":{");
         out.extend_from_slice(&payload);
         out.push(b'}');

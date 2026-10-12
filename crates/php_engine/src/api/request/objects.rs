@@ -11,7 +11,7 @@ use std::any::Any;
 
 use php_heap::{Fatal, Heap, Obj, Zval};
 use php_link::{LinkedClass, Row};
-use php_unit::decl::{ClassDecl, ClassKind, PropertyDecl, Visibility};
+use php_unit::decl::{Bare, ClassDecl, ClassKind, PropertyDecl, Visibility};
 
 use crate::api::abi::{DimensionRead, DtorObj, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
@@ -375,7 +375,7 @@ impl Request {
     /// itself; here a name the bundle does not link is the
     /// `InternalError` fatal that says which, and no object is made.
     pub(crate) fn new_object_of(&mut self, class_name: &str) -> Result<PhpObject, Thrown> {
-        let Some(class) = self.class_named(class_name.as_bytes()) else {
+        let Some(class) = self.class_named(Bare::resolved(class_name.as_bytes())) else {
             return Err(crate::api::raising::fatal(
                 self,
                 &format!("InternalError: the class {class_name} is not linked into this engine"),
@@ -909,7 +909,7 @@ impl Request {
     /// array.
     fn array_access(&mut self, object: PhpObject) -> Result<(), Thrown> {
         let implements = self
-            .class_named(b"ArrayAccess")
+            .class_named(Bare::resolved(b"ArrayAccess"))
             .is_some_and(|interface| self.instance_of(object.class(), interface));
         if implements {
             return Ok(());
@@ -1576,7 +1576,7 @@ impl Request {
         let cloned = self.heap.object_clone(object.heap(), custom);
         let Some(new) = self.fatal_of(cloned)? else {
             let class = self.class_name(object.class());
-            return self.fatal_of(Err(Fatal::Error(format!(
+            return self.fatal_of(Err(Fatal::error(format!(
                 "InternalError: Std::clone_obj over an object of class {class}, whose native payload its own table must copy"
             ))));
         };
@@ -1749,9 +1749,8 @@ impl Request {
         // them again after, whatever a write threw; `EG(fake_scope) =
         // scope` for the writes and put back after them.
         Self::mark_reinitable(*new, true);
-        let saved = self.replace_fake_scope(scope);
-        let written = self.clone_with_writes(*new, table, properties);
-        self.replace_fake_scope(saved);
+        let written =
+            self.in_fake_scope(scope, |req| req.clone_with_writes(*new, table, properties));
         Self::mark_reinitable(*new, false);
         if let Err(thrown) = written {
             new.give_up(self);

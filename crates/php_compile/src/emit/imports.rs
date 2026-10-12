@@ -91,14 +91,18 @@ impl Symbol {
 /// kinds as bits.
 #[derive(Default)]
 pub(super) struct Imports {
-    classes: HashMap<Vec<u8>, Vec<u8>>,
-    functions: HashMap<Vec<u8>, Vec<u8>>,
-    consts: HashMap<Vec<u8>, Vec<u8>>,
-    seen: HashMap<Vec<u8>, u8>,
+    classes: ByName<Vec<u8>>,
+    functions: ByName<Vec<u8>>,
+    consts: ByName<Vec<u8>>,
+    seen: ByName<u8>,
 }
 
+/// One of the file's tables keyed by a name, hashed as every table by
+/// name is ([`php_link::NameHasher`]).
+type ByName<V> = HashMap<Vec<u8>, V, php_link::NameHasher>;
+
 impl Imports {
-    fn table(&mut self, kind: Symbol) -> &mut HashMap<Vec<u8>, Vec<u8>> {
+    fn table(&mut self, kind: Symbol) -> &mut ByName<Vec<u8>> {
         match kind {
             Symbol::Class => &mut self.classes,
             Symbol::Function => &mut self.functions,

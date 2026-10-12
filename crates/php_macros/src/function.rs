@@ -363,7 +363,9 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
         .into_iter()
         .map(|check| quote!(#(#cfg)* #check))
         .collect();
-    let module = |module: &Ident, php: &str| {
+    // php registers an alias as a `ZEND_RAW_FENTRY` with no frameless
+    // infos (`join`, `strchr`), so the native's arities are its own name's.
+    let module = |module: &Ident, php: &str, frameless: &[u32]| {
         let php = bytes(php);
         quote! {
             #(#cfg)*
@@ -388,12 +390,12 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
             }
         }
     };
-    let mut modules = vec![module(&ident, &expr::qualified(&keys, &ident)?)];
+    let mut modules = vec![module(&ident, &expr::qualified(&keys, &ident)?, &frameless)];
     if let Some(tokens) = keys.list("aliases") {
         let aliases = syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated
             .parse2(tokens.clone())?;
         for alias in aliases {
-            modules.push(module(&alias, &expr::qualified(&keys, &alias)?));
+            modules.push(module(&alias, &expr::qualified(&keys, &alias)?, &[]));
         }
     }
     Ok(quote! {

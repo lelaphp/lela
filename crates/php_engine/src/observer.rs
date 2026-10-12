@@ -539,6 +539,19 @@ pub(crate) fn observing(req: &Request) -> bool {
     req.shared.observers != 0
 }
 
+/// Whether a frameless call of `function` is served as a full call, a
+/// frame pushed for the observers to see: php's `ZEND_OBSERVER_ENABLED
+/// && !zend_observer_handler_is_unobserved(...)` before
+/// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`), which
+/// is every call while the function's slot is unresolved and none once
+/// the observers declined it. One load and one compare while no
+/// observer is declared.
+#[inline(always)] // as `call`
+#[allow(clippy::inline_always)]
+pub(crate) fn frameless_observed(req: &Request, function: Function) -> bool {
+    observing(req) && !req.native_unobserved(function)
+}
+
 /// The call home: `frame` pushed, its prologue not yet served. One load and
 /// one compare while no observer is declared.
 #[inline(always)] // design §4.3 seam 9: the home pays the load and the branch, never a call
@@ -1045,7 +1058,7 @@ pub(crate) fn function_declared_at_load(req: &mut Request, unit: &Unit, at: usiz
         return;
     };
     let name = decl.name.0.to_ascii_lowercase();
-    if let Some(declared) = req.function_named(&name) {
+    if let Some(declared) = req.function_named((&decl.name).into()) {
         function_declared(req, declared, &name);
     }
 }
@@ -1063,7 +1076,7 @@ pub(crate) fn class_linked_at_load(req: &mut Request, unit: &Unit, at: usize) {
         return;
     };
     let name = decl.name.0.to_ascii_lowercase();
-    if let Some(class) = req.class_named(&name) {
+    if let Some(class) = req.class_named((&decl.name).into()) {
         class_linked(req, class, &name);
     }
 }

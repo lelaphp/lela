@@ -138,7 +138,7 @@ pub(crate) fn run(
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let ask = |n: usize| -> Result<Vec<u8>> {
         let response = server.ask(&entries[n].http, &names[n], timeout)?.0;
-        Ok(super::uploads_named_alike(&from_http(&response)))
+        Ok(entries[n].randoms_named_alike(&from_http(&response)))
     };
     let Alone {
         held: alone,

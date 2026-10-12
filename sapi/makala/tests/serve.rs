@@ -238,6 +238,44 @@ fn a_form_post_is_post_and_input_whole() {
     );
 }
 
+/// A relative `upload_tmp_dir` puts an upload under the process's working
+/// directory, as php-fpm's rfc1867 resolves it at request startup in its
+/// pool's (#2610), and not under the program's, which the program itself
+/// is served in.
+#[test]
+fn a_relative_upload_tmp_dir_is_under_the_process_s_working_directory() {
+    let root = root(
+        "upload",
+        &[(
+            "up.php",
+            "<?php echo dirname($_FILES['f']['tmp_name']), ' ', $_FILES['f']['error'], ' ', getcwd() === __DIR__ ? 'in its own' : 'elsewhere';",
+        )],
+    );
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("makala-upload-cwd");
+    std::fs::create_dir_all(dir.join("spool")).unwrap_or_else(|e| panic!("{e}"));
+    let dir = dir.canonicalize().unwrap_or_else(|e| panic!("{e}"));
+    let server = Server::in_dir(
+        &root,
+        &dir,
+        &["--threads", "2", "-d", "upload_tmp_dir=spool"],
+    );
+    let body = "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\
+                Content-Type: text/plain\r\n\r\nhello\r\n--b--\r\n";
+    let mut stream = server.connect();
+    write!(
+        stream,
+        "POST /up.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let response = read_response(&mut stream);
+    assert_eq!(
+        String::from_utf8_lossy(&response.body),
+        format!("{}/spool 0 in its own", dir.display())
+    );
+}
+
 /// `connection_aborted()` turns true on the write after the client has
 /// gone, and not before (#2337, user story 23): the program writes once,
 /// waits until the client has read that and closed, reads
@@ -339,4 +377,126 @@ fn forwarded_fields_are_trusted_from_no_proxy() {
         String::from_utf8_lossy(&response.body),
         "127.0.0.1 10.9.9.9 for=10.8.8.8\n"
     );
+}
+
+/// What one `GET` of `path` on a connection of its own reads back, whole.
+fn get(server: &Server, path: &str) -> Vec<u8> {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    server
+        .exchange(request.as_bytes(), Duration::from_secs(30))
+        .bytes
+}
+
+/// The status line carries the reason phrase PHP set, as php-fpm hands it
+/// on in `Status:` and the web server in front of it writes it (#2636):
+/// phar's `403 Access Denied`, a code hyper has no phrase for with one,
+/// and with none the code and a space, never hyper's `<none>`. A phrase
+/// set on a 200 is no status php-fpm writes, so the line is `200 OK`.
+#[test]
+fn the_status_line_carries_the_reason_php_set() {
+    let root = root(
+        "reason",
+        &[
+            ("denied.php", "<?php header('HTTP/1.1 403 Access Denied');"),
+            (
+                "adventure.php",
+                "<?php header('HTTP/1.1 399 Choose Your Own Adventure');",
+            ),
+            ("bare.php", "<?php http_response_code(399);"),
+            ("fine.php", "<?php header('HTTP/1.1 200 Fine');"),
+            ("plain.php", "<?php http_response_code(404);"),
+        ],
+    );
+    let server = Server::start(&root);
+    for (path, status) in [
+        ("/denied.php", "HTTP/1.1 403 Access Denied"),
+        ("/adventure.php", "HTTP/1.1 399 Choose Your Own Adventure"),
+        ("/bare.php", "HTTP/1.1 399 "),
+        ("/fine.php", "HTTP/1.1 200 OK"),
+        ("/plain.php", "HTTP/1.1 404 Not Found"),
+    ] {
+        let bytes = get(&server, path);
+        let line = bytes.split(|b| *b == b'\n').next().unwrap_or_default();
+        assert_eq!(
+            String::from_utf8_lossy(line),
+            format!("{status}\r"),
+            "{path}"
+        );
+    }
+}
+
+/// A 304 the program sets carries no `content-type`, as php-fpm's
+/// `sapi_cgi_send_headers` drops PHP's under a 304 (#2608), and keeps the
+/// rest of PHP's lines.
+#[test]
+fn a_304_carries_no_content_type() {
+    let root = root(
+        "not-modified",
+        &[(
+            "index.php",
+            "<?php header('HTTP/1.1 304 Not Modified'); header('Location: /elsewhere');",
+        )],
+    );
+    let server = Server::start(&root);
+    let response = common::parse_response(&get(&server, "/index.php"));
+    assert_eq!(response.status, "HTTP/1.1 304 Not Modified");
+    assert_eq!(response.header("content-type"), None, "{response:?}");
+    assert_eq!(response.header("location"), Some("/elsewhere"));
+    assert_eq!(response.header("x-powered-by"), Some("PHP/8.5.9"));
+}
+
+/// A response's header names go out lowercase, in the order PHP set them,
+/// with PHP's values (`trace:makala-lowercase-header-names`, #2600): the
+/// head read as the bytes on the wire, where `Response::header` folds a
+/// name's case.
+#[test]
+fn a_response_s_header_names_go_out_lowercase_in_php_s_order() {
+    let root = root(
+        "lowercase",
+        &[("index.php", "<?php header('X-Test: yes'); echo 'body';")],
+    );
+    let server = Server::start(&root);
+    let bytes = get(&server, "/index.php");
+    let end = bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("no head in {:?}", String::from_utf8_lossy(&bytes)));
+    let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    let php: Vec<&str> = head
+        .split("\r\n")
+        .skip(1)
+        .filter(|line| {
+            let name = line.split(':').next().unwrap_or_default();
+            ["x-powered-by", "x-test", "content-type"].contains(&name.to_ascii_lowercase().as_str())
+        })
+        .collect();
+    assert_eq!(
+        php,
+        [
+            "x-powered-by: PHP/8.5.9",
+            "x-test: yes",
+            "content-type: text/html; charset=UTF-8"
+        ],
+        "{head}"
+    );
+}
+
+/// `include_path`'s default is the build's `PHP_INCLUDE_PATH`, the CLI's
+/// too: `.:` and the PEAR directory the build was handed, where it was
+/// handed one (`php_engine`'s `build_defs/layout.rs`, #1371), and never
+/// another installed php's (#2704). The witness on makala's `engine`
+/// holds it to `DEFAULT_INCLUDE_PATH` beside the pinned php-fpm.
+#[test]
+fn include_path_defaults_to_the_build_s() {
+    let root = root(
+        "include-path",
+        &[("index.php", "<?php echo get_include_path();")],
+    );
+    let server = Server::start(&root);
+    let response = common::parse_response(&get(&server, "/index.php"));
+    let build = option_env!("PHP_INCLUDE_PATH").map_or_else(
+        || format!(".:{}", option_env!("PEAR_INSTALL_DIR").unwrap_or("")),
+        str::to_owned,
+    );
+    assert_eq!(String::from_utf8_lossy(&response.body), build);
 }

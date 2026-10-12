@@ -45,7 +45,7 @@ pub mod syntax {
     };
 }
 
-use php_heap::{Fatal, Intern};
+use php_heap::{Fatal, FatalReason, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name, Visibility};
@@ -529,10 +529,7 @@ fn compile_scanned<'p>(
                 // compile asked for the memory.
                 Err(fatal) => Err(CompileError {
                     level: Level::Error,
-                    message: match fatal {
-                        Fatal::Error(message) => message,
-                        Fatal::OutOfMemory(_) => String::from("Out of memory"),
-                    },
+                    message: fatal_message(fatal),
                     line: unit.main.line_end,
                     raised: unit.diagnostics,
                     thrown: false,
@@ -675,6 +672,15 @@ fn level_of(level: php_syntax::Level) -> Level {
     }
 }
 
+/// The sentence a compile ends in where the heap refused it a fatal:
+/// the fatal's own message, and php's `Out of memory` for the limit.
+pub(crate) fn fatal_message(fatal: Fatal) -> String {
+    match fatal.into_reason() {
+        FatalReason::Error(message) => message,
+        FatalReason::OutOfMemory(_) => String::from("Out of memory"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,12 +754,10 @@ mod tests {
         b"exit",
     ];
 
-    /// The natives with a frameless entry the tests below call, as
-    /// `ext/standard` declares them: the name, the parameters as php's
-    /// stub has them with a default where the stub has one, and the
-    /// arities of `frameless_function_infos_<name>`.
-    fn frameless_natives() -> Vec<FunctionDecl> {
-        let parameter = |name: &str, ty: Type, default: Option<ConstExpr>| Parameter {
+    /// A native's parameter as its stub declares it, by value, with its
+    /// default where it has one.
+    fn parameter(name: &str, ty: Type, default: Option<ConstExpr>) -> Parameter {
+        Parameter {
             name: Name::from(name),
             ty: Some(ty),
             by_ref: false,
@@ -765,40 +769,87 @@ mod tests {
                 php_unit::decl::ParameterDefault::Expr,
             ),
             attributes: Vec::new(),
+        }
+    }
+
+    /// The natives with a frameless entry the tests below call, as
+    /// `ext/standard` declares them, in `basic_functions.stub.php`'s
+    /// order, which is `zend_flf_functions`' among them: the name, the
+    /// parameters as php's stub has them with a default where the stub
+    /// has one, and the arities of `frameless_function_infos_<name>`;
+    /// and `join` and `strchr`, aliases php registers with none.
+    fn frameless_natives() -> Vec<FunctionDecl> {
+        let string = |name| parameter(name, Type::String, None);
+        let either = |name| parameter(name, Type::Union(vec![Type::Array, Type::String]), None);
+        let nullable =
+            |name, ty| parameter(name, Type::Nullable(Box::new(ty)), Some(ConstExpr::Null));
+        let long = |name, value| {
+            let radix = php_unit::decl::Radix::Decimal;
+            parameter(name, Type::Int, Some(ConstExpr::Long { value, radix }))
+        };
+        let haystack =
+            |more: Vec<Parameter>| [vec![string("haystack"), string("needle")], more].concat();
+        let implode = || vec![either("separator"), nullable("array", Type::Array)];
+        let before = || {
+            haystack(vec![parameter(
+                "before_needle",
+                Type::Bool,
+                Some(ConstExpr::Bool(false)),
+            )])
+        };
+        let characters = Some(ConstExpr::Str(b" ".as_slice().into()));
+        let count = Parameter {
+            by_ref: true,
+            ..parameter("count", Type::Mixed, Some(ConstExpr::Null))
         };
         [
             (
                 "trim",
                 vec![
-                    parameter("string", Type::String, None),
-                    parameter(
-                        "characters",
-                        Type::String,
-                        Some(ConstExpr::Str(b" ".as_slice().into())),
-                    ),
+                    string("string"),
+                    parameter("characters", Type::String, characters),
                 ],
                 vec![1, 2],
             ),
+            ("implode", implode(), vec![1, 2]),
+            ("join", implode(), vec![]),
             (
-                "str_contains",
-                vec![
-                    parameter("haystack", Type::String, None),
-                    parameter("needle", Type::String, None),
-                ],
-                vec![2],
+                "dirname",
+                vec![string("path"), long("levels", 1)],
+                vec![1, 2],
             ),
+            ("strstr", before(), vec![2, 3]),
+            ("strchr", before(), vec![]),
+            ("strpos", haystack(vec![long("offset", 0)]), vec![2, 3]),
+            ("str_contains", haystack(vec![]), vec![2]),
+            ("str_starts_with", haystack(vec![]), vec![2]),
             (
                 "substr",
                 vec![
-                    parameter("string", Type::String, None),
+                    string("string"),
                     parameter("offset", Type::Int, None),
-                    parameter(
-                        "length",
-                        Type::Nullable(Box::new(Type::Int)),
-                        Some(ConstExpr::Null),
-                    ),
+                    nullable("length", Type::Int),
                 ],
                 vec![2, 3],
+            ),
+            (
+                "strtr",
+                vec![
+                    string("string"),
+                    either("from"),
+                    nullable("to", Type::String),
+                ],
+                vec![2, 3],
+            ),
+            (
+                "str_replace",
+                vec![
+                    either("search"),
+                    either("replace"),
+                    either("subject"),
+                    count,
+                ],
+                vec![3],
             ),
         ]
         .into_iter()
@@ -3614,14 +3665,57 @@ mod tests {
         assert_eq!(
             rows,
             [
-                (Opcode::FramelessIcall2, 2),
+                (Opcode::FramelessIcall2, 10),
                 (Opcode::FramelessIcall1, 0),
                 (Opcode::FramelessIcall2, 1),
-                (Opcode::FramelessIcall2, 3),
-                (Opcode::FramelessIcall2, 2),
+                (Opcode::FramelessIcall2, 12),
+                (Opcode::FramelessIcall2, 10),
             ],
-            "zend_flf_functions in registration order: trim 1, trim 2, str_contains 2, substr 2, substr 3"
+            "zend_flf_functions in registration order: trim 1, trim 2, implode 1, implode 2, dirname 1, dirname 2, strstr 2, strstr 3, strpos 2, strpos 3, str_contains 2, str_starts_with 2, substr 2, substr 3"
         );
+    }
+
+    /// A call of each of the seven natives #2673 found with no entry, at
+    /// each arity php declares for it, is a `FRAMELESS_ICALL_<n>` with
+    /// its row of `zend_flf_functions` as `basic_functions.stub.php`
+    /// orders them; a call of `join` or `strchr`, aliases php declares
+    /// no entry for, and `str_replace` with its fourth argument, above
+    /// every arity, stay the ordinary call.
+    #[test]
+    fn each_arity_php_declares_is_a_frameless_call_with_its_row() {
+        let source = b"<?php implode($a); implode($a, $b); dirname($a); dirname($a, 2); strstr($a, $b); strstr($a, $b, true); strpos($a, $b); strpos($a, $b, 1); str_starts_with($a, $b); strtr($a, $b); strtr($a, $b, $c); str_replace($a, $b, $c); join($a, $b); strchr($a, $b); str_replace($a, $b, $c, $d);";
+        let unit = unit_of(source);
+        let rows: Vec<(Opcode, u32)> = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode.is_frameless_icall())
+            .map(|op| (op.opcode, op.extended_value))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Opcode::FramelessIcall1, 2),
+                (Opcode::FramelessIcall2, 3),
+                (Opcode::FramelessIcall1, 4),
+                (Opcode::FramelessIcall2, 5),
+                (Opcode::FramelessIcall2, 6),
+                (Opcode::FramelessIcall3, 7),
+                (Opcode::FramelessIcall2, 8),
+                (Opcode::FramelessIcall3, 9),
+                (Opcode::FramelessIcall2, 11),
+                (Opcode::FramelessIcall2, 14),
+                (Opcode::FramelessIcall3, 15),
+                (Opcode::FramelessIcall3, 16),
+            ]
+        );
+        let ordinary = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode == Opcode::InitFcall)
+            .count();
+        assert_eq!(ordinary, 3, "join, strchr and str_replace of four");
     }
 
     /// A third argument rides in an `OP_DATA` after the opline

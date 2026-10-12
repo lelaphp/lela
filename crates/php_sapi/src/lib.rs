@@ -36,7 +36,7 @@ use std::process::ExitCode;
 use php_engine::LeakSensor;
 
 pub use php_engine::{
-    Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
+    Aborted, Body, BuildDefs, Chdir, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
     FileHandles, Forked, HostPage, HostServes, HostThread, HostValue, IniEvent, IniFile, IniFiles,
     IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink, PHP_CONFIG_FILE_PATH,
     PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid,

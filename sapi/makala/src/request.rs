@@ -21,6 +21,7 @@ use std::convert::Infallible;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -29,7 +30,7 @@ use php_proto::cgi::{Environment, RequestInfo, Settings};
 use php_proto::vpath::Translated;
 use php_sapi::cgi::Disk;
 use php_sapi::{
-    Aborted, Body, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
+    Aborted, Body, Chdir, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -193,15 +194,43 @@ fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
 }
 
 /// How the pool serves each request: through its own `Engine::serve` on
-/// `engine`, under the document root `root`.
+/// `engine`, under the document root `root`, starting in the process's
+/// working directory as it stands now, which no request moves; in the
+/// document root where the process's has gone and `getcwd(3)` fails.
 pub(crate) fn serving(engine: &Engine, root: &Arc<[u8]>) -> impl Fn(Job) + Clone + Send + 'static {
     let engine = engine.clone();
     let root = Arc::clone(root);
-    move |job| serve(&engine, &root, job)
+    let started_in: Arc<Path> = std::env::current_dir()
+        .unwrap_or_else(|_| php_sapi::cgi::path_of(&root))
+        .into();
+    move |job| serve(&engine, &root, &started_in, job)
 }
 
-/// One program's request, through its own `Engine::serve`.
-fn serve(engine: &Engine, root: &[u8], job: Job) {
+/// One program's request, through its own `Engine::serve`. It starts in
+/// `started_in`, the process's working directory, as php-fpm's request
+/// starts in its pool's (#2610): what request startup resolves, a
+/// relative `upload_tmp_dir` among it, is resolved there, and the program
+/// is served in its own directory, as `php_execute_script` enters it
+/// ([`Chdir::IntoProgramDir`]), without moving the process's, which every
+/// request thread shares.
+///
+/// ```php
+/// var_dump(getcwd() === __DIR__);
+/// register_shutdown_function(function () { var_dump(getcwd() === __DIR__); });
+/// ```
+/// ```request makala
+/// --GET--
+/// q=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// bool(true)
+/// bool(false)
+/// ```
+fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
     let Job {
         head,
         program,
@@ -214,15 +243,6 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
     // program as named and leaves the split as it came.
     let settings = Settings::default();
     let info = php_proto::cgi::request_info(&mut env, settings, None, &Disk);
-    let cwd = info
-        .path_translated
-        .as_deref()
-        .and_then(|path| {
-            php_sapi::cgi::path_of(path)
-                .parent()
-                .map(std::path::Path::to_path_buf)
-        })
-        .unwrap_or_else(|| php_sapi::cgi::path_of(root));
     // php-fpm registers the parameters newest first, as `fcgi_hash_apply`
     // walks them (`Z/main/fastcgi.c:399-407`): the header fields first and
     // `SCRIPT_FILENAME` last, in `$_SERVER` and `getallheaders()` alike.
@@ -246,7 +266,8 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
     let description = RequestDescription {
         server: php_sapi::cgi::server_variables(&env, &info, settings),
         params: newest.0,
-        cwd,
+        cwd: started_in.to_path_buf(),
+        chdir: Chdir::IntoProgramDir,
         sapi_name: crate::NAME.to_owned(),
         web: Some(web),
         script_name: info.path_translated.clone(),
@@ -680,6 +701,14 @@ mod tests {
     /// after a head and a write, and any other program is answered with
     /// the serving thread's name.
     fn start() -> SocketAddr {
+        // A head as the engine sends a request's: its code, 200 where
+        // the program set none.
+        fn ok() -> ResponseHead {
+            ResponseHead {
+                code: 200,
+                ..ResponseHead::default()
+            }
+        }
         let root = root();
         let argv: Vec<std::ffi::OsString> = [
             "--listen",
@@ -706,7 +735,7 @@ mod tests {
             match &head.target[..] {
                 b"/panic.php" => panic!("a request panicked before its head, on cue"),
                 b"/cut.php" => {
-                    sink.send_headers(&ResponseHead::default());
+                    sink.send_headers(&ok());
                     sink.write(b"partial").ok();
                     let (read, seen) = &READ;
                     let guard = read.lock().unwrap_or_else(PoisonError::into_inner);
@@ -717,7 +746,7 @@ mod tests {
                     panic!("a request panicked mid-response, on cue");
                 }
                 _ => {
-                    sink.send_headers(&ResponseHead::default());
+                    sink.send_headers(&ok());
                     let name = std::thread::current().name().unwrap_or("").to_owned();
                     sink.write(name.as_bytes()).ok();
                 }

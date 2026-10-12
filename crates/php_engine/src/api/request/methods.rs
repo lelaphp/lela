@@ -7,7 +7,7 @@
 //! the engine's linked classes and the classes the request declared.
 
 use php_link::{LinkedClass, Row};
-use php_unit::decl::{ClassKind, MethodDecl, Visibility};
+use php_unit::decl::{Bare, ClassKind, MethodDecl, Visibility};
 
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::{Thrown, none_pending};
@@ -100,7 +100,7 @@ impl Request {
         if let Some((trampoline, _)) = self.trampoline_of(function) {
             return match trampoline.via {
                 crate::trampoline::Via::Magic(magic) => self.method_class(magic),
-                crate::trampoline::Via::Invoke(_) => self.class_named(b"Closure"),
+                crate::trampoline::Via::Invoke(_) => self.class_named(Bare::resolved(b"Closure")),
                 crate::trampoline::Via::Native(_) => None,
             };
         }

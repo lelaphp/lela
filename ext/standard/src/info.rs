@@ -21,6 +21,7 @@ use php_ext::values::{Key, Owner, PhpString};
 use crate::arg_value_error;
 
 mod logos;
+use crate::string::Decimal;
 use constants::{
     CREDITS_ALL, CREDITS_DOCS, CREDITS_FULLPAGE, CREDITS_GENERAL, CREDITS_GROUP, CREDITS_MODULES,
     CREDITS_QA, CREDITS_SAPI, INFO_CONFIGURATION, INFO_CREDITS, INFO_ENVIRONMENT, INFO_GENERAL,
@@ -403,7 +404,7 @@ fn gpcse(req: &mut Request, name: &str) -> Result<Vec<u8>, Thrown> {
         }
         out.extend_from_slice(format!("${name}['").as_bytes());
         match key {
-            Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
+            Key::Int(n) => out.extend_from_slice(Decimal::of(n).as_bytes()),
             Key::Str(s) if html => {
                 let escaped = esc(req, s.as_bytes());
                 out.extend_from_slice(&escaped);

@@ -5,8 +5,8 @@
 //! `__private` (`ext.no-private`).
 
 use php_unit::decl::{
-    Attribute, AttributeArgument, ClassDecl, ClassKind, ConstExpr, FunctionDecl, MethodDecl, Name,
-    Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    Attribute, AttributeArgument, Bare, ClassDecl, ClassKind, ConstExpr, FunctionDecl, MethodDecl,
+    Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{Cases, Class, ClassRef, ExtensionBuilder, ObjectHandlers};
@@ -152,7 +152,7 @@ pub fn abstract_entry(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 }
 
 fn linked<E: Class>(req: &mut Request) -> Result<ClassId, Thrown> {
-    match req.class_named(E::NAME) {
+    match req.class_named(Bare::resolved(E::NAME)) {
         Some(class) => Ok(class),
         None => Err(fatal(req, "InternalError: a declared enum is not linked")),
     }

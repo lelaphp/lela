@@ -2,6 +2,7 @@
 //! libargon2 (phc-winner-argon2 20190702, version 0x13, the `ref.c` fill),
 //! with php's own reading of argon2 hashes from `Z/ext/standard/password.c`.
 
+use crate::string::Decimal;
 use php_ext::coerce::is_space;
 
 /// `ARGON2_SYNC_POINTS`: slices per pass.
@@ -978,13 +979,13 @@ pub(super) fn encode(params: &Params, salt: &[u8], tag: &[u8]) -> Result<String,
     out.push('$');
     out.push_str(params.variant.name());
     out.push_str("$v=");
-    out.push_str(&params.version.to_string());
+    out.push_str(Decimal::unsigned(u64::from(params.version)).as_str());
     out.push_str("$m=");
-    out.push_str(&params.m_cost.to_string());
+    out.push_str(Decimal::unsigned(u64::from(params.m_cost)).as_str());
     out.push_str(",t=");
-    out.push_str(&params.t_cost.to_string());
+    out.push_str(Decimal::unsigned(u64::from(params.t_cost)).as_str());
     out.push_str(",p=");
-    out.push_str(&params.lanes.to_string());
+    out.push_str(Decimal::unsigned(u64::from(params.lanes)).as_str());
     out.push('$');
     to_base64(&mut out, salt);
     out.push('$');

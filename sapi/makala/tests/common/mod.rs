@@ -43,7 +43,14 @@ impl Server {
     /// `makala -n` over `root` with `args` after the address, once its
     /// started line names the addresses.
     pub fn with_args(root: &Path, args: &[&str]) -> Server {
+        Server::in_dir(root, Path::new(env!("CARGO_MANIFEST_DIR")), args)
+    }
+
+    /// [`Server::with_args`], the process started in the working
+    /// directory `dir`.
+    pub fn in_dir(root: &Path, dir: &Path, args: &[&str]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_makala"))
+            .current_dir(dir)
             .args(["-n", "--listen", "127.0.0.1:0"])
             .args(args)
             .arg("--root")

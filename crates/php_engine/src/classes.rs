@@ -19,14 +19,14 @@
 use std::cmp::Ordering;
 
 use php_unit::Level;
-use php_unit::decl::{FunctionDecl, MethodDecl, Name, Type};
+use php_unit::decl::{Bare, FunctionDecl, MethodDecl, Name, Type};
 
 use php_macros::php_class;
 
 use crate::api::__private::native_function;
 use crate::api::abi::{
     Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, GcTable, Instance,
-    NamedVariadic, ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
+    NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
@@ -40,15 +40,7 @@ use crate::trampoline::{public_method, variadic};
 /// is uncloneable (`zend_register_default_exception`), and the rest
 /// `Std`'s. A user class extending a throwable is reached through this
 /// table, as php's inherits `create_object`.
-struct ThrowableHandlers;
-
-impl ObjectHandlers for ThrowableHandlers {
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-}
-
-static THROWABLE: ThrowableHandlers = ThrowableHandlers;
+static THROWABLE: Refusals = Refusals::NONE.cloning();
 
 /// Whether `handlers` is the throwables' table: php's
 /// `zend_default_exception_new`, the `create_object` of every class
@@ -1326,7 +1318,7 @@ impl ArrayAccess {
 /// seven properties and eleven methods in its order: the private
 /// `__clone`, the constructor, `__wakeup` with its tentative `void`, the
 /// seven final getters and `__toString`. Its objects are reached through
-/// [`ThrowableHandlers`], which a user class extending it inherits, as
+/// [`THROWABLE`], which a user class extending it inherits, as
 /// php's inherits `create_object`. `Throwable` is declared on it and on
 /// `Error` alone, and the linker carries it down (design §6.2);
 /// `Stringable` is never written, `Throwable` extending it.
@@ -2139,7 +2131,7 @@ fn do_closure_bind(
         NewScope::Object(object) => Some(object.class()),
         NewScope::Named(name) if name == b"static" => info.scope,
         NewScope::Named(name) => {
-            let Some(class) = req.class_named(name.strip_prefix(b"\\").unwrap_or(&name)) else {
+            let Some(class) = req.class_named(Bare::of(&name)) else {
                 warning(
                     req,
                     &format!("Class \"{}\" not found", String::from_utf8_lossy(&name)),
@@ -2156,7 +2148,7 @@ fn do_closure_bind(
     // `called_scope = newthis ? Z_OBJCE_P(newthis) : ce`, the new scope
     // before a receiver with none takes `Closure` as its dummy one.
     let called_scope = scope;
-    let scope = scope.or_else(|| this.and_then(|_| req.class_named(b"Closure")));
+    let scope = scope.or_else(|| this.and_then(|_| req.class_named(Bare::resolved(b"Closure"))));
     create_closure(req, &info, scope, called_scope, this).map(|made| Some(Instance::of(made)))
 }
 
@@ -2173,7 +2165,7 @@ fn create_closure(
     called_scope: Option<ClassId>,
     this: Option<PhpObject>,
 ) -> Result<PhpObject, Thrown> {
-    let Some(class) = req.class_named(b"Closure") else {
+    let Some(class) = req.class_named(Bare::resolved(b"Closure")) else {
         return Err(throw_error(req, "Error", "Class \"Closure\" not found"));
     };
     let bound = info

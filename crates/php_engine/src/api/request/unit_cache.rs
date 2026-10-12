@@ -8,6 +8,7 @@
 //! itself whether its configuration lets it answer, as opcache's
 //! `accelerator_enabled` does.
 
+use php_unit::decl::Bare;
 use std::sync::Arc;
 
 use php_compile::SourceKind;
@@ -453,7 +454,7 @@ impl Request {
         let stack = self.stack_limit();
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
         let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
-        let holds = |name: &[u8]| self.class_named(name).is_some();
+        let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
         let (arena, cwd) = (Arc::clone(&self.arena), &self.cwd);
         let (compiled, filed, early) = shared.units.file(

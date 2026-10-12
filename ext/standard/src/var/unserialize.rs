@@ -26,6 +26,7 @@ use super::{
     Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, has_method, is_enum_class, is_serializable,
     locked, not_serializable,
 };
+use crate::string::Decimal;
 
 /// `HT_MAX_SIZE` on a 64-bit build.
 const HT_MAX_SIZE: i64 = 0x4000_0000;
@@ -2281,17 +2282,22 @@ impl State<'_> {
     ) -> Result<bool, Thrown> {
         while elements > 0 {
             elements -= 1;
-            let key = match self.key(req) {
+            let scalar = self.key(req);
+            let digits;
+            let key: &[u8] = match &scalar {
                 Some(Scalar::Str(bytes)) => bytes,
-                Some(Scalar::Long(n)) => n.to_string().into_bytes(),
+                Some(Scalar::Long(n)) => {
+                    digits = Decimal::of(*n);
+                    digits.as_bytes()
+                }
                 _ => return Ok(false),
             };
             // A key is `zend_string_init_existing_interned`'s, so a name
             // a unit already holds costs nothing.
-            let owned = PhpString::existing_interned(req, &key)?;
+            let owned = PhpString::existing_interned(req, key)?;
             let name = *owned;
             self.hash.keys.push(owned.into_key());
-            if let Some(old) = object.prop(req, &key) {
+            if let Some(old) = object.prop(req, key) {
                 let old = Owner::take(req, old);
                 self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Property(object, name));
@@ -2306,7 +2312,7 @@ impl State<'_> {
             if !self.value(req, Some(Slot::Property(object, name)))? {
                 return Ok(false);
             }
-            object.unserialize_verify(req, &key)?;
+            object.unserialize_verify(req, key)?;
             // An `R:` value numbered no slot of its own.
             if matches!(self.hash.slots.get(at), Some(Some((Slot::Property(of, _), _))) if *of == object)
             {

@@ -13,6 +13,7 @@ use crate::api::abi::{Beneath, chain};
 use crate::api::call::write_prop;
 use crate::api::request::Request;
 use crate::api::values::{Owner, PhpObject, PhpString, Value, adopted};
+use php_unit::decl::Bare;
 
 /// php's error levels, `E_*`: the unit's, since a compile-time
 /// diagnostic is recorded on the unit at one of them and raised here
@@ -731,7 +732,7 @@ pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thr
     }
     let held = thrown.exception().copied();
     let caught = held.or_else(|| req.pending()).filter(|throwable| {
-        req.class_named(class.as_bytes())
+        req.class_named(Bare::resolved(class.as_bytes()))
             .is_some_and(|class| req.instance_of(throwable.class(), class))
     });
     let Some(throwable) = caught else {

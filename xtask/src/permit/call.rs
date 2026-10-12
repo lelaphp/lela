@@ -44,6 +44,10 @@ pub struct Call {
     /// The subagent the call runs in, absent on the main loop.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// How long the call ran, which the `PostToolUse` hook carries: what
+    /// began during it began no earlier than this before the hook.
+    #[serde(default)]
+    pub(super) duration_ms: Option<u64>,
     /// The answered `AskUserQuestion` calls the function hook read from
     /// the engine, read only by that adapter ([`Evidence`]).
     #[serde(default)]

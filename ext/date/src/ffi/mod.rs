@@ -46,6 +46,7 @@ use timelib_sys as sys;
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext::values::NameHasher;
 
 use crate::lent::{Lent, lent};
 
@@ -485,7 +486,7 @@ impl Zone {
 #[derive(Default)]
 pub(crate) struct Zones {
     /// The zones by the name each was asked for, each with its key.
-    zones: HashMap<Vec<u8>, Cached>,
+    zones: HashMap<Vec<u8>, Cached, NameHasher>,
     /// The table's own blocks, made at the first ask.
     table: Option<Table>,
 }

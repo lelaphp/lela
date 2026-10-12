@@ -134,14 +134,36 @@ const HEAD_INI: [&[u8]; 2] = [b"cgi.nph", b"cgi.rfc2616_headers"];
 /// header line, and the blank line.
 #[must_use]
 pub fn head(head: &ResponseHead) -> Vec<u8> {
+    php_proto::cgi::head(
+        shape(head),
+        head.code,
+        head.status_line.as_deref(),
+        &head.lines,
+    )
+}
+
+/// [`head`] line by line ([`php_proto::cgi::lines`]): what a web server in
+/// front of php-fpm reads the response's status and header lines from.
+#[must_use]
+pub fn lines(head: &ResponseHead) -> Vec<php_proto::cgi::Line<'_>> {
+    php_proto::cgi::lines(
+        shape(head),
+        head.code,
+        head.status_line.as_deref(),
+        &head.lines,
+    )
+}
+
+/// The shape the head's `cgi.nph` and `cgi.rfc2616_headers` give it at the
+/// send, each empty where the request's host names neither.
+fn shape(head: &ResponseHead) -> Shape {
     let entry = |name: &[u8]| {
         head.ini
             .iter()
             .find(|(had, _)| *had == name)
             .map_or(&[][..], |(_, value)| value.as_slice())
     };
-    let shape = Shape::of(entry(b"cgi.nph"), entry(b"cgi.rfc2616_headers"));
-    php_proto::cgi::head(shape, head.code, head.status_line.as_deref(), &head.lines)
+    Shape::of(entry(b"cgi.nph"), entry(b"cgi.rfc2616_headers"))
 }
 
 /// The directory `php_cgi_ini_activate_user_config` scans to for

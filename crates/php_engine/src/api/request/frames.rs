@@ -838,13 +838,32 @@ impl Request {
     /// write its arguments into, `header` laid down whole; a page the
     /// memory limit refuses is the fatal php raises there.
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let Some(function) = header.function else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a call pushed with no callee",
-            )));
-        };
-        let room = self.call_room(function, header.num_args);
+        let (_, room) = self.callee_room(&header)?;
         self.push_room(room, header)
+    }
+
+    /// The call of a frameless native, `FRAMELESS_ICALL_*`'s: php's full
+    /// call where the native is observed
+    /// ([`crate::observer::frameless_observed`]), on the VM stack as
+    /// [`Request::push_call`] pushes it, and any other off the stack's
+    /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
+    /// over no frame and it takes no room php's call does not.
+    pub(crate) fn push_frameless(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
+        let (function, room) = self.callee_room(&header)?;
+        if crate::observer::frameless_observed(self, function) {
+            return self.push_room(room, header);
+        }
+        self.vm.push_frameless(room, header)
+    }
+
+    /// The callee `header` names and the room its call takes
+    /// ([`Request::call_room`]); a header with no callee is the engine's
+    /// error.
+    fn callee_room(&self, header: &exec::Header) -> Result<(Function, usize), Fatal> {
+        let Some(function) = header.function else {
+            return Err(Fatal::error("InternalError: a call pushed with no callee"));
+        };
+        Ok((function, self.call_room(function, header.num_args)))
     }
 
     /// A call pushed with `room` slots past its header, which the caller
@@ -984,7 +1003,7 @@ impl Request {
         crate::observer::call(self, call);
         Ok(exec::Activated {
             frame: call,
-            prologue: (opline < shape.entry).then_some(shape.entry),
+            prologue: opline < shape.entry,
         })
     }
 
@@ -1228,6 +1247,14 @@ impl Request {
     /// the frame for all of them (design §5.8). Empty for a frame that
     /// is not live, where every operand reads as `UNDEF` and the inline
     /// path stands aside for the kernel.
+    ///
+    /// The lookup is the frame table's bounds check on `frame`, the
+    /// table's base and the frame's slot base and count: eight
+    /// instructions of an inline `JMPZ` over a CV, before the operand's
+    /// own bounds check, where php indexes off `execute_data` in a
+    /// register (#2516). A frame cursor the loop keeps valid across
+    /// handlers would be an `unsafe` contract across the heap seam,
+    /// which #2540 ruled out for this term.
     pub(crate) fn slots_mut(&mut self, frame: FrameRef) -> &mut [Zval] {
         self.vm
             .stack

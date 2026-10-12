@@ -81,6 +81,21 @@ use crate::ffi::{Action, Code, Compress, Decompress};
 /// bzcompress(): Argument #3 ($work_factor) must be between 0 and 250
 /// bool(true)
 /// ```
+///
+/// `bzcompress` and `bzdecompress` leave `bzalloc` null
+/// (`Z/ext/bz2/bz2.c:521-522`), so the library's state is on its own
+/// allocator and the request's heap never counts it, where a filter's is
+/// counted ([`crate::filter::factory`]):
+///
+/// ```php
+/// $s = str_repeat('abc', 1000); $z = bzcompress($s);
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $y = bzcompress($s, 9); var_dump(memory_get_peak_usage() - $m < 65536);
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $x = bzdecompress($z); var_dump(memory_get_peak_usage() - $m < 65536);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
 #[php_function]
 fn bzcompress(
     req: &mut Request,

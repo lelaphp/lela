@@ -305,9 +305,7 @@ impl Str {
         // `ZEND_CONCAT`'s own check (`Z/Zend/zend_vm_def.h:410-412`);
         // `concat_function` throws before it asks.
         let Some(len) = old.checked_add(add) else {
-            return Err(Fatal::Error(String::from(
-                "Integer overflow in memory allocation",
-            )));
+            return Err(Fatal::error("Integer overflow in memory allocation"));
         };
         let utf8 = s.is_valid_utf8() && tail.is_valid_utf8();
         let same = s.is_same(tail);
@@ -1088,12 +1086,12 @@ pub(crate) fn hash_func(bytes: &[u8]) -> u64 {
 fn persistent(bytes: &[u8]) -> Result<Str, Fatal> {
     let size = Str::allocation_size(bytes.len());
     let Ok(layout) = Layout::from_size_align(size, align_of::<StrHeader>()) else {
-        return Err(Fatal::OutOfMemory(size));
+        return Err(Fatal::out_of_memory(size));
     };
     // SAFETY: the layout's size is the header and the bytes, never zero.
     let at = unsafe { std::alloc::alloc(layout) };
     let Some(at) = NonNull::new(at) else {
-        return Err(Fatal::OutOfMemory(size));
+        return Err(Fatal::out_of_memory(size));
     };
     // SAFETY: the allocation is exactly what `init` asks for and holds
     // nothing else.

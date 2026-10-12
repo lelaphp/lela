@@ -828,7 +828,7 @@ impl Mm {
         size: usize,
     ) -> Result<NonNull<u8>, Fatal> {
         let Some(index) = self.huge.iter().position(|block| block.at == at) else {
-            return Err(Fatal::Error(String::from("zend_mm_heap corrupted")));
+            return Err(Fatal::error("zend_mm_heap corrupted"));
         };
         let old_size = self.huge[index].size;
         if size > MAX_LARGE_SIZE {
@@ -1315,7 +1315,7 @@ impl Mm {
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let page = real_page_size();
         let Some(new_size) = size.checked_next_multiple_of(page) else {
-            return Err(Fatal::Error(format!(
+            return Err(Fatal::error(format!(
                 "Possible integer overflow in memory allocation ({size} + {page})"
             )));
         };
@@ -1683,7 +1683,7 @@ fn munmap(at: *mut u8, size: usize) {
 /// php's exact text when a chunk would take the request past its
 /// `memory_limit` (`Z/Zend/zend_alloc.c:1045`).
 fn limit_exhausted(limit: usize, size: usize) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "Allowed memory size of {limit} bytes exhausted (tried to allocate {size} bytes)"
     ))
 }
@@ -1691,7 +1691,7 @@ fn limit_exhausted(limit: usize, size: usize) -> Fatal {
 /// php's exact text when the system cannot give the mapping
 /// (`Z/Zend/zend_alloc.c:1063`).
 fn out_of_memory(allocated: usize, size: usize) -> Fatal {
-    Fatal::Error(format!(
+    Fatal::error(format!(
         "Out of memory (allocated {allocated} bytes) (tried to allocate {size} bytes)"
     ))
 }

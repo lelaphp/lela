@@ -13,7 +13,6 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -24,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Intern, Strings, Zval};
-use php_link::{Exact, Folded, Indexed, LinkedClass, Names};
+use php_link::{Exact, Folded, Indexed, LinkedClass, NameMap, Names};
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
     Type,
@@ -38,8 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request, Sink, TypedIni,
-    placed_of,
+    BuildDefs, Ending, ExtensionId, HandlePath, LongEntry, LongHandler, Placed, PropertyInfo,
+    Request, Sink, TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -91,6 +90,9 @@ pub struct RequestDescription {
     /// How the host hands a wrapped program's file over, which decides
     /// whether the request holds it open, and until when.
     pub program_file: ProgramFile,
+    /// Whether a wrapped program is served in its own directory, the
+    /// request starting in [`RequestDescription::cwd`] either way.
+    pub chdir: Chdir,
     /// php's `EG(exit_status)` as the request starts: zero, as
     /// `init_executor` writes it, but where a host serves one request of
     /// php's as several of the engine's and hands each the status the
@@ -155,6 +157,26 @@ pub enum ProgramFile {
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1905`), and `shutdown_executor` closes
     /// the list after the shutdown functions and destructors.
     Listed,
+}
+
+/// Where `php_execute_script` serves a wrapped program
+/// (`Z/main/main.c:2596-2604`): in the working directory the request
+/// started in, under `SAPI_OPTION_NO_CHDIR`, or in the program's own
+/// directory, `VCWD_CHDIR_FILE` over its name before `auto_prepend_file`,
+/// and the directory before it restored once the program and
+/// `auto_append_file` have been served. What request startup resolves, a
+/// relative `upload_tmp_dir` among it, is resolved in the directory the
+/// request started in, and so are the shutdown functions and destructors
+/// after.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Chdir {
+    /// `SAPI_OPTION_NO_CHDIR`: php's CLI, and php-cgi's `-C`.
+    #[default]
+    Stay,
+    /// The program's directory, as php-fpm and php-cgi serve a program:
+    /// its name cut at its last `/`, as `virtual_chdir_file` cuts it,
+    /// resolved against the working directory as `chdir(2)` resolves it.
+    IntoProgramDir,
 }
 
 /// A throwable the program left uncaught, for a host that renders it:
@@ -682,7 +704,7 @@ pub(crate) struct Shared {
     /// declarations alone, which the compiler reads as they stand on
     /// every compile ([`Declared`]).
     pub(crate) functions: Vec<FunctionDecl>,
-    /// `functions` by lowered name, `CG(function_table)`'s keys.
+    /// `functions` by name, any case, `CG(function_table)`'s keys.
     function_names: Names<Folded>,
     /// Each native's entry, one row per row of `functions`, the
     /// interception's where an extension intercepts it.
@@ -711,9 +733,10 @@ pub(crate) struct Shared {
     /// order, each with its methods on it: what a `ClassId` below the
     /// request's own declarations indexes.
     pub(crate) classes: Vec<ClassDecl>,
-    /// `classes` by lowered name, without the aliases `class_keys`
-    /// files: what the compiler finds a native class by.
-    class_names: Names<Folded>,
+    /// `CG(class_table)`'s keys over `classes` as startup leaves them
+    /// ([`Shared::class_at`]), whose first half the compiler finds a
+    /// native class by.
+    class_keys: ClassKeys,
     /// Each native class's `ce->info.internal.module`, one row per row
     /// of `classes`: the extension that declared it, `Core` for Zend's.
     pub(crate) class_modules: Vec<ExtensionId>,
@@ -738,11 +761,6 @@ pub(crate) struct Shared {
     /// The class each parameter of each native holds its argument to, by
     /// the native's number ([`parameter_classes`]).
     pub(crate) parameter_classes: Vec<Box<[Option<ClassId>]>>,
-    /// `CG(class_table)`'s keys as startup leaves them
-    /// ([`class_keys`]): what a lookup by name finds among the engine's
-    /// classes in one hash lookup, as `zend_hash_find` does, before the
-    /// request's own rows.
-    pub(crate) class_keys: HashMap<Box<[u8]>, ClassId>,
     /// Each class's linked record, one row per row of `classes`
     /// ([`native_records`]): `ce->function_table` whole, in php's order.
     pub(crate) records: Vec<LinkedClass<ClassId>>,
@@ -752,8 +770,8 @@ pub(crate) struct Shared {
     pub(crate) method_functions: Vec<Box<[Option<Function>]>>,
     /// Each class's trampolines, one row per row of `classes`
     /// ([`trampoline_tables`]): what its `get_method` synthesises under
-    /// a name its function table has no row for, each under its lowered
-    /// name.
+    /// a name its function table has no row for, each under its name,
+    /// found in any case.
     pub(crate) trampoline_tables: Vec<FunctionTable>,
     /// Each class's `ce->parent`, one row per row of `classes`, resolved
     /// once as `zend_register_internal_class_ex` links it: a native
@@ -1086,29 +1104,45 @@ fn link_classes(declarations: &mut [Declarations]) -> LinkedClasses {
     }
 }
 
-/// `CG(class_table)`'s keys at the end of startup: each class under its
-/// lowered name, as `zend_register_internal_class_ex` adds it, then each
-/// stub `@alias` under its own, as `zend_register_class_alias_ex` adds
-/// it after its class. `zend_hash_add` refuses a key the table holds, so
-/// the first row of a name is the one found.
-fn class_keys(classes: &[ClassDecl]) -> HashMap<Box<[u8]>, ClassId> {
-    let mut keys = HashMap::with_capacity(classes.len());
-    let ids = (0u32..).map(ClassId);
-    for (class, decl) in ids.clone().zip(classes) {
-        keys.entry(lowered(&decl.name.0)).or_insert(class);
-    }
-    for (class, decl) in ids.zip(classes) {
-        for alias in &decl.aliases {
-            keys.entry(lowered(&alias.0)).or_insert(class);
-        }
-    }
-    keys
+/// `CG(class_table)`'s keys at the end of startup, any case: each class
+/// under its name, as `zend_register_internal_class_ex` adds it, then
+/// each stub `@alias` under its own, as `zend_register_class_alias_ex`
+/// adds it after its class. `zend_hash_add` refuses a key the table
+/// holds, so the first row of a name is the one found.
+struct ClassKeys {
+    /// The classes by name, an index over the rows that carry them.
+    names: Names<Folded>,
+    /// The aliases and the class each names.
+    aliases: NameMap<Folded, ClassId>,
 }
 
-/// A class's trampolines by their lowered names, which its `get_method`
-/// answers past its function table ([`trampoline_tables`]): one lookup of
-/// the lowered name.
-pub(crate) type FunctionTable = HashMap<Box<[u8]>, Function>;
+impl ClassKeys {
+    fn over(classes: &[ClassDecl]) -> ClassKeys {
+        let mut aliases = NameMap::new();
+        for (class, decl) in (0u32..).map(ClassId).zip(classes) {
+            for alias in &decl.aliases {
+                aliases.add(&alias.0, class);
+            }
+        }
+        ClassKeys {
+            names: Names::over(classes),
+            aliases,
+        }
+    }
+
+    /// `zend_hash_find(CG(class_table), lcname)` over `classes`, the rows
+    /// the keys were made over.
+    fn find(&self, classes: &[ClassDecl], name: &[u8]) -> Option<ClassId> {
+        match self.names.find(classes, name) {
+            Some(at) => u32::try_from(at).ok().map(ClassId),
+            None => self.aliases.find(name).copied(),
+        }
+    }
+}
+
+/// A class's trampolines by name, any case, which its `get_method`
+/// answers past its function table ([`trampoline_tables`]): one lookup.
+pub(crate) type FunctionTable = NameMap<Folded, Function>;
 
 /// The function each native class's own methods are, by their index
 /// among its declaration: every row of `methods` a class declares,
@@ -1143,10 +1177,7 @@ fn method_functions(
 /// `zend_class_implements` to its interfaces: each built once every
 /// class it names is, a class standing before what it names waiting a
 /// round. One whose names never resolve has its own methods alone.
-fn native_records(
-    classes: &[ClassDecl],
-    keys: &HashMap<Box<[u8]>, ClassId>,
-) -> Vec<LinkedClass<ClassId>> {
+fn native_records(classes: &[ClassDecl], keys: &ClassKeys) -> Vec<LinkedClass<ClassId>> {
     let mut records: Vec<Option<LinkedClass<ClassId>>> = vec![None; classes.len()];
     let mut progress = true;
     while progress {
@@ -1157,7 +1188,7 @@ fn native_records(
             }
             let built = {
                 let lookup = |name: &[u8]| {
-                    let class = *keys.get(&*lowered(name))?;
+                    let class = keys.find(classes, name)?;
                     let at = usize::try_from(class.0).ok()?;
                     Some(php_link::Held {
                         decl: classes.get(at)?,
@@ -1238,7 +1269,7 @@ fn native_placed(
 
 /// Each native class's trampolines by name: every row of `methods` a
 /// class's `get_method` answers ([`MethodAt::Trampoline`]), under the
-/// lowered name of its row of `trampolines`, the first of a name kept.
+/// name of its row of `trampolines`, the first of a name kept.
 fn trampoline_tables(
     classes: usize,
     methods: &[NativeMethod],
@@ -1255,7 +1286,7 @@ fn trampoline_tables(
 
 /// One table per class, `classes` of them: each row of `methods` that
 /// `place` gives a class and a declaration, filed among that class's
-/// rows under the declaration's lowered name and numbered past the
+/// rows under the declaration's name and numbered past the
 /// `functions` natives; the first of a name stays.
 fn tables_of<'a>(
     classes: usize,
@@ -1276,9 +1307,7 @@ fn tables_of<'a>(
         ) else {
             continue;
         };
-        table
-            .entry(lowered(&decl.function.name.0))
-            .or_insert(Function(row));
+        table.add(&decl.function.name.0, Function(row));
     }
     tables
 }
@@ -1296,7 +1325,7 @@ fn parameter_classes(
     methods: &[NativeMethod],
     classes: &[ClassDecl],
     trampolines: &[MethodDecl],
-    class_keys: &HashMap<Box<[u8]>, ClassId>,
+    class_at: impl Fn(&[u8]) -> Option<ClassId>,
 ) -> Vec<Box<[Option<ClassId>]>> {
     let of = |decl: Option<&FunctionDecl>| -> Box<[Option<ClassId>]> {
         decl.map_or_else(Box::default, |decl| {
@@ -1311,7 +1340,7 @@ fn parameter_classes(
                         },
                         _ => return None,
                     };
-                    class_keys.get(&*lowered(&named.0)).copied()
+                    class_at(&named.0)
                 })
                 .collect()
         })
@@ -1480,7 +1509,7 @@ impl Shared {
             constants: Indexed::new(&self.constants, &self.constant_names),
             functions: Indexed::new(&self.functions, &self.function_names),
             frameless: &self.frameless,
-            classes: Indexed::new(&self.classes, &self.class_names),
+            classes: Indexed::new(&self.classes, &self.class_keys.names),
             hooked: self.hooked,
             extended_info: self.extended_info,
         }
@@ -1578,7 +1607,7 @@ impl Shared {
         };
         let bound = crate::multibyte::bound(req, ini.multibyte);
         let cwd = req.cwd();
-        let keys_before = req.keys_made;
+        let keys_before = req.keys_made();
         let stack = req.stack_limit();
         let declared = Declared {
             extended_info: self.extended_info && !req.compiling_host_string,
@@ -1595,8 +1624,7 @@ impl Shared {
             };
             compile(source, origin, ini, declared, stack, heap)
         })?;
-        let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
-        req.keys_made = req.keys_made.saturating_add(made);
+        req.count_keys_made(unit.runtime_keys.len());
         Ok(req.take_unit(unit))
     }
 
@@ -1900,6 +1928,13 @@ impl Shared {
     /// `functions`: `zend_hash_find(CG(function_table), lcname)`.
     pub(crate) fn function_at(&self, name: &[u8]) -> Option<usize> {
         self.function_names.find(&self.functions, name)
+    }
+
+    /// The engine's class named `name` whatever its case, or the class a
+    /// stub alias of that name names: `zend_hash_find(CG(class_table),
+    /// lcname)` over the table startup leaves.
+    pub(crate) fn class_at(&self, name: &[u8]) -> Option<ClassId> {
+        self.class_keys.find(&self.classes, name)
     }
 }
 
@@ -2519,8 +2554,7 @@ const BEFORE_OPTIMIZER: i64 = 0x1_0000;
 
 /// `zend_ini_parse_quantity`, which `OnUpdateLong` reads every
 /// whole-number ini entry by: `crate::ini_quantity`, the one reading
-/// of it, whose sentence for a shape php interprets for backwards
-/// compatibility no entry of this engine raises yet.
+/// of it, here without the sentence `Request::ini_quantity_warn` raises.
 fn ini_quantity(value: &[u8]) -> i64 {
     crate::ini_quantity::parse(value).0
 }
@@ -2602,11 +2636,18 @@ fn startup_directives(req: &mut Request, shared: &Shared) {
 }
 
 /// The core entries' handlers over what the host set, in the order
-/// `main.c` declares them (`Z/main/main.c:814-866`): `report_memleaks`
-/// off is `OnUpdateReportMemleaks`'s deprecation, and `memory_limit`
-/// past `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
+/// `main.c` declares them (`Z/main/main.c:807-885`): each whole-number
+/// entry's `zend_ini_parse_quantity_warn` over the value the host set,
+/// one `OnUpdateLongGEZero` refused among them, `report_memleaks` off is
+/// `OnUpdateReportMemleaks`'s deprecation, and `memory_limit` past
+/// `max_memory_limit` is `OnChangeMemoryLimit`'s warning with the
 /// maximum's text in its place. What an entry takes is the answer.
 fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    // `main.c` declares `report_memleaks` after `max_input_time` and
+    // `memory_limit` after `max_input_vars`.
+    let (before_memleaks, rest) = split_after(&LongHandler::ENTRIES, b"max_input_time");
+    let (before_limit, after_limit) = split_after(rest, b"max_input_vars");
+    quantities_warn(req, before_memleaks);
     if req
         .ini_get(b"report_memleaks")
         .is_some_and(|v| !Request::ini_parse_bool(v))
@@ -2614,16 +2655,38 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         let message = "Directive 'report_memleaks' is deprecated";
         crate::api::raising::docref(req, Level::Deprecated, message);
     }
+    quantities_warn(req, before_limit);
     let limit = req
         .ini_get(b"memory_limit")
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
-    match req.memory_limit_verdict(&limit) {
+    let taken = match req.memory_limit_verdict(&limit) {
         Some(taken) if taken != limit => {
             req.take_startup_value(b"memory_limit", &taken);
             vec![(b"memory_limit".to_vec(), Some(taken))]
         }
         _ => Vec::new(),
+    };
+    quantities_warn(req, after_limit);
+    taken
+}
+
+/// `entries` up to and with the one named `name`, and the rest.
+fn split_after<'a>(entries: &'a [LongEntry], name: &[u8]) -> (&'a [LongEntry], &'a [LongEntry]) {
+    let at = (entries.iter().position(|(n, _)| *n == name)).map_or(0, |at| at + 1);
+    entries.split_at(at)
+}
+
+/// `zend_register_ini_entries_ex`'s handler over each of `entries` the
+/// host set a value for, as [`Request::ini_quantity_warn`] reads it.
+/// The value comes from the configuration, not the entry, since a
+/// value an `OnUpdateLongGEZero` refused was warned about before the
+/// refusal, and never reached the entry ([`Request::ini_verdict`]).
+fn quantities_warn(req: &mut Request, entries: &[LongEntry]) {
+    for (name, _) in entries {
+        if let Some(value) = req.shared.directive(name).map(<[u8]>::to_vec) {
+            req.ini_quantity_warn(name, &value);
+        }
     }
 }
 
@@ -3297,22 +3360,19 @@ impl EngineBuilder {
             methods,
             trampolines,
         } = link_classes(&mut declarations);
-        let class_keys = class_keys(&classes);
-        let class_names = Names::over(&classes);
+        let class_keys = ClassKeys::over(&classes);
+        let class_at = |name: &[u8]| class_keys.find(&classes, name);
         let records = native_records(&classes, &class_keys);
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
         let parents: Vec<Option<ClassId>> = classes
             .iter()
-            .map(|decl| {
-                let parent = decl.parent.as_ref()?;
-                class_keys.get(&*lowered(&parent.0)).copied()
-            })
+            .map(|decl| class_at(&decl.parent.as_ref()?.0))
             .collect();
         let placed = native_placed(&classes, &records, &parents);
         let parameter_classes =
-            parameter_classes(&functions, &methods, &classes, &trampolines, &class_keys);
+            parameter_classes(&functions, &methods, &classes, &trampolines, class_at);
         // `module_registry`: `Core` first, as `zend_startup` registers it,
         // so Zend's constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
@@ -3347,14 +3407,13 @@ impl EngineBuilder {
                 function_flags,
                 frameless,
                 classes,
-                class_names,
+                class_keys,
                 class_modules,
                 handlers,
                 natives,
                 methods,
                 trampolines,
                 parameter_classes,
-                class_keys,
                 records,
                 method_functions,
                 trampoline_tables,
@@ -4839,7 +4898,9 @@ impl Engine {
     /// whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
         let script = req.primary() == Primary::Wrapped;
+        let mut left = None;
         if script {
+            left = req.enter_program_dir();
             req.expand_primary_file(source.is_some());
         }
         if script && source.is_none() {
@@ -4847,6 +4908,9 @@ impl Engine {
         }
         let ran = self.execute_wrapped(req, source, script);
         req.close_served_files();
+        if let Some(left) = left {
+            req.leave_program_dir(left);
+        }
         ran
     }
 
@@ -6124,7 +6188,8 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&second.stdout), "gd");
         assert!(!Arc::ptr_eq(&before, &after), "a new epoch");
         let preloaded = engine.shared.units.preloaded();
-        let functions = preloaded.map_or_else(Vec::new, |preloaded| preloaded.functions.to_vec());
+        let functions =
+            preloaded.map_or_else(Vec::new, |preloaded| preloaded.functions.rows().to_vec());
         assert!(!functions.is_empty());
         for function in functions {
             let (was, is) = (before.function(function), after.function(function));
@@ -7659,9 +7724,9 @@ mod tests {
         let frame = req.pushed(unit.published());
         assert_eq!(
             crate::tier::execute::<Nop, Untold>(&mut req, frame),
-            Err(Fatal::Error(String::from(
+            Err(Fatal::error(
                 "InternalError: ZEND_USER_OPCODE has no handler in this engine yet"
-            )))
+            ))
         );
     }
 
