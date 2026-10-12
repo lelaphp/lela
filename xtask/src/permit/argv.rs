@@ -635,15 +635,17 @@ const RESERVED: [&str; 10] = [
 ];
 
 /// Programs that run the rest of their words as a command, with the
-/// options each reads a value after.
-const WRAPPERS: [(&str, &[&str]); 7] = [
-    ("command", &[]),
-    ("builtin", &[]),
-    ("exec", &["-a"]),
-    ("nohup", &[]),
-    ("time", &[]),
-    ("env", &["-u", "-C", "-S"]),
-    ("nice", &["-n"]),
+/// options each reads a value after and the operands it reads before the
+/// command: `timeout`'s duration (#2668).
+const WRAPPERS: [(&str, &[&str], usize); 8] = [
+    ("command", &[], 0),
+    ("builtin", &[], 0),
+    ("exec", &["-a"], 0),
+    ("nohup", &[], 0),
+    ("time", &[], 0),
+    ("env", &["-u", "-C", "-S"], 0),
+    ("nice", &["-n"], 0),
+    ("timeout", &["-s", "--signal", "-k", "--kill-after"], 1),
 ];
 
 /// Programs that read commands, from a `-c` argument, a file or stdin.
@@ -691,7 +693,8 @@ impl Argv {
                 expanded = true;
                 continue;
             }
-            let Some((_, valued)) = WRAPPERS.iter().find(|(w, _)| *w == basename(word)) else {
+            let Some((_, valued, operands)) = WRAPPERS.iter().find(|(w, ..)| *w == basename(word))
+            else {
                 break;
             };
             at += 1;
@@ -702,6 +705,7 @@ impl Argv {
                     1
                 };
             }
+            at += operands;
         }
         words.drain(..at);
         if let Some(own) = xtask_own(&words) {
