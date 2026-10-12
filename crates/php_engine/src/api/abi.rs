@@ -554,6 +554,9 @@ pub(crate) type PostStartupHook = fn(&mut Request, Beneath<'_, chain::PostStartu
 /// What the unit cache tells each extension of a file it holds:
 /// [`ExtensionBuilder::cached`].
 pub(crate) type CachedHook = fn(&mut Request, &[u8]);
+/// What the unit cache hands each file where php's optimizer would
+/// optimize it: [`ExtensionBuilder::optimizer_pass`].
+pub(crate) type OptimizerPass = fn(&mut Request, &[u8]);
 /// The host's log for a fatal: [`ExtensionBuilder::fatal_logged`].
 pub(crate) type FatalLoggedHook = fn(&mut Request) -> AfterLog;
 
@@ -1526,6 +1529,22 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn cached(mut self, hook: fn(&mut Request, &[u8])) -> ExtensionBuilder {
         self.supplies.cached = Some(hook);
+        self
+    }
+
+    /// `zend_optimizer_register_pass`: `pass` is called with each file
+    /// opcache optimizes, by its full path, on the request that compiled
+    /// it, where `zend_optimize_script` calls the registered passes after
+    /// its own (`zend_optimizer_call_registered_passes`): a file the
+    /// unit cache compiles and holds, or keeps in the file cache alone,
+    /// and each file a preload saves. Every extension's passes are called
+    /// in the order they were registered, an extension's in the order it
+    /// hands them here. This engine has no optimizer over an executed op
+    /// array (design §6.1, revision 44), so no op array crosses the
+    /// face: a pass is told the file, and rewrites nothing.
+    #[must_use]
+    pub fn optimizer_pass(mut self, pass: fn(&mut Request, &[u8])) -> ExtensionBuilder {
+        self.supplies.optimizer_passes.push(pass);
         self
     }
 

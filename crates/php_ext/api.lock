@@ -130,6 +130,7 @@ abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::observer
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::opcodes
+abi::ExtensionBuilder::optimizer_pass
 abi::ExtensionBuilder::post_deactivate
 abi::ExtensionBuilder::post_startup
 abi::ExtensionBuilder::process_state
