@@ -53,6 +53,9 @@ enum Computed {
     HandEdited,
     /// `run` answers with an untrusted exec region; `check` finds it fresh.
     Untrusted,
+    /// A region whose command fails: `run` keeps the body and says so, and
+    /// `check` finds the region unrendered, as `computed` 0.3.0 answers.
+    Failing,
     /// A region left as a bare closer, as `computed merge` leaves one both
     /// sides re-rendered: `check` finds it unrendered until `run` renders
     /// it, which rewrites `AGENTS.md` and says so.
@@ -70,6 +73,9 @@ impl Computed {
             }
             Computed::Untrusted => {
                 "if [ \"$1\" = run ]; then printf 'AGENTS.md:3 layout exec untrusted skipped; run `computed trust`\\n' >&2; exit 1; fi\nexit 0\n"
+            }
+            Computed::Failing => {
+                "if [ \"$1\" = run ]; then printf 'AGENTS.md:3 layout exec unrendered failed; body kept\\n    exit status 3\\n' >&2; exit 1; fi\nif [ \"$1\" = check ]; then printf 'AGENTS.md:3 layout exec unrendered\\n' >&2; exit 1; fi\nexit 0\n"
             }
             Computed::Unrendered => {
                 "if [ \"$1\" = run ] && ! grep -qx rendered AGENTS.md; then echo rendered >> AGENTS.md; printf 'AGENTS.md:3 layout exec unrendered written\\n' >&2; exit 1; fi\nif [ \"$1\" = check ] && ! grep -qx rendered AGENTS.md; then printf 'AGENTS.md:3 layout exec unrendered\\n' >&2; exit 1; fi\nexit 0\n"
@@ -612,6 +618,21 @@ fn a_hand_edited_region_refuses_the_commit_naming_computed_check() {
     assert!(out.contains("AGENTS.md:3 layout tree hand-edited"), "{out}");
     let staged = scratch.git(&["diff", "--cached", "--name-only"], false);
     assert_eq!(staged.trim(), "crates/php_heap/src/lib.rs");
+}
+
+/// A region whose command fails is never committed unrendered: `xtask
+/// regions` passes on `computed run`'s exit 1, and the `computed check`
+/// after it refuses the commit naming the region (#2744).
+#[test]
+fn a_region_whose_command_fails_refuses_the_commit() {
+    let scratch = scratch("failing-render", &Computed::Failing);
+    let before = scratch.head();
+    let (code, out) = scratch.stage_and_commit();
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    assert!(out.contains("exec unrendered failed; body kept"), "{out}");
+    assert!(out.contains("could not be rendered"), "{out}");
+    assert!(out.contains("AGENTS.md:3 layout exec unrendered"), "{out}");
 }
 
 /// A root without a trust grant is refused with the `computed trust`
