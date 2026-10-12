@@ -1150,7 +1150,7 @@ fn emit_nodes(buf: &mut String, model: &Model<'_>) {
          pub struct Nodes {{\n    \
              /// Where each struct kind's vector stands in `stores`, by the kind's slot,\n    \
              /// and none while no node of the kind is built.\n    \
-             slots: [Option<u8>; {count}],\n    \
+             slots: [Option<StoreAt>; {count}],\n    \
              /// The vectors, in the order their kinds' first nodes were built.\n    \
              stores: Vec<Store>,\n\
          }}\n\n\
@@ -1829,7 +1829,7 @@ mod tests {
         );
         for needle in [
             "enum Store {\n    Root(Vec<Root>),\n    Decl(Vec<Decl>),",
-            "    slots: [Option<u8>; 6],",
+            "    slots: [Option<StoreAt>; 6],",
             "fn all(nodes: &Nodes) -> &[Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes,\n            _ => &[],\n        }\n    }",
             "impl Decl {",
             "    ) -> Result<Self, &'static str> {",

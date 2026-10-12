@@ -244,12 +244,33 @@ pub(crate) enum Resolved {
     Untyped,
 }
 
+/// Where a kind's vector stands in `Nodes::stores`. Held one up in a
+/// `NonZeroU8`, so an absent slot, `None`, costs no byte of its own and
+/// the slots stay one byte a kind: the arena is moved by value from the
+/// builder into the parse, and a wider slot measured 300 instructions
+/// more a parse of `return 1;`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StoreAt(std::num::NonZeroU8);
+
+impl StoreAt {
+    /// The place of the `index`-th vector, none past what a byte holds.
+    fn new(index: usize) -> Option<StoreAt> {
+        let raised = u8::try_from(index.checked_add(1)?).ok()?;
+        std::num::NonZeroU8::new(raised).map(StoreAt)
+    }
+
+    /// The vector's index in `stores`.
+    fn index(self) -> usize {
+        usize::from(self.0.get()) - 1
+    }
+}
+
 impl Nodes {
     /// The vector of the struct kind at `slot`, none while no node of
     /// the kind is built.
     fn store(&self, slot: usize) -> Option<&Store> {
         let at = (*self.slots.get(slot)?)?;
-        self.stores.get(usize::from(at))
+        self.stores.get(at.index())
     }
 
     /// The vector of the struct kind at `slot`, made empty by `empty`
@@ -260,12 +281,12 @@ impl Nodes {
         let at = if let Some(at) = *self.slots.get(slot)? {
             at
         } else {
-            let at = u8::try_from(self.stores.len()).ok()?;
+            let at = StoreAt::new(self.stores.len())?;
             self.stores.push(empty(Vec::new()));
             *self.slots.get_mut(slot)? = Some(at);
             at
         };
-        self.stores.get_mut(usize::from(at))
+        self.stores.get_mut(at.index())
     }
 }
 
