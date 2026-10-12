@@ -233,12 +233,6 @@ impl<'t> Parser<'t> {
         self.input.kind(self.pos) == kind
     }
 
-    /// Is the current token one of `kinds`?
-    #[allow(dead_code)]
-    pub fn at_any(&self, kinds: &[SyntaxKind]) -> bool {
-        kinds.contains(&self.input.kind(self.pos))
-    }
-
     /// Was there a newline in the whitespace or comments before the
     /// current token?
     pub fn newline_before_current(&self) -> bool {
@@ -323,9 +317,8 @@ impl<'t> Parser<'t> {
         self.burst = 0;
     }
 
-    /// At `kind`, consume it and answer true; otherwise record the
-    /// expectation and answer false, with no diagnostic: the caller
-    /// decides.
+    /// At `kind`, consume it and answer true; otherwise answer false,
+    /// with no diagnostic: the caller decides.
     pub fn eat(&mut self, kind: SyntaxKind) -> bool {
         if self.at(kind) {
             self.bump(kind);

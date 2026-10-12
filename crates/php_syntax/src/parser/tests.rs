@@ -66,7 +66,6 @@ fn at_reads_the_current_token_and_a_bump_moves_on() {
     let lines = LineIndex::new(text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     assert!(!p.at(SyntaxKind::COMMA));
-    assert!(!p.at_any(&[SyntaxKind::R_PAREN, SyntaxKind::COMMA]));
     assert!(!p.at(SyntaxKind::IDENT));
     assert!(p.at(SyntaxKind::VARIABLE));
     p.bump(SyntaxKind::VARIABLE);

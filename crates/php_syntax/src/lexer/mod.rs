@@ -214,6 +214,16 @@ impl States {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &StateFrame> {
         std::iter::once(&self.base).chain(&self.above)
     }
+
+    /// A state pushed above the active one.
+    fn push(&mut self, frame: StateFrame) {
+        self.above.push(frame);
+    }
+
+    /// The active state popped, unless it is the base, which stays.
+    fn pop(&mut self) {
+        self.above.pop();
+    }
 }
 
 /// Progress of the `__halt_compiler ( ) ;` recognizer, `?>` standing as
@@ -407,7 +417,7 @@ impl<'a> Lexer<'a> {
 
     /// Zend `yy_push_state(state)`.
     pub(crate) fn push_state(&mut self, state: State, opener: Span) {
-        self.frames.above.push(StateFrame {
+        self.frames.push(StateFrame {
             state,
             aux: StateAux {
                 opener,
@@ -419,7 +429,7 @@ impl<'a> Lexer<'a> {
     /// Zend `yy_pop_state()`. The base state stays.
     pub(crate) fn pop_state(&mut self) {
         debug_assert!(self.frames.depth() > 1, "popping the base state");
-        self.frames.above.pop();
+        self.frames.pop();
     }
 
     /// Zend `BEGIN(state)`: replace the active state, keep the stack below.
