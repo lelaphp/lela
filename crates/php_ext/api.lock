@@ -3,7 +3,7 @@
 Nop
 __private::Entry
 __private::abstract_entry
-__private::arity
+__private::arguments
 __private::attribute
 __private::case_of
 __private::case_value
@@ -13,6 +13,7 @@ __private::entered
 __private::native_function
 __private::parameter
 __private::property
+abi::Absent
 abi::Admission
 abi::AfterLog
 abi::BeginHandler
@@ -339,6 +340,7 @@ abi::chain::PostStartup
 abi::chain::ResolvePath
 abi::chain::Throw
 abi::chain::Upload
+attr::mirrors
 attr::php_class
 attr::php_const
 attr::php_function
@@ -398,11 +400,9 @@ call::write_static_prop
 coerce::BinaryOp
 coerce::Exponent
 coerce::Exponent::as_char
-coerce::argument
 coerce::atoi
 coerce::binary_op
 coerce::c_str
-coerce::callable_argument
 coerce::callable_checked
 coerce::callable_name
 coerce::coerce_param

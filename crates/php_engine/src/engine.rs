@@ -5405,9 +5405,9 @@ fn compile(
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
     let options = php_compile::Options {
-        filename: Name(origin.filename.into()),
+        filename: origin.filename,
         kind: origin.kind,
-        cwd: origin.cwd.as_os_str().as_encoded_bytes().to_vec(),
+        cwd: origin.cwd.as_os_str().as_encoded_bytes(),
         strict_types: false,
         precision: ini.precision,
         short_open_tag: ini.short_open_tag,

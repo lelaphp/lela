@@ -1310,9 +1310,7 @@ mod tests {
             .with_feature("mbstring")
             .with_oracle("zend-test");
         assert_eq!(asked_of(&varied, HOME), ASKED_OF_EVERY_OTHER_CRATE);
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap();
+        let root = crate::package_dir().parent().unwrap();
         let manifest = crate::manifest::Manifest::load(root).unwrap();
         let zend_test = manifest.crate_named("ext/zend_test").unwrap();
         let carried = Carried::binary(root).unwrap();

@@ -5,8 +5,6 @@
 //! is not installed, the reading is a skip naming the command that
 //! installs it, and the control returns; CI's Miri job installs it.
 
-use std::path::Path;
-
 use xtask::manifest::Manifest;
 use xtask::miri;
 use xtask::reading::{Number, Reading, Status};
@@ -20,7 +18,7 @@ fn count(reading: &Reading, key: &str) -> i64 {
 
 #[test]
 fn a_read_after_a_free_fails_the_crate_and_the_test_beside_it_runs() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/miri/use-after-free");
+    let root = xtask::package_dir().join("fixtures/miri/use-after-free");
     let manifest = Manifest::load(&root).unwrap();
     let readings = miri::run(&root, &manifest, &[]).unwrap();
     let [reading] = &readings[..] else {
@@ -59,7 +57,7 @@ fn a_read_after_a_free_fails_the_crate_and_the_test_beside_it_runs() {
 /// in one and not the other fails here.
 #[test]
 fn the_ci_job_installs_the_toolchain_the_instrument_runs_on() {
-    let workflow = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/harness.yml");
+    let workflow = xtask::package_dir().join("../.github/workflows/harness.yml");
     let text = std::fs::read_to_string(workflow).unwrap();
     let install = format!(
         "rustup toolchain install {} --profile minimal --component miri,rust-src\n",

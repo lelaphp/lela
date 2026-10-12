@@ -76,7 +76,7 @@ fn on_a_branch(name: &str) -> Tree {
 
 /// The binary, from `root`: exit code, stdout, stderr.
 fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(args)
@@ -263,4 +263,33 @@ fn a_branch_names_its_ticket_by_record_and_never_by_its_name() {
     sh(&root, &["git", "config", "branch.t30.ticket", "thirty"]);
     let err = Track::of(&root, Some("t30")).unwrap_err();
     assert!(format!("{err:#}").contains("thirty"), "{err:#}");
+}
+
+/// #2719: with no `--root`, the binary measures the workspace it runs in,
+/// the nearest `Cargo.toml` holding `[workspace]` from its working
+/// directory up, else from `CARGO_MANIFEST_DIR` as cargo sets it; never
+/// the one it was compiled in, which a shared target directory can make
+/// another checkout's.
+#[test]
+fn with_no_root_the_binary_measures_the_workspace_it_runs_in() {
+    let root = scratch("runs-in");
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+    std::fs::create_dir_all(root.join("xtask/src")).unwrap();
+    let elsewhere = Tree::new("track-runs-in-elsewhere").unwrap();
+    for (dir, manifest_dir) in [
+        (root.join("xtask/src"), None),
+        (elsewhere.to_path_buf(), Some(root.join("xtask"))),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        command
+            .arg("track")
+            .current_dir(&dir)
+            .env_remove("CARGO_MANIFEST_DIR");
+        if let Some(manifest_dir) = manifest_dir {
+            command.env("CARGO_MANIFEST_DIR", manifest_dir);
+        }
+        let out = String::from_utf8(command.output().unwrap().stdout).unwrap();
+        let store = format!("store: {}, whose", root.display());
+        assert!(out.contains(&store), "from {}: {out}", dir.display());
+    }
 }

@@ -800,7 +800,6 @@ fn walk_tree(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<UsePath>) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::manifest::Manifest;
@@ -812,7 +811,7 @@ mod tests {
     /// finds a crate through a manifest row.
     #[test]
     fn an_inherent_impl_lands_under_the_type_it_is_written_on_alone() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api-check/same-name");
+        let root = crate::package_dir().join("fixtures/api-check/same-name");
         let manifest = Manifest::named("php_heap");
         let crates = Crates::scan(&manifest, &root).unwrap();
         let mut inventory = Inventory::new(&crates);
@@ -842,7 +841,7 @@ mod tests {
     /// own; the including module answers for no name a glob asks.
     #[test]
     fn a_type_included_from_out_dir_lists_its_impls_and_a_glob_through_it_answers_nothing() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api-check/include");
+        let root = crate::package_dir().join("fixtures/api-check/include");
         let manifest = Manifest::named("php_heap");
         let crates = Crates::scan(&manifest, &root).unwrap();
         let mut inventory = Inventory::new(&crates);
@@ -870,7 +869,7 @@ mod tests {
     /// so the per-module counts sum to the lock's.
     #[test]
     fn a_method_is_defined_by_the_module_its_impl_block_is_written_in() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api-check/same-name");
+        let root = crate::package_dir().join("fixtures/api-check/same-name");
         let manifest = Manifest::named("php_heap");
         let crates = Crates::scan(&manifest, &root).unwrap();
         let mut inventory = Inventory::new(&crates);

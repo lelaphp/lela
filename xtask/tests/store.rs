@@ -9,7 +9,7 @@ use xtask::reading::{self, Log, Outcome, Reading, Status, Store};
 use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn scratch(name: &str) -> Tree {
@@ -280,7 +280,7 @@ fn two_writers_over_one_log_tear_no_line() {
 fn a_torn_line_is_counted_and_named_and_the_rest_is_read() {
     let dir = scratch("torn");
     let store = Store::at(dir.path());
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
+    let fixture = xtask::package_dir().join("fixtures/store/torn.jsonl");
     std::fs::create_dir_all(store.root().join("log")).unwrap();
     std::fs::copy(&fixture, store.root().join("log/permit.jsonl")).unwrap();
 
@@ -326,7 +326,7 @@ fn another_stores_log_is_landed_and_emptied() {
     store.record(&[reading(Status::Pass, 0)]).unwrap();
     let from_dir = scratch("land-from");
     let from = Store::at(from_dir.path());
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
+    let fixture = xtask::package_dir().join("fixtures/store/torn.jsonl");
     let mut foreign = std::fs::read(&fixture).unwrap();
     foreign.pop();
     assert!(!foreign.ends_with(b"\n"), "the last line has no newline");

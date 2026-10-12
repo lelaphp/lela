@@ -102,7 +102,7 @@ pub(crate) fn type_expr(p: &mut Parser<'_>, site: TypeSite) {
 }
 
 fn type_expr_inner(p: &mut Parser<'_>, site: TypeSite) {
-    if p.peek_at(K::QUESTION) {
+    if p.at(K::QUESTION) {
         let m = p.start();
         p.bump(K::QUESTION);
         // `'?' type`: one name, never a group (`?(A&B)`) and never a
@@ -123,7 +123,7 @@ fn type_expr_inner(p: &mut Parser<'_>, site: TypeSite) {
 fn union_type(p: &mut Parser<'_>, site: TypeSite) {
     let m = p.start();
     let grouped = intersection_type(p, site);
-    if p.peek_at(K::PIPE) {
+    if p.at(K::PIPE) {
         while p.eat(K::PIPE) {
             intersection_type(p, site);
         }
@@ -144,18 +144,18 @@ fn union_type(p: &mut Parser<'_>, site: TypeSite) {
 /// (`A&(B&C)`, probed 8.5.9). Whether what was parsed is one DNF group.
 fn intersection_type(p: &mut Parser<'_>, site: TypeSite) -> bool {
     let m = p.start();
-    let grouped = p.peek_at(K::L_PAREN);
+    let grouped = p.at(K::L_PAREN);
     atomic_type(p, site);
-    if grouped && p.peek_at(K::AMP) {
+    if grouped && p.at(K::AMP) {
         // A group joins a union alone (`(A&B)&C` is `unexpected token
         // "&", expecting "|"`, probed 8.5.9).
         let d = p.unexpected_here_expecting("\"|\"");
         p.error(d);
     }
-    if p.peek_at(K::AMP) && !matches!(p.nth(1), K::VARIABLE | K::DOT_DOT_DOT) {
-        while p.peek_at(K::AMP) && !matches!(p.nth(1), K::VARIABLE | K::DOT_DOT_DOT) {
+    if p.at(K::AMP) && !matches!(p.nth(1), K::VARIABLE | K::DOT_DOT_DOT) {
+        while p.at(K::AMP) && !matches!(p.nth(1), K::VARIABLE | K::DOT_DOT_DOT) {
             p.bump(K::AMP);
-            if p.peek_at(K::L_PAREN) {
+            if p.at(K::L_PAREN) {
                 p.error_unexpected();
             }
             atomic_type(p, site);
@@ -177,7 +177,7 @@ fn intersection_type(p: &mut Parser<'_>, site: TypeSite) -> bool {
 /// (probed 8.5.9). The group's own `(` and `)` are on the parser's
 /// delimiter stack, so the balance text stands where it applies.
 fn atomic_type(p: &mut Parser<'_>, site: TypeSite) {
-    if p.peek_at(K::L_PAREN) {
+    if p.at(K::L_PAREN) {
         let m = p.start();
         p.bump(K::L_PAREN);
         let group = p.start();
@@ -193,11 +193,11 @@ fn atomic_type(p: &mut Parser<'_>, site: TypeSite) {
                 p.error_unexpected();
                 break;
             }
-            if p.peek_at(K::AMP) {
+            if p.at(K::AMP) {
                 p.bump(K::AMP);
                 continue;
             }
-            if !p.peek_at(K::R_PAREN) && !p.at_eof() && p.bracket_closer_message().is_none() {
+            if !p.at(K::R_PAREN) && !p.at_eof() && p.bracket_closer_message().is_none() {
                 let d = if members > 1 {
                     p.unexpected_expecting("token \"&\" or \")\"")
                 } else {
@@ -211,7 +211,7 @@ fn atomic_type(p: &mut Parser<'_>, site: TypeSite) {
             group.complete(p, K::INTERSECTION_TYPE);
         } else {
             group.abandon(p);
-            if members == 1 && p.peek_at(K::R_PAREN) {
+            if members == 1 && p.at(K::R_PAREN) {
                 let d = p.unexpected_expecting("token \"&\"");
                 p.error(d);
             }
@@ -243,7 +243,7 @@ fn named_type(p: &mut Parser<'_>, site: TypeSite) {
 /// `static` where the rule is `type_without_static`: the unexpected
 /// token, left for [`name_ref`] to take so the tree keeps its shape.
 fn refuse_static(p: &mut Parser<'_>, site: TypeSite) {
-    if site == TypeSite::WithoutStatic && p.peek_at(K::STATIC_KW) {
+    if site == TypeSite::WithoutStatic && p.at(K::STATIC_KW) {
         p.error_unexpected();
     }
 }

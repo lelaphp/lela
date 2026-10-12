@@ -1,0 +1,5 @@
+# The fixture's surface of ext/random, every item listed, so the markers alone fail it.
+Rng
+Rng::default_engine
+Rng::engine
+absent

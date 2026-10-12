@@ -85,7 +85,6 @@ pub(crate) const HOSTS: [EngineHost; 4] = [CLI, CGI, FPM, PHPDBG];
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use super::*;
     use crate::oracle::{Host, Sapi};
@@ -116,7 +115,7 @@ mod tests {
     /// `sapi/*` crate the lane hands no test to is not asked to be one.
     #[test]
     fn every_host_is_a_sapi_crate_of_the_workspace_as_its_cargo_toml_declares_it() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = crate::package_dir().join("..");
         for host in HOSTS.into_iter().chain([MAKALA]) {
             let text = std::fs::read_to_string(root.join(host.krate).join("Cargo.toml"))
                 .unwrap_or_else(|e| panic!("{}: {e}", host.krate));

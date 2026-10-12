@@ -28,7 +28,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn manifest() -> Manifest {
@@ -620,7 +620,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         .collect();
     fs::write(&pin, text.join("\n")).unwrap();
     let tree = fixture_tree();
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&root)
         .args(["phpt", "--subset", "Zend/tests"])
@@ -633,7 +633,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         stdout.contains("Zend/tests") && !stderr.contains("neither place"),
         "the subset resolved under the fixture:\n{stdout}\n{stderr}"
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&root)
         .args(["phpt", "--subset", "Zend/tests"])
@@ -688,7 +688,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let run = |given: &Path| {
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(given)
             .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
@@ -780,7 +780,7 @@ fn a_program_runs_by_its_absolute_path_so_a_directory_before_its_name_is_matched
     if oracle().is_none() {
         return;
     }
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/FileName_basic.phpt");
+    let fixture = xtask::package_dir().join("fixtures/phpt/FileName_basic.phpt");
     let text = fs::read_to_string(&fixture).unwrap();
     assert!(
         text.contains("\"%sFileName_basic.php\""),
@@ -1528,16 +1528,56 @@ fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
 /// each run passes every test; the waits are on a reading. The control: a
 /// run that holds its keys within itself alone binds the port while the
 /// other run's test holds it, and that test misses.
+///
+/// The port is found free and let go before the tests bind it, so another
+/// process on the machine can take it first (#2773). Then every test of
+/// both runs misses, which keys held apart never cause, since one test
+/// of each run binds the port; the exchange is run again on a fresh port,
+/// three at most.
 #[test]
 fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
     if oracle().is_none() {
         return;
     }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let free = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let readings = std::iter::repeat_with(free)
+        .take(3)
+        .find_map(|port| {
+            let readings = over_a_fixed_port(port);
+            let bound =
+                |r: &Reading| !matches!(r.numbers.get("passed"), None | Some(Number::Int(0)));
+            readings.iter().any(bound).then_some(readings)
+        })
+        .expect("another process took each of three ports before the tests bound it");
+    for reading in &readings {
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
+    }
+    let waited: i64 = readings
+        .iter()
+        .map(|r| match r.numbers.get("waited") {
+            Some(Number::Int(n)) => *n,
+            _ => 0,
+        })
+        .sum();
+    assert!(waited > 0, "one run waited for the other: {readings:#?}");
+    assert!(
+        readings.iter().any(|r| {
+            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
+            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
+        }),
+        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
+    );
+}
+
+/// The two runs of the test above, at once, over `port`.
+fn over_a_fixed_port(port: u16) -> [Reading; 2] {
     let binds = |name: &str| {
         (
             format!("{name}.phpt"),
@@ -1558,31 +1598,12 @@ fn two_runs_at_once_over_a_fixed_port_each_read_what_a_lone_run_reads() {
     );
     let locks = Tree::new("phpt-across-locks").unwrap();
     let locks = locks.path();
-    let readings = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let runs = [&first, &second].map(|scratch| {
             scope.spawn(move || scratch.run_among(&registry(""), &scratch.engine, locks))
         });
         runs.map(|run| run.join().unwrap())
-    });
-    for reading in &readings {
-        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-        assert_eq!(count(reading, "passed"), 3, "{reading:#?}");
-    }
-    let waited: i64 = readings
-        .iter()
-        .map(|r| match r.numbers.get("waited") {
-            Some(Number::Int(n)) => *n,
-            _ => 0,
-        })
-        .sum();
-    assert!(waited > 0, "one run waited for the other: {readings:#?}");
-    assert!(
-        readings.iter().any(|r| {
-            let (said, stamp) = r.message.rsplit_once("; ").unwrap();
-            said.contains("waited") && said.contains("conflict key") && stamp.starts_with("run by ")
-        }),
-        "the wait is said before the engine's stamp, which stays last: {readings:#?}"
-    );
+    })
 }
 
 /// A test naming `all` in one run runs beside no test of another key in a
@@ -1873,7 +1894,7 @@ impl OneTree {
     /// The command [`OneTree::run`] spawns, for a run that needs one more
     /// variable set.
     fn command(&self, root: &Tree, subset: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
         command
             .arg("--root")
             .arg(root.path())
@@ -2223,7 +2244,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
     if oracle().is_none() {
         return;
     }
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/writes");
+    let fixture = xtask::package_dir().join("fixtures/phpt/writes");
     let tests: Vec<(String, String)> = fs::read_dir(&fixture)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -2262,7 +2283,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
 
 /// The tests of a fixture directory, by file name and text.
 fn fixture_tests(dir: &str) -> Vec<(String, String)> {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let fixture = xtask::package_dir().join(dir);
     let mut tests: Vec<(String, String)> = fs::read_dir(&fixture)
         .unwrap()
         .map(|entry| entry.unwrap().path())

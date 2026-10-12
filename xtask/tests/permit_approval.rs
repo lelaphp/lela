@@ -22,11 +22,11 @@ const ASK: &str = "toolu_01AskFixtureApproval0001";
 const RULE: &str = "harness.self";
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/approval")
+    xtask::package_dir().join("fixtures/approval")
 }
 
 /// One case's stdin, its file and its transcript at their absolute paths,
@@ -109,7 +109,7 @@ fn scratch(name: &str) -> Tree {
 
 /// `xtask --root <root> permit <args>` over `input`; the hook's stdout.
 fn permit(root: &Path, input: &Value, args: &[&str]) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .arg("permit")
@@ -241,7 +241,7 @@ fn each_adapter_reads_its_own_evidence_and_an_admitted_change_is_one_audit_entry
 /// session's own, under `xtask/fixtures/approval-live/`.
 #[test]
 fn a_live_answer_whose_preview_is_cut_at_its_last_line_admits_its_edit() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/approval-live");
+    let root = xtask::package_dir().join("fixtures/approval-live");
     let manifest = Manifest::load(&root).unwrap();
     let mut call: Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("call.json")).unwrap()).unwrap();

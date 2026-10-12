@@ -229,6 +229,23 @@ impl Request {
         (index < call.num_args()).then(|| Value::of_zval(call.frame.slot(Slot(index))))
     }
 
+    /// The call being served read once: how many arguments it was given
+    /// and the first `N` of them as [`Request::argument`] reads each,
+    /// `UNDEF` past the count; none given and all `UNDEF` outside a
+    /// native's body.
+    pub(crate) fn arguments_given<const N: usize>(&self) -> (usize, [Value; N]) {
+        let Some(call) = self.serving_call() else {
+            return (0, [Value::undef(); N]);
+        };
+        let given = call.num_args() as usize;
+        let slots = call.frame.slots();
+        let arguments = std::array::from_fn(|at| match slots.get(at) {
+            Some(zval) if at < given => Value::of_zval(*zval),
+            _ => Value::undef(),
+        });
+        (given, arguments)
+    }
+
     /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`
     /// on: the call's remaining arguments as they stand on the frame,
     /// each a view the call keeps one owner of, and none where the call

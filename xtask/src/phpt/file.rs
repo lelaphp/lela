@@ -400,7 +400,7 @@ mod tests {
     /// standing in place of its directory's file.
     #[test]
     fn the_keys_are_the_sections_else_the_directorys_file() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/conflicts");
+        let fixture = crate::package_dir().join("fixtures/phpt/conflicts");
         let mut dirs = BTreeMap::new();
         let mut keys = |test: &str| conflicts(&fixture.join(test), &mut dirs);
         assert_eq!(keys("a-keyed/one.phpt"), ["shared"]);

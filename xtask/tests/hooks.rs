@@ -18,7 +18,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// The region files pre-commit renders, in the order it names them; the
@@ -127,7 +127,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
             refuse = dir.join("refuse").display(),
             tested = dir.join("tested-AGENTS.md").display(),
             probe = std::env::current_exe().unwrap().display(),
-            xtask = env!("CARGO_BIN_EXE_xtask"),
+            xtask = xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
         ),
     );
     executable(
@@ -338,8 +338,8 @@ fn as_xtask_test_runs_a_map_test() {
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
 /// then `xtask regions --staged` over the six region files and not the
 /// gitignored local one, which reaches `computed run`, and `computed
-/// check` over the six; then `clippy` and `test`, then `witness` and `crosscheck` at once
-/// (#1252), crosscheck on the staged extensions alone (#1312). The region
+/// check` over the six; then `clippy` and `test`, then `witness` (#1252),
+/// and no `crosscheck`, whose exit the hook never read (revision 140). The region
 /// file `computed` rewrote is re-staged before `test` runs, so the map
 /// tests read the map the commit carries from the index (#1416): a hook
 /// that renders after `test` hands it the map before the render and fails
@@ -363,10 +363,9 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         "xtask vocab --staged",
         "xtask permit --diff",
     ];
-    let building = ["xtask witness --staged", "xtask crosscheck --staged"];
+    let building = ["xtask witness --staged"];
     let mut calls = scratch.calls("cargo");
     calls[1..6].sort_unstable();
-    calls[9..11].sort_unstable();
     let rendering = format!("xtask regions --staged {regions}");
     let mut expected: Vec<String> = ["fmt --check"]
         .into_iter()
@@ -377,7 +376,6 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         .map(str::to_owned)
         .collect();
     expected[1..6].sort_unstable();
-    expected[9..11].sort_unstable();
     assert_eq!(calls, expected);
     let tested = fs::read_to_string(scratch.dir.join("tested-AGENTS.md")).unwrap();
     assert!(
@@ -700,10 +698,11 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
 }
 
 /// An instrument that fails past the first group refuses the commit by
-/// name, and the ones after it still run: every command's exit is read,
-/// none short-circuits.
+/// name: `test` still runs after a `clippy` refusal, so the commit says
+/// both, and `witness`, whose lanes' build takes minutes, is not started
+/// for a commit already refused (revision 140).
 #[test]
-fn a_failing_instrument_refuses_the_commit_and_the_rest_still_run() {
+fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
     let scratch = scratch("failing", &Computed::Rendered);
     scratch.refuse("xtask clippy");
     let before = scratch.head();
@@ -714,14 +713,86 @@ fn a_failing_instrument_refuses_the_commit_and_the_rest_still_run() {
         out.contains("pre-commit: cargo xtask clippy --staged failed"),
         "{out}"
     );
+    assert!(out.contains("refused before witness ran"), "{out}");
     let calls = scratch.calls("cargo");
-    for after in ["xtask test --staged", "xtask witness --staged"] {
-        assert!(calls.iter().any(|c| c == after), "{after}: {calls:?}");
-    }
+    assert!(
+        calls.iter().any(|c| c == "xtask test --staged"),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.starts_with("xtask witness")),
+        "{calls:?}"
+    );
     assert!(
         calls.iter().any(|c| c.starts_with("xtask regions")),
         "{calls:?}"
     );
+}
+
+/// A merge committed through `git commit` after `--no-commit`, the way
+/// /specs merges into `main`, runs `clippy` and `test` and no `witness`:
+/// the merge check's `witness --unmeasured` measures the merged tree
+/// (revision 140).
+#[test]
+fn a_merge_commit_runs_no_witness() {
+    let scratch = scratch("merge-witness", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    scratch.git(&["checkout", "-q", "-b", "t9", &main], false);
+    write(
+        &scratch.root,
+        "crates/php_heap/src/lib.rs",
+        "pub fn alloc() {}\npub fn free() {}\n",
+    );
+    scratch.git(&["commit", "-q", "-am", "the work of #9"], false);
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t9"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("a merge commit; witness is the merge check's"),
+        "{out}"
+    );
+    let calls = scratch.calls("cargo");
+    for ran in ["xtask clippy --staged", "xtask test --staged"] {
+        assert!(calls.iter().any(|c| c == ran), "{ran}: {calls:?}");
+    }
+    assert!(
+        !calls.iter().any(|c| c.starts_with("xtask witness")),
+        "{calls:?}"
+    );
+}
+
+/// git reads the file `-F` names only after pre-commit, so a missing one
+/// is refused by the hook before any instrument starts, by name; one that
+/// exists is committed (revision 140).
+#[test]
+fn a_missing_message_file_is_refused_before_anything_runs() {
+    let scratch = scratch("message-file", &Computed::Rendered);
+    let path = "crates/php_heap/src/lib.rs";
+    write(&scratch.root, path, "pub fn alloc() {}\npub fn free() {}\n");
+    scratch.git(&["add", "--", path], false);
+    let missing = scratch.dir.join("no-such.msg");
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &["commit", "-q", "-F", missing.to_str().unwrap(), "--", path],
+        true,
+    );
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    assert!(out.contains("not a file git can read"), "{out}");
+    assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
+
+    let message = scratch.dir.join("change.msg");
+    fs::write(&message, "a change under a crate\n").unwrap();
+    let (code, out) = scratch.run(
+        &["commit", "-q", "-F", message.to_str().unwrap(), "--", path],
+        true,
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 }
 
 /// A refusal among the instruments that only read the tree ends the hook

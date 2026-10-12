@@ -12,13 +12,11 @@ use xtask::reading::{Number, Status, Store};
 use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/port-map")
-        .join(name)
+    xtask::package_dir().join("fixtures/port-map").join(name)
 }
 
 /// A scratch workspace with the tracked manifest, pin, census, lock and
@@ -83,7 +81,7 @@ fn census_rows() -> i64 {
 }
 
 fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(args)

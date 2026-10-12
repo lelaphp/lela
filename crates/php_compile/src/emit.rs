@@ -565,10 +565,10 @@ pub(crate) struct Emit<'a> {
     hooks: Vec<HookBody>,
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
-    filename: Name,
+    filename: &'a [u8],
     /// The request's working directory, [`Options::cwd`], what `__DIR__`
     /// is where the file's name has no directory.
-    cwd: Vec<u8>,
+    cwd: &'a [u8],
     /// `CG(context).brk_cont_array`: every loop and `switch` of the op
     /// array, in the order begun, and `current_brk_cont`, the innermost
     /// one open.
@@ -1060,6 +1060,43 @@ struct ActiveClass {
     /// `ZEND_ACC_ANON_CLASS`, whose `self` and `parent` a type keeps as
     /// written.
     anonymous: bool,
+    /// The method whose body is compiling, which `zend_begin_method_decl`
+    /// put into the class's `function_table` before the body: none
+    /// between methods.
+    declaring: Option<Declaring>,
+}
+
+/// The method `zend_begin_method_decl` has put into
+/// `CG(active_class_entry)->function_table` and whose body is compiling,
+/// so a call in that body to the method itself is a call to a method the
+/// table has: `DestructableObject::__destruct()` written inside
+/// `DestructableObject::__destruct`.
+struct Declaring {
+    name: Vec<u8>,
+    visibility: Visibility,
+    is_final: bool,
+    /// What a call site reads of it, none until `zend_compile_attributes`
+    /// and `zend_compile_params` have read its attributes and its
+    /// parameters, which no call in the body precedes.
+    signature: Option<Signature>,
+}
+
+/// A user method's parameters, and whether its `fn_flags` carry
+/// `ZEND_ACC_DEPRECATED` or `ZEND_ACC_NODISCARD`: what a call site whose
+/// callee the table has reads of it.
+struct Signature {
+    parameters: Vec<Parameter>,
+    flagged: bool,
+}
+
+/// One method `CG(active_class_entry)->function_table` holds while the
+/// class compiles: a method compiled before the call, or the one whose
+/// body the call stands in.
+struct TableMethod {
+    visibility: Visibility,
+    is_final: bool,
+    flagged: bool,
+    callee: Callee,
 }
 
 /// The set visibility `zend_declare_typed_property` gives a public
@@ -1195,7 +1232,7 @@ impl<'a> Emit<'a> {
     #[allow(clippy::too_many_lines)] // the emitter laid down a field a line
     fn new(
         parsed: &'a Parsed,
-        options: &Options<'a>,
+        options: &'a Options<'a>,
         strings: &'a mut dyn Intern,
         halt: Option<i64>,
     ) -> Emit<'a> {
@@ -1240,7 +1277,7 @@ impl<'a> Emit<'a> {
             const_exprs: Vec::new(),
             vars: Vec::new(),
             http_response_header: ResponseHeader::Predefined,
-            safepoints: vec![OplineIdx(0)],
+            safepoints: entry_safepoints(),
             temporaries: 0,
             cache_slots: 0,
             line: 1,
@@ -1262,8 +1299,8 @@ impl<'a> Emit<'a> {
             numeric_dims: Vec::new(),
             methods: Vec::new(),
             hooks: Vec::new(),
-            filename: options.filename.clone(),
-            cwd: options.cwd.clone(),
+            filename: options.filename,
+            cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,
             jumps: Vec::new(),
@@ -1389,6 +1426,14 @@ struct Saved {
     numeric_dims: Vec<ConstIdx>,
     active_property: Option<Vec<u8>>,
     active_hook: Option<HookKind>,
+}
+
+/// An op array's safepoints as it begins: the entry, number zero, with
+/// room for its returns, since every op array has one at least.
+fn entry_safepoints() -> Vec<OplineIdx> {
+    let mut safepoints = Vec::with_capacity(4);
+    safepoints.push(OplineIdx(0));
+    safepoints
 }
 
 /// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
@@ -1949,14 +1994,22 @@ impl Emit<'_> {
     /// `VAR`, and anything else the value `zend_compile_expr` leaves.
     fn receiver_of(&mut self, object: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
         if self.is_this(object) {
-            if self.this_in_scope {
-                return Ok((OperandKind::Unused, 0));
-            }
-            let this = self.fetch_this(OperandKind::Var);
-            return Ok(self.operand(this));
+            return Ok(self.this_receiver());
         }
         let value = self.chain_link(object)?;
         Ok(self.operand(value))
+    }
+
+    /// `$this` as a receiver, the `is_this_fetch` arm of
+    /// `zend_delayed_compile_prop` and `zend_compile_method_call`: the
+    /// `IS_UNUSED` operand where `this_guaranteed_exists`, and a
+    /// `FETCH_THIS` into a `VAR` where it may not.
+    fn this_receiver(&mut self) -> (OperandKind, u32) {
+        if self.this_in_scope {
+            return (OperandKind::Unused, 0);
+        }
+        let this = self.fetch_this(OperandKind::Var);
+        self.operand(this)
     }
 
     /// `zend_compile_assign`, `zend_compile_assign_ref` and
@@ -3360,7 +3413,7 @@ impl Emit<'_> {
                 name.extend_from_slice(enclosing);
                 name.extend_from_slice(b"()");
             }
-            None => name.extend_from_slice(&self.filename.0),
+            None => name.extend_from_slice(self.filename),
         }
         name.extend_from_slice(format!(":{line}}}").as_bytes());
         name
@@ -3781,7 +3834,13 @@ impl Emit<'_> {
                 String::from_utf8_lossy(&name)
             )));
         }
-        let (function, body) = self.body(
+        self.set_declaring(Some(Declaring {
+            name: name.clone(),
+            visibility: method.visibility,
+            is_final: method.is_final,
+            signature: None,
+        }));
+        let compiled = self.body(
             &method.function,
             &name,
             Some(&class_name),
@@ -3790,7 +3849,9 @@ impl Emit<'_> {
                 is_abstract,
                 ..FnFlags::default()
             },
-        )?;
+        );
+        self.set_declaring(None);
+        let (function, body) = compiled?;
         let declared = MethodDecl {
             function,
             visibility: method.visibility,
@@ -4172,6 +4233,7 @@ impl Emit<'_> {
         }
         let parameters = self.recv_prologue(function, is_ctor, &shown)?;
         self.no_discard_refused(&attributes)?;
+        self.declared_signature(&parameters, &attributes);
         // The entry safepoint is the opline after the prologue (design
         // §5.7), which `begin_body` numbered zero at opline zero; the
         // assignments a promoted parameter makes stand after it, as
@@ -4233,7 +4295,7 @@ impl Emit<'_> {
                 is_generator: function.generator,
                 attributes,
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
-                file: self.filename.clone(),
+                file: Name(self.filename.into()),
                 line,
                 end_line: function.end_line,
                 frameless: Vec::new(),
@@ -4729,7 +4791,7 @@ impl Emit<'_> {
             const_exprs: std::mem::take(&mut self.const_exprs),
             vars: std::mem::take(&mut self.vars),
             http_response_header: std::mem::take(&mut self.http_response_header),
-            safepoints: std::mem::replace(&mut self.safepoints, vec![OplineIdx(0)]),
+            safepoints: std::mem::replace(&mut self.safepoints, entry_safepoints()),
             temporaries: std::mem::take(&mut self.temporaries),
             cache_slots: std::mem::take(&mut self.cache_slots),
             loops: std::mem::take(&mut self.loops),
@@ -4828,7 +4890,7 @@ impl Emit<'_> {
             try_catch: std::mem::take(&mut self.try_catch).into_boxed_slice(),
             live_ranges,
             safepoints: std::mem::take(&mut self.safepoints).into_boxed_slice(),
-            filename: self.filename.clone(),
+            filename: Name(self.filename.into()),
             line_start,
             line_end,
             cache_size: self.cache_slots,
@@ -5072,6 +5134,7 @@ impl Emit<'_> {
             kind: class.kind,
             at,
             anonymous,
+            declaring: None,
         });
         let enclosing_parent = std::mem::replace(&mut self.active_parent, parent.clone());
         let attributes = self.class_attributes(class, &name, class.line);
@@ -5100,7 +5163,7 @@ impl Emit<'_> {
             methods: Vec::new(),
             attributes,
             doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
-            file: self.filename.clone(),
+            file: Name(self.filename.into()),
             line,
             end_line: class.end_line,
             object_size: 0,
@@ -5112,6 +5175,7 @@ impl Emit<'_> {
             kind: class.kind,
             at,
             anonymous,
+            declaring: None,
         });
         self.active_parent.clone_from(&parent);
         self.class_placed(decl, class, &name, at)?;
@@ -5257,7 +5321,7 @@ impl Emit<'_> {
         };
         let mut name = prefix;
         name.extend_from_slice(b"@anonymous\0");
-        name.extend_from_slice(&self.filename.0);
+        name.extend_from_slice(self.filename);
         name.extend_from_slice(format!(":{}${:x}", class.line, self.keys_made()).as_bytes());
         // `CG(active_class_entry)` is the anonymous class while its body
         // compiles and the enclosing one's again after, and so is the
@@ -5310,6 +5374,75 @@ impl Emit<'_> {
     /// body.
     fn active_name(&self) -> Option<Vec<u8>> {
         self.active_class.as_ref().map(|class| class.name.clone())
+    }
+
+    /// `zend_begin_method_decl`'s `zend_hash_add_ptr` into the active
+    /// class's `function_table`, or the method's body done.
+    fn set_declaring(&mut self, declaring: Option<Declaring>) {
+        if let Some(active) = self.active_class.as_mut() {
+            active.declaring = declaring;
+        }
+    }
+
+    /// What `zend_compile_params` and `zend_compile_attributes` left on
+    /// the op array of the method whose body is compiling, read by a call
+    /// to it from its own body. The method's prologue is the first to
+    /// record it: a closure's, one written in a parameter's default
+    /// among them, records nothing, and a function declared in the body
+    /// or a member of a class declared there compiles under another
+    /// active class, or none.
+    fn declared_signature(&mut self, parameters: &[Parameter], attributes: &[Attribute]) {
+        if self.fn_flags.closure {
+            return;
+        }
+        let Some(declaring) = self
+            .active_class
+            .as_mut()
+            .and_then(|active| active.declaring.as_mut())
+        else {
+            return;
+        };
+        if declaring.signature.is_none() {
+            declaring.signature = Some(Signature {
+                parameters: parameters.to_vec(),
+                flagged: attributes::deprecated_or_no_discard(attributes),
+            });
+        }
+    }
+
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the class
+    /// declared at `at` while it compiles: the methods compiled so far,
+    /// and the one whose body is compiling where `at` is the active
+    /// class, which `zend_begin_method_decl` added before its body.
+    fn table_method(&self, at: usize, name: &[u8]) -> Option<TableMethod> {
+        let decl = self.classes.get(at)?;
+        if let Some(method) = decl
+            .methods
+            .iter()
+            .find(|m| m.function.name.0.eq_ignore_ascii_case(name))
+        {
+            return Some(TableMethod {
+                visibility: method.visibility,
+                is_final: method.is_final,
+                flagged: attributes::deprecated_or_no_discard(&method.function.attributes),
+                callee: Callee::of(&method.function.parameters),
+            });
+        }
+        let active = self
+            .active_class
+            .as_ref()
+            .filter(|active| active.at == at)?;
+        let declaring = active
+            .declaring
+            .as_ref()
+            .filter(|declaring| declaring.name.eq_ignore_ascii_case(name))?;
+        let signature = declaring.signature.as_ref()?;
+        Some(TableMethod {
+            visibility: declaring.visibility,
+            is_final: declaring.is_final,
+            flagged: signature.flagged,
+            callee: Callee::of(&signature.parameters),
+        })
     }
 
     /// `CG(rtd_key_counter)`: the keys made before this source and by it
@@ -6998,10 +7131,10 @@ impl Emit<'_> {
             None => (OperandKind::Unused, 0),
         };
         let lowered = name.to_ascii_lowercase();
-        let mut key = Vec::with_capacity(lowered.len() + self.filename.0.len() + 16);
+        let mut key = Vec::with_capacity(lowered.len() + self.filename.len() + 16);
         key.push(0);
         key.extend_from_slice(&lowered);
-        key.extend_from_slice(&self.filename.0);
+        key.extend_from_slice(self.filename);
         key.extend_from_slice(format!(":{line}${:x}", self.keys_made()).as_bytes());
         let lowered = self.string(&lowered)?;
         let op1 = self.literal(lowered);
@@ -8740,6 +8873,21 @@ impl Emit<'_> {
     ///   string(1) "b"
     /// }
     /// ```
+    ///
+    /// `$this` is `FETCH_THIS` into a `VAR` there, and the loop writes
+    /// the object's properties through it:
+    ///
+    /// ```php
+    /// class P {
+    ///     public $a = 1;
+    ///     protected $b = 2;
+    ///     function double() { foreach ($this as $k => &$v) { $v *= 2; } unset($v); foreach ($this as $k => $v) { echo "$k=$v "; } echo "\n"; }
+    /// }
+    /// (new P)->double();
+    /// ```
+    /// ```expect
+    /// a=2 b=4
+    /// ```
     fn foreach_subject(&mut self, expr: tree::Expr, by_ref: bool) -> Result<Where, CompileError> {
         let node = self.peel(expr);
         // `zend_can_write_to_variable`: a chain a `?->` stands in is
@@ -8758,9 +8906,14 @@ impl Emit<'_> {
                 _ => Where::Returned(at),
             });
         }
-        // `$GLOBALS` under `BP_VAR_W`: `FETCH_GLOBALS` into a `VAR`.
+        // `$GLOBALS` under `BP_VAR_W`: `FETCH_GLOBALS` into a `VAR`, and
+        // `$this` `FETCH_THIS` into one, `zend_compile_simple_var`'s
+        // `is_this_fetch` arm outside `BP_VAR_R` and `BP_VAR_IS`.
         if by_ref && self.is_globals(node) {
             return Ok(self.fetch_globals(OperandKind::Var));
+        }
+        if by_ref && self.is_this(node) {
+            return Ok(self.fetch_this(OperandKind::Var));
         }
         let subject = self.expr(expr)?;
         if by_ref && self.is_call(expr) {
@@ -12975,7 +13128,23 @@ impl Emit<'_> {
     /// evaluates the right `$a` first, through a `QM_ASSIGN` into a
     /// temporary, since the write to the left one may move what the
     /// right one named. php compares the written names of the chain's
-    /// base and of the value, so `$a[0][1] = $a` is one too.
+    /// base and of the value (`zend_is_assign_to_self`), the chain walked
+    /// through every node `zend_is_variable` takes, so `$a[0][1] = $a`,
+    /// `$a->x[] = $a` and `$a[0]->p[1] = $a` are each one too.
+    ///
+    /// ```php
+    /// $a = new stdClass;
+    /// $a->x[] = $a;
+    /// var_dump($a->x[0] === $a);
+    /// $b = [new stdClass];
+    /// $b[0]->p[1] = $b;
+    /// var_dump(count($b[0]->p[1]), $b[0]->p[1][0] === $b[0]);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(1)
+    /// bool(true)
+    /// ```
     fn assigned_value(
         &mut self,
         target: tree::Expr,
@@ -12988,11 +13157,7 @@ impl Emit<'_> {
         let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
             return self.expr(value);
         };
-        let mut base = self.peel(target);
-        while let tree::Expr::SubscriptExpr(id) = base {
-            base = self.peel(self.parsed.tree[id].base);
-        }
-        let tree::Expr::SimpleVarExpr(id) = base else {
+        let tree::Expr::SimpleVarExpr(id) = self.chain_base(target) else {
             return self.expr(value);
         };
         if self.simple_var_of(id, line)? != SimpleVar::Cv(name.clone()) {
@@ -13010,6 +13175,39 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_is_assign_to_self`'s walk down a target to its first
+    /// child while `zend_is_variable` (`Z/Zend/zend_compile.c:2718`)
+    /// holds and the node is no `ZEND_AST_VAR`: a dimension's base, a
+    /// property's object and a `static` property's class. A call stops
+    /// it, so `$a->m()->x[0] = $a` assigns the CV itself. Where it stops
+    /// is what the value's name is held to.
+    ///
+    /// ```php
+    /// class C { public static $s = []; public $x = []; function m() { return $this; } }
+    /// $a = new C;
+    /// $a->m()->x[0] = $a;
+    /// $a::$s[0] = $a;
+    /// var_dump($a->x[0] === $a, C::$s[0] === $a);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    fn chain_base(&self, target: tree::Expr) -> tree::Expr {
+        let mut node = self.peel(target);
+        loop {
+            let child = match node {
+                tree::Expr::SubscriptExpr(id) => self.parsed.tree[id].base,
+                tree::Expr::MemberAccessExpr(id) => self.parsed.tree[id].obj,
+                tree::Expr::ScopedAccessExpr(id) if self.names_property(id) => {
+                    self.parsed.tree[id].scope
+                }
+                _ => return node,
+            };
+            node = self.peel(child);
+        }
     }
 
     /// `zend_compile_assign`, the `ZEND_AST_PROP` arm: the property
@@ -14182,7 +14380,25 @@ impl Emit<'_> {
     /// `FETCH_THIS`, and the two suffixes the in-string grammar takes
     /// as the one `FETCH_DIM_R` or `FETCH_OBJ_R` over it, which is what
     /// `zend_compile_encaps_var_offset` and `zend_compile_prop` leave
-    /// there.
+    /// there; a property's `$this` is the receiver
+    /// ([`Self::this_receiver`]), `THIS` inside a method.
+    ///
+    /// ```php
+    /// class C {
+    ///     public $p = 'p';
+    ///     function m() { return "$this->p {$this->p} $this?->p"; }
+    ///     static function s() { return "$this->p"; }
+    /// }
+    /// echo (new C)->m(), "\n";
+    /// $f = function () { return "[$this->p]"; };
+    /// echo Closure::bind($f, new C, C::class)(), "\n";
+    /// try { C::s(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// p p p
+    /// [p]
+    /// Using $this when not in object context
+    /// ```
     fn fetched(&mut self, fetch: &Fetched) -> Result<Where, CompileError> {
         match fetch {
             Fetched::Text(bytes) => Ok(Where::Constant(self.string(bytes)?)),
@@ -14224,12 +14440,19 @@ impl Emit<'_> {
             // `"$a?->b"`, php's `ZEND_AST_NULLSAFE_PROP` inside
             // `zend_compile_encaps_list`, is its own chain: the
             // `JMP_NULL` over the variable and the commit after the fetch.
+            // `"$this->b"` is `zend_delayed_compile_prop`'s receiver, which
+            // needs no `JMP_NULL`, since it throws where `$this` is not.
             Fetched::Prop(name, prop, nullsafe) => {
                 let checkpoint = self.short_circuits.len();
-                let (op1_type, op1) = self.in_string_operand(name)?;
-                if *nullsafe && name != b"this" {
-                    self.jmp_null((op1_type, op1), false);
-                }
+                let (op1_type, op1) = if name == b"this" {
+                    self.this_receiver()
+                } else {
+                    let receiver = self.in_string_operand(name)?;
+                    if *nullsafe {
+                        self.jmp_null(receiver, false);
+                    }
+                    receiver
+                };
                 let name = self.string(prop)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
@@ -16167,10 +16390,12 @@ impl Emit<'_> {
     /// `INIT_METHOD_CALL` over it with the method's constant pair in
     /// `op2`, two cache slots in `result` and the number of arguments in
     /// `extended_value`, the arguments sent for a callee nothing is
-    /// known of, and `DO_FCALL`. A method the program names is `op2`'s
-    /// `CV` or temporary and takes no cache slot; the engine holds it to
-    /// be a string before it reads the receiver, so `Method name must be
-    /// a string` stands before what a receiver that is no object raises.
+    /// known of, and `DO_FCALL`, but for a method of `$this` the class
+    /// being compiled pins down ([`Self::known_on_this`]). A method the
+    /// program names is `op2`'s `CV` or temporary and takes no cache
+    /// slot; the engine holds it to be a string before it reads the
+    /// receiver, so `Method name must be a string` stands before what a
+    /// receiver that is no object raises.
     ///
     /// ```php
     /// class C { function hi($x) { return "hi $x"; } }
@@ -16209,14 +16434,22 @@ impl Emit<'_> {
         if nullsafe && !self.is_this(object) {
             self.jmp_null((op1_type, op1), false);
         }
-        let (op2_type, op2, out) = match self.method_name(method)? {
+        let (op2_type, op2, out, known) = match self.method_name(method)? {
             MethodName::Constant(method) => {
                 let at = self.func_name_literal(&method)?;
-                (OperandKind::Const, at, self.cache_slots(2))
+                let known = self.known_on_this(op1_type, &method);
+                (OperandKind::Const, at, self.cache_slots(2), known)
             }
-            MethodName::Computed((kind, at)) => (kind, at, 0),
+            MethodName::Computed((kind, at)) => (kind, at, 0, None),
         };
-        let plan = Plan::of(arguments, None);
+        let (call_op, callee) = match known {
+            Some(method) => (
+                self.get_call_op(Fbc::User, method.flagged),
+                Some(method.callee),
+            ),
+            None => (Opcode::DoFcall, None),
+        };
+        let plan = Plan::of(arguments, callee.as_ref());
         self.push(Opline {
             opcode: Opcode::InitMethodCall,
             op1_type,
@@ -16227,7 +16460,7 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        let served = self.call_common(&plan, arguments, None, Opcode::DoFcall, line)?;
+        let served = self.call_common(&plan, arguments, callee.as_ref(), call_op, line)?;
         // `short_circuiting_checkpoint != zend_short_circuiting_checkpoint()`
         // once `zend_compile_call_common` made a closure: a `?->` the
         // receiver stands on would leave it null.
@@ -16239,6 +16472,38 @@ impl Emit<'_> {
             );
         }
         Ok(served)
+    }
+
+    /// `zend_compile_method_call`'s "known method on `$this`": where the
+    /// receiver is the `IS_UNUSED` `$this` of a method whose scope is
+    /// known, the method of the name the class being compiled has
+    /// declared so far, its own among them, is the callee where it is
+    /// private or final, since no class extending it can put another in
+    /// its place. Then the call is `DO_UCALL` and its arguments are sent
+    /// by the parameters it declares.
+    ///
+    /// ```php
+    /// class A {
+    ///     private function p(&$r, $n) { $r .= "A::p$n "; return $n ? $this->p($r, $n - 1) : $r; }
+    ///     final function f(array $a) { return count($a); }
+    ///     function run() { $s = ''; $this->p($s, 2); return $s . $this->f([1, 2]) . ' ' . self::d(); }
+    ///     static function d() { return 'd'; }
+    /// }
+    /// class B extends A {
+    ///     function p() { return 'B::p'; }
+    /// }
+    /// echo (new B)->run(), "\n";
+    /// ```
+    /// ```expect
+    /// A::p2 A::p1 A::p0 2 d
+    /// ```
+    fn known_on_this(&self, receiver: OperandKind, method: &[u8]) -> Option<TableMethod> {
+        if receiver != OperandKind::Unused || !self.scope_known() {
+            return None;
+        }
+        let at = self.active_class.as_ref()?.at;
+        self.table_method(at, method)
+            .filter(|m| m.visibility == Visibility::Private || m.is_final)
     }
 
     /// The receiver of a method call or a property fetch: `$this` is
@@ -16954,9 +17219,11 @@ impl Emit<'_> {
     /// the class named, one the engine declared ([`Options::classes`])
     /// or one this file has bound before the call, has a public method
     /// of the name; a private or protected one is compatible only from
-    /// inside the class, which nothing here is. The name is resolved as
-    /// the fetch resolves it ([`Self::class_name`]), which is the name a
-    /// declaration of the file took under the same namespace.
+    /// the class itself while it compiles, `ce == CG(active_class_entry)`,
+    /// which finds its own method too ([`Self::table_method`]). The
+    /// name is resolved as the fetch resolves it ([`Self::class_name`]),
+    /// which is the name a declaration of the file took under the same
+    /// namespace.
     #[cfg(test)]
     fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
         self.known_method_of(&self.class_name(class), method)
@@ -16968,10 +17235,6 @@ impl Emit<'_> {
     fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<(Known, Callee)> {
         let class = class.to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
-        let own = self
-            .active_class
-            .as_ref()
-            .is_some_and(|active| active.name.to_ascii_lowercase() == class);
         if let Some((_, decl)) = self.known_classes.find(&class) {
             return decl
                 .methods
@@ -16986,36 +17249,26 @@ impl Emit<'_> {
         // `CG(active_class_entry)`: a class of the file bound early, or
         // the one whose body is compiling, and never one a
         // `DECLARE_CLASS` binds, which the table holds under its key.
-        let active = self.active_class.as_ref().and_then(|active| {
+        let active = self.active_class.as_ref().map(|active| active.at);
+        let at = self.bound.iter().copied().chain(active).find(|at| {
             self.classes
-                .iter()
-                .rev()
-                .find(|decl| *decl.name.0 == *active.name)
-        });
-        let decl = self
-            .bound
-            .iter()
-            .filter_map(|at| self.classes.get(*at))
-            .chain(active)
-            .find(|decl| decl.name.0.to_ascii_lowercase() == class)?;
+                .get(*at)
+                .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(&class))
+        })?;
         // The methods `zend_enum_register_funcs` gives an enum are the
         // engine's, added at the link: php's compile-time table has none
         // of them, so a call to one is compiled as to a method unknown.
-        if decl.kind == ClassKind::Enum
+        if self.classes.get(at)?.kind == ClassKind::Enum
             && matches!(method.as_slice(), b"cases" | b"from" | b"tryfrom")
         {
             return None;
         }
-        decl.methods
-            .iter()
-            .find(|m| {
-                m.function.name.0.to_ascii_lowercase() == method
-                    && (m.visibility == Visibility::Public || own)
-            })
-            .map(|m| {
-                let flagged = attributes::deprecated_or_no_discard(&m.function.attributes);
-                (Known::User { flagged }, Callee::of(&m.function.parameters))
-            })
+        // `ce == CG(active_class_entry)`: the class compiling may call
+        // any method of its own.
+        let own = active == Some(at);
+        self.table_method(at, &method)
+            .filter(|m| m.visibility == Visibility::Public || own)
+            .map(|m| (Known::User { flagged: m.flagged }, m.callee))
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered
@@ -17274,11 +17527,11 @@ impl Emit<'_> {
     fn magic_const(&self, which: Magic, line: u32) -> Folded {
         let text = match which {
             Magic::Line => return Folded::Line(i64::from(line)),
-            Magic::File => self.filename.0.to_vec(),
+            Magic::File => self.filename.to_vec(),
             Magic::Dir => {
-                let dirname = dirname(&self.filename.0);
+                let dirname = dirname(self.filename);
                 if dirname == b"." {
-                    self.cwd.clone()
+                    self.cwd.to_vec()
                 } else {
                     dirname
                 }
@@ -19105,8 +19358,8 @@ mod tests {
             numeric_dims: Vec::new(),
             methods: Vec::new(),
             hooks: Vec::new(),
-            filename: options.filename.clone(),
-            cwd: options.cwd.clone(),
+            filename: options.filename,
+            cwd: options.cwd,
             loops: Vec::new(),
             current_loop: None,
             jumps: Vec::new(),

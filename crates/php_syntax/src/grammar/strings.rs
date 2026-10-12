@@ -63,7 +63,7 @@ pub(crate) fn heredoc(p: &mut Parser<'_>) -> CompletedMarker {
         // An indented nowdoc carries one STRING_TEXT per body line, the
         // indentation between them not significant: consume the run.
         let mut seen = Parts::None;
-        while p.peek_at(K::STRING_TEXT) {
+        while p.at(K::STRING_TEXT) {
             p.bump(K::STRING_TEXT);
             seen = Parts::TextOnly;
         }
@@ -140,7 +140,7 @@ fn parts(p: &mut Parser<'_>, enders: &[K]) -> Parts {
 fn simple_interpolation(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::VARIABLE);
-    if p.peek_at(K::L_BRACK) {
+    if p.at(K::L_BRACK) {
         simple_dim(p, false);
     } else if matches!(p.current(), K::ARROW | K::NULLSAFE_ARROW) && p.nth(1) == K::IDENT {
         let s = p.start();
@@ -190,7 +190,7 @@ fn simple_dim(p: &mut Parser<'_>, in_scripting: bool) {
             p.error(d);
         }
     }
-    if p.peek_at(K::R_BRACK) {
+    if p.at(K::R_BRACK) {
         if in_scripting {
             p.bump(K::R_BRACK);
         } else {
@@ -226,9 +226,9 @@ fn offset_unexpected(p: &mut Parser<'_>, in_scripting: bool, expecting: &str) ->
 fn dollar_brace(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::DOLLAR_L_CURLY);
-    if p.peek_at(K::IDENT) && matches!(p.nth(1), K::R_CURLY | K::L_BRACK) {
+    if p.at(K::IDENT) && matches!(p.nth(1), K::R_CURLY | K::L_BRACK) {
         p.bump(K::IDENT);
-        if p.peek_at(K::L_BRACK) {
+        if p.at(K::L_BRACK) {
             simple_dim(p, true);
         }
     } else if !expr::expr(p) {

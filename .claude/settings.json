@@ -1,7 +1,8 @@
 {
   "env": {
     "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
-    "BASH_MAX_TIMEOUT_MS": "2700000"
+    "BASH_MAX_TIMEOUT_MS": "2700000",
+    "CARGO_BUILD_JOBS": 4
   },
   "permissions": {
     "allow": [

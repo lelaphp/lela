@@ -89,11 +89,47 @@ use manifest::Manifest;
 use reading::{Outcome, Reading, Store};
 use sources::Standing;
 
-/// The workspace this binary was built in: the parent of `xtask/`.
+/// The workspace this binary runs in: the nearest directory holding a
+/// `Cargo.toml` with a `[workspace]` table, from the working directory up,
+/// else from `CARGO_MANIFEST_DIR` as cargo sets it for the process, else
+/// the one it was built in. Cargo reuses one compiled binary for every
+/// checkout sharing a target directory whose sources are no newer than it,
+/// so a path baked in at compile time can name another checkout (#2719).
+/// The working directory comes first, as it does for cargo finding a
+/// workspace, since every process a cargo-run one starts inherits its
+/// `CARGO_MANIFEST_DIR`, a session `track work` spawns and its hooks
+/// among them; so a run from inside a fixture workspace measures that
+/// fixture, as `cargo` run there would.
 pub(crate) fn built_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    let workspace = |from: PathBuf| {
+        from.ancestors()
+            .find(|dir| {
+                let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+                manifest.lines().any(|line| line.trim() == "[workspace]")
+            })
+            .map(Path::to_path_buf)
+    };
+    std::env::current_dir()
+        .ok()
+        .and_then(workspace)
+        .or_else(|| std::env::var_os("CARGO_MANIFEST_DIR").and_then(|dir| workspace(dir.into())))
+        .or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// `xtask/` as cargo names it for the process running, a test's among
+/// them, else the one in the workspace it runs in: what a test reads its
+/// fixtures under, never a path baked in at compile time (#2719).
+pub fn package_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .map_or_else(|| built_root().join("xtask"), PathBuf::from)
+    })
 }
 
 /// The binary's whole body: the command line run, an error printed as

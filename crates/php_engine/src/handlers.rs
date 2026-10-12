@@ -1518,7 +1518,7 @@ fn dynamic_call_array(
     let (function, receiver) = method_on(
         req,
         object,
-        &method.to_ascii_lowercase(),
+        &exec::Lowered::of(&method),
         &second,
         Undefined::OnHanded,
     )?;
@@ -1579,7 +1579,7 @@ fn dynamic_call_static(
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
     let written = Value::string(req.string(method)?);
-    let found = static_method(req, class, &method.to_ascii_lowercase(), &written, this);
+    let found = static_method(req, class, &exec::Lowered::of(method), &written, this);
     req.release(written);
     let (function, _) = found?;
     if req
@@ -1711,6 +1711,8 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn init_fcall_by_name<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -1827,7 +1829,7 @@ pub(crate) fn send_val<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default()) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -1857,7 +1859,7 @@ pub(crate) fn send_var<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, A::default()) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), false) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -1892,7 +1894,8 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// warning is [`send`]'s. `SEND_VAL_EX` and `SEND_VAR_EX` take it too
 /// where the callee's parameter at the number takes its argument by
 /// value, as php's `_EX` handlers go to the same arm once
-/// `ARG_SHOULD_BE_SENT_BY_REF` is clear.
+/// `ARG_SHOULD_BE_SENT_BY_REF` is clear, which `ex` asks of the callee
+/// ([`Request::arg_send_mode`]).
 ///
 /// ```php
 /// function f($a, $b, $c) { return "$a|$b|$c"; }
@@ -1919,14 +1922,19 @@ fn inline_send(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
+    ex: bool,
 ) -> Option<Edge> {
     if op.op2_type == OperandKind::Const {
         return None;
     }
     let to = (op.op2 as usize).checked_sub(1)?;
-    let call = req.vm().building_at()?;
-    let callee = req.vm().stack.frame(call)?;
-    if to >= callee.header().num_args as usize || !callee.slots().get(to)?.is_undef() {
+    let (call, callee) = req.vm().stack.top()?;
+    let header = callee.header();
+    if !header.info.building()
+        || to >= header.num_args as usize
+        || !callee.slots().get(to)?.is_undef()
+        || ex && req.arg_send_mode(header.function?, op.op2).0
+    {
         return None;
     }
     let slots = req.slots_mut(frame);
@@ -2158,16 +2166,15 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
 /// Unknown named parameter $y
 /// C::r(): Argument #1 ($x) could not be passed by reference
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn send_val_ex<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op2_type != OperandKind::Const
-        && !should_be_sent_by_ref(req, op.op2)
-        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
-    {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
         return edge;
     }
     let reserved = match reserve_arg(req, frame, code, op) {
@@ -2229,16 +2236,15 @@ pub(crate) fn send_val_ex<T: Tier>(
 /// string(5) "bound"
 /// string(1) "v"
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn send_var_ex<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op2_type != OperandKind::Const
-        && !should_be_sent_by_ref(req, op.op2)
-        && let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type))
-    {
+    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), true) {
         return edge;
     }
     let reserved = match reserve_arg(req, frame, code, op) {
@@ -3299,12 +3305,17 @@ pub(crate) fn do_icall<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn do_fcall_by_name<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_enter(req, frame, code, op, true) {
+        return edge;
+    }
     do_call(req, frame, code, op, "ZEND_DO_FCALL_BY_NAME")
 }
 
@@ -3327,12 +3338,17 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
 /// ```expect
 /// bool(true)
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn do_fcall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_enter(req, frame, code, op, true) {
+        return edge;
+    }
     do_call(req, frame, code, op, "ZEND_DO_FCALL")
 }
 
@@ -3634,13 +3650,39 @@ fn answered(
 /// int(200)
 /// int(0)
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn do_ucall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_enter(req, frame, code, op, false) {
+        return edge;
+    }
     do_call(req, frame, code, op, "ZEND_DO_UCALL")
+}
+
+/// The inline path of `DO_UCALL`, and of `DO_FCALL` and
+/// `DO_FCALL_BY_NAME` where `flagged`: a call to a user function that
+/// `i_init_func_execute_data` makes a frame of by writing words alone
+/// ([`Request::enter_call`]), entered with no call out of the loop. The
+/// answer is [`Stepped::Pushed`], as [`enter`]'s; `None`, with nothing
+/// touched, for every other call, which [`do_call`] serves.
+#[inline(always)] // as `inline_init_fcall`
+#[allow(clippy::inline_always)]
+fn inline_enter(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    flagged: bool,
+) -> Option<Edge> {
+    let returns_to =
+        (op.out_type != OperandKind::Unused).then(|| exec::temporary_slot(code, op.out));
+    let callee = req.enter_call(returns_to, frame, flagged)?;
+    Some(Ok(Stepped::Pushed(callee).into()))
 }
 
 /// The `ZEND_USER_FUNCTION` arm of the `DO_*CALL` handlers
@@ -5115,9 +5157,9 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // The pair answers where it holds this pass's class and was written
     // from this frame's scope ([`Request::cached_callee`]).
     let cached_callee = match (op.op2_type, primed) {
-        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
-            req.cached_callee(frame, slot, class)
-        }
+        (OperandKind::Const, Cached::ClassAndCallee { .. }) => req
+            .cached_callee(frame, slot, class)
+            .map(|(function, _)| function),
         _ => None,
     };
     if let Some(function) = cached_callee {
@@ -5154,9 +5196,14 @@ pub(crate) fn init_static_method_call<T: Tier>(
         OperandKind::Const => {
             let written = exec::constant(code, ConstIdx(op.op2));
             let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
-            let lowered = lowered.as_str_bytes().unwrap_or_default().to_vec();
             let this = req.vm().this(frame);
-            match static_method(req, class, &lowered, &written, this) {
+            match static_method(
+                req,
+                class,
+                lowered.as_str_bytes().unwrap_or_default(),
+                &written,
+                this,
+            ) {
                 Ok((function, never_cached)) => {
                     uncached = never_cached;
                     function
@@ -5196,24 +5243,24 @@ fn static_method(
     written: &Value,
     this: Option<PhpObject>,
 ) -> Result<(Function, bool), Thrown> {
-    let name = written.as_str_bytes().unwrap_or_default().to_vec();
+    let name = written.as_str_bytes().unwrap_or_default();
     if let Some(function) = req
         .handlers_of(class)
-        .get_static_method(req, class, lowered, &name)?
+        .get_static_method(req, class, lowered, name)?
     {
         return Ok((function, true));
     }
     let function = match req.method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
         Some(function) => {
-            if let Some(trampoline) = req.static_trampoline(class, &name, this) {
+            if let Some(trampoline) = req.static_trampoline(class, name, this) {
                 trampoline
             } else {
-                req.check_method_access(function, &name)?;
+                req.check_method_access(function, name)?;
                 function
             }
         }
-        None => match req.static_trampoline(class, &name, this) {
+        None => match req.static_trampoline(class, name, this) {
             Some(trampoline) => trampoline,
             None => return Err(undefined_method(req, class, written)),
         },
@@ -5241,7 +5288,7 @@ fn static_call_named(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let this = req.vm().this(frame);
-    let found = static_method(req, class, &method.lowered, &method.written, this);
+    let found = static_method(req, class, &method.lowered(), &method.written, this);
     let edge = match found {
         Ok((function, _)) => static_call_frame(req, frame, op, class, function),
         Err(thrown) => threw(req, frame, &thrown),
@@ -5593,6 +5640,82 @@ pub(crate) fn init_method_call<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if let Some(edge) = inline_init_method_call(req, frame, code, op) {
+        return edge;
+    }
+    method_call(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_INIT_METHOD_CALL` over a constant name
+/// (`ZEND_INIT_METHOD_CALL_SPEC_CV_CONST`, `_TMPVAR_CONST` and
+/// `_UNUSED_CONST`, `Z/Zend/zend_vm_def.h:3778`): the receiver an
+/// object a CV or a temporary holds, or the frame's `$this`; the callee
+/// off the cache slot `result.num` names where the slot holds the
+/// receiver's class and was written from this frame's scope
+/// (`CACHED_PTR(opline->result.num) == called_scope`), and takes
+/// `$this`; and the call pushed over the receiver with the class as its
+/// called scope, the CV's object with one more owner (`GC_ADDREF`), the
+/// temporary's moved, and `$this` lent. Nothing here raises but the
+/// memory limit on a page the push takes. `None`, with nothing touched,
+/// for a name the program computes, a slot not primed for the class
+/// and scope, a static callee, and a receiver that is no object or is
+/// one through a reference, which [`method_call`] serves. Out of the
+/// loop's own body, a call of its own, since inlined it costs every
+/// other opline of the loop registers.
+#[inline(never)]
+fn inline_init_method_call(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<Edge> {
+    if op.op2_type != OperandKind::Const {
+        return None;
+    }
+    let at = match op.op1_type {
+        OperandKind::Unused => None,
+        OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => {
+            Some(ByKind(op.op1_type).slot(code, op.op1)?)
+        }
+        OperandKind::Const => return None,
+    };
+    let object = match at {
+        None => req.vm().this(frame)?,
+        Some(at) => PhpObject::of(req.slots_mut(frame).get(at)?.as_obj()?),
+    };
+    let class = object.class();
+    let (function, instance) = req.cached_callee(frame, CacheSlot(op.out), class)?;
+    if !instance {
+        return None;
+    }
+    let room = req.call_room(function, op.extended_value);
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.called_scope = Some(class);
+    header.set_receiver(Some(match at {
+        None => exec::Receiver::lent(object),
+        Some(_) => exec::Receiver::Owned(object),
+    }));
+    if let Err(fatal) = req.push_room(room, header) {
+        return Some(Err(fatal));
+    }
+    match (op.op1_type, at) {
+        (OperandKind::Cv, _) => req.addref(&object.as_value()),
+        (OperandKind::Tmp | OperandKind::Var, Some(at)) => {
+            if let Some(slot) = req.slots_mut(frame).get_mut(at) {
+                *slot = Zval::UNDEF;
+            }
+        }
+        _ => {}
+    }
+    Some(Ok(advanced()))
+}
+
+/// `INIT_METHOD_CALL` past its inline path: the name, the receiver and
+/// the callee looked up or read off the slot, and the call pushed. A
+/// call of its own, so that the inline path before it keeps to the
+/// registers it needs.
+#[inline(never)]
+fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     // A method the program names is held to be a string before the
     // receiver is read ([`exec::MethodName`]).
     let method = match exec::MethodName::of(req, frame, code, op) {
@@ -5617,7 +5740,7 @@ pub(crate) fn init_method_call<T: Tier>(
             ),
         )),
     };
-    let (object, (function, receiver)) = match found {
+    let (object, (function, receiver, instance)) = match found {
         Ok(found) => found,
         Err(thrown) => {
             method.release(req);
@@ -5655,10 +5778,7 @@ pub(crate) fn init_method_call<T: Tier>(
     // static method gives that owner up here, and the receiver it was
     // may go with it, its destructor served before the call.
     let called = object.class();
-    let this = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let this = if instance {
         Some(if lends {
             exec::Receiver::lent(object)
         } else {
@@ -5699,24 +5819,27 @@ fn method_of_call(
     op: &Opline,
     object: PhpObject,
     method: &exec::MethodName,
-) -> Result<(Function, Option<PhpObject>), Thrown> {
+) -> Result<(Function, Option<PhpObject>, bool), Thrown> {
     let slot = CacheSlot(op.out);
     let class = object.class();
     let named = op.op2_type == OperandKind::Const;
-    if named && let Some(function) = req.cached_callee(frame, slot, class) {
-        return Ok((function, None));
+    if named && let Some((function, instance)) = req.cached_callee(frame, slot, class) {
+        return Ok((function, None, instance));
     }
     let (function, receiver) = method_on(
         req,
         object,
-        &method.lowered,
+        &method.lowered(),
         &method.written,
         Undefined::OnCalled,
     )?;
     if named && receiver.is_none() && !req.never_cached(function) {
         req.prime_callee(frame, slot, class, function);
     }
-    Ok((function, receiver))
+    let instance = req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance);
+    Ok((function, receiver, instance))
 }
 
 /// Which object `Call to undefined method X::m()` names where no class
@@ -5781,8 +5904,8 @@ fn method_on(
     {
         req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
     }
-    let bytes = written.as_str_bytes().unwrap_or_default().to_vec();
-    let (found, receiver) = req.method_found(object, lowered, &bytes)?;
+    let bytes = written.as_str_bytes().unwrap_or_default();
+    let (found, receiver) = req.method_found(object, lowered, bytes)?;
     let Some(function) = found else {
         let named = match undefined {
             Undefined::OnCalled => object,
@@ -5796,10 +5919,10 @@ fn method_on(
     let function = if req.method_accessible(function) {
         function
     } else {
-        req.call_trampoline(object.class(), &bytes, false)
+        req.call_trampoline(object.class(), bytes, false)
             .unwrap_or(function)
     };
-    req.check_method_access(function, &bytes)?;
+    req.check_method_access(function, bytes)?;
     Ok((function, None))
 }
 
@@ -10670,7 +10793,7 @@ fn class_operand(
     }
     let written = exec::constant(code, ConstIdx(at));
     if let Some(class) =
-        crate::api::call::autoload(req, written.as_str_bytes().unwrap_or_default())?
+        crate::api::call::autoload_keyed(req, written.as_str_bytes().unwrap_or_default())?
     {
         if let Some(slot) = slot {
             req.prime(frame, slot, Cached::Class(class));
@@ -11100,6 +11223,8 @@ fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
 /// #0 {main}
 ///   thrown in %s on line 4
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -11392,6 +11517,26 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// 909
 /// 909
 /// ```
+///
+/// The operands are given up as the call ends, `FREE_OP*`, so a
+/// temporary the native read is destroyed before the statement that
+/// reads what the call returned goes on, and a string an argument's
+/// coercion made is the call's and gone with it:
+///
+/// ```php
+/// class S { function __toString(): string { return "abc"; } function __destruct() { echo "d\n"; } }
+/// var_dump(str_contains(new S, "b"));
+/// $m = memory_get_usage(); $r = strtr(new S, "a", "x"); var_dump($r, memory_get_usage() - $m);
+/// echo "after\n";
+/// ```
+/// ```expect
+/// d
+/// bool(true)
+/// d
+/// string(3) "xbc"
+/// int(32)
+/// after
+/// ```
 fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
@@ -11399,7 +11544,7 @@ fn frameless_call(
     op: &Opline,
     arguments: &[(OperandKind, u32)],
 ) -> Edge {
-    let Some(entry) = req.frameless_entry(op.extended_value) else {
+    let Some((function, entry)) = req.frameless_entry(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: {} indexes frameless entry {} and the engine's table has {} entries",
             op.opcode.name(),
@@ -11407,10 +11552,8 @@ fn frameless_call(
             req.frameless_count()
         )));
     };
-    let mut header = exec::Header::call(
-        Function(entry.function),
-        u32::try_from(arguments.len()).unwrap_or(u32::MAX),
-    );
+    let mut header =
+        exec::Header::call(function, u32::try_from(arguments.len()).unwrap_or(u32::MAX));
     header.info.set_serving();
     header.info.set_frameless(true);
     let call = req.push_frameless(header)?;
@@ -11429,8 +11572,8 @@ fn frameless_call(
     // The call ends with the result whether the native threw or not, as
     // php's frameless handler and its full call for an observed one do
     // (`Z/Zend/zend_execute.c:1597`).
-    let served = req.serve_native(Function(entry.function), OnThrow::ReturnValue);
-    req.pop_call();
+    let served = req.serve_entry(function, entry, OnThrow::ReturnValue);
+    req.pop_frameless();
     let at = req.vm().opline(frame);
     let width = if arguments.len() == 3 { 2 } else { 1 };
     match served {
@@ -21403,29 +21546,11 @@ fn inline_return<T: Tier>(
         }
         _ => return None,
     };
-    let leave = req.leaves_plainly(frame, moved)?;
-    match leave.returns_to {
-        Some(slot)
-            if req
-                .slots_mut(leave.caller)
-                .get(slot as usize)?
-                .is_refcounted() =>
-        {
-            return None;
-        }
-        None if z.is_refcounted() => return None,
-        _ => {}
-    }
+    let leave = req.leaves_plainly(frame, moved, z)?;
     if let Err(fatal) = continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)))) {
         return Some(Err(fatal));
     }
-    req.leave_plainly(leave);
-    if let Some(slot) = leave.returns_to
-        && let Some(into) = req.slots_mut(leave.caller).get_mut(slot as usize)
-    {
-        *into = z;
-    }
-    req.vm_mut().advance(leave.caller);
+    req.leave_plainly(leave, z);
     Some(Ok(Stepped::Popped(leave.caller).into()))
 }
 
@@ -24013,7 +24138,7 @@ mod tests {
             assert!(
                 matches!(
                     req.cached(frame, CacheSlot(0)),
-                    Cached::ClassAndCallee { class, scope: None, function }
+                    Cached::ClassAndCallee { class, scope: None, function, .. }
                         if Some(class) == closure && Some(function) == callee
                 ),
                 "the class and the callee are in the slot after pass {pass}"
@@ -24143,7 +24268,7 @@ mod tests {
             assert!(
                 matches!(
                     req.cached(frame, CacheSlot(0)),
-                    Cached::ClassAndCallee { class: held, scope: None, function: callee }
+                    Cached::ClassAndCallee { class: held, scope: None, function: callee, .. }
                         if Some(held) == class && Some(callee) == function
                 ),
                 "the receiver's class and its callee are in the slot after pass {pass}"

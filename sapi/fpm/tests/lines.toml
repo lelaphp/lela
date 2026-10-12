@@ -11,7 +11,10 @@
 # A child that has served `pm.max_requests` ends its engine on the way out,
 # as php's child calls `php_module_shutdown`: a `dba_popen` `cdb_make` file
 # the request left open is finished there, so the next child's request reads
-# the value (#1804).
+# the value (#1804). That child ends at its own `pm.max_requests` too, after
+# the reader's answer, and the master logs it and its replacement only if
+# the stop has not come first, under either host: so the stop waits for the
+# second `started` in the log (#2531).
 [[line]]
 name = "a-child-past-its-max-requests-finishes-a-persistent-cdb-make-file"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
@@ -20,6 +23,7 @@ mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|chil
 [line.serve]
 listen = "{dir}/fpm.sock"
 stop = "SIGTERM"
+settled = ["fpm.log", '(?s)started\n.*started\n']
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/writer.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
 [[line.serve.request]]

@@ -5,16 +5,20 @@
 # unsafe-audit, vocab and `permit --diff`, and a refusal among them ends
 # the hook there, before clippy has built anything, since a vocab word or
 # a missing lock line is seconds to find and a clippy and test cycle is
-# minutes. Then clippy and test on the crates with a staged change, and
-# witness on them beside crosscheck on the extensions the binary carries
-# whose rendering reads a staged file (#1312, #1159); each writes a reading, so `done` has
-# the readings its condition 1 asks a touched crate for. With `--staged`
-# each leaves out a crate whose reading passes and was taken over exactly
-# what is staged, naming the reading (#1143), a retired worktree's
-# included, which is how a branch's passes stand at its merge (#1252).
-# crosscheck writes its readings the same way and refuses nothing here,
-# since a red row is an extension not yet ported and `done` is what holds
-# a touched one to it (#269);
+# minutes. Then clippy and test on the crates with a staged change, and,
+# once both pass and the commit is not a merge, witness on them; each
+# writes a reading, so `done` has the readings its condition 1 asks a
+# touched crate for. With `--staged` each leaves out a crate whose
+# reading passes and was taken over exactly what is staged, naming the
+# reading (#1143), a retired worktree's included, which is how a branch's
+# passes stand at its merge (#1252). crosscheck is not run here: its exit
+# was never read, so it refused nothing and cost a release build of every
+# extension per engine commit; `done` asks a touched extension for its
+# row, and `cargo xtask crosscheck --ext <name>` takes it (revision 140).
+# Before anything runs, a `git commit -F` whose file is missing is
+# refused, since git reads the message only after this hook, and a
+# commit in a linked worktree, a builder's, runs at a lower priority than
+# one in the main checkout, a merge (revision 140);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Between
@@ -29,8 +33,8 @@
 # .claude/harness.local.md, is not rendered here: no commit takes it, and
 # every session re-renders it, so its render here could only refuse a
 # commit for another session's write (#1312). Every command's own exit is
-# read; past the first group the commit is refused while any failed and
-# none cuts the rest short. When a path under
+# read; past the first group the commit is refused while any failed, and
+# clippy and test both run before witness is skipped. When a path under
 # harness-plugins/ is staged, the function-hook declarations are rewritten
 # first (#62): harness-plugins/types is a tracked generated file, written
 # by the committer's own Claude Code as `declarations` below says, and
@@ -47,6 +51,57 @@
 # scripts/hooks`.
 set -u
 cd "$(git rev-parse --show-toplevel)"
+# The message file `git commit -F` names, read from the committing git's
+# arguments, since git reads it only after this hook: a missing one
+# refused a commit sixteen minutes into the hook twice in one session. A
+# path is tried word by word, so one with a space in it is found; a
+# relative one is tried against the checkout's root and the directory git
+# was started from, and is not judged beside `-C`. Where the arguments
+# cannot be read, nothing is judged.
+message_file() {
+    local args word path=
+    args=$(ps -ww -o args= -p "$PPID" 2>/dev/null) || return 0
+    set -f
+    # shellcheck disable=SC2086 # the words are what is wanted
+    set -- $args
+    set +f
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -F | --file) path=${2-} && shift ;;
+            --file=*) path=${1#--file=} ;;
+            --*) ;;
+            -*F) path=${2-} && shift ;;
+            -*F*) path=${1#*F} ;;
+        esac
+        shift
+        [ -n "$path" ] && break
+    done
+    [ -n "$path" ] && [ "$path" != - ] || return 0
+    case "$path" in /*) ;; *) case " $args " in *" -C "*) return 0 ;; esac ;; esac
+    local from rest next
+    from=$(lsof -a -p "$(ps -o ppid= -p "$PPID" | tr -d ' ')" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+    # The words after the flag, joined one more at a time.
+    word=$path
+    rest=${args#*"$path"}
+    while :; do
+        case "$word" in
+            /*) [ -r "$word" ] && return 0 ;;
+            *) [ -r "$word" ] || { [ -n "$from" ] && [ -r "$from/$word" ]; } && return 0 ;;
+        esac
+        case "$rest" in " "*) ;; *) break ;; esac
+        rest=${rest# }
+        next=${rest%% *}
+        word="$word $next"
+        rest=${rest#"$next"}
+    done
+    echo "pre-commit: git commit -F names $path, which is not a file git can read, so the commit is refused before anything runs" >&2
+    return 1
+}
+message_file || exit 1
+# A builder commits from a linked worktree, whose .git is a file, while
+# the coordinator merges in the main checkout; the builder's hook and
+# every build under it yield the cores to the merge.
+[ -f .git ] && renice -n 10 -p $$ >/dev/null 2>&1
 X='cargo xtask'
 status=0
 step() {
@@ -164,10 +219,8 @@ gather() {
         i=$((i + 1))
         cat "$at_once/$i.out"
         [ "$(cat "$at_once/$i.exit")" = 0 ] && continue
-        case "$(cat "$at_once/$i.cmd")" in
-            *" crosscheck --staged") echo "pre-commit: crosscheck: a staged extension's rendering is not the oracle's; done holds a touched one to its row" >&2 ;;
-            *) echo "pre-commit: $(cat "$at_once/$i.cmd") failed" >&2; status=1 ;;
-        esac
+        echo "pre-commit: $(cat "$at_once/$i.cmd") failed" >&2
+        status=1
     done
     first=$n
 }
@@ -208,11 +261,23 @@ if ! computed check $regions >/dev/null 2>&1; then
     computed check $regions 2>&1 >&2 | grep -Ev ' fresh$' >&2
     status=1
 fi
+rm -rf "$at_once"
 step $X clippy --staged
 step $X test --staged
-spawn $X witness --staged
-spawn $X crosscheck --staged
-gather
-rm -rf "$at_once"
+# witness builds the lanes' optimised binary, minutes where clippy and
+# test took seconds, so a commit clippy or test already refuses is not
+# built for. A merge commit is not witnessed here either: on `main` it is
+# the merge check's `witness --unmeasured` (the specs skill, §6), and on
+# a branch merging `main` in, `done` asks the witness of each crate the
+# branch touched before it is ready.
+if [ "$status" != 0 ]; then
+    echo "pre-commit: refused before witness ran; it measures the commit once clippy and test pass" >&2
+    exit "$status"
+fi
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    echo "pre-commit: a merge commit; witness is the merge check's (\`cargo xtask witness --unmeasured\`), and not run here" >&2
+    exit "$status"
+fi
+step $X witness --staged
 
 exit "$status"

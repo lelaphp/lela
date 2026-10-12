@@ -15,6 +15,10 @@
 //! `api.lock` is ([`super::hold_lock`]): the lock is the one place the
 //! items live, landed in the same diff as the code that changes them, and
 //! the rows' Items and Mirrors cells are a person's prose about them.
+//!
+//! **The marker.** An item of the surface may carry `#[mirrors]`, the
+//! php-src declaration it stands for, held against the pinned tree
+//! ([`super::mirrors`], #2353), in a crate with a surface or without one.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -26,7 +30,9 @@ use anyhow::{Context, Result};
 use super::LockKind;
 use super::inventory::Inventory;
 use super::lock::{Block, Lock};
+use super::mirrors::Pinned;
 use super::workspace::{Crates, Present};
+use crate::oracle::Source;
 
 /// The design of record, at the workspace root.
 const DESIGN: &str = "third-engine-design.md";
@@ -45,6 +51,8 @@ pub(crate) struct Surfaces {
     /// on a row and the reading says why.
     found: bool,
     edges: BTreeSet<(String, String)>,
+    /// The pin's php-src, which a marker is held against.
+    pinned: Pinned,
 }
 
 /// What the hold makes of one extension: problems, which fail the reading,
@@ -56,15 +64,19 @@ pub(crate) struct Held {
 }
 
 impl Surfaces {
-    /// §4.10 of `root`'s [`DESIGN`]; a workspace without the file has no
-    /// rows.
-    pub(crate) fn read(root: &Path) -> Result<Surfaces> {
+    /// §4.10 of `root`'s [`DESIGN`], with the markers to be held against
+    /// `source`; a workspace without the file has no rows.
+    pub(crate) fn read(root: &Path, source: &Source) -> Result<Surfaces> {
         let path = root.join(DESIGN);
-        match fs::read_to_string(&path) {
-            Ok(text) => Ok(Surfaces::parse(&text)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Surfaces::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-        }
+        let surfaces = match fs::read_to_string(&path) {
+            Ok(text) => Surfaces::parse(&text),
+            Err(e) if e.kind() == ErrorKind::NotFound => Surfaces::default(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        Ok(Surfaces {
+            pinned: Pinned::new(source),
+            ..surfaces
+        })
     }
 
     /// The rows as `text`, a design document, writes them in its §4.10.
@@ -135,6 +147,10 @@ impl Surfaces {
                 }
             ));
         }
+
+        let marked = self.pinned.hold(krate)?;
+        held.problems.extend(marked.problems);
+        held.notes.extend(marked.notes);
 
         let items = surface(inventory, krate)?;
         let path = krate.dir.join(LOCK);

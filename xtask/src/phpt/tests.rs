@@ -502,7 +502,7 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
 #[test]
 fn a_refusal_of_the_compiler_is_read_as_unread() {
     let pin = manifest().pin;
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let fixture = crate::package_dir().join(FIXTURE);
     let phpt = file::Phpt::load(&fixture).unwrap();
     let program = phpt.section("FILE").expect("the fixture has a --FILE--");
     let snippet = String::from_utf8_lossy(program)
@@ -1324,7 +1324,7 @@ fn a_subset_that_missed_nothing_has_an_empty_census() {
 /// The run at `xtask/fixtures/phpt/census/run.json`, as `xtask phpt`
 /// keeps one.
 fn census_fixture() -> against::Run {
-    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/census/run.json");
+    let file = crate::package_dir().join("fixtures/phpt/census/run.json");
     serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap()
 }
 
@@ -1427,9 +1427,7 @@ fn fixture_subset(name: &str) -> (Tree, Subset) {
 
 /// A fixture directory under `xtask/fixtures/phpt`.
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/phpt")
-        .join(name)
+    crate::package_dir().join("fixtures/phpt").join(name)
 }
 
 /// Every file under `from` copied to the same place under `to`.

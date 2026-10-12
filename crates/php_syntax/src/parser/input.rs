@@ -22,12 +22,14 @@ impl<'t> Input<'t> {
     /// concatenate to it.
     #[must_use]
     pub fn new(text: &'t [u8], tokens: &'t [Token]) -> Input<'t> {
-        let significant = tokens
-            .iter()
-            .enumerate()
-            .filter(|(_, token)| !token.kind.is_trivia())
-            .map(|(i, _)| u32::try_from(i).unwrap_or(u32::MAX))
-            .collect();
+        let mut significant = Vec::with_capacity(tokens.len());
+        significant.extend(
+            tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| !token.kind.is_trivia())
+                .map(|(i, _)| u32::try_from(i).unwrap_or(u32::MAX)),
+        );
         Input {
             text,
             tokens,

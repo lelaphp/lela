@@ -17,13 +17,11 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/api-check")
-        .join(name)
+    xtask::package_dir().join("fixtures/api-check").join(name)
 }
 
 fn readings(name: &str) -> Vec<Reading> {
@@ -128,6 +126,32 @@ fn a_surface_item_without_its_surface_lock_line_fails() {
         pcre.message,
         "2 pub items of ext/pcre beyond extension() have no line in ext/pcre/surface.lock: \
          Regex::study, unlisted; 1 lines of ext/pcre/surface.lock name no public item: gone"
+    );
+}
+
+/// A surface item's `#[mirrors]` is held against the pinned php-src
+/// (#2353): the `mirrors` fixture's tree stands in for it, and of its three
+/// markers the one naming `php_random_default_algo`, which the header
+/// declares `PHPAPI`, holds, while the one naming the header's `static
+/// inline` and the one naming a header the tree lacks fail the reading.
+#[test]
+fn a_marker_naming_what_the_pinned_header_does_not_declare_fails() {
+    let mut manifest = Manifest::load(workspace()).unwrap();
+    let root = fixture("mirrors");
+    manifest.pin = manifest.pin.on_this_machine(Some(root.join("php-src")));
+    let readings = api_check::hold(&manifest, &root, false).unwrap();
+    let random = of(&readings, "ext/random");
+    assert_eq!(random.status, Status::Fail, "{}", random.message);
+    assert_eq!(random.rule, "ext.pub-beyond-extension");
+    let tag = &manifest.pin.source.tag;
+    assert_eq!(
+        random.message,
+        format!(
+            "src/lib.rs's `Rng::engine` mirrors `php_random_default_engine`, which \
+             ext/random/php_random.h at {tag} declares with none of PHPAPI, PDO_API, ZEND_API; \
+             src/lib.rs's `absent` mirrors ext/random/php_rng.h, which php-src at {tag} lacks; \
+             4 pub items of ext/random beyond extension() match ext/random/surface.lock"
+        )
     );
 }
 

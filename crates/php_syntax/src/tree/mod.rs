@@ -11,7 +11,10 @@
 //!
 //! **How a node is addressed.** [`Tree`] owns [`Nodes`], the arena: one
 //! vector per node kind, so a `NodeId<ClassDecl>` is a position among the
-//! class declarations and `tree[id]` is one index into one vector. Beside
+//! class declarations and `tree[id]` reads the kind's slot, then
+//! indexes that kind's vector. A kind's vector is made with its first
+//! node, so a tree pays for the kinds it holds and not for every kind
+//! the schema names, in its making, its moves and its drop. Beside
 //! the arena the tree keeps its shape, every node and every significant
 //! token as one [`Element`] in source order with the size of each node's
 //! subtree, which is what a walk that has no field to follow reads, the
@@ -232,10 +235,59 @@ pub(crate) enum Resolved {
     /// The node's struct is in the arena at this index.
     Node(u32),
     /// A required child (`!`) is absent, named `Kind.field`; no struct was
-    /// built.
+    /// built. `Nodes.kind` names the other failure that leaves a node
+    /// unbuilt, the arena having no vector to put the kind in, which the
+    /// codegen's count of slots rules out; it is reported where the
+    /// grammar's broken promises are, never put in another kind's place.
     Missing(&'static str),
     /// The kind has no struct: `ERROR`, or a token kind opened as a node.
     Untyped,
+}
+
+/// Where a kind's vector stands in `Nodes::stores`. Held one up in a
+/// `NonZeroU8`, so an absent slot, `None`, costs no byte of its own and
+/// the slots stay one byte a kind: the arena is moved by value from the
+/// builder into the parse, and a wider slot measured 300 instructions
+/// more a parse of `return 1;`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StoreAt(std::num::NonZeroU8);
+
+impl StoreAt {
+    /// The place of the `index`-th vector, none past what a byte holds.
+    fn new(index: usize) -> Option<StoreAt> {
+        let raised = u8::try_from(index.checked_add(1)?).ok()?;
+        std::num::NonZeroU8::new(raised).map(StoreAt)
+    }
+
+    /// The vector's index in `stores`.
+    fn index(self) -> usize {
+        usize::from(self.0.get()) - 1
+    }
+}
+
+impl Nodes {
+    /// The vector of the struct kind at `slot`, none while no node of
+    /// the kind is built.
+    fn store(&self, slot: usize) -> Option<&Store> {
+        let at = (*self.slots.get(slot)?)?;
+        self.stores.get(at.index())
+    }
+
+    /// The vector of the struct kind at `slot`, made empty by `empty`
+    /// with the kind's first node. `None` only where the slot is not a
+    /// kind's, or more kinds stand than a slot counts; the caller's
+    /// match on the kind's variant is what reads the vector.
+    fn open<T>(&mut self, slot: usize, empty: fn(Vec<T>) -> Store) -> Option<&mut Store> {
+        let at = if let Some(at) = *self.slots.get(slot)? {
+            at
+        } else {
+            let at = StoreAt::new(self.stores.len())?;
+            self.stores.push(empty(Vec::new()));
+            *self.slots.get_mut(slot)? = Some(at);
+            at
+        };
+        self.stores.get_mut(at.index())
+    }
 }
 
 /// One node into its kind's vector, and where it went.
@@ -300,9 +352,23 @@ fn first_after<T: Child>(
     None
 }
 
-/// Every child the field admits, in order.
+/// Every child the field admits, in order. Counted first, so the slice
+/// is one allocation of its own length and none where the list is empty.
 fn all<T: Child>(children: &[Element]) -> Box<[T]> {
-    children.iter().filter_map(T::of).collect()
+    exact(children.iter().filter_map(T::of))
+}
+
+/// What `items` yields, in one allocation of exactly its length: walked
+/// once to count and once to fill, where collecting grew a vector and
+/// then reallocated it down to a slice.
+fn exact<T>(items: impl Iterator<Item = T> + Clone) -> Box<[T]> {
+    let count = items.clone().count();
+    if count == 0 {
+        return Box::default();
+    }
+    let mut out = Vec::with_capacity(count);
+    out.extend(items);
+    out.into_boxed_slice()
 }
 
 /// The first token whose kind is in `kinds`, after a token in `anchors`
@@ -323,13 +389,10 @@ fn token(children: &[Element], anchors: &[SyntaxKind], kinds: &[SyntaxKind]) -> 
 
 /// Every token whose kind is in `kinds`, in order.
 fn tokens(children: &[Element], kinds: &[SyntaxKind]) -> Box<[TokenId]> {
-    children
-        .iter()
-        .filter_map(|element| match element {
-            Element::Token { kind, id } if kinds.contains(kind) => Some(*id),
-            _ => None,
-        })
-        .collect()
+    exact(children.iter().filter_map(|element| match element {
+        Element::Token { kind, id } if kinds.contains(kind) => Some(*id),
+        _ => None,
+    }))
 }
 
 /// Is this token a member name: an `IDENT`, or, since the parser remaps a

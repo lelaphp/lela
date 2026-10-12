@@ -356,7 +356,6 @@ pub(super) fn round<'a>(
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
     use std::time::Instant;
 
     use crate::oracle::Pin;
@@ -370,7 +369,7 @@ mod tests {
     /// then does.
     #[test]
     fn a_master_that_ends_before_it_listens_is_named_by_its_exit_and_its_log() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = crate::package_dir();
         let pin =
             Pin::parse(&fs::read_to_string(workspace.join("../oracle.toml")).unwrap()).unwrap();
         let hosts = Tree::new("witness-fpm-ended").unwrap();
@@ -405,7 +404,7 @@ mod tests {
     /// each say where the response broke off.
     #[test]
     fn a_response_that_breaks_off_names_where() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = crate::package_dir();
         let pin =
             Pin::parse(&fs::read_to_string(workspace.join("../oracle.toml")).unwrap()).unwrap();
         for name in ["request-reset-sent", "request-empty"] {
@@ -432,7 +431,7 @@ mod tests {
     /// php-fpm's one child does.
     #[test]
     fn what_the_child_appends_after_the_response_ends_is_there_when_the_fence_returns() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = crate::package_dir();
         let pin =
             Pin::parse(&fs::read_to_string(workspace.join("../oracle.toml")).unwrap()).unwrap();
         let hosts = Tree::new("witness-fpm-finishing").unwrap();

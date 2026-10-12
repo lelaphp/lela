@@ -14,7 +14,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn read(path: &str) -> String {
@@ -360,7 +360,7 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
         regions
             .iter()
             .map(|(_, opener)| {
-                let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+                let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
                     .arg("--root")
                     .arg(&*root)
                     .args(xtask_args(opener))
@@ -501,7 +501,7 @@ fn the_invocation_region_is_the_types_and_a_field_it_gains_stales_it() {
         !stale.status.success() && said.contains("invocation") && said.contains("stale"),
         "a field the type gains stales the region until it is rendered: {said}"
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&*root)
         .args(xtask_args(opener))
@@ -674,7 +674,7 @@ fn block_cap() -> usize {
 
 /// `xtask status --session --format json` over a root: the two blocks.
 fn session_blocks(root: &Path) -> (String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .args(["--root"])
         .arg(root)
         .args(["status", "--session", "--format", "json"])
@@ -696,7 +696,7 @@ fn session_blocks(root: &Path) -> (String, String) {
 /// The section of the local file rendered from this workspace's store,
 /// as `computed run` renders it into the local file.
 fn section(name: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .args(["--root"])
         .arg(workspace())
         .args(["status", "--section", name])

@@ -2855,7 +2855,18 @@ impl Value {
     /// `false` and `true` are two codes where [`Value::tag`] has one
     /// `Bool`. A reference is the code of what it holds, as
     /// `zend_check_type` reads it through `Z_REFVAL_P`.
+    #[inline]
     pub(crate) fn type_code(&self) -> u8 {
+        match &self.inner {
+            Inner::Reference(r) => r.get().own_type_code(),
+            _ => self.own_type_code(),
+        }
+    }
+
+    /// [`Value::type_code`] of the value as it stands, a reference not
+    /// followed: `IS_REFERENCE`'s own code there.
+    #[inline]
+    const fn own_type_code(&self) -> u8 {
         match &self.inner {
             Inner::Undef => 0,
             Inner::Null => 1,
@@ -2867,7 +2878,7 @@ impl Value {
             Inner::Array(_) => 7,
             Inner::Object(_) => 8,
             Inner::Resource(_) => 9,
-            Inner::Reference(r) => r.get().type_code(),
+            Inner::Reference(_) => 10,
         }
     }
 
@@ -2911,6 +2922,7 @@ impl Value {
     /// never another reference. Not `Deref`: a value is not a pointer to
     /// another value.
     #[must_use]
+    #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn deref(&self) -> Value {
         match &self.inner {
@@ -2951,35 +2963,22 @@ impl Value {
 
     /// A zval as the face names it, no owner taken: what it names is
     /// named and not copied, as php's `ZVAL_COPY_VALUE` names it.
+    #[inline]
     pub(crate) fn of_zval(zval: Zval) -> Value {
-        if let Some(n) = zval.as_long() {
-            return Value::int(n);
-        }
-        if let Some(f) = zval.as_double() {
-            return Value::float(f);
-        }
-        if let Some(b) = zval.as_bool() {
-            return Value::bool(b);
-        }
-        if let Some(s) = zval.as_str() {
-            return Value::string(PhpString::of(s));
-        }
-        if let Some(a) = zval.as_arr() {
-            return Value::array(PhpArray::of(a));
-        }
-        if let Some(o) = zval.as_obj() {
-            return Value::object(PhpObject::of(o));
-        }
-        if let Some(r) = zval.as_resource() {
-            return Value::resource(Resource::of(r));
-        }
-        if let Some(r) = zval.as_reference() {
-            return Value::reference(PhpRef::of(r));
-        }
-        match zval.kind() {
-            ZvalType::Undef => Value::undef(),
-            _ => Value::null(),
-        }
+        let named = match zval.kind() {
+            ZvalType::Undef => Some(Value::undef()),
+            ZvalType::False => Some(Value::bool(false)),
+            ZvalType::True => Some(Value::bool(true)),
+            ZvalType::Long => zval.as_long().map(Value::int),
+            ZvalType::Double => zval.as_double().map(Value::float),
+            ZvalType::String => zval.as_str().map(|s| Value::string(PhpString::of(s))),
+            ZvalType::Array => zval.as_arr().map(|a| Value::array(PhpArray::of(a))),
+            ZvalType::Object => zval.as_obj().map(|o| Value::object(PhpObject::of(o))),
+            ZvalType::Resource => zval.as_resource().map(|r| Value::resource(Resource::of(r))),
+            ZvalType::Reference => zval.as_reference().map(|r| Value::reference(PhpRef::of(r))),
+            ZvalType::Null | ZvalType::ConstExpr | ZvalType::Indirect | ZvalType::Ptr => None,
+        };
+        named.unwrap_or_else(Value::null)
     }
 
     /// The zval this value is: the sixteen bytes it names, no owner

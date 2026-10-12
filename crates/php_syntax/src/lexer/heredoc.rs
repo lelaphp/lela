@@ -296,10 +296,7 @@ impl Lexer<'_> {
 
     /// The line of the open heredoc's `<<<`, read off the state frame.
     fn heredoc_opener_line(&self) -> u32 {
-        let opener = self
-            .frames
-            .last()
-            .map_or(0, |frame| frame.aux.opener.start as usize);
+        let opener = self.frames.top().aux.opener.start as usize;
         self.line(opener)
     }
 
@@ -308,7 +305,7 @@ impl Lexer<'_> {
     /// current position. One forward pass per heredoc; body lexing then
     /// reads the cache, so there is no per-line rescan.
     fn ensure_heredoc_info(&mut self, label: &[u8]) -> HeredocInfo {
-        if let Some(info) = self.frames.last().and_then(|f| f.aux.heredoc) {
+        if let Some(info) = self.frames.top().aux.heredoc {
             return info;
         }
         // Start at the current line if the position sits in its whitespace
@@ -368,9 +365,7 @@ impl Lexer<'_> {
             line = self.next_line_start(ls);
             // line == None: unterminated, nothing to strip (the EOF diagnostic says so).
         }
-        if let Some(f) = self.frames.last_mut() {
-            f.aux.heredoc = Some(computed);
-        }
+        self.frames.top_mut().aux.heredoc = Some(computed);
         computed
     }
 

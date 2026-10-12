@@ -623,6 +623,19 @@ impl Heap {
         true
     }
 
+    /// Whether giving up one owner of `z` serves nothing past the
+    /// decrement: another owner stands, and the value is in the
+    /// collector's buffer already or can be no possible root
+    /// (`!GC_MAY_LEAK`), so `gc_check_possible_root` takes nothing and no
+    /// collection follows ([`Heap::release`]). What a frame's leave asks
+    /// of the receiver it owns before giving it up with no PHP code
+    /// served, as `OBJ_RELEASE` in `zend_leave_helper` serves none for
+    /// such an object.
+    #[must_use]
+    pub fn releases_quietly(z: Zval) -> bool {
+        counted_header(z).is_some_and(|header| header.refcount() > 1 && !header.may_leak())
+    }
+
     /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
     /// and at zero a string, an object or a resource freed here, while a
     /// table or a reference cell is handed back undestroyed, since what

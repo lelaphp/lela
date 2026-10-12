@@ -1023,6 +1023,7 @@ impl RuntimeCache {
     /// up every pass, which is the reading a program that was never
     /// given the slot would have had; php's would be a read past the
     /// allocation.
+    #[inline]
     pub(crate) fn get(&self, slot: CacheSlot) -> Cached {
         self.slots
             .as_ref()
@@ -1110,10 +1111,10 @@ pub(crate) fn init_runtime_cache(map: &mut RuntimeCaches, code: &OpArray, body: 
 /// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
 /// the function's first activation in the request, found laid down by
 /// every one after.
+#[inline]
 pub(crate) fn lay_runtime_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) {
-    let cache = map.map(at);
-    if cache.slots.is_none() {
-        cache.lay_down(cache_size);
+    if !map.laid(at) {
+        map.map(at).lay_down(cache_size);
     }
 }
 
@@ -1182,10 +1183,20 @@ pub(crate) enum Cached {
     /// opline take the slot in turn where php's keep one each. What the
     /// slot holds is what was asked and what answered, never how the
     /// answer was found.
+    ///
+    /// `from` is the function of the frame that wrote the pair where
+    /// that frame is no closure's, which fixes its scope, as
+    /// [`Cached::Property`]'s `function` does: a frame of that function
+    /// reads the pair back without its scope being asked. And `instance`
+    /// is whether the callee takes `$this`, the test of
+    /// `fbc->common.fn_flags` php makes, read where the pair is written,
+    /// as php reads it off the callee it holds.
     ClassAndCallee {
         class: ClassId,
         scope: Option<ClassId>,
+        from: Option<Function>,
         function: Function,
+        instance: bool,
     },
     /// The declared slot a property fetch or assignment over a constant
     /// name placed on its first pass, `CACHE_POLYMORPHIC_PTR_EX(cache_slot,
@@ -1439,6 +1450,7 @@ impl Vm {
     /// `IS_UNDEF` until an opline or a placed argument writes it
     /// (`i_init_func_execute_data`), which is what a read of a CV warns
     /// of. A page the memory limit refuses is the fatal php raises there.
+    #[inline]
     pub(crate) fn push(
         &mut self,
         heap: &mut php_heap::Heap,
@@ -1609,6 +1621,7 @@ impl Vm {
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, read off the request's map table
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
+    #[inline]
     pub(crate) fn cached(&self, map: &RuntimeCaches, frame: FrameRef, slot: CacheSlot) -> Cached {
         self.at(frame)
             .and_then(|header| map.get(header.runtime_cache()))
@@ -2034,12 +2047,84 @@ impl Member {
 /// A method's name as `INIT_METHOD_CALL` and `INIT_STATIC_METHOD_CALL`
 /// carry it in `op2`: the constant pair the compiler wrote, the name as
 /// written and lowered, or the string a `CV` or a temporary holds, which
-/// the handler takes an owner of, lowers itself as `get_method` does
-/// with no key, and gives up with [`MethodName::release`].
+/// the handler takes an owner of, lowers as `get_method` does with no
+/// key ([`MethodName::lowered`]), and gives up with
+/// [`MethodName::release`].
 pub(crate) struct MethodName {
     pub(crate) written: Value,
-    pub(crate) lowered: Vec<u8>,
+    /// The second constant of a constant name's pair, the name lowered,
+    /// `RT_CONSTANT(opline, opline->op2) + 1`, which the unit holds;
+    /// none for a name the program computed.
+    lowered_constant: Option<Value>,
     owned: bool,
+}
+
+/// A name lowered for a table keyed by the lowered name, as php has
+/// one: the compiler's lowered constant, or a name with no upper-case
+/// byte, borrowed (`zend_string_tolower` answers such a name itself);
+/// otherwise lowered into a buffer on the stack where it fits, as
+/// `zend_std_get_method` lowers a name it was given no key for
+/// (`ZSTR_ALLOCA_ALLOC`, `zend_str_tolower_copy`), and allocated only
+/// past [`INLINE_NAME`] bytes, where php's `do_alloca` goes to the
+/// heap too. A name is found under any case whichever of the three
+/// holds it, a name past the stack's bytes too:
+///
+/// ```php
+/// class C {
+///     function hello() { return "hello"; }
+///     static function make() { return "make"; }
+///     function aMethodWhoseNameIsLongerThanSixtyFourBytesSoItsLoweredFormIsAllocated() { return "long"; }
+/// }
+/// $o = new C; $n = 'HeLLo'; $s = 'MAKE';
+/// $long = 'AMETHODWHOSENAMEISLONGERTHANSIXTYFOURBYTESSOITSLOWEREDFORMISALLOCATED';
+/// echo $o->$n(), " ", [$o, 'HELLO'](), " ", C::$s(), " ", ['C', 'Make'](), " ", $o->$long(), "\n";
+/// var_dump(method_exists($o, 'HELLO'), method_exists('C', $long), is_callable([$o, 'Nope']));
+/// ```
+/// ```expect
+/// hello hello make make long
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) enum Lowered<'a> {
+    Borrowed(&'a [u8]),
+    Inline { bytes: [u8; INLINE_NAME], len: u8 },
+    Allocated(Vec<u8>),
+}
+
+/// How many bytes a name [`Lowered`] lowers on the stack holds at most.
+const INLINE_NAME: usize = 64;
+
+impl<'a> Lowered<'a> {
+    /// `name` lowered, borrowed where it has no upper-case byte.
+    #[inline]
+    pub(crate) fn of(name: &'a [u8]) -> Lowered<'a> {
+        if !name.iter().any(u8::is_ascii_uppercase) {
+            return Lowered::Borrowed(name);
+        }
+        match u8::try_from(name.len()) {
+            Ok(len) if name.len() <= INLINE_NAME => {
+                let mut bytes = [0; INLINE_NAME];
+                for (into, byte) in bytes.iter_mut().zip(name) {
+                    *into = byte.to_ascii_lowercase();
+                }
+                Lowered::Inline { bytes, len }
+            }
+            _ => Lowered::Allocated(name.to_ascii_lowercase()),
+        }
+    }
+}
+
+impl std::ops::Deref for Lowered<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Lowered::Borrowed(name) => name,
+            Lowered::Inline { bytes, len } => bytes.get(..usize::from(*len)).unwrap_or_default(),
+            Lowered::Allocated(name) => name,
+        }
+    }
 }
 
 impl MethodName {
@@ -2056,21 +2141,19 @@ impl MethodName {
         op: &Opline,
     ) -> Result<MethodName, Thrown> {
         if op.op2_type == OperandKind::Const {
-            let lowered = constant(code, ConstIdx(op.op2.saturating_add(1)));
             return Ok(MethodName {
                 written: constant(code, ConstIdx(op.op2)),
-                lowered: lowered.as_str_bytes().unwrap_or_default().to_vec(),
+                lowered_constant: Some(constant(code, ConstIdx(op.op2.saturating_add(1)))),
                 owned: false,
             });
         }
         let value = operand_undef(req, frame, code, op.op2_type, op.op2);
         let held = value.deref();
-        let name = if let Some(bytes) = held.as_str_bytes() {
-            let lowered = bytes.to_ascii_lowercase();
+        let name = if held.as_str_bytes().is_some() {
             req.addref(&held);
             Ok(MethodName {
                 written: held,
-                lowered,
+                lowered_constant: None,
                 owned: true,
             })
         } else {
@@ -2085,6 +2168,15 @@ impl MethodName {
         };
         free_operand(req, frame, code, op.op2_type, op.op2);
         name
+    }
+
+    /// The name lowered: the pair's lowered constant, borrowed, or the
+    /// computed name lowered as [`Lowered::of`] lowers it.
+    pub(crate) fn lowered(&self) -> Lowered<'_> {
+        match &self.lowered_constant {
+            Some(lowered) => Lowered::Borrowed(lowered.as_str_bytes().unwrap_or_default()),
+            None => Lowered::of(self.written.as_str_bytes().unwrap_or_default()),
+        }
     }
 
     /// The owner of a name the program computed given up.
@@ -2358,6 +2450,42 @@ pub(crate) fn entry_of(code: &OpArray) -> u32 {
 pub(crate) struct Activated {
     pub(crate) frame: FrameRef,
     pub(crate) prologue: bool,
+}
+
+/// The `RECV` oplines from `start` in `code`, the op array `callee`
+/// serves, that php's handler passes on its first test, read off the
+/// frame once: each a parameter the call passed an argument for, not
+/// by reference, of a type the mask the compiler put in `op2` holds
+/// (`ZEND_RECV`'s `opline->op2.num & (1u << Z_TYPE_P(param))`,
+/// `MAY_BE_ANY` for a parameter with no type). The answer is the first
+/// opline that does not pass, where the handlers take over, at most the
+/// entry safepoint; nothing observes these, so no observer is told.
+#[inline]
+pub(crate) fn recv_passed(req: &Request, callee: FrameRef, code: &OpArray, start: u32) -> u32 {
+    let entry = entry_of(code);
+    let Some(frame) = req.vm().stack.frame(callee) else {
+        return start;
+    };
+    let passed = frame.header().num_args;
+    let slots = frame.slots();
+    let mut at = start;
+    while at < entry {
+        let Some(op) = code.oplines.get(at as usize) else {
+            break;
+        };
+        if op.opcode != php_unit::Opcode::Recv || op.op1 > passed {
+            break;
+        }
+        let Some(argument) = slots.get(op.out as usize) else {
+            break;
+        };
+        let kind = argument.kind();
+        if kind == php_heap::ZvalType::Reference || op.op2 & (1u32 << (kind as u32)) == 0 {
+            break;
+        }
+        at += 1;
+    }
+    at
 }
 
 /// The `RECV*` oplines of [`parameter_prologue`] from where `callee`

@@ -146,9 +146,7 @@ fn every_steerable_file_is_one_permit_denies() {
 /// One of the proposals under `xtask/fixtures/steer/`, beside the
 /// `tracked.toml` every one of them is judged against.
 fn fixture(name: &str) -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/steer")
-        .join(name);
+    let path = xtask::package_dir().join("fixtures/steer").join(name);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("the fixture {}: {e}", path.display()))
 }
 
@@ -222,7 +220,7 @@ covers = [\"phpt:php-src/ext/fixture/tests/a.phpt\", \"phpt:php-src/ext/fixture/
 #[test]
 fn a_new_row_with_covers_is_one_addition_to_the_registry() {
     let tracked = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        xtask::package_dir()
             .join("..")
             .join(xtask::divergence::FILE),
     )
@@ -290,7 +288,7 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
 /// learned in the same change), and a table it knows is an addition.
 #[test]
 fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written() {
-    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let workspace = xtask::package_dir().join("..");
     let whole = fs::read_to_string(workspace.join("oracle.toml")).expect("the workspace's pin");
     // The pin without its own `[sapi]`, so the proposal below adds the table.
     let pin = match whole.find("\n[sapi]\n") {

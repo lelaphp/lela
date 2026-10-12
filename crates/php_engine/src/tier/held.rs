@@ -101,11 +101,11 @@ impl Units {
 }
 
 impl Kept {
-    /// The op array of `callee`, pushed by a call to a function the
-    /// loop has called before; none otherwise, and the loop enters it.
+    /// The op array of a callee of `function`, pushed by a call to a
+    /// function the loop has called before; none otherwise, and the loop
+    /// enters it.
     #[inline]
-    pub(super) fn called(&self, req: &Request, callee: FrameRef) -> Option<Code> {
-        let function = req.vm().at(callee)?.function?;
+    pub(super) fn called(&self, function: Function) -> Option<Code> {
         match *self.functions.get(function.0 as usize % KEPT)? {
             Some((kept, code)) if kept == function => Some(code),
             _ => None,
