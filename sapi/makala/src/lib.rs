@@ -26,6 +26,7 @@
     clippy::unimplemented
 )]
 
+mod boundary;
 mod connection;
 mod framing;
 mod log;
@@ -35,6 +36,7 @@ mod request;
 mod route;
 mod socket;
 mod static_file;
+mod tls;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -51,8 +53,9 @@ pub const NAME: &str = "makala";
 /// `SERVER_SOFTWARE`, `makala/<version>` (#2335).
 pub const SERVER_SOFTWARE: &str = concat!("makala/", env!("CARGO_PKG_VERSION"));
 
-/// The host's `main`: the line read into its [`Options`], one engine of
-/// the bundle's enabled set started, the listening socket bound, the
+/// The host's `main`: the line read into its [`Options`], the TLS
+/// certificates read where it serves TLS, one engine of the bundle's
+/// enabled set started, the listening sockets bound, the
 /// request threads started, and the connection side run on this thread
 /// for as long as the process serves, until the drain SIGTERM begins
 /// has ended (#2344). The engine is the last to end, once the request
@@ -65,6 +68,20 @@ pub fn main() -> ExitCode {
         Ok(options) => options,
         Err(refusal) => {
             say(&format!("makala: {refusal}\n{}", options::usage()));
+            return php_sapi::exit_code(1);
+        }
+    };
+    // The certificates are read before the engine starts, so a line whose
+    // TLS cannot serve ends the process before anything else.
+    let tls = match options
+        .tls
+        .as_ref()
+        .map(|tls| Ok::<_, String>((tls.listen, tls::acceptor(tls)?)))
+        .transpose()
+    {
+        Ok(tls) => tls,
+        Err(refusal) => {
+            say(&format!("makala: {refusal}\n"));
             return php_sapi::exit_code(1);
         }
     };
@@ -84,13 +101,10 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(1);
         }
     };
-    let listener = match std::net::TcpListener::bind(options.listen) {
-        Ok(listener) => listener,
+    let listeners = match listeners(&options, tls) {
+        Ok(listeners) => listeners,
         Err(e) => {
-            say(&format!(
-                "makala: cannot listen on {}: {e}\n",
-                options.listen
-            ));
+            say(&format!("makala: {e}\n"));
             return php_sapi::exit_code(1);
         }
     };
@@ -110,13 +124,18 @@ pub fn main() -> ExitCode {
                 return php_sapi::exit_code(1);
             }
         };
-    if let Ok(local) = listener.local_addr() {
+    if let Ok(urls) = listeners
+        .iter()
+        .map(connection::Listener::url)
+        .collect::<std::io::Result<Vec<_>>>()
+    {
         say(&format!(
-            "{SERVER_SOFTWARE} listening on http://{local}, document root {}\n",
+            "{SERVER_SOFTWARE} listening on {}, document root {}\n",
+            urls.join(", "),
             options.document_root.display()
         ));
     }
-    let drained = match side.run(options.limits, router, listener, queue) {
+    let drained = match side.run(options.limits, router, listeners, queue) {
         Ok(drained) => drained,
         Err(e) => {
             say(&format!("makala: {e}\n"));
@@ -157,6 +176,31 @@ fn engine(options: &Options) -> Engine {
         .configure(php_bundle::configure_for(php_bundle::Serving::Threads))
         .tier::<php_bundle::Tier>();
     php_sapi::start(natives::declare(builder), &options.ini, log::error)
+}
+
+/// The listening sockets the line asks for, bound: the clear one first,
+/// then the TLS one at `tls`'s address with its handshakes.
+fn listeners(
+    options: &Options,
+    tls: Option<(std::net::SocketAddr, tokio_rustls::TlsAcceptor)>,
+) -> Result<Vec<connection::Listener>, String> {
+    let bind = |addr| {
+        std::net::TcpListener::bind(addr).map_err(|e| format!("cannot listen on {addr}: {e}"))
+    };
+    let mut listeners = Vec::new();
+    if let Some(addr) = options.listen {
+        listeners.push(connection::Listener {
+            socket: bind(addr)?,
+            tls: None,
+        });
+    }
+    if let Some((addr, tls)) = tls {
+        listeners.push(connection::Listener {
+            socket: bind(addr)?,
+            tls: Some(tls),
+        });
+    }
+    Ok(listeners)
 }
 
 /// A line of the server's own on stderr.

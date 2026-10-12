@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use common::{Ending, Exchange, Server};
+use common::{Ending, Exchange, Server, eventually};
 
 /// Long enough for any answer on a loaded machine; a server that closes
 /// ends the wait at once.
@@ -315,4 +315,37 @@ fn a_clean_request_keeps_the_connection_open() {
     let exchange = server.exchange(b"GET /echo.php HTTP/1.1\r\nHost: a\r\n\r\n", SHORT);
     assert_eq!(exchange.codes(), [200], "{}", exchange.text());
     assert_eq!(exchange.ending, Ending::Open);
+}
+
+/// A TLS handshake sent to the port that serves HTTP without TLS is
+/// closed unanswered, no 400 sent, and the error log says so; the port
+/// serves HTTP on (#2343, research/production-server.r2.md M19).
+#[test]
+fn a_tls_handshake_on_the_clear_port_is_closed_and_logged() {
+    let log = echo_root().join("clear-port.log");
+    std::fs::remove_file(&log).ok();
+    let log_arg = log.to_string_lossy().into_owned();
+    let server = Server::with_args(echo_root(), &["--threads", "2", "--error-log", &log_arg]);
+    // The first record of a TLS 1.2 ClientHello: a handshake record, the
+    // ClientHello's type and length, its version and the start of its
+    // random.
+    let mut hello = vec![
+        0x16, 0x03, 0x01, 0x00, 0x31, 0x01, 0x00, 0x00, 0x2d, 0x03, 0x03,
+    ];
+    hello.extend([0x5a; 32]);
+    let exchange = server.exchange(&hello, WAIT);
+    assert_eq!(exchange.bytes, b"", "{}", exchange.text());
+    assert_eq!(exchange.ending, Ending::Closed);
+    let read = || std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        eventually(WAIT, || read()
+            .contains("a TLS handshake came to the clear port")),
+        "{}",
+        read()
+    );
+    let next = server.exchange(
+        b"GET /echo.php HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
+        WAIT,
+    );
+    assert_eq!(next.codes(), [200], "{}", next.text());
 }
