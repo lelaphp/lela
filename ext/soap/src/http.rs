@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use php_ext::call::{call, lookup_function, new_object};
-use php_ext::coerce::{atoi, c_str, is_space, numeric_string, strtol, to_callable};
+use php_ext::coerce::{atoi, c_str, is_space, numeric_string, to_callable};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{
     Handshake, OwnedStream as _, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx,
@@ -574,7 +574,7 @@ fn chunked_body(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
 /// the connect's timeout where none is given: none, no deadline, for
 /// one below zero.
 fn default_timeout(req: &Request) -> Option<Duration> {
-    let secs = req.ini_get(b"default_socket_timeout").map_or(60, strtol);
+    let secs = req.ini_long(b"default_socket_timeout");
     u64::try_from(secs).ok().map(Duration::from_secs)
 }
 

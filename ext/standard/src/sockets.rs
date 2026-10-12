@@ -182,15 +182,11 @@ fn timeout_or_default(req: &Request, timeout: Option<f64>) -> f64 {
 }
 
 /// `FG(default_socket_timeout)` as a double of seconds, what a timeout
-/// of `null` is.
+/// of `null` is: the quantity the entry's `OnUpdateLong` read.
 pub(crate) fn default_timeout(req: &Request) -> f64 {
-    req.ini_get(b"default_socket_timeout")
-        .and_then(|text| String::from_utf8_lossy(text).trim().parse::<i64>().ok())
-        .map_or(60.0, |secs| {
-            #[allow(clippy::cast_precision_loss)] // php's `(double)FG(default_socket_timeout)`
-            let secs = secs as f64;
-            secs
-        })
+    #[allow(clippy::cast_precision_loss)] // php's `(double)FG(default_socket_timeout)`
+    let secs = req.ini_long(b"default_socket_timeout") as f64;
+    secs
 }
 
 /// `PHP_TIMEOUT_ULL_MAX / 1000000.0`, the most seconds a timeout holds.
