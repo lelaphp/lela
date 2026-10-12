@@ -12,7 +12,7 @@ use xtask::{budget, generated};
 mod common;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn int(n: &Number) -> i64 {
@@ -340,7 +340,7 @@ fn clippy_refuses_a_mutex_in_an_ext_crate_under_the_generated_file() {
 /// The fixture whose `ext.no-locks` row is the one #1781 ruled, word for
 /// word: the once types beside the locks and cells, and `deny_macros`.
 fn ruled_fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/clippy/once-and-thread-local")
+    xtask::package_dir().join("fixtures/clippy/once-and-thread-local")
 }
 
 /// The ruled row rendered into a scratch tree beside the fixture's
@@ -500,7 +500,7 @@ fn clippy_refuses_a_once_type_and_a_thread_local_under_the_ruled_row() {
 /// source per denied path, named for it with `::` written `-`, and
 /// `home.rs`, the call the rule allows.
 fn methods_fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/rules/fork.threads")
+    xtask::package_dir().join("fixtures/rules/fork.threads")
 }
 
 /// Whether the target the test runs on declares the function: libc's
@@ -659,7 +659,7 @@ fn a_clippy_rule_clippy_cannot_hold_is_refused_naming_why() {
 
 #[test]
 fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/budget/ceiling");
+    let fixture = xtask::package_dir().join("fixtures/budget/ceiling");
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")
         .arg(&fixture)
@@ -681,7 +681,7 @@ fn the_binary_writes_the_readings_and_exits_nonzero_on_a_failure() {
 /// 160; the same 200 crates beside 88 third-party packages pass.
 #[test]
 fn lock_packages_counts_the_third_party_packages_and_not_the_workspaces_crates() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/budget/lock-packages");
+    let fixture = xtask::package_dir().join("fixtures/budget/lock-packages");
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")
         .arg(&fixture)

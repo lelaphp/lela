@@ -221,6 +221,7 @@ oracle::normalise
 oracle::normalise_in
 oracle::run_by
 oracle::verdict
+package_dir
 permit::Adapter
 permit::Arguments
 permit::Call

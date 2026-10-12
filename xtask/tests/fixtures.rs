@@ -14,14 +14,11 @@ use xtask::reading::{Reading, Status};
 use xtask::{budget, unsafe_audit};
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture(kind: &str, name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures")
-        .join(kind)
-        .join(name);
+    let dir = xtask::package_dir().join("fixtures").join(kind).join(name);
     assert!(dir.is_dir(), "no fixture at {}", dir.display());
     dir
 }

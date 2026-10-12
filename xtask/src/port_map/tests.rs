@@ -14,14 +14,12 @@ use super::{
 use crate::api_check::lock::Lock;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    crate::package_dir().parent().unwrap()
 }
 
 /// A negative control of this instrument, under `xtask/fixtures/port-map`.
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/port-map")
-        .join(name)
+    crate::package_dir().join("fixtures/port-map").join(name)
 }
 
 /// A lock of these items.

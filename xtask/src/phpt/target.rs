@@ -480,7 +480,7 @@ mod tests {
     use crate::scratch::Tree;
 
     fn fixture(name: &str) -> Run {
-        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let file = crate::package_dir()
             .join("fixtures/phpt/met-of-target")
             .join(name);
         serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap()
@@ -752,11 +752,9 @@ mod tests {
     #[test]
     fn a_target_is_kept_and_found_under_the_pin() {
         let dir = Tree::new("target-kept").unwrap();
-        let mut pin = Pin::parse(
-            &fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../oracle.toml"))
-                .unwrap(),
-        )
-        .unwrap();
+        let mut pin =
+            Pin::parse(&fs::read_to_string(crate::package_dir().join("../oracle.toml")).unwrap())
+                .unwrap();
         let target = Target::of(fixture("control.json"));
         target.keep(dir.path(), &pin, "ext/fixture").unwrap();
         let roots = [dir.path().to_path_buf()];

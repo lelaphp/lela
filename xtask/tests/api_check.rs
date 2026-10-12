@@ -17,13 +17,11 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/api-check")
-        .join(name)
+    xtask::package_dir().join("fixtures/api-check").join(name)
 }
 
 fn readings(name: &str) -> Vec<Reading> {

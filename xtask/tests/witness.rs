@@ -29,7 +29,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn manifest() -> Manifest {
@@ -44,10 +44,7 @@ fn fixture(rule: &str) -> PathBuf {
 /// A negative-control fixture by the two names its path carries: the
 /// instrument's, or `rules` for one of a manifest rule's.
 fn fixture_at(kind: &str, name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures")
-        .join(kind)
-        .join(name);
+    let dir = xtask::package_dir().join("fixtures").join(kind).join(name);
     assert!(dir.is_dir(), "no fixture at {}", dir.display());
     dir
 }

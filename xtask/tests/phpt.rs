@@ -28,7 +28,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn manifest() -> Manifest {
@@ -780,7 +780,7 @@ fn a_program_runs_by_its_absolute_path_so_a_directory_before_its_name_is_matched
     if oracle().is_none() {
         return;
     }
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/FileName_basic.phpt");
+    let fixture = xtask::package_dir().join("fixtures/phpt/FileName_basic.phpt");
     let text = fs::read_to_string(&fixture).unwrap();
     assert!(
         text.contains("\"%sFileName_basic.php\""),
@@ -2223,7 +2223,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
     if oracle().is_none() {
         return;
     }
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/writes");
+    let fixture = xtask::package_dir().join("fixtures/phpt/writes");
     let tests: Vec<(String, String)> = fs::read_dir(&fixture)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -2262,7 +2262,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
 
 /// The tests of a fixture directory, by file name and text.
 fn fixture_tests(dir: &str) -> Vec<(String, String)> {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let fixture = xtask::package_dir().join(dir);
     let mut tests: Vec<(String, String)> = fs::read_dir(&fixture)
         .unwrap()
         .map(|entry| entry.unwrap().path())
