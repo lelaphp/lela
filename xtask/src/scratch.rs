@@ -1136,7 +1136,17 @@ mod tests {
     /// stands in.
     #[test]
     fn a_dead_runs_stray_is_stopped_and_a_live_runs_or_a_childs_never() {
+        let _alone = alone();
         strays_stopped();
+    }
+
+    /// Held by each test that runs [`strays_stopped`], in this process or
+    /// a child, for its length: one's first tree sweeps another's.
+    fn alone() -> std::sync::MutexGuard<'static, ()> {
+        static STRAYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        STRAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The same under a subreaper (#2761): a test process run under a perl
@@ -1153,6 +1163,7 @@ mod tests {
             strays_stopped();
             return;
         }
+        let _alone = alone();
         // prctl(PR_SET_CHILD_SUBREAPER, 1), by its number on this machine.
         let prctl = if cfg!(target_arch = "aarch64") {
             "167"
@@ -1180,9 +1191,9 @@ mod tests {
         drop(dead);
         let kept = Tree::short("strays").unwrap();
         std::fs::remove_file(beside(&kept, LOCK)).unwrap();
-        // A run killed outright: its tree stands, its lock let go.
+        // A run killed outright: its tree stands, its lock let go just
+        // before the sweep, so no other process's sweep removes it first.
         let mut cut = Tree::short("strays").unwrap();
-        drop(cut.held.take());
         // perl forks, and the child takes a session of its own and writes
         // its pid before its parent exits and leaves it to its adopter;
         // it names a path in `tree` on its command line, or stands in it.
@@ -1222,6 +1233,7 @@ mod tests {
             .current_dir(&cut)
             .spawn()
             .unwrap();
+        drop(cut.held.take());
         let stopped = stop_forsaken("strays");
         let child_ran = child.try_wait().unwrap().is_none();
         child.kill().ok();
