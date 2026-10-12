@@ -1581,7 +1581,7 @@ impl Shared {
         };
         let bound = crate::multibyte::bound(req, ini.multibyte);
         let cwd = req.cwd();
-        let keys_before = req.keys_made;
+        let keys_before = req.keys_made();
         let stack = req.stack_limit();
         let declared = Declared {
             extended_info: self.extended_info && !req.compiling_host_string,
@@ -1598,8 +1598,7 @@ impl Shared {
             };
             compile(source, origin, ini, declared, stack, heap)
         })?;
-        let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
-        req.keys_made = req.keys_made.saturating_add(made);
+        req.count_keys_made(unit.runtime_keys.len());
         Ok(req.take_unit(unit))
     }
 

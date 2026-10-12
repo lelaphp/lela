@@ -39,16 +39,35 @@ pub(crate) struct Conn {
     pub(crate) exceptions: bool,
     /// The next statement's id.
     next: u64,
-    /// The callables the functions, aggregates and collations of a
-    /// connection since closed held: php's `funcs` and `collations`,
-    /// which `SQLite3::close` leaves on the object and only
-    /// `php_sqlite3_object_free_storage` gives up.
-    closed_handlers: Vec<Handler>,
-    /// `authorizer_fcc` of a connection since closed, which
+    /// `authorizer_fcc`, the callable the open connection's authorizer
+    /// calls through a view of it ([`Db::set_authorizer`]), which
     /// `SQLite3::close` leaves on the object for
     /// `php_sqlite3_object_free_storage` to give up, and a successful
-    /// `SQLite3::open` forgets ([`Forgotten`]).
-    closed_authorizer: Option<Handler>,
+    /// `SQLite3::open` forgets ([`Forgotten`]). Boxed, so the payload
+    /// fits the struct php allocates.
+    authorizer: Option<Box<Handler>>,
+    /// `funcs`, every function and aggregate created on the object,
+    /// across a close and an open, oldest first: php prepends each, so
+    /// its walk from the head is this list's from the end.
+    funcs: Vec<Registration>,
+    /// `collations`, as `funcs`.
+    collations: Vec<Registration>,
+}
+
+/// Which of the object's lists a registration joins.
+#[derive(Clone, Copy)]
+enum List {
+    Funcs,
+    Collations,
+}
+
+impl Conn {
+    fn list(&mut self, list: List) -> &mut Vec<Registration> {
+        match list {
+            List::Funcs => &mut self.funcs,
+            List::Collations => &mut self.collations,
+        }
+    }
 }
 
 /// Request-scoped (ADR-0005): the authorizers `SQLite3::open` forgot,
@@ -87,11 +106,6 @@ pub(crate) struct Open {
     /// `free_list`: each statement prepared, none for a text that held
     /// no statement, finalized when it leaves the list.
     stmts: BTreeMap<StmtId, Option<Stmt>>,
-    /// `funcs` and `collations`.
-    registrations: Vec<Registration>,
-    /// `authorizer_fcc`, the callable the connection's authorizer calls
-    /// through a view of it ([`Db::set_authorizer`]).
-    authorizer: Option<Handler>,
 }
 
 impl Open {
@@ -329,29 +343,80 @@ impl ObjectHandlers for Handlers {
         REFUSALS
     }
 
-    /// `php_sqlite3_object_free_storage`: the authorizer and every
-    /// function and collation given up, the statements finalized and the
-    /// connection closed.
+    /// `php_sqlite3_object_free_storage`: the statements finalized, the
+    /// authorizer given up, then every function and every collation,
+    /// each list newest first, as php walks the lists it prepends to,
+    /// those of a connection since closed after the open one's, then
+    /// the connection closed:
+    ///
+    /// ```php
+    /// class A { function __construct(public $n) {} function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// $db = new SQLite3(':memory:');
+    /// $f1 = new A('f1'); $db->createFunction('f1', function () use ($f1) { return 1; }); unset($f1);
+    /// $f2 = new A('f2'); $db->createFunction('f2', function () use ($f2) { return 1; }); unset($f2);
+    /// $c = new A('c'); $db->createCollation('c', function ($a, $b) use ($c) { return 0; }); unset($c);
+    /// $au = new A('auth'); $db->setAuthorizer(function () use ($au) { return SQLite3::OK; }); unset($au);
+    /// unset($db);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// dtor auth
+    /// dtor f2
+    /// dtor f1
+    /// dtor c
+    /// end
+    /// ```
+    ///
+    /// ```php
+    /// class A { function __construct(public $n) {} function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// $db = new SQLite3(':memory:');
+    /// $f1 = new A('f1'); $db->createFunction('f1', function () use ($f1) { return 1; }); unset($f1);
+    /// $c1 = new A('c1'); $db->createCollation('c1', function ($a, $b) use ($c1) { return 0; }); unset($c1);
+    /// $f2 = new A('f2'); $db->createAggregate('f2', function () use ($f2) { return 1; }, function () { return 1; }); unset($f2);
+    /// $db->close();
+    /// $db->open(':memory:');
+    /// $f3 = new A('f3'); $db->createFunction('f3', function () use ($f3) { return 1; }); unset($f3);
+    /// $c2 = new A('c2'); $db->createCollation('c2', function ($a, $b) use ($c2) { return 0; }); unset($c2);
+    /// $au = new A('auth'); $db->setAuthorizer(function () use ($au) { return SQLite3::OK; }); unset($au);
+    /// unset($db);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// dtor auth
+    /// dtor f3
+    /// dtor f2
+    /// dtor f1
+    /// dtor c2
+    /// dtor c1
+    /// end
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let Some(conn) = object.native_mut::<Conn>(req) else {
             return;
         };
-        let mut handlers: Vec<Handler> = conn.closed_authorizer.take().into_iter().collect();
-        handlers.append(&mut conn.closed_handlers);
-        if let Link::Open(open) = std::mem::take(&mut conn.link) {
-            let Open {
-                owner,
-                stmts,
-                registrations,
-                authorizer,
-            } = *open;
-            drop(stmts);
-            Db::of(&owner).set_authorizer(req, None);
-            handlers.extend(authorizer);
-            handlers.extend(Db::release(req, owner, registrations));
-        }
-        for handler in handlers {
+        let link = std::mem::take(&mut conn.link);
+        let authorizer = conn.authorizer.take();
+        let funcs = std::mem::take(&mut conn.funcs);
+        let collations = std::mem::take(&mut conn.collations);
+        let owner = match link {
+            Link::Open(open) => {
+                let Open { owner, stmts } = *open;
+                drop(stmts);
+                Db::of(&owner).set_authorizer(req, None);
+                Some(owner)
+            }
+            Link::Unopened | Link::Closed => None,
+        };
+        if let Some(handler) = authorizer {
             handler.give_up(req);
+        }
+        for registration in funcs.into_iter().rev().chain(collations.into_iter().rev()) {
+            for handler in registration.unregister(req) {
+                handler.give_up(req);
+            }
+        }
+        if let Some(owner) = owner {
+            Db::release(req, owner);
         }
     }
 
@@ -366,16 +431,11 @@ impl ObjectHandlers for Handlers {
         let Some(conn) = object.native::<Conn>(req) else {
             return GcTable::Properties;
         };
-        for handler in conn.closed_authorizer.iter().chain(&conn.closed_handlers) {
+        if let Some(handler) = &conn.authorizer {
             handler.visit(visit);
         }
-        if let Link::Open(open) = &conn.link {
-            if let Some(handler) = &open.authorizer {
-                handler.visit(visit);
-            }
-            for registration in &open.registrations {
-                registration.visit(visit);
-            }
+        for registration in conn.funcs.iter().rev().chain(conn.collations.iter().rev()) {
+            registration.visit(visit);
         }
         GcTable::Properties
     }
@@ -424,13 +484,11 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
     let open = Link::Open(Box::new(Open {
         owner,
         stmts: BTreeMap::new(),
-        registrations: Vec::new(),
-        authorizer: None,
     }));
     let conn = conn(req, object)?;
     conn.link = open;
-    if let Some(forgotten) = conn.closed_authorizer.take() {
-        req.state::<Forgotten>().0.push(forgotten);
+    if let Some(forgotten) = conn.authorizer.take() {
+        req.state::<Forgotten>().0.push(*forgotten);
     }
     Ok(())
 }
@@ -447,11 +505,12 @@ fn ever_opened(req: &mut Request, object: PhpObject) -> Result<Option<Db>, Throw
 
 /// `sqlite3_create_function` or `sqlite3_create_collation` of what
 /// `make` registers, its callables kept (`zend_fcc_dup`) once the
-/// connection stands, kept on the connection; the handlers given up
-/// where the library refused it.
+/// connection stands, kept on `list` of the object; the handlers given
+/// up where the library refused it.
 fn register(
     req: &mut Request,
     object: PhpObject,
+    list: List,
     make: impl FnOnce(&mut Request, Db) -> Result<Registration, Vec<Handler>>,
 ) -> Result<bool, Thrown> {
     let db = match &conn(req, object)?.link {
@@ -464,9 +523,7 @@ fn register(
     };
     match outcome {
         Ok(registration) => {
-            if let Link::Open(open) = &mut conn(req, object)?.link {
-                open.registrations.push(registration);
-            }
+            conn(req, object)?.list(list).push(registration);
             Ok(true)
         }
         Err(handlers) => {
@@ -865,28 +922,26 @@ impl SQLite3 {
             conn.link = Link::Unopened;
             return Ok(true);
         };
-        let Open {
-            owner,
-            stmts,
-            registrations,
-            authorizer,
-        } = *open;
+        let Open { owner, stmts } = *open;
         drop(stmts);
-        match Db::close(req, owner, registrations) {
-            Ok(handlers) => {
-                let conn = self::conn(req, object)?;
-                conn.closed_authorizer = authorizer;
-                conn.closed_handlers.extend(handlers);
-                Ok(true)
-            }
+        let mut funcs = std::mem::take(&mut conn.funcs);
+        let mut collations = std::mem::take(&mut conn.collations);
+        let closed = Db::close(req, owner, funcs.iter_mut().chain(&mut collations));
+        let conn = self::conn(req, object)?;
+        conn.funcs = funcs;
+        conn.collations = collations;
+        match closed {
+            Ok(()) => Ok(true),
             Err(unclosed) => {
                 let ffi::Unclosed {
                     owner,
-                    registrations,
                     code,
                     message,
                 } = *unclosed;
-                conn_reopen(req, object, owner, registrations, authorizer)?;
+                conn.link = Link::Open(Box::new(Open {
+                    owner,
+                    stmts: BTreeMap::new(),
+                }));
                 let message = format!("Unable to close database: {}", text(&message));
                 fail(req, exceptions, None, i64::from(code), &message)?;
                 Ok(false)
@@ -1288,7 +1343,7 @@ impl SQLite3 {
         let name = name.as_bytes().to_vec();
         // php hands the library its `zend_long`s as `int`s.
         #[allow(clippy::cast_possible_truncation)]
-        register(req, object, |req, db| {
+        register(req, object, List::Funcs, |req, db| {
             let function = Function::Scalar(Owner::take(req, callback));
             db.create_function(req, &name, argCount as i32, flags as i32, function)
                 .map_err(|(function, _)| function.into_handlers())
@@ -1324,7 +1379,7 @@ impl SQLite3 {
         let name = name.as_bytes().to_vec();
         // php hands the library its `zend_long` as an `int`.
         #[allow(clippy::cast_possible_truncation)]
-        register(req, object, |req, db| {
+        register(req, object, List::Funcs, |req, db| {
             let step = Owner::take(req, stepCallback);
             let finalize = Owner::take(req, finalCallback);
             let function = Function::Aggregate { step, finalize };
@@ -1360,7 +1415,7 @@ impl SQLite3 {
             return Ok(false);
         }
         let name = name.as_bytes().to_vec();
-        register(req, object, |req, db| {
+        register(req, object, List::Collations, |req, db| {
             let handler = Owner::take(req, callback);
             db.create_collation(req, &name, handler)
                 .map_err(|(handler, _)| vec![handler])
@@ -1515,31 +1570,10 @@ impl SQLite3 {
         let (db, _) = open_db(req, object)?;
         let handler = callback.map(|callable| Owner::take(req, callable));
         db.set_authorizer(req, handler.as_deref());
-        let old = match &mut conn(req, object)?.link {
-            Link::Open(open) => std::mem::replace(&mut open.authorizer, handler),
-            _ => handler,
-        };
+        let old = std::mem::replace(&mut conn(req, object)?.authorizer, handler.map(Box::new));
         if let Some(old) = old {
             old.give_up(req);
         }
         Ok(true)
     }
-}
-
-/// The connection put back after a close the library refused, with
-/// what hangs off it but the statements the close finalized.
-fn conn_reopen(
-    req: &mut Request,
-    object: PhpObject,
-    owner: Foreign<Connection>,
-    registrations: Vec<Registration>,
-    authorizer: Option<Handler>,
-) -> Result<(), Thrown> {
-    conn(req, object)?.link = Link::Open(Box::new(Open {
-        owner,
-        stmts: BTreeMap::new(),
-        registrations,
-        authorizer,
-    }));
-    Ok(())
 }

@@ -651,7 +651,7 @@ impl Connection for Handle {
             Db::of(&owner)
                 .replace_einfo(req, Einfo::default())
                 .free(req);
-            Db::release(req, owner, Vec::new());
+            Db::release(req, owner);
         }
         if let Some(allocation) = self.allocation.take() {
             allocation.free(req);

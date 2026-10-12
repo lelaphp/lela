@@ -467,7 +467,7 @@ fn errmsg(raw: *mut sys::sqlite3) -> Vec<u8> {
 /// payload, a statement and a registration reach the connection by, as
 /// long as its owner keeps it. Each method answers as the library
 /// answers a misused connection (`SQLITE_MISUSE`) where it is gone.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Db(ForeignId<Conn>);
 
 impl Db {
@@ -528,65 +528,64 @@ impl Db {
     }
 
     /// `sqlite3_close` of the connection `owner` keeps, given up where
-    /// the library closes it, and the handlers of the functions and
-    /// collations registered on it handed back: `Err` with the
-    /// connection still open and everything handed back, the code and
-    /// the library's text, where a statement or a blob still holds it,
-    /// or a call into the library is in progress on it, which php's
-    /// `sqlite3_close` from inside a callback answers `SQLITE_BUSY` for
-    /// the statement the call runs.
-    pub fn close(
+    /// the library closes it, and each of `registrations` made on it
+    /// closed with it ([`Registration`]), its handlers kept for the
+    /// caller to give up when it will, as `SQLite3::close` leaves php's
+    /// `funcs` and `collations` on the object. `Err` with the connection
+    /// still open, its owner, the code and the library's text, where a
+    /// statement or a blob still holds it, or a call into the library is
+    /// in progress on it, which php's `sqlite3_close` from inside a
+    /// callback answers `SQLITE_BUSY` for the statement the call runs.
+    pub fn close<'r>(
         req: &mut Request,
         owner: Foreign<Conn>,
-        registrations: Vec<Registration>,
-    ) -> Result<Vec<Handler>, Box<Unclosed>> {
-        if Db::of(&owner).conn(req).is_some_and(Conn::serving) {
+        registrations: impl IntoIterator<Item = &'r mut Registration>,
+    ) -> Result<(), Box<Unclosed>> {
+        let db = Db::of(&owner);
+        if db.conn(req).is_some_and(Conn::serving) {
             return Err(Box::new(Unclosed {
                 owner,
-                registrations,
                 code: SQLITE_BUSY,
                 message: BUSY.to_vec(),
             }));
         }
+        let registrations = registrations
+            .into_iter()
+            .filter(move |registration| registration.db == db);
         let Some(conn) = req.disown(owner) else {
             // No call holds it, or `serving` would have answered; were one
             // to, it closes as the call ends and may call back with what
             // is registered on it until then, so the data is left to it.
-            return Ok(registrations
-                .into_iter()
-                .flat_map(Registration::abandoned)
-                .collect());
+            registrations.for_each(|registration| registration.close(Freed::Never));
+            return Ok(());
         };
         match conn.close() {
-            Ok(()) => Ok(registrations
-                .into_iter()
-                .flat_map(Registration::closed)
-                .collect()),
-            Err((conn, code, message)) => Err(Box::new(Unclosed {
-                owner: req.adopt(conn),
-                registrations,
-                code,
-                message,
-            })),
+            Ok(()) => {
+                registrations.for_each(|registration| registration.close(Freed::Now));
+                Ok(())
+            }
+            Err((conn, code, message)) => {
+                // The request keeps it again under a new name, which the
+                // registrations on it follow.
+                let owner = req.adopt(conn);
+                let kept = Db::of(&owner);
+                registrations.for_each(|registration| registration.db = kept);
+                Err(Box::new(Unclosed {
+                    owner,
+                    code,
+                    message,
+                }))
+            }
         }
     }
 
     /// The connection `owner` keeps given up, closed now or as the last
-    /// statement on it is finalized (`sqlite3_close_v2`), the functions
-    /// and collations registered on it taken off it first and their
-    /// handlers handed back, as `sqlite_handle_closer` and
-    /// `php_sqlite3_object_free_storage` take them off.
-    pub fn release(
-        req: &mut Request,
-        owner: Foreign<Conn>,
-        registrations: Vec<Registration>,
-    ) -> Vec<Handler> {
-        let handlers = registrations
-            .into_iter()
-            .flat_map(|registration| registration.unregister(req))
-            .collect();
+    /// statement on it is finalized (`sqlite3_close_v2`), as
+    /// `sqlite_handle_closer` and `php_sqlite3_object_free_storage`
+    /// close it once each function and collation is taken off it
+    /// ([`Registration::unregister`]).
+    pub fn release(req: &mut Request, owner: Foreign<Conn>) {
         drop(req.disown(owner));
-        handlers
     }
 
     /// `sqlite3_errcode`.
@@ -830,7 +829,7 @@ impl Db {
             db: self,
             name: c_name,
             argc,
-            kind,
+            state: State::Registered(kind),
         })
     }
 
@@ -872,7 +871,7 @@ impl Db {
             db: self,
             name: c_name,
             argc: 0,
-            kind,
+            state: State::Registered(kind),
         })
     }
 
@@ -959,10 +958,9 @@ fn load_config(raw: *mut sys::sqlite3, on: c_int) {
 }
 
 /// What [`Db::close`] hands back where the connection stays open: its
-/// owner, the registrations it was given, and the code and text of why.
+/// owner, and the code and text of why.
 pub struct Unclosed {
     pub owner: Foreign<Conn>,
-    pub registrations: Vec<Registration>,
     pub code: i32,
     pub message: Vec<u8>,
 }
@@ -1030,16 +1028,36 @@ impl Kind {
 }
 
 /// One function or collation registered on a connection, php's
-/// `pdo_sqlite_func` or `pdo_sqlite_collation`, which the connection's
-/// object keeps until it closes ([`Registration::unregister`],
-/// [`Db::close`]). Its handlers are given up there whatever the library
-/// answers, as php gives them up; the data the library holds is freed
-/// only once the library can no longer call back with it.
+/// `pdo_sqlite_func`, `pdo_sqlite_collation`, `php_sqlite3_func` or
+/// `php_sqlite3_collation`, which the connection's object keeps until it
+/// is freed ([`Registration::unregister`]), across a close of the
+/// connection ([`Db::close`]) too. Its handlers are given up there
+/// whatever the library answers, as php gives them up; the data the
+/// library holds is freed only once the library can no longer call back
+/// with it.
 pub struct Registration {
     db: Db,
     name: CString,
     argc: i32,
-    kind: Kind,
+    state: State,
+}
+
+/// Where a [`Registration`] stands.
+enum State {
+    /// On its connection, which holds the data and calls back with it.
+    Registered(Kind),
+    /// Its connection closed by [`Db::close`]: the handlers it served,
+    /// its data freed or left to the library.
+    Closed(Vec<Handler>),
+}
+
+/// Whether [`Registration::close`] frees the data: the library closed
+/// the connection, or closes it as the call holding it ends and may call
+/// back with the data until then.
+#[derive(Clone, Copy)]
+enum Freed {
+    Now,
+    Never,
 }
 
 impl Registration {
@@ -1054,14 +1072,19 @@ impl Registration {
     /// connection's lend keeps the data until the connection closes.
     /// Where the connection is gone already, the library may hold the
     /// data until the last statement on it is finalized, which nothing
-    /// here can see, so the data is left to it.
+    /// here can see, so the data is left to it. One whose connection
+    /// [`Db::close`] closed hands back the handlers it kept.
     pub fn unregister(self, req: &mut Request) -> Vec<Handler> {
-        let handlers = self.kind.take_handlers();
+        let kind = match self.state {
+            State::Registered(kind) => kind,
+            State::Closed(handlers) => return handlers,
+        };
+        let handlers = kind.take_handlers();
         let Some(conn) = self.db.conn(req) else {
             return handlers;
         };
         let raw = conn.raw.get();
-        let rc = match self.kind {
+        let rc = match kind {
             Kind::Function(_) => {
                 // SAFETY: the registration's live connection; no callback
                 // and no data, which deletes the function.
@@ -1094,31 +1117,34 @@ impl Registration {
             }
         };
         if rc == SQLITE_OK {
-            self.kind.free();
+            kind.free();
         } else {
-            conn.lend().kept.push(self.kind);
+            conn.lend().kept.push(kind);
         }
         handlers
     }
 
-    /// The data freed and its handlers handed back, the library having
-    /// closed the connection.
-    fn closed(self) -> Vec<Handler> {
-        let handlers = self.kind.take_handlers();
-        self.kind.free();
-        handlers
-    }
-
-    /// Its handlers handed back and its data left to the library, which
-    /// closes the connection as the call holding it ends.
-    fn abandoned(self) -> Vec<Handler> {
-        self.kind.take_handlers()
+    /// Its connection closed: its handlers kept, its data freed where
+    /// `freed` says the library let go of it; one closed already keeps
+    /// the handlers it holds.
+    fn close(&mut self, freed: Freed) {
+        let State::Registered(kind) = &self.state else {
+            return;
+        };
+        let handlers = kind.take_handlers();
+        let State::Registered(kind) = std::mem::replace(&mut self.state, State::Closed(handlers))
+        else {
+            return;
+        };
+        if let Freed::Now = freed {
+            kind.free();
+        }
     }
 
     /// What its handlers count, for the cycle collector.
     pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
-        match self.kind {
-            Kind::Function(registered) => {
+        match &self.state {
+            State::Registered(Kind::Function(registered)) => {
                 // SAFETY: a registration's data, live while the library
                 // holds it, and read only.
                 let registered = unsafe { &*registered.get() };
@@ -1126,10 +1152,15 @@ impl Registration {
                     function.visit(visit);
                 }
             }
-            Kind::Collation(registered) => {
+            State::Registered(Kind::Collation(registered)) => {
                 // SAFETY: as above.
                 let registered = unsafe { &*registered.get() };
                 if let Some(handler) = &registered.handler {
+                    handler.visit(visit);
+                }
+            }
+            State::Closed(handlers) => {
+                for handler in handlers {
                     handler.visit(visit);
                 }
             }
