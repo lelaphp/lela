@@ -800,7 +800,8 @@ impl Request {
         slot: CacheSlot,
         class: crate::api::values::ClassId,
     ) -> Option<(Function, bool)> {
-        let header = self.vm.at(frame)?;
+        let state = self.frame_at(frame)?;
+        let header = state.header();
         let exec::Cached::ClassAndCallee {
             class: held,
             scope,
@@ -813,7 +814,7 @@ impl Request {
         };
         let same = held == class
             && (from.is_some() && header.closure.is_none() && header.function == from
-                || scope == self.frame_scope(frame));
+                || scope == self.scope_of(state));
         same.then_some((function, instance))
     }
 
@@ -931,11 +932,20 @@ impl Request {
     /// arguments and the magic method's CVs and temporaries, at least
     /// two, as `zend_get_call_trampoline_func` sizes the frame it
     /// reuses.
+    #[inline]
     pub(crate) fn call_room(&self, function: Function, count: u32) -> usize {
+        match self.user_function(function) {
+            Some(user) => usize::try_from(user.shape.room(count)).unwrap_or(usize::MAX),
+            None => self.call_room_past_user(function, count),
+        }
+    }
+
+    /// [`Request::call_room`] of a callee that is no user function: a
+    /// native's or a trampoline's.
+    #[inline(never)]
+    fn call_room_past_user(&self, function: Function, count: u32) -> usize {
         let shape = |function: Function| Some(self.user_function(function)?.shape);
-        let room = if let Some(shape) = shape(function) {
-            shape.room(count)
-        } else if let Some(magic) = self
+        let room = if let Some(magic) = self
             .trampoline_of(function)
             .and_then(|(trampoline, _)| trampoline.magic())
             && let Some(magic) = shape(magic)

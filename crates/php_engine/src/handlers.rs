@@ -5702,7 +5702,9 @@ fn inline_init_method_call(
         return Some(Err(fatal));
     }
     match (op.op1_type, at) {
-        (OperandKind::Cv, _) => req.addref(&object.as_value()),
+        // `GC_ADDREF(obj)`: the receiver is an object, so its own
+        // header's count and nothing that asks its type.
+        (OperandKind::Cv, _) => object.heap().addref(),
         (OperandKind::Tmp | OperandKind::Var, Some(at)) => {
             if let Some(slot) = req.slots_mut(frame).get_mut(at) {
                 *slot = Zval::UNDEF;
