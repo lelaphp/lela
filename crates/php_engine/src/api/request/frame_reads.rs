@@ -64,12 +64,11 @@ pub struct FrameId {
     /// [`Request::in_frame`] looks for it while the generator is
     /// suspended and its frame on no stack.
     generator: Option<crate::api::values::PhpObject>,
-    /// The coroutine whose stack the frame stood on, a `Fiber` or an
+    /// The coroutine whose stack the frame stood on, a `Fiber`'s or an
     /// extension's, no owner; none for the request's own stack: where
-    /// [`Request::in_frame`] looks for it while the coroutine is off the
-    /// running chain and its stack held, as php reaches it through
-    /// `fiber->execute_data`.
-    coroutine: Option<crate::api::values::PhpObject>,
+    /// [`Request::in_frame`] looks for it while the coroutine is
+    /// suspended, as php reaches it through `fiber->execute_data`.
+    coroutine: Option<crate::fiber::Context>,
 }
 
 /// The number a request gives one frame and no other, held in the
@@ -523,12 +522,12 @@ impl Request {
     /// ([`Request::on_stack`]); and a suspended generator's, kept as a
     /// [`FrameId`] while it ran, which stands on top of the running
     /// stack for `f` as a resumption stands it and is suspended again
-    /// after ([`crate::generator::with_kept_frame`]). And a frame of a
-    /// coroutine off the running chain, a suspended fiber's or one a
-    /// suspend passed through, on the stack the coroutine holds, which
-    /// the request runs on for `f` with the chain ending at the
-    /// coroutine's bottom frame ([`Request::on_held_stack`]). `None` for
-    /// a frame popped.
+    /// after ([`crate::generator::with_kept_frame`]). And a suspended
+    /// fiber's frame, on the stack the fiber holds, which the request runs
+    /// on for `f` with the chain ending at the fiber's bottom frame
+    /// ([`Request::on_held_stack`]). `None` for a frame popped, and for a
+    /// frame of a coroutine a suspend passed through, whose chain runs on
+    /// into its resumer's held stack, which no serve stands it on.
     pub(super) fn in_frame<R>(
         &mut self,
         id: FrameId,
@@ -538,10 +537,9 @@ impl Request {
             return self.on_stack(stack, |req| f(req, at));
         }
         if let Some(coroutine) = id.coroutine
-            && let Some(at) = self
-                .fibers
-                .held(coroutine)
-                .and_then(|held| id.place_on(&held.vm))
+            && let Some(at) = coroutine
+                .coroutine(self)
+                .and_then(|held| id.place_on(&held.suspended()?.vm))
         {
             return self.on_held_stack(coroutine, |req| f(req, at));
         }

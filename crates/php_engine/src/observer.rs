@@ -1118,14 +1118,14 @@ pub(crate) struct AsFiber {
 pub(crate) enum Caller {
     /// `EG(main_fiber_context)`, the request's own stack.
     Request,
-    /// The coroutine the object holds, a `Fiber`'s or an extension's.
-    Coroutine(PhpObject),
+    /// A coroutine, a `Fiber`'s or an extension's.
+    Coroutine(crate::fiber::Context),
 }
 
 impl Caller {
     /// The caller a resume from `resumer` sets, none being the request's
     /// own stack.
-    pub(crate) fn of(resumer: Option<PhpObject>) -> Caller {
+    pub(crate) fn of(resumer: Option<crate::fiber::Context>) -> Caller {
         resumer.map_or(Caller::Request, Caller::Coroutine)
     }
 
@@ -1134,7 +1134,7 @@ impl Caller {
     fn is(self, fiber: Option<PhpObject>) -> bool {
         match (self, fiber) {
             (Caller::Request, None) => true,
-            (Caller::Coroutine(caller), Some(fiber)) => caller.index() == fiber.index(),
+            (Caller::Coroutine(caller), Some(fiber)) => caller.object().index() == fiber.index(),
             (Caller::Request, Some(_)) | (Caller::Coroutine(_), None) => false,
         }
     }

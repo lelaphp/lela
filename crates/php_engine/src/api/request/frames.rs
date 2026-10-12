@@ -410,31 +410,37 @@ impl Request {
         Some(served)
     }
 
-    /// `f` served with the request running on the stack `coroutine` left
-    /// off the running chain, suspended or waiting on a suspend that
-    /// passed through it, as a debugger serves a suspended fiber's frame
-    /// with `EG(current_execute_data)` moved into `fiber->execute_data`'s
+    /// `f` served with the request running on the stack of `coroutine`,
+    /// suspended, as a debugger serves a suspended fiber's frame with
+    /// `EG(current_execute_data)` moved into `fiber->execute_data`'s
     /// chain: every running coroutine set aside, so the chain runs from
     /// that stack and ends at the coroutine's bottom frame, where
     /// `zend_fiber_suspend` cut `prev_execute_data`. The request's own
     /// stack is kept where [`crate::fiber::Fibers::request_stack`] finds
-    /// it, so `EG(symbol_table)`'s CVs are read where they stand. As in
-    /// [`Request::on_stack`], the error-reporting level and the machine
-    /// stack's limit stay the running fiber's, and no fiber starts,
-    /// suspends or resumes meanwhile. `None` where the coroutine holds
-    /// no execution.
+    /// it, so `EG(symbol_table)`'s CVs are read where they stand, and the
+    /// serve holds one owner of the coroutine's object, so nothing `f`
+    /// does destroys it meanwhile. As in [`Request::on_stack`], the
+    /// error-reporting level and the machine stack's limit stay the
+    /// running fiber's, and no fiber starts, suspends or resumes
+    /// meanwhile. `None` where the coroutine is not suspended.
     pub(super) fn on_held_stack<R>(
         &mut self,
-        coroutine: PhpObject,
+        coroutine: crate::fiber::Context,
         f: impl FnOnce(&mut Request) -> R,
     ) -> Option<R> {
-        let mut execution = self.fibers.set_aside_for(coroutine)?;
+        let mut execution = coroutine.coroutine(self)?.take_suspended()?;
+        let object = coroutine.object().as_value();
+        self.addref(&object);
         self.switch_stack(&mut execution);
-        self.fibers.displace(execution);
+        self.fibers.set_aside_for(coroutine, execution);
         let served = self.with_fiber_switch_blocked(f);
-        let mut execution = self.fibers.take_displaced();
-        self.switch_stack(&mut execution);
-        self.fibers.hold_again(execution);
+        if let Some((coroutine, mut execution)) = self.fibers.take_back() {
+            self.switch_stack(&mut execution);
+            if let Some(held) = coroutine.coroutine(self) {
+                held.hold(execution);
+            }
+        }
+        self.release(object);
         Some(served)
     }
 

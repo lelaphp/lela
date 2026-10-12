@@ -285,6 +285,22 @@ fn a_suspended_fibers_frame_is_written_and_evaluated_in() {
     assert_eq!(out, "[set ok][eval int(10)]5\n[set refused][eval refused]");
 }
 
+/// An evaluation in a suspended fiber's frame that gives up the last
+/// owner of the fiber does not destroy it under the evaluation: the
+/// serve holds the fiber until its frames are back with it, and the
+/// fiber is destroyed once the evaluation is done, its `finally` blocks entered
+/// there.
+#[test]
+fn a_suspended_fiber_whose_last_owner_an_evaluation_gives_up_is_destroyed_after_it() {
+    let out = serve_kept(
+        "$GLOBALS['fiber'] = null",
+        false,
+        "<?php\nfunction pause() {}\nfunction f() {\n    $x = 1;\n    pause();\n    try { Fiber::suspend(); } finally { echo \"[finally]\"; }\n}\n\
+         $fiber = new Fiber(function () { f(); });\n$fiber->start();\npause();\necho \"[on]\\n\";\n",
+    );
+    assert_eq!(out, "[set ok][finally][eval null][on]\n");
+}
+
 /// What code evaluated in a suspended fiber's frame throws traces down
 /// php's `prev_execute_data` chain from that frame, which ends at the
 /// fiber's bottom frame, `zend_fiber_suspend` having cut what stood
