@@ -142,7 +142,6 @@ fn the_map_is_under_100_written_lines_with_the_regions_of_the_design() {
         ("adrs", "scripts/adr-index.sh"),
         ("crates", "status --section crates"),
         ("seams", "status --section locks --format md"),
-        ("rules", "status --section rules --format md"),
         ("instruments", "--help"),
         ("layout", "tree src=crates depth=1"),
     ];
@@ -332,14 +331,7 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
     use xtask::reading::{Reading, Status, Store};
 
     let regions = status_regions();
-    for name in [
-        "crates",
-        "seams",
-        "rules",
-        "bundle-order",
-        "divergence",
-        "edges",
-    ] {
+    for name in ["crates", "seams", "bundle-order", "divergence", "edges"] {
         assert!(
             regions
                 .iter()
