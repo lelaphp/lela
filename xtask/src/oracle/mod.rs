@@ -2136,7 +2136,8 @@ pub fn normalise_in(rules: &Normalise, dir: &Path, bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-fn replace(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
+/// `haystack` with each `needle`, which is not empty, as `with`.
+pub(crate) fn replace(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(haystack.len());
     let mut i = 0;
     while i < haystack.len() {
