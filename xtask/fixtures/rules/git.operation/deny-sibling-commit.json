@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"the-starter","agent_id":"a-sibling","tool_input":{"command":"git commit -F /tmp/merge-t2634.txt -- AGENTS.md","description":"Commit a merge another agent of this session started"}}

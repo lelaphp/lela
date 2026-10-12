@@ -382,4 +382,54 @@ mod tests {
         let other = bash("another-hand", own.command().unwrap());
         assert_eq!(judged(&other).as_deref(), Some("git.operation"));
     }
+
+    /// #2720 as it happened: an agent's `git merge` is admitted, and before
+    /// the merge writes its marker a sibling agent of the same session has
+    /// a line admitted that `cd`s into its own worktree past its first
+    /// command and runs `git merge --ff-only` there. The merge stays its
+    /// starter's: `allow-starter-commit.json` and the starter's abort pass,
+    /// and `deny-sibling-commit.json` and the sibling's abort are refused.
+    #[test]
+    fn a_sibling_s_line_between_a_start_and_its_marker_leaves_the_merge_its_starters() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let manifest = Manifest::load(workspace).unwrap();
+        let fixture = |name: &str| {
+            let path = workspace
+                .join("xtask/fixtures/rules/git.operation")
+                .join(name);
+            Call::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let own = fixture("allow-starter-commit.json");
+        let sibling = fixture("deny-sibling-commit.json");
+        let saying = |call: &Call, line: &str| {
+            let mut call = call.clone();
+            call.tool_input.command = Some(line.to_owned());
+            call
+        };
+        let dir = repository("permit-operating-sibling");
+        let admit = |call: &Call| {
+            let admitted = judge(&manifest, &dir, call).unwrap();
+            assert!(admitted.denial().is_none(), "{admitted:?}");
+            record_the_operation(&dir, call, &admitted);
+        };
+        admit(&saying(&own, "git merge --no-ff --no-commit t2634"));
+        let elsewhere = format!(
+            "S=/var/empty; cat $S/owner; cd /var/empty/t2645; git merge --ff-only main; \
+             cd {}; git log --oneline -3",
+            dir.display()
+        );
+        admit(&saying(&sibling, &elsewhere));
+        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
+
+        let judged = |call: &Call| {
+            let judgement = judge(&manifest, &dir, call).unwrap();
+            judgement.denial().map(|f| f.rule.clone())
+        };
+        let refused = Some("git.operation");
+        assert_eq!(judged(&own), None);
+        assert_eq!(judged(&saying(&own, "git merge --abort")), None);
+        assert_eq!(judged(&sibling).as_deref(), refused);
+        let abort = saying(&sibling, "git merge --abort");
+        assert_eq!(judged(&abort).as_deref(), refused);
+    }
 }

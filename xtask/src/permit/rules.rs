@@ -258,7 +258,7 @@ fn evaluate(
         return Ok(None);
     }
     // A rule scoped by `where` judges a call only in the checkout it
-    // names: where a command it fires on runs ([`command_runs_in`]), whose
+    // names: where a command it fires on runs ([`fired_in`]), whose
     // branch records a ticket, or where an operation stands that the
     // calling session did not start, which the denial names (#2476).
     let mut foreign = None;
@@ -372,16 +372,27 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
     standing(root, line).0
 }
 
-/// Where one command of `line` runs: where the line stands ([`runs_in`]),
-/// moved, for git, by each `-C` among the options before its subcommand,
-/// as git reads them ([`moved`]).
-pub(super) fn command_runs_in(root: &Path, line: Option<&Line>, argv: &Argv) -> PathBuf {
-    moved(runs_in(root, line), argv)
+/// The commands of `line` whose place is read, each with where it runs:
+/// those past the leading directory changes and before the first `cd`,
+/// `pushd` or `popd` among the rest, at where the line stands
+/// ([`runs_in`]) moved, for git, by each `-C` among the options before its
+/// subcommand ([`moved`]). A command past such a change runs where the
+/// change took the shell, if it ran, which this does not read; what
+/// records whose operation stands in a checkout leaves it out rather than
+/// read it where the shell started (#2720).
+pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
+    let (dir, rest) = standing(root, Some(line));
+    rest.iter()
+        .take_while(|argv| !matches!(argv.program(), "cd" | "pushd" | "popd"))
+        .map(|argv| (argv, moved(dir.clone(), argv)))
+        .collect()
 }
 
-/// Where each command of `line` that `fires` runs ([`command_runs_in`]):
-/// a rule scoped by `where` judges the commands it fires on there, so
-/// `git -C /wt commit` is judged in `/wt`.
+/// Where each command of `line` that `fires` runs, read as [`placed`]
+/// reads it and, past a later directory change, where the line stands
+/// all the same, the side that judges: a rule scoped by `where` judges
+/// the commands it fires on there, so `git -C /wt commit` is judged in
+/// `/wt`.
 pub(super) fn fired_in(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Vec<PathBuf> {
     let dir = runs_in(root, Some(line));
     line.commands()
@@ -414,7 +425,7 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The one reading of where a shell line stands, from which [`runs_in`],
-/// [`command_runs_in`], [`fired_in`] and [`acts_in`] are read, so `where =
+/// [`placed`], [`fired_in`] and [`acts_in`] are read, so `where =
 /// "ticketed"`, `where = "operating"`, the checkout `permit --after` holds
 /// and the approvals it reads move together (#2597, #2607): the call's
 /// `root`, moved by each `cd` and `pushd` before the first command that
