@@ -8,9 +8,9 @@ use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
 use php_ext::values::walk;
-use php_ext::values::{Key, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Value, ValueRef};
 
-use crate::ffi::{Action, Code, Compress, Decompress};
+use crate::ffi::{Action, Code, LentCompress, LentDecompress};
 
 /// The name `MINIT` registers the factory under.
 pub(crate) const NAME: &[u8] = b"bzip2.*";
@@ -18,30 +18,82 @@ pub(crate) const NAME: &[u8] = b"bzip2.*";
 /// The size of php's `inbuf` and `outbuf`.
 const BUFFER: usize = 2048;
 
+/// `sizeof(php_bz2_filter_data)` on the oracle's LP64: the 80-byte
+/// `bz_stream`, the two buffers and their lengths, the status, the bits
+/// and `persistent`.
+const DATA: usize = 128;
+
 /// `PHP_BZ2_FILTER_DEFAULT_BLOCKSIZE` and `_WORKFACTOR`.
 const DEFAULT_BLOCKS: i64 = 4;
 const DEFAULT_WORK: i64 = 0;
+
+/// What `php_bz2_filter_create` allocates beside the library's state, on
+/// the request's heap as a filter that is not persistent has them
+/// (design §5.13): `data`, the `php_bz2_filter_data`, and its `inbuf`,
+/// which each piece of a bucket is copied through, and `outbuf`, which
+/// each call writes into.
+struct Buffers {
+    data: Emalloc,
+    inbuf: Emalloc,
+    outbuf: Emalloc,
+}
+
+impl Buffers {
+    /// `pecalloc(1, sizeof(php_bz2_filter_data))` and the two
+    /// `pemalloc(2048)`s; the `Err` is the memory limit's fatal.
+    fn new(req: &mut Request) -> Result<Buffers, Thrown> {
+        Ok(Buffers {
+            data: Emalloc::new(req, DATA)?,
+            inbuf: Emalloc::new(req, BUFFER)?,
+            outbuf: Emalloc::new(req, BUFFER)?,
+        })
+    }
+
+    /// `piece` copied into `inbuf`, as php's `memcpy` before each call:
+    /// the input, and `outbuf` to write into.
+    fn take_in(&mut self, piece: &[u8]) -> (&[u8], &mut [u8]) {
+        let inbuf = &mut self.inbuf.bytes_mut()[..piece.len()];
+        inbuf.copy_from_slice(piece);
+        (inbuf, self.outbuf.bytes_mut())
+    }
+
+    /// The first `written` bytes of `outbuf`, `estrndup(data->outbuf,
+    /// bucketlen)` for the bucket handed on.
+    fn out(&self, written: usize) -> Vec<u8> {
+        self.outbuf.bytes()[..written].to_vec()
+    }
+
+    /// The dtor's `pefree`s, in php's order.
+    fn free(self, req: &mut Request) {
+        self.inbuf.free(req);
+        self.outbuf.free(req);
+        self.data.free(req);
+    }
+}
 
 /// `enum strm_status` with the stream it runs: none made yet, one
 /// running, or one ended and not to be made again.
 enum Status {
     Uninitialized,
-    Running(Decompress),
+    Running(LentDecompress),
     Finished,
 }
 
 /// `bzip2.decompress`: the status, `small_footprint` and
-/// `expect_concatenated`.
+/// `expect_concatenated`, and the buffers, `None` once the dtor freed them.
 struct Decompressing {
     status: Status,
     small: bool,
     concatenated: bool,
+    buffers: Option<Buffers>,
 }
 
-/// `bzip2.compress`: the stream, and `is_flushed`, whether no flush is
-/// pending since the last bucket.
+/// `bzip2.compress`: the stream, `None` once the dtor ended it, the
+/// buffers, `None` once the dtor freed them, and `is_flushed`, whether no
+/// flush is pending since the last bucket.
 struct Compressing {
-    stream: Compress,
+    stream: Option<LentCompress>,
+    buffers: Option<Buffers>,
     flushed: bool,
 }
 
@@ -56,14 +108,16 @@ impl StreamFilter for Decompressing {
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown> {
+        let Some(buffers) = self.buffers.as_mut() else {
+            return Ok(FilterStatus::ErrFatal);
+        };
         let mut exit = FilterStatus::FeedMe;
         let mut total = 0;
-        let mut out = vec![0; BUFFER];
         while let Some(bucket) = input.pop_front() {
             let mut bin = 0;
             while bin < bucket.len() {
                 if matches!(self.status, Status::Uninitialized) {
-                    let Ok(stream) = Decompress::new(self.small) else {
+                    let Ok(stream) = LentDecompress::new(req, self.small)? else {
                         return Ok(FilterStatus::ErrFatal);
                     };
                     self.status = Status::Running(stream);
@@ -73,14 +127,18 @@ impl StreamFilter for Decompressing {
                     break;
                 };
                 let desired = (bucket.len() - bin).min(BUFFER);
-                let step = stream.decompress(&bucket[bin..bin + desired], &mut out);
+                let (piece, out) = buffers.take_in(&bucket[bin..bin + desired]);
+                let step = stream.decompress(req, piece, out)?;
                 match step.code {
                     Code::StreamEnd => {
-                        self.status = if self.concatenated {
+                        let next = if self.concatenated {
                             Status::Uninitialized
                         } else {
                             Status::Finished
                         };
+                        if let Status::Running(ended) = std::mem::replace(&mut self.status, next) {
+                            ended.end(req);
+                        }
                     }
                     Code::Ok => {}
                     _ => {
@@ -91,7 +149,7 @@ impl StreamFilter for Decompressing {
                 total += step.read;
                 bin += step.read;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 } else if step.code == Code::StreamEnd {
                     return Ok(FilterStatus::PassOn);
@@ -102,9 +160,9 @@ impl StreamFilter for Decompressing {
             && let Status::Running(stream) = &mut self.status
         {
             loop {
-                let step = stream.decompress(&[], &mut out);
+                let step = stream.decompress(req, &[], buffers.outbuf.bytes_mut())?;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 } else if step.code == Code::Ok {
                     break;
@@ -119,19 +177,34 @@ impl StreamFilter for Decompressing {
         }
         Ok(exit)
     }
+
+    /// `php_bz2_decompress_dtor`: `BZ2_bzDecompressEnd` where the stream
+    /// is running, then the buffers and `data` freed.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if let Status::Running(stream) = std::mem::replace(&mut self.status, Status::Finished) {
+            stream.end(req);
+        }
+        if let Some(buffers) = self.buffers.take() {
+            buffers.free(req);
+        }
+        Ok(())
+    }
 }
 
 impl StreamFilter for Compressing {
     /// `php_bz2_compress_filter`.
     fn filter(
         &mut self,
-        _req: &mut Request,
+        req: &mut Request,
         _stream: Stream,
         input: &mut Brigade,
         output: &mut Brigade,
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown> {
+        let (Some(stream), Some(buffers)) = (self.stream.as_mut(), self.buffers.as_mut()) else {
+            return Ok(FilterStatus::ErrFatal);
+        };
         let action = match flags {
             FilterFlags::FlushClose => Action::Finish,
             FilterFlags::FlushInc => Action::Flush,
@@ -139,22 +212,20 @@ impl StreamFilter for Compressing {
         };
         let mut exit = FilterStatus::FeedMe;
         let mut total = 0;
-        let mut out = vec![0; BUFFER];
         while let Some(bucket) = input.pop_front() {
             let mut bin = 0;
             while bin < bucket.len() {
                 let desired = (bucket.len() - bin).min(BUFFER);
                 self.flushed = action != Action::Run;
-                let step = self
-                    .stream
-                    .compress(&bucket[bin..bin + desired], &mut out, action);
+                let (piece, out) = buffers.take_in(&bucket[bin..bin + desired]);
+                let step = stream.compress(req, piece, out, action)?;
                 if !matches!(step.code, Code::RunOk | Code::FlushOk | Code::FinishOk) {
                     return Ok(FilterStatus::ErrFatal);
                 }
                 total += step.read;
                 bin += step.read;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 }
             }
@@ -167,10 +238,10 @@ impl StreamFilter for Compressing {
                 (Action::Flush, Code::FlushOk)
             };
             loop {
-                let step = self.stream.compress(&[], &mut out, last);
+                let step = stream.compress(req, &[], buffers.outbuf.bytes_mut(), last)?;
                 self.flushed = true;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 }
                 if step.code != going {
@@ -182,6 +253,18 @@ impl StreamFilter for Compressing {
             *consumed = total;
         }
         Ok(exit)
+    }
+
+    /// `php_bz2_compress_dtor`: `BZ2_bzCompressEnd`, then the buffers and
+    /// `data` freed.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if let Some(stream) = self.stream.take() {
+            stream.end(req);
+        }
+        if let Some(buffers) = self.buffers.take() {
+            buffers.free(req);
+        }
+        Ok(())
     }
 }
 
@@ -262,11 +345,47 @@ fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>
 /// bool(false)
 /// string(0) ""
 /// ```
+///
+/// A filter that is not persistent keeps `data`, its two buffers and the
+/// library's state on the request's heap, as `php_bz2_alloc` points the
+/// library at it. Each filter is counted past what `string.rot13`, which
+/// allocates nothing of its own, counts; the decompressor's state is made
+/// as the first bucket comes, and given back at its stream's end or with
+/// the filter.
+///
+/// ```php
+/// $f = fopen('php://memory', 'w+');
+/// $w = fopen('php://memory', 'w+'); stream_filter_append($w, 'bzip2.compress', STREAM_FILTER_WRITE);
+/// $m = memory_get_usage(); $r = stream_filter_append($f, 'string.rot13', STREAM_FILTER_WRITE); $base = memory_get_usage() - $m;
+/// $m = memory_get_usage(); $c = stream_filter_append($f, 'bzip2.compress', STREAM_FILTER_WRITE); echo memory_get_usage() - $m - $base, "\n";
+/// $m = memory_get_usage(); $c9 = stream_filter_append($f, 'bzip2.compress', STREAM_FILTER_WRITE, ['blocks' => 9]); echo memory_get_usage() - $m - $base, "\n";
+/// $m = memory_get_usage(); $d = stream_filter_append($f, 'bzip2.decompress', STREAM_FILTER_READ); echo memory_get_usage() - $m - $base, "\n";
+/// $m = memory_get_usage(); stream_filter_remove($r); $base = memory_get_usage() - $m;
+/// $m = memory_get_usage(); stream_filter_remove($c9); echo memory_get_usage() - $m - $base, "\n";
+/// $s = ''; for ($i = 0; $i < 20000; $i++) $s .= md5($i);
+/// foreach ([false, true] as $small) {
+///     $g = fopen('php://memory', 'w+'); fwrite($g, bzcompress($s)); rewind($g);
+///     $d = stream_filter_append($g, 'bzip2.decompress', STREAM_FILTER_READ, $small);
+///     $m = memory_get_usage(); $t = fread($g, 100); echo strlen($t), ' ', memory_get_usage() - $m, "\n";
+///     $m = memory_get_usage(); stream_filter_remove($d); echo memory_get_usage() - $m - $base, "\n";
+/// }
+/// ```
+/// ```expect
+/// 3530720
+/// 7536656
+/// 4064
+/// -7536776
+/// 100 2068608
+/// -1671296
+/// 100 1470464
+/// -1073280
+/// ```
 pub(crate) fn factory(
     req: &mut Request,
     name: &[u8],
     params: Option<&Value>,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+    let buffers = Buffers::new(req)?;
     if name.eq_ignore_ascii_case(b"bzip2.decompress") {
         let (mut small, mut concatenated) = (false, false);
         if let Some(params) = params {
@@ -286,9 +405,11 @@ pub(crate) fn factory(
             status: Status::Uninitialized,
             small,
             concatenated,
+            buffers: Some(buffers),
         })));
     }
     if !name.eq_ignore_ascii_case(b"bzip2.compress") {
+        buffers.free(req);
         return Ok(None);
     }
     let (mut blocks, mut work) = (DEFAULT_BLOCKS, DEFAULT_WORK);
@@ -320,10 +441,13 @@ pub(crate) fn factory(
         i32::try_from(blocks).unwrap_or(9),
         i32::try_from(work).unwrap_or(0),
     );
-    Ok(Compress::new(blocks, work).ok().map(|stream| {
-        Box::new(Compressing {
-            stream,
-            flushed: true,
-        }) as Box<dyn StreamFilter>
-    }))
+    let Ok(stream) = LentCompress::new(req, blocks, work)? else {
+        buffers.free(req);
+        return Ok(None);
+    };
+    Ok(Some(Box::new(Compressing {
+        stream: Some(stream),
+        buffers: Some(buffers),
+        flushed: true,
+    })))
 }
