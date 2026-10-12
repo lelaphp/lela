@@ -6295,6 +6295,34 @@ class C {
         assert!(dump.contains(m), "php's C::m, {dump}");
     }
 
+    /// `zend_compile_class_decl` compiles the body in the order written
+    /// (#2797), so a property hook sees in `CG(active_class_entry)`'s
+    /// `function_table` the methods declared above its property and
+    /// none below: `$this->p()` to a private method above is php's
+    /// `DO_UCALL`, with its argument sent by the parameter, and
+    /// `$this->q($a)` to one below stays `DO_FCALL`.
+    #[test]
+    fn a_hook_knows_the_methods_declared_above_its_property() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    private function p(&$r) { return 1; }
+    public $x { get => $this->p($a); }
+    public $y { get => $this->q($a); }
+    private function q(&$r) { return 2; }
+}
+",
+        );
+        let x = "0000 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
+                 0001 SEND_REF CV0($a) 1\n\
+                 0002 V1 = DO_UCALL\n";
+        let y = "0000 INIT_METHOD_CALL 1 THIS string(\"q\")\n\
+                 0001 SEND_VAR_EX CV0($a) 1\n\
+                 0002 V1 = DO_FCALL\n";
+        assert!(dump.contains(x), "php's C::$x::get, {dump}");
+        assert!(dump.contains(y), "php's C::$y::get, {dump}");
+    }
+
     /// `zend_compile_static_call` over a class bound early (#2016):
     /// `zend_get_compatible_func_or_null` finds the method in the linked
     /// class's `function_table`, which holds what it inherited, so

@@ -1056,9 +1056,7 @@ impl Emit<'_> {
             traits: Vec::new(),
             attributes,
             doc_comment: self.doc_comment(doc_comment),
-            properties: Vec::new(),
-            constants: Vec::new(),
-            methods: Vec::new(),
+            body: Vec::new(),
             statement_lines: Vec::new(),
             line,
             end_line: self.end_line(range),
@@ -1228,7 +1226,7 @@ impl Emit<'_> {
         let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
             return Err(unread(line, "an enum case whose name is no identifier"));
         };
-        class.constants.push(Constant {
+        class.body.push(ClassStmt::Constant(Constant {
             name: self.text(name).to_vec(),
             visibility: Visibility::Public,
             is_final: false,
@@ -1238,7 +1236,7 @@ impl Emit<'_> {
             attributes,
             doc_comment: self.doc_comment(node.doc_comment),
             line,
-        });
+        }));
         Ok(())
     }
 
@@ -1260,7 +1258,7 @@ impl Emit<'_> {
             let (name, value, line) = self.const_declarator(*declarator)?;
             let attributes = self.walk_attributes(&node.attrs)?;
             let doc_comment = self.doc_comment(self.parsed.tree[*declarator].doc_comment);
-            class.constants.push(Constant {
+            class.body.push(ClassStmt::Constant(Constant {
                 name,
                 visibility: modifiers.visibility.unwrap_or_default(),
                 is_final: modifiers.has(Flag::Final),
@@ -1270,7 +1268,7 @@ impl Emit<'_> {
                 attributes,
                 doc_comment,
                 line,
-            });
+            }));
         }
         Ok(())
     }
@@ -1311,7 +1309,7 @@ impl Emit<'_> {
                 Some(list) => Some(self.walk_hooks(list, &name)?),
                 None => None,
             };
-            class.properties.push(Property {
+            class.body.push(ClassStmt::Property(Property {
                 name,
                 hooks,
                 visibility: modifiers.visibility.unwrap_or_default(),
@@ -1325,8 +1323,7 @@ impl Emit<'_> {
                 default: declarator.init,
                 doc_comment: self.doc_comment(declarator.doc_comment),
                 line: declarator.line(),
-                constants_before: class.constants.len(),
-            });
+            }));
         }
         Ok(())
     }
@@ -1360,7 +1357,7 @@ impl Emit<'_> {
             line,
             node.range(),
         )?;
-        class.methods.push(Method {
+        class.body.push(ClassStmt::Method(Method {
             function: Function {
                 attributes,
                 ..function
@@ -1370,8 +1367,7 @@ impl Emit<'_> {
             is_abstract: modifiers.has(Flag::Abstract),
             has_body: node.body.is_some(),
             is_final: modifiers.has(Flag::Final),
-            constants_before: class.constants.len(),
-        });
+        }));
         Ok(())
     }
 }
@@ -1491,9 +1487,12 @@ pub(super) struct Class {
     pub(super) traits: Vec<TraitUse>,
     pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
-    pub(super) properties: Vec<Property>,
-    pub(super) constants: Vec<Constant>,
-    pub(super) methods: Vec<Method>,
+    /// The constants, the enum cases, the properties and the methods,
+    /// in the order written, which is the order
+    /// `zend_compile_class_decl` compiles them in (`zend_compile_stmt`
+    /// over the member list), so each sees in the class's tables what
+    /// stands above it and nothing below.
+    pub(super) body: Vec<ClassStmt>,
     /// The line of each member `zend_compile_stmt` compiles as a
     /// statement of the op array the class is declared in, in written
     /// order: a property group and an enum case, the members
@@ -1506,6 +1505,16 @@ pub(super) struct Class {
     pub(super) line: u32,
     /// The line of the closing brace, `ce->info.user.line_end`.
     pub(super) end_line: u32,
+}
+
+/// One member of a class body that declares something in the class's
+/// tables: a constant or an enum case, one property declarator, or a
+/// method.
+#[derive(Debug, PartialEq)]
+pub(super) enum ClassStmt {
+    Constant(Constant),
+    Property(Property),
+    Method(Method),
 }
 
 /// One `use` of traits in a class body, php's `ZEND_AST_USE_TRAIT`: the
@@ -1657,10 +1666,6 @@ pub(super) struct Method {
     pub(super) is_abstract: bool,
     pub(super) has_body: bool,
     pub(super) is_final: bool,
-    /// How many of the class's constants stand before the method in the
-    /// body, which are the ones `CG(active_class_entry)->constants_table`
-    /// holds while it compiles.
-    pub(super) constants_before: usize,
 }
 
 /// One closure as written, php's `ZEND_AST_CLOSURE` and its
@@ -1726,10 +1731,6 @@ pub(super) struct Property {
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
-    /// How many constants the class declared before this property, the
-    /// ones `CG(active_class_entry)->constants_table` holds while its
-    /// default compiles.
-    pub(super) constants_before: usize,
 }
 
 /// One class constant declarator, php's `ZEND_AST_CONST_ELEM` with the

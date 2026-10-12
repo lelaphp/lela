@@ -10,7 +10,7 @@
 //! [`Unit::hooks`]: php_unit::Unit::hooks
 
 use php_syntax::tree::TypeExpr;
-use php_unit::decl::{ClassDecl, ClassKind, HookKind, MethodDecl, PropertyHooks, Type, Visibility};
+use php_unit::decl::{ClassKind, HookKind, MethodDecl, PropertyHooks, Type, Visibility};
 use php_unit::{HookBody, Opcode, OperandKind, Opline};
 
 use super::walk::{self, Function, Hook};
@@ -33,10 +33,6 @@ pub(super) struct Hooked<'a> {
     /// The type `ty` compiled to, which a `set` hook's parameter is
     /// held to.
     pub(super) declared: Option<&'a Type>,
-    /// The class the property is declared in where it is not yet among
-    /// [`Emit::classes`], its members still compiling; `None` where it
-    /// is, at `class`.
-    pub(super) pending: Option<&'a ClassDecl>,
     pub(super) visibility: Visibility,
     pub(super) is_static: bool,
     pub(super) is_readonly: bool,
@@ -157,9 +153,9 @@ impl Emit<'_> {
         hooked: &Hooked<'_>,
         set: &MethodDecl,
     ) -> Result<(), CompileError> {
-        let Some(scope) = hooked
-            .pending
-            .or_else(|| self.classes.get(usize::try_from(hooked.class).ok()?))
+        let Some(scope) = usize::try_from(hooked.class)
+            .ok()
+            .and_then(|at| self.classes.get(at))
         else {
             return Err(self.fatal("InternalError: a set hook of a class the unit has not"));
         };

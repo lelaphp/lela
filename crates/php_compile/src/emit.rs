@@ -414,12 +414,6 @@ pub(crate) struct Emit<'a> {
     /// `CG(active_class_entry)->parent_name`: the name the class being
     /// compiled extends, which `parent` needs one of.
     active_parent: Option<Vec<u8>>,
-    /// The constants of `CG(active_class_entry)->constants_table` while a
-    /// method of it compiles: the ones the class declared before the
-    /// method, by name, with the value each was written as, which is
-    /// what `zend_try_ct_eval_class_const` substitutes where it folded
-    /// to a scalar.
-    active_constants: Vec<(Vec<u8>, ConstExpr)>,
     /// `CG(active_op_array)->function_name`: the function or method whose
     /// body is being compiled, by name, and none in the main op array,
     /// which `__FUNCTION__` and `__METHOD__` fold to.
@@ -1281,7 +1275,6 @@ impl<'a> Emit<'a> {
             imports: Imports::default(),
             active_class: None,
             active_parent: None,
-            active_constants: Vec::new(),
             active_function: None,
             this_in_scope: false,
             return_type: None,
@@ -3340,11 +3333,9 @@ impl Emit<'_> {
         // declares is no nested one.
         let class = self.active_class.take();
         let parent = self.active_parent.take();
-        let constants = std::mem::take(&mut self.active_constants);
         let declared = self.body(function, name, None, false, FnFlags::default());
         self.active_class = class;
         self.active_parent = parent;
-        self.active_constants = constants;
         let declared = declared?;
         if let Some(slot) = self.dynamic.get_mut(at as usize) {
             *slot = Some(declared);
@@ -3775,7 +3766,6 @@ impl Emit<'_> {
                     name: &parameter.name,
                     ty: parameter.ty,
                     declared: ty,
-                    pending: None,
                     visibility: promoted.visibility,
                     is_static: false,
                     is_readonly,
@@ -5098,11 +5088,13 @@ impl Emit<'_> {
 
     /// `zend_compile_class_decl` from its `ce` to its body, which a
     /// named class and an anonymous one share: the parent and the
-    /// interfaces resolved, the traits, the attributes, the constants,
-    /// the properties and the methods, the declaration pushed onto
-    /// [`Emit::classes`] under `name` before its methods compile. Where
-    /// it stands and its parent, resolved, are what the caller binds it
-    /// by. An anonymous class is filed under its lowered name
+    /// interfaces resolved, the traits, the attributes, then the
+    /// declaration pushed onto [`Emit::classes`] under `name` and its
+    /// constants, properties and methods compiled into it in the order
+    /// written, as `zend_compile_stmt` compiles the member list, so each
+    /// member sees what stands above it in the class's tables and
+    /// nothing below. Where it stands and its parent, resolved, are what
+    /// the caller binds it by. An anonymous class is filed under its lowered name
     /// ([`Unit::runtime_keys`]) as it is pushed, before a method can
     /// declare another, as `zend_generate_anon_class_name` took the
     /// file's count before the body compiled.
@@ -5114,6 +5106,30 @@ impl Emit<'_> {
     ///
     /// The class's own attributes compile with the class as the active
     /// one, so `self` in them is the class, an anonymous one's too:
+    ///
+    /// A promoted property is declared as its constructor compiles, so
+    /// it stands before a property written below the constructor; and a
+    /// class a member declares takes the file's count in the order the
+    /// members are written, a hook's among them:
+    ///
+    /// ```php
+    /// class A { function __construct(public $a = 0) {} public $b = 1; }
+    /// var_dump(new A);
+    /// $o = new class { function m() { return new class {}; } public $h { get => new class {}; } };
+    /// foreach ([$o->h, $o->m()] as $x) {
+    ///     echo substr(get_class($x), strrpos(get_class($x), '$')), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// object(A)#1 (2) {
+    ///   ["a"]=>
+    ///   int(0)
+    ///   ["b"]=>
+    ///   int(1)
+    /// }
+    /// $2
+    /// $1
+    /// ```
     ///
     /// ```php
     /// class C3 { private const FOO = 'foo'; static function foo() { return new #[A1(self::class, self::FOO)] class() { private const FOO = 'bar'; }; } }
@@ -5199,7 +5215,10 @@ impl Emit<'_> {
         };
         self.active_class = Some(ActiveClass::entered(&name, class.kind, at, anonymous));
         self.active_parent.clone_from(&parent);
-        self.class_placed(decl, class, &name, at)?;
+        // The class takes its place `at` in the unit before its body, so
+        // a class a member declares, `new class {}` in a method or a
+        // hook, takes the next place.
+        self.classes.push(decl);
         if anonymous {
             self.runtime_keys.push((
                 Name(name.to_ascii_lowercase().into_boxed_slice()),
@@ -5207,14 +5226,17 @@ impl Emit<'_> {
             ));
         }
         let mark = self.methods.len();
-        for method in &class.methods {
-            self.line = method.function.line;
-            self.active_constants =
-                self.foldable_constants(&self.classes[at].constants, method.constants_before);
-            self.method_decl(at, method)?;
+        for member in &class.body {
+            match member {
+                walk::ClassStmt::Constant(constant) => self.class_constant(at, constant, &name)?,
+                walk::ClassStmt::Property(property) => self.class_property(at, property, &name)?,
+                walk::ClassStmt::Method(method) => {
+                    self.line = method.function.line;
+                    self.method_decl(at, method)?;
+                }
+            }
         }
         self.own_bodies_last(mark, at);
-        self.active_constants.clear();
         let hooked_variance_checks = self
             .active_class
             .take()
@@ -5243,27 +5265,6 @@ impl Emit<'_> {
             .partition(|body| body.class == own);
         self.methods.extend(nested);
         self.methods.append(&mut bodies);
-    }
-
-    /// The class's constants and properties laid down, its place `at`
-    /// in the unit taken first, so a class a property hook declares,
-    /// `new class {}` in a `get`, takes the next place; the declaration
-    /// stands there once its members do.
-    fn class_placed(
-        &mut self,
-        mut decl: ClassDecl,
-        class: &Class,
-        name: &[u8],
-        at: usize,
-    ) -> Result<(), CompileError> {
-        self.classes.push(decl.clone());
-        self.class_constants(&mut decl, class, name)?;
-        self.class_properties(&mut decl, class, name)?;
-        let Some(place) = self.classes.get_mut(at) else {
-            return Err(self.fatal("InternalError: a class whose place the unit has not"));
-        };
-        *place = decl;
-        Ok(())
     }
 
     /// `zend_compile_new`'s anonymous arm, `zend_compile_class_decl`
@@ -5365,7 +5366,6 @@ impl Emit<'_> {
         let enclosing = (
             self.active_class.take(),
             self.active_parent.take(),
-            std::mem::take(&mut self.active_constants),
             self.active_property.take(),
             self.active_hook.take(),
         );
@@ -5373,7 +5373,6 @@ impl Emit<'_> {
         (
             self.active_class,
             self.active_parent,
-            self.active_constants,
             self.active_property,
             self.active_hook,
         ) = enclosing;
@@ -5501,26 +5500,24 @@ impl Emit<'_> {
             .is_some_and(|class| class.kind == ClassKind::Trait)
     }
 
-    /// The constants of the class being compiled that
-    /// `zend_try_ct_eval_class_const` may substitute
-    /// ([`foldable_constants_of`]), and none of a trait's:
+    /// The constant of the name `CG(active_class_entry)->constants_table`
+    /// holds while a member compiles, the ones declared above it, with
+    /// the value it was written as, where `zend_try_ct_eval_class_const`
+    /// may substitute it: none of a trait's, since
     /// `zend_verify_ct_const_access` refuses a constant whose class is a
-    /// trait, since a composing class takes it as its own at the link.
-    fn foldable_constants(
-        &self,
-        constants: &[ClassConstDecl],
-        before: usize,
-    ) -> Vec<(Vec<u8>, ConstExpr)> {
+    /// trait, which a composing class takes as its own at the link; no
+    /// enum case, whose value is the enum's instance for it
+    /// (`ZEND_AST_CONST_ENUM_INIT`) and never the scalar it is backed by;
+    /// and no `ZEND_ACC_DEPRECATED` one, fetched as the program serves,
+    /// where its deprecation is raised.
+    fn foldable_constant(&self, name: &[u8]) -> Option<&ConstExpr> {
         if self.in_trait() {
-            return Vec::new();
+            return None;
         }
-        foldable_constants_of(constants, before)
-    }
-
-    /// [`Self::foldable_constants`] as `active_constants`, for the
-    /// member that follows the first `before` of `constants`.
-    fn constants_above(&mut self, constants: &[ClassConstDecl], before: usize) {
-        self.active_constants = self.foldable_constants(constants, before);
+        (self.active_decl()?.constants.iter())
+            .find(|c| *c.name.0 == *name)
+            .filter(|c| !c.is_case && !attributes::is_deprecated(&c.attributes))
+            .map(|c| &c.value)
     }
 
     /// `zend_compile_use_trait` (`Z/Zend/zend_compile.c:9137`) over each
@@ -5697,7 +5694,7 @@ impl Emit<'_> {
     /// ```
     fn case_or_constant(
         &mut self,
-        decl: &ClassDecl,
+        backing: EnumBacking,
         constant: &walk::Constant,
         name: &[u8],
     ) -> Result<ConstExpr, CompileError> {
@@ -5707,7 +5704,7 @@ impl Emit<'_> {
             };
             return self.const_expr(value);
         }
-        let backed = decl.backing != EnumBacking::Pure;
+        let backed = backing != EnumBacking::Pure;
         match (backed, constant.value) {
             (true, None) => Err(self.compile_error(format!(
                 "Case {} of backed enum {} must have a value",
@@ -5781,69 +5778,75 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: A class constant must not be called 'class'; it is reserved for class name fetching in %s on line 2
     /// ```
-    fn class_constants(
+    fn class_constant(
         &mut self,
-        decl: &mut ClassDecl,
-        class: &Class,
+        at: usize,
+        constant: &walk::Constant,
         name: &[u8],
     ) -> Result<(), CompileError> {
-        for constant in &class.constants {
-            self.line = constant.line;
-            let member = format!(
-                "{}::{}",
+        let Some((kind, backing)) = self.classes.get(at).map(|decl| (decl.kind, decl.backing))
+        else {
+            return Err(self.fatal("InternalError: a constant of a class the unit has not"));
+        };
+        self.line = constant.line;
+        let member = format!(
+            "{}::{}",
+            php_unit::decl::shown(name),
+            String::from_utf8_lossy(&constant.name)
+        );
+        let ty = match constant.ty {
+            Some(written) => Some(self.class_constant_type(written, &member)?),
+            None => None,
+        };
+        if constant.visibility == Visibility::Private && constant.is_final {
+            return Err(self.compile_error(format!(
+                "Private constant {member} cannot be final as it is not visible to other classes"
+            )));
+        }
+        let mut value = self.case_or_constant(backing, constant, name)?;
+        if let Some(ty) = &ty
+            && let Err(kind) = valid_default(ty, &mut value)
+        {
+            return Err(self.compile_error(format!(
+                "Cannot use {} as value for class constant {member} of type {}",
+                zval_type_name(kind),
+                php_unit::type_to_string(ty)
+            )));
+        }
+        // `zend_declare_typed_class_constant`'s first test.
+        if kind == ClassKind::Interface && constant.visibility != Visibility::Public {
+            return Err(self.compile_error(format!(
+                "Access type for interface constant {member} must be public"
+            )));
+        }
+        if constant.name.eq_ignore_ascii_case(b"class") {
+            return Err(self.compile_error(
+                "A class constant must not be called 'class'; it is reserved for class name fetching",
+            ));
+        }
+        if (self.classes.get(at))
+            .is_some_and(|decl| decl.constants.iter().any(|c| *c.name.0 == *constant.name))
+        {
+            return Err(self.compile_error(format!(
+                "Cannot redefine class constant {}::{}",
                 php_unit::decl::shown(name),
                 String::from_utf8_lossy(&constant.name)
-            );
-            let ty = match constant.ty {
-                Some(written) => Some(self.class_constant_type(written, &member)?),
-                None => None,
-            };
-            if constant.visibility == Visibility::Private && constant.is_final {
-                return Err(self.compile_error(format!(
-                    "Private constant {member} cannot be final as it is not visible to other classes"
-                )));
-            }
-            self.constants_above(&decl.constants, usize::MAX);
-            let mut value = self.case_or_constant(decl, constant, name)?;
-            if let Some(ty) = &ty
-                && let Err(kind) = valid_default(ty, &mut value)
-            {
-                return Err(self.compile_error(format!(
-                    "Cannot use {} as value for class constant {member} of type {}",
-                    zval_type_name(kind),
-                    php_unit::type_to_string(ty)
-                )));
-            }
-            // `zend_declare_typed_class_constant`'s first test.
-            if decl.kind == ClassKind::Interface && constant.visibility != Visibility::Public {
-                return Err(self.compile_error(format!(
-                    "Access type for interface constant {member} must be public"
-                )));
-            }
-            if constant.name.eq_ignore_ascii_case(b"class") {
-                return Err(self.compile_error(
-                    "A class constant must not be called 'class'; it is reserved for class name fetching",
-                ));
-            }
-            if decl.constants.iter().any(|c| *c.name.0 == *constant.name) {
-                return Err(self.compile_error(format!(
-                    "Cannot redefine class constant {}::{}",
-                    php_unit::decl::shown(name),
-                    String::from_utf8_lossy(&constant.name)
-                )));
-            }
-            let attributes = self.case_attributes(constant)?;
-            decl.constants.push(ClassConstDecl {
-                name: Name(constant.name.clone().into_boxed_slice()),
-                visibility: constant.visibility,
-                is_final: constant.is_final,
-                is_case: constant.is_case,
-                ty,
-                value,
-                attributes,
-                doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
-            });
+            )));
         }
+        let attributes = self.case_attributes(constant)?;
+        let Some(decl) = self.classes.get_mut(at) else {
+            return Err(self.fatal("InternalError: a constant of a class the unit has not"));
+        };
+        decl.constants.push(ClassConstDecl {
+            name: Name(constant.name.clone().into_boxed_slice()),
+            visibility: constant.visibility,
+            is_final: constant.is_final,
+            is_case: constant.is_case,
+            ty,
+            value,
+            attributes,
+            doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
+        });
         Ok(())
     }
 
@@ -6423,118 +6426,116 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Static property P::$x cannot be readonly in %s on line 2
     /// ```
-    fn class_properties(
+    fn class_property(
         &mut self,
-        decl: &mut ClassDecl,
-        class: &Class,
+        at: usize,
+        property: &walk::Property,
         name: &[u8],
     ) -> Result<(), CompileError> {
-        for property in &class.properties {
-            self.line = property.line;
-            if class.kind == ClassKind::Enum {
-                return Err(self.compile_error(format!(
-                    "Enum {} cannot include properties",
-                    String::from_utf8_lossy(name)
-                )));
-            }
-            self.property_modifiers_refused(class.kind, property)?;
-            // The body compiles in the order written: a default sees
-            // only the constants above it (`zend_compile_class_decl`).
-            self.constants_above(&decl.constants, property.constants_before);
-            let member = format!(
-                "{}::${}",
-                php_unit::decl::shown(name),
-                String::from_utf8_lossy(&property.name)
-            );
-            self.active_property = Some(property.name.clone());
-            let ty = match property.ty {
-                Some(written) => Some(self.property_type(written, &member)?),
-                None => None,
-            };
-            if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
-                return Err(self.compile_error(format!("Cannot redeclare {member}")));
-            }
-            let mut default = match property.default {
-                Some(expr) => Some(self.const_expr(expr)?),
-                None => None,
-            };
-            if let (Some(ty), Some(default)) = (&ty, default.as_mut()) {
-                self.property_default_refused(ty, default, &member)?;
-            }
-            self.active_property = None;
-            // A readonly class's properties are readonly.
-            let is_readonly = property.is_readonly || decl.flags.is_readonly;
-            if is_readonly {
-                self.readonly_refused(
-                    &member,
-                    ty.is_some(),
-                    default.is_some(),
-                    property.is_static,
-                )?;
-            }
-            let set_visibility = self.set_visibility_of(
-                property.visibility,
-                property.set_visibility,
-                is_readonly,
-                ty.is_some(),
-                &member,
-            )?;
-            let (hooks, is_virtual) = match &property.hooks {
-                Some(hooks) => {
-                    let hooked = hooks::Hooked {
-                        class: self
-                            .active_class
-                            .as_ref()
-                            .and_then(|active| u32::try_from(active.at).ok())
-                            .unwrap_or(u32::MAX),
-                        property: u32::try_from(decl.properties.len()).unwrap_or(u32::MAX),
-                        class_name: name,
-                        kind: class.kind,
-                        name: &property.name,
-                        ty: property.ty,
-                        declared: ty.as_ref(),
-                        pending: Some(decl),
-                        visibility: property.visibility,
-                        is_static: property.is_static,
-                        is_readonly,
-                        is_abstract: property.is_abstract || class.kind == ClassKind::Interface,
-                    };
-                    let (hooks, is_virtual) = self.property_hooks(&hooked, hooks)?;
-                    (Some(Box::new(hooks)), is_virtual)
-                }
-                None => (None, false),
-            };
-            // `zend_compile_prop_decl` compiles the attributes under
-            // `active_property_info_name`, where `__PROPERTY__` reads it.
-            self.active_property = Some(property.name.clone());
-            let attributes = self.member_attributes(
-                &property.attributes,
-                attributes::TARGET_PROPERTY,
-                0,
-                property.line,
-            );
-            self.active_property = None;
-            let attributes = attributes?;
-            let declared = PropertyDecl {
-                name: Name(property.name.clone().into_boxed_slice()),
-                visibility: property.visibility,
-                set_visibility,
-                is_instance: !property.is_static,
-                is_readonly,
-                // `zend_declare_typed_property`: a `private(set)`
-                // property is implicitly final.
-                is_final: property.is_final || set_visibility == Some(Visibility::Private),
-                is_promoted: false,
-                is_virtual,
-                ty,
-                default,
-                attributes,
-                hooks,
-                doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
-            };
-            self.hooked_property_verified(decl, &declared)?;
-            decl.properties.push(declared);
+        let Some((kind, is_readonly_class)) =
+            (self.classes.get(at)).map(|decl| (decl.kind, decl.flags.is_readonly))
+        else {
+            return Err(self.fatal("InternalError: a property of a class the unit has not"));
+        };
+        self.line = property.line;
+        if kind == ClassKind::Enum {
+            return Err(self.compile_error(format!(
+                "Enum {} cannot include properties",
+                String::from_utf8_lossy(name)
+            )));
         }
+        self.property_modifiers_refused(kind, property)?;
+        let member = format!(
+            "{}::${}",
+            php_unit::decl::shown(name),
+            String::from_utf8_lossy(&property.name)
+        );
+        self.active_property = Some(property.name.clone());
+        let ty = match property.ty {
+            Some(written) => Some(self.property_type(written, &member)?),
+            None => None,
+        };
+        let declared_before = (self.classes.get(at)).map_or(0, |decl| decl.properties.len());
+        if (self.classes.get(at))
+            .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *property.name))
+        {
+            return Err(self.compile_error(format!("Cannot redeclare {member}")));
+        }
+        let mut default = match property.default {
+            Some(expr) => Some(self.const_expr(expr)?),
+            None => None,
+        };
+        if let (Some(ty), Some(default)) = (&ty, default.as_mut()) {
+            self.property_default_refused(ty, default, &member)?;
+        }
+        self.active_property = None;
+        // A readonly class's properties are readonly.
+        let is_readonly = property.is_readonly || is_readonly_class;
+        if is_readonly {
+            self.readonly_refused(&member, ty.is_some(), default.is_some(), property.is_static)?;
+        }
+        let set_visibility = self.set_visibility_of(
+            property.visibility,
+            property.set_visibility,
+            is_readonly,
+            ty.is_some(),
+            &member,
+        )?;
+        let (hooks, is_virtual) = match &property.hooks {
+            Some(hooks) => {
+                let hooked = hooks::Hooked {
+                    class: u32::try_from(at).unwrap_or(u32::MAX),
+                    property: u32::try_from(declared_before).unwrap_or(u32::MAX),
+                    class_name: name,
+                    kind,
+                    name: &property.name,
+                    ty: property.ty,
+                    declared: ty.as_ref(),
+                    visibility: property.visibility,
+                    is_static: property.is_static,
+                    is_readonly,
+                    is_abstract: property.is_abstract || kind == ClassKind::Interface,
+                };
+                let (hooks, is_virtual) = self.property_hooks(&hooked, hooks)?;
+                (Some(Box::new(hooks)), is_virtual)
+            }
+            None => (None, false),
+        };
+        // `zend_compile_prop_decl` compiles the attributes under
+        // `active_property_info_name`, where `__PROPERTY__` reads it.
+        self.active_property = Some(property.name.clone());
+        let attributes = self.member_attributes(
+            &property.attributes,
+            attributes::TARGET_PROPERTY,
+            0,
+            property.line,
+        );
+        self.active_property = None;
+        let attributes = attributes?;
+        let declared = PropertyDecl {
+            name: Name(property.name.clone().into_boxed_slice()),
+            visibility: property.visibility,
+            set_visibility,
+            is_instance: !property.is_static,
+            is_readonly,
+            // `zend_declare_typed_property`: a `private(set)`
+            // property is implicitly final.
+            is_final: property.is_final || set_visibility == Some(Visibility::Private),
+            is_promoted: false,
+            is_virtual,
+            ty,
+            default,
+            attributes,
+            hooks,
+            doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
+        };
+        if let Some(decl) = self.classes.get(at) {
+            self.hooked_property_verified(decl, &declared)?;
+        }
+        let Some(decl) = self.classes.get_mut(at) else {
+            return Err(self.fatal("InternalError: a property of a class the unit has not"));
+        };
+        decl.properties.push(declared);
         Ok(())
     }
 
@@ -16873,14 +16874,9 @@ impl Emit<'_> {
         if !refers {
             return Ok(None);
         }
-        let Some((_, value)) = self
-            .active_constants
-            .iter()
-            .find(|(held, _)| held.as_slice() == name)
-        else {
+        let Some(value) = self.foldable_constant(name).cloned() else {
             return Ok(None);
         };
-        let value = value.clone();
         if let ConstExpr::ImmutableArray(array) = &value
             && !array_is_const(array.value())
         {
@@ -19384,7 +19380,6 @@ mod tests {
             imports: Imports::default(),
             active_class: None,
             active_parent: None,
-            active_constants: Vec::new(),
             active_function: None,
             this_in_scope: false,
             return_type: None,
@@ -19472,9 +19467,7 @@ mod tests {
             traits: Vec::new(),
             attributes: Vec::new(),
             doc_comment: None,
-            properties: Vec::new(),
-            constants: Vec::new(),
-            methods: Vec::new(),
+            body: Vec::new(),
             statement_lines: Vec::new(),
             line: 1,
             end_line: 1,
@@ -19835,23 +19828,6 @@ enum Evaluation {
 /// `zend_startup` register, which no CV holds.
 fn is_auto_global(name: &[u8]) -> bool {
     name == b"GLOBALS" || AutoGlobal::of(name).is_some()
-}
-
-/// The first `before` constants of the class being compiled that
-/// `zend_try_ct_eval_class_const` may substitute, by name with the value
-/// each was written as: an enum's case is left out, since its value is
-/// the enum's instance for it (`ZEND_AST_CONST_ENUM_INIT`) and never
-/// the scalar it is backed by.
-fn foldable_constants_of(constants: &[ClassConstDecl], before: usize) -> Vec<(Vec<u8>, ConstExpr)> {
-    constants
-        .iter()
-        .take(before)
-        // `zend_verify_ct_const_access`: a `ZEND_ACC_DEPRECATED`
-        // constant is fetched as the program serves, where its
-        // deprecation is raised.
-        .filter(|c| !c.is_case && !attributes::is_deprecated(&c.attributes))
-        .map(|c| (c.name.0.to_vec(), c.value.clone()))
-        .collect()
 }
 
 /// `zend_enum_register_props` (`Z/Zend/zend_enum.c:475`): an enum's
