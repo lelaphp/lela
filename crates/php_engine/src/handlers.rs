@@ -1623,6 +1623,8 @@ pub(crate) fn echo<T: Tier>(
 /// written there (`CACHED_PTR`, `CACHE_PTR`), as the two `INIT_*_BY_NAME`
 /// read and write theirs. A name nothing is declared under is php's
 /// `Error`, over the same constant.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -1812,6 +1814,8 @@ fn pushed(req: &mut Request, frame: FrameRef, header: exec::Header) -> Edge {
 /// Unknown named parameter $nope
 /// Named parameter $string overwrites previous argument
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn send_val<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -1840,6 +1844,8 @@ pub(crate) fn send_val<T: Tier, A: Operand + Default>(
 /// ```expect
 /// string(6) " abc  "
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn send_var<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -7348,6 +7354,8 @@ fn fetch_static_prop(
 ///   int(2)
 /// }
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn fetch_obj_r<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -7685,6 +7693,8 @@ fn fetch_obj(
 /// ```expect
 /// int(1)
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn fetch_obj_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -8584,6 +8594,8 @@ fn freeing_container(
 /// #0 {main}
 ///   thrown in %s on line 11
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn fetch_dim_r<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -9977,6 +9989,8 @@ fn write_entry(req: &mut Request, array: PhpArray, at: WriteAt) -> Result<Landin
 /// #0 {main}
 ///   thrown in %s on line 9
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn fetch_dim_w<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -11476,6 +11490,8 @@ fn frameless_call(
 /// after
 /// d2
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -12266,6 +12282,8 @@ pub(crate) fn assign_obj_ref<T: Tier>(
 /// int(0)
 /// DONE
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn assign_obj<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -13841,6 +13859,8 @@ fn assign_text_dim(
 /// Undefined variable $y
 /// NULL
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn assign_dim<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -17750,6 +17770,8 @@ fn set_fe_iter(req: &mut Request, frame: FrameRef, slot: u32, walk: Option<HashI
 /// ```expect
 /// n=1 s=x n=1 p=2 s=x q=3
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn fe_fetch_r<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -18615,6 +18637,8 @@ fn fe_iterator_del(req: &mut Request, frame: FrameRef, slot: u32) {
 
 /// `ZEND_ADD`: [`crate::ops::add`] over the two operands, into the
 /// temporary the opline's `result` field names.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn add<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -18637,6 +18661,8 @@ pub(crate) fn add<T: Tier, A: Operand + Default, B: Operand + Default>(
 }
 
 /// `ZEND_SUB`: [`crate::ops::sub`], the same way.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn sub<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -18659,6 +18685,8 @@ pub(crate) fn sub<T: Tier, A: Operand + Default, B: Operand + Default>(
 }
 
 /// `ZEND_MUL`: [`crate::ops::mul`], the same way.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn mul<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -18748,6 +18776,8 @@ pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op
 /// string(1) "b"
 /// string(1) "a"
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn concat<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -18936,6 +18966,8 @@ fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
 /// Stack trace:
 /// #0 {main}
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn fast_concat<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -19175,6 +19207,8 @@ fn rope_piece(
 /// into the temporary the opline's `result` field names. php's handler
 /// takes the long pair and the double pairs before it calls
 /// `zend_compare`, and those are the kernel's first arms.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -19223,6 +19257,8 @@ pub(crate) fn is_smaller_or_equal<T: Tier>(
 /// `ZEND_IS_EQUAL`: [`crate::ops::is_equal`], the same way. Each
 /// comparison branches over a `JMPZ` or a `JMPNZ` after it
 /// ([`smart_branch`]).
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -19270,6 +19306,8 @@ pub(crate) fn is_not_equal<T: Tier>(
 /// `ZEND_IS_IDENTICAL`: [`crate::ops::is_identical`], the same way, both
 /// operands dereferenced (`GET_OP*_ZVAL_PTR_DEREF`), which the kernel
 /// does.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn is_identical<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -19337,7 +19375,7 @@ fn inline_identical<T: Tier>(
             req,
             frame,
             at.saturating_add(1),
-            &jump,
+            jump,
             answer,
         ));
     }
@@ -19400,6 +19438,8 @@ pub(crate) fn spaceship<T: Tier>(
 /// int(2)
 /// int(3)
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn pre_inc<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -19941,6 +19981,8 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
 /// }
 /// Using $this when not in object context
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn isset_isempty_dim_obj<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -20014,7 +20056,7 @@ fn inline_isset_dim<T: Tier>(
             req,
             frame,
             at.saturating_add(1),
-            &jump,
+            jump,
             answer,
         ));
     }
@@ -20589,6 +20631,8 @@ pub(crate) fn array_key_exists<T: Tier>(
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
 /// bit in `extended_value`, into the temporary; the operand freed after
 /// it.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn count<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -20673,6 +20717,8 @@ pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: 
 /// the target; a target at or before `at` is the back-edge, where the
 /// interrupt is tested and then the loop safepoint raised with
 /// `number`, the one the compiler wrote into the jump's `result`.
+#[inline(always)] // the back-edge of every loop, in the loop
+#[allow(clippy::inline_always)]
 fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, number: u32) -> Edge {
     if target <= at {
         req.vm_mut().stand(frame, target);
@@ -20691,6 +20737,8 @@ fn jumped<T: Tier>(req: &mut Request, frame: FrameRef, at: u32, target: u32, num
 /// there: the frame at the target, the interrupt check, the site with
 /// the number the compiler wrote in `result`. Not taken, it is
 /// `ZEND_VM_NEXT_OPCODE`.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn jmpnz<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -20718,6 +20766,8 @@ pub(crate) fn jmpnz<T: Tier, A: Operand + Default>(
 /// ```expect
 /// zeronone
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn jmpz<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -21237,6 +21287,8 @@ pub(crate) fn copy_tmp<T: Tier>(
 ///   int(1)
 /// }
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn r#return<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
@@ -21511,7 +21563,7 @@ fn smart_branch<T: Tier>(
         req,
         frame,
         at.saturating_add(1),
-        &jump,
+        jump,
         answer.as_bool() == Some(true),
     )
 }
@@ -21534,21 +21586,23 @@ fn compared_branch<T: Tier>(
 /// The `JMPZ` or `JMPNZ` after the comparison at `at` that branches on
 /// the comparison's temporary, which is what makes the comparison's
 /// handler one over both oplines (`ZEND_VM_SMART_BRANCH`, design §5.8).
-fn fused_jump(code: &OpArray, op: &Opline, at: u32) -> Option<Opline> {
-    exec::opline_at(code, at.saturating_add(1))
-        .copied()
-        .filter(|jump| {
-            matches!(jump.opcode, Opcode::Jmpz | Opcode::Jmpnz)
-                && op.out_type == OperandKind::Tmp
-                && jump.op1_type == OperandKind::Tmp
-                && jump.op1 == op.out
-        })
+#[inline(always)] // the comparison's inline path, which is in the loop
+#[allow(clippy::inline_always)]
+fn fused_jump<'c>(code: &'c OpArray, op: &Opline, at: u32) -> Option<&'c Opline> {
+    exec::opline_at(code, at.saturating_add(1)).filter(|jump| {
+        matches!(jump.opcode, Opcode::Jmpz | Opcode::Jmpnz)
+            && op.out_type == OperandKind::Tmp
+            && jump.op1_type == OperandKind::Tmp
+            && jump.op1 == op.out
+    })
 }
 
 /// The fused jump at `at` over the comparison's `answer`: on past the
 /// jump where it is not taken, and taken as [`jumped`] takes it from the
 /// jump's own opline, a backward one raising the loop safepoint with
 /// the jump's number.
+#[inline(always)] // as `fused_jump`
+#[allow(clippy::inline_always)]
 fn branch_fused<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -21620,7 +21674,7 @@ fn inline_compare<T: Tier>(
             req,
             frame,
             at.saturating_add(1),
-            &jump,
+            jump,
             answer,
         ));
     }
