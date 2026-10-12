@@ -225,12 +225,12 @@ impl Telling for Declared {
     }
 }
 
-/// [`Telling::before`] where one opline is dispatched outside the loop:
-/// by a stepping host's [`crate::tier::step`], and by a frame's
-/// parameter prologue, which serves the `RECV*` php's VM dispatches
-/// ([`crate::exec::parameter_prologue`]). Neither is generic over the
-/// loop's choice, so each pays one test of the set, a word that is zero
-/// while none is declared.
+/// [`Telling::before`] where one opline is dispatched outside the loop,
+/// by a stepping host's [`crate::tier::step`], which is not generic over
+/// the loop's choice and so pays one test of the set, a word that is zero
+/// while none is declared. A parameter prologue served outside the loop
+/// reads the set the same way, through [`Declared`]
+/// ([`crate::exec::parameter_prologue`]).
 #[inline(always)] // as `Telling::before`
 #[allow(clippy::inline_always)]
 pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {

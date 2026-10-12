@@ -45,7 +45,7 @@ pub mod syntax {
     };
 }
 
-use php_heap::{Fatal, Intern};
+use php_heap::{Fatal, FatalReason, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name, Visibility};
@@ -529,10 +529,7 @@ fn compile_scanned<'p>(
                 // compile asked for the memory.
                 Err(fatal) => Err(CompileError {
                     level: Level::Error,
-                    message: match fatal {
-                        Fatal::Error(message) => message,
-                        Fatal::OutOfMemory(_) => String::from("Out of memory"),
-                    },
+                    message: fatal_message(fatal),
                     line: unit.main.line_end,
                     raised: unit.diagnostics,
                     thrown: false,
@@ -672,6 +669,15 @@ fn level_of(level: php_syntax::Level) -> Level {
         php_syntax::Level::CompileError => Level::CompileError,
         php_syntax::Level::CompileWarning => Level::CompileWarning,
         php_syntax::Level::Deprecated => Level::Deprecated,
+    }
+}
+
+/// The sentence a compile ends in where the heap refused it a fatal:
+/// the fatal's own message, and php's `Out of memory` for the limit.
+pub(crate) fn fatal_message(fatal: Fatal) -> String {
+    match fatal.into_reason() {
+        FatalReason::Error(message) => message,
+        FatalReason::OutOfMemory(_) => String::from("Out of memory"),
     }
 }
 

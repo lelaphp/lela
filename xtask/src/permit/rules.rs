@@ -373,19 +373,30 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The commands of `line` whose place is read, each with where it runs:
-/// those past the leading directory changes and before the first `cd`,
-/// `pushd` or `popd` among the rest, at where the line stands
-/// ([`runs_in`]) moved, for git, by each `-C` among the options before its
-/// subcommand ([`moved`]). A command past such a change runs where the
-/// change took the shell, if it ran, which this does not read; what
-/// records whose operation stands in a checkout leaves it out rather than
-/// read it where the shell started (#2720).
+/// those past the leading directory changes, at where the line stands
+/// ([`runs_in`]) moved by each later `cd`, `pushd` and `popd` as
+/// [`standing`] reads one, and, for git, by each `-C` among the options
+/// before its subcommand ([`moved`]); none past a change the line does not
+/// say where it goes. What records whose operation stands in a checkout
+/// reads a command past a later change where that change took the shell,
+/// never where the shell started (#2720): an orchestrator's `cat $S/owner; cd <main>;
+/// git merge --no-commit t1955` started a merge no record named (#2723).
+/// A command after a subshell's change is read where the change took it,
+/// the lexer keeping no subshell's end.
 pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
-    let (dir, rest) = standing(root, Some(line));
-    rest.iter()
-        .take_while(|argv| !matches!(argv.program(), "cd" | "pushd" | "popd"))
-        .map(|argv| (argv, moved(dir.clone(), argv)))
-        .collect()
+    let (mut dir, rest) = standing(root, Some(line));
+    let mut pushed = Vec::new();
+    let mut placed = Vec::new();
+    for argv in rest {
+        if change(&mut dir, &mut pushed, argv) {
+            continue;
+        }
+        if matches!(argv.program(), "cd" | "pushd" | "popd") {
+            break;
+        }
+        placed.push((argv, moved(dir.clone(), argv)));
+    }
+    placed
 }
 
 /// Where each command of `line` that `fires` runs, read as [`placed`]
@@ -445,24 +456,39 @@ fn standing<'a>(root: &Path, line: Option<&'a Line>) -> (PathBuf, &'a [Argv]) {
     let commands = line.map_or(&[][..], Line::commands);
     let mut dir = root.to_path_buf();
     let mut pushed = Vec::new();
-    let known = |to: &str| !to.starts_with(['-', '+', '$']);
     for (at_command, argv) in commands.iter().enumerate() {
         let words = argv.words();
-        let to = argv.directories().next().filter(|to| known(to));
-        match (words.first().map(String::as_str), to) {
-            (Some("export"), _) if words.iter().skip(1).all(|w| w.contains('=')) => {}
-            (Some("cd"), Some(to)) => dir = at(&dir, to),
-            (Some("pushd"), Some(to)) if words.len() == 2 => {
-                pushed.push(dir.clone());
-                dir = at(&dir, to);
-            }
-            (Some("popd"), _) if words.len() == 1 && !pushed.is_empty() => {
-                dir = pushed.pop().unwrap_or(dir);
-            }
-            _ => return (dir, commands.get(at_command..).unwrap_or_default()),
+        let exports = words.first().is_some_and(|w| w == "export")
+            && words.iter().skip(1).all(|w| w.contains('='));
+        if !exports && !change(&mut dir, &mut pushed, argv) {
+            return (dir, commands.get(at_command..).unwrap_or_default());
         }
     }
     (dir, &[])
+}
+
+/// `dir` moved by `argv` where it is a `cd`, `pushd` or `popd` the line
+/// says where it goes ([`standing`]), `pushed` the `pushd` stack; whether
+/// it was one.
+fn change(dir: &mut PathBuf, pushed: &mut Vec<PathBuf>, argv: &Argv) -> bool {
+    let words = argv.words();
+    let to = argv
+        .directories()
+        .next()
+        .filter(|to| !to.starts_with(['-', '+', '$']));
+    match (words.first().map(String::as_str), to) {
+        (Some("cd"), Some(to)) => *dir = at(dir, to),
+        (Some("pushd"), Some(to)) if words.len() == 2 => {
+            pushed.push(dir.clone());
+            *dir = at(dir, to);
+        }
+        (Some("popd"), _) if words.len() == 1 => match pushed.pop() {
+            Some(back) => *dir = back,
+            None => return false,
+        },
+        _ => return false,
+    }
+    true
 }
 
 /// `dir` moved, for a git command, by each `-C` among its options before

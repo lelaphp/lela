@@ -49,6 +49,11 @@ EntryGuard
 Exponent
 Exponent::as_char
 Fatal
+Fatal::error
+Fatal::into_reason
+Fatal::out_of_memory
+Fatal::reason
+FatalReason
 FiberStack
 FiberStack::base
 FiberStack::end
@@ -336,6 +341,7 @@ VmStack::pop_entry
 VmStack::pop_frame
 VmStack::push_entry
 VmStack::push_frame
+VmStack::push_frameless
 VmStack::put_back
 VmStack::restore_frame
 VmStack::resume_frame

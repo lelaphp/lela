@@ -1449,6 +1449,18 @@ impl Vm {
         self.stack.push_frame(heap, slots, extra_args, header)
     }
 
+    /// The frame of an unobserved frameless call, off the VM stack's
+    /// pages ([`php_heap::VmStack::push_frameless`]): `slots` slots,
+    /// every one `IS_UNDEF` until its operand is placed; more than three
+    /// is the engine's error.
+    pub(crate) fn push_frameless(
+        &mut self,
+        slots: usize,
+        header: Header,
+    ) -> Result<FrameRef, Fatal> {
+        self.stack.push_frameless(slots, header)
+    }
+
     /// A frame that was off the stack back on top of it, the half of a
     /// generator's resumption that is the engine's, and the calls its
     /// body was building when it yielded back on the stack above it,
@@ -1680,7 +1692,7 @@ impl Vm {
 /// oplines can be read while the request is borrowed.
 pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal> {
     req.serving(frame).ok_or_else(|| {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: frame {} is serving no op array",
             frame.0
         ))
@@ -1690,7 +1702,7 @@ pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal>
 /// The op array `frame` is serving, out of its unit.
 pub(crate) fn serving_code(serving: &Serving, frame: FrameRef) -> Result<&OpArray, Fatal> {
     serving.code().ok_or_else(|| {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: frame {} names a body its unit has not",
             frame.0
         ))
@@ -1835,13 +1847,13 @@ pub(crate) fn container(
         }
         OperandKind::Unused => req.vm().this(frame).map_or_else(
             || {
-                Err(php_heap::Fatal::Error(format!(
+                Err(php_heap::Fatal::error(format!(
                     "InternalError: {opcode} over $this on a frame with no receiver"
                 )))
             },
             |this| Ok(this.as_value()),
         ),
-        OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::Error(format!(
+        OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::error(format!(
             "InternalError: {opcode} over a constant or a temporary, which php compiles no write over"
         ))),
     }
@@ -2300,11 +2312,12 @@ pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32
 ///
 /// `Some` is the frame a `RECV` raised on, whose throwable is pending;
 /// the caller decides what a raise before the activation means to it.
-/// Every call a user function is reached by crosses this: the one an
-/// opline pushed ([`enter`]) and the one a native served
-/// ([`Request::serve_user`]), so a `ReflectionMethod::invoke` verifies
-/// what `DO_UCALL` verifies, and the coercion a scalar parameter
-/// carries outside `strict_types` is served there too:
+/// Every call a user function is reached by crosses it: the one an
+/// opline pushed, which the loop serves as it takes the push
+/// ([`crate::tier`]), and the one a native served
+/// ([`Request::serve_user`]), here, so a `ReflectionMethod::invoke`
+/// verifies what `DO_UCALL` verifies, and the coercion a scalar
+/// parameter carries outside `strict_types` is served there too:
 ///
 /// ```php
 /// function f(int $a, float $b, string $c) { var_dump($a, $b, $c); }
@@ -2323,52 +2336,65 @@ pub(crate) fn parameter_prologue(
     // A frame whose push skipped every `RECV*` stands at its entry
     // already, which its activation told, and its op array is not held
     // for a run of none.
-    match activated.prologue {
-        None => Ok(None),
-        Some(entry) => prologue_from(req, activated.frame, entry),
+    if !activated.prologue {
+        return Ok(None);
     }
+    let serving = standing(req, activated.frame)?;
+    let code = serving_code(&serving, activated.frame)?;
+    let told = <crate::observer::Declared as crate::observer::Telling>::of(req);
+    prologue(req, activated.frame, code, told)
+}
+
+/// The entry safepoint of `code`, `safepoints[0]`: the first opline past
+/// the `RECV*` prologue (design §5.6), zero for an op array with none.
+pub(crate) fn entry_of(code: &OpArray) -> u32 {
+    code.safepoints.first().map_or(0, |at| at.0)
 }
 
 /// A call made a user frame ([`Request::activate_user`]): the frame, and
-/// the entry safepoint its `RECV*` prologue runs to where the activation
-/// did not skip it.
+/// whether the activation left `RECV*` oplines of its prologue to serve
+/// before the entry safepoint ([`entry_of`]).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Activated {
     pub(crate) frame: FrameRef,
-    pub(crate) prologue: Option<u32>,
+    pub(crate) prologue: bool,
 }
 
-/// The `RECV*` oplines of [`parameter_prologue`], up to the entry
-/// safepoint at `entry`.
+/// The `RECV*` oplines of [`parameter_prologue`] from where `callee`
+/// stands up to the entry safepoint of `code`, the op array it serves,
+/// the observers of a declared opcode told of each as `told` says: the
+/// loop's own choice where the loop serves the push, so an engine where
+/// no extension declared an opcode tests nothing here either (design
+/// §5.8, #2287).
 #[inline(never)]
-fn prologue_from(
+pub(crate) fn prologue<D: crate::observer::Telling>(
     req: &mut Request,
     callee: FrameRef,
-    entry: u32,
+    code: &OpArray,
+    told: D,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
-    let serving = standing(req, callee)?;
-    let body = serving_code(&serving, callee)?;
+    let entry = entry_of(code);
     loop {
         let at = req.vm().opline(callee);
         if at >= entry {
             break;
         }
-        let Some(prologue) = opline_at(body, at) else {
+        let Some(prologue) = opline_at(code, at) else {
             break;
         };
-        crate::observer::tell_before(req, callee, prologue.opcode);
+        told.before(req, callee, at, prologue.opcode);
         let next = match prologue.opcode {
             php_unit::Opcode::Recv => {
-                crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             php_unit::Opcode::RecvInit => {
-                crate::handlers::recv_init::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv_init::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             php_unit::Opcode::RecvVariadic => {
-                crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             other => {
-                return Err(php_heap::Fatal::Error(format!(
+                return Err(php_heap::Fatal::error(format!(
                     "InternalError: {} stands before the entry safepoint, and this engine serves no handler for it yet",
                     other.name()
                 )));

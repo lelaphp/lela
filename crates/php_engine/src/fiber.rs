@@ -46,7 +46,7 @@ use php_heap::{Block, FiberStack, Host, StackRefused, Suspensions, Switched};
 use php_macros::php_class;
 
 use crate::api::abi::{
-    Callable, CloneObj, DtorObj, GcTable, Instance, NamedVariadic, ObjectHandlers, This,
+    Callable, DtorObj, GcTable, Instance, NamedVariadic, ObjectHandlers, Refusals, This,
 };
 use crate::api::call::call_named_made;
 use crate::api::raising::{Thrown, throw, throw_error};
@@ -615,8 +615,8 @@ impl ObjectHandlers for FiberHandlers {
     }
 
     /// `clone_obj = NULL`: a fiber is uncloneable.
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 
     /// `zend_fiber_object_gc` (`Z/Zend/zend_fibers.c:818`): the callable
@@ -2013,7 +2013,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
                 gc.fiber = None;
             }
             if !req.release_held(fiber.as_value()) {
-                let fatal = php_heap::Fatal::Error(format!(
+                let fatal = php_heap::Fatal::error(format!(
                     "InternalError: the collector's fiber #{} destroyed with the collector's owner its last",
                     fiber.index()
                 ));

@@ -748,6 +748,81 @@ fn a_frameless_call_is_observed_as_a_full_call() {
     );
 }
 
+/// For each of sixteen frame sizes, a function of `$k` locals more than
+/// the last: the depth at which its recursion first opens a second VM
+/// stack page with no call at its bottom, found by halving, and with a
+/// frameless call there, which is that depth or the one before it,
+/// `k: alone called`.
+const AT_THE_PAGE: &str = "<?php\n\
+    function opens($f, $d, $call) { memory_reset_peak_usage(); $base = memory_get_usage(); $f($d, $call); return memory_get_peak_usage() - $base >= 262144; }\n\
+    for ($k = 0; $k < 16; $k++) {\n\
+    $locals = ''; for ($i = 0; $i < $k; $i++) { $locals .= \"\\$v$i = 0; \"; }\n\
+    eval(\"function f$k(\\$n, \\$call) { $locals return \\$n ? f$k(\\$n - 1, \\$call) : (\\$call ? frameless_probe('a' . \\$n) : 0); }\");\n\
+    $lo = 1; $hi = 4096;\n\
+    while ($lo < $hi) { $mid = ($lo + $hi) >> 1; if (opens(\"f$k\", $mid, false)) { $hi = $mid; } else { $lo = $mid + 1; } }\n\
+    echo $k, ': ', $lo, ' ', opens(\"f$k\", $lo - 1, true) ? $lo - 1 : $lo, \"\\n\"; }\n";
+
+/// An observer of every function with a begin handler that does nothing.
+fn watching(_: &mut Observed<'_>) -> ObserverHandlers {
+    ObserverHandlers {
+        begin: Some(|_| {}),
+        end: None,
+    }
+}
+
+/// An observer that declines every function.
+fn declining(_: &mut Observed<'_>) -> ObserverHandlers {
+    ObserverHandlers::default()
+}
+
+/// [`AT_THE_PAGE`] served beside `observer`: each frame size's two
+/// depths.
+fn depths_at_the_page(observer: fn(&mut Observed<'_>) -> ObserverHandlers) -> Vec<(u32, u32)> {
+    let engine = Engine::cli_builder()
+        .extensions(&[
+            ExtensionBuilder::default()
+                .observer(observer)
+                .build("observer_room"),
+            probe(),
+        ])
+        .build();
+    let served = engine.serve_capture(AT_THE_PAGE, Capture::default());
+    String::from_utf8_lossy(&served.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (_, depths) = line.split_once(": ")?;
+            let (alone, called) = depths.split_once(' ')?;
+            Some((alone.parse().ok()?, called.parse().ok()?))
+        })
+        .collect()
+}
+
+/// A frameless call an observer watches is php's full call
+/// (`zend_frameless_observed_call`), its frame pushed on the VM stack,
+/// so where the recursion leaves less room on the page than that frame
+/// takes it opens the next page a depth sooner than the recursion
+/// alone; one every observer declined takes no room at any frame size,
+/// as with no observer at all.
+#[test]
+fn an_observed_frameless_call_takes_a_full_calls_room_and_a_declined_one_none() {
+    let declined = depths_at_the_page(declining);
+    assert_eq!(declined.len(), 16, "{declined:?}");
+    assert!(
+        declined.iter().all(|(alone, called)| alone == called),
+        "{declined:?}"
+    );
+    let watched = depths_at_the_page(watching);
+    assert_eq!(watched.len(), 16, "{watched:?}");
+    assert!(
+        watched.iter().all(|(alone, called)| called <= alone),
+        "{watched:?}"
+    );
+    assert!(
+        watched.iter().any(|(alone, called)| called < alone),
+        "{watched:?}"
+    );
+}
+
 /// An end handler that records whether a throwable stands pending as it
 /// is called, under extension number 9.
 fn pending_init(_: &mut Observed<'_>) -> ObserverHandlers {
