@@ -1,7 +1,6 @@
 //! The parser (design §4.9, ADR-0003): a cursor over the significant
 //! tokens, markers that open and close nodes as [`Event`]s for the
-//! builder, the expected set recorded since the last consumed token, the
-//! forward-progress fuel, the nesting cap and the open-delimiter stack
+//! builder, the forward-progress fuel, the nesting cap and the open-delimiter stack
 //! from which php's bracket-balance text is spelled. The grammar (#203 to
 //! #205) is written against this surface and nothing else sees it.
 //!
@@ -13,8 +12,8 @@
 //! what bison's stack answers in php (`Zend/tests/bug64660.phpt`). Where a
 //! grammar position has a fixed `, expecting …` clause in php's tables,
 //! the site pins it through [`Parser::unexpected_expecting`] or
-//! [`Parser::unexpected_here_expecting`]; the recorded expected set is the
-//! parser's own and is not printed. A statement position's clause is the
+//! [`Parser::unexpected_here_expecting`]; the parser records no expected
+//! set of its own, since nothing would print it. A statement position's clause is the
 //! enclosing list's, [`Parser::stmt_clause`], which the list loops set:
 //! `expecting end of file` at the top level, `"elseif" or "else" or
 //! "endif"` inside an alternative-syntax `if`, none inside a block. The
@@ -50,9 +49,6 @@ pub struct Parser<'t> {
     /// line N` inside the bracket-balance text.
     lines: &'t LineIndex,
     events: Vec<Event>,
-    /// The kinds recorded as expected at the current position since the
-    /// last consumed token, in the order the grammar asked.
-    expected: Vec<SyntaxKind>,
     /// Forward-progress fuel: spent on every lookahead, refilled on every
     /// consumed token. Exhaustion trips [`Parser::is_stuck`]. A legitimate
     /// lookahead burst (an attribute scan) exceeds any small constant, so
@@ -161,10 +157,6 @@ pub struct CompletedMarker {
     pub kind: SyntaxKind,
 }
 
-/// Room for the expected set before it grows: what a statement's start
-/// records in one position.
-const EXPECTED: usize = 32;
-
 impl<'t> Parser<'t> {
     /// A parser at the start of `input`, `lines` being the table over the
     /// same source.
@@ -182,7 +174,6 @@ impl<'t> Parser<'t> {
             // for what a parse of this many tokens emits, so the stream
             // seldom grows.
             events: Vec::with_capacity(input.len().saturating_mul(3).saturating_add(4)),
-            expected: Vec::with_capacity(EXPECTED),
             fuel: FUEL,
             burst: 0,
             burst_cap,
@@ -237,24 +228,15 @@ impl<'t> Parser<'t> {
         self.input.range(prev).in_file(self.file)
     }
 
-    /// Is the current token `kind`? Records `kind` as expected; the order
-    /// the grammar asks is the order the set keeps.
-    pub fn at(&mut self, kind: SyntaxKind) -> bool {
-        self.expected.push(kind);
+    /// Is the current token `kind`?
+    pub fn at(&self, kind: SyntaxKind) -> bool {
         self.input.kind(self.pos) == kind
     }
 
     /// Is the current token one of `kinds`?
     #[allow(dead_code)]
-    pub fn at_any(&mut self, kinds: &[SyntaxKind]) -> bool {
-        self.expected.extend_from_slice(kinds);
+    pub fn at_any(&self, kinds: &[SyntaxKind]) -> bool {
         kinds.contains(&self.input.kind(self.pos))
-    }
-
-    /// [`at`](Self::at) without recording an expectation: a predicate or a
-    /// recovery scan.
-    pub fn peek_at(&self, kind: SyntaxKind) -> bool {
-        self.input.kind(self.pos) == kind
     }
 
     /// Was there a newline in the whitespace or comments before the
@@ -310,7 +292,6 @@ impl<'t> Parser<'t> {
         self.pos += 1;
         self.fuel = FUEL;
         self.burst = 0;
-        self.expected.clear();
     }
 
     /// Consumes whatever the current token is; nothing at the end.
@@ -340,7 +321,6 @@ impl<'t> Parser<'t> {
         self.pos += 1;
         self.fuel = FUEL;
         self.burst = 0;
-        self.expected.clear();
     }
 
     /// At `kind`, consume it and answer true; otherwise record the
@@ -382,19 +362,6 @@ impl<'t> Parser<'t> {
     /// `errors_high_water`).
     pub fn has_error_at_or_after(&self, pos: u32) -> bool {
         self.errors_high_water.is_some_and(|hw| hw >= pos)
-    }
-
-    /// The expected set at the current position, each kind once, in the
-    /// order first recorded.
-    #[allow(dead_code)]
-    pub fn expected_set(&self) -> Vec<SyntaxKind> {
-        let mut seen = Vec::new();
-        for &kind in &self.expected {
-            if !seen.contains(&kind) {
-                seen.push(kind);
-            }
-        }
-        seen
     }
 
     /// The line php reports for a diagnostic at the current token: the

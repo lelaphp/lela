@@ -70,11 +70,11 @@ const STMT_START: &[K] = &[
 /// is one by design: a template-heavy file recovers per segment.
 fn at_stmt_recovery(p: &mut Parser<'_>) -> bool {
     p.at_eof()
-        || p.peek_at(K::SEMICOLON)
-        || p.peek_at(K::R_CURLY)
-        || p.peek_at(K::CLOSE_TAG)
-        || p.peek_at(K::INLINE_HTML)
-        || p.peek_at(K::OPEN_TAG)
+        || p.at(K::SEMICOLON)
+        || p.at(K::R_CURLY)
+        || p.at(K::CLOSE_TAG)
+        || p.at(K::INLINE_HTML)
+        || p.at(K::OPEN_TAG)
         || STMT_START.contains(&p.current())
 }
 
@@ -476,7 +476,7 @@ pub(crate) fn semicolon_expecting(p: &mut Parser<'_>, expecting: Option<&str>) {
     // input does not: a statement that runs off the end of the file
     // without its `;` is a parse error (`eval('abc')` is `unexpected end
     // of file`).
-    if p.peek_at(K::CLOSE_TAG) || p.peek_at(K::INLINE_HTML) {
+    if p.at(K::CLOSE_TAG) || p.at(K::INLINE_HTML) {
         return;
     }
     // The statement already failed at or after where the `;` was due:
@@ -497,7 +497,7 @@ pub(crate) fn semicolon_expecting(p: &mut Parser<'_>, expecting: Option<&str>) {
     // stray brace on the current statement (`const X = 1 {0};`, probed
     // 8.5.7).
     let stmt_starts_here =
-        p.newline_before_current() || (STMT_START.contains(&p.current()) && !p.peek_at(K::L_CURLY));
+        p.newline_before_current() || (STMT_START.contains(&p.current()) && !p.at(K::L_CURLY));
     if !stmt_starts_here {
         recover_to_stmt_boundary(p);
     }
@@ -527,7 +527,7 @@ pub(crate) fn recover_to_stmt_boundary(p: &mut Parser<'_>) {
     if at_stmt_recovery(p) {
         // The boundary token itself belongs to the next construct,
         // except a stray `;`, which folds into the error region.
-        if p.peek_at(K::SEMICOLON) {
+        if p.at(K::SEMICOLON) {
             p.bump(K::SEMICOLON);
         }
         return;
@@ -537,7 +537,7 @@ pub(crate) fn recover_to_stmt_boundary(p: &mut Parser<'_>) {
         p.bump_any();
     }
     e.complete(p, K::ERROR);
-    if p.peek_at(K::SEMICOLON) {
+    if p.at(K::SEMICOLON) {
         p.bump(K::SEMICOLON);
     }
 }
@@ -568,7 +568,7 @@ fn expr_stmt(p: &mut Parser<'_>) {
             let e = p.start();
             p.bump_any();
             e.complete(p, K::ERROR);
-        } else if p.peek_at(K::SEMICOLON) {
+        } else if p.at(K::SEMICOLON) {
             p.bump(K::SEMICOLON);
         }
     }
@@ -576,7 +576,7 @@ fn expr_stmt(p: &mut Parser<'_>) {
 
 fn echo_stmt(p: &mut Parser<'_>) {
     let m = p.start();
-    if p.peek_at(K::OPEN_TAG_ECHO) {
+    if p.at(K::OPEN_TAG_ECHO) {
         p.bump(K::OPEN_TAG_ECHO);
     } else {
         p.bump(K::ECHO_KW);
@@ -597,7 +597,7 @@ fn return_stmt(p: &mut Parser<'_>) {
 
 fn break_continue_stmt(p: &mut Parser<'_>) {
     let m = p.start();
-    let kind = if p.peek_at(K::BREAK_KW) {
+    let kind = if p.at(K::BREAK_KW) {
         p.bump(K::BREAK_KW);
         K::BREAK_STMT
     } else {
@@ -612,7 +612,7 @@ fn break_continue_stmt(p: &mut Parser<'_>) {
 /// php's clause at the value slot and after it is `";"` alone (`return
 /// ,;` and `return 1 foo` are `expecting ";"`, probed 8.5.9).
 fn single_value_tail(p: &mut Parser<'_>) {
-    if !p.peek_at(K::SEMICOLON) && !p.peek_at(K::CLOSE_TAG) && !p.at_eof() && !expr::expr(p) {
+    if !p.at(K::SEMICOLON) && !p.at(K::CLOSE_TAG) && !p.at_eof() && !expr::expr(p) {
         let d = p.unexpected_here_expecting("\";\"");
         p.error(d);
         recover_to_stmt_boundary(p);
@@ -757,7 +757,7 @@ fn halt_compiler_stmt(p: &mut Parser<'_>, top_level: bool) {
         let d = p.unexpected_here_expecting("\";\"");
         p.error(d);
     }
-    if p.peek_at(K::HALT_DATA) {
+    if p.at(K::HALT_DATA) {
         p.bump(K::HALT_DATA);
     }
     m.complete(p, K::HALT_COMPILER_STMT);
@@ -807,9 +807,9 @@ fn if_stmt(p: &mut Parser<'_>) {
         const IF_CLAUSE: Option<&str> = Some("\"elseif\" or \"else\" or \"endif\"");
         alt_stmt_list(p, ENDERS, IF_CLAUSE);
         let mut clause = IF_CLAUSE;
-        while p.peek_at(K::ELSEIF_KW) || (p.peek_at(K::ELSE_KW) && p.nth(1) == K::IF_KW) {
+        while p.at(K::ELSEIF_KW) || (p.at(K::ELSE_KW) && p.nth(1) == K::IF_KW) {
             let c = p.start();
-            if p.peek_at(K::ELSEIF_KW) {
+            if p.at(K::ELSEIF_KW) {
                 p.bump(K::ELSEIF_KW);
             } else {
                 // `else if` in the alternative syntax: parsed as an
@@ -831,7 +831,7 @@ fn if_stmt(p: &mut Parser<'_>) {
             alt_stmt_list(p, ENDERS, IF_CLAUSE);
             c.complete(p, K::ALT_ELSEIF_CLAUSE);
         }
-        if p.peek_at(K::ELSE_KW) {
+        if p.at(K::ELSE_KW) {
             let c = p.start();
             p.bump(K::ELSE_KW);
             if !p.eat(K::COLON) {
@@ -845,14 +845,14 @@ fn if_stmt(p: &mut Parser<'_>) {
         alt_terminator(p, K::ENDIF_KW, clause);
     } else {
         statement(p, false);
-        while p.peek_at(K::ELSEIF_KW) {
+        while p.at(K::ELSEIF_KW) {
             let c = p.start();
             p.bump(K::ELSEIF_KW);
             paren_cond(p);
             statement(p, false);
             c.complete(p, K::ELSEIF_CLAUSE);
         }
-        if p.peek_at(K::ELSE_KW) {
+        if p.at(K::ELSE_KW) {
             let c = p.start();
             p.bump(K::ELSE_KW);
             statement(p, false);
@@ -944,19 +944,19 @@ fn for_stmt(p: &mut Parser<'_>) {
     p.bump(K::FOR_KW);
     if p.eat(K::L_PAREN) {
         let w = p.start();
-        if !p.peek_at(K::SEMICOLON) {
+        if !p.at(K::SEMICOLON) {
             for_exprs(p, false);
         }
         w.complete(p, K::FOR_INIT);
         for_semicolon(p);
         let w = p.start();
-        if !p.peek_at(K::SEMICOLON) {
+        if !p.at(K::SEMICOLON) {
             for_exprs(p, true);
         }
         w.complete(p, K::FOR_COND);
         for_semicolon(p);
         let w = p.start();
-        if !p.peek_at(K::R_PAREN) && !p.peek_at(K::SEMICOLON) {
+        if !p.at(K::R_PAREN) && !p.at(K::SEMICOLON) {
             for_exprs(p, false);
         }
         w.complete(p, K::FOR_STEP);
@@ -981,7 +981,7 @@ fn for_stmt(p: &mut Parser<'_>) {
 /// is `unexpected token ";", expecting ","`, probed 8.5.9).
 fn for_exprs(p: &mut Parser<'_>, cond: bool) {
     loop {
-        let voided = p.peek_at(K::CAST)
+        let voided = p.at(K::CAST)
             && p.current_text()
                 .to_ascii_lowercase()
                 .windows(4)
@@ -992,7 +992,7 @@ fn for_exprs(p: &mut Parser<'_>, cond: bool) {
             break;
         }
         if !p.eat(K::COMMA) {
-            if cond && voided && p.peek_at(K::SEMICOLON) {
+            if cond && voided && p.at(K::SEMICOLON) {
                 let d = p.unexpected_here_expecting("\",\"");
                 p.error(d);
             }
@@ -1034,12 +1034,12 @@ fn foreach_stmt(p: &mut Parser<'_>) {
         // variable or a `[…]` pattern, and `"=>" or ")"` after a
         // `list(…)` that may yet be the key (probed 8.5.9).
         let mut closer = Some(expr::AFTER_VARIABLE);
-        if p.peek_at(K::AMP) {
+        if p.at(K::AMP) {
             let t = p.start();
             p.bump(K::AMP);
             p.grants.list_target = true;
             expr::variable_target(p);
-            if p.peek_at(K::FAT_ARROW) {
+            if p.at(K::FAT_ARROW) {
                 // `&$k => …`: what was parsed was the by-reference key,
                 // completed as `FOREACH_KEY` with the `&` inside it for
                 // the compiler; then the value target, itself optionally
@@ -1058,7 +1058,7 @@ fn foreach_stmt(p: &mut Parser<'_>) {
             let first = p.start();
             p.grants.list_target = true;
             let target = expr::variable_target(p);
-            if target.is_some() && p.peek_at(K::FAT_ARROW) {
+            if target.is_some() && p.at(K::FAT_ARROW) {
                 // What was parsed was the key; `=>` lives inside
                 // `ForeachKey`.
                 p.bump(K::FAT_ARROW);
@@ -1102,7 +1102,7 @@ fn switch_stmt(p: &mut Parser<'_>) {
     if p.eat(K::L_CURLY) {
         switch_arms(p, &[K::R_CURLY], "\"case\" or \"default\" or \"}\"");
         expect_closer(p, K::R_CURLY, None);
-    } else if p.peek_at(K::COLON) {
+    } else if p.at(K::COLON) {
         p.bump(K::COLON);
         switch_arms(p, &[K::ENDSWITCH_KW], ALT_SWITCH_CLAUSE);
         alt_terminator(p, K::ENDSWITCH_KW, Some(ALT_SWITCH_CLAUSE));
@@ -1117,15 +1117,15 @@ fn switch_arms(p: &mut Parser<'_>, enders: &[K], clause: &'static str) {
     let outer = p.stmt_clause.replace(clause);
     // One `;` may open the list (`switch_case_list: '{' ';' case_list
     // '}'`), an archaism php's grammar keeps.
-    if p.peek_at(K::SEMICOLON) {
+    if p.at(K::SEMICOLON) {
         let e = p.start();
         p.bump(K::SEMICOLON);
         e.complete(p, K::EMPTY_STMT);
     }
     while !p.at_eof() && !enders.contains(&p.current()) {
-        if p.peek_at(K::CASE_KW) || p.peek_at(K::DEFAULT_KW) {
+        if p.at(K::CASE_KW) || p.at(K::DEFAULT_KW) {
             let arm = p.start();
-            let is_default = p.peek_at(K::DEFAULT_KW);
+            let is_default = p.at(K::DEFAULT_KW);
             if is_default {
                 p.bump(K::DEFAULT_KW);
             } else {
@@ -1151,8 +1151,8 @@ fn switch_arms(p: &mut Parser<'_>, enders: &[K], clause: &'static str) {
             }
             let body = p.start();
             while !p.at_eof()
-                && !p.peek_at(K::CASE_KW)
-                && !p.peek_at(K::DEFAULT_KW)
+                && !p.at(K::CASE_KW)
+                && !p.at(K::DEFAULT_KW)
                 && !enders.contains(&p.current())
             {
                 if p.is_stuck() {
@@ -1180,7 +1180,7 @@ fn try_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::TRY_KW);
     block(p);
-    while p.peek_at(K::CATCH_KW) {
+    while p.at(K::CATCH_KW) {
         let c = p.start();
         p.bump(K::CATCH_KW);
         if p.eat(K::L_PAREN) {
@@ -1204,7 +1204,7 @@ fn try_stmt(p: &mut Parser<'_>) {
         block(p);
         c.complete(p, K::CATCH_CLAUSE);
     }
-    if p.peek_at(K::FINALLY_KW) {
+    if p.at(K::FINALLY_KW) {
         let c = p.start();
         p.bump(K::FINALLY_KW);
         block(p);
@@ -1263,7 +1263,7 @@ fn namespace_def(p: &mut Parser<'_>) {
         // namespaced-names RFC (`namespace fn;`, `namespace enum {}`;
         // php-src namespace_name_reserved_keywords.php, pinned 8.5.6).
         p.bump_remap(K::IDENT);
-    } else if !p.peek_at(K::L_CURLY) {
+    } else if !p.at(K::L_CURLY) {
         // `namespace ;` is `expecting "{"` (probed 8.5.9).
         let d = p.unexpected_here_expecting("\"{\"");
         p.error(d);
@@ -1271,7 +1271,7 @@ fn namespace_def(p: &mut Parser<'_>) {
     // `RESET_DOC_COMMENT()`: the node takes what is pending and keeps
     // nothing of it (the docs above).
     p.doc_comment();
-    if p.peek_at(K::L_CURLY) {
+    if p.at(K::L_CURLY) {
         block_of(p, true);
     } else {
         // After the name only `;` or the braces can follow (`namespace A
@@ -1291,7 +1291,7 @@ fn use_stmt(p: &mut Parser<'_>) {
     // per-item kind, a distinction php's expected-set clause reflects
     // when a group item is malformed (`… expecting … or "function" or
     // "const"` for the mixed form alone).
-    let mixed = !(p.peek_at(K::FUNCTION_KW) || p.peek_at(K::CONST_KW));
+    let mixed = !(p.at(K::FUNCTION_KW) || p.at(K::CONST_KW));
     if !mixed {
         p.bump_any();
     }
@@ -1300,9 +1300,7 @@ fn use_stmt(p: &mut Parser<'_>) {
     loop {
         // The group form, `Prefix\{ … }`: the prefix may be fully
         // qualified (`use function \Foo\{…}`, php-src ns_095).
-        if (p.peek_at(K::NAME_QUALIFIED)
-            || p.peek_at(K::IDENT)
-            || p.peek_at(K::NAME_FULLY_QUALIFIED))
+        if (p.at(K::NAME_QUALIFIED) || p.at(K::IDENT) || p.at(K::NAME_FULLY_QUALIFIED))
             && p.nth(1) == K::BACKSLASH
             && p.nth(2) == K::L_CURLY
         {
@@ -1329,7 +1327,7 @@ fn use_stmt(p: &mut Parser<'_>) {
             }
             // `A\` with nothing after the separator is a group whose
             // brace is missing (`use A\ ;` is `expecting "{"`).
-            if p.peek_at(K::BACKSLASH) {
+            if p.at(K::BACKSLASH) {
                 p.bump(K::BACKSLASH);
                 let d = p.unexpected_here_expecting("\"{\"");
                 p.error(d);
@@ -1375,13 +1373,13 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
     };
     // Empty group braces are a parse error in php: at least one name is
     // required (`use Baz\{};`).
-    if p.peek_at(K::R_CURLY) {
+    if p.at(K::R_CURLY) {
         let d = p.unexpected_expecting(item_start_expecting);
         p.error(d);
     }
     let mut parsed_item = false;
     loop {
-        if p.peek_at(K::R_CURLY) || p.at_eof() {
+        if p.at(K::R_CURLY) || p.at_eof() {
             break;
         }
         // After a name and a comma the trailing comma has reduced to
@@ -1393,7 +1391,7 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
             item_start_expecting
         };
         let item = p.start();
-        if p.peek_at(K::FUNCTION_KW) || p.peek_at(K::CONST_KW) {
+        if p.at(K::FUNCTION_KW) || p.at(K::CONST_KW) {
             if mixed {
                 // A plain `use Baz\{…}` group may carry a per-item kind
                 // (`use Baz\{function f, const K}`).
@@ -1417,7 +1415,7 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
         // legal on the prefix alone; after a comma the clause is the
         // closer's, as for any item (`use Foo\{Baz, \Qux}` is
         // `expecting "}"`, probed 8.5.9).
-        if p.peek_at(K::NAME_FULLY_QUALIFIED) {
+        if p.at(K::NAME_FULLY_QUALIFIED) {
             let d = p.unexpected_expecting(expecting);
             p.error(d);
             // `name_ref` still consumes it: one diagnostic, and the tree
@@ -1445,20 +1443,20 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
         // and the statement's `;` recovery do not emit competing
         // diagnostics: a later missing-`;` would anchor at an earlier
         // span, the end of the last item, and sort ahead of this one.
-        if !p.peek_at(K::R_CURLY) && !p.at_eof() {
+        if !p.at(K::R_CURLY) && !p.at_eof() {
             let d = p.unexpected_expecting("\"}\"");
             p.error(d);
             let e = p.start();
             let mut depth = 0u32;
             while !p.at_eof() {
-                if p.peek_at(K::R_CURLY) {
+                if p.at(K::R_CURLY) {
                     if depth == 0 {
                         break;
                     }
                     depth -= 1;
-                } else if p.peek_at(K::L_CURLY) {
+                } else if p.at(K::L_CURLY) {
                     depth += 1;
-                } else if p.peek_at(K::SEMICOLON) && depth == 0 {
+                } else if p.at(K::SEMICOLON) && depth == 0 {
                     break;
                 }
                 p.bump_any();
@@ -1486,7 +1484,7 @@ fn use_name_ref(p: &mut Parser<'_>) -> bool {
 }
 
 fn use_alias(p: &mut Parser<'_>) {
-    if p.peek_at(K::AS_KW) {
+    if p.at(K::AS_KW) {
         let a = p.start();
         p.bump(K::AS_KW);
         // php's alias is `T_STRING` alone (`unprefixed_use_declaration`,
@@ -1549,7 +1547,7 @@ fn declare_stmt(p: &mut Parser<'_>) {
     if p.eat(K::COLON) {
         alt_stmt_list(p, ALT_ENDERS, None);
         alt_terminator(p, K::ENDDECLARE_KW, None);
-    } else if p.peek_at(K::SEMICOLON) {
+    } else if p.at(K::SEMICOLON) {
         p.bump(K::SEMICOLON);
     } else {
         // php's `declare_statement` is any statement: `declare(ticks=1)

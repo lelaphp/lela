@@ -59,7 +59,7 @@ fn marker_precede_chains() {
 }
 
 #[test]
-fn expected_set_ranked_and_cleared_by_a_bump() {
+fn at_reads_the_current_token_and_a_bump_moves_on() {
     let text = b"$x;";
     let raw = tokens(&[(SyntaxKind::VARIABLE, 2), (SyntaxKind::SEMICOLON, 1)]);
     let input = Input::new(text, &raw);
@@ -67,15 +67,10 @@ fn expected_set_ranked_and_cleared_by_a_bump() {
     let mut p = Parser::new(&input, FileId(0), &lines);
     assert!(!p.at(SyntaxKind::COMMA));
     assert!(!p.at_any(&[SyntaxKind::R_PAREN, SyntaxKind::COMMA]));
-    assert!(!p.peek_at(SyntaxKind::IDENT));
+    assert!(!p.at(SyntaxKind::IDENT));
     assert!(p.at(SyntaxKind::VARIABLE));
-    // Each kind once, in the order first asked; a peek records nothing.
-    assert_eq!(
-        p.expected_set(),
-        vec![SyntaxKind::COMMA, SyntaxKind::R_PAREN, SyntaxKind::VARIABLE]
-    );
     p.bump(SyntaxKind::VARIABLE);
-    assert!(p.expected_set().is_empty());
+    assert!(!p.at(SyntaxKind::VARIABLE));
     assert!(p.eat(SyntaxKind::SEMICOLON));
     assert!(p.at_eof());
     assert_eq!(p.current(), SyntaxKind::EOF);
