@@ -172,6 +172,17 @@ fn long2ip(req: &mut Request, ip: i64) -> Result<Owner<PhpString>, Thrown> {
 /// string(2) "on"
 /// ```
 ///
+/// A named value is `zend_string_init`'s, an allocation however short:
+///
+/// ```php
+/// putenv("DAX_V=a"); putenv("DAX_W=");
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// pk(function () { $a = getenv("DAX_V"); $b = getenv("DAX_W", true); });
+/// ```
+/// ```expect
+/// 64
+/// ```
+///
 /// The declarations Reflection is asked for most.
 ///
 /// ```php
@@ -225,7 +236,12 @@ fn getenv(
         req.env(name).map(<[u8]>::to_vec)
     };
     match value {
-        Some(value) => Ok(Union::B(OrFalse::Value(PhpString::new(req, &value)?))),
+        // `RETVAL_STRING` and `php_getenv`'s `zend_string_init`: an
+        // allocation whatever the length, never the interned string.
+        Some(value) => {
+            let value = PhpString::filled(req, value.len(), |bytes| bytes.copy_from_slice(&value))?;
+            Ok(Union::B(OrFalse::Value(value)))
+        }
         None => Ok(Union::B(OrFalse::False)),
     }
 }
