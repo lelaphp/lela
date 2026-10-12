@@ -20,7 +20,7 @@ use crate::props::{self, Props};
 use crate::result::mysqli_result;
 use crate::stmt::mysqli_stmt;
 use crate::{
-    On, Resource, State, affected, closed, extras, ini_bool, ini_long, ini_string, long_or_string,
+    On, Resource, State, affected, closed, extras, ini_bool, ini_string, long_or_string,
     not_initialized, report_conn, report_index, report_mode, sql_exception, string,
 };
 
@@ -227,7 +227,7 @@ impl Target {
             port: args
                 .port
                 .filter(|p| *p != 0)
-                .unwrap_or_else(|| ini_long(req, b"mysqli.default_port")),
+                .unwrap_or_else(|| req.ini_long(b"mysqli.default_port")),
             socket: unempty(args.socket).or_else(|| ini_string(req, b"mysqli.default_socket")),
             persistent,
         }
@@ -384,9 +384,30 @@ fn end_psession(req: &mut Request, handle: Mysqlnd) -> Result<bool, Thrown> {
 
 /// `mysqli.max_links` and `mysqli.max_persistent` held to the counts: the
 /// warning's text where one is reached.
+///
+/// The three entries are `OnUpdateLong`'s, read by the quantity rule with
+/// its warning: `-0x1` is `-1`, no limit, and `1x` is 1, where nothing
+/// listens.
+///
+/// ```php
+/// $code = 'mysqli_report(MYSQLI_REPORT_OFF); var_dump(@mysqli_connect("127.0.0.1", "u", "p", "d"), mysqli_connect_error(), ini_set("mysqli.default_port", "3306q"));';
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'mysqli.max_links=-0x1', '-d', 'mysqli.default_port=1x', '-r', $code], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// ```
+/// ```expect process
+/// Warning: Invalid "mysqli.default_port" setting. Invalid quantity "1x": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
+///
+/// Warning: Invalid "mysqli.default_port" setting. Invalid quantity "3306q": unknown multiplier "q", interpreting as "3306" for backwards compatibility in Command line code on line 1
+/// bool(false)
+/// string(18) "Connection refused"
+/// string(2) "1x"
+///
+/// Warning: Invalid "mysqli.default_port" setting. Invalid quantity "1x": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
+/// 0
+/// ```
 fn over_limit(req: &mut Request, persistent: bool) -> Option<String> {
-    let max_links = ini_long(req, b"mysqli.max_links");
-    let max_persistent = ini_long(req, b"mysqli.max_persistent");
+    let max_links = req.ini_long(b"mysqli.max_links");
+    let max_persistent = req.ini_long(b"mysqli.max_persistent");
     let state = req.state::<State>();
     let persistent_links = state.num_active_persistent;
     let persistent_links = persistent_links + crate::num_inactive_persistent(req);
