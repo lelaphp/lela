@@ -167,6 +167,7 @@ Heap::release
 Heap::release_held
 Heap::release_nogc
 Heap::release_string
+Heap::releases_quietly
 Heap::reset_peak
 Heap::resource
 Heap::resource_at

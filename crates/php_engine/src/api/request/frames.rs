@@ -618,8 +618,10 @@ impl Request {
     /// How `frame`, the top of the stack, returns `returned` with no PHP
     /// code served, `zend_leave_helper`'s first arm with
     /// `i_free_compiled_variables` giving up only strings: a user
-    /// function's frame its caller pushed, with no annex, no receiver,
-    /// no closure and no argument past its parameters, none of whose
+    /// function's frame its caller pushed, with no annex, no closure and
+    /// no argument past its parameters, whose receiver, where it has
+    /// one, is lent or owned with another owner standing and nothing for
+    /// the collector to take ([`php_heap::Heap::releases_quietly`]), none of whose
     /// slots but `moved`, which the caller has taken the value out of,
     /// owns anything but a string, returning into a caller's slot that
     /// owns nothing, or, where the call reads no value, returning a
@@ -641,9 +643,10 @@ impl Request {
             return None;
         }
         let header = laid.header();
+        let receiver = header.this().is_some();
         let plain = header.function.is_some()
             && header.annex.is_none()
-            && header.this().is_none()
+            && (!receiver || quiet_receiver(header))
             && header.closure.is_none()
             && !header.info.call()
             && !header.info.extra_args();
@@ -677,13 +680,15 @@ impl Request {
             returns_to,
             moved,
             strings,
+            receiver,
         })
     }
 
     /// The top frame left, as [`Request::leaves_plainly`] found it: each
     /// string its slots but the moved one own given up, in slot order as
-    /// `i_free_compiled_variables` gives them up, then
-    /// `zend_vm_stack_free_call_frame`; `returned` written into the
+    /// `i_free_compiled_variables` gives them up, the receiver after
+    /// them (`OBJ_RELEASE` under `ZEND_CALL_RELEASE_THIS`, a lent one's
+    /// pin let go), then `zend_vm_stack_free_call_frame`; `returned` written into the
     /// caller's slot where the call reads it, and the caller on past its
     /// call opline, `LOAD_NEXT_OPLINE()`, the caller read once for both.
     #[inline(always)] // as `leaves_plainly`
@@ -691,6 +696,9 @@ impl Request {
     pub(crate) fn leave_plainly(&mut self, leave: PlainLeave, returned: Zval) {
         if leave.strings {
             self.give_up_strings(leave.moved);
+        }
+        if leave.receiver {
+            self.give_up_top_receiver();
         }
         self.vm.stack.pop_frame(&mut self.heap);
         if let Some(caller) = self.vm.stack.frame_mut(leave.caller) {
@@ -701,6 +709,19 @@ impl Request {
             }
             let header = caller.header_mut();
             header.opline = header.opline.saturating_add(1);
+        }
+    }
+
+    /// The receiver of the top frame given up ([`Request::leave_plainly`]).
+    #[inline(never)]
+    fn give_up_top_receiver(&mut self) {
+        if let Some(receiver) = self
+            .vm
+            .stack
+            .top()
+            .and_then(|(_, top)| top.header().receiver())
+        {
+            self.give_up_receiver(receiver);
         }
     }
 
@@ -1596,14 +1617,29 @@ impl Request {
     }
 }
 
+/// Whether a frame's receiver is given up with no PHP code served: lent,
+/// or owned with another owner standing and nothing for the collector
+/// to take ([`php_heap::Heap::releases_quietly`]).
+#[inline(never)]
+fn quiet_receiver(header: &exec::Header) -> bool {
+    match header.receiver() {
+        None | Some(exec::Receiver::Lent(_)) => true,
+        Some(exec::Receiver::Owned(object)) => {
+            php_heap::Heap::releases_quietly(object.as_value().to_zval())
+        }
+    }
+}
+
 /// A frame [`Request::leaves_plainly`] found returns with no PHP code
 /// served: the frame it returns into and the slot of it that takes the
 /// value, where the call reads one, the slot the returned value was
-/// moved out of, and whether any other slot owns a string to give up.
+/// moved out of, whether any other slot owns a string to give up, and
+/// whether the frame has a receiver to give up.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlainLeave {
     pub(crate) caller: FrameRef,
     pub(crate) returns_to: Option<u32>,
     moved: Option<usize>,
     strings: bool,
+    receiver: bool,
 }
