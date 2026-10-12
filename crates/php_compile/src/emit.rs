@@ -98,7 +98,8 @@ use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
-    Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
+    Arr, Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string,
+    numeric_prefix,
 };
 use php_link::{Exact, Indexed};
 use php_unit::decl::{
@@ -13728,11 +13729,75 @@ impl Emit<'_> {
             return self.bitwise(op, left, right);
         }
         if let (Where::Constant(a), Where::Constant(b)) = (left, right)
-            && let Some(folded) = fold(op, a, b)
+            && let Some(folded) = self.arithmetic_fold(op, a, b)?
         {
             return Ok(Where::Constant(folded));
         }
         Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
+    }
+
+    /// `zend_try_ct_eval_binary_op` over the arithmetic operators: two
+    /// constant arrays under `+` are the one pair of arrays
+    /// `zend_binary_op_produces_error` lets through, which `add_function`
+    /// joins ([`Self::array_union`]); an array beside anything else, or
+    /// under any other operator, is left to the opcode, which throws;
+    /// every other pair is [`fold`]'s.
+    fn arithmetic_fold(
+        &mut self,
+        op: BinaryOp,
+        left: Zval,
+        right: Zval,
+    ) -> Result<Option<Zval>, CompileError> {
+        match (op, left.as_arr(), right.as_arr()) {
+            (BinaryOp::Add, Some(left), Some(right)) => self.array_union(left, right).map(Some),
+            (_, None, None) => Ok(fold(op, left, right)),
+            _ => Ok(None),
+        }
+    }
+
+    /// `add_function` over two arrays: the left one's entries in its
+    /// order, then each of the right one's whose key the left one has
+    /// not (`zend_hash_merge` without overwrite), laid down as one
+    /// constant array.
+    ///
+    /// ```php
+    /// var_dump([0, 1] + [2, 3, 4], ['a' => 1, 5 => 'x'] + ['a' => 2, 'b' => 3], [] + []);
+    /// $p = [0, 1] + [2];
+    /// $p[] = 'n';
+    /// var_dump($p);
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(1)
+    ///   [2]=>
+    ///   int(4)
+    /// }
+    /// array(3) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   [5]=>
+    ///   string(1) "x"
+    ///   ["b"]=>
+    ///   int(3)
+    /// }
+    /// array(0) {
+    /// }
+    /// array(3) {
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(1)
+    ///   [2]=>
+    ///   string(1) "n"
+    /// }
+    /// ```
+    fn array_union(&mut self, left: Arr, right: Arr) -> Result<Zval, CompileError> {
+        let mut entries: Vec<(Key, Zval)> = left.iter().collect();
+        entries.extend(right.iter().filter(|(key, _)| left.get(*key).is_none()));
+        self.lay_array(&entries)
     }
 
     /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm over the two
@@ -15339,7 +15404,8 @@ impl Emit<'_> {
         if compares(op) {
             return Ok(self.compare_fold(op, left, right));
         }
-        fold(op, left, right).ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+        self.arithmetic_fold(op, left, right)?
+            .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm

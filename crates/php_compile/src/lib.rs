@@ -1358,6 +1358,38 @@ mod tests {
         );
     }
 
+    /// `zend_try_ct_eval_binary_op` folds `+` over two constant arrays, the
+    /// one pair of arrays `zend_binary_op_produces_error` lets through, into
+    /// the array `add_function` makes, wherever the sum stands: assigned,
+    /// under `isset` and under `empty`, which php compiles as the `!` of it;
+    /// `-` over two arrays and `+` over an array and a number stay the
+    /// opcodes, which throw. The dump is the oracle's under `[regime.dump]` at
+    /// 8.5.9 (#2682).
+    #[test]
+    fn two_constant_arrays_under_a_plus_fold_to_the_array_php_s_add_makes() {
+        assert_eq!(
+            dump_of(b"<?php $p = [0, 1] + [2]; $q = [] + []; var_dump(isset(([0, 1] + [])[0]), empty([] + []), [1] - [1], [1] + 1);"),
+            "\n$_main:\n\
+             \x20    ; (lines=12, args=0, vars=2, tmps=6)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 ASSIGN CV0($p) array(...)\n\
+             0001 ASSIGN CV1($q) array(...)\n\
+             0002 INIT_FCALL 4 144 string(\"var_dump\")\n\
+             0003 T4 = ISSET_ISEMPTY_DIM_OBJ (isset) array(...) int(0)\n\
+             0004 SEND_VAL T4 1\n\
+             0005 SEND_VAL bool(true) 2\n\
+             0006 T5 = SUB array(...) array(...)\n\
+             0007 SEND_VAL T5 3\n\
+             0008 T6 = ADD array(...) int(1)\n\
+             0009 SEND_VAL T6 4\n\
+             0010 DO_ICALL\n\
+             0011 RETURN int(1)\n\
+             "
+        );
+    }
+
     #[test]
     fn arithmetic_php_does_not_fold_is_emitted_as_the_opcode_php_emits() {
         assert_eq!(
