@@ -1192,8 +1192,7 @@ fn constructor_visibility(req: &mut Request, class: ClassId) -> Option<php_ext::
         {
             return Some(method.visibility);
         }
-        let parent = decl.parent.clone();
-        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
+        at = req.class_parent(class);
     }
     None
 }

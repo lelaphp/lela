@@ -254,6 +254,26 @@ impl Request {
             .map(|(_, method)| method)
     }
 
+    /// The function a row of a function table is, the `zend_function *`
+    /// the bucket holds: the declaring class's method at the row's place,
+    /// a native trait's method copied into a class among them, which is
+    /// the class's own function ([`Request::function_extension`] reads
+    /// the trait's extension off it).
+    ///
+    /// ```php
+    /// class E extends Exception { function own() {} }
+    /// foreach (['getMessage', 'own'] as $m) {
+    ///     var_dump((new ReflectionMethod('E', $m))->getExtensionName());
+    /// }
+    /// ```
+    /// ```expect
+    /// string(4) "Core"
+    /// bool(false)
+    /// ```
+    pub fn row_function(&self, row: MethodRow) -> Option<Function> {
+        self.method_function(row.scope(), row.row.at)
+    }
+
     /// The name of the method a row of `class`'s function table is.
     fn row_method_name(&self, class: ClassId, row: Row<ClassId>) -> &[u8] {
         self.row_method_at(class, row)
@@ -314,12 +334,15 @@ impl Request {
     /// The native a function number serves by: the trait's own for a
     /// native trait's method copied into a class, the function itself
     /// for any other. What php's copy shares with the trait's, its
-    /// handler, its declaration, its flags and its runtime cache, is read
-    /// through this alone (`entry_of`, `method_decl`, `function_flags`,
-    /// `native_place`); its scope is the class's (`method_class`).
+    /// handler, its flags, its extension and its runtime cache, is read
+    /// through this alone (`entry_of`, `function_flags`,
+    /// `function_extension`, `native_place`); its scope is the class's
+    /// (`method_class`), and its declaration, the name and the
+    /// visibility an alias gave it, the class's own row
+    /// ([`Request::method_decl`]).
     pub(super) fn served_native(&self, function: Function) -> Function {
         match self.class_native_of(function) {
-            Some((_, ClassNative::Trait(native))) => native,
+            Some((_, ClassNative::Trait { native, .. })) => native,
             _ => function,
         }
     }
@@ -377,7 +400,14 @@ impl Request {
 
     /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
-        let function = self.served_native(function);
+        // `zend_add_trait_method`'s copy of a native trait's method: the
+        // using class's row, under the alias's name and visibility.
+        if let Some((class, ClassNative::Trait { at, .. })) = self.class_native_of(function) {
+            return self
+                .class_decl(class)?
+                .methods
+                .get(usize::try_from(at).ok()?);
+        }
         if let Some((class, ClassNative::Enum(method))) = self.class_native_of(function) {
             return self
                 .class_decl(class)?
@@ -489,8 +519,25 @@ impl Request {
 
     /// The class and its parents up from it, `ce` then `ce->parent` and
     /// on, as php's walks up a chain go, held to 64 classes so a chain
-    /// that loops cannot hold the request.
-    pub(crate) fn lineage(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
+    /// that loops cannot hold the request. Each step is
+    /// [`Request::class_parent`], read by number and never by name, so a
+    /// parent an `extends` spelled in another case is the class as it
+    /// was declared:
+    ///
+    /// ```php
+    /// class A {} class B extends a {} class C extends b {}
+    /// var_dump(class_parents('C'), get_parent_class('C'));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["B"]=>
+    ///   string(1) "B"
+    ///   ["A"]=>
+    ///   string(1) "A"
+    /// }
+    /// string(1) "B"
+    /// ```
+    pub fn lineage(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
         std::iter::successors(Some(class), move |&at| self.class_parent(at)).take(64)
     }
 
@@ -516,7 +563,8 @@ impl Request {
     /// bool(false)
     /// bool(true)
     /// ```
-    pub(crate) fn class_parent(&self, class: ClassId) -> Option<ClassId> {
+    #[must_use]
+    pub fn class_parent(&self, class: ClassId) -> Option<ClassId> {
         match self.native_class_at(class) {
             Some(at) => self.shared.parents.get(at).copied().flatten(),
             None => self.declared_row(class)?.bound.parent,

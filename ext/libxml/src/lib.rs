@@ -34,7 +34,7 @@ use php_ext::abi::{
     True, Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::call::{lookup_class, write_prop};
+use php_ext::call::write_prop;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, docref};
 use php_ext::request::{Request, StreamCtx};
@@ -646,14 +646,9 @@ pub fn register_export(class: &'static [u8], export: ExportNode) -> Export {
 /// The row of the export table that answers for the root of `object`'s
 /// class.
 fn export_row(req: &mut Request, object: PhpObject) -> Option<(ExportNode, Option<NodeObjectOf>)> {
-    let mut class = object.class();
-    let mut depth = 0;
-    while let Some(parent) = req.class_decl(class).and_then(|d| d.parent.clone()) {
-        class = lookup_class(req, &parent.0).ok().flatten()?;
-        depth += 1;
-        if depth > 64 {
-            return None;
-        }
+    let class = req.lineage(object.class()).last()?;
+    if req.class_parent(class).is_some() {
+        return None;
     }
     let root = req.class_decl(class)?.name.0.clone();
     req.registered::<Export>()
