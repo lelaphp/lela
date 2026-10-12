@@ -208,9 +208,9 @@ impl<R: Host> FiberStack<R> {
         transfer: R::Transfer,
     ) -> Result<Switched<R::Transfer>, Fatal> {
         if self.coroutine.done() {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a fiber resumed after its body returned",
-            )));
+            ));
         }
         let depth = host.suspensions().running.len();
         let switched = self
@@ -234,9 +234,9 @@ impl<R: Host> FiberStack<R> {
 /// since the native asks php's question first.
 pub fn suspend<R: Host>(host: &mut R, transfer: R::Transfer) -> Result<R::Transfer, Fatal> {
     let Some(point) = host.suspensions().running.pop() else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a suspend with no fiber running",
-        )));
+        ));
     };
     let expected = std::ptr::from_mut(host);
     // SAFETY: `point` was pushed by the body of the innermost running
@@ -247,9 +247,9 @@ pub fn suspend<R: Host>(host: &mut R, transfer: R::Transfer) -> Result<R::Transf
     let Resume(resumer, back) = suspender.suspend(Resume(expected, transfer));
     host.suspensions().running.push(point);
     if resumer != expected {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a fiber resumed on a request it was not started on",
-        )));
+        ));
     }
     Ok(back)
 }
@@ -287,7 +287,7 @@ mod tests {
             probe.log.push(second);
             second * 3
         }) else {
-            return Err(Fatal::Error(String::from("no stack")));
+            return Err(Fatal::error("no stack"));
         };
         assert!(fiber.base() > fiber.end());
         assert!(matches!(
@@ -327,7 +327,7 @@ mod tests {
             probe.log.push(13);
             14
         }) else {
-            return Err(Fatal::Error(String::from("no stack")));
+            return Err(Fatal::error("no stack"));
         };
         assert!(matches!(
             outer.resume(&mut probe, 0)?,

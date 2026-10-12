@@ -7683,9 +7683,9 @@ mod tests {
         let frame = req.pushed(unit.published());
         assert_eq!(
             crate::tier::execute::<Nop, Untold>(&mut req, frame),
-            Err(Fatal::Error(String::from(
+            Err(Fatal::error(
                 "InternalError: ZEND_USER_OPCODE has no handler in this engine yet"
-            )))
+            ))
         );
     }
 

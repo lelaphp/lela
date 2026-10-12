@@ -255,7 +255,7 @@ mod tests {
         }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-            Fatal::OutOfMemory(bytes)
+            Fatal::out_of_memory(bytes)
         }
     }
 

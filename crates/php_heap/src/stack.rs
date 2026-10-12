@@ -491,9 +491,9 @@ impl<H> VmStack<H> {
             Placed::Opened
         };
         let Some(page) = self.pages.last_mut() else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a VM stack with no page after its push laid one down",
-            )));
+            ));
         };
         let from = page.top;
         page.top += used;
@@ -542,7 +542,7 @@ impl<H> VmStack<H> {
     /// engine's error.
     pub fn push_frameless(&mut self, slots: usize, header: H) -> Result<FrameRef, Fatal> {
         if slots > LOOSE_OPERANDS {
-            return Err(Fatal::Error(format!(
+            return Err(Fatal::error(format!(
                 "InternalError: a frameless call's frame of {slots} slots, past the {LOOSE_OPERANDS} operands its room holds"
             )));
         }
@@ -582,14 +582,14 @@ impl<H> VmStack<H> {
             .filter(|_| top == Some(f.0 as usize))
             .map(|frame| (frame.placed.page_from(), frame.len, frame.at))
         else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a VM stack frame grown that is not the top one",
-            )));
+            ));
         };
         let Some(from) = from else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a frame off the VM stack's pages grown on it",
-            )));
+            ));
         };
         let fits = self
             .pages
@@ -703,15 +703,15 @@ impl<H> VmStack<H> {
             Placed::Opened => PAGE_HEADER_SLOTS,
             Placed::Loose(_) => {
                 self.frames.push(frame);
-                return Err(Fatal::Error(String::from(
+                return Err(Fatal::error(
                     "InternalError: a frameless call's frame moved off the VM stack",
-                )));
+                ));
             }
         };
         let Some(page) = self.pages.last() else {
-            return Err(Fatal::Error(String::from(
+            return Err(Fatal::error(
                 "InternalError: a frame moved off a VM stack with no page",
-            )));
+            ));
         };
         let used = page.top.saturating_sub(start);
         let block = match heap.mm.alloc(used * SLOT) {
@@ -1118,9 +1118,9 @@ mod tests {
             .find_map(Result::err);
         assert_eq!(
             refused,
-            Some(Fatal::Error(String::from(
+            Some(Fatal::error(
                 "Allowed memory size of 4194304 bytes exhausted (tried to allocate 262144 bytes)"
-            )))
+            ))
         );
         drop(stack.close(&mut heap));
     }

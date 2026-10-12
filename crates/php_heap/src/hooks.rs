@@ -28,12 +28,50 @@ use crate::{Zval, ZvalRef};
 /// `Err` of the loop and propagated with `?` through nested serving;
 /// Zend's `zend_bailout` without its `longjmp`. `exit` is not one: php 8
 /// unwinds it as a throwable, and so does the engine.
+///
+/// One word, its [`FatalReason`] boxed: a fatal is the cold path of every
+/// call that can raise one, so a `Result<T, Fatal>` costs a pointer beside
+/// `T`, and a handler's answer to the loop, where it goes on and the fatal
+/// that ends it instead, is two registers rather than a slot in memory
+/// (design §5.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Fatal {
+pub struct Fatal(Box<FatalReason>);
+
+/// Why a request ends in a [`Fatal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FatalReason {
     /// A fatal error, with the message the request renders.
     Error(String),
     /// The memory limit, with the bytes that were asked for.
     OutOfMemory(usize),
+}
+
+impl Fatal {
+    /// A fatal error, with the message the request renders.
+    #[cold]
+    #[must_use]
+    pub fn error(message: impl Into<String>) -> Fatal {
+        Fatal(Box::new(FatalReason::Error(message.into())))
+    }
+
+    /// The memory limit, with the bytes that were asked for.
+    #[cold]
+    #[must_use]
+    pub fn out_of_memory(bytes: usize) -> Fatal {
+        Fatal(Box::new(FatalReason::OutOfMemory(bytes)))
+    }
+
+    /// Why the request ends.
+    #[must_use]
+    pub fn reason(&self) -> &FatalReason {
+        &self.0
+    }
+
+    /// Why the request ends, taken out.
+    #[must_use]
+    pub fn into_reason(self) -> FatalReason {
+        *self.0
+    }
 }
 
 /// The table php's `get_gc` hands back beside the values it names, the

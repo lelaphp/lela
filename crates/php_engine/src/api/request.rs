@@ -627,9 +627,7 @@ impl FrameShape {
             typed: decl.parameters.iter().any(|p| p.ty.is_some()),
             cvs: code.map_or(0, |code| code.num_cvs),
             slots: code.map_or(0, |code| code.num_cvs.saturating_add(code.num_tmps)),
-            entry: code
-                .and_then(|code| code.safepoints.first())
-                .map_or(0, |at| at.0),
+            entry: code.map_or(0, exec::entry_of),
             cache: code.map_or_else(exec::CacheAt::default, |code| {
                 exec::CacheAt::of(code.runtime_cache)
             }),
@@ -1265,7 +1263,7 @@ impl HeapHooks for Hooks<'_> {
     }
 
     fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-        Fatal::OutOfMemory(bytes)
+        Fatal::out_of_memory(bytes)
     }
 
     /// `zend_free_source_list`: the row the cell's word names, dropped

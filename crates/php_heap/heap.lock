@@ -49,6 +49,11 @@ EntryGuard
 Exponent
 Exponent::as_char
 Fatal
+Fatal::error
+Fatal::into_reason
+Fatal::out_of_memory
+Fatal::reason
+FatalReason
 FiberStack
 FiberStack::base
 FiberStack::end
