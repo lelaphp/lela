@@ -1623,8 +1623,8 @@ fn dynamic_call_static(
         this,
     );
     let refused = match found {
-        Ok((function, _)) if req.takes_this(function) => Err(non_static_method_call(req, function)),
-        Ok((function, _)) => Ok(function),
+        Ok(callee) if callee.takes_this => Err(non_static_method_call(req, callee.function)),
+        Ok(callee) => Ok(callee.function),
         Err(thrown) => Err(thrown),
     };
     let function = match refused {
@@ -5211,6 +5211,8 @@ pub(crate) fn init_static_method_call<T: Tier>(
         return static_call_frame(req, frame, op, class, (function, instance));
     }
     let mut uncached = false;
+    // Whether the callee takes `$this`, where the lookup read it.
+    let mut looked_up = None;
     let function = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.constructor(class) else {
@@ -5249,9 +5251,10 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 &written,
                 this,
             ) {
-                Ok((function, never_cached)) => {
-                    uncached = never_cached;
-                    function
+                Ok(callee) => {
+                    uncached = callee.uncached;
+                    looked_up = Some(callee.takes_this);
+                    callee.function
                 }
                 Err(thrown) => return threw(req, frame, &thrown),
             }
@@ -5265,7 +5268,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // a callee reached through a trampoline, one marked
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
-    let instance = req.takes_this(function);
+    let instance = looked_up.unwrap_or_else(|| req.takes_this(function));
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
         req.prime_callee(frame, slot, class, (function, instance));
     }
@@ -5288,13 +5291,17 @@ fn static_method(
     lowered: &[u8],
     written: &Value,
     this: Option<PhpObject>,
-) -> Result<(Function, bool), Thrown> {
+) -> Result<StaticCallee, Thrown> {
     let name = written.as_str_bytes().unwrap_or_default();
     if let Some(function) = req
         .handlers_of(class)
         .get_static_method(req, class, lowered, name)?
     {
-        return Ok((function, true));
+        return Ok(StaticCallee {
+            function,
+            uncached: true,
+            takes_this: req.takes_this(function),
+        });
     }
     let function = match req.method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
@@ -5312,8 +5319,21 @@ fn static_method(
         },
     };
     let never_cached = req.never_cached(function);
-    let of_trait = req.static_method_found(function)?;
-    Ok((function, never_cached || of_trait))
+    let found = req.static_method_found(function)?;
+    Ok(StaticCallee {
+        function,
+        uncached: never_cached || found.of_trait,
+        takes_this: found.takes_this,
+    })
+}
+
+/// The callee [`static_method`] found, whether php keeps it out of the
+/// cache slot, and whether it takes `$this`, each read once.
+#[derive(Debug, Clone, Copy)]
+struct StaticCallee {
+    function: Function,
+    uncached: bool,
+    takes_this: bool,
 }
 
 /// `INIT_STATIC_METHOD_CALL` over a method the program names, once the
@@ -5336,9 +5356,8 @@ fn static_call_named(
     let this = req.vm().this(frame);
     let found = static_method(req, class, &method.lowered(), &method.written, this);
     let edge = match found {
-        Ok((function, _)) => {
-            let instance = req.takes_this(function);
-            static_call_frame(req, frame, op, class, (function, instance))
+        Ok(callee) => {
+            static_call_frame(req, frame, op, class, (callee.function, callee.takes_this))
         }
         Err(thrown) => threw(req, frame, &thrown),
     };

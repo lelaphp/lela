@@ -588,13 +588,25 @@ impl Request {
     /// trait, which is a method named on the trait itself and never one
     /// a class took from it, is php's deprecation, after which a
     /// handler that threw stops the call. The answer is whether the
-    /// method is a trait's, which is the callee php never caches.
-    pub(crate) fn static_method_found(&mut self, function: Function) -> Result<bool, Thrown> {
-        let Some(is_abstract) = self.method_decl(function).map(|decl| decl.is_abstract) else {
-            return Ok(false);
+    /// method is a trait's, which is the callee php never caches, and
+    /// whether it takes `$this`, read off the one declaration
+    /// ([`StaticFound`]).
+    pub(crate) fn static_method_found(
+        &mut self,
+        function: Function,
+    ) -> Result<StaticFound, Thrown> {
+        let Some((is_abstract, takes_this)) = self
+            .method_decl(function)
+            .map(|decl| (decl.is_abstract, decl.is_instance))
+        else {
+            return Ok(StaticFound::default());
+        };
+        let plain = StaticFound {
+            of_trait: false,
+            takes_this,
         };
         let Some(class) = self.method_class(function) else {
-            return Ok(false);
+            return Ok(plain);
         };
         let is_trait = self
             .class_decl(class)
@@ -602,7 +614,7 @@ impl Request {
         // The name is spelled only for the `Error` or the deprecation:
         // nearly every call is neither, and makes no string.
         if !is_abstract && !is_trait {
-            return Ok(false);
+            return Ok(plain);
         }
         let name = self
             .method_decl(function)
@@ -629,7 +641,10 @@ impl Request {
             );
             none_pending(self)?;
         }
-        Ok(is_trait)
+        Ok(StaticFound {
+            of_trait: is_trait,
+            takes_this,
+        })
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`): a
@@ -834,4 +849,14 @@ pub(super) fn visibility_string(visibility: Visibility) -> &'static str {
         Visibility::Protected => "protected",
         Visibility::Private => "private",
     }
+}
+
+/// What [`Request::static_method_found`] read off a static call's
+/// callee, the one declaration asked once: whether it is a trait's own,
+/// which php never caches, and whether it takes `$this`, which php's
+/// `INIT_STATIC_METHOD_CALL` reads off `fbc->common.fn_flags`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StaticFound {
+    pub(crate) of_trait: bool,
+    pub(crate) takes_this: bool,
 }
