@@ -54,7 +54,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
-use php_proto::cgi;
+use php_proto::cgi::Line;
 use php_sapi::ResponseHead;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
@@ -578,9 +578,11 @@ async fn hand_over(
             } else {
                 Content::File(file.body())
             };
-            return own(connection, &head, content);
+            return own_response(connection, &head, content);
         }
-        Route::Refused(refusal) => return own(connection, &refusal.head(), Content::Empty),
+        Route::Refused(refusal) => {
+            return own_response(connection, &refusal.head(), Content::Empty);
+        }
     };
     let (feed, body) = mpsc::channel(BODY_PIECES);
     let (head_sent, answered) = oneshot::channel();
@@ -606,7 +608,7 @@ async fn hand_over(
             if let Ok(fault) = fault.try_recv() {
                 cut(connection, fault);
             }
-            sent(
+            php_response(
                 connection,
                 &head,
                 Content::Written(Written { pieces, whole }),
@@ -800,30 +802,27 @@ fn cut(connection: &Connection, fault: BodyFault) {
 
 /// The response for the head a request sent, as php-fpm writes it and
 /// the web server in front of it reads it (#2636, #2608): the lines
-/// `sapi_cgi_send_headers` writes ([`cgi::lines`]), so a 304 carries no
-/// `Content-Type` of PHP's; the status their status line says, 200 where
-/// there is none, with the reason phrase it carries, which is the one PHP
-/// set (`header("HTTP/1.1 403 Access Denied")`) or php's for the code; and
-/// each header line after it. A status whose code is not three digits,
-/// which nginx refuses, is a 500.
-fn sent(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
-    let lines = cgi::lines(
-        cgi::Shape::default(),
-        head.code,
-        head.status_line.as_deref(),
-        &head.lines,
-    );
+/// `sapi_cgi_send_headers` writes ([`php_sapi::cgi::lines`]), so a 304
+/// carries no `Content-Type` of PHP's; the status their status line says,
+/// 200 where there is none, with the reason phrase it carries, which is
+/// the one PHP set (`header("HTTP/1.1 403 Access Denied")`) or php's for
+/// the code; and each header line after it. A status whose code is not
+/// three digits, which nginx refuses, is a 500: php-fpm's code is 200
+/// from the request's start (`init_request_info`,
+/// `Z/sapi/fpm/fpm/fpm_main.c:995`), as the engine's is, never 0.
+fn php_response(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
+    let lines = php_sapi::cgi::lines(head);
     let (mut status, mut reason) = (StatusCode::OK, &[][..]);
     let mut fields = Vec::with_capacity(lines.len());
     for line in &lines {
         match line {
-            cgi::Line::Status(_) => {
+            Line::Status(line) => {
                 (status, reason) = line
-                    .status()
+                    .read()
                     .and_then(|(code, reason)| Some((StatusCode::from_u16(code).ok()?, reason)))
                     .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, &[]));
             }
-            cgi::Line::Field(field) => fields.push(*field),
+            Line::Field(field) => fields.push(*field),
         }
     }
     let mut response = response(connection, status, fields, content);
@@ -883,7 +882,7 @@ fn response<'a>(
 
 /// The response for a head of the server's own, a static file's or a
 /// refusal's: its code and its header lines, with hyper's reason.
-fn own(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
+fn own_response(connection: &Connection, head: &ResponseHead, content: Content) -> Response<Reply> {
     let status = u16::try_from(head.code)
         .ok()
         .and_then(|code| StatusCode::from_u16(code).ok())

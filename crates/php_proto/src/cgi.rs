@@ -7,6 +7,8 @@
 //! plain values: the one question asked of the file system, whether a
 //! path names a file, is the caller's to answer.
 
+use std::borrow::Cow;
+
 /// An environment, as `environ` holds it: names and values in order, a
 /// name set again keeping its place, as `setenv(3)` keeps it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -576,9 +578,8 @@ impl Shape {
 /// One line of the head `sapi_cgi_send_headers` writes ([`lines`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line<'a> {
-    /// The response's status, whole: `Status: 404 Not Found`, or under
-    /// `cgi.rfc2616_headers` the `HTTP/` status line `header()` was given.
-    Status(std::borrow::Cow<'a, [u8]>),
+    /// The response's status line.
+    Status(Status<'a>),
     /// A header line the request set, as it set it.
     Field(&'a [u8]),
 }
@@ -588,27 +589,39 @@ impl Line<'_> {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         match self {
-            Line::Status(line) => line,
+            Line::Status(status) => status.bytes(),
             Line::Field(line) => line,
         }
     }
+}
 
-    /// The status a web server in front of php reads off a status line,
-    /// as nginx's `ngx_http_fastcgi_process_header` reads `Status:`
+/// The response's status as `sapi_cgi_send_headers` writes it, whole:
+/// `Status: 404 Not Found`, or under `cgi.rfc2616_headers` the `HTTP/`
+/// status line `header()` was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status<'a>(Cow<'a, [u8]>);
+
+impl Status<'_> {
+    /// The line as it goes on the wire, without its line end.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The status a web server in front of php reads off the line, as
+    /// nginx's `ngx_http_fastcgi_process_header` reads `Status:`
     /// (`src/http/modules/ngx_http_fastcgi_module.c:2067-2083` at the
     /// release `oracle.toml`'s `[fastcgi]` names): the code, its first
-    /// three bytes as digits, and the text past the space after them,
-    /// which the server's status line carries as its reason phrase; `None`
-    /// for a field, or a status whose code is not three digits, which
-    /// nginx refuses as an invalid status. An `HTTP/` line is read past
-    /// its first space.
+    /// three bytes as digits, as `ngx_atoi(value, 3)` reads them, and the
+    /// text past the space after them, which the server's status line
+    /// carries as its reason phrase; `None` for a code that is not three
+    /// digits, which nginx refuses as an invalid status. An `HTTP/` line
+    /// is read past its first space.
     #[must_use]
-    pub fn status(&self) -> Option<(u16, &[u8])> {
-        let Line::Status(line) = self else {
-            return None;
-        };
-        let value = if line.len() >= 7 && line[..7].eq_ignore_ascii_case(b"Status:") {
-            line[7..].trim_ascii_start()
+    pub fn read(&self) -> Option<(u16, &[u8])> {
+        let line = self.bytes();
+        let value = if is_named(line, b"Status:") {
+            line[b"Status:".len()..].trim_ascii_start()
         } else {
             let space = line.iter().position(|b| *b == b' ')?;
             &line[space + 1..]
@@ -622,6 +635,12 @@ impl Line<'_> {
         let reason = value[3..].strip_prefix(b" ").unwrap_or(&value[3..]);
         Some((code, reason))
     }
+}
+
+/// Whether a header line is the header `name` names, its colon included,
+/// with a value after it: `sapi_cgi_send_headers`' `strncasecmp`.
+fn is_named(line: &[u8], name: &[u8]) -> bool {
+    line.len() > name.len() && line[..name.len()].eq_ignore_ascii_case(name)
 }
 
 /// `sapi_cgi_send_headers` ([`lines`]) on the wire: each line and its CRLF,
@@ -653,9 +672,6 @@ pub fn lines<'a>(
     status_line: Option<&'a [u8]>,
     lines: &'a [Vec<u8>],
 ) -> Vec<Line<'a>> {
-    let is = |line: &[u8], name: &[u8]| {
-        line.len() > name.len() && line[..name.len()].eq_ignore_ascii_case(name)
-    };
     let mut out = Vec::new();
     let mut ignore_status = false;
     let mut response_status = code;
@@ -673,7 +689,7 @@ pub fn lines<'a>(
             let mut built = b"Status:".to_vec();
             built.extend_from_slice(rest);
             Some(built)
-        } else if lines.iter().any(|line| is(line, b"Status:")) {
+        } else if lines.iter().any(|line| is_named(line, b"Status:")) {
             None
         } else {
             Some(match reason(code) {
@@ -683,17 +699,17 @@ pub fn lines<'a>(
         };
         if let Some(mut status) = status {
             status.truncate(MAX_HEADER_LENGTH - 1);
-            out.push(Line::Status(status.into()));
+            out.push(Line::Status(Status(status.into())));
             ignore_status = true;
         }
     }
     for line in lines.iter().filter(|line| !line.is_empty()) {
-        if is(line, b"Status:") {
+        if is_named(line, b"Status:") {
             if !ignore_status {
                 ignore_status = true;
-                out.push(Line::Status(line.as_slice().into()));
+                out.push(Line::Status(Status(line.as_slice().into())));
             }
-        } else if response_status != 304 || !is(line, b"Content-Type:") {
+        } else if response_status != 304 || !is_named(line, b"Content-Type:") {
             out.push(Line::Field(line));
         }
     }
@@ -808,8 +824,8 @@ mod tests {
     #[test]
     fn a_status_line_is_read_as_a_web_server_reads_it() {
         let status = |line: &'static [u8]| {
-            let line = Line::Status(line.into());
-            line.status().map(|(code, reason)| (code, reason.to_vec()))
+            let status = Status(line.into());
+            status.read().map(|(code, reason)| (code, reason.to_vec()))
         };
         assert_eq!(
             status(b"Status: 403 Access Denied"),
@@ -821,7 +837,6 @@ mod tests {
             Some((201, b"A long one".to_vec()))
         );
         assert_eq!(status(b"Status: 1"), None);
-        assert_eq!(Line::Field(b"Status: 200 OK").status(), None);
         let lines = [b"Content-Type: text/html".to_vec(), b"X: 1".to_vec()];
         assert_eq!(
             super::lines(
@@ -831,7 +846,7 @@ mod tests {
                 &lines
             ),
             [
-                Line::Status(b"Status: 304 Not Modified".as_slice().into()),
+                Line::Status(Status(b"Status: 304 Not Modified".as_slice().into())),
                 Line::Field(b"X: 1")
             ]
         );
