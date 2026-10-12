@@ -34,7 +34,7 @@ use crate::git::git;
 use crate::layout;
 use crate::manifest::{LockCeiling, Manifest, Measure, SCRIPTS, Seam, Week};
 use crate::oracle::hosts::{EngineHost, HOSTS};
-use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
+use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
 use crate::phpt;
 use crate::port_map;
@@ -1585,13 +1585,15 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// variable by name, its value and whether it is set; the promise's
 /// likewise; the pin's path and whether it is a directory; its tag and
 /// commit as `[source]` states them, which the corpus section clones at
-/// (#66); where
-/// [`crate::oracle::Source::tree`] found the tree, the variable's or the
-/// pin's, or the absence it named; and the pinned php, its version, keg
-/// path and md5. CI reads the two names
+/// (#66); where [`crate::oracle::Source::tree`] found the tree, the
+/// variable's or the pin's, or the absence it named; and the pinned php,
+/// its version, keg path and md5. An eighth, `closure`, names the kegs
+/// `[closure]` records php loading, each at its version, where the pin
+/// records them (#2657). CI reads the two names
 /// off the JSON, `tree.variable` and `promise.variable`, and sets them
 /// under those names, so the workflow spells neither; the oracle runner
-/// pours the keg `binary` names and holds it to that md5 (#2253).
+/// pours the keg `binary` names and holds it to that md5 (#2253), and
+/// pours and pins each keg `closure` names at its version.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let php = &pin.oracle;
@@ -1634,11 +1636,15 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "path": php.path.display().to_string(),
                 "md5": php.md5,
             },
+            "closure": pin.closure.as_ref().map(Closure::kegs),
         }))?,
         Table::Md => {
             let mut out = String::new();
-            writeln!(out, "| fact | variable | value | state |").ok();
-            writeln!(out, "|---|---|---|---|").ok();
+            writeln!(
+                out,
+                "| fact | variable | value | state |\n|---|---|---|---|"
+            )
+            .ok();
             writeln!(
                 out,
                 "| tree | {TREE_VARIABLE} | {} | {} |",
@@ -1685,9 +1691,23 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 php.md5
             )
             .ok();
+            closure_row(&mut out, pin.closure.as_ref());
             out
         }
     })
+}
+
+/// The oracle section's `closure` row: each keg `[closure]` records and its
+/// version, none where the pin records no closure.
+fn closure_row(out: &mut String, closure: Option<&Closure>) {
+    let Some(closure) = closure else { return };
+    let kegs: Vec<String> = closure
+        .kegs()
+        .iter()
+        .map(|(k, v)| format!("{k} {v}"))
+        .collect();
+    let (count, kegs) = (kegs.len(), cell(&kegs.join(", ")));
+    writeln!(out, "| closure |  | {kegs} | {count} kegs, the pin's |").ok();
 }
 
 /// The `corpus` section: what CI checks out of the pinned php-src (#1713),

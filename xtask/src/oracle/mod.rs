@@ -22,6 +22,7 @@
 //! The version, the digest and the path are values of the pin and appear in
 //! no source file (§10 rule 5).
 
+mod closure;
 pub(crate) mod expect;
 mod fastcgi;
 pub(crate) mod hosts;
@@ -29,6 +30,7 @@ pub(crate) mod linked;
 pub(crate) mod profile;
 mod variant;
 
+pub(crate) use closure::Closure;
 pub use fastcgi::{Mapping, Param, Piece, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Variant};
 
@@ -185,6 +187,11 @@ pub struct Pin {
     /// under for a host php does not ship (#2334); [`Pin::fastcgi`].
     #[serde(default)]
     fastcgi: Option<Mapping>,
+    /// `[closure]`: the Homebrew kegs the pinned binaries load, each at
+    /// its version (#2657), held beside the digest; absent until a person
+    /// records it, and then nothing the binaries load is held.
+    #[serde(default)]
+    pub(crate) closure: Option<closure::Closure>,
     /// How many times the digest was asserted through this pin; not a
     /// value of the file.
     #[serde(skip)]
@@ -825,7 +832,8 @@ impl Pin {
         self.asserted.0.load(Ordering::Relaxed)
     }
 
-    /// The binary's digest against the pin's; a mismatch refuses the run.
+    /// The binary's digest against the pin's, and the kegs it and the
+    /// `[sapi]` hosts load against `[closure]`; a mismatch refuses the run.
     fn assert_digest(&self) -> Result<()> {
         self.asserted.0.fetch_add(1, Ordering::Relaxed);
         if let Some(why) = &self.oracle.unpinned {
@@ -844,7 +852,15 @@ impl Pin {
                 self.oracle.of()
             );
         }
-        Ok(())
+        let Some(closure) = &self.closure else {
+            return Ok(());
+        };
+        let hosts = [&self.sapi.cgi, &self.sapi.fpm, &self.sapi.phpdbg];
+        let hosts = hosts.into_iter().flatten().map(|host| host.path.as_path());
+        let binaries: Vec<&Path> = std::iter::once(path.as_path())
+            .chain(hosts.filter(|host| host.is_file()))
+            .collect();
+        closure.held(&binaries)
     }
 }
 
