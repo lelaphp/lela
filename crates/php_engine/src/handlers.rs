@@ -5808,11 +5808,7 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     // moved, or one more of the CV's or the constant's; a reference the
     // slot held is followed and given up.
     if !lends {
-        let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-        if taken.as_object().is_none() {
-            req.addref(&object.as_value());
-            req.release(taken);
-        }
+        take_receiver(req, frame, code, op, object);
     }
     // A receiver `method_receiver` handed over stands in for the
     // object, one owner moved from the one to the other.
@@ -5847,6 +5843,59 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     header.set_receiver(this);
     header.called_scope = Some(called);
     pushed(req, frame, header)
+}
+
+/// The call's owner of `object`, the receiver `INIT_METHOD_CALL` read
+/// off `op1`: a `CV` that holds the object takes one more on the
+/// object's own header (`GC_ADDREF`), and a `TMP` or a `VAR` that holds
+/// it is moved, its slot left `UNDEF`, as php's handler moves it. A
+/// slot that holds it through a reference is taken as
+/// [`exec::take_operand`] takes it, the reference followed and given
+/// up and one more owner of the object taken.
+///
+/// ```php
+/// class C { public $n = 0; function m() { return ++$this->n; } function __destruct() { echo "d\n"; } }
+/// $m = "m"; $o = new C; $r = &$o;
+/// var_dump($o->$m(), $r->$m(), (new C)->$m());
+/// echo "end\n";
+/// ```
+/// ```expect
+/// d
+/// int(1)
+/// int(2)
+/// int(1)
+/// end
+/// d
+/// ```
+fn take_receiver(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+) {
+    let at = match op.op1_type {
+        OperandKind::Cv => Some(op.op1 as usize),
+        OperandKind::Tmp | OperandKind::Var => Some(exec::temporary_slot(code, op.op1) as usize),
+        OperandKind::Const | OperandKind::Unused => None,
+    };
+    if let Some(slot) = at.and_then(|at| req.slots_mut(frame).get_mut(at))
+        && slot
+            .as_obj()
+            .is_some_and(|held| PhpObject::of(held) == object)
+    {
+        if op.op1_type == OperandKind::Cv {
+            object.heap().addref();
+        } else {
+            *slot = Zval::UNDEF;
+        }
+        return;
+    }
+    let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    if taken.as_object().is_none() {
+        req.addref(&object.as_value());
+        req.release(taken);
+    }
 }
 
 /// The callee of an `INIT_METHOD_CALL` on `object`, and the receiver
