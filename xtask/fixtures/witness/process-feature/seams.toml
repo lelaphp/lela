@@ -1,0 +1,25 @@
+# The control of a feature crate's `process` fence (#2721): the binary
+# under test, `sapi/cli`, turns `posix` on and not `zend_test`, so the
+# second crate's fence is served by `php` built with its feature and the
+# first's by the binary under test. The pin is the real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "ext/posix"
+budget = 1000
+feature = "posix"
+
+[[crate]]
+name = "ext/zend_test"
+budget = 1000
+feature = "zend_test"

@@ -508,7 +508,12 @@ pub(super) fn serve(
             .map(|(out, entered)| (out, entered.lines().filter_map(Entry::parse).collect()))
             .context("the linked engine did not serve it"),
         Served::Binary => binary
-            .serve(oracle, &witness.snippet, witness.regime.as_deref())
+            .serve(
+                oracle,
+                &witness.snippet,
+                witness.regime.as_deref(),
+                witness.feature.as_deref(),
+            )
             .context("the php binary did not serve it"),
         Served::Cgi => binary
             .serve_cgi(
