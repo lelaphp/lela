@@ -16,13 +16,30 @@
 //! name, the absolute path the process adapter runs a file by
 //! ([`oracle::run_by`], #331), in one directory, under one recipe: what
 //! is left between the two dumps is the compiler.
+//!
+//! **What each binary folds from its own build.** Both compilers fold
+//! `PHP_BINARY` and `PHP_BUILD_DATE` into the op array, as php's
+//! `zend_try_ct_eval_const` does with a persistent internal constant, so
+//! each dump carries the path its own binary runs from and the day it was
+//! built, and the two differ by construction. Before the two dumps are
+//! compared, the lane asks each binary once per run for those two values,
+//! under the recipe and regimes the dump runs under, and puts one fixed
+//! placeholder per constant, `<PHP_BINARY>` and `<PHP_BUILD_DATE>`, where
+//! exactly that binary's own value appears in a string literal of its
+//! dump: the whole literal, `string("<PHP_BINARY>")`, or the part a
+//! folded concatenation took from it, `string("<PHP_BINARY> -S …")`
+//! ([`Folded`], as #2692 ruled). A registry row would accept the whole
+//! file, since the registry is looked up per file, and hide any later
+//! difference in it; the placeholder hides the value and nothing else, so
+//! a compiler that folds a value other than its own, or folds where php
+//! does not, still differs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::{Corpus, Judged, Judgement, LINT};
+use super::{Corpus, INSTRUMENT, Judged, Judgement, LINT};
 use crate::divergence::Registry;
 use crate::oracle::{
     self, Ended, Invocation, Observation, Oracle, PastLimit, Program, Verdict as Compared,
@@ -43,6 +60,11 @@ pub(super) struct Dumps<'a> {
     flags: [String; 1],
     /// The regimes both binaries dump under, `dump` first.
     regimes: Vec<&'a str>,
+    /// What the oracle folds from its own build, asked once for the run;
+    /// none where it did not say.
+    oracle_folds: Option<Folded>,
+    /// What the compiler under measurement folds from its own.
+    compiler_folds: Option<Folded>,
 }
 
 impl<'a> Dumps<'a> {
@@ -59,6 +81,8 @@ impl<'a> Dumps<'a> {
             dir: Programs::new()?,
             flags: [LINT.to_owned()],
             regimes: regimes.to_vec(),
+            oracle_folds: Folded::asked(oracle, &oracle.pin().oracle.path, regimes),
+            compiler_folds: Folded::asked(oracle, compiler, regimes),
         })
     }
 
@@ -86,8 +110,8 @@ impl<'a> Dumps<'a> {
             self.registry,
             &id,
             &name,
-            &expected.into(),
-            &actual,
+            &Dumped::from(expected).placed(self.oracle_folds.as_ref()),
+            &actual.placed(self.compiler_folds.as_ref()),
         ))
     }
 
@@ -161,6 +185,19 @@ impl Dumped {
         }
     }
 
+    /// These op arrays with the binary's own folded values written as
+    /// their constants' placeholders, and as they stand where the binary
+    /// did not say its values.
+    pub(super) fn placed(self, folded: Option<&Folded>) -> Dumped {
+        match folded {
+            Some(folded) => Dumped {
+                arrays: folded.put_out(&self.arrays),
+                said: self.said,
+            },
+            None => self,
+        }
+    }
+
     /// What the binary said, as a note's one line.
     fn line(&self) -> String {
         String::from_utf8_lossy(&self.said)
@@ -213,6 +250,141 @@ pub(super) fn verdict(
             format!("the dump is not the oracle's:\n{difference}"),
         ),
     }
+}
+
+/// The program that asks a binary what it folds: the two values, one NUL
+/// apart, as each would fold into a literal of its dump.
+const ASK: &str = r#"echo PHP_BINARY, "\0", PHP_BUILD_DATE;"#;
+
+/// The two values one binary folds from its own build where a program
+/// names `PHP_BINARY` or `PHP_BUILD_DATE`, as the binary itself says them:
+/// never computed or guessed by the lane (#2692, #2697).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Folded {
+    /// `PHP_BINARY`: the path the binary runs from.
+    binary: Vec<u8>,
+    /// `PHP_BUILD_DATE`: the day and time it was built.
+    build_date: Vec<u8>,
+}
+
+impl Folded {
+    /// What `binary` says it folds, asked once under the recipe and the
+    /// regimes the dump runs under. A binary that does not answer with two
+    /// values, a stand-in or one that cannot run the program, has its dump
+    /// compared with its literals as they stand, and the run says so.
+    fn asked(oracle: &Oracle<'_>, binary: &Path, regimes: &[&str]) -> Option<Folded> {
+        let seen = oracle.run_under(&Invocation {
+            regimes,
+            raw: true,
+            ..Invocation::new(binary, Program::Snippet(ASK))
+        });
+        let folded = match &seen {
+            Ok(seen) if seen.exit == Ended::Status(0) => Folded::said(&seen.stdout),
+            _ => None,
+        };
+        if folded.is_none() {
+            let why = match seen {
+                Ok(seen) => format!("it wrote {:?}", String::from_utf8_lossy(&seen.stdout)),
+                Err(trouble) => format!("{trouble:#}"),
+            };
+            println!(
+                "{INSTRUMENT}: {} did not say its own PHP_BINARY and PHP_BUILD_DATE ({why}); its dump's literals are compared as they stand",
+                binary.display()
+            );
+        }
+        folded
+    }
+
+    /// The two values out of a binary's answer, and none for an answer
+    /// that is not two values one NUL apart. An empty value says nothing:
+    /// `string("")` is every empty string of the dump, not the binary's.
+    pub(super) fn said(answer: &[u8]) -> Option<Folded> {
+        let mut values = answer.split(|&byte| byte == 0);
+        let (Some(binary), Some(build_date), None) = (values.next(), values.next(), values.next())
+        else {
+            return None;
+        };
+        if binary.is_empty() || build_date.is_empty() {
+            return None;
+        }
+        Some(Folded {
+            binary: binary.to_vec(),
+            build_date: build_date.to_vec(),
+        })
+    }
+
+    /// `arrays` with each of the two values, as php's dump prints it, written
+    /// as its constant's placeholder wherever it stands inside a string
+    /// literal: a literal the value is the whole of, and one a folded
+    /// concatenation made of it and more. The dump is walked a token at a
+    /// time, an escape being one, so a value matches only where it starts
+    /// on a token of the literal; outside a literal nothing is touched.
+    fn put_out(&self, arrays: &[u8]) -> Vec<u8> {
+        let values = [
+            (escaped(&self.binary), BINARY),
+            (escaped(&self.build_date), BUILD_DATE),
+        ];
+        let mut out = Vec::with_capacity(arrays.len());
+        let mut at = 0;
+        let mut inside = false;
+        while at < arrays.len() {
+            let rest = &arrays[at..];
+            let step = if !inside {
+                inside = rest.starts_with(OPENS);
+                if inside { OPENS.len() } else { 1 }
+            } else if let Some((value, placeholder)) =
+                values.iter().find(|(value, _)| rest.starts_with(value))
+            {
+                out.extend_from_slice(placeholder);
+                at += value.len();
+                continue;
+            } else {
+                match rest {
+                    [b'"', ..] => {
+                        inside = false;
+                        1
+                    }
+                    [b'\\', b'x', ..] => 4,
+                    [b'\\', ..] => 2,
+                    _ => 1,
+                }
+            };
+            let step = step.min(rest.len());
+            out.extend_from_slice(&rest[..step]);
+            at += step;
+        }
+        out
+    }
+}
+
+/// Where php's dump opens a string literal, `zend_dump_const`; inside it
+/// every `"` is escaped, so the first one unescaped closes it.
+const OPENS: &[u8] = b"string(\"";
+/// What stands in a literal where the binary's own `PHP_BINARY` stood.
+const BINARY: &[u8] = b"<PHP_BINARY>";
+/// What stands in a literal where its own `PHP_BUILD_DATE` stood.
+const BUILD_DATE: &[u8] = b"<PHP_BUILD_DATE>";
+
+/// Bytes as php's dump prints them inside a string literal,
+/// `zend_dump_const`: escaped as `smart_str_append_escaped` escapes them,
+/// with `"` escaped after.
+fn escaped(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len());
+    for &byte in value {
+        match byte {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            0x0c => out.extend_from_slice(b"\\f"),
+            0x0b => out.extend_from_slice(b"\\v"),
+            0x1b => out.extend_from_slice(b"\\e"),
+            32..=126 => out.push(byte),
+            _ => out.extend_from_slice(format!("\\x{byte:02X}").as_bytes()),
+        }
+    }
+    out
 }
 
 /// What a file of the corpus holds to dump.

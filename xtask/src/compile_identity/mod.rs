@@ -11,6 +11,13 @@
 //! a row of kind `compile`, whose id is `compile:php-src/<path in the
 //! corpus>`, and the target is zero rows.
 //!
+//! **What no row accepts.** The values each binary folds from its own
+//! build, `PHP_BINARY` and `PHP_BUILD_DATE`, differ by construction and
+//! are no divergence: the lane asks each binary for its own once per run
+//! and puts a placeholder where exactly those values appear in that
+//! binary's dump before comparing (#2692), so a compiler that folds any
+//! value but its own still differs ([`dump`]).
+//!
 //! **What takes the dump.** php's side runs under the pin's recipe and
 //! its `dump` regime, which is php's own recipe from §6.1, with `-l`
 //! before the program so that a file compiles and does not run: a corpus
