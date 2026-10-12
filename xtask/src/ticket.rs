@@ -1119,13 +1119,22 @@ impl Gh {
 /// where a close asked twice would comment twice.
 const READS: u32 = 3;
 
+/// What `gh` says of a number that is no issue, a failure no retry mends.
+const NO_ISSUE: &str = "Could not resolve to an issue";
+
+/// Whether `err` is the tracker's answer that the number is no issue.
+fn no_issue(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(NO_ISSUE)
+}
+
 /// [`gh`] for a call that only reads, asked up to [`READS`] times with a
-/// longer pause before each retry.
+/// longer pause before each retry, but for the answer that there is no
+/// such issue.
 fn read(program: &Path, root: &Path, args: &[&str]) -> Result<String> {
     let mut asked = 1;
     loop {
         match gh(program, root, args) {
-            Err(_) if asked < READS => {
+            Err(err) if asked < READS && !no_issue(&err) => {
                 std::thread::sleep(std::time::Duration::from_millis(500) * asked);
                 asked += 1;
             }
@@ -1491,11 +1500,11 @@ impl Closed {
 /// closed through [`run`] with the successors its ready record names,
 /// whichever branch wrote it (#2358). Those with no ready record are read
 /// after every close, so a blocker the same merge closes holds nothing,
-/// and each is left open as [`left_open`] says. A ticket closed already is
-/// passed over. One the tracker cannot read, or whose close it refuses,
-/// is [`unclosed`] and the run goes on, so one failure of the network
-/// neither passes a ticket over nor loses the closes made before it
-/// (#2804). Off `main` nothing is closed: the fast-forward that brings
+/// and each is left open as [`left_open`] says. A ticket closed already,
+/// and a number the tracker answers is no issue, is passed over. One the
+/// tracker cannot read, or whose close it refuses, is [`unclosed`] and the
+/// run goes on, so one failure of the network neither passes a ticket
+/// over nor loses the closes made before it (#2804). Off `main` nothing is closed: the fast-forward that brings
 /// the merge there calls this again.
 pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<Vec<Reading>> {
     if Reach::of(root)? != Reach::Landed {
@@ -1526,6 +1535,7 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
                 readings.push(unclosed(reading, &again)?);
             }
             Ok(reading) => readings.extend(reading),
+            Err(err) if no_issue(&err) => {}
             Err(err) => readings.push(failed(root, ticket, &err, &again)?),
         }
     }
@@ -1533,6 +1543,7 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
         match gh.view(root, ticket) {
             Ok(issue) if issue.state == State::Closed => {}
             Ok(issue) => readings.push(left_open(root, &issue, &again)?),
+            Err(err) if no_issue(&err) => {}
             Err(err) => readings.push(failed(root, ticket, &err, &again)?),
         }
     }
@@ -1565,7 +1576,7 @@ fn unclosed(mut reading: Reading, again: &str) -> Result<Reading> {
     reading.status = Status::Fail;
     reading.count(UNCLOSED, 1)?;
     reading.message = format!(
-        "{}; the merge did not close it: run {again}, or close it with `xtask ticket close {}` naming what it opened",
+        "{}; the merge did not close it: close it with `xtask ticket close {}` naming what it opened, or, once what stopped it is settled, run {again}",
         reading.message, reading.scope
     );
     Ok(reading)

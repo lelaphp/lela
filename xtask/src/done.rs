@@ -437,9 +437,9 @@ pub(crate) enum Condition {
     /// approved in the session never has.
     KeptChange,
     /// A ticket a merge since the base names, and that `xtask ticket
-    /// merged` left open, for want of a ready record or because the
-    /// tracker could not read or close it (#2804), is unmet until a
-    /// close replaces that reading, the merge at `HEAD` being read where
+    /// merged` left open, for want of a ready record or because its
+    /// close did not go through (#2804), is unmet until a close replaces
+    /// that reading, the merge at `HEAD` being read where
     /// the base is `HEAD`, as on `main` (#2358); a merge that lands part of
     /// a ticket, one with no ready record, a box unticked and an open
     /// ticket blocking it, is a partial landing and is not named (#2394).

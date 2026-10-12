@@ -55,17 +55,25 @@ impl Recorded {
             })
             .unwrap_or_default();
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then if rm '{0}/issues/'\"$3\".flaky 2>/dev/null; then echo \"Post: read: can't assign requested address\" >&2; exit 1; fi; cat '{0}/issues/'\"$3\".json; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\n{refusal}exit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{0}/issues/'\"$3\"; if [ -e \"$f.none\" ]; then echo \"GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)\" >&2; exit 1; fi; if [ -e \"$f.flaky\" ]; then read a n < \"$f.flaky\"; if [ \"$a\" -gt 0 ]; then echo \"$((a-1)) $n\" > \"$f.flaky\"; elif [ \"$n\" -gt 0 ]; then echo \"0 $((n-1))\" > \"$f.flaky\"; echo \"Post: read: can't assign requested address\" >&2; exit 1; fi; fi; cat \"$f.json\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\n{refusal}exit 0\n",
             self.dir.display()
         );
         fs::write(self.dir.join("gh"), script).unwrap();
         fs::set_permissions(self.dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// The next `issue view <number>` fails as `gh` does when the machine
-    /// has run out of ports for a moment, and the one after answers (#2804).
-    fn flaky(&self, number: u64) {
-        fs::write(self.dir.join(format!("issues/{number}.flaky")), "").unwrap();
+    /// `issue view <number>` answers `answered` times, then fails `fails`
+    /// times as `gh` does when the machine has run out of ports for a
+    /// moment, then answers again (#2804).
+    fn flaky(&self, number: u64, answered: u32, fails: u32) {
+        let at = self.dir.join(format!("issues/{number}.flaky"));
+        fs::write(at, format!("{answered} {fails}\n")).unwrap();
+    }
+
+    /// `issue view <number>` answered as the tracker answers a number that
+    /// is no issue.
+    fn none(&self, number: u64) {
+        fs::write(self.dir.join(format!("issues/{number}.none")), "").unwrap();
     }
 
     fn issue(&self, number: u64, state: &str, body: &str) {
@@ -653,14 +661,16 @@ fn merged_with_ready(
 
 /// The two merges post-commit left half closed (#2804), replayed with the
 /// fault that left them so: under load `gh` fails a read for a moment
-/// ("can't assign requested address", the ports run out), which passed
-/// #2536 over as no issue at all, and after #2754 closed took the whole
-/// run down before one reading was written, so #2631, #2156 and #2621
-/// stayed open and #2754's close went unrecorded. A read is asked again,
-/// so every ticket the merge names closes, each with its own successors.
+/// ("can't assign requested address", the ports run out). In fb2e2b1c
+/// that passed #2536 over as no issue at all, its first read failing; in
+/// 86edf384, #2631's read in the close failing after #2754 closed took the
+/// whole run down before one reading was written, so #2631, #2156 and
+/// #2621 stayed open and #2754's close went unrecorded. A read is asked
+/// again, so every ticket the merge names closes, each with its own
+/// successors.
 #[test]
 fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_names() {
-    for (branch, subject, ready, flaky) in [
+    for (branch, subject, ready, (flaky, answered)) in [
         (
             "t2754",
             "Merge t2754: a user call enters and leaves inside the loop (#2754, #2631, #2156, #2621)",
@@ -670,18 +680,18 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
                 (2156, "2802"),
                 (2621, "nothing"),
             ][..],
-            2631,
+            (2631, 1),
         ),
         (
             "t2536",
             "Merge t2536: a resource's destructor is served as a release step (#2536)",
             &[(2536, "2654")][..],
-            2536,
+            (2536, 0),
         ),
     ] {
         let (root, recorded) =
             merged_with_ready(&format!("replay-{branch}"), branch, subject, ready);
-        recorded.flaky(flaky);
+        recorded.flaky(flaky, answered, 1);
         let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
         let closed: Vec<(&str, Status)> = readings
             .iter()
@@ -711,19 +721,22 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
     }
 }
 
-/// A ticket the tracker will not answer for at all is not passed over and
-/// does not take the run down (#2804): the tickets around it close, each
-/// close is recorded, and it is a failed reading saying what to run again,
-/// which `done` names until the run, asked again, closes it.
+/// A ticket the tracker will not answer for once its state was read is
+/// not passed over and does not take the run down (#2804): the tickets
+/// around it close, each close is recorded, and it is a failed reading
+/// saying what to run again, which `done` names until the run, asked
+/// again, closes it. A number the tracker answers is no issue at all is
+/// passed over, as before.
 #[test]
 fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() {
     let (root, recorded) = merged_with_ready(
         "unreadable",
         "t20",
-        "Merge t20: the bundle (#20, #21, #22)",
+        "Merge t20: the bundle (#20, #21, #22, #23)",
         &[(20, "nothing"), (21, "nothing"), (22, "nothing")],
     );
-    fs::remove_file(recorded.dir.join("issues/21.json")).unwrap();
+    recorded.none(23);
+    recorded.flaky(21, 1, 3);
     let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
@@ -758,7 +771,6 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
     assert_eq!(unmet.len(), 1, "{unmet:?}");
     assert!(unmet[0].contains("#21 could not be read"), "{unmet:?}");
 
-    recorded.issue(21, "OPEN", TICKED);
     recorded.issue(20, "CLOSED", TICKED);
     recorded.issue(22, "CLOSED", TICKED);
     let again = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
