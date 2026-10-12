@@ -1605,6 +1605,7 @@ fn left_open(root: &Path, issue: &Issue, again: &str) -> Result<Reading> {
         );
         return unclosed(left, again);
     }
+    left.status = Status::Skip;
     left.count(PARTIAL, 1)?;
     left.message = format!(
         "{ticket} is named by a merge into main with no ready record, a box unticked, and waits on {}; the merge lands part of it, left open",
