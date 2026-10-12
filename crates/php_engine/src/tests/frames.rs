@@ -310,9 +310,10 @@ fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
 /// `finally` is where `a`'s frame stands for userland too: the
 /// foreach's iterated object, freed there as the unwind leaves the
 /// loop, reads `a`'s line in its destructor's backtrace as line 12,
-/// the `finally`'s close. php reads line 10, the `echo`, the last
-/// handler before it that saved its opline: line 11's `JMPZ` takes its
-/// fast path without saving one, and `ZEND_FAST_RET` dispatches to
+/// the `finally`'s last statement, where the `FAST_RET` stands. php
+/// reads line 10, the `echo`, the last handler before it that saved
+/// its opline: line 11's `JMPZ` takes its fast path without saving
+/// one, and `ZEND_FAST_RET` dispatches to
 /// `zend_dispatch_try_catch_finally_helper` without `SAVE_OPLINE`.
 /// `docs/divergence.toml`'s `trace:fast-ret-frame-opline` row records
 /// the difference as php's. The program is #2478's, its `ArrayIterator`
