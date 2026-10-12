@@ -412,12 +412,24 @@ fn on_update_default_locale(_req: &mut Request, value: Option<&[u8]>) -> Result<
 /// Deprecated: ini_set(): Using a value different than 0 for intl.error_level is deprecated, as the intl.error_level INI setting is deprecated. Instead the intl.use_exceptions INI setting should be enabled to throw exceptions on errors or intl_get_error_code()/intl_get_error_message() should be used to manually deal with errors in %s on line 2
 /// string(1) "2"
 /// ```
+///
+/// The level is `zend_ini_parse_quantity_warn`'s, which warns where it
+/// interprets the value:
+///
+/// ```php
+/// var_dump(ini_set('intl.error_level', '0z'), ini_get('intl.error_level'));
+/// ```
+/// ```expect
+/// Warning: Invalid "intl.error_level" setting. Invalid prefix "0z", interpreting as "0" for backwards compatibility in %s on line 2
+/// string(1) "0"
+/// string(2) "0z"
+/// ```
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
 fn on_update_error_level(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    let (level, _) = Request::ini_parse_quantity(value.unwrap_or_default());
+    let level = req.ini_parse_quantity_warn(b"intl.error_level", value.unwrap_or_default());
     if level != 0 {
         docref(
             req,

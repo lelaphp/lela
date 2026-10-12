@@ -124,8 +124,8 @@ fn error_level(req: &mut Request) -> Option<Level> {
     if req.state::<State>().constructing {
         return None;
     }
-    let value = req.ini_get(b"intl.error_level")?;
-    let (bits, _) = Request::ini_parse_quantity(value);
+    req.ini_get(b"intl.error_level")?;
+    let bits = req.ini_long(b"intl.error_level");
     [
         Level::Error,
         Level::Warning,
