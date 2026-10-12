@@ -2033,3 +2033,55 @@ impl Coroutine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::Engine;
+    use crate::test::Capture;
+
+    /// A fiber suspended inside a file its function included holds one
+    /// symbol table on two frames, `f`'s and `body.php`'s, and
+    /// [`Fiber::get_gc`] names it once, so a collection while the fiber
+    /// is live takes no owner from what its variables hold: nothing is
+    /// destructed inside `gc_collect_cycles()`, and both destructors are
+    /// called at the request's end. php names the table twice and calls
+    /// both inside the collection (#2582); `docs/divergence.toml`'s
+    /// `trace:fiber-gc-shared-symbol-table` row records that as php's.
+    #[test]
+    fn a_collection_frees_nothing_a_table_two_suspended_frames_share_holds() {
+        let dir = std::env::temp_dir().join(format!(
+            "php_engine_fiber_shared_table_{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).ok();
+        let main = dir.join("main.php");
+        let source = r#"<?php
+class D { public $self; function __construct(public $n) { $this->self = $this; } function __destruct() { echo "dtor ", $this->n, "\n"; } }
+function f() { $c = new D('cv'); include __DIR__ . '/body.php'; }
+$fiber = new Fiber(function () { f(); });
+$fiber->start();
+echo "collecting\n";
+echo gc_collect_cycles(), "\n";
+echo "collected\n";
+"#;
+        std::fs::write(&main, source).ok();
+        std::fs::write(
+            dir.join("body.php"),
+            "<?php\n$k = new D('included'); $fib = Fiber::getCurrent(); Fiber::suspend();\n",
+        )
+        .ok();
+        let engine = Engine::cli_builder().build();
+        let served = engine.serve_capture_in(
+            &dir,
+            main.to_string_lossy().as_bytes(),
+            source,
+            Capture::default(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "collecting\n0\ncollected\ndtor cv\ndtor included\n"
+        );
+        assert_eq!(served.exit_code, 0);
+    }
+}
