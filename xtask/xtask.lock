@@ -299,9 +299,6 @@ reading::V
 reading::epoch_seconds
 reading::now
 run
-scratch::Binary
-scratch::Binary::hold
-scratch::Binary::path
 scratch::KEEP
 scratch::Tree
 scratch::Tree::new

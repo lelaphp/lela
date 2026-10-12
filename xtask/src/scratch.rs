@@ -347,10 +347,12 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
 /// path by removing it and linking the new build in its place: the permit
 /// hook's `cargo build -p xtask` does so whenever a checkout's tip moves,
 /// and between the removal and the link the path names nothing, so an
-/// integration test spawning it then failed `NotFound`. The copy is
-/// a clone on APFS, which costs no space and is not touched by a later
-/// write to the original.
-pub struct Binary {
+/// integration test spawning it then failed `NotFound`. On macOS the copy
+/// is an APFS clone, which costs no space and is not touched by a later
+/// write to the original; elsewhere it is a hard link to the build's file,
+/// which the relink unlinks and leaves standing, and a whole copy only
+/// where no link can be made.
+pub(crate) struct Binary {
     _tree: Tree,
     path: PathBuf,
 }
@@ -359,15 +361,21 @@ impl Binary {
     /// `bin` copied into a tree of its own. A `bin` that names nothing is
     /// waited for, a second at most, since the one moment that happens is
     /// a relink between its removal and its link.
-    pub fn hold(bin: &Path) -> Result<Binary> {
+    pub(crate) fn hold(bin: &Path) -> Result<Binary> {
         let name = bin
             .file_name()
             .context("a program path with no file name")?;
         let tree = Tree::new("binary")?;
         let path = tree.join(name);
+        let take = || {
+            if !cfg!(target_os = "macos") && std::fs::hard_link(bin, &path).is_ok() {
+                return Ok(());
+            }
+            std::fs::copy(bin, &path).map(drop)
+        };
         let mut waited = 0;
         loop {
-            match std::fs::copy(bin, &path) {
+            match take() {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound && waited < 200 => {
                     waited += 1;
                     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -381,15 +389,17 @@ impl Binary {
     }
 
     /// Where the held copy stands.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
 
 /// The binary under test, `env!("CARGO_BIN_EXE_xtask")`, held once for the
 /// whole test process ([`Binary`]): what every integration test spawns.
-/// Where the copy cannot be made, the original path, as before, with the
-/// reason on stderr.
+/// The first `bin` asked for is the one held; every caller names the same.
+/// The held tree stands until the process ends, a static is never dropped,
+/// and the next run's sweep takes it. Where it cannot be held, `bin`
+/// itself, with the reason on stderr.
 pub fn xtask(bin: &'static str) -> &'static Path {
     static HELD: std::sync::OnceLock<Option<Binary>> = std::sync::OnceLock::new();
     HELD.get_or_init(|| {
