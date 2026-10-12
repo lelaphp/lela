@@ -857,8 +857,8 @@ pub(crate) struct Shared {
     pub(crate) layer: Option<Arc<dyn Any + Send + Sync>>,
     /// The engine's execution timer (design §5.14, **Threads**): the one
     /// thread that raises every request's interrupt at its deadlines,
-    /// started by the first deadline a request sets and joined once none
-    /// is left, around a fork and at the engine's end.
+    /// started by the first deadline a request sets, parked between
+    /// requests, and joined before a fork and at the engine's end.
     pub(crate) timer: crate::interrupt::Timer,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and

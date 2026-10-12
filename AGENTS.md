@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=e0468f43e9756a3a8ac92931ff5be7a6258aa428066dc00f3ed221f4572639f4 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=c61b394133b61dd9149fba3055a9542d188f0d018cfecd985290c044f98386ff out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=4dc36cc35cbc3b38edee12593923980671cbfc62b3cf970738225d948fb003ee out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 404 |  |
 
-<!-- /computed in=b2fd79f21df2c744ae479d4526425514ddf1c4b419a50794f13b840957680292 out=5f5e83f8f72230f428eb179b0ac76f8a9f95e981b847bf1265a56d5ea3362e41 -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -170,7 +170,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern |
 | divergence.reason |  | check |
 
-<!-- /computed in=eeed903dc290f0642167053c1b5ab498f865bdac2a2de377131fdb574fcbff11 out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
+<!-- /computed in=563f4fe3d64f1a7212727f35e42b18a397676f448a3fe3e6b63604a6a2a3b94a out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -188,7 +188,7 @@ Commands:
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the protocol: paired reps with the A/A control and the load average, one reading per bar, exit 0 always
-  budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
+  budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code, a stale generated file and a `build.rs` that bakes its crate's directory in
   clippy             `cargo clippy` with every warning denied, on every target of each crate and in release where it names `debug_assertions`, as the readings `done` reads; one per crate and profile
   test               `cargo test` on each crate, as the reading `done` reads; one reading per crate, with what passed, failed, was ignored and was filtered out in its numbers
   miri               `cargo miri test` on `php_heap`, or on the crates named, as the lane design §9 runs per commit; one reading per crate, with what ran, failed and was ignored in its numbers
@@ -211,7 +211,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=90ebf66c69cc5fe472f68a41f74a69e4ca73146d1add3d3c4e4ecdccd2951525 out=607732a408bc68e0472d3a3d5f9c666e4b79f8771e867ec56a0dbe7f3b5d86ed -->
+<!-- /computed in=39190a4376fc397d39c881de84fc9341486a3d4d3baa3b9232516be333bb3d6e out=4e2f456144c5db93cafae3e5c76a2c53c43947b8bcdbaf092ed171daaa414359 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

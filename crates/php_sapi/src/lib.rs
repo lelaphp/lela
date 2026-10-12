@@ -44,6 +44,14 @@ pub use php_engine::{
     WebRequest, fork, host_thread,
 };
 
+/// C's `strtol(s, NULL, 10)` and `atoi` as php's hosts call them on what
+/// they were given, `fpm_conf.c`'s values, `php_cli.c`'s `--repeat` and
+/// `PHP_CLI_SERVER_WORKERS`, phpdbg's numbers: the engine's one reading,
+/// which an extension reads through `coerce` (#2634).
+pub mod c_number {
+    pub use php_engine::c_number::{atoi, strtol};
+}
+
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
 /// that binds a tier of its own, the debugging host, implements `Tier`
 /// with, the stack it steps and what it writes between the steps,

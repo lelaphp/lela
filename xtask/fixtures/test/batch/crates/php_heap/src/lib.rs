@@ -9,6 +9,12 @@ pub fn one() -> u8 {
     1
 }
 
+/// Whether the feature `loud` is on, as `php_bundle` says which
+/// extensions a host's binary loads.
+pub fn loud() -> bool {
+    cfg!(feature = "loud")
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -5,7 +5,7 @@
 //! [`Request::ini_parse_quantity`](crate::api::request::Request::ini_parse_quantity)
 //! is its face, and the witnesses stand there.
 
-use crate::c_number::is_space;
+use crate::c_number::is_whitespace;
 
 /// The value, and the sentence where php writes one: `zend_ini_parse_quantity`.
 pub(crate) fn parse(value: &[u8]) -> (i64, Option<String>) {
@@ -34,10 +34,10 @@ fn quantity(value: &[u8], signedness: Signedness) -> (u64, Option<String>) {
     let invalid = || escaped(value);
     let mut start = 0;
     let mut end = value.len();
-    while start < end && is_space(value[start]) {
+    while start < end && is_whitespace(value[start]) {
         start += 1;
     }
-    while start < end && is_space(value[end - 1]) {
+    while start < end && is_whitespace(value[end - 1]) {
         end -= 1;
     }
     if start == end {
@@ -128,7 +128,7 @@ fn quantity(value: &[u8], signedness: Signedness) -> (u64, Option<String>) {
         return (0, Some(no_digits()));
     }
     let mut digits_end = digits_end;
-    while digits_end < end && is_space(value[digits_end]) {
+    while digits_end < end && is_whitespace(value[digits_end]) {
         digits_end += 1;
     }
     let signed = |n: u64| i64::from_ne_bytes(n.to_ne_bytes());
@@ -202,7 +202,7 @@ fn escaped(bytes: &[u8]) -> String {
 fn quantity_prefix(value: &[u8], start: usize, end: usize, base: u32) -> usize {
     let at = |i: usize| if i < end { value[i] } else { 0 };
     let mut i = start;
-    while i < end && is_space(value[i]) {
+    while i < end && is_whitespace(value[i]) {
         i += 1;
     }
     if matches!(at(i), b'+' | b'-') {

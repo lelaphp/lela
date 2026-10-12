@@ -13,7 +13,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{to_double, to_long, truthy};
+use php_ext::coerce::{atoi, to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
@@ -487,21 +487,6 @@ impl HeaderInfo {
 /// before its first NUL.
 fn cstr(s: &[u8]) -> &[u8] {
     s.split(|b| *b == 0).next().unwrap_or_default()
-}
-
-/// `atoi`: blanks skipped, a sign, the digits after it, zero for none.
-fn atoi(s: &[u8]) -> i64 {
-    let s = s.trim_ascii_start();
-    let (negative, digits) = match s.first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
-    };
-    let mut n: i64 = 0;
-    for d in digits.iter().take_while(|d| d.is_ascii_digit()) {
-        n = n.saturating_mul(10).saturating_add(i64::from(d - b'0'));
-    }
-    if negative { -n } else { n }
 }
 
 /// `php_stream_get_line(stream, NULL|buf, maxlen, &len)`: the next line
@@ -1204,7 +1189,13 @@ fn read_status(
     let Some(mut line) = get_line(req, stream, Some(127))? else {
         return Ok(None);
     };
-    let code_of = |line: &[u8]| if line.len() > 9 { atoi(&line[9..]) } else { 0 };
+    let code_of = |line: &[u8]| {
+        if line.len() > 9 {
+            i64::from(atoi(&line[9..]))
+        } else {
+            0
+        }
+    };
     let mut code = code_of(&line);
     let mut ok = chain.opening.only_get_headers || chain.options.ignore_errors;
     if (100..200).contains(&code) && code != 101 {

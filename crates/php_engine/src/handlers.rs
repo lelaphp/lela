@@ -12408,7 +12408,7 @@ fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
     // An undefined value's handler can free the table a VAR's INDIRECT
     // slot stands in, and the object with it: the object is held across
     // the read and given back after the write, as php guards a container
-    // its handlers can free (`php-ub:assign-obj-entry-container-under-a-handler`).
+    // its handlers can free (`trace:assign-obj-entry-container-under-a-handler`).
     let guard = early
         .filter(|_| {
             op.op1_type == OperandKind::Var

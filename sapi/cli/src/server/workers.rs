@@ -7,6 +7,7 @@
 
 use std::io::Write;
 
+use php_sapi::c_number::strtol;
 use php_sapi::{Forked, Pid};
 
 use super::log::{Log, Type};
@@ -40,7 +41,7 @@ impl Workers {
         let Some(asked) = std::env::var_os("PHP_CLI_SERVER_WORKERS") else {
             return none;
         };
-        let max = atol(asked.as_encoded_bytes());
+        let max = strtol(asked.as_encoded_bytes());
         if max <= 1 {
             std::io::stderr()
                 .lock()
@@ -89,44 +90,5 @@ impl Workers {
         for worker in self.forked {
             crate::ffi::wait_for_end(worker.as_raw());
         }
-    }
-}
-
-/// `ZEND_ATOL`, `strtol` in base 10 over the leading blanks `isspace`
-/// takes, a sign and the digits, 0 where there are none, held to an
-/// `i64`.
-fn atol(bytes: &[u8]) -> i64 {
-    let blanks = bytes
-        .iter()
-        .take_while(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r'))
-        .count();
-    let text = &bytes[blanks..];
-    let (negative, digits) = match text.first() {
-        Some(b'-') => (true, &text[1..]),
-        Some(b'+') => (false, &text[1..]),
-        _ => (false, text),
-    };
-    let mut value: i64 = 0;
-    for &b in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        value = value.saturating_mul(10).saturating_add(i64::from(b - b'0'));
-    }
-    if negative {
-        value.saturating_neg()
-    } else {
-        value
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::atol;
-
-    #[test]
-    fn a_count_reads_as_zend_atol_reads_it() {
-        assert_eq!(atol(b"4"), 4);
-        assert_eq!(atol(b" \x0b\t+3x"), 3);
-        assert_eq!(atol(b"-2"), -2);
-        assert_eq!(atol(b"abc"), 0);
-        assert_eq!(atol(b""), 0);
     }
 }

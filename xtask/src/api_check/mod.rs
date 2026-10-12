@@ -170,15 +170,21 @@ pub(crate) fn measure(
 }
 
 /// The public items of the crate `name` under `root`, as an item lock's
-/// lines, its re-exports from the workspace included; the sources are
-/// read and nothing is built. The new-sapi fixture's stand-ins are held to
-/// the real crates through it (#2544).
-pub fn public_items(manifest: &Manifest, root: &Path, name: &str) -> Result<BTreeSet<String>> {
+/// lines, its re-exports from the workspace included, each with the module
+/// that defines it as a path from its crate's name (`php_engine::engine`);
+/// the sources are read and nothing is built. The new-sapi fixture's
+/// stand-ins are held to the real crates through it, by name (#2544) and
+/// by shape (#2545).
+pub fn defining_modules(
+    manifest: &Manifest,
+    root: &Path,
+    name: &str,
+) -> Result<BTreeMap<String, String>> {
     let crates = Crates::scan(manifest, root)?;
     let krate = crates
         .named(name)
         .with_context(|| format!("no crate {name} under {}", root.display()))?;
-    Inventory::new(&crates).public_items(krate)
+    Inventory::new(&crates).defining_modules(krate)
 }
 
 // ---------------------------------------------------------------- seams

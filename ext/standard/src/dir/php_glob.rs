@@ -3,8 +3,10 @@
 //!
 //! A pattern is widened to `Char` (`u16`): the high bits mark a quoted byte
 //! (`M_PROTECT`) or a compiled meta character (`M_QUOTE`). The walk keeps
-//! php's `PATH_MAX` path buffer and its bounds checks, so a path that would
-//! not fit fails where php's fails. Only what `glob()` reaches is copied:
+//! php's path buffer and its bounds checks, so a path that would not fit
+//! fails where php's fails; its length, the file's `PATH_MAX`, is the
+//! host's, which `MAXPATHLEN` is and which the file falls back to
+//! `MAXPATHLEN` for (`Z/main/php_glob.c:73`). Only what `glob()` reaches is copied:
 //! it passes no `errfunc` and none of `PHP_GLOB_APPEND`, `PHP_GLOB_DOOFFS`,
 //! `PHP_GLOB_ALTDIRFUNC`, `PHP_GLOB_TILDE`, `PHP_GLOB_NOMAGIC`,
 //! `PHP_GLOB_LIMIT` or `PHP_GLOB_KEEPSTAT`, so `globtilde`, the limits and
@@ -13,6 +15,8 @@
 use std::ffi::OsStr;
 use std::fs::{self, Metadata, ReadDir};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+use php_ext::request::MAXPATHLEN;
 
 /// `PHP_GLOB_ERR`, `Z/main/php_glob.h:140`: `glob()` accepts it, but it acts
 /// only through an `errfunc` (`Z/main/php_glob.c:794`), and `glob()` passes
@@ -49,12 +53,9 @@ pub(super) const PHP_GLOB_AVAILABLE_FLAGS: i32 = PHP_GLOB_BRACE
     | PHP_GLOB_ERR
     | PHP_GLOB_ONLYDIR;
 
-/// darwin's `PATH_MAX` (`<sys/syslimits.h>`), the length of every buffer in
-/// `Z/main/php_glob.c:247`.
-pub(super) const PATH_MAX: usize = 1024;
 /// `pathend_last`, `Z/main/php_glob.c:696`: the last usable slot of the path
 /// buffer.
-const PATHEND_LAST: usize = PATH_MAX - 1;
+const PATHEND_LAST: usize = MAXPATHLEN - 1;
 
 /// `Char`, `Z/main/php_glob.c:135`: a pattern byte widened for its marks.
 type Char = u16;
@@ -205,7 +206,7 @@ struct Glob {
 
 /// `php_glob`, `Z/main/php_glob.c:243`: the paths `pattern` matches, or the
 /// nonzero answer php returns (`PHP_GLOB_NOMATCH`, `PHP_GLOB_ABORTED`, or 1
-/// when a path overflows `PATH_MAX`). `pattern`
+/// when a path overflows `MAXPATHLEN`). `pattern`
 /// ends at its first NUL, as a C string does. A relative pattern is walked
 /// from the process's working directory. `PHPAPI` in `main/php_glob.h`:
 /// what `glob()` expands, and what `GlobIterator` calls directly, as php's
@@ -231,11 +232,11 @@ pub fn php_glob(pattern: &[u8], flags: i32) -> Result<Vec<Vec<u8>>, i32> {
         flags,
         pathv: Vec::new(),
     };
-    // zend_strnlen(pattern, PATH_MAX) == PATH_MAX
-    if pattern.len() >= PATH_MAX {
+    // zend_strnlen(pattern, MAXPATHLEN) == MAXPATHLEN
+    if pattern.len() >= MAXPATHLEN {
         return Err(PHP_GLOB_NOMATCH);
     }
-    let bufend = PATH_MAX - 1;
+    let bufend = MAXPATHLEN - 1;
     let mut patbuf: Vec<Char> = Vec::with_capacity(pattern.len());
     let mut next = 0;
     while patbuf.len() < bufend {
@@ -313,13 +314,13 @@ fn g_ctoc(s: &[Char], len: usize) -> Option<Vec<u8>> {
 
 /// `g_lstat`, `Z/main/php_glob.c:1079`.
 fn g_lstat(path: &[Char]) -> Option<Metadata> {
-    let buf = g_ctoc(path, PATH_MAX)?;
+    let buf = g_ctoc(path, MAXPATHLEN)?;
     fs::symlink_metadata(OsStr::from_bytes(&buf)).ok()
 }
 
 /// `g_stat`, `Z/main/php_glob.c:1090`.
 fn g_stat(path: &[Char]) -> Option<Metadata> {
-    let buf = g_ctoc(path, PATH_MAX)?;
+    let buf = g_ctoc(path, MAXPATHLEN)?;
     fs::metadata(OsStr::from_bytes(&buf)).ok()
 }
 
@@ -328,7 +329,7 @@ fn g_opendir(path: &[Char]) -> Option<ReadDir> {
     let buf = if at(path, 0) == EOS {
         b".".to_vec()
     } else {
-        g_ctoc(path, PATH_MAX)?
+        g_ctoc(path, MAXPATHLEN)?
     };
     fs::read_dir(OsStr::from_bytes(&buf)).ok()
 }
@@ -673,7 +674,7 @@ impl Glob {
         if at(pattern, 0) == EOS {
             return 0;
         }
-        let mut pathbuf = vec![EOS; PATH_MAX];
+        let mut pathbuf = vec![EOS; MAXPATHLEN];
         self.glob2(&mut pathbuf, 0, pattern, 0)
     }
 

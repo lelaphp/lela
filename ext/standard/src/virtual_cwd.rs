@@ -5,9 +5,6 @@
 
 use php_ext::request::{Request, Resolve};
 
-/// `MAXPATHLEN` on this host.
-pub(super) const MAXPATHLEN: usize = 1024;
-
 /// `expand_filepath_ex(path, real, relative_to, len)` under
 /// `CWD_FILEPATH` (`Z/main/fopen_wrappers.c:787`): an absolute path as
 /// it is, a relative one against `relative_to`, the working directory

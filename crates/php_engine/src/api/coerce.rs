@@ -12,6 +12,12 @@
 use std::cmp::Ordering;
 
 pub use php_heap::Exponent;
+
+/// C's `strtol(s, NULL, 10)`, `atoi` and `isspace` as php's extensions
+/// call them, `ZEND_STRTOL`, `ZEND_ATOL` and `zend_atoi`'s C library
+/// (`Z/Zend/zend_long.h:77`): the engine's one reading, so an extension
+/// reads a value past `int` or the long as php does (#2634).
+pub use crate::c_number::{atoi, is_space, strtol};
 use php_heap::ZvalType;
 use php_unit::decl::{Bare, Type};
 

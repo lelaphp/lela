@@ -669,6 +669,8 @@ pub(crate) fn dba_fetch(
     let legacy = three && is_connection(req, &skip.value()) && longish(&dba.value());
     let (key, skip, object) = if legacy {
         let key = key.hold(req)?;
+        // The legacy order's `Z_PARAM_LONG`, where the stub declares `$dba`
+        // untyped.
         let skip = long_of(&coerce_param(req, &dba.value(), &Type::Int, 2)?);
         deprecated(
             req,
@@ -680,6 +682,9 @@ pub(crate) fn dba_fetch(
         arity(req, 2, Some(3))?;
         let key = key.hold(req)?;
         let class = Type::Named(Name(b"Dba\\Connection".as_slice().into()));
+        // `Z_PARAM_OBJECT_OF_CLASS` over `Dba\Connection` and
+        // `Z_PARAM_LONG`, where the stub declares `$dba` and `$skip`
+        // untyped for the legacy order.
         let object = coerce_param(req, &dba.value(), &class, 2)?;
         let skip = if three {
             long_of(&coerce_param(req, &skip.value(), &Type::Int, 3)?)
@@ -829,6 +834,8 @@ pub(crate) fn dba_key_split(
         );
         return Ok(OrFalse::False);
     }
+    // `"s"` past the `null` and `false` arm, where the stub declares
+    // `string|false|null $key`.
     let held = coerce_param(req, &value, &Type::String, 1)?;
     let ValueRef::Str(text) = held.as_ref() else {
         return Ok(OrFalse::False);

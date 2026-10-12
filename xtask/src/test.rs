@@ -10,7 +10,9 @@
 //! none and fails all the same.
 //!
 //! A run is three steps over every crate at once, as `cargo test` would
-//! take them one crate at a time (#2165). One `cargo build --tests
+//! take them one crate at a time (#2165), and a crate with a binary takes
+//! them alone, so its binary is built with its own features
+//! ([`batch::runs`], #2606). One `cargo build --tests
 //! --keep-going` builds every crate's test targets, cargo building crates
 //! side by side, and a crate that does not compile stops only the crates
 //! built on it ([`batch::Run`]). Each crate's test executables then run,
@@ -67,16 +69,22 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     if crates.is_empty() {
         return Ok(Vec::new());
     }
-    let built = Run::of(root, &["build", "--keep-going"], &crates, Targets::Tests)?;
-    let docs = doctests(root, &built, &crates)?;
-    let missed = Pin::missed(root, &built, &crates)?;
-    crates
-        .iter()
-        .map(|krate| {
+    let mut readings = Vec::with_capacity(crates.len());
+    for run in batch::runs(root, &crates)? {
+        let built = Run::of(root, &["build", "--keep-going"], &run, Targets::Tests)?;
+        let docs = doctests(root, &built, &run)?;
+        let missed = Pin::missed(root, &built, &run)?;
+        for krate in run {
             let missed = missed.get(&krate.name).map_or(&[][..], Vec::as_slice);
-            reading(&snapshot, krate, &built, (docs.get(&krate.name), missed))
-        })
-        .collect()
+            readings.push(reading(
+                &snapshot,
+                krate,
+                &built,
+                (docs.get(&krate.name), missed),
+            )?);
+        }
+    }
+    Ok(readings)
 }
 
 /// `--staged`: the crates with a staged change, pre-commit's touched

@@ -8,6 +8,7 @@
 
 use php_ext::abi::{Ref, Union, Variadic};
 use php_ext::attr::php_function;
+use php_ext::coerce::is_space;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -17,13 +18,10 @@ const SCAN_MAX_ARGS: u64 = 0xff;
 /// `SCAN_ERROR_EOF`.
 const SCAN_ERROR_EOF: i64 = -1;
 
-/// C's `isspace` under the C locale.
-const fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
-
 /// `ZEND_STRTOUL(s, &end, 10)` for the digits at `at`: the value and
-/// the offset past them.
+/// the offset past them. Kept beside the face's `strtol`: php calls it on
+/// a digit, so no space or sign is read, and the unsigned long it answers
+/// saturates at `ULONG_MAX` with its end.
 fn strtoul(s: &[u8], at: usize) -> (u64, usize) {
     let mut end = at;
     let mut value: u64 = 0;
@@ -271,7 +269,8 @@ enum Target {
 
 /// `ZEND_STRTOL(buf, NULL, base)` and `ZEND_STRTOUL`: the digits of
 /// `buf` in `base`, saturated as `strtol` saturates, and the unsigned
-/// read wrapping a sign as `strtoul` does.
+/// read wrapping a sign as `strtoul` does. Kept beside the face's
+/// `strtol`, which reads base 10 and signed alone.
 fn strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
     let mut i = 0;
     let negative = match buf.first() {
@@ -393,6 +392,23 @@ fn strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
 /// cannot mix "%" and "%n$" conversion specifiers
 /// Unmatched [ in format string
 /// int(1)
+/// ```
+///
+/// A conversion skips the white space C's `isspace` reads under the
+/// request's `LC_CTYPE`, 0xA0 among it under macOS's `C.UTF-8`.
+///
+/// ```php
+/// var_dump(sscanf("\xa012 x\xa0y", "%d %s%s"));
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   int(12)
+///   [1]=>
+///   string(1) "x"
+///   [2]=>
+///   string(1) "y"
+/// }
 /// ```
 #[php_function]
 pub(super) fn sscanf(

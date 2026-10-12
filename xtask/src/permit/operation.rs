@@ -32,9 +32,20 @@
 //! checkout, an operation another hand starts outside permit on the same
 //! `HEAD` would read as the recorded session's. A rebase whose `orig-head`
 //! is not the `HEAD` it was started on (`git rebase <upstream> <branch>`)
-//! is refused to its own starter, the safe side. The recording runs only
-//! where the manifest carries such a rule, so the mechanism is inert until
-//! a person lands the row.
+//! is refused to its own starter, the safe side.
+//!
+//! A git command past a directory change the line makes after its first
+//! command touches no record, since where it runs is not read (#2720): a
+//! sibling agent's `cat f; cd <its worktree>; git merge --ff-only main`,
+//! read in the main checkout its shell starts in, dropped a merge's record
+//! there and took that merge as its own start. So a start written that
+//! way is not recorded and is refused to its own starter, and a record
+//! left by a start that began nothing on the same `HEAD` would claim it.
+//! A git line of another hand read in the checkout between a start's
+//! admission and the marker git writes still drops the starter's record,
+//! and its start there takes it (#2723). The recording runs whatever the
+//! manifest holds, since an operation can bring the first such
+//! rule into its own working tree (#2694).
 
 use std::fmt;
 use std::fs;
@@ -45,7 +56,7 @@ use serde::{Deserialize, Serialize};
 
 use super::argv::{Argv, Line};
 use super::call::Call;
-use super::rules::{acts_in, command_runs_in, fired_in};
+use super::rules::{acts_in, fired_in, placed};
 use crate::reading::{self, Store};
 use crate::{git, track};
 
@@ -196,15 +207,18 @@ pub(crate) fn foreign(
 }
 
 /// What `line` does to the records of the checkouts it runs git in: each
-/// git command that finds nothing standing drops the record, as does an
-/// `--abort` or `--quit`; then the session making `call` is recorded as
-/// the starter of each operation the line starts where none stands. A
+/// git command whose place it reads ([`placed`]) and that finds nothing
+/// standing drops the record, as does an `--abort` or `--quit`; then the
+/// session making `call` is recorded as the starter of each operation the
+/// line starts where none stands. A
 /// command run while an operation stands, its `--continue`, `--skip` or
 /// `--edit-todo` among them, leaves the record as it is.
 pub(crate) fn record(root: &Path, call: &Call, line: &Line) -> Result<()> {
     let mut starting = Vec::new();
-    for git in line.commands().iter().filter(|argv| argv.runs("git")) {
-        let checkout = command_runs_in(root, Some(line), git);
+    for (git, checkout) in placed(root, line)
+        .into_iter()
+        .filter(|(argv, _)| argv.runs("git"))
+    {
         let Some(git_dir) = git_dir(&checkout) else {
             continue;
         };
@@ -413,6 +427,47 @@ mod tests {
         }
         record(&dir, &call("s1", None), &Line::read("git merge --abort")).unwrap();
         assert_eq!(standing(&dir, add, "s1", None), Some(Operation::Merge));
+    }
+
+    /// #2720: a sibling agent's line that `cd`s into its own worktree past
+    /// its first command, and runs `git merge --ff-only` there, was read
+    /// in the checkout its shell starts in. Judged between the starter's
+    /// admitted `git merge` and the marker that merge writes, it dropped
+    /// the starter's record and took the merge as its own start. A git
+    /// command past a directory change the line makes after its first
+    /// command does not run where its shell starts, and is not read
+    /// there, a subshell's `cd` among them, so the merge stays its
+    /// starter's to commit and abort and stays foreign to the sibling. A
+    /// git command the line runs before any such change is read where the
+    /// shell starts, as it was, and still drops the record.
+    #[test]
+    fn a_sibling_s_git_line_past_a_later_cd_leaves_the_starter_s_record() {
+        let (starter, sibling) = (Some("the-starter-agent"), Some("a-sibling"));
+        let dir = repository("operation-sibling");
+        let start = Line::read("git merge --no-ff --no-commit topic");
+        record(&dir, &call("s1", starter), &start).unwrap();
+        for elsewhere in [
+            format!(
+                "S=/var/empty; cat $S/owner; cd /var/empty/t2645; git status --short; \
+                 git merge --ff-only main 2>&1 | tail -1; cd {}; git log --oneline -3",
+                dir.display()
+            ),
+            "(cd /var/empty/t2645 && git merge --ff-only main)".to_owned(),
+        ] {
+            record(&dir, &call("s1", sibling), &Line::read(&elsewhere)).unwrap();
+        }
+        merging(&dir);
+        for line in ["git add -- a", "git commit -F m -- a", "git merge --abort"] {
+            assert_eq!(standing(&dir, line, "s1", starter), None, "{line}");
+            let other = standing(&dir, line, "s1", sibling);
+            assert_eq!(other, Some(Operation::Merge), "{line}");
+        }
+        ended(&dir);
+        let before_the_cd = "git log -1; cd /var/empty; git status";
+        record(&dir, &call("s1", sibling), &Line::read(before_the_cd)).unwrap();
+        merging(&dir);
+        let own = standing(&dir, "git add -- a", "s1", starter);
+        assert_eq!(own, Some(Operation::Merge));
     }
 
     /// A start that began nothing, a merge already up to date, leaves a
