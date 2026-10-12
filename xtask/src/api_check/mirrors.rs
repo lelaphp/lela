@@ -8,16 +8,28 @@
 //! no marker is not held, so the marker lands crate by crate.
 //!
 //! Every marker under the crate's `src/` is read, on whatever item it
-//! stands; a file the text `mirrors` is not in is not parsed.
+//! stands, in a crate with a surface or without one: an attribute whose
+//! path ends in `mirrors`, so one renamed by `use .. as` is not read, and
+//! a file the text `mirrors` is not in is not parsed.
 //!
-//! The header is read a line at a time and not compiled. A line declares
-//! `sym` when, outside a comment line and a preprocessor line, it carries
-//! one of the three macros as a word and the last identifier after it,
-//! before the first `(`, `;`, `[`, `=` or `{`, is `sym`. Not read, so a
-//! marker naming one fails: a declaration whose name stands on a later
-//! line than its macro, one whose name follows a macro taking arguments
-//! (`ZEND_ATTRIBUTE_FORMAT(..)`), and a function pointer's.
+//! The pinned tree is found once per run, by the first marker that asks
+//! ([`Pinned`]). Where it is at neither place [`Source::tree`] tries, the
+//! markers are not held and the reading says so, unless the machine
+//! promised the tree, when that fails it; a tree standing there and
+//! refused, at another commit, fails it always.
+//!
+//! The header is read with its comments taken out, a line at a time, and
+//! not compiled or preprocessed, so a declaration under `#if 0` counts. A
+//! line declares `sym` when, not a preprocessor line, it carries one of
+//! the three macros as a word and the last identifier after it, before
+//! the first `(`, `;`, `[`, `=` or `{`, is `sym`. A declaration whose name
+//! stands on a later line than its macro is not read, so a marker naming
+//! it fails. Where that identifier is not the declared name, as in a
+//! function pointer's `int (*hook)(..)` or after an attribute macro with
+//! arguments, `ZEND_ATTRIBUTE_ALLOC_SIZE(1) void *_emalloc(..)`, the line
+//! is read as declaring the type or the macro, which no marker names.
 
+use std::cell::OnceCell;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -27,7 +39,9 @@ use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Attribute, ImplItem, Item, LitStr, Token, TraitItem, Type};
 
+use super::surfaces::Held;
 use super::workspace::Present;
+use crate::oracle::{Promise, Promised, Source};
 
 /// The macros a declaration a marker names may carry.
 const MACROS: [&str; 3] = ["PHPAPI", "PDO_API", "ZEND_API"];
@@ -39,12 +53,105 @@ pub(super) struct Marker {
     /// `src/rng.rs`'s `Rng::default_engine`.
     file: PathBuf,
     item: String,
-    /// The header and the symbol, or why the arguments are not those.
-    named: Result<(String, String), String>,
+    /// What the marker names, or why its arguments name nothing.
+    named: Result<Declaration, String>,
+}
+
+/// What a marker names: a header, a path from php-src's root, and the
+/// symbol it declares.
+#[derive(Debug)]
+struct Declaration {
+    header: String,
+    symbol: String,
+}
+
+/// The pin's php-src, which every marker of a run is held against.
+#[derive(Debug, Default)]
+pub(super) struct Pinned {
+    source: Source,
+    /// Where the tree is on this machine, asked once, by the first marker
+    /// that needs it.
+    tree: OnceCell<Tree>,
+}
+
+/// The pinned php-src as this machine has it.
+#[derive(Debug)]
+enum Tree {
+    At(PathBuf),
+    /// At neither place [`Source::tree`] tries: the markers are not held.
+    Absent(String),
+    /// At one of them, and refused there, at another commit: the markers
+    /// fail, since a tree at the wrong revision holds them to the wrong
+    /// declarations.
+    Refused(String),
+}
+
+impl Tree {
+    fn of(source: &Source) -> Tree {
+        match source.tree() {
+            Ok(tree) => Tree::At(tree),
+            Err(e)
+                if [source.named(), Some(source.path())]
+                    .into_iter()
+                    .flatten()
+                    .any(Path::is_dir) =>
+            {
+                Tree::Refused(format!("{e:#}"))
+            }
+            Err(e) => Tree::Absent(format!("{e:#}")),
+        }
+    }
+}
+
+impl Pinned {
+    pub(super) fn new(source: &Source) -> Pinned {
+        Pinned {
+            source: source.clone(),
+            tree: OnceCell::new(),
+        }
+    }
+
+    /// Hold `krate`'s markers against the tree: a problem per marker it
+    /// does not bear out, and a note of the count where all hold.
+    pub(super) fn hold(&self, krate: &Present) -> Result<Held> {
+        let mut held = Held::default();
+        let markers = markers(krate)?;
+        if markers.is_empty() {
+            return Ok(held);
+        }
+        let n = markers.len();
+        let tag = &self.source.tag;
+        match self.tree.get_or_init(|| Tree::of(&self.source)) {
+            Tree::At(tree) => {
+                held.problems = hold(&markers, tree, tag);
+                if held.problems.is_empty() {
+                    let names = if n == 1 {
+                        "marker names"
+                    } else {
+                        "markers name"
+                    };
+                    held.notes.push(format!(
+                        "{n} #[mirrors] {names} what php-src at {tag} declares"
+                    ));
+                }
+            }
+            Tree::Refused(why) => held
+                .problems
+                .push(format!("{n} #[mirrors] held against nothing: {why}")),
+            Tree::Absent(why) if Promised::load()?.holds(Promise::Tree) => {
+                held.problems.push(format!(
+                    "{n} #[mirrors] held against nothing: {why}, and this machine promised the {}",
+                    Promise::Tree.word()
+                ));
+            }
+            Tree::Absent(why) => held.notes.push(format!("{n} #[mirrors] not held: {why}")),
+        }
+        Ok(held)
+    }
 }
 
 /// The markers under `krate`'s `src/`.
-pub(super) fn markers(krate: &Present) -> Result<Vec<Marker>> {
+fn markers(krate: &Present) -> Result<Vec<Marker>> {
     let src = krate.dir.join("src");
     let mut found = Found::default();
     for file in krate.sources()?.into_iter().filter(|f| f.starts_with(&src)) {
@@ -64,11 +171,11 @@ pub(super) fn markers(krate: &Present) -> Result<Vec<Marker>> {
 /// What `markers` holds against the tree at `tree`, of tag `tag`: one
 /// problem per marker whose header the tree lacks or does not declare its
 /// symbol in.
-pub(super) fn hold(markers: &[Marker], tree: &Path, tag: &str) -> Result<Vec<String>> {
+fn hold(markers: &[Marker], tree: &Path, tag: &str) -> Vec<String> {
     let mut problems = Vec::new();
     for marker in markers {
         let at = format!("{}'s `{}`", marker.file.display(), marker.item);
-        let (header, symbol) = match &marker.named {
+        let Declaration { header, symbol } = match &marker.named {
             Ok(named) => named,
             Err(why) => {
                 problems.push(format!("{at} carries a #[mirrors] that {why}"));
@@ -96,18 +203,20 @@ pub(super) fn hold(markers: &[Marker], tree: &Path, tag: &str) -> Result<Vec<Str
                     "{at} mirrors {header}, which php-src at {tag} lacks"
                 ));
             }
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+            Err(e) => problems.push(format!(
+                "{at} mirrors {header}, which php-src at {tag} holds as no header it reads: {e}"
+            )),
         }
     }
-    Ok(problems)
+    problems
 }
 
 /// Whether `header`, a C header's text, declares `symbol` with one of
 /// [`MACROS`], as the module's rustdoc says a line is read.
 fn declares(header: &str, symbol: &str) -> bool {
-    header.lines().any(|line| {
+    uncommented(header).lines().any(|line| {
         let line = line.trim_start();
-        if ["//", "/*", "*", "#"].iter().any(|p| line.starts_with(p)) {
+        if line.starts_with('#') {
             return false;
         }
         let Some(after) = MACROS.iter().filter_map(|m| word_end(line, m)).min() else {
@@ -121,6 +230,30 @@ fn declares(header: &str, symbol: &str) -> bool {
             .rfind(|word| !word.is_empty())
             == Some(symbol)
     })
+}
+
+/// `header` with each `/* .. */` and `// ..` comment taken out, a block
+/// comment's lines kept as empty ones. String literals are not told apart,
+/// which a declaration line does not carry.
+fn uncommented(header: &str) -> String {
+    let mut out = String::with_capacity(header.len());
+    let mut rest = header;
+    while let Some(at) = rest.find(['/']) {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        if let Some(after) = rest.strip_prefix("/*") {
+            let end = after.find("*/").map_or(after.len(), |e| e + 2);
+            out.extend(after[..end].chars().filter(|&c| c == '\n'));
+            rest = &after[end..];
+        } else if let Some(after) = rest.strip_prefix("//") {
+            rest = &after[after.find('\n').unwrap_or(after.len())..];
+        } else {
+            out.push('/');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Where the first occurrence of `word` in `line` as a whole identifier
@@ -148,6 +281,8 @@ struct Found {
 }
 
 impl Found {
+    /// Gather the markers among `attrs`, the attributes of the item
+    /// `name`.
     fn take(&mut self, attrs: &[Attribute], name: &str) {
         for attr in attrs.iter().filter(|a| {
             a.path()
@@ -167,6 +302,7 @@ impl Found {
         }
     }
 
+    /// `walk` with `owner` as the type or trait whose items are visited.
     fn inside(&mut self, owner: String, walk: impl FnOnce(&mut Found)) {
         let outer = self.owner.replace(owner);
         walk(self);
@@ -174,8 +310,11 @@ impl Found {
     }
 }
 
-/// The marker's header and symbol: two non-empty string literals.
-fn named(attr: &Attribute) -> Result<(String, String), String> {
+/// The marker's header and symbol: two non-empty string literals, the
+/// shape `php_macros::marker` refuses any other of at compile time; read
+/// again here, since the harness builds nothing it holds (ADR-0007 keeps
+/// the macro crate a leaf, so no reader is shared).
+fn named(attr: &Attribute) -> Result<Declaration, String> {
     let parsed = attr
         .parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)
         .map_err(|e| format!("does not parse: {e}"))?;
@@ -185,16 +324,17 @@ fn named(attr: &Attribute) -> Result<(String, String), String> {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        [header, symbol] if !header.is_empty() && !symbol.is_empty() => {
-            Ok((header.clone(), symbol.clone()))
-        }
+        [header, symbol] if !header.is_empty() && !symbol.is_empty() => Ok(Declaration {
+            header: header.clone(),
+            symbol: symbol.clone(),
+        }),
         _ => Err("names no header and symbol".to_owned()),
     }
 }
 
 impl<'ast> Visit<'ast> for Found {
     fn visit_item(&mut self, item: &'ast Item) {
-        let named = match item {
+        let attributed = match item {
             Item::Const(i) => Some((&i.attrs, &i.ident)),
             Item::Enum(i) => Some((&i.attrs, &i.ident)),
             Item::Fn(i) => Some((&i.attrs, &i.sig.ident)),
@@ -205,7 +345,7 @@ impl<'ast> Visit<'ast> for Found {
             Item::Union(i) => Some((&i.attrs, &i.ident)),
             _ => None,
         };
-        if let Some((attrs, ident)) = named {
+        if let Some((attrs, ident)) = attributed {
             self.take(attrs, &ident.to_string());
         }
         match item {
@@ -250,12 +390,19 @@ fn type_name(ty: &Type) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::declares;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{Declaration, Marker, declares, hold};
 
     const HEADER: &str = "\
 #define PHPAPI_FAKE php_random_default_engine
 /* PHPAPI void php_commented(void); */
- * PHPAPI void php_in_a_block(void);
+/*
+   PHPAPI void php_in_a_block(void);
+ */
+int php_code; /* PHPAPI void php_trailing(void); */
+PHPAPI void php_after_a_comment(void); // PHPAPI void php_line_comment(void);
 PHPAPI const php_random_algo *php_random_default_algo(void);
 extern PHPAPI const php_random_algo php_random_algo_mt19937;
 PHPAPI zend_long php_mt_rand_range(zend_long min, zend_long max);
@@ -276,6 +423,7 @@ php_on_the_next_line(void);
             "php_pdo_free_statement",
             "zend_parse_arg",
             "php_split",
+            "php_after_a_comment",
         ] {
             assert!(declares(HEADER, symbol), "{symbol}");
         }
@@ -287,6 +435,8 @@ php_on_the_next_line(void);
             "php_random_default_engine",
             "php_commented",
             "php_in_a_block",
+            "php_trailing",
+            "php_line_comment",
             "php_mt_rand",
             "zend_long",
             "min",
@@ -294,5 +444,71 @@ php_on_the_next_line(void);
         ] {
             assert!(!declares(HEADER, symbol), "{symbol}");
         }
+    }
+
+    /// A marker whose arguments name nothing, one whose header is no path
+    /// from the root, and one whose header is a directory each fail it,
+    /// beside one that holds.
+    #[test]
+    fn a_marker_the_tree_cannot_bear_out_is_a_problem_naming_why() {
+        let tree = crate::scratch::Tree::new("mirrors-hold").unwrap();
+        fs::create_dir_all(tree.path().join("ext/random")).unwrap();
+        fs::write(
+            tree.path().join("ext/random/php_random.h"),
+            "PHPAPI const php_random_algo *php_random_default_algo(void);\n",
+        )
+        .unwrap();
+        let marker = |header: &str, symbol: &str| Marker {
+            file: PathBuf::from("src/lib.rs"),
+            item: "f".to_owned(),
+            named: Ok(Declaration {
+                header: header.to_owned(),
+                symbol: symbol.to_owned(),
+            }),
+        };
+        let markers = [
+            marker("ext/random/php_random.h", "php_random_default_algo"),
+            Marker {
+                named: Err("names no header and symbol".to_owned()),
+                ..marker("", "")
+            },
+            marker("../php_random.h", "php_random_default_algo"),
+            marker("ext/random", "php_random_default_algo"),
+        ];
+        let problems = hold(&markers, Path::new(tree.path()), "php-tag");
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(
+            problems[0],
+            "src/lib.rs's `f` carries a #[mirrors] that names no header and symbol"
+        );
+        assert_eq!(
+            problems[1],
+            "src/lib.rs's `f` mirrors ../php_random.h, which is no path from php-src's root"
+        );
+        assert!(
+            problems[2].starts_with(
+                "src/lib.rs's `f` mirrors ext/random, which php-src at php-tag holds as no header it reads: "
+            ),
+            "{}",
+            problems[2]
+        );
+    }
+
+    /// A tree at neither place is absent, and one at a place that refuses
+    /// it, here a `.git` git cannot read, is refused, never absent.
+    #[test]
+    fn a_tree_standing_where_the_pin_looks_and_refused_is_not_absent() {
+        use super::Tree;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let text = fs::read_to_string(root.join("oracle.toml")).unwrap();
+        let text = text.replace("path = \"/Users/", "path = \"/nonexistent/");
+        let pin = crate::oracle::Pin::parse(&text).unwrap();
+        assert!(matches!(Tree::of(&pin.source), Tree::Absent(_)));
+
+        let scratch = crate::scratch::Tree::new("mirrors-refused-tree").unwrap();
+        fs::write(scratch.path().join(".git"), "not a checkout").unwrap();
+        let pin = pin.on_this_machine(Some(scratch.path().to_path_buf()));
+        assert!(matches!(Tree::of(&pin.source), Tree::Refused(_)));
     }
 }
