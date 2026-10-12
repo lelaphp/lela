@@ -1986,14 +1986,22 @@ impl Emit<'_> {
     /// `VAR`, and anything else the value `zend_compile_expr` leaves.
     fn receiver_of(&mut self, object: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
         if self.is_this(object) {
-            if self.this_in_scope {
-                return Ok((OperandKind::Unused, 0));
-            }
-            let this = self.fetch_this(OperandKind::Var);
-            return Ok(self.operand(this));
+            return Ok(self.this_receiver());
         }
         let value = self.chain_link(object)?;
         Ok(self.operand(value))
+    }
+
+    /// `$this` as a receiver, the `is_this_fetch` arm of
+    /// `zend_delayed_compile_prop` and `zend_compile_method_call`: the
+    /// `IS_UNUSED` operand where `this_guaranteed_exists`, and a
+    /// `FETCH_THIS` into a `VAR` where it may not.
+    fn this_receiver(&mut self) -> (OperandKind, u32) {
+        if self.this_in_scope {
+            return (OperandKind::Unused, 0);
+        }
+        let this = self.fetch_this(OperandKind::Var);
+        self.operand(this)
     }
 
     /// `zend_compile_assign`, `zend_compile_assign_ref` and
@@ -14296,7 +14304,25 @@ impl Emit<'_> {
     /// `FETCH_THIS`, and the two suffixes the in-string grammar takes
     /// as the one `FETCH_DIM_R` or `FETCH_OBJ_R` over it, which is what
     /// `zend_compile_encaps_var_offset` and `zend_compile_prop` leave
-    /// there.
+    /// there; a property's `$this` is the receiver
+    /// ([`Self::this_receiver`]), `THIS` inside a method.
+    ///
+    /// ```php
+    /// class C {
+    ///     public $p = 'p';
+    ///     function m() { return "$this->p {$this->p} $this?->p"; }
+    ///     static function s() { return "$this->p"; }
+    /// }
+    /// echo (new C)->m(), "\n";
+    /// $f = function () { return "[$this->p]"; };
+    /// echo Closure::bind($f, new C, C::class)(), "\n";
+    /// try { C::s(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// p p p
+    /// [p]
+    /// Using $this when not in object context
+    /// ```
     fn fetched(&mut self, fetch: &Fetched) -> Result<Where, CompileError> {
         match fetch {
             Fetched::Text(bytes) => Ok(Where::Constant(self.string(bytes)?)),
@@ -14338,12 +14364,19 @@ impl Emit<'_> {
             // `"$a?->b"`, php's `ZEND_AST_NULLSAFE_PROP` inside
             // `zend_compile_encaps_list`, is its own chain: the
             // `JMP_NULL` over the variable and the commit after the fetch.
+            // `"$this->b"` is `zend_delayed_compile_prop`'s receiver, which
+            // needs no `JMP_NULL`, since it throws where `$this` is not.
             Fetched::Prop(name, prop, nullsafe) => {
                 let checkpoint = self.short_circuits.len();
-                let (op1_type, op1) = self.in_string_operand(name)?;
-                if *nullsafe && name != b"this" {
-                    self.jmp_null((op1_type, op1), false);
-                }
+                let (op1_type, op1) = if name == b"this" {
+                    self.this_receiver()
+                } else {
+                    let receiver = self.in_string_operand(name)?;
+                    if *nullsafe {
+                        self.jmp_null(receiver, false);
+                    }
+                    receiver
+                };
                 let name = self.string(prop)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();

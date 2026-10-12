@@ -6294,6 +6294,28 @@ class C {
         assert!(dump.contains(m), "php's C::m, {dump}");
     }
 
+    /// `zend_delayed_compile_prop` under `zend_compile_encaps_list`
+    /// (#2676): `"$this->p"` inside a method reads the property off the
+    /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.
+    #[test]
+    fn this_s_property_in_a_string_is_fetched_off_this() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    public function m() { return \"$this->p {$this->p}\"; }
+}
+",
+        );
+        let m = "0000 T0 = FETCH_OBJ_R THIS string(\"p\")\n\
+                 0001 T3 = ROPE_INIT 3 T0\n\
+                 0002 T3 = ROPE_ADD 1 T3 string(\" \")\n\
+                 0003 T1 = FETCH_OBJ_R THIS string(\"p\")\n\
+                 0004 T2 = ROPE_END 2 T3 T1\n\
+                 0005 RETURN T2\n\
+                 0006 RETURN null\n";
+        assert!(dump.contains(m), "php's C::m, {dump}");
+    }
+
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
     /// inside an array expression folds every key and value in place
     /// (`zend_try_ct_eval_array`'s first pass), so a cast over a
