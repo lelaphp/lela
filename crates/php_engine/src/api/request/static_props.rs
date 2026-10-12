@@ -1,6 +1,6 @@
 //! The static properties of a request: `CE_STATIC_MEMBERS(ce)`, one
-//! slot per declared `static` property keyed by the class that declared
-//! it, laid down on first use from its default as
+//! slot per declared `static` property keyed by the property's row,
+//! laid down on first use from its default as
 //! `zend_class_init_statics` lays it, read, written under the declared
 //! type, and bound by reference. The slots are [`StaticProps`]'s, whose
 //! field no file but this one reads.
@@ -11,43 +11,39 @@ use crate::api::abi::PropertyRead;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpRef, TypeTag, Value, ValueRef};
 
-use super::{PropertyInfo, Request};
+use super::{PropertyInfo, Request, WordMap};
 
 /// The static properties' slots, whose field no file but this one
 /// reads.
 #[derive(Default)]
 pub(super) struct StaticProps {
     /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
-    /// one slot per declared `static` property, keyed by the class that
-    /// declared it and by the property's name. php gives every class a
-    /// table of its own whose inherited rows are `IS_INDIRECT` into the
-    /// parent's, so a child and its parent read and write one cell; the
-    /// declaring class is that cell's name here. A slot is laid down on
-    /// first use from the default the declaration carries,
+    /// one slot per declared `static` property, keyed by the property's
+    /// row, `prop_info->ce` and the index php's `prop_info->offset`
+    /// stands for. php gives every class a table of its own whose
+    /// inherited rows are `IS_INDIRECT` into the parent's, so a child
+    /// and its parent read and write one cell; the row names the
+    /// declaring class, so that cell is the one slot here. A slot is
+    /// laid down on first use from the default the declaration carries,
     /// `zend_class_init_statics`, and a typed property with no default
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
-    slots: Vec<((ClassId, Vec<u8>), Value)>,
+    slots: WordMap<PropertyInfo, Value>,
+    /// The rows in the order their slots were laid down, which the
+    /// teardown gives them up in.
+    laid: Vec<PropertyInfo>,
 }
 
 impl StaticProps {
-    /// The slot of the `static` property `name` that `declaring`
-    /// declares; none where it is not laid down.
-    fn slot(&self, declaring: ClassId, name: &[u8]) -> Option<&Value> {
-        let held = self
-            .slots
-            .iter()
-            .find(|((at, under), _)| *at == declaring && under == name);
-        held.map(|(_, value)| value)
+    /// The slot of the `static` property `info` names; none where it is
+    /// not laid down.
+    fn slot(&self, info: PropertyInfo) -> Option<&Value> {
+        self.slots.get(&info)
     }
 
     /// [`StaticProps::slot`] to write.
-    fn slot_mut(&mut self, declaring: ClassId, name: &[u8]) -> Option<&mut Value> {
-        let held = self
-            .slots
-            .iter_mut()
-            .find(|((at, under), _)| *at == declaring && under == name);
-        held.map(|(_, value)| value)
+    fn slot_mut(&mut self, info: PropertyInfo) -> Option<&mut Value> {
+        self.slots.get_mut(&info)
     }
 }
 
@@ -59,7 +55,8 @@ impl Request {
     /// to the heap's mass release.
     #[cfg(debug_assertions)]
     pub(super) fn free_static_members(&mut self) {
-        for (_, value) in std::mem::take(&mut self.static_props.slots) {
+        let StaticProps { mut slots, laid } = std::mem::take(&mut self.static_props);
+        for value in laid.iter().filter_map(|info| slots.remove(info)) {
             self.release(value);
         }
     }
@@ -179,21 +176,16 @@ impl Request {
     /// evaluated in the declaring scope and held to its type under the
     /// strict rule, and `IS_UNDEF` for a typed one with no default.
     pub(super) fn lay_down_static(&mut self, info: PropertyInfo) -> Result<(), Thrown> {
+        if self.static_props.slot(info).is_some() {
+            return Ok(());
+        }
         let declaring = info.declaring;
         let Some(property) = self.property_decl(info) else {
             return Ok(());
         };
-        let name = &property.name.0;
-        if self.static_props.slot(declaring, name).is_some() {
-            return Ok(());
-        }
         // The default expression alone is handed on past what writes the
         // request, so it is what is cloned.
-        let (name, default, typed) = (
-            name.to_vec(),
-            property.default.clone(),
-            property.ty.is_some(),
-        );
+        let (default, typed) = (property.default.clone(), property.ty.is_some());
         let value = match default {
             Some(expr) => {
                 let value = crate::api::call::eval_declared_made(self, &expr, Some(declaring))?;
@@ -202,17 +194,17 @@ impl Request {
             None if typed => Value::undef(),
             None => Value::null(),
         };
-        self.static_props.slots.push(((declaring, name), value));
+        self.static_props.slots.insert(info, value);
+        self.static_props.laid.push(info);
         Ok(())
     }
 
     /// `CE_STATIC_MEMBERS(ce)[prop_info->offset]`: what the slot of the
-    /// `static` property `name` on the class that declared it holds,
-    /// nobody's to release, and `IS_UNDEF` where the slot stands
-    /// unwritten or the table has none.
-    pub(crate) fn held_static(&self, declaring: ClassId, name: &[u8]) -> Value {
+    /// `static` property `info` names holds, nobody's to release, and
+    /// `IS_UNDEF` where the slot stands unwritten or the table has none.
+    pub(crate) fn held_static(&self, info: PropertyInfo) -> Value {
         self.static_props
-            .slot(declaring, name)
+            .slot(info)
             .map_or_else(Value::undef, |value| *value)
     }
 
@@ -239,7 +231,7 @@ impl Request {
         let Some(info) = self.static_slot(class, name, scope, read)? else {
             return Ok(Value::null());
         };
-        let held = self.held_static(info.declaring, name);
+        let held = self.held_static(info);
         if held.tag() == TypeTag::Undef {
             if self.property_typed(info) && read == PropertyRead::Warning {
                 let declaring = self.class_name(info.declaring);
@@ -283,7 +275,7 @@ impl Request {
         let Some(info) = self.static_slot(class, name, scope, PropertyRead::Silent)? else {
             return Ok(None);
         };
-        let held = self.held_static(info.declaring, name);
+        let held = self.held_static(info);
         if held.tag() == TypeTag::Undef {
             return Ok(Some(if self.property_typed(info) {
                 Value::undef()
@@ -377,12 +369,12 @@ impl Request {
         // another `static` than this one (`Test::$x =& Test::$y`).
         let held = |req: &Request| {
             req.static_props
-                .slot(declaring, name)
+                .slot(info)
                 .map_or(Value::null(), Value::deref)
         };
         let garbage = held(self);
         self.addref(&garbage);
-        if let Some(cell) = self.static_slot_cell(declaring, name)
+        if let Some(cell) = self.static_slot_cell(info)
             && cell.heap().sources() != 0
         {
             if let Err(thrown) = self.assign_to_reference(cell.heap(), value, strict) {
@@ -390,7 +382,7 @@ impl Request {
                 return Err(thrown);
             }
         } else {
-            self.store_static_property(declaring, name, value);
+            self.store_static_property(info, value);
         }
         Ok((held(self), garbage))
     }
@@ -420,8 +412,8 @@ impl Request {
     /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
     /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
     /// ```
-    pub(crate) fn store_static_property(&mut self, declaring: ClassId, name: &[u8], value: Value) {
-        let Some(slot) = self.static_props.slot_mut(declaring, name) else {
+    pub(crate) fn store_static_property(&mut self, info: PropertyInfo, value: Value) {
+        let Some(slot) = self.static_props.slot_mut(info) else {
             self.release(value);
             return;
         };
@@ -456,13 +448,12 @@ impl Request {
     /// nothing a program can see.
     pub(crate) fn bind_static_place(
         &mut self,
-        declaring: ClassId,
-        name: &[u8],
+        info: PropertyInfo,
     ) -> Result<php_heap::ZvalRef, Thrown> {
-        if let Some(cell) = self.static_slot_cell(declaring, name) {
+        if let Some(cell) = self.static_slot_cell(info) {
             return Ok(cell.heap().val_ref());
         }
-        let held = self.held_static(declaring, name);
+        let held = self.held_static(info);
         let held = if held.tag() == TypeTag::Undef {
             Value::null()
         } else {
@@ -471,7 +462,7 @@ impl Request {
         // The row owns what it holds and the cell takes that owner, so
         // the row's value is replaced and never released.
         let cell = self.reference(held)?;
-        if let Some(slot) = self.static_props.slot_mut(declaring, name) {
+        if let Some(slot) = self.static_props.slot_mut(info) {
             *slot = Value::reference(cell);
         }
         Ok(cell.heap().val_ref())
@@ -481,9 +472,9 @@ impl Request {
     /// must know whether it is writing through a reference php would
     /// have typed (`ZEND_REF_HAS_TYPE_SOURCES` at the top of
     /// `ZEND_ASSIGN_STATIC_PROP_OP`); none where the slot holds a value.
-    pub(crate) fn static_slot_cell(&self, declaring: ClassId, name: &[u8]) -> Option<PhpRef> {
+    pub(crate) fn static_slot_cell(&self, info: PropertyInfo) -> Option<PhpRef> {
         self.static_props
-            .slot(declaring, name)
+            .slot(info)
             .and_then(|value| value.as_php_ref().copied())
     }
 
@@ -501,8 +492,8 @@ impl Request {
         scope: Option<ClassId>,
         bound: Value,
     ) -> Result<(), Thrown> {
-        let declaring = match self.static_slot(class, name, scope, PropertyRead::Warning) {
-            Ok(Some(info)) => info.declaring,
+        let info = match self.static_slot(class, name, scope, PropertyRead::Warning) {
+            Ok(Some(info)) => info,
             Ok(None) => {
                 self.release(bound);
                 return Ok(());
@@ -512,7 +503,7 @@ impl Request {
                 return Err(thrown);
             }
         };
-        let Some(slot) = self.static_props.slot_mut(declaring, name) else {
+        let Some(slot) = self.static_props.slot_mut(info) else {
             self.release(bound);
             return Ok(());
         };
