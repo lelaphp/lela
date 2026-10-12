@@ -5,6 +5,7 @@
 
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
+use php_ext::coerce::c_str;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Zone};
 use php_ext::values::{Owner, PhpArray, PhpString};
@@ -84,7 +85,7 @@ fn strptime(
     timestamp: PhpString,
     format: PhpString,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
+    let c_string = |bytes: &[u8]| c_str(bytes).to_vec();
     let Some(parsed) = crate::ffi::strptime(
         &c_string(timestamp.as_bytes()),
         &c_string(format.as_bytes()),

@@ -402,6 +402,7 @@ coerce::Exponent
 coerce::Exponent::as_char
 coerce::atoi
 coerce::binary_op
+coerce::c_str
 coerce::callable_checked
 coerce::callable_name
 coerce::coerce_param

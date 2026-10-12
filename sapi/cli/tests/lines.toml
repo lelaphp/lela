@@ -380,6 +380,45 @@ function listed($at) {
 }
 ''', "pre.php" = "<?php require_once __DIR__ . '/listed.php'; listed('prepend');" }
 
+# The built-in server's request starts in the server's working directory:
+# its router is served there, under `SAPI_OPTION_NO_CHDIR`, and the
+# directory it stood in is restored after it whatever it moved to
+# (`php_cli_server_dispatch_router`, `Z/sapi/cli/php_cli_server.c:2258-2286`);
+# a program `php_execute_script` serves is entered in its own directory and
+# left once it, `auto_append_file` among it, has been served, so shutdown
+# functions and destructors run where the request started (#2748).
+[[line]]
+name = "the-built-in-server-enters-the-program-directory-and-not-the-routers"
+args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}/www", "router.php"]
+files = { "home/" = "", "at.php" = '''
+<?php
+function at() {
+    $cwd = getcwd();
+    return match (true) { $cwd === __DIR__ . '/www' => 'program', $cwd === __DIR__ => 'start', default => basename($cwd) };
+}
+''', "router.php" = '''
+<?php
+require_once __DIR__ . '/at.php';
+echo 'router ', at(), "\n";
+register_shutdown_function(fn () => print('router shutdown ' . at() . "\n"));
+chdir(__DIR__ . '/home');
+return $_SERVER['REQUEST_URI'] === '/taken' ? null : false;
+''', "www/t.php" = '''
+<?php
+require_once __DIR__ . '/../at.php';
+echo 'run ', at(), "\n";
+register_shutdown_function(fn () => print('shutdown ' . at() . "\n"));
+$o = new class { function __destruct() { echo 'destructor ', at(), "\n"; } };
+''' }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+[[line.serve.request]]
+http = "GET /taken HTTP/1.0\r\nHost: x\r\n\r\n"
+
 # The built-in server's router and its program are `zend_stream_init_filename`'s
 # `zend_file_handle`s (`php_cli_server_dispatch_router`,
 # `php_cli_server_dispatch_script`), each opened as it compiles, after the
@@ -496,10 +535,19 @@ args = ["-n", "-d", "auto_prepend_file={dir}/gz.phar.tar.gz", "-d", "auto_append
 # 400 of the page php built and never sent; a path past the file it found is
 # that file, sent, and one past a program is its path's info, which
 # `PATH_INFO` keeps whole and `PHP_SELF` reads up to the NUL; and nothing found
-# is 404 (#2695). The text after a 400's
-# ` - ` in the log is `strerror(errno)` of whatever call last set it, EINVAL's
-# under php and none under the engine, and is masked until #2758 finds the
-# call.
+# is 404 (#2695). The text after a 400's ` - ` in the log is masked: it is
+# `get_last_error()`, `strerror(errno)` (`Z/sapi/cli/php_cli_server.c:286`),
+# and nothing on the request's path fails, so errno is what the server's last
+# failing call left on its thread, no call of the request's. That is
+# `zend_signal_init`'s scan of every signal, `sigaction(signo, NULL, &sa)`
+# (`Z/Zend/zend_signal.c:398`), which `do_cli_server` runs once the socket
+# listens (`php_cli_server.c:2907`) and which libc answers EINVAL for SIGKILL
+# and SIGSTOP on macOS and for glibc's own two signals on Linux; or, once a
+# client has closed its end before the server, that connection's
+# `shutdown(2)` (`:2419`), ENOTCONN, so the text follows how an earlier
+# client closed (measured under lldb on the pinned php -S, #2758). The
+# engine's server keeps no such stale errno, and a NUL path's 400 says
+# nothing of its own cause either way.
 [[line]]
 name = "the-built-in-server-refuses-a-path-holding-a-nul"
 args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
@@ -526,7 +574,9 @@ http = "HEAD /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 http = "GET /nope%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 
 # The same requests under a router that declines each: the router runs
-# first, and then the file is served or refused as without one (#2695).
+# first, and then the file is served or refused as without one (#2695). The
+# text after a 400's ` - ` is masked for the reason the line above gives: a
+# stale errno no call of the request's set (#2758).
 [[line]]
 name = "the-built-in-server-refuses-a-path-holding-a-nul-after-the-router"
 args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/router.php"]

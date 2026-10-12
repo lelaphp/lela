@@ -9,7 +9,7 @@
 use crate::string::Decimal;
 use php_ext::abi::{Ref, Union, Variadic};
 use php_ext::attr::php_function;
-use php_ext::coerce::is_space;
+use php_ext::coerce::{c_str, is_space};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -458,7 +458,7 @@ pub fn php_sscanf_internal(
     first: u32,
     num_vars: usize,
 ) -> Result<Owner<Value>, Thrown> {
-    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
+    let c_string = |bytes: &[u8]| c_str(bytes).to_vec();
     let (input, format) = (c_string(string), c_string(format));
     scan(req, &input, &format, first, num_vars)
 }

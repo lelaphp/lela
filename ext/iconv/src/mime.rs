@@ -10,7 +10,7 @@
 
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_long, with_string};
+use php_ext::coerce::{c_str, to_long, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
@@ -49,11 +49,6 @@ impl Mode {
     fn after_word(self) -> Scan {
         if self.strict { Scan::Word } else { Scan::Any }
     }
-}
-
-/// A C string's bytes: up to the first NUL, as `strlen` reads them.
-fn c_str(bytes: &[u8]) -> &[u8] {
-    bytes.split(|&b| b == 0).next().unwrap_or_default()
 }
 
 /// `qp_table`: what one byte costs as quoted-printable, itself or `=XX`.

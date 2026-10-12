@@ -15,7 +15,9 @@ use super::{BuildDefs, HostPath, Request};
 use crate::engine::Chdir;
 
 /// The working directory a request stood in before it entered its
-/// program's ([`Request::enter_program_dir`]), which it goes back to.
+/// program's ([`Request::enter_program_dir`]) or served its router
+/// ([`Request::standing_dir`]), which it goes back to
+/// ([`Request::go_back`]).
 pub(crate) struct LeftDir(PathBuf);
 
 /// The C library's `P_tmpdir` (`<stdio.h>`), the directory
@@ -203,24 +205,26 @@ impl Request {
         Ok(())
     }
 
-    /// `VCWD_CHDIR_FILE` over the program's name where the host serves
-    /// it in its own directory ([`Chdir::IntoProgramDir`];
-    /// `Z/main/main.c:2597-2604`): the working directory moved to the
-    /// directory the name names, cut at its last `/` as
-    /// `virtual_chdir_file` cuts it (`Z/Zend/zend_virtual_cwd.c:1211`),
-    /// where that resolves to a directory, as `virtual_chdir` moves only
-    /// there; and the directory it stood in, for
-    /// [`Request::leave_program_dir`]. `None` where the host stays or names
-    /// no program, as `php_execute_script_ex` keeps no directory to go
-    /// back to then.
+    /// `VCWD_CHDIR_FILE` over the program's `name` as the host gave it
+    /// (`primary_file->filename`), where the host serves it in its own
+    /// directory ([`Chdir::IntoProgramDir`]; `Z/main/main.c:2597-2604`):
+    /// the working directory moved to the directory the name names, cut
+    /// at its last `/` as `virtual_chdir_file` cuts it
+    /// (`Z/Zend/zend_virtual_cwd.c:1211`), where that resolves to a
+    /// directory, as `virtual_chdir` moves only there; and the directory
+    /// it stood in, for [`Request::go_back`]. `None` where the
+    /// host stays or names no program, as `php_execute_script_ex` keeps no
+    /// directory to go back to then. The name is not the path the file
+    /// opened as, so a link is entered where it stands, not where it
+    /// points.
     ///
     /// [`Chdir::IntoProgramDir`]: crate::engine::Chdir::IntoProgramDir
-    pub(crate) fn enter_program_dir(&mut self) -> Option<LeftDir> {
+    pub(crate) fn enter_program_dir(&mut self, name: Option<&[u8]>) -> Option<LeftDir> {
         if self.description.chdir != Chdir::IntoProgramDir {
             return None;
         }
-        let name = self.description.script_name.clone()?;
-        let left = LeftDir(self.cwd.clone());
+        let name = name?;
+        let left = self.standing_dir();
         // A name with no `/` is `ENOENT` to `virtual_chdir_file`, and one
         // whose only `/` leads keeps it, the root.
         if let Some(cut) = name.iter().rposition(|b| *b == b'/') {
@@ -232,11 +236,20 @@ impl Request {
         Some(left)
     }
 
-    /// The working directory `php_execute_script_ex` restores once the
-    /// program has been served (`Z/main/main.c:2670-2672`), the one
-    /// [`Request::enter_program_dir`] left, whatever the program moved it
-    /// to.
-    pub(crate) fn leave_program_dir(&mut self, left: LeftDir) {
+    /// The working directory the request stands in, kept to go back to:
+    /// the built-in server's `VCWD_GETCWD` before its router is served
+    /// (`Z/sapi/cli/php_cli_server.c:2260`).
+    pub(crate) fn standing_dir(&self) -> LeftDir {
+        LeftDir(self.cwd.clone())
+    }
+
+    /// The working directory restored, whatever the program moved it to:
+    /// the one [`Request::enter_program_dir`] left, as
+    /// `php_execute_script_ex` restores it once the program has been
+    /// served (`Z/main/main.c:2670-2672`), or the one the built-in server
+    /// kept before its router ([`Request::standing_dir`];
+    /// `Z/sapi/cli/php_cli_server.c:2284-2286`).
+    pub(crate) fn go_back(&mut self, left: LeftDir) {
         self.cwd = left.0;
     }
 

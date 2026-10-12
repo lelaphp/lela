@@ -9,6 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use nix::ifaddrs::getifaddrs;
 use nix::net::if_::{if_indextoname, if_nametoindex};
 
+use php_ext::coerce::c_str;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::PhpObject;
@@ -25,14 +26,6 @@ const HOST_NOT_FOUND: i32 = 1;
 const TRY_AGAIN: i32 = 2;
 const NO_RECOVERY: i32 = 3;
 const NO_DATA: i32 = 4;
-
-/// A string as C reads it: up to its first NUL.
-pub(crate) fn c_str(bytes: &[u8]) -> &[u8] {
-    bytes
-        .iter()
-        .position(|b| *b == 0)
-        .map_or(bytes, |at| &bytes[..at])
-}
 
 /// `inet_pton(AF_INET, ..)`.
 fn pton4(text: &[u8]) -> Option<Ipv4Addr> {

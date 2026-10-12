@@ -18,7 +18,7 @@ use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::cgi::{Disk, ini_text};
 use php_sapi::{
-    Aborted, Body, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
+    Aborted, Body, Chdir, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
     OutputSink, ProgramFile, RequestDescription, ResponseHead, WebRequest,
 };
 
@@ -757,7 +757,14 @@ impl Worker {
         wire: &Arc<Mutex<Wire>>,
         peer: Option<IpAddr>,
     ) -> Served {
-        let mut env = params;
+        // `apache_request_headers` reads each parameter whole
+        // (`sapi_add_request_header`); every other reading php makes of
+        // one, `init_request_info`'s, the loop's, `getenv()`'s and
+        // `$_SERVER`'s, goes through a `char *` and stops at a NUL (#2757).
+        let headers = php_proto::cgi::request_headers(&Environment(
+            fcgi::newest_first(&params).cloned().collect(),
+        ));
+        let mut env = params.cut_at_nul();
         let settings = Settings {
             fix_pathinfo: self.flag(b"cgi.fix_pathinfo", true),
             discard_path: self.flag(b"cgi.discard_path", false),
@@ -783,7 +790,7 @@ impl Worker {
             );
         }
         let head_only = info.method.as_deref() == Some(b"HEAD");
-        let description = self.describe(&env, &info, wire);
+        let description = self.describe(&env, &info, headers, wire);
         let response = Box::new(Response {
             wire: Arc::clone(wire),
             board: Some(self.board()),
@@ -1038,11 +1045,13 @@ impl Worker {
     /// `PHP_VALUE`s kept, then the php.ini's `[HOST=]` table of its
     /// `SERVER_NAME` and `[PATH=]` tables along its directory, which
     /// `sapi_cgi_activate` sets ([`Engine::activated_ini`]), then its
-    /// `.user.ini` lines.
+    /// `.user.ini` lines; `headers` are `apache_request_headers`', read
+    /// off the parameters as they came.
     fn describe(
         &mut self,
         env: &Environment,
         info: &php_proto::cgi::RequestInfo,
+        headers: Vec<(Vec<u8>, Vec<u8>)>,
         wire: &Arc<Mutex<Wire>>,
     ) -> RequestDescription {
         let mut ini = self.sticky.clone();
@@ -1068,29 +1077,21 @@ impl Worker {
             .map(|(n, v)| (n.into_encoded_bytes(), v.into_encoded_bytes()))
             .collect();
         let newest = Environment(fcgi::newest_first(env).cloned().collect());
-        // The file's directory, which `php_execute_script` moves to; the
-        // child's own where the request names no file.
-        let cwd = info
-            .path_translated
-            .as_deref()
-            .and_then(|path| {
-                crate::conf::path(path)
-                    .parent()
-                    .map(std::path::Path::to_path_buf)
-            })
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let web = WebRequest {
             body,
             response_code: info.response_code,
-            headers: php_proto::cgi::request_headers(&Environment(
-                fcgi::newest_first(env).cloned().collect(),
-            )),
+            headers,
             ..php_sapi::cgi::web(env, info)
         };
         RequestDescription {
             env: process_env,
             params: newest.0,
-            cwd,
+            // The child's directory, the pool's `chdir` where it names
+            // one (`fpm_unix_init_child`, `Z/sapi/fpm/fpm/fpm_unix.c:457`);
+            // `php_execute_script` enters the program's and comes back
+            // before the request shuts down.
+            cwd: std::env::current_dir().unwrap_or_default(),
+            chdir: Chdir::IntoProgramDir,
             server: rows,
             sapi_name: String::from(NAME),
             web: Some(web),

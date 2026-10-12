@@ -8,7 +8,7 @@ use std::os::fd::RawFd;
 
 use php_ext::abi::{Instance, OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::value_name;
+use php_ext::coerce::{c_str, value_name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw_error,
 };
@@ -16,7 +16,7 @@ use php_ext::request::{OptionAnswer, Request, StreamOption};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use crate::State;
-use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
+use crate::addr::{inet_addr, inet6_addr, ntop};
 use crate::constants::PHP_NORMAL_READ;
 use crate::ffi::{self, Addr, SUN_PATH};
 use crate::socket::{

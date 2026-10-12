@@ -12,6 +12,10 @@
 //! php's `isspace` and the white space `strtol` skips are; php's
 //! locale-free spelling of the six bytes, `zend_is_whitespace` and
 //! `_is_numeric_string_ex`'s, is [`is_whitespace`].
+//!
+//! [`c_str`] is the string all of them read: a `char *` as `strlen` reads
+//! it, up to its first NUL, which is what php hands C, or prints with
+//! `%s`, of a string that may hold one (#2763).
 
 /// C's `isspace` under the thread's `LC_CTYPE`, the request's locale
 /// where `setlocale()` installed one: the six bytes [`is_whitespace`]
@@ -107,9 +111,28 @@ pub fn atoi(bytes: &[u8]) -> i32 {
     strtol(bytes) as i32
 }
 
+/// `bytes` as C reads a `char *` through `strlen`: the bytes before the
+/// first NUL, every byte where there is none. php reads a string so
+/// wherever it hands its bytes to a C function that takes no length, or
+/// prints them with `%s`.
+#[must_use]
+pub fn c_str(bytes: &[u8]) -> &[u8] {
+    bytes.split(|&b| b == 0).next().unwrap_or(bytes)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{atoi, strtol, strtol_prefixed};
+    use super::{atoi, c_str, strtol, strtol_prefixed};
+
+    /// A C string ends at its first NUL, is empty where it leads, and is
+    /// every byte where there is none.
+    #[test]
+    fn c_str_reads_up_to_the_first_nul() {
+        assert_eq!(c_str(b"a.txt\0.php\0x"), b"a.txt");
+        assert_eq!(c_str(b"\0a"), b"");
+        assert_eq!(c_str(b"abc"), b"abc");
+        assert_eq!(c_str(b""), b"");
+    }
 
     /// The edges C's library reads: white space and one sign before the
     /// digits, nothing after the first byte that is not one, a long's

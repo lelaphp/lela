@@ -16,8 +16,9 @@ pub use php_heap::Exponent;
 /// C's `strtol(s, NULL, 10)`, `atoi` and `isspace` as php's extensions
 /// call them, `ZEND_STRTOL`, `ZEND_ATOL` and `zend_atoi`'s C library
 /// (`Z/Zend/zend_long.h:77`): the engine's one reading, so an extension
-/// reads a value past `int` or the long as php does (#2634).
-pub use crate::c_number::{atoi, is_space, strtol};
+/// reads a value past `int` or the long as php does (#2634); and
+/// `c_str`, a string's bytes as C reads them, up to its first NUL (#2763).
+pub use crate::c_number::{atoi, c_str, is_space, strtol};
 use php_heap::ZvalType;
 use php_unit::decl::{Bare, Type};
 

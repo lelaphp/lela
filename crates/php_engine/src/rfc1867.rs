@@ -15,7 +15,7 @@ use crate::api::raising::{Level, Thrown, docref, throw};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{Owner, PhpArray, PhpString, Value};
-use crate::c_number::is_space;
+use crate::c_number::{c_str, is_space};
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;
@@ -240,11 +240,6 @@ fn memstr(haystack: &[u8], needle: &[u8], partial: bool) -> Option<usize> {
         at += 1;
     }
     None
-}
-
-/// The bytes before the first NUL, what C reads of a line.
-fn c_str(bytes: &[u8]) -> &[u8] {
-    bytes.split(|b| *b == 0).next().unwrap_or_default()
 }
 
 /// `php_ap_getword`: the text up to `stop` outside quotes, a quote's

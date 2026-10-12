@@ -205,8 +205,7 @@ fn syslog_ident(named: Option<&[u8]>) -> &'static CStr {
 /// `bytes` up to the first NUL, as a C string; every byte after it is one
 /// C never reads.
 fn ident_bytes(bytes: &[u8]) -> CString {
-    let head = bytes.split(|&b| b == 0).next().unwrap_or_default();
-    CString::new(head).unwrap_or_default()
+    CString::new(php_proto::c_str(bytes)).unwrap_or_default()
 }
 
 /// A `syslog.facility` number as `nix` names it; one it names not, the

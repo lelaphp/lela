@@ -12,6 +12,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::attr::{php_const, php_function};
+use php_ext::coerce::c_str;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString};
@@ -29,14 +30,6 @@ const PHP_MAX_SALT_LEN: usize = 123;
 /// traditional DES salt alphabet `./0-9A-Za-z`.
 fn is_valid_salt_character(c: u8) -> bool {
     (b'.'..=b'9').contains(&c) || c.is_ascii_uppercase() || c.is_ascii_lowercase()
-}
-
-/// The bytes of `s` before its first NUL: what C's `strlen` sees.
-fn c_str(s: &[u8]) -> &[u8] {
-    s.iter()
-        .position(|&c| c == 0)
-        .and_then(|n| s.get(..n))
-        .unwrap_or(s)
 }
 
 /// `php_crypt`, `Z/ext/standard/crypt.c:70`, as a `PHP_USE_PHP_CRYPT_R` build

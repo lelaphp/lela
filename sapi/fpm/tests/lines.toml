@@ -298,3 +298,60 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
+# A request starts in the child's working directory, the pool's `chdir`
+# (`fpm_unix_init_child`), and `php_execute_script` enters the program's and
+# leaves it once the program has been served, so shutdown functions and
+# destructors run where the request started (#2748).
+[[line]]
+name = "a-request-enters-the-program-directory-and-leaves-it-before-shutdown"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\nchdir = {dir}/home\npm = static\npm.max_children = 1\n", "home/" = "", "at.php" = '''
+<?php
+function at() {
+    $cwd = getcwd();
+    return match (true) { $cwd === __DIR__ . '/www' => 'program', $cwd === __DIR__ => 'start', default => basename($cwd) };
+}
+''', "www/t.php" = '''
+<?php
+require_once __DIR__ . '/../at.php';
+echo 'run ', at(), "\n";
+register_shutdown_function(fn () => print('shutdown ' . at() . "\n"));
+$o = new class { function __destruct() { echo 'destructor ', at(), "\n"; } };
+''' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/www/t.php"], ["REQUEST_METHOD", "GET"]]
+
+# A FastCGI parameter holding a NUL: php reads every parameter
+# `init_request_info` and the request loop ask for through a `char *`
+# (`FCGI_GETENV`, `sapi_cgibin_getenv`), so each stops at its NUL, and
+# `security.limit_extensions` judges the file it names there; `$_SERVER`
+# registers each through `strlen` too (`cgi_php_load_env_var`), and
+# `getallheaders()` alone reads one whole (`sapi_add_request_header`) (#2757).
+[[line]]
+name = "a-parameter-holding-a-nul-is-read-up-to-it"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "a.txt" = "hello\n", "run.php" = '''
+<?php
+echo "ran\n";
+foreach ($_SERVER as $name => $value) {
+    if (is_string($value) && (str_contains($value, "\0") || str_contains($value, 'run.php') || str_starts_with($name, 'ORIG_') || $name === 'QUERY_STRING')) echo $name, ' ', json_encode($value), "\n";
+}
+var_dump($_GET, getallheaders()['X-A'] ?? null, getenv('QUERY_STRING'));
+''' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/run.php\u0000.txt"], ["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/run.php\u0000.txt"], ["QUERY_STRING", "a=1\u0000&b=2"], ["HTTP_X_A", "b\u0000c"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/run.php\u0000"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/a.txt\u0000.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/run.php/x\u0000y"], ["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/run.php"], ["PATH_INFO", "/x\u0000y"]]

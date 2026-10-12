@@ -11,7 +11,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
-use php_ext::coerce::value_name;
+use php_ext::coerce::{c_str, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{
     Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
@@ -757,13 +757,6 @@ fn persistent_key(
         key.extend(c_str(named));
     }
     key
-}
-
-/// The bytes of `s` to its first NUL: what php reads of a string it holds
-/// as a `char *`, by `strchr`, `strlen`, `pestrdup` and `%s`, as
-/// `php_pdo_internal_construct_driver` holds the DSN and the credentials.
-fn c_str(s: &[u8]) -> &[u8] {
-    s.split(|b| *b == 0).next().unwrap_or(s)
 }
 
 /// The persistent connection under `key` lent to the request: the one it

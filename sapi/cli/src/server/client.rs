@@ -18,8 +18,8 @@ use php_proto::http::{self, Credentials, Events, Parser};
 use php_proto::vpath;
 use php_sapi::cgi::Disk;
 use php_sapi::{
-    Aborted, Method, OutputSink, PHP_VERSION, ProgramFile, ProgramServed, RequestDescription,
-    ResponseHead, Routed, WebRequest,
+    Aborted, Chdir, Method, OutputSink, PHP_VERSION, ProgramFile, ProgramServed,
+    RequestDescription, ResponseHead, Routed, WebRequest,
 };
 
 use super::Site;
@@ -401,15 +401,15 @@ fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
 fn describe(site: &Site, client: &Client, is_static: bool) -> RequestDescription {
     let request = &client.building.request;
     let method = request.method().name().as_bytes();
-    let cwd = match (&site.router, &request.path_translated) {
-        (None, Some(path)) => os(path).parent().map(std::path::Path::to_path_buf),
-        _ => None,
-    };
     RequestDescription {
         env: std::env::vars_os()
             .map(|(n, v)| (n.as_encoded_bytes().to_vec(), v.as_encoded_bytes().to_vec()))
             .collect(),
-        cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+        // The server's directory: the router is served in it
+        // (`SAPI_OPTION_NO_CHDIR`), and `php_execute_script` enters the
+        // program's (`php_cli_server_dispatch_script`).
+        cwd: std::env::current_dir().unwrap_or_default(),
+        chdir: Chdir::IntoProgramDir,
         server: server_variables(site, client),
         sapi_name: String::from(super::NAME),
         web: Some(WebRequest {

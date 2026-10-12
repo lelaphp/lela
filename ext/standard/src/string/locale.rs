@@ -20,7 +20,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, Untyped, Variadic};
 use php_ext::attr::php_function;
-use php_ext::coerce::with_string;
+use php_ext::coerce::{c_str, with_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -192,8 +192,7 @@ fn from_environment(req: &Request, category: usize) -> Vec<u8> {
 /// The bytes up to the first NUL, what the C library reads of a
 /// `zend_string`'s value, as a C string.
 fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(c_str(bytes)).unwrap_or_default()
 }
 
 /// `try_setlocale_str(cat, loc)`: the name answered, or `None` where
