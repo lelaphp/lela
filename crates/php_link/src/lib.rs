@@ -279,6 +279,10 @@ pub enum Refusal {
     /// `Enum %s cannot include magic method %s`
     /// (`zend_verify_enum_magic_methods`).
     EnumMagic { class: String, method: &'static str },
+    /// `Cannot redeclare %s::%s()`, an enum that declares a method
+    /// `zend_enum_register_funcs` gives it, named as php's known string
+    /// spells it, `tryfrom` lowered.
+    EnumRedeclare { class: String, method: &'static str },
     /// `Enum %s cannot implement the Serializable interface`
     /// (`zend_verify_enum_interfaces`).
     EnumSerializable { class: String },
@@ -758,6 +762,9 @@ impl fmt::Display for Refusal {
             }
             Refusal::EnumMagic { class, method } => {
                 write!(f, "Enum {class} cannot include magic method {method}")
+            }
+            Refusal::EnumRedeclare { class, method } => {
+                write!(f, "Cannot redeclare {class}::{method}()")
             }
             Refusal::EnumSerializable { class } => {
                 write!(
@@ -1546,6 +1553,16 @@ pub fn link<'a, H: Copy + PartialEq>(
     holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
     values: &'a dyn Fn(&ConstExpr) -> Option<ConstExpr>,
 ) -> Linking<H> {
+    if let Some(refused) = enum_funcs_refused(child) {
+        return Linking {
+            outcome: Linked::Refused(refused),
+            raised: Vec::new(),
+            composed: None,
+            obligations: Vec::new(),
+            autoloads: Vec::new(),
+            record: None,
+        };
+    }
     if child.traits.is_empty() {
         return Linker::over(lookup, holder, Vec::new()).link_plain(child);
     }
@@ -1603,6 +1620,61 @@ pub fn link<'a, H: Copy + PartialEq>(
         autoloads: deferred.autoloads,
         record,
     }
+}
+
+/// `zend_enum_register_funcs`, the first act of `zend_do_link_class`
+/// over an enum: `cases`, and for a backed enum `from` and `tryfrom`,
+/// added to its function table, where a method of its own under the
+/// name is php's `Cannot redeclare`, raised as the enum links, at its
+/// declaration. The declaration holds the enum's own methods and after
+/// them the rows [`php_unit::enum_methods`] gives every enum, so a name
+/// held twice is `zend_hash_add_ptr` failing.
+///
+/// ```php
+/// echo "before\n";
+/// enum Foo: int {
+///     case Bar = 0;
+///     public static function tryFrom(int|string $v): ?self { return null; }
+/// }
+/// ```
+/// ```expect exit=255
+/// before
+///
+/// Fatal error: Cannot redeclare Foo::tryfrom() in %s on line 3
+/// ```
+///
+/// A pure enum is given no `from`, so one of its own is its own:
+///
+/// ```php
+/// enum Foo { case Bar; public function from() { return 1; } }
+/// var_dump(Foo::Bar->from());
+/// ```
+/// ```expect
+/// int(1)
+/// ```
+fn enum_funcs_refused(child: &ClassDecl) -> Option<Refused> {
+    if child.kind != ClassKind::Enum {
+        return None;
+    }
+    let backed = child.backing != php_unit::decl::EnumBacking::Pure;
+    let given: &[&'static str] = if backed {
+        &["cases", "from", "tryfrom"]
+    } else {
+        &["cases"]
+    };
+    let held = |name: &str| {
+        (child.methods.iter())
+            .filter(|m| m.function.name.0.eq_ignore_ascii_case(name.as_bytes()))
+            .count()
+    };
+    let method = given.iter().copied().find(|name| held(name) > 1)?;
+    Some(at_class(
+        child,
+        Refusal::EnumRedeclare {
+            class: text(&child.name.0),
+            method,
+        },
+    ))
 }
 
 /// `zend_try_early_bind` over `child`, a class with no trait, while the

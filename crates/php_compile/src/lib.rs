@@ -6295,6 +6295,60 @@ class C {
         assert!(dump.contains(m), "php's C::m, {dump}");
     }
 
+    /// `zend_enum_register_funcs` runs as the enum links (#2678): an
+    /// enum declaring its own `cases()`, or a backed one its own
+    /// `from()`, compiles, its `DECLARE_CLASS` and its method dumped as
+    /// `Zend/tests/enum/no-cases.phpt` and `no-from.phpt` dump them, and
+    /// the link refuses it when the opline runs.
+    #[test]
+    fn an_enum_declaring_its_own_cases_or_from_compiles() {
+        let cases = dump_of(
+            b"<?php
+enum Foo {
+    case Bar;
+    public static function cases(): array { return []; }
+}
+",
+        );
+        assert!(
+            cases.contains("0000 DECLARE_CLASS string(\"foo\")\n0001 RETURN int(1)\n"),
+            "php's $_main, {cases}"
+        );
+        assert!(
+            cases.contains(
+                "\nFoo::cases:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
+                 \x20    ; (before optimizer)\n     ; :4-4\n     ; return  [] RANGE[0..0]\n\
+                 0000 RETURN array(...)\n\
+                 0001 VERIFY_RETURN_TYPE\n\
+                 0002 RETURN null\n"
+            ),
+            "php's Foo::cases, {cases}"
+        );
+        let from = dump_of(
+            b"<?php
+enum Foo: int {
+    case Bar = 0;
+    public static function from(string|int $value): self { return $this; }
+}
+",
+        );
+        assert!(
+            from.contains("0000 DECLARE_CLASS string(\"foo\")\n0001 RETURN int(1)\n"),
+            "php's $_main, {from}"
+        );
+        assert!(
+            from.contains(
+                "0000 CV0($value) = RECV 1\n\
+                 0001 T1 = FETCH_THIS\n\
+                 0002 VERIFY_RETURN_TYPE T1\n\
+                 0003 RETURN T1\n\
+                 0004 VERIFY_RETURN_TYPE\n\
+                 0005 RETURN null\n"
+            ),
+            "php's Foo::from, {from}"
+        );
+    }
+
     /// `zend_compile_class_decl` compiles the body in the order written
     /// (#2797), so a property hook sees in `CG(active_class_entry)`'s
     /// `function_table` the methods declared above its property and

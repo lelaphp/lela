@@ -5245,7 +5245,7 @@ impl Emit<'_> {
         self.member_statements(&class.statement_lines);
         self.line = line;
         if is_enum {
-            self.verify_enum(at, &name)?;
+            self.enum_funcs_registered(at)?;
         }
         Ok(Entered {
             at,
@@ -5721,35 +5721,19 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_enum_register_funcs` over the enum at `at` of the unit's
-    /// classes: the enum takes `cases`, and for a backed one `from` and
-    /// `tryFrom`, after its own methods, a method of its own under one
-    /// of those names being php's `Cannot redeclare`. The magic methods
-    /// php keeps off an enum are the linker's to refuse, as
+    /// The methods `zend_enum_register_funcs` gives the enum at `at` of
+    /// the unit's classes: `cases`, and for a backed one `from` and
+    /// `tryFrom`, after its own methods. php registers them as the enum
+    /// links, when its `DECLARE_CLASS` runs, so a method of its own
+    /// under one of those names compiles, and the link refuses the two
+    /// as php's `Cannot redeclare` ([`php_link::link`]). The magic
+    /// methods php keeps off an enum are the linker's to refuse too, as
     /// `zend_verify_enum` refuses them when the class links.
-    fn verify_enum(&mut self, at: usize, name: &[u8]) -> Result<(), CompileError> {
-        let Some(decl) = self.classes.get(at) else {
+    fn enum_funcs_registered(&mut self, at: usize) -> Result<(), CompileError> {
+        let Some(decl) = self.classes.get_mut(at) else {
             return Err(self.fatal("InternalError: an enum the unit has not"));
         };
-        let has = |wanted: &str| {
-            decl.methods
-                .iter()
-                .any(|m| m.function.name.0.eq_ignore_ascii_case(wanted.as_bytes()))
-        };
-        let builtins = php_unit::enum_methods(decl.backing);
-        if let Some(clash) = builtins
-            .iter()
-            .find(|builtin| has(&String::from_utf8_lossy(&builtin.function.name.0)))
-        {
-            return Err(self.compile_error(format!(
-                "Cannot redeclare {}::{}()",
-                String::from_utf8_lossy(name),
-                String::from_utf8_lossy(&clash.function.name.0)
-            )));
-        }
-        if let Some(decl) = self.classes.get_mut(at) {
-            decl.methods.extend(builtins);
-        }
+        decl.methods.extend(php_unit::enum_methods(decl.backing));
         Ok(())
     }
 
@@ -17305,15 +17289,9 @@ impl Emit<'_> {
         if !active.name.eq_ignore_ascii_case(class) {
             return None;
         }
-        // The methods `zend_enum_register_funcs` gives an enum are the
-        // engine's, added at the link: php's compile-time table has none
-        // of them, so a call to one is compiled as to a method unknown.
-        let lowered = method.to_ascii_lowercase();
-        if active.kind == ClassKind::Enum
-            && matches!(lowered.as_slice(), b"cases" | b"from" | b"tryfrom")
-        {
-            return None;
-        }
+        // The methods `zend_enum_register_funcs` gives an enum are added
+        // at the link, so while the body compiles the table holds an
+        // enum's own `cases` alone, where it declares one.
         self.table_method(active.at, method)
             .map(|m| (Known::User { flagged: m.flagged }, m.callee))
     }
