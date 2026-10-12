@@ -97,8 +97,9 @@ impl Walked {
             if !seen.insert(file.clone()) {
                 continue;
             }
-            for name in dylibs(&file)? {
-                let Some(real) = resolved(&file, &name) else {
+            let loads = Loads::of(&file)?;
+            for name in &loads.names {
+                let Some(real) = loads.resolved(&file, name)? else {
                     continue;
                 };
                 if let Some((prefix, keg)) = in_cellar(&real) {
@@ -122,18 +123,6 @@ fn installed(prefix: &Path, keg: &str) -> Option<String> {
     Some(target.file_name()?.to_string_lossy().into_owned())
 }
 
-/// A load command's library as the file it resolves to from `loader`, none
-/// for a name relative to a search path or the executable, which no
-/// library of the closure uses, and for one not on disk.
-fn resolved(loader: &Path, name: &str) -> Option<PathBuf> {
-    let path = match name.strip_prefix("@loader_path/") {
-        Some(rest) => loader.parent()?.join(rest),
-        None if name.starts_with('/') => PathBuf::from(name),
-        None => return None,
-    };
-    fs::canonicalize(path).ok()
-}
-
 /// The prefix, keg and version of a file under `<prefix>/Cellar/<keg>/<version>/`.
 fn in_cellar(real: &Path) -> Option<(PathBuf, (String, String))> {
     let parts: Vec<Component<'_>> = real.components().collect();
@@ -148,39 +137,107 @@ fn in_cellar(real: &Path) -> Option<(PathBuf, (String, String))> {
 /// `LC_LOAD_UPWARD_DYLIB` (`<mach-o/loader.h>`).
 const LOADS: [u32; 5] = [0xc, 0x8000_0018, 0x8000_001f, 0x20, 0x8000_0023];
 
-/// `MH_MAGIC_64`: a 64-bit Mach-O file in this machine's byte order.
+/// `LC_RPATH`: a directory an `@rpath/` name is searched in.
+const RPATH: u32 = 0x8000_001c;
+
+/// `MH_MAGIC_64` as a little-endian word: a 64-bit Mach-O file of arm64 or
+/// `x86_64`, the only shape Homebrew pours on either.
 const MAGIC: u32 = 0xfeed_facf;
 
-/// The libraries a file's load commands name, none where it is not a
-/// 64-bit Mach-O file.
-fn dylibs(file: &Path) -> Result<Vec<String>> {
-    let mut reader = File::open(file).with_context(|| format!("reading {}", file.display()))?;
-    let mut header = [0; 32];
-    if reader.read_exact(&mut header).is_err() || word(&header, 0) != Some(MAGIC) {
-        return Ok(Vec::new());
-    }
-    let size = word(&header, 20).unwrap_or_default();
-    let mut commands = vec![0; size as usize];
-    reader
-        .read_exact(&mut commands)
-        .with_context(|| format!("reading the load commands of {}", file.display()))?;
-    let mut names = Vec::new();
-    let mut at = 0;
-    while let (Some(command), Some(length)) = (word(&commands, at), word(&commands, at + 4)) {
-        let end = at + length as usize;
-        if LOADS.contains(&command)
-            && let Some(name) =
-                word(&commands, at + 8).and_then(|offset| commands.get(at + offset as usize..end))
-        {
-            let name = name.split(|&b| b == 0).next().unwrap_or_default();
-            names.push(String::from_utf8_lossy(name).into_owned());
+/// The other Mach-O shapes, a 32-bit file and a universal one (`MH_MAGIC`,
+/// `FAT_MAGIC` read little-endian): refused, since their loads go unread.
+const UNREAD: [u32; 2] = [0xfeed_face, 0xbeba_feca];
+
+/// What one file's load commands say: the libraries it names and the
+/// directories its `@rpath/` names are searched in, both empty where it
+/// is not a Mach-O file.
+#[derive(Debug, Default)]
+struct Loads {
+    names: Vec<String>,
+    rpaths: Vec<String>,
+}
+
+impl Loads {
+    fn of(file: &Path) -> Result<Loads> {
+        let mut reader = File::open(file).with_context(|| format!("reading {}", file.display()))?;
+        let mut header = [0; 32];
+        if reader.read_exact(&mut header).is_err() {
+            return Ok(Loads::default());
         }
-        if length == 0 {
-            break;
+        match word(&header, 0) {
+            Some(MAGIC) => {}
+            Some(magic) if UNREAD.contains(&magic) => bail!(
+                "{} is a 32-bit or universal Mach-O file, whose loads the walk of the pin's [closure] does not read",
+                file.display()
+            ),
+            _ => return Ok(Loads::default()),
         }
-        at = end;
+        let size = word(&header, 20).unwrap_or_default();
+        let length = reader.metadata().map(|m| m.len()).unwrap_or_default();
+        if u64::from(size) > length {
+            bail!(
+                "{} names {size} bytes of load commands, more than the file holds",
+                file.display()
+            );
+        }
+        let mut commands = vec![0; size as usize];
+        reader
+            .read_exact(&mut commands)
+            .with_context(|| format!("reading the load commands of {}", file.display()))?;
+        let mut loads = Loads::default();
+        let mut at = 0;
+        while let (Some(command), Some(length)) = (word(&commands, at), word(&commands, at + 4)) {
+            let end = at + length as usize;
+            // A dylib command and an rpath command both carry their string's
+            // offset from the command's start at +8.
+            let text = || {
+                let bytes = word(&commands, at + 8)
+                    .and_then(|offset| commands.get(at + offset as usize..end))?;
+                let bytes = bytes.split(|&b| b == 0).next()?;
+                Some(String::from_utf8_lossy(bytes).into_owned())
+            };
+            if LOADS.contains(&command) {
+                loads.names.extend(text());
+            } else if command == RPATH {
+                loads.rpaths.extend(text());
+            }
+            if length == 0 {
+                break;
+            }
+            at = end;
+        }
+        Ok(loads)
     }
-    Ok(names)
+
+    /// A library `loader` names as the file it resolves to, none for one
+    /// not on disk, a system library's: an absolute name, one under
+    /// `@loader_path/`, or one under `@rpath/` found in the first of the
+    /// loader's rpaths that holds it. A name the walk cannot place,
+    /// `@executable_path/` or an `@rpath/` name in none of them, is refused
+    /// rather than passed over, so a keg reached through one is never a
+    /// keg unseen.
+    fn resolved(&self, loader: &Path, name: &str) -> Result<Option<PathBuf>> {
+        let placed = |name: &str| match name.strip_prefix("@loader_path/") {
+            Some(rest) => loader.parent().map(|dir| dir.join(rest)),
+            None => name.starts_with('/').then(|| PathBuf::from(name)),
+        };
+        if let Some(rest) = name.strip_prefix("@rpath/") {
+            let found = self
+                .rpaths
+                .iter()
+                .filter_map(|rpath| placed(rpath))
+                .find_map(|dir| fs::canonicalize(dir.join(rest)).ok());
+            if found.is_some() {
+                return Ok(found);
+            }
+        } else if let Some(path) = placed(name) {
+            return Ok(fs::canonicalize(path).ok());
+        }
+        bail!(
+            "{} loads {name}, which the walk of the pin's [closure] does not resolve",
+            loader.display()
+        )
+    }
 }
 
 fn word(bytes: &[u8], at: usize) -> Option<u32> {
@@ -196,37 +253,36 @@ mod tests {
 
     /// A 64-bit Mach-O file whose load commands name `loads`.
     fn macho(loads: &[&str]) -> Vec<u8> {
-        let mut commands = Vec::new();
-        for name in loads {
-            let mut body = name.as_bytes().to_vec();
+        let loads: Vec<(u32, &str)> = loads.iter().map(|name| (LOADS[0], *name)).collect();
+        commanded(&loads)
+    }
+
+    /// A 64-bit Mach-O file of `commands`, each a command and its string.
+    fn commanded(commands: &[(u32, &str)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (command, text) in commands {
+            let mut body = text.as_bytes().to_vec();
             body.resize((body.len() + 1).next_multiple_of(8), 0);
             let length = u32::try_from(24 + body.len()).unwrap();
-            for w in [0xc, length, 24, 0, 0, 0] {
-                commands.extend(u32::to_le_bytes(w));
+            for w in [*command, length, 24, 0, 0, 0] {
+                bytes.extend(u32::to_le_bytes(w));
             }
-            commands.extend(body);
+            bytes.extend(body);
         }
+        let count = u32::try_from(commands.len()).unwrap();
+        let size = u32::try_from(bytes.len()).unwrap();
         let mut file = Vec::new();
-        let header = [
-            MAGIC,
-            0x0100_000c,
-            0,
-            2,
-            u32::try_from(loads.len()).unwrap(),
-            u32::try_from(commands.len()).unwrap(),
-            0,
-            0,
-        ];
-        for w in header {
+        for w in [MAGIC, 0x0100_000c, 0, 2, count, size, 0, 0] {
             file.extend(u32::to_le_bytes(w));
         }
-        file.extend(commands);
+        file.extend(bytes);
         file
     }
 
     /// A Homebrew prefix of the closure's shape: php loading zip by its
     /// `opt` link and the system library, zip loading zstd beside it by
-    /// `@loader_path`, and ca-certificates installed and loaded by none.
+    /// `@rpath` through an rpath under `@loader_path`, and ca-certificates
+    /// installed and loaded by none.
     fn prefix(tree: &Tree) -> (PathBuf, PathBuf) {
         let root = tree.path().join("brew");
         let keg = |name: &str, version: &str, file: &str, bytes: Vec<u8>| {
@@ -243,7 +299,10 @@ mod tests {
         let zip = root.join("opt/zip/lib/libzip.dylib");
         let php = macho(&[zip.to_str().unwrap(), "/usr/lib/libSystem.B.dylib"]);
         keg("php", "1", "php", php);
-        let libzip = macho(&["@loader_path/../../../zstd/1.5.7_1/lib/libzstd.dylib"]);
+        let libzip = commanded(&[
+            (RPATH, "@loader_path/../../../zstd/1.5.7_1/lib"),
+            (LOADS[0], "@rpath/libzstd.dylib"),
+        ]);
         keg("zip", "1.12_1", "lib/libzip.dylib", libzip);
         keg("zstd", "1.5.7_1", "lib/libzstd.dylib", macho(&[]));
         keg("ca-certificates", "2026-09-25", "lib/cert.pem", Vec::new());
@@ -298,6 +357,15 @@ mod tests {
             err.contains("zstd 1.5.7_1 is loaded and not recorded"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_name_the_walk_does_not_resolve_refuses_naming_it() {
+        let tree = Tree::new("closure-rpath").unwrap();
+        let php = tree.path().join("php");
+        fs::write(&php, macho(&["@rpath/libzip.dylib"])).unwrap();
+        let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
+        assert!(err.contains("loads @rpath/libzip.dylib"), "{err}");
     }
 
     #[test]

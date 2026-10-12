@@ -188,8 +188,8 @@ pub struct Pin {
     #[serde(default)]
     fastcgi: Option<Mapping>,
     /// `[closure]`: the Homebrew kegs the pinned binaries load, each at
-    /// its version (#2657), held beside the digest; absent until a person
-    /// records it, and then nothing the binaries load is held.
+    /// its version (#2657), held beside the digest. While the pin records
+    /// none, nothing the binaries load is held.
     #[serde(default)]
     pub(crate) closure: Option<closure::Closure>,
     /// How many times the digest was asserted through this pin; not a
