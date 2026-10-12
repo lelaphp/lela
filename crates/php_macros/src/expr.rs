@@ -30,6 +30,61 @@ pub(crate) fn const_expr(tokens: Tokens) -> syn::Result<Tokens> {
     parser.parse2(tokens)
 }
 
+/// The `Absent` an entry lays down for a parameter whose default is
+/// `tokens`: a scalar written as itself as its value and a string
+/// written as itself as its bytes, which the call takes with nothing
+/// evaluated, as php's C default is a constant; anything else as the
+/// function that builds its `ConstExpr`, which the request calls once,
+/// where it evaluates the expression first.
+pub(crate) fn absent(tokens: Tokens) -> syn::Result<Tokens> {
+    let root = root();
+    let literal = |input: ParseStream<'_>| -> syn::Result<Option<Tokens>> {
+        let negative = input.peek(Token![-]);
+        if negative {
+            input.parse::<Token![-]>()?;
+        }
+        let absent = if input.peek(syn::LitInt) {
+            let (value, _) = php_int(&input.parse()?)?;
+            let value = if negative {
+                value.wrapping_neg()
+            } else {
+                value
+            };
+            quote!(#root::abi::Absent::Value(#root::values::Value::int(#value)))
+        } else if input.peek(syn::LitFloat) {
+            let value: f64 = input.parse::<syn::LitFloat>()?.base10_parse()?;
+            let value = if negative { -value } else { value };
+            quote!(#root::abi::Absent::Value(#root::values::Value::float(#value)))
+        } else if negative {
+            return Ok(None);
+        } else if input.peek(syn::LitStr) {
+            let value = bytes(&input.parse::<syn::LitStr>()?.value());
+            quote!(#root::abi::Absent::Str(#value))
+        } else if input.peek(syn::LitByteStr) {
+            let literal: syn::LitByteStr = input.parse()?;
+            quote!(#root::abi::Absent::Str(#literal))
+        } else if input.peek(syn::LitBool) {
+            let value = input.parse::<syn::LitBool>()?.value;
+            quote!(#root::abi::Absent::Value(#root::values::Value::bool(#value)))
+        } else if input
+            .fork()
+            .call(Ident::parse_any)
+            .is_ok_and(|word| word == "null")
+        {
+            input.call(Ident::parse_any)?;
+            quote!(#root::abi::Absent::Value(#root::values::Value::null()))
+        } else {
+            return Ok(None);
+        };
+        Ok(input.is_empty().then_some(absent))
+    };
+    if let Ok(Some(absent)) = literal.parse2(tokens.clone()) {
+        return Ok(absent);
+    }
+    let expr = const_expr(tokens)?;
+    Ok(quote!(#root::abi::Absent::Expr(|| #expr)))
+}
+
 /// php's binary operators over constant expressions, by precedence
 /// (`zend_language_parser.y`), the loosest first.
 fn operator(input: ParseStream<'_>) -> Option<(&'static str, u8)> {

@@ -229,6 +229,22 @@ impl Request {
         (index < call.num_args()).then(|| Value::of_zval(call.frame.slot(Slot(index))))
     }
 
+    /// The call being served read once: how many arguments it was given
+    /// and the first `N` of them as [`Request::argument`] reads each,
+    /// `UNDEF` past the count; none given and all `UNDEF` outside a
+    /// native's body.
+    pub(crate) fn arguments_given<const N: usize>(&self) -> (usize, [Value; N]) {
+        let mut out = [Value::undef(); N];
+        let Some(call) = self.serving_call() else {
+            return (0, out);
+        };
+        let given = call.num_args() as usize;
+        for (cell, zval) in out.iter_mut().zip(call.frame.slots().iter().take(given)) {
+            *cell = Value::of_zval(*zval);
+        }
+        (given, out)
+    }
+
     /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`
     /// on: the call's remaining arguments as they stand on the frame,
     /// each a view the call keeps one owner of, and none where the call

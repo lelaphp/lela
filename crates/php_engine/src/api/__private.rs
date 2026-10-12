@@ -122,10 +122,15 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
     }
 }
 
-/// The count check a declared native's entry makes before its body,
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s: [`raising::arity`], the
-/// one place the sentence is written, which an `arity = manual` native
-/// calls from its body after its own first step.
+/// What a declared native's entry reads before its body,
+/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s: the call being served read
+/// once, its count held to `min..=max` by [`raising::arity`]'s sentence,
+/// the one place it is written, which an `arity = manual` native calls
+/// from its body after its own first step (its entry asks `0..`, which
+/// nothing refuses); and the first `N` arguments as the call passed
+/// them, a reference not followed and `UNDEF` past what it was given, as
+/// `Z_PARAM_*` steps a pointer over `ZEND_CALL_ARG(execute_data, 1)`.
+/// Each is a view the call keeps one owner of until it is popped.
 ///
 /// [`raising::arity`]: crate::api::raising::arity
 ///
@@ -141,8 +146,14 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
 /// min() expects at least 1 argument, 0 given
 /// mt_srand() expects at most 2 arguments, 3 given
 /// ```
-pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
-    crate::api::raising::arity(req, min, max)
+pub fn arguments<const N: usize>(
+    req: &mut Request,
+    min: usize,
+    max: Option<usize>,
+) -> Result<[Value; N], Thrown> {
+    let (given, arguments) = req.arguments_given::<N>();
+    crate::api::raising::arity_of(req, given, min, max)?;
+    Ok(arguments)
 }
 
 /// The entry of an abstract or interface method, which the engine never

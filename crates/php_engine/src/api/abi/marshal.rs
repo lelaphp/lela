@@ -4,8 +4,10 @@
 //! or a return is an item of one of the two traits, so the macro matches
 //! no type by name and the vocabulary widens by an `impl`.
 //!
-//! The entry the macro emits is php's ZPP: the arity, then each argument
-//! left to right through [`FromArgument::hold`], then the body, then
+//! The entry the macro emits is php's ZPP: the call read once, its
+//! arity held and its arguments taken as they stand on it, then each
+//! argument left to right through [`FromArgument::hold`], an absent one
+//! through [`FromArgument::from_default`], then the body, then
 //! [`IntoReturn::into_return`]. A hold whose argument already has a type
 //! the declaration's pure mask admits takes it as it is, as
 //! `ZEND_TYPE_CONTAINS_CODE` does before anything else; any other is
@@ -76,14 +78,14 @@ const fn nullable_mask(inner: u32) -> u32 {
     inner | bits::NULL
 }
 
-/// The argument at `position` as the call gave it, none where it gave
-/// none.
-fn given(req: &Request, position: u32) -> Option<Value> {
-    req.argument(position)
-        .filter(|given| !matches!(given.as_ref(), ValueRef::Undef))
+/// The argument as the call gave it, none where it gave none.
+#[inline]
+fn given(given: Value) -> Option<Value> {
+    (!matches!(given.as_ref(), ValueRef::Undef)).then_some(given)
 }
 
 /// Whether `mask` admits `value` as it is, `ZEND_TYPE_CONTAINS_CODE`.
+#[inline]
 fn admits(mask: u32, value: &Value) -> bool {
     mask & (1u32 << u32::from(value.type_code())) != 0
 }
@@ -132,37 +134,58 @@ pub trait FromArgument: Sized {
     fn accepts(value: &Value) -> bool;
     /// The value the engine held to the declaration, as `Self`.
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown>;
-    /// The argument at `position` held to the declaration: as it is where
-    /// its type is one [`FromArgument::MASK`] admits, and otherwise
-    /// through [`coerce::argument`], with the 8.1 null deprecation and
-    /// php's `TypeError`; `None` where the call gave none.
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        let Some(given) = given(req, position) else {
+    /// The argument the call passed at `position`, `given` as it stands
+    /// on the call (`UNDEF` where the call gave none), held to the
+    /// declaration: as it is where its type is one
+    /// [`FromArgument::MASK`] admits, and otherwise through
+    /// [`coerce::argument`], with the 8.1 null deprecation and php's
+    /// `TypeError`; `None` where the call gave none.
+    #[inline]
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        let Some(given) = self::given(given) else {
             return Ok(None);
         };
         let plain = given.deref();
         if admits(Self::MASK, &plain) {
             return Self::from_value(req, plain).map(Some);
         }
-        match coerce::argument(req, position)? {
-            Some(held) => Self::from_value(req, held).map(Some),
-            None => Ok(None),
-        }
+        let held = coerce::argument(req, given, position)?;
+        Self::from_value(req, held).map(Some)
     }
-    /// The absent argument: the declaration's default expression,
-    /// evaluated in `scope`, the declaring class, and held to the
-    /// declared type. A plain scalar is taken as written; anything else
-    /// is evaluated once per request and kept by the request, which owns
-    /// what it made (design §4.7).
+    /// The absent argument: the declaration's default, `absent` as the
+    /// entry lays it down, evaluated in `scope`, the declaring class, and
+    /// held to the declared type ([`Absent`]).
     fn from_default(
         req: &mut Request,
-        expr: &ConstExpr,
+        absent: Absent,
         scope: Option<&[u8]>,
         position: u32,
     ) -> Result<Self, Thrown> {
-        let value = default_value(req, expr, scope, position, (Self::MASK, Self::declared))?;
+        let value = default_value(req, absent, scope, position, (Self::MASK, Self::declared))?;
         Self::from_value(req, value)
     }
+}
+
+/// A parameter's default as the entry lays it down where the call gave
+/// no argument, the declaration's expression in the form that costs the
+/// call least: a scalar as written, a string as its bytes, as php's
+/// native leaves its C default standing under `Z_PARAM_OPTIONAL`; and
+/// anything else as the function that builds its expression, called
+/// on the request's first use alone, the value it evaluates to kept by
+/// the request after, as `ZEND_RECV_INIT` caches an evaluated default in
+/// its `run_time_cache` slot and `zend_get_default_from_internal_arg_info`
+/// evaluates a native's (design §4.7).
+#[derive(Debug, Clone, Copy)]
+pub enum Absent {
+    /// `null`, a `bool`, an `int` or a `float` written as itself, php's
+    /// C default: laid down as the value, nothing evaluated.
+    Value(Value),
+    /// A string written as itself, the engine's string made of it at
+    /// startup.
+    Str(&'static [u8]),
+    /// Any other constant expression, built where the request evaluates
+    /// it first and kept by the request after.
+    Expr(fn() -> ConstExpr),
 }
 
 /// The default `from_default` takes: a scalar as written, a string the
@@ -181,51 +204,67 @@ pub trait FromArgument: Sized {
 /// ```
 fn default_value(
     req: &mut Request,
-    expr: &ConstExpr,
+    absent: Absent,
     scope: Option<&[u8]>,
     position: u32,
     (mask, declared): (u32, fn() -> Option<Type>),
 ) -> Result<Value, Thrown> {
-    let plain = match expr {
-        ConstExpr::Null => Some(Value::null()),
-        ConstExpr::Bool(b) => Some(Value::bool(*b)),
-        ConstExpr::Long { value, .. } => Some(Value::int(*value)),
-        ConstExpr::Double(f) => Some(Value::float(*f)),
+    let value = match absent {
+        Absent::Value(value) => value,
         // php's C default for an omitted string costs the request
         // nothing, and neither does the engine's string made at startup.
-        ConstExpr::Str(written) => req
-            .shared
-            .default_string(written)
-            .map(|s| Value::string(crate::api::values::PhpString::of(s))),
-        _ => None,
-    };
-    let key = (req.serving_function().unwrap_or(Function::PASS), position);
-    let value = if let Some(value) = plain {
-        value
-    } else {
-        if let Some(kept) = req.default_argument(key) {
-            return Ok(kept);
+        Absent::Str(written) => {
+            let Some(made) = req.shared.default_string(written) else {
+                let expr = || ConstExpr::Str(written.into());
+                return evaluated(req, expr, scope, position, declared);
+            };
+            Value::string(crate::api::values::PhpString::of(made))
         }
-        let scope = scope.and_then(|name| req.class_named(Bare::resolved(name)));
-        crate::api::call::eval_const_expr_made(req, expr, scope)?
+        Absent::Expr(built) => return evaluated(req, built, scope, position, declared),
     };
-    let held = if admits(mask, &value) {
-        value
-    } else {
-        match declared() {
-            // The declared type, as above, over a default.
-            Some(ty) if !coerce::holds(req, &value, &ty, coerce::Scopes::default()) => {
-                let held = coerce::coerce_param(req, &value, &ty, position)?;
-                req.release(value);
-                held
-            }
-            _ => value,
-        }
-    };
-    if plain.is_none() {
-        req.keep_default_argument(key, held);
+    if admits(mask, &value) {
+        return Ok(value);
     }
+    held_default(req, value, position, declared)
+}
+
+/// A default that is no value as written, its expression built and
+/// evaluated in `scope` on the request's first use and held to the declared type, and the request's
+/// kept value after.
+fn evaluated(
+    req: &mut Request,
+    expr: impl FnOnce() -> ConstExpr,
+    scope: Option<&[u8]>,
+    position: u32,
+    declared: fn() -> Option<Type>,
+) -> Result<Value, Thrown> {
+    let key = (req.serving_function().unwrap_or(Function::PASS), position);
+    if let Some(kept) = req.default_argument(key) {
+        return Ok(kept);
+    }
+    let expr = expr();
+    let scope = scope.and_then(|name| req.class_named(Bare::resolved(name)));
+    let value = crate::api::call::eval_const_expr_made(req, &expr, scope)?;
+    let held = held_default(req, value, position, declared)?;
+    req.keep_default_argument(key, held);
     Ok(held)
+}
+
+/// A default held to the declared type, as an argument is.
+fn held_default(
+    req: &mut Request,
+    value: Value,
+    position: u32,
+    declared: fn() -> Option<Type>,
+) -> Result<Value, Thrown> {
+    match declared() {
+        Some(ty) if !coerce::holds(req, &value, &ty, coerce::Scopes::default()) => {
+            let held = coerce::coerce_param(req, &value, &ty, position)?;
+            req.release(value);
+            Ok(held)
+        }
+        _ => Ok(value),
+    }
 }
 
 /// `mixed`: the value as passed.
@@ -252,6 +291,7 @@ macro_rules! scalar {
             fn accepts(value: &Value) -> bool {
                 matches!(value.as_ref(), ValueRef::$pat(_))
             }
+            #[inline]
             fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
                 match value.as_ref() {
                     ValueRef::$pat(held) => Ok(held.clone()),
@@ -284,8 +324,8 @@ impl FromArgument for Resource {
             _ => mismatch(req, "resource"),
         }
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        let Some(given) = given(req, position) else {
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        let Some(given) = self::given(given) else {
             return Ok(None);
         };
         let given = given.deref();
@@ -317,8 +357,8 @@ impl FromArgument for Path {
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         PhpString::from_value(req, value).map(Path)
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        let Some(string) = PhpString::hold(req, position)? else {
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        let Some(string) = PhpString::hold(req, given, position)? else {
             return Ok(None);
         };
         if string.as_bytes().contains(&0) {
@@ -340,8 +380,8 @@ impl FromArgument for Callable {
     fn from_value(req: &mut Request, _: Value) -> Result<Self, Thrown> {
         mismatch(req, "callable held off its own slot")
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        coerce::callable_argument(req, position)
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        coerce::callable_argument(req, given, position)
     }
 }
 
@@ -367,8 +407,8 @@ impl<T: FromArgument> FromArgument for Option<T> {
             _ => T::from_value(req, value).map(Some),
         }
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        match given(req, position) {
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        match self::given(given) {
             None => Ok(None),
             Some(given) if matches!(given.deref().as_ref(), ValueRef::Null) => Ok(Some(None)),
             // `Z_PARAM_RESOURCE_OR_NULL`: an untyped resource's refusal
@@ -385,7 +425,7 @@ impl<T: FromArgument> FromArgument for Option<T> {
                     &format!("be of type resource or null, {name} given"),
                 ))
             }
-            Some(_) => T::hold(req, position).map(|held| held.map(Some)),
+            Some(given) => T::hold(req, given, position).map(|held| held.map(Some)),
         }
     }
 }
@@ -408,8 +448,8 @@ impl<T: FromArgument> FromArgument for Untyped<T> {
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         T::from_value(req, value).map(Untyped)
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        match given(req, position) {
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        match self::given(given) {
             Some(given) => held_as::<T>(req, given, position).map(|held| Some(Untyped(held))),
             None => Ok(None),
         }
@@ -605,18 +645,13 @@ impl<T: FromArgument> FromArgument for Passed<T> {
     fn from_value(req: &mut Request, value: Value) -> Result<Self, Thrown> {
         T::from_value(req, value).map(Passed::Given)
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        Ok(Some(match T::hold(req, position)? {
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        Ok(Some(match T::hold(req, given, position)? {
             Some(held) => Passed::Given(held),
             None => Passed::Omitted,
         }))
     }
-    fn from_default(
-        _: &mut Request,
-        _: &ConstExpr,
-        _: Option<&[u8]>,
-        _: u32,
-    ) -> Result<Self, Thrown> {
+    fn from_default(_: &mut Request, _: Absent, _: Option<&[u8]>, _: u32) -> Result<Self, Thrown> {
         Ok(Passed::Omitted)
     }
 }
@@ -631,6 +666,9 @@ impl<T: FromArgument> FromArgument for Passed<T> {
 /// type array".
 pub struct Raw<T> {
     value: Value,
+    /// The argument as it stands on the call, `UNDEF` for a default and
+    /// for a value no call passed.
+    given: Value,
     position: u32,
     held: PhantomData<fn() -> T>,
 }
@@ -647,6 +685,7 @@ impl<T> Raw<T> {
     pub(crate) fn returned(value: Value) -> Raw<T> {
         Raw {
             value,
+            given: Value::undef(),
             position: 0,
             held: PhantomData,
         }
@@ -661,12 +700,12 @@ impl<T: FromArgument> Raw<T> {
     }
 
     /// The declared coercion, with the text the entry would raise: the
-    /// argument held off its own slot as the entry holds one, so a type
-    /// only a slot can serve (`callable`, which `zend_is_callable`
+    /// argument held as it stands on the call, as the entry holds one, so
+    /// a type only a slot can serve (`callable`, which `zend_is_callable`
     /// resolves where the argument stands) holds here too; the value as
-    /// passed where the slot holds none.
+    /// passed where the call gave none.
     pub fn hold(&self, req: &mut Request) -> Result<T, Thrown> {
-        match T::hold(req, self.position)? {
+        match T::hold(req, self.given, self.position)? {
             Some(held) => Ok(held),
             None => held_as(req, self.value, self.position),
         }
@@ -684,13 +723,15 @@ impl<T: FromArgument> FromArgument for Raw<T> {
     fn from_value(_: &mut Request, value: Value) -> Result<Self, Thrown> {
         Ok(Raw {
             value,
+            given: Value::undef(),
             position: 0,
             held: PhantomData,
         })
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        Ok(given(req, position).map(|given| Raw {
+    fn hold(_: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        Ok(self::given(given).map(|given| Raw {
             value: given.deref(),
+            given,
             position,
             held: PhantomData,
         }))
@@ -700,13 +741,14 @@ impl<T: FromArgument> FromArgument for Raw<T> {
     /// before any is coerced; [`Raw::hold`] holds it at its position.
     fn from_default(
         req: &mut Request,
-        expr: &ConstExpr,
+        absent: Absent,
         scope: Option<&[u8]>,
         position: u32,
     ) -> Result<Self, Thrown> {
-        let value = default_value(req, expr, scope, position, (bits::ANY, || None))?;
+        let value = default_value(req, absent, scope, position, (bits::ANY, || None))?;
         Ok(Raw {
             value,
+            given: Value::undef(),
             position,
             held: PhantomData,
         })
@@ -795,8 +837,8 @@ impl<T: FromArgument> FromArgument for Ref<T> {
             held: Some(held),
         })
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        let Some(given) = given(req, position) else {
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        let Some(given) = self::given(given) else {
             return Ok(None);
         };
         let cell = given.as_php_ref().copied();
@@ -806,12 +848,7 @@ impl<T: FromArgument> FromArgument for Ref<T> {
             held: Some(held),
         }))
     }
-    fn from_default(
-        _: &mut Request,
-        _: &ConstExpr,
-        _: Option<&[u8]>,
-        _: u32,
-    ) -> Result<Self, Thrown> {
+    fn from_default(_: &mut Request, _: Absent, _: Option<&[u8]>, _: u32) -> Result<Self, Thrown> {
         Ok(Ref {
             cell: None,
             held: None,
@@ -829,7 +866,8 @@ fn tail<T: FromArgument>(req: &mut Request, position: u32) -> Result<Vec<T>, Thr
     let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);
     let mut out = Vec::new();
     for at in position..=count {
-        if let Some(held) = T::hold(req, at)? {
+        let given = req.argument(at).unwrap_or(Value::undef());
+        if let Some(held) = T::hold(req, given, at)? {
             out.push(held);
         }
     }
@@ -849,7 +887,9 @@ impl<T: FromArgument> FromArgument for Variadic<T> {
     fn from_value(_: &mut Request, _: Value) -> Result<Self, Thrown> {
         Ok(Variadic(Vec::new()))
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
+    /// The tail is read off the call from `position` on, `given` being
+    /// its first.
+    fn hold(req: &mut Request, _: Value, position: u32) -> Result<Option<Self>, Thrown> {
         req.variadic_arguments(position)?;
         tail(req, position).map(|held| Some(Variadic(held)))
     }
@@ -887,7 +927,7 @@ impl<T: FromArgument> FromArgument for NamedVariadic<T> {
             named: Vec::new(),
         })
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
+    fn hold(req: &mut Request, _: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let positional = tail(req, position)?;
         let past = u32::try_from(req.argument_count())
             .unwrap_or(u32::MAX)
