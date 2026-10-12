@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::dump::{Dumped, Held, engine_side, held, verdict};
+use super::dump::{Dumped, Folded, Held, engine_side, held, verdict};
 use super::*;
 use crate::divergence::Registry;
 use crate::oracle::Runner;
@@ -388,4 +388,140 @@ fn a_dump_past_the_limit_or_ended_by_a_signal_is_the_files_fail_naming_it() {
         wall: std::time::Duration::ZERO,
     };
     assert_eq!(engine_side(Ok(dumped)).unwrap().arrays, b"$_main:");
+}
+
+/// The two values a binary folds from its own build, as it says them.
+fn folds(binary: &str, build_date: &str) -> Folded {
+    Folded::said(format!("{binary}\0{build_date}").as_bytes()).unwrap()
+}
+
+/// A fixture dump of a program that names both constants, as php's
+/// `zend_try_ct_eval_const` folds them, and returns `returned`.
+fn naming_both(binary: &str, build_date: &str, returned: &str) -> Dumped {
+    Dumped::of(
+        format!(
+            "$_main:
+     ; (lines=5, args=0, vars=0, tmps=1)
+     ; (before optimizer)
+     ; %SCRATCH%/build_date.php:1-4
+     ; return  [] RANGE[0..0]
+0000 INIT_FCALL 1 96 string(\"var_dump\")
+0001 SEND_VAL string(\"{binary}\") 1
+0002 DO_ICALL
+0003 ECHO string(\"{build_date}\")
+0004 RETURN {returned}
+"
+        )
+        .as_bytes(),
+    )
+}
+
+const PHP: &str = "/pinned/php/bin/php";
+const ENGINE: &str = "/work/dax-php/target/release-da/php";
+
+/// Each side's dump with that binary's own values put out of it, then the
+/// verdict: what `Dumps::judge` does with the two dumps of one file.
+fn compared(expected: Dumped, actual: Dumped) -> OneJudged<Judgement> {
+    verdict(
+        &registry(""),
+        "compile:php-src/tests/basic/build_date.phpt",
+        "tests/basic/build_date.phpt",
+        &expected.placed(Some(&folds(PHP, "Jul 28 2026 13:06:52"))),
+        &actual.placed(Some(&folds(ENGINE, "Oct 11 2026 09:14:03"))),
+    )
+}
+
+/// #2692: two dumps that differ in each binary's own `PHP_BINARY` and
+/// `PHP_BUILD_DATE` alone are identical once each binary's own values are
+/// put out of its dump, and no registry row is consulted to say so.
+#[test]
+fn each_binarys_own_build_literals_alone_are_no_difference() {
+    let judged = compared(
+        naming_both(PHP, "Jul 28 2026 13:06:52", "int(1)"),
+        naming_both(ENGINE, "Oct 11 2026 09:14:03", "int(1)"),
+    );
+    assert_eq!(judged.judgement, Judgement::Pass, "{judged:#?}");
+}
+
+/// The placeholder hides the literal and nothing else: one more
+/// difference in the file is still the file's failure, named.
+#[test]
+fn a_difference_beside_the_build_literals_still_differs() {
+    let judged = compared(
+        naming_both(PHP, "Jul 28 2026 13:06:52", "int(1)"),
+        naming_both(ENGINE, "Oct 11 2026 09:14:03", "int(2)"),
+    );
+    assert_eq!(judged.judgement, Judgement::Fail, "{judged:#?}");
+    assert!(
+        judged.note.contains("-0004 RETURN int(1)") && judged.note.contains("+0004 RETURN int(2)"),
+        "{}",
+        judged.note
+    );
+}
+
+/// Only a binary's own value is put out: a compiler that folds a value
+/// other than its own, here php's path and date, still differs. Its own
+/// value is put out of a literal a folded concatenation made of it too,
+/// `PHP_BINARY . ' -S …'` as `php_cli_server_ipv4_error_message.phpt`
+/// folds it, and the rest of that literal is still compared.
+#[test]
+fn a_binary_that_folds_a_value_not_its_own_still_differs() {
+    let judged = compared(
+        naming_both(PHP, "Jul 28 2026 13:06:52", "int(1)"),
+        naming_both(PHP, "Jul 28 2026 13:06:52", "int(1)"),
+    );
+    assert_eq!(judged.judgement, Judgement::Fail, "{judged:#?}");
+    assert!(
+        judged
+            .note
+            .contains("-0001 SEND_VAL string(\"<PHP_BINARY>\") 1")
+            && judged
+                .note
+                .contains(&format!("+0001 SEND_VAL string(\"{PHP}\") 1"))
+            && judged
+                .note
+                .contains("-0003 ECHO string(\"<PHP_BUILD_DATE>\")"),
+        "{}",
+        judged.note
+    );
+    let serving = |binary: &str, port: u16| {
+        Dumped::of(
+            format!("0002 SEND_VAL string(\"{binary} -S \\\"192.168.1.999:{port}\\\"\") 1\n")
+                .as_bytes(),
+        )
+    };
+    assert_eq!(
+        compared(serving(PHP, 8080), serving(ENGINE, 8080)).judgement,
+        Judgement::Pass
+    );
+    assert_eq!(
+        compared(serving(PHP, 8080), serving(ENGINE, 8081)).judgement,
+        Judgement::Fail
+    );
+}
+
+/// The value is matched as php's dump prints it, escaped as
+/// `zend_dump_const` escapes a string, and only inside a string literal:
+/// the same bytes on a line the dump writes of its own are left, and a
+/// dump with no answer beside it is compared as it stands.
+#[test]
+fn the_value_is_matched_as_php_prints_it_inside_a_literal_alone() {
+    let odd = folds("/a \"b\"\\c\n\u{7f}", "d");
+    let dump = Dumped::of(
+        b"     ; /a \\\"b\\\"\\\\c\\n\\x7F:1-2\n0000 SEND_VAL string(\"/a \\\"b\\\"\\\\c\\n\\x7F\") 1\n",
+    );
+    assert_eq!(
+        dump.clone().placed(Some(&odd)).arrays,
+        b"     ; /a \\\"b\\\"\\\\c\\n\\x7F:1-2\n0000 SEND_VAL string(\"<PHP_BINARY>\") 1\n"
+    );
+    assert_eq!(dump.clone().placed(None), dump);
+}
+
+/// A binary's answer is heard only whole: two values one NUL apart, each
+/// of them something, since an empty value would match every literal.
+#[test]
+fn only_a_whole_answer_is_heard() {
+    for answer in [&b""[..], b"/bin/php", b"/bin/php\0", b"\0date", b"a\0b\0c"] {
+        assert_eq!(Folded::said(answer), None, "{answer:?}");
+    }
 }
