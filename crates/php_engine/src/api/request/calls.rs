@@ -311,17 +311,16 @@ impl Request {
         // `EG(fake_scope) = NULL` for the call and put back after it: a
         // destructor or a `__toString` a scoped write serves stands in its
         // own scope.
-        let fake = self.replace_fake_scope(None);
-        let served = self.serve_call_body(
-            function,
-            this,
-            called_scope,
-            closure,
-            arguments,
-            extra_named,
-        );
-        self.replace_fake_scope(fake);
-        served
+        self.in_fake_scope(None, |req| {
+            req.serve_call_body(
+                function,
+                this,
+                called_scope,
+                closure,
+                arguments,
+                extra_named,
+            )
+        })
     }
 
     /// [`Request::serve_call`] with no scope a write named standing.
