@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
+use php_link::NameHasher;
 use php_unit::Unit;
 
 use super::Request;
@@ -26,7 +27,7 @@ use crate::api::values::{PhpString, Value};
 #[derive(Default)]
 pub(crate) struct UnitNames {
     units: Vec<(Weak<Unit>, Vec<PhpString>)>,
-    by_bytes: HashMap<Box<[u8]>, PhpString>,
+    by_bytes: HashMap<Box<[u8]>, PhpString, NameHasher>,
 }
 
 impl UnitNames {
@@ -91,7 +92,7 @@ impl Request {
         self.unit_names
             .units
             .push((Arc::downgrade(unit), Vec::new()));
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::with_hasher(NameHasher);
         for name in php_compile::op_array_names(unit) {
             if !seen.insert(name) {
                 continue;
