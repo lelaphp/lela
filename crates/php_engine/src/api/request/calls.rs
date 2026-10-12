@@ -1017,18 +1017,18 @@ impl Request {
         self.call_trampoline(class, name, true)
     }
 
-    /// The trampoline `class` answers under the lowered name, php's
+    /// The trampoline `class` answers under `name`, any case, php's
     /// `ZEND_ACC_CALL_VIA_HANDLER` function: a method the class's
     /// `get_method` synthesises, which `ce->function_table` has no row
     /// for, so [`Request::method_named`] never finds it and no
     /// rendering lists it. `zend_get_closure_invoke_method` is the one
     /// the engine makes, `Closure::__invoke`.
-    pub(crate) fn trampoline_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+    pub(crate) fn trampoline_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
         let table = self
             .shared
             .trampoline_tables
             .get(self.native_class_at(class)?)?;
-        super::lowered_key(lowered, |key| table.get(key).copied())
+        table.find(name).copied()
     }
 
     /// Serve the native the call frame on top of [`Vm`] names: its entry

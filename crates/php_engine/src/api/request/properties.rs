@@ -1630,7 +1630,7 @@ impl Request {
         decl.interfaces
             .iter()
             .chain(decl.parent.as_ref())
-            .filter_map(|name| self.class_named(&name.0))
+            .filter_map(|name| self.class_named(name.into()))
             .any(|above| self.guards_handed_on(above, depth + 1))
     }
 

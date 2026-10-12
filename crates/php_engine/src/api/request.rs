@@ -453,10 +453,12 @@ pub struct Request {
     /// The names the request-only units it compiled carry, held while
     /// each unit lives ([`unit_names::UnitNames`]).
     unit_names: unit_names::UnitNames,
-    /// php's `EG(function_table)` past the natives as the preload left
-    /// it: its functions, published, in the order its table holds them,
-    /// which the request's own top-level functions follow.
-    preloaded_functions: Arc<[Function]>,
+    /// php's `EG(function_table)` past the natives, each function under
+    /// its name: the preload's, published, in the order its table holds
+    /// them, then each the request declared, in the order declared. A
+    /// closure or a method is never a row, being found through its
+    /// object or its class.
+    functions: Keyed<Function>,
     /// The `static` variables' tables ([`static_vars::StaticVars`]).
     static_vars: static_vars::StaticVars,
     /// Where the request is the preload's (design §6.3), the files it
@@ -746,24 +748,6 @@ impl std::hash::Hasher for WordHasher {
     }
 }
 
-/// `zend_string_tolower` for a lookup: `find` over `name` lowered, on the
-/// stack where it fits, since the key is only read, and over `name`
-/// itself where it has nothing to lower.
-pub(crate) fn lowered_key<R>(name: &[u8], find: impl FnOnce(&[u8]) -> R) -> R {
-    if !name.iter().any(u8::is_ascii_uppercase) {
-        return find(name);
-    }
-    let mut buffer = [0u8; 128];
-    match buffer.get_mut(..name.len()) {
-        Some(lowered) => {
-            lowered.copy_from_slice(name);
-            lowered.make_ascii_lowercase();
-            find(lowered)
-        }
-        None => find(&name.to_ascii_lowercase()),
-    }
-}
-
 impl Declared {
     /// The declaration the table holds for the class.
     fn decl(&self) -> Option<&ClassDecl> {
@@ -887,7 +871,7 @@ impl Request {
             aliases: tables.aliases,
             user_functions: Vec::new(),
             unit_names: unit_names::UnitNames::default(),
-            preloaded_functions: tables.functions,
+            functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,
             accel_loaded: None,

@@ -13,6 +13,7 @@
 
 use php_macros::php_class;
 use php_unit::decl::Attribute as AttributeDecl;
+use php_unit::decl::Bare;
 
 use php_unit::Level;
 
@@ -49,12 +50,11 @@ impl Flags {
 }
 
 /// `zend_get_attribute_str`: the attribute of a lowered name among a
-/// declaration's, its name as resolved, a leading `\` dropped.
+/// declaration's, each named as resolved ([`php_unit::decl::Name`]).
 fn find<'a>(attributes: &'a [AttributeDecl], name: &[u8]) -> Option<&'a AttributeDecl> {
-    attributes.iter().find(|one| {
-        let written = one.name.0.strip_prefix(b"\\").unwrap_or(&one.name.0);
-        written.eq_ignore_ascii_case(name)
-    })
+    attributes
+        .iter()
+        .find(|one| one.name.0.eq_ignore_ascii_case(name))
 }
 
 /// `zend_get_attribute_object` with no call frame of its own, over the
@@ -74,7 +74,7 @@ fn internal_strings(
     let Some(attribute) = find(attributes, class).filter(|one| !one.arguments.is_empty()) else {
         return Ok(None);
     };
-    let Some(class) = req.class_named(class) else {
+    let Some(class) = req.class_named(Bare::resolved(class)) else {
         return Ok(None);
     };
     let object = attribute_object_made(req, class, attribute, scope, None)?;

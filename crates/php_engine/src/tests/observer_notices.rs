@@ -10,6 +10,7 @@
 //! `observer_error_*.phpt`, and as `Z/Zend/zend_observer.c` lays out
 //! the slot.
 
+use php_unit::decl::Bare;
 use std::path::{Path, PathBuf};
 
 use php_macros::php_function;
@@ -528,7 +529,7 @@ fn acting_init(observed: &mut Observed<'_>) -> ObserverHandlers {
 
 fn target(observed: &Observed<'_>) -> crate::api::call::Function {
     observed
-        .function_named(b"target")
+        .function_named(Bare::resolved(b"target"))
         .unwrap_or(crate::api::call::Function::PASS)
 }
 
@@ -550,7 +551,7 @@ fn acted(what: String) {
 
 fn add(observed: &mut Observed<'_>) {
     let function = target(observed);
-    let untouched = observed.function_named(b"untouched");
+    let untouched = observed.function_named(Bare::resolved(b"untouched"));
     let added = observed.add_begin_handler(function, extra_begin);
     let untouched = untouched.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
     acted(format!("add {added} untouched {untouched}"));
@@ -713,15 +714,15 @@ fn native_init(observed: &mut Observed<'_>) -> ObserverHandlers {
 }
 
 fn add_to_native(observed: &mut Observed<'_>) {
-    let native = observed.function_named(b"strcmp");
-    let strncmp = observed.function_named(b"strncmp");
+    let native = observed.function_named(Bare::resolved(b"strcmp"));
+    let strncmp = observed.function_named(Bare::resolved(b"strncmp"));
     let added = native.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
     let unresolved = strncmp.is_some_and(|f| observed.add_begin_handler(f, extra_begin));
     acted(format!("add {added} unresolved {unresolved}"));
 }
 
 fn remove_from_native(observed: &mut Observed<'_>) {
-    let native = observed.function_named(b"strcmp");
+    let native = observed.function_named(Bare::resolved(b"strcmp"));
     let removed = native.and_then(|f| observed.remove_begin_handler(f, extra_begin));
     acted(format!("remove {}", removed.is_some()));
 }

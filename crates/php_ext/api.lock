@@ -1186,6 +1186,7 @@ values::Key::lookup
 values::Key::to_prop_name
 values::Layout
 values::Laziness
+values::NameHasher
 values::Owner
 values::Owner::append
 values::Owner::bool

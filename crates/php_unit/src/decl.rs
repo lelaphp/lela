@@ -7,9 +7,55 @@
 //! is `api.lock`'s as well as `unit.lock`'s; the trait adaptations, which
 //! no native writes, are not re-exported.
 
-/// A name as written: bytes, interned by the engine at publication.
+/// A name as declared: resolved, as `zend_resolve_class_name` leaves a
+/// written one, so fully qualified with no leading `\`, and in the case
+/// it was declared in. The compiler resolves a name the source wrote
+/// before it makes one of it; a native's is spelled in its crate. What a
+/// table by name files the declaration under ([`Bare`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct Name(pub Box<[u8]>);
+
+/// A name to look up a class or a function by: past the one leading
+/// `\` that marks a written name fully qualified, which
+/// `zend_lookup_class_ex` and `zend_init_dynamic_call_string` drop, and
+/// in any case, since a table by name folds it. Made once where a name
+/// as written enters a lookup ([`Bare::of`]), or from a name that never
+/// had the `\` ([`Bare::resolved`], a [`Name`]); never made again from
+/// one, so no lookup drops a second `\`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bare<'a>(&'a [u8]);
+
+impl<'a> Bare<'a> {
+    /// `written` past its leading `\`, where it has one.
+    #[must_use]
+    pub fn of(written: &'a [u8]) -> Bare<'a> {
+        Bare(written.strip_prefix(b"\\").unwrap_or(written))
+    }
+
+    /// `name`, which the compiler resolved or the engine spells in its
+    /// own source, as it stands. A name as written handed here is a
+    /// strip missed, which a debug build refuses (#2711).
+    #[must_use]
+    pub fn resolved(name: &'a [u8]) -> Bare<'a> {
+        debug_assert!(
+            !name.starts_with(b"\\"),
+            "a name as written handed to Bare::resolved"
+        );
+        Bare(name)
+    }
+
+    /// The name's bytes.
+    #[must_use]
+    pub const fn bytes(self) -> &'a [u8] {
+        self.0
+    }
+}
+
+impl<'a> From<&'a Name> for Bare<'a> {
+    fn from(name: &'a Name) -> Bare<'a> {
+        Bare(&name.0)
+    }
+}
 
 impl From<&str> for Name {
     fn from(s: &str) -> Name {
@@ -1163,4 +1209,24 @@ pub struct IniDecl {
     pub user: bool,
     pub per_dir: bool,
     pub system: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bare, Name};
+
+    #[test]
+    fn a_bare_name_drops_one_leading_backslash_once() {
+        assert_eq!(Bare::of(b"\\\\Foo").bytes(), b"\\Foo");
+        assert_eq!(Bare::of(b"Foo").bytes(), b"Foo");
+        let name = Name::from("NS\\Foo");
+        assert_eq!(Bare::from(&name).bytes(), b"NS\\Foo");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a name as written handed to Bare::resolved")]
+    fn a_resolved_name_refuses_a_leading_backslash_in_a_debug_build() {
+        assert!(Bare::resolved(b"\\Foo").bytes().is_empty());
+    }
 }
