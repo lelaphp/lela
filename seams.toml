@@ -95,7 +95,6 @@ budget = 2000                              # the hosts' facade and what php-src 
 [[crate]]
 name = "php_streams"
 budget = 10000                              # php's main/streams/ and main/network.c, split from php_engine (#1773, #1874)
-porting = true
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
@@ -109,15 +108,9 @@ lock = "xtask.lock"                        # harness §4.1, revision 16: the har
 [[crate]]
 name = "ext/standard"
 budget = 68500
-# The port is partial: `crosscheck` and `phpt` are its meter, not a
-# condition of done (harness §4.5 condition 1, #383). The key's deletion
-# is the port's completion certificate.
-porting = true
 [[crate]]
 name = "ext/spl"
 budget = 16500
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "timelib_sys"
 budget = 1500
@@ -125,79 +118,46 @@ budget = 1500
 [[crate]]
 name = "ext/date"
 budget = 10000
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/reflection"
 budget = 9500
-# The port is partial: both `crosscheck` columns render as the oracle's,
-# and the corpus reaches the methods standing beside `stub::unbuilt`
-# (#378), so `phpt` is the meter here (harness §4.5 condition 1, #383).
-porting = true
 [[crate]]
 name = "ext/pcre"
 budget = 6000
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/mbstring"
 budget = 17000
 feature = "mbstring"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664). libmbfl is vendored byte for byte from php-src ext/mbstring/libmbfl at the pinned tag under its LGPL-2.1, compiled by build.rs, and bound in src/ffi/, the bindings pool's (#1173).
-porting = true
+# libmbfl is vendored byte for byte from php-src ext/mbstring/libmbfl at the pinned tag under its LGPL-2.1, compiled by build.rs, and bound in src/ffi/, the bindings pool's (#1173).
 [[crate]]
 name = "ext/session"
 budget = 5500
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/pdo"
 budget = 7000
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/dom"
 budget = 25500
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/random"
 budget = 3500
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/pdo_mysql"
 budget = 2500
 feature = "pdo_mysql"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/filter"
 budget = 3000
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/tokenizer"
 budget = 1500
-# The port is partial: every miss in the crate's corpus is another crate's
-# gap -- `implode`, `strncmp` and `set_error_handler`, which nothing declares,
-# and the `Cannot override final method` fatal the linker does not raise -- so
-# `phpt` is the meter here (harness §4.5 condition 1, #383, #521).
-porting = true
 [[crate]]
 name = "ext/json"
 budget = 1700
-# The port is partial: the corpus reads 9 of 88 failing, and the crate is
-# touched by anything that changes the shape of a declaration (#376), so
-# `phpt` is the meter here too (harness §4.5 condition 1, #383).
-porting = true
 [[crate]]
 name = "ext/openssl"
 budget = 13500
 feature = "openssl"
-# The port is partial: 197 of 228 missed at 7ec36601, so `phpt` is the
-# meter until #725 replaces the key (#1212).
-porting = true
 [[crate]]
 name = "ext/curl"
 budget = 6000
@@ -205,238 +165,160 @@ feature = "curl"
 [[crate]]
 name = "ext/iconv"
 budget = 3000
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/pdo_sqlite"
 budget = 2500
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/ctype"
 budget = 500
 [[crate]]
 name = "ext/hash"
 budget = 17000    # design ledger 9: no Mahout crate; a thin port over the RustCrypto hash crates
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/libxml"
 budget = 2000     # #731: libxml's natives, LibXMLError and the error state every XML extension reads; libxml2's binding is in src/ffi/, the bindings pool's
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/lexbor"
 budget = 500      # #731: php-src's vendored lexbor compiled by build.rs, and its binding in src/ffi/, the bindings pool's
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/zlib"
 budget = 4000     # #924: zlib.c, its filter and its compress.zlib:// wrapper; a pure-Rust deflate first, libz-sys where its bytes cannot match (design revision 34)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/pcntl"
 budget = 2500     # pcntl.c: fork, wait, signals through Request::interrupt, alarm, exec, priority; the CLI binary alone, as php builds pcntl for cli (Mitchell, 2026-09-27)
 feature = "pcntl"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/posix"
 budget = 2000     # posix.c: ids, the user and group databases, rlimits, ttys, mkfifo, uname, times; the CLI binary alone (Mitchell, 2026-09-27)
 feature = "posix"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/sockets"
 budget = 5000     # sockets.c, conversions.c, multicast.c; nix with libc for what it lacks, as posix and pcntl (Mitchell, 2026-09-27, #1078)
 feature = "sockets"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/phar"
 budget = 14000    # phar.c, phar_object.c, util.c, tar.c, zip.c, stream.c, dirstream.c, func_interceptors.c (Mitchell, 2026-09-27, #1086)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/bz2"
 budget = 2500     # bz2.c and bz2_filter.c; pure Rust first, held to the oracle's bytes, libbz2 where none matches (Mitchell, 2026-09-28, #1107)
 feature = "bz2"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/opcache"
 budget = 2000     # zend_accelerator_module.c and zend_accelerator_blacklist.c: the ini entries, the natives and the status and configuration arrays; the unit cache they answer from is php_engine's (design §6.3), so the shared allocator, persist and file cache are not ported here (#1163)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/calendar"
 budget = 2000     # calendar.c, cal_unix.c, dow.c, easter.c, french.c, gregor.c, jewish.c, julian.c; pure arithmetic, php's own C ported, no library (#1163)
 feature = "calendar"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/bcmath"
 budget = 5000     # bcmath.c and libbcmath, php's own C, ported (design §7.2) and so counted, less xsse.h's SIMD shim; no library (#1163)
 feature = "bcmath"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/simplexml"
 budget = 3000     # simplexml.c over the libxml2 ext/libxml binds, reached through its safe types, with no src/ffi/ of its own (design §4.10, §7.2) (#1163)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/uri"
 budget = 3500     # php_uri.c, php_uri_common.c and the three parser adapters; uriparser vendored from php-src's ext/uri/uriparser, compiled by build.rs and bound in src/ffi/, the bindings pool's; Uri\WhatWg over ext/lexbor's safe types (#1163)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/xml"
 budget = 2500     # xml.c and compat.c, the expat-compatible parser over libxml2's SAX2 push parser, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 1,852 lines of C (#1166, #727's rule, #1323)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/xmlreader"
 budget = 1500     # php_xmlreader.c over libxml2's xmlTextReader, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 1,089 lines of C (#1166, #727's rule, #1323)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/xmlwriter"
 budget = 1150     # php_xmlwriter.c over libxml2's xmlTextWriter, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 769 lines of C (#1166, #727's rule, #1323)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/exif"
 budget = 5500     # exif.c, php's own C ported, no library; php's --enable-exif, whose feature turns on mbstring, the decoding the oracle's --ri reports; 4,198 lines of C (#1166, #727's rule, #1323)
 feature = "exif"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/ftp"
 budget = 4000     # ftp.c and php_ftp.c, php's own C ported over the engine's sockets; php's --enable-ftp, whose feature turns on openssl for ftp_ssl_connect, which the oracle carries; 2,847 lines of C (#1166, #727's rule, #1323)
 feature = "ftp"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/shmop"
 budget = 500      # shmop.c over System V shared memory, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; php's --enable-shmop; 247 lines of C (#1166, #727's rule, #1323)
 feature = "shmop"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/sysvmsg"
 budget = 500      # sysvmsg.c over System V message queues, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; php's --enable-sysvmsg; 328 lines of C (#1166, #727's rule, #1323)
 feature = "sysvmsg"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/sysvsem"
 budget = 500      # sysvsem.c over System V semaphores, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; php's --enable-sysvsem; 231 lines of C (#1166, #727's rule, #1323)
 feature = "sysvsem"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/sysvshm"
 budget = 500      # sysvshm.c over System V shared memory, bound from libc in src/ffi/, the bindings pool's, since nix binds no System V IPC; the segment in php's own layout, which a php process on the same key reads; php's --enable-sysvshm; 325 lines of C (#1166, #727's rule, #1323)
 feature = "sysvshm"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 
 [[crate]]
 name = "ext/mysqlnd"
 budget = 16500    # mysqlnd/*.c, 13,089 lines of C: the wire protocol over mysql_common's codec and the engine's streams, charsets, statistics, auth, result typing, prepared statements; the driver mysqli and pdo_mysql share, as php's mysqlnd is (#1345)
 feature = "mysqlnd"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+# The port is partial: `crosscheck` is the meter, not a condition of done; the `phpt` subset is held to no regression (#383, #725).
 porting = true
 [[crate]]
 name = "ext/mysqli"
 budget = 5500     # mysqli*.c, 3,713 lines of C, over ext/mysqlnd (#1345)
 feature = "mysqli"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/sqlite3"
 budget = 3500     # sqlite3.c over libsqlite3, which ext/pdo_sqlite already binds; built by php's default ./configure; 2,555 lines of C (#1166, #727's rule, #1451)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/fileinfo"
 budget = 1000     # fileinfo.c over libmagic, vendored from php-src and compiled by build.rs as lexbor, its src/ffi/ the bindings pool's; built by php's default ./configure; 524 lines of C of its own (#1166, #727's rule, #1451)
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/dba"
 budget = 6000     # dba.c with the flatfile, inifile and cdb handlers, php's own C ported, and ndbm over the platform's <ndbm.h>, bound in src/ffi/, the bindings pool's (#1512, #1523); php's --enable-dba; 4,555 lines of C (#1166, #727's rule, #1451)
 feature = "dba"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/zip"
 budget = 10000    # php_zip.c and zip_stream.c, ZipArchive and the zip:// wrapper, over the `zip` crate, pure Rust with no src/ffi/; php's --with-zip; 3,897 lines of C by #727's rule, and room for the libzip behaviour revision 70 re-derives in Rust, which the rule does not count (#1515, #1544)
 feature = "zip"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/gmp"
 budget = 2500     # gmp.c over the libgmp the pinned keg links, found through pkg-config and bound in src/ffi/, never vendored; 1,615 lines of C (#1166, #727's rule, #1540)
 feature = "gmp"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/sodium"
 budget = 6000     # libsodium.c and sodium_pwhash.c over the libsodium the pinned keg links, through pkg-config, bound in src/ffi/, never vendored; 4,643 lines of C (#1166, #727's rule, #1540)
 feature = "sodium"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/tidy"
 budget = 2500     # tidy.c over the libtidy (tidy-html5) the pinned keg links, through pkg-config, bound in src/ffi/; 1,690 lines of C (#1166, #727's rule, #1540)
 feature = "tidy"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/gettext"
 budget = 500      # gettext.c over the libintl the pinned keg links, through pkg-config, bound in src/ffi/; 331 lines of C (#1166, #727's rule, #1540)
 feature = "gettext"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/xsl"
 budget = 1500     # php_xsl.c and xsltprocessor.c over the platform's libxslt and libexslt, beside ext/libxml's libxml2, bound in src/ffi/; 1,078 lines of C (#1166, #727's rule, #1540)
 feature = "xsl"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+# The port is partial: `crosscheck` is the meter, not a condition of done; the `phpt` subset is held to no regression (#383, #725).
 porting = true
 [[crate]]
 name = "ext/readline"
 budget = 2000     # readline.c and readline_cli.c over the platform's libedit, as the oracle links it, bound in src/ffi/, with the CLI's interactive shell where php puts it; 1,252 lines of C (#1166, #727's rule, #1540)
 feature = "readline"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/soap"
 budget = 20000    # php's soap C ported over ext/libxml's surface, no library of its own, as simplexml; 15,620 lines of C (#1166, #727's rule, #1540)
 feature = "soap"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/intl"
 budget = 28000    # php's intl C over the ICU4C the pinned keg links (icu4c@78), through pkg-config, never vendored, its C++ paths through an extern "C" C++ shim of the crate's own in src/ffi/; 14,794 lines of C and 7,445 of C++ (#1166, #727's rule, #1573)
 feature = "intl"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/gd"
 budget = 5500     # gd.c over the libgd the pinned keg links, through pkg-config, bound in src/ffi/, never vendored; 4,259 lines of C, libgd excluded (#1166, #727's rule, #1573)
 feature = "gd"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/ffi"
 budget = 14000    # ffi.c and its C-declaration parser over the platform's libffi, as the oracle links it, bound in src/ffi/; 11,035 lines of C (#1166, #727's rule, #1573)
 feature = "ffi"
-# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
-porting = true
 [[crate]]
 name = "ext/zend_test"
 budget = 4000
@@ -448,45 +330,36 @@ porting = true                              # the rest of php's test extension i
 # binary, reaching the engine through php_sapi alone (ADR-0008). Budgets by
 # #727's rule, 1.25 × php-src's non-blank, non-comment C lines at php-8.5.9,
 # rounded up to 500 (#1248). php-src's sapi/ suites are the hosts' own tests,
-# in the lane beside the extensions' (#1161: every test the oracle runs). The
-# ports are partial: `phpt` is the meter, not a condition of done, until the
-# no-regression rule replaces the key (#652, #664).
+# in the lane beside the extensions' (#1161: every test the oracle runs), each
+# subset held to no regression against the merge base (#725).
 [[crate]]
 name = "sapi/cli"
 budget = 8500     # php_cli.c with the -S server, 6,641 lines of C
 phpt = ["sapi/cli/tests"]
-porting = true
 [[crate]]
 name = "sapi/cgi"
 budget = 3000     # cgi_main.c, 2,118
 phpt = ["sapi/cgi/tests"]
-porting = true
 [[crate]]
 name = "sapi/fpm"
 budget = 14500    # fpm/, 11,284
 phpt = ["sapi/fpm/tests"]
-porting = true
 [[crate]]
 name = "sapi/phpdbg"
 budget = 13500    # phpdbg*.c, 10,795
 phpt = ["sapi/phpdbg/tests"]
-porting = true
 [[crate]]
 name = "sapi/embed"
 budget = 500      # php_embed.c, 210; php-src carries no sapi/embed/tests
-porting = true
 [[crate]]
 name = "sapi/apache2handler"
 budget = 2000     # 1,313; no tests directory
-porting = true
 [[crate]]
 name = "sapi/litespeed"
 budget = 8000     # 6,088; no tests directory
-porting = true
 [[crate]]
 name = "sapi/fuzzer"
 budget = 1500     # 921; no tests directory
-porting = true
 [[crate]]
 name = "sapi/makala"
 budget = 4000     # a host php does not ship, so #727's rule has no C to multiply: php -S's port is 1,510 lines, with TLS, the request pool and its configuration on top; ratcheted to the measured size at stage 1's close (#2332, Mitchell 2026-10-09). Its HTTP-served lane is #2334's subset, not a phpt row of its own

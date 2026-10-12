@@ -21,7 +21,7 @@ use php_ext::abi::This;
 use php_ext::attr::php_class;
 use php_ext::call::{attribute_object, autoload, eval_const_expr, eval_declared};
 use php_ext::coerce::value_name;
-use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
+use php_ext::decl::{Attribute, AttributeTarget, class_attribute_refusal, hook_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_error, throw_error_chained};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, FreshString, Owner, PhpArray, PhpObject, PhpString};
@@ -718,6 +718,25 @@ impl ReflectionAttribute {
             && let Some(refused) = hook_attribute_refusal(&looked_up)
         {
             return Err(throw(req, "Error", refused));
+        }
+        // An extension's validator over a program's subject, which the
+        // compiler ran where the attribute stands unless
+        // `#[\DelayedTargetValidation]` deferred its refusal to here; a
+        // native's subject was never compiled, so never validated.
+        if kept.file.is_some()
+            && let Some(validator) = req
+                .class_decl(class)
+                .and_then(|decl| decl.attribute_validator)
+            && let Some(target) = u32::try_from(kept.target)
+                .ok()
+                .and_then(|bit| AttributeTarget::try_from(bit).ok())
+            && let Some(refused) = (validator.0)(
+                &kept.attribute,
+                target,
+                kept.scope.map(|scope| class_name_of(req, scope)).as_deref(),
+            )
+        {
+            return Err(throw(req, "Error", &refused));
         }
         if !is_internal(req, class) && flags & IS_REPEATABLE == 0 && kept.repeated {
             return Err(throw_error(

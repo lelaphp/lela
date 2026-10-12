@@ -217,6 +217,34 @@ fn a_head_past_the_header_timeout_answers_408() {
     );
 }
 
+/// A head whose start came in one write with the whole request before it,
+/// as a pipelining client sends it, is timed by the header timeout from
+/// that request's response's end, not by the keep-alive clock (#2572):
+/// the first request is answered, the second 408 within a few seconds,
+/// with a keep-alive limit of a minute.
+#[test]
+fn a_head_begun_with_the_request_before_it_is_timed_by_the_header_timeout() {
+    let server = server(&[
+        "--limit",
+        "header-timeout=500ms",
+        "--limit",
+        "keep-alive-idle=60s",
+    ]);
+    let started = Instant::now();
+    let mut stream = server.connect();
+    stream
+        .write_all(b"GET /echo.php HTTP/1.1\r\nHost: a\r\n\r\nGET /echo.php?second HTTP/1.1\r\nHo")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let exchange = read_until_closed(&mut stream, WAIT);
+    assert_eq!(exchange.codes(), [200, 408], "{}", exchange.text());
+    assert_eq!(exchange.ending, Ending::Closed);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 /// A kept-alive connection idle past the keep-alive limit is closed with
 /// nothing sent; one idle past the header timeout but within the
 /// keep-alive limit still serves its next request, the two clocks apart.

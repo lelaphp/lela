@@ -465,8 +465,8 @@ impl Request {
             |unit| self.publish_unit(unit),
         );
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
-        if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
-            self.tell_cached(&full);
+        if matches!(cached, Some(Ok(_))) {
+            self.tell_compiled(&full, validation, filed);
         }
         let served = AccelServed::of(validation, filed);
         self.accel_loaded = (cached.clone().and_then(Result::ok)).zip(served);
@@ -581,6 +581,34 @@ impl Request {
             Admission::KeptOut => None,
             Admission::Held { file_cache, .. } => file_cache,
             Admission::OnDisk { file_cache, .. } => Some(file_cache),
+        }
+    }
+
+    /// What follows a file the cache compiled as `filed`: the passes
+    /// called where `cache_script_in_shared_memory` and
+    /// `cache_script_in_file_cache` optimize what they store, before they
+    /// store it, and the extensions told where the first holds it, which
+    /// opcache logs cached. A file validated on every hit is one no
+    /// accelerator admitted, held as php without opcache compiles it,
+    /// which optimizes nothing.
+    fn tell_compiled(&mut self, full: &[u8], validation: Validation, filed: Filed) {
+        if validation != Validation::EveryHit && matches!(filed, Filed::Held | Filed::Kept) {
+            self.run_optimizer_passes(full);
+        }
+        if filed == Filed::Held {
+            self.tell_cached(full);
+        }
+    }
+
+    /// Every pass an extension registered called with the file at the
+    /// full path `full`, in the order they were registered
+    /// ([`crate::api::abi::ExtensionBuilder::optimizer_pass`]),
+    /// `zend_optimizer_call_registered_passes` at the end of
+    /// `zend_optimize_script`.
+    pub(crate) fn run_optimizer_passes(&mut self, full: &[u8]) {
+        let shared = Arc::clone(&self.shared);
+        for pass in shared.supplied.optimizer_passes.iter() {
+            pass(self, full);
         }
     }
 
@@ -818,7 +846,7 @@ impl AccelServed {
             _ if validation == Validation::EveryHit => None,
             Filed::Compiled => None,
             Filed::Held => Some(AccelServed::Compiled),
-            Filed::Hit | Filed::Unheld => Some(AccelServed::Hit),
+            Filed::Hit | Filed::Unheld | Filed::Kept => Some(AccelServed::Hit),
         }
     }
 }

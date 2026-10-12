@@ -958,6 +958,7 @@ fn declaring(name: &str, class: &str, requires: &[&str]) -> Extension {
         end_line: 0,
         object_size: 0,
         object_beside: Box::new([]),
+        attribute_validator: None,
     };
     ExtensionBuilder::default()
         .dependencies(requires.iter().map(|name| required(name)).collect())
