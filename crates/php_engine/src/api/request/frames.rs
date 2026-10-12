@@ -898,19 +898,23 @@ impl Request {
     /// The frameless call on top popped ([`Request::push_frameless`]),
     /// its operands given up as php's `FREE_OP*` after the frameless
     /// handler frees them, `zval_ptr_dtor_nogc`, once the call is on no
-    /// chain. Such a call has no receiver, closure, name or extra named
-    /// arguments; one an argument's coercion gave an annex is popped as
-    /// any call is ([`Request::pop_call`]).
+    /// chain. A frameless call is pushed with no receiver and no
+    /// closure, and an annex only where an argument's coercion kept a
+    /// value there; a record carrying any of them is popped as any call
+    /// is ([`Request::pop_call`]).
     pub(crate) fn pop_frameless(&mut self) {
+        /// `ZEND_FRAMELESS_ICALL_3`'s, the most operands a frameless
+        /// call passes.
+        const OPERANDS: usize = 3;
         let call = self.vm.stack.current();
         let Some(header) = self.vm.at_mut(call) else {
             return;
         };
-        if header.annex.is_some() {
+        if header.annex.is_some() || header.closure.is_some() || header.receiver().is_some() {
             return self.pop_call();
         }
         header.info.set_leaving(true);
-        let mut operands = [php_heap::Zval::UNDEF; 3];
+        let mut operands = [php_heap::Zval::UNDEF; OPERANDS];
         if let Some(frame) = self.vm.stack.frame_mut(call) {
             for (operand, slot) in operands.iter_mut().zip(frame.slots_mut()) {
                 *operand = std::mem::replace(slot, php_heap::Zval::UNDEF);

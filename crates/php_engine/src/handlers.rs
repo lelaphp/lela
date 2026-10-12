@@ -11392,6 +11392,26 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// 909
 /// 909
 /// ```
+///
+/// The operands are given up as the call ends, `FREE_OP*`, so a
+/// temporary the native read is destroyed before the statement that
+/// reads what the call returned goes on, and a string an argument's
+/// coercion made is the call's and gone with it:
+///
+/// ```php
+/// class S { function __toString(): string { return "abc"; } function __destruct() { echo "d\n"; } }
+/// var_dump(str_contains(new S, "b"));
+/// $m = memory_get_usage(); $r = strtr(new S, "a", "x"); var_dump($r, memory_get_usage() - $m);
+/// echo "after\n";
+/// ```
+/// ```expect
+/// d
+/// bool(true)
+/// d
+/// string(3) "xbc"
+/// int(32)
+/// after
+/// ```
 fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
