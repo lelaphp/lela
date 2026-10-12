@@ -1,52 +1,99 @@
 #!/usr/bin/env bash
-# pinned-php.sh — the pinned php on an Apple-silicon Mac, poured the way it
-# was poured on the machine that pinned it (#2253; harness §4.3):
-# homebrew-core's own formula at the commit that bottled the pin's version,
-# installed from a local tap, so brew fetches that bottle from homebrew/core's
-# packages and relocates and signs it for /opt/homebrew as it did there.
+# pinned-php.sh — the pinned php and the kegs it loads on an Apple-silicon
+# Mac, poured the way they were poured on the machine that pinned them
+# (#2253, #2657; harness §4.3): each from homebrew-core's own formula at the
+# commit that bottled the recorded version, installed from a local tap, so
+# brew fetches that bottle from homebrew/core's packages and relocates and
+# signs it for /opt/homebrew as it did there.
 #
 #   scripts/ci/pinned-php.sh <oracle.json>
 #
-# <oracle.json> is `xtask status --section oracle --format json`, whose
-# `binary` names the version, the keg path and the md5; oracle.toml is read
-# by xtask alone and this script spells none of the three. A keg already at
-# the path with the pin's md5 is left as it is, so the oracle runner pours
-# once and every job after it checks; a pour whose md5 is not the pin's
-# exits 1, before any lane, and xtask would refuse it anyway.
+# <oracle.json> is `xtask status --section oracle --format json`: its
+# `binary` names php's version, keg path and md5, and its `closure` each keg
+# php loads and the version recorded for it; oracle.toml is read by xtask
+# alone and this script spells none of them. Each keg is poured first, where
+# Homebrew's `opt` link points at another version, and `brew pin`ned, so no
+# later `brew upgrade` moves it; a keg already at its version is pinned and
+# left. Then php: a keg already at the path with the pin's md5 is left as it
+# is, so the oracle runner pours once and every job after it checks; a pour
+# whose md5 is not the pin's, or a keg that lands at another version, exits
+# 1 before any lane, and xtask would refuse the run anyway.
+#
+# DRY_RUN=1 reads the pin and the machine and says what it would pour, and
+# pours, pins and fetches nothing.
 #
 # Used by .github/actions/pinned-php in CI and by scripts/ci/runner.sh when
 # the Mac is set up. GH_TOKEN, where set, raises GitHub's API rate limit for
-# the one query that finds the bottling commit.
+# the queries that find the bottling commits.
 set -euo pipefail
 
 pin=${1:?usage: pinned-php.sh <oracle.json from xtask status --section oracle --format json>}
 version=$(jq -er .binary.version "$pin")
 path=$(jq -er .binary.path "$pin")
 md5=$(jq -er .binary.md5 "$pin")
+kegs=$(jq -r '.closure // {} | to_entries[] | "\(.key) \(.value)"' "$pin")
+dry=${DRY_RUN:-}
+
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_ANALYTICS=1
+prefix=$(brew --prefix)
+
+auth=()
+[ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
+
+# pour <formula> <version>: the formula from the homebrew-core commit whose
+# message bottles that version, installed in place of what stands.
+pour() {
+    local name=$1 at=$2 shard sha formula
+    case $name in lib*) shard=lib ;; *) shard=${name:0:1} ;; esac
+    sha=$(curl -sSfL ${auth[@]+"${auth[@]}"} \
+        "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/$shard/$name.rb&per_page=100" |
+        jq -r --arg m "$name: update $at bottle." '[.[] | select(.commit.message | startswith($m))][0].sha // empty')
+    [ -n "$sha" ] || { echo "::error::no homebrew-core commit bottles $name $at"; exit 1; }
+    echo "$name $at from homebrew-core $sha"
+    brew unpin "$name" >/dev/null 2>&1 || true
+    brew uninstall --ignore-dependencies --force "$name" >/dev/null 2>&1 || true
+    brew tap | grep -qx dax/pin || brew tap-new --no-git dax/pin >/dev/null
+    formula="$(brew --repository dax/pin)/Formula/$name.rb"
+    curl -sSfL -o "$formula" "https://raw.githubusercontent.com/Homebrew/homebrew-core/$sha/Formula/$shard/$name.rb"
+    # A tap's bottles are the tap's own packages by default; these are homebrew/core's.
+    sed -i '' 's|^  bottle do$|  bottle do\n    root_url "https://ghcr.io/v2/homebrew/core"|' "$formula"
+    brew install "dax/pin/$name"
+}
+
+# The version Homebrew's `opt` link points a keg at, empty where none is.
+linked() {
+    local target
+    target=$(readlink "$prefix/opt/$1") || return 0
+    basename "$target"
+}
+
+while read -r keg at; do
+    [ -n "$keg" ] || continue
+    now=$(linked "$keg")
+    if [ "$now" = "$at" ]; then
+        echo "$keg $at: the record's; already poured"
+    elif [ -n "$dry" ]; then
+        echo "$keg: would pour $at in place of ${now:-nothing}"
+        continue
+    else
+        pour "$keg" "$at"
+        now=$(linked "$keg")
+        [ "$now" = "$at" ] || { echo "::error::$keg is ${now:-not installed}; the record is $at"; exit 1; }
+    fi
+    [ -n "$dry" ] || brew pin "$keg"
+done <<<"$kegs"
 
 if [ -f "$path" ] && [ "$(md5 -q "$path")" = "$md5" ]; then
     echo "$path: md5 $md5, the pin's; already poured"
     exit 0
 fi
+if [ -n "$dry" ]; then
+    echo "php: would pour $version at $path"
+    exit 0
+fi
 
-export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_ANALYTICS=1
-
-auth=()
-[ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
-sha=$(curl -sSfL ${auth[@]+"${auth[@]}"} \
-    "https://api.github.com/repos/Homebrew/homebrew-core/commits?path=Formula/p/php.rb&per_page=100" |
-    jq -r --arg m "php: update $version bottle." '[.[] | select(.commit.message | startswith($m))][0].sha // empty')
-[ -n "$sha" ] || { echo "::error::no homebrew-core commit bottles php $version"; exit 1; }
-echo "php $version from homebrew-core $sha"
-
-brew uninstall --ignore-dependencies --force php >/dev/null 2>&1 || true
-brew tap | grep -qx dax/pin || brew tap-new --no-git dax/pin >/dev/null
-formula="$(brew --repository dax/pin)/Formula/php.rb"
-curl -sSfL -o "$formula" "https://raw.githubusercontent.com/Homebrew/homebrew-core/$sha/Formula/p/php.rb"
-# A tap's bottles are the tap's own packages by default; these are homebrew/core's.
-sed -i '' 's|^  bottle do$|  bottle do\n    root_url "https://ghcr.io/v2/homebrew/core"|' "$formula"
-brew install dax/pin/php
+pour php "$version"
 
 got=$(md5 -q "$path")
 [ "$got" = "$md5" ] || { echo "::error::$path has md5 $got; the pin is $md5"; exit 1; }
