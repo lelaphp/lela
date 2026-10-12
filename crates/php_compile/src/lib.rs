@@ -6239,6 +6239,152 @@ echo f(1), C::s(), $o->m(1), $o->p;
         assert_eq!(unit.methods.len(), 3);
     }
 
+    /// `zend_compile_method_call` and `zend_compile_static_call` against
+    /// the class being compiled (#2675): `$this->p()` to a private and
+    /// `$this->f()` to a final method the class declared before the call
+    /// are `DO_UCALL` with the arguments sent by the parameters, by
+    /// reference to `&$a`, where a public one stays `DO_FCALL` and so
+    /// does the method calling itself, which is public; `self::s()` and
+    /// `C::s()` inside `class C` are `DO_UCALL` too, the second in `s`'s
+    /// own body, which `zend_begin_method_decl` put in the table before
+    /// it compiled.
+    #[test]
+    fn a_call_the_class_being_compiled_pins_down_is_do_ucall() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    private function p($a) {}
+    final public function f(&$a) {}
+    public function g($a) {}
+    public static function s($a) { return C::s($a); }
+    public function m($a) {
+        $this->p($a);
+        $this->f($a);
+        $this->g($a);
+        self::s(1);
+        return $this->m($a);
+    }
+}
+",
+        );
+        let s = "0000 CV0($a) = RECV 1\n\
+                 0001 INIT_STATIC_METHOD_CALL 1 string(\"C\") string(\"s\")\n\
+                 0002 SEND_VAR CV0($a) 1\n\
+                 0003 V1 = DO_UCALL\n\
+                 0004 RETURN V1\n\
+                 0005 RETURN null\n";
+        let m = "0000 CV0($a) = RECV 1\n\
+                 0001 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
+                 0002 SEND_VAR CV0($a) 1\n\
+                 0003 DO_UCALL\n\
+                 0004 INIT_METHOD_CALL 1 THIS string(\"f\")\n\
+                 0005 SEND_REF CV0($a) 1\n\
+                 0006 DO_UCALL\n\
+                 0007 INIT_METHOD_CALL 1 THIS string(\"g\")\n\
+                 0008 SEND_VAR_EX CV0($a) 1\n\
+                 0009 DO_FCALL\n\
+                 0010 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"s\")\n\
+                 0011 SEND_VAL int(1) 1\n\
+                 0012 DO_UCALL\n\
+                 0013 INIT_METHOD_CALL 1 THIS string(\"m\")\n\
+                 0014 SEND_VAR_EX CV0($a) 1\n\
+                 0015 V5 = DO_FCALL\n\
+                 0016 RETURN V5\n\
+                 0017 RETURN null\n";
+        assert!(dump.contains(s), "php's C::s, {dump}");
+        assert!(dump.contains(m), "php's C::m, {dump}");
+    }
+
+    /// `zend_delayed_compile_prop` under `zend_compile_encaps_list`
+    /// (#2676): `"$this->p"` inside a method reads the property off the
+    /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.
+    #[test]
+    fn this_s_property_in_a_string_is_fetched_off_this() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    public function m() { return \"$this->p {$this->p}\"; }
+}
+",
+        );
+        let m = "0000 T0 = FETCH_OBJ_R THIS string(\"p\")\n\
+                 0001 T3 = ROPE_INIT 3 T0\n\
+                 0002 T3 = ROPE_ADD 1 T3 string(\" \")\n\
+                 0003 T1 = FETCH_OBJ_R THIS string(\"p\")\n\
+                 0004 T2 = ROPE_END 2 T3 T1\n\
+                 0005 RETURN T2\n\
+                 0006 RETURN null\n";
+        assert!(dump.contains(m), "php's C::m, {dump}");
+    }
+
+    /// `zend_compile_foreach` over `$this` (#2687): by reference the
+    /// subject is compiled under `BP_VAR_W`, `FETCH_THIS` into a `VAR`
+    /// and `FE_RESET_RW` over it; by value under `BP_VAR_R`, into a
+    /// temporary.
+    #[test]
+    fn foreach_over_this_by_reference_fetches_it_into_a_var() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    public function g() { foreach ($this as &$v) {} foreach ($this as $v) {} }
+}
+",
+        );
+        let g = "0000 V1 = FETCH_THIS\n\
+                 0001 V2 = FE_RESET_RW V1 0004\n\
+                 0002 FE_FETCH_RW V2 CV0($v) 0004\n\
+                 0003 JMP 0002\n\
+                 0004 FE_FREE V2\n\
+                 0005 T3 = FETCH_THIS\n\
+                 0006 V4 = FE_RESET_R T3 0009\n\
+                 0007 FE_FETCH_R V4 CV0($v) 0009\n\
+                 0008 JMP 0007\n\
+                 0009 FE_FREE V4\n\
+                 0010 RETURN null\n";
+        assert!(dump.contains(g), "php's C::g, {dump}");
+    }
+
+    /// `zend_is_assign_to_self` through a property (#2683): `$a->x[] =
+    /// $a` and `$a[0]->p[1] = $a` read `$a` into a temporary first,
+    /// numbered after the delayed fetches, and `OP_DATA` carries it.
+    #[test]
+    fn an_assignment_to_self_through_a_property_reads_the_value_first() {
+        let dump = dump_of(
+            b"<?php
+$a = new stdClass;
+$a->x[] = $a;
+$a[0]->p[1] = $a;
+",
+        );
+        let main = "0003 T6 = QM_ASSIGN CV0($a)\n\
+                    0004 V4 = FETCH_OBJ_W (dim write) CV0($a) string(\"x\")\n\
+                    0005 ASSIGN_DIM V4 NEXT\n\
+                    0006 OP_DATA T6\n\
+                    0007 T10 = QM_ASSIGN CV0($a)\n\
+                    0008 V7 = FETCH_DIM_W CV0($a) int(0)\n\
+                    0009 V8 = FETCH_OBJ_W (dim write) V7 string(\"p\")\n\
+                    0010 ASSIGN_DIM V8 int(1)\n\
+                    0011 OP_DATA T10\n\
+                    0012 RETURN int(1)\n";
+        assert!(dump.contains(main), "php's main, {dump}");
+        // `zend_is_variable` takes no call, so the walk stops at
+        // `$a->m()`, and a `static` property's class is walked into.
+        let dump = dump_of(b"<?php\n$a->m()->x[0] = $a;\n$a::$s[0] = $a;\n");
+        let main = "0000 INIT_METHOD_CALL 0 CV0($a) string(\"m\")\n\
+                    0001 V1 = DO_FCALL\n\
+                    0002 V1 = SEPARATE V1\n\
+                    0003 V2 = FETCH_OBJ_W (dim write) V1 string(\"x\")\n\
+                    0004 ASSIGN_DIM V2 int(0)\n\
+                    0005 OP_DATA CV0($a)\n\
+                    0006 V4 = FETCH_CLASS (exception) CV0($a)\n\
+                    0007 T7 = QM_ASSIGN CV0($a)\n\
+                    0008 V5 = FETCH_STATIC_PROP_W (dim write) string(\"s\") V4\n\
+                    0009 ASSIGN_DIM V5 int(0)\n\
+                    0010 OP_DATA T7\n\
+                    0011 RETURN int(1)\n";
+        assert!(dump.contains(main), "php's main, {dump}");
+    }
+
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
     /// inside an array expression folds every key and value in place
     /// (`zend_try_ct_eval_array`'s first pass), so a cast over a
