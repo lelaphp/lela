@@ -6,7 +6,7 @@
 //! (`phar_create_or_parse_filename`, `phar_open_or_create_filename`).
 //! An error is php's message, `None` where php sets none.
 
-use php_ext::abi::{Beneath, chain};
+use php_ext::abi::{Beneath, Compiled, chain};
 use php_ext::raising::Thrown;
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, Value};
@@ -706,9 +706,10 @@ pub(crate) fn open_executed(
 
 /// `phar_compile_file`, phar's `zend_compile_file`: a file whose name
 /// says `.phar`, and no `://`, opened as an archive; a tar or zip one
-/// compiles from its `.phar/stub.php`, a whole-file compressed one from
-/// its decompressed bytes, under the file's own name, and any other
-/// file left to the one it saved, `phar_orig_compile_file`. The witness includes a tar-based archive built by
+/// hands the one it saved, `phar_orig_compile_file`, its
+/// `.phar/stub.php`, a whole-file compressed one its decompressed bytes,
+/// to compile under the file's own name, and any other file is left to
+/// it as it is. The witness includes a tar-based archive built by
 /// hand, which the recipe's `phar.readonly` forbids `Phar` to write.
 ///
 /// ```php
@@ -730,9 +731,9 @@ pub(crate) fn open_executed(
 pub(crate) fn compile_file(
     req: &mut Request,
     beneath: Beneath<'_, chain::CompileFile>,
-) -> Result<Option<Vec<u8>>, Thrown> {
+) -> Result<Option<Compiled>, Thrown> {
     match archive_source(req, beneath.path())? {
-        Some(source) => Ok(Some(source)),
+        Some(source) => beneath.with_source(&source).serve(req),
         None => beneath.serve(req),
     }
 }

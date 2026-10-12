@@ -71,6 +71,7 @@ pub fn extension() -> Extension {
         ])
         .constants(constants::declared())
         .fatal_logged(crate::debugger::fatal_logged)
+        .compile_file(crate::list::compile_file)
         .build(crate::NAME)
 }
 

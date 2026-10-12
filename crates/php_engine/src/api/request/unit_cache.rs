@@ -385,20 +385,59 @@ impl Request {
         written: Option<&[u8]>,
         handle: HandlePath,
     ) -> Cached {
+        self.cached_source(path, written, handle, None)
+    }
+
+    /// [`Request::cached_file`] where a `zend_compile_file` link may have
+    /// handed down a `source` to compile under the file's path in place
+    /// of the file's own, the engine's cached compile beneath every link
+    /// ([`crate::api::abi::chain::CompileFile`]): what is compiled from
+    /// it is held under the file's names as the file's own would be, as
+    /// opcache's `persistent_compile_file` caches what the compile it
+    /// saved, phar's, made of an archive's stub. The link opened the
+    /// stream it read, so the compile opens none, as for the program the
+    /// host opened ([`HandlePath::Host`]).
+    ///
+    /// ```php
+    /// function member($name, $data) {
+    ///     $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', sprintf('%011o', strlen($data)), '00000000000', '        ', '0', '', 'ustar', '00', '');
+    ///     $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+    ///     return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+    /// }
+    /// $t = __DIR__ . '/cached.phar.tar';
+    /// $tar = member('.phar/stub.php', '<?php echo "stub\n"; __HALT_COMPILER();');
+    /// $tar .= member('.phar/signature.bin', pack('VV', 2, 20) . sha1($tar, true)) . str_repeat("\0", 1024);
+    /// file_put_contents($t, $tar); touch($t, time() - 60);
+    /// $s = fn () => opcache_get_status()['opcache_statistics'];
+    /// $before = $s();
+    /// include $t; include $t;
+    /// $after = $s();
+    /// var_dump(opcache_is_script_cached($t), $after['hits'] - $before['hits'], $after['misses'] - $before['misses'], $after['num_cached_scripts'] - $before['num_cached_scripts']);
+    /// unlink($t);
+    /// ```
+    /// ```expect regime=jit-off
+    /// stub
+    /// stub
+    /// bool(true)
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// ```
+    pub(crate) fn cached_source(
+        &mut self,
+        path: &[u8],
+        written: Option<&[u8]>,
+        handle: HandlePath,
+        source: Option<&[u8]>,
+    ) -> Cached {
         if self.preloading.is_some() {
             return self.preload_file(path);
         }
         let shared = Arc::clone(&self.shared);
         let full = full_path(path, &self.cwd);
+        let handle = source.map_or(handle, |_| HandlePath::Host);
         let (validation, lookup, protection, file_cache, memory) = match self.admission(&full) {
-            Admission::KeptOut => {
-                self.arena.files.note_blacklisted();
-                let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
-                if handle != HandlePath::Host {
-                    self.open_include_stream(&full, handle);
-                }
-                return Some(shared.compile_for(self, &source, path, SourceKind::File));
-            }
+            Admission::KeptOut => return self.kept_out(path, &full, handle, source),
             Admission::Held {
                 validation,
                 lookup,
@@ -445,6 +484,7 @@ impl Request {
             .is_some_and(|key| shared.units.find(&self.arena.files, key).is_some());
         let asked = Asked {
             path: &full,
+            source,
             written,
             validation,
             protection,
@@ -494,6 +534,26 @@ impl Request {
             self.open_include_stream(&full, handle);
         }
         cached
+    }
+
+    /// A file the answer keeps out of the cache, `blacklist_misses`
+    /// counted: compiled as this request's own from the `source` handed
+    /// down or the file's bytes, which are opened as a stream as php
+    /// opens them.
+    fn kept_out(
+        &mut self,
+        path: &[u8],
+        full: &[u8],
+        handle: HandlePath,
+        source: Option<&[u8]>,
+    ) -> Cached {
+        self.arena.files.note_blacklisted();
+        let source = crate::unit_cache::source_or_read(source, path)?;
+        if handle != HandlePath::Host {
+            self.open_include_stream(full, handle);
+        }
+        let shared = Arc::clone(&self.shared);
+        Some(shared.compile_for(self, &source, path, SourceKind::File))
     }
 
     /// `do_validate_timestamps` over a held copy whose stat is due

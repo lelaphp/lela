@@ -729,7 +729,7 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
     if session::with(|s| s.after_run == AfterRun::Quit).unwrap_or(false) {
         if !at.unwinding {
             stepped_opline(req, at.frame);
-            logged(req, at.frame, position, &read::serves(req, at.frame));
+            logged(position, &read::serves(req, at.frame));
         }
         return None;
     }
@@ -765,7 +765,7 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
         if !stop {
             stepped_opline(req, at.frame);
         }
-        logged(req, at.frame, position, &serves);
+        logged(position, &serves);
     }
     let uncaught_here = pending.is_some() && !tier::catches(req, at.frame);
     let checks = Checks {
@@ -869,30 +869,13 @@ fn stepped_opline(req: &Request, frame: FrameRef) {
 }
 
 /// `phpdbg_print_opline`'s oplog: the opline written to the oplog open
-/// last, where one is; and the file whose code the loop reached first at
-/// this opline kept among the session's sources, as `phpdbg_compile_file`
-/// keeps what it compiles.
-fn logged(req: &mut Request, frame: FrameRef, position: &read::Position, serves: &read::Serves) {
+/// last, where one is.
+fn logged(position: &read::Position, serves: &read::Serves) {
     let (function, class) = match serves {
         read::Serves::Code => (None, None),
         read::Serves::Function { name, class } => (Some(name.clone()), class.clone()),
     };
-    let fresh = function.is_none()
-        && position.opline == 0
-        && session::with(|s| !s.sources.iter().any(|source| source.file == position.file))
-            .unwrap_or(false);
-    let code = if fresh {
-        read::frame_code(req, frame)
-    } else {
-        None
-    };
     session::with(|s| {
-        if let Some(code) = code {
-            s.sources.push(session::Source {
-                file: position.file.clone(),
-                ops: code.ops,
-            });
-        }
         if let Some(log) = s.oplogs.last_mut() {
             log.push(session::Logged {
                 file: position.file.clone(),
@@ -983,9 +966,6 @@ fn moved(s: &mut Session, here: &At<'_>, checks: &Checks) -> Option<bool> {
 
 /// The breakpoints: whether one stops the loop here.
 fn broken(s: &mut Session, here: &At<'_>, checks: &Checks) -> bool {
-    if s.breaks.has_pending() {
-        s.breaks.resolve_pending(here.file);
-    }
     let mut at = here.clone();
     at.line = checks.line;
     if let Some(found) = s.breaks.find(&at)

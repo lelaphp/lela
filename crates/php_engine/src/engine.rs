@@ -1656,6 +1656,7 @@ impl Shared {
         let full = crate::unit_cache::full_path(path, cwd);
         let asked = crate::unit_cache::Asked {
             path: &full,
+            source: None,
             written: None,
             validation: Validation::EveryHit,
             protection: 0,
@@ -4947,31 +4948,24 @@ impl Engine {
             (Primary::Wrapped, _) => HandlePath::Host,
             (Primary::Bare, _) => HandlePath::Opened,
         };
-        self.compile_file(req, &script, written.unwrap_or(&script), handle)
+        Engine::compile_file(req, &script, written.unwrap_or(&script), handle)
     }
 
     /// The file at `path`, named `written` by the host, compiled for the
-    /// request through a `zend_file_handle` of the kind `handle` names:
-    /// what an extension's `zend_compile_file` answers, or the unit
-    /// cache's.
+    /// request through a `zend_file_handle` of the kind `handle` names,
+    /// `zend_compile_file` ([`Request::compile_file`]); what a link
+    /// threw is left pending and nothing compiled.
     fn compile_file(
-        &self,
         req: &mut Request,
         path: &[u8],
         written: &[u8],
         handle: HandlePath,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
-        match req.compile_file_source(path) {
-            Ok(Some(source)) => Some(
-                self.shared
-                    .compile_for(req, &source, path, SourceKind::File),
-            ),
-            Ok(None) => req.cached_file(path, Some(written), handle),
-            Err(thrown) => {
+        req.compile_file(path, Some(written), handle)
+            .unwrap_or_else(|thrown| {
                 req.leave_pending(&thrown);
                 None
-            }
-        }
+            })
     }
 
     /// `php_cli_server_dispatch` (`Z/sapi/cli/php_cli_server.c:2294`)
@@ -5053,7 +5047,7 @@ impl Engine {
         let path = req
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
-        let ran = match self.compile_file(req, &path, router, HandlePath::Kept) {
+        let ran = match Engine::compile_file(req, &path, router, HandlePath::Kept) {
             Some(Ok(unit)) => serve_unit(req, &unit, entry),
             Some(Err(refused)) => {
                 refused_program(req, &refused, &path);

@@ -16,7 +16,7 @@ use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
 use crate::exec::IncludeKind;
-use crate::supplied::chain::StringArgs;
+use crate::supplied::chain::{FileArgs, StringArgs};
 
 use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
 
@@ -88,12 +88,50 @@ impl Request {
         self.included_files.paths()
     }
 
-    /// The source the `zend_compile_file` chain answers for `path`
-    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]), entered
-    /// from the top; `None` where no link replaces it.
-    pub(crate) fn compile_file_source(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    /// `zend_compile_file` over the file at the full path `path`, named
+    /// `written` where it was, through a `zend_file_handle` of the kind
+    /// `handle` names: the links the bundle supplied
+    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]) entered from
+    /// the top, and beneath them all the engine's cached compile
+    /// ([`Request::cached_source`]). The `Err` is what a link threw; the
+    /// unit or the compiler's refusal is the `Ok`, and nothing where the
+    /// file was not there to read.
+    ///
+    /// What the compiler raises is raised at the included file's line,
+    /// as php raises it inside `zend_include_or_eval`, whichever
+    /// construct included it, and a once form serves the unit it compiled
+    /// or nothing:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/scope.inc';
+    /// file_put_contents($f, "<?php\ndeclare(encoding='UTF-8');\nif (!function_exists('scoped')) { function scoped(\$a = 1, \$b) {} }\nreturn 1;\n");
+    /// var_dump(include $f, require $f, include_once $f, require_once $f);
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: declare(encoding=...) ignored because Zend multibyte feature is turned off by settings in %s on line 2
+    ///
+    /// Deprecated: scoped(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 3
+    ///
+    /// Warning: declare(encoding=...) ignored because Zend multibyte feature is turned off by settings in %s on line 2
+    ///
+    /// Deprecated: scoped(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 3
+    /// int(1)
+    /// int(1)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    pub(crate) fn compile_file(
+        &mut self,
+        path: &[u8],
+        written: Option<&[u8]>,
+        handle: HandlePath,
+    ) -> Result<Option<Result<Arc<Unit>, CompileError>>, Thrown> {
         let shared = Arc::clone(&self.shared);
-        Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), path).serve(self)
+        let args = FileArgs::new(path, written, handle);
+        let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
+        Ok(top.serve(self)?.map(|compiled| compiled.0))
     }
 
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
@@ -333,23 +371,16 @@ impl Request {
         if kind.once() {
             self.note_included(&path)?;
         }
-        let outer = self.include.including.replace((kind, self.vm.depth()));
-        let replaced = self.compile_file_source(&path);
-        self.include.including = outer;
-        if let Some(source) = replaced? {
-            let shared = Arc::clone(&self.shared);
-            let unit = match shared.compile_for(self, &source, &path, SourceKind::File) {
-                Ok(unit) => unit,
-                Err(refused) => {
-                    return Err(self.refused_include(&refused, &path, SourceKind::File));
-                }
-            };
-            self.note_included(&path)?;
-            return Ok(Opened::Unit(unit));
-        }
-        let cached = match held {
-            Some(held) => Some(held.unit.clone()),
-            None => self.cached_file(&path, Some(written), handle),
+        // A unit the lookup by the key served is opcache's answer above
+        // every link; any other file is compiled through them all, inside
+        // the include, as `zend_include_or_eval` calls `zend_compile_file`.
+        let cached = if let Some(held) = held {
+            Some(held.unit.clone())
+        } else {
+            let outer = self.include.including.replace((kind, self.vm.depth()));
+            let compiled = self.compile_file(&path, Some(written), handle);
+            self.include.including = outer;
+            compiled?
         };
         match cached {
             Some(Ok(unit)) => {

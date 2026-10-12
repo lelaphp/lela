@@ -16,6 +16,7 @@
 mod disk;
 mod wire;
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -388,11 +389,14 @@ pub(crate) enum Levels<'a> {
     Disk(Disk<'a>),
 }
 
-/// One file asked of [`UnitCache::file`]: its full path, the path as
-/// written it is filed under too where given, how a hit is validated at
-/// the request time `now`, how new a file is kept, and where.
+/// One file asked of [`UnitCache::file`]: its full path, the source a
+/// `zend_compile_file` link handed down to compile in place of the
+/// file's own where one did, the path as written it is filed under too
+/// where given, how a hit is validated at the request time `now`, how
+/// new a file is kept, and where.
 pub(crate) struct Asked<'a> {
     pub(crate) path: &'a [u8],
+    pub(crate) source: Option<&'a [u8]>,
     pub(crate) written: Option<UnitKey>,
     pub(crate) validation: Validation,
     pub(crate) protection: u32,
@@ -472,6 +476,17 @@ pub(crate) const PRELOAD_SCRIPT: &[u8] = b"$PRELOAD$";
 fn preload_weight(preloaded: &Preloaded) -> u64 {
     let saved = preloaded.scripts.iter().map(|held| held.size);
     saved.fold(preloaded.statistics.memory_consumption, u64::saturating_add)
+}
+
+/// The source a `zend_compile_file` link `handed` down, or else the bytes
+/// of the file at `path`; none where it cannot be read.
+pub(crate) fn source_or_read<'a>(handed: Option<&'a [u8]>, path: &[u8]) -> Option<Cow<'a, [u8]>> {
+    match handed {
+        Some(handed) => Some(Cow::Borrowed(handed)),
+        None => std::fs::read(String::from_utf8_lossy(path).as_ref())
+            .ok()
+            .map(Cow::Owned),
+    }
 }
 
 /// Now, in whole seconds since the epoch, php's `time_t`.
@@ -626,7 +641,8 @@ impl UnitCache {
     /// where there is one, a hit
     /// where it keeps the file as it stands, `decode`d and held under the
     /// full path alone; else a
-    /// miss, the file read and `compile`d, and what it compiled to held
+    /// miss, the file read, or the source a link handed down taken in
+    /// its place, and `compile`d, and what it compiled to held
     /// in place of a discarded copy, or what another request held for the
     /// path meanwhile, filed under
     /// `written` too where given, and kept in the file cache. A file
@@ -650,6 +666,7 @@ impl UnitCache {
     ) -> Answered {
         let Asked {
             path,
+            source: handed,
             written,
             validation,
             protection,
@@ -709,7 +726,7 @@ impl UnitCache {
         if memory && validation != Validation::EveryHit {
             files.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let Ok(source) = std::fs::read(String::from_utf8_lossy(path).as_ref()) else {
+        let Some(source) = source_or_read(handed, path) else {
             return (None, Filed::Unheld, None);
         };
         let unit = compile(&source);

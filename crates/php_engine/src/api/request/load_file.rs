@@ -50,14 +50,8 @@ impl Request {
             self.serve_top_code(unit)?;
             return Ok(true);
         }
-        let replaced = match self.compile_file_source(&path)? {
-            Some(source) => {
-                let shared = Arc::clone(&self.shared);
-                Some(shared.compile_for(self, &source, &path, php_compile::SourceKind::File))
-            }
-            None => self.cached_file(&path, Some(written), super::HandlePath::Opened),
-        };
-        let unit = match replaced {
+        let compiled = self.compile_file(&path, Some(written), super::HandlePath::Opened)?;
+        let unit = match compiled {
             Some(Ok(unit)) => unit,
             Some(Err(refused)) => {
                 return Err(self.refused_include(&refused, &path, php_compile::SourceKind::File));

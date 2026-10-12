@@ -20,7 +20,7 @@ use crate::api::abi::{
     PostStartupHook, ResolvePathHook, ThrownHook, UploadHook,
 };
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::{Request, Unresolved};
+use crate::api::request::{HandlePath, Request, Unresolved};
 use crate::api::values::{PhpObject, PhpString};
 use crate::observer::Opcodes;
 
@@ -115,11 +115,16 @@ impl<'a, K: ChainKind> Beneath<'a, K> {
 /// the links. What a link answers is left pending where the loop stands.
 pub enum Interrupt {}
 
-/// `zend_compile_file` as an extension overrides it before the compile,
-/// as phar's `phar_compile_file` answers an archive's stub and leaves
-/// any other file to the one it saved (`Z/ext/phar/phar.c:3248-3256`):
-/// the source the file compiles from where a link replaces it, and
-/// beneath every link none, the file's own, which the unit cache serves.
+/// `zend_compile_file` (`Z/Zend/zend_compile.c:87`): the compiled file,
+/// with beneath every link the engine's cached compile of it, the unit
+/// cache's lookup and compile ([`Request::cached_file`]), in which
+/// opcache's admission decides as the one question the cache asks
+/// (ADR-0005, #2457). A link wraps it and may post-process what it
+/// answers, as phpdbg's `phpdbg_compile_file` keeps a file's source, or
+/// hands the ones beneath a source of its own, as phar's
+/// `phar_compile_file` hands `phar_orig_compile_file` an archive's stub
+/// (`Z/ext/phar/phar.c:3248-3310`). The answer is `None` where the file
+/// was not there to read, php's `NULL` op array with nothing thrown.
 pub enum CompileFile {}
 
 /// `zend_compile_string` (`Z/Zend/zend_compile.c:88`), beneath every
@@ -181,13 +186,37 @@ impl sealed::Kind for Interrupt {
     }
 }
 
+/// What a link of `zend_compile_file` is handed, the `zend_file_handle`
+/// as the engine holds it: the file's full path, the name it was written
+/// by, which opcache files a key of, the kind of `zend_file_handle` it is
+/// compiled through, and the source a link above handed down in place of the
+/// file's own.
+#[derive(Clone, Copy)]
+pub struct FileArgs<'a> {
+    path: &'a [u8],
+    written: Option<&'a [u8]>,
+    handle: HandlePath,
+    source: Option<&'a [u8]>,
+}
+
+impl<'a> FileArgs<'a> {
+    pub(crate) fn new(path: &'a [u8], written: Option<&'a [u8]>, handle: HandlePath) -> Self {
+        FileArgs {
+            path,
+            written,
+            handle,
+            source: None,
+        }
+    }
+}
+
 impl ChainKind for CompileFile {
-    type Answer = Result<Option<Vec<u8>>, Thrown>;
+    type Answer = Result<Option<Compiled>, Thrown>;
 }
 
 impl sealed::Kind for CompileFile {
     type Link = CompileFileHook;
-    type Args<'a> = &'a [u8];
+    type Args<'a> = FileArgs<'a>;
 
     fn link(
         link: CompileFileHook,
@@ -197,8 +226,9 @@ impl sealed::Kind for CompileFile {
         link(req, beneath)
     }
 
-    fn own(_: &mut Request, _: &[u8]) -> <Self as ChainKind>::Answer {
-        Ok(None)
+    fn own(req: &mut Request, args: FileArgs<'_>) -> <Self as ChainKind>::Answer {
+        let cached = req.cached_source(args.path, args.written, args.handle, args.source);
+        Ok(cached.map(Compiled))
     }
 }
 
@@ -206,7 +236,26 @@ impl<'a> Beneath<'a, CompileFile> {
     /// The full path of the file about to be compiled.
     #[must_use]
     pub fn path(&self) -> &'a [u8] {
-        self.args
+        self.args.path
+    }
+
+    /// The ones beneath handed `source` to compile under the file's path
+    /// in place of the file's own, as a link calls the pointer it saved
+    /// with a `zend_file_handle` of its own over the same name: the unit
+    /// cache files what it compiles under the file, as opcache's
+    /// `persistent_compile_file` caches what the one it saved compiled.
+    #[must_use]
+    pub fn with_source<'b>(self, source: &'b [u8]) -> Beneath<'b, CompileFile>
+    where
+        'a: 'b,
+    {
+        Beneath {
+            links: self.links,
+            args: FileArgs {
+                source: Some(source),
+                ..self.args
+            },
+        }
     }
 }
 

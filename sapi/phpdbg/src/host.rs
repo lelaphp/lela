@@ -116,6 +116,9 @@ pub fn serve(engine: &Engine) -> i32 {
         };
         s.exit_status = s.status.take().unwrap_or(observed.exit_code);
         status = s.exit_status;
+        // `php_sapi_phpdbg_deactivate`: what the request compiled goes
+        // with it.
+        s.sources.clear();
         ended(&mut s, plan, &observed);
         session::put(s);
     }
@@ -502,11 +505,17 @@ pub fn real_path(path: &[u8]) -> Vec<u8> {
 }
 
 /// Where a breakpoint on `name:line` goes (`phpdbg_set_breakpoint_file`):
-/// the real path of a file that exists, and else, for a relative name,
-/// the compiled file it is the tail of; none leaves it pending. An
-/// absolute name that exists nowhere is refused with php's error, and
-/// the breakpoint is not set.
+/// a file the request compiled under that name, `stdin`'s code among
+/// them, as php finds it in `file_sources`; the real path of a file that
+/// exists, and else, for a relative name, the compiled file it is the
+/// tail of; none leaves it pending. An absolute name that exists nowhere
+/// is refused with php's error, and the breakpoint is not set.
 pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
+    let stdin = name == b"Standard input code" && s.stdin_code.is_some();
+    if stdin || s.sources.iter().any(|kept| kept.file == name) {
+        s.breaks.set_file(Some(name.to_vec()), name, line);
+        return;
+    }
     let os = Path::new(std::ffi::OsStr::from_bytes(name));
     match std::fs::metadata(os) {
         Ok(meta) if !meta.is_file() => {
@@ -535,12 +544,19 @@ pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
             );
         }
         Err(_) => {
-            let compiled = s.exec.clone().filter(|exec| {
-                exec.len() > name.len()
-                    && exec.ends_with(name)
-                    && exec[exec.len() - name.len() - 1] == b'/'
-            });
-            s.breaks.set_file(compiled, name, line);
+            let tail = |file: &[u8]| {
+                file.len() > name.len()
+                    && file.ends_with(name)
+                    && file[file.len() - name.len() - 1] == b'/'
+            };
+            let kept = s.sources.iter().map(|kept| kept.file.as_slice());
+            let compiled = s
+                .exec
+                .as_deref()
+                .into_iter()
+                .chain(kept)
+                .find(|file| tail(file));
+            s.breaks.set_file(compiled.map(<[u8]>::to_vec), name, line);
         }
     }
 }
