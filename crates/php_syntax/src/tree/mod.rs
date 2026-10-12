@@ -11,7 +11,10 @@
 //!
 //! **How a node is addressed.** [`Tree`] owns [`Nodes`], the arena: one
 //! vector per node kind, so a `NodeId<ClassDecl>` is a position among the
-//! class declarations and `tree[id]` is one index into one vector. Beside
+//! class declarations and `tree[id]` is one index into one vector. A
+//! kind's vector is made with its first node, so a small tree pays for
+//! the three kinds it holds and not for the hundred and more the schema
+//! names, in its making, its moves and its drop. Beside
 //! the arena the tree keeps its shape, every node and every significant
 //! token as one [`Element`] in source order with the size of each node's
 //! subtree, which is what a walk that has no field to follow reads, the
@@ -236,6 +239,28 @@ pub(crate) enum Resolved {
     Missing(&'static str),
     /// The kind has no struct: `ERROR`, or a token kind opened as a node.
     Untyped,
+}
+
+impl Nodes {
+    /// The vector of the struct kind at `slot`, none while no node of
+    /// the kind is built.
+    fn store(&self, slot: usize) -> Option<&Store> {
+        let at = usize::from(*self.slots.get(slot)?).checked_sub(1)?;
+        self.stores.get(at)
+    }
+
+    /// The vector of the struct kind at `slot`, made empty by `empty`
+    /// with the kind's first node. `None` only where the slot is not a
+    /// kind's, or more kinds stand than a slot counts; the caller's
+    /// match on the kind's variant is what reads the vector.
+    fn open<T>(&mut self, slot: usize, empty: fn(Vec<T>) -> Store) -> Option<&mut Store> {
+        let at = self.slots.get_mut(slot)?;
+        if *at == 0 {
+            *at = u8::try_from(self.stores.len() + 1).ok()?;
+            self.stores.push(empty(Vec::new()));
+        }
+        self.stores.get_mut(usize::from(*at) - 1)
+    }
 }
 
 /// One node into its kind's vector, and where it went.
