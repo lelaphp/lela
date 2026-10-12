@@ -333,7 +333,7 @@ pub struct Request {
     /// php's `EG(weakrefs)`: every weakly referenced object's id against
     /// the `WeakReference` and `WeakMap` objects that name it
     /// (`crate::weakrefs`).
-    pub(crate) weakrefs: crate::weakrefs::Table,
+    weakrefs: crate::weakrefs::Table,
     /// php's `EG(lazy_objects_store)`: what goes with each lazy object's
     /// state, by its id ([`lazy`]).
     lazy: lazy::Table,
@@ -424,7 +424,7 @@ pub struct Request {
     /// itself: the runtime definition keys and anonymous class names
     /// they made, which the next one counts on from
     /// ([`crate::engine::Shared::compile_for`]).
-    pub(crate) keys_made: u32,
+    keys_made: u32,
     /// Whether the string compiling now is one the host evaluates of its
     /// own, which `zend_eval_stringl` compiles with `CG(compiler_options)`
     /// at `ZEND_COMPILE_DEFAULT_FOR_EVAL`, so without the engine's
@@ -935,6 +935,31 @@ impl Request {
     /// and before which no more such code is served.
     pub fn stream_thrown(&mut self) -> &mut Option<Thrown> {
         &mut self.stream_thrown
+    }
+
+    /// php's `EG(weakrefs)`, which `crate::weakrefs` alone reads and
+    /// writes through its own face.
+    pub(crate) fn weakrefs(&self) -> &crate::weakrefs::Table {
+        &self.weakrefs
+    }
+
+    /// [`Request::weakrefs`], to register or unregister a holder.
+    pub(crate) fn weakrefs_mut(&mut self) -> &mut crate::weakrefs::Table {
+        &mut self.weakrefs
+    }
+
+    /// `CG(rtd_key_counter)` over the units this request compiled for
+    /// itself: where the next compile counts its runtime definition keys
+    /// on from ([`crate::engine::Shared::compile_for`]).
+    pub(crate) fn keys_made(&self) -> u32 {
+        self.keys_made
+    }
+
+    /// The `made` runtime definition keys of a unit this request just
+    /// compiled for itself, counted on, saturating at `u32::MAX`.
+    pub(crate) fn count_keys_made(&mut self, made: usize) {
+        let made = u32::try_from(made).unwrap_or(u32::MAX);
+        self.keys_made = self.keys_made.saturating_add(made);
     }
 }
 

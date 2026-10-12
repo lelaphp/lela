@@ -84,7 +84,7 @@ pub(crate) struct ZendWeakMap {
 fn register(req: &mut Request, object: PhpObject, holder: Holder) {
     object.heap().set_weakly_referenced(true);
     let id = object.index();
-    let table = &mut req.weakrefs;
+    let table = req.weakrefs_mut();
     if let Some(holders) = table.row(id) {
         holders.push(holder);
     } else {
@@ -98,10 +98,10 @@ fn register(req: &mut Request, object: PhpObject, holder: Holder) {
 /// given up, which may free it and so comes last.
 fn unregister(req: &mut Request, object: PhpObject, holder: Holder, unref: bool) {
     let id = object.index();
-    if let Some(holders) = req.weakrefs.row(id) {
+    if let Some(holders) = req.weakrefs_mut().row(id) {
         holders.retain(|held| *held != holder);
         if holders.is_empty() {
-            drop(req.weakrefs.take(id));
+            drop(req.weakrefs_mut().take(id));
             object.heap().set_weakly_referenced(false);
         }
     }
@@ -142,7 +142,7 @@ fn stored(req: &Request, id: u32) -> Option<PhpObject> {
 /// members: the row taken, and every holder in it cleared.
 pub(crate) fn notify(req: &mut Request, object: Obj) {
     let id = object.id().0;
-    for holder in req.weakrefs.take(id) {
+    for holder in req.weakrefs_mut().take(id) {
         unref_single(req, id, holder);
     }
 }
@@ -183,7 +183,7 @@ pub(crate) fn gc_entries(
 /// `WeakReference` names none.
 pub(crate) fn gc_keyed(req: &Request, key: Obj, visit: &mut dyn FnMut(php_heap::ZvalRef, Obj)) {
     let id = key.id().0;
-    let Some((_, holders)) = req.weakrefs.rows.iter().find(|(at, _)| *at == id) else {
+    let Some((_, holders)) = req.weakrefs().rows.iter().find(|(at, _)| *at == id) else {
         return;
     };
     for holder in holders {
@@ -849,12 +849,15 @@ impl WeakReference {
         object: PhpObject,
     ) -> Result<Owner<Instance<WeakReference>>, Thrown> {
         let referent = object;
-        let existing = req.weakrefs.row(referent.index()).and_then(|holders| {
-            holders.iter().find_map(|holder| match holder {
-                Holder::Reference(at) => Some(*at),
-                Holder::Map(_) => None,
-            })
-        });
+        let existing = req
+            .weakrefs_mut()
+            .row(referent.index())
+            .and_then(|holders| {
+                holders.iter().find_map(|holder| match holder {
+                    Holder::Reference(at) => Some(*at),
+                    Holder::Map(_) => None,
+                })
+            });
         if let Some(at) = existing
             && let Some(reference) = stored(req, at)
         {
