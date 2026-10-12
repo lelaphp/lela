@@ -34,8 +34,10 @@
 //! to exit rounded out to whole seconds. Any other new object that names
 //! no process stands, and the run counts it apart from those it removed.
 //! Only the subsets of [`SUBSETS`] make such objects, the only ones whose
-//! tests call System V IPC, and only they hold the claim the next
-//! paragraphs and the one on two runs at once rest on, so any other subset
+//! tests call System V IPC, and the subsets holding a test of [`CALLERS`],
+//! which calls every function, and only they hold the claim the next
+//! paragraphs and the one on two runs at once rest on ([`makes_unnamed`],
+//! #2811), so any other subset
 //! removes only what its own processes are named on: a pooled run of
 //! `echo`s took another run's private queue of the same second (#2563).
 //! Such a subset holds a claim of its processes alone ([`Claim::own`]),
@@ -1270,6 +1272,22 @@ pub(crate) fn stop_cut_off() {
 /// The subsets whose tests make System V objects, the four extensions of
 /// System V IPC.
 pub(crate) const SUBSETS: [&str; 4] = ["ext/shmop", "ext/sysvmsg", "ext/sysvsem", "ext/sysvshm"];
+
+/// The tests outside [`SUBSETS`] that make System V objects naming no
+/// process, by their place in the corpus (#2811): `arginfo_zpp_mismatch`
+/// calls every function with nulls, so `msg_get_queue(null)`,
+/// `msg_get_queue(null, null)` and `msg_queue_exists(null)` each make a
+/// private queue of mode 0 nobody sends to, three per php that runs it,
+/// which nothing removed and which filled the machine's 40 on #2808.
+const CALLERS: [&str; 1] = ["Zend/tests/arginfo_zpp_mismatch.phpt"];
+
+/// Whether a subset of `scope` over the corpus directories `dirs` makes
+/// System V objects naming no process, and so holds a windowed claim: one
+/// of [`SUBSETS`], or one holding a test of [`CALLERS`].
+pub(crate) fn makes_unnamed<'a>(scope: &str, mut dirs: impl Iterator<Item = &'a Path>) -> bool {
+    SUBSETS.contains(&scope)
+        || dirs.any(|dir| CALLERS.iter().any(|test| Path::new(test).starts_with(dir)))
+}
 
 /// The private IPC namespace a System V subset's programs run in on Linux
 /// where `unshare` permits (#1482): each program in one of its own, made
