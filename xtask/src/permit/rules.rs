@@ -381,13 +381,24 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// reads a command past a later change where that change took the shell,
 /// never where the shell started (#2720): an orchestrator's `cat $S/owner; cd <main>;
 /// git merge --no-commit t1955` started a merge no record named (#2723).
-/// A command after a subshell's change is read where the change took it,
-/// the lexer keeping no subshell's end.
+/// A change inside a subshell, a substitution or a child shell moves the
+/// commands in it alone, and the one after it is read where the shell
+/// stood before it ([`Line::shells`], #2764).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
-    let (mut dir, rest) = standing(root, Some(line));
-    let mut pushed = Vec::new();
+    let (mut dir, mut pushed) = (root.to_path_buf(), Vec::new());
+    let mut entered: Vec<(u32, PathBuf, Vec<PathBuf>)> = Vec::new();
     let mut placed = Vec::new();
-    for argv in rest {
+    for (argv, shells) in line.commands().iter().zip(line.shells()) {
+        let kept = entered
+            .iter()
+            .zip(shells)
+            .take_while(|((id, ..), s)| id == *s)
+            .count();
+        while entered.len() > kept {
+            (_, dir, pushed) = entered.pop().unwrap_or_default();
+        }
+        let left = shells.get(kept..).unwrap_or_default();
+        entered.extend(left.iter().map(|id| (*id, dir.clone(), pushed.clone())));
         if change(&mut dir, &mut pushed, argv) {
             continue;
         }
