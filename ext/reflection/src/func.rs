@@ -1439,8 +1439,7 @@ impl ReflectionFunction {
             }
             Union::B(name) => name.as_bytes().to_vec(),
         };
-        let bare = name.strip_prefix(b"\\").unwrap_or(&name);
-        let Some(function) = lookup_function(req, bare) else {
+        let Some(function) = lookup_function(req, &name) else {
             return Err(throw(
                 req,
                 "ReflectionException",

@@ -7,7 +7,7 @@
 //! native was called from ([`Request::scope`]).
 
 use php_macros::php_function;
-use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
+use php_unit::decl::{Bare, ClassKind, PropertyDecl, Visibility};
 
 use crate::api::abi::{
     OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
@@ -17,22 +17,37 @@ use crate::api::request::{HookedRow, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-/// `zend_lookup_class_ex`: a leading `\` dropped, the table under the
-/// lowered name, and the autoloaders where the table has none and
-/// `autoload` asks for them.
+/// `zend_lookup_class_ex`: one leading `\` dropped, the table under
+/// the name whatever its case, and the autoloaders where the table has
+/// none and `autoload` asks for them, each handed the name past that
+/// one `\`, which a second `\` stays in:
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load [$c]\n"; });
+/// var_dump(class_exists("\\\\stdClass"), class_exists("\\STDCLASS"), class_exists("\\\\Nope"));
+/// var_dump(interface_exists("\\\\Countable"), class_exists("\\"), class_exists(""));
+/// ```
+/// ```expect
+/// load [\stdClass]
+/// load [\Nope]
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// load [\Countable]
+/// load []
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
 pub(super) fn lookup_class(
     req: &mut Request,
     name: &[u8],
     autoload: bool,
 ) -> Result<Option<ClassId>, Thrown> {
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    if let Some(class) = req.class_named(bare) {
-        return Ok(Some(class));
+    if autoload {
+        return crate::api::call::autoload(req, name);
     }
-    if !autoload {
-        return Ok(None);
-    }
-    crate::api::call::autoload(req, bare)
+    Ok(req.class_named(Bare::of(name)))
 }
 
 /// One `Z_PARAM_OBJ_OR_CLASS_NAME` of a native: an object's class, or
@@ -868,7 +883,7 @@ fn method_exists(
         }
         on = table.method_receiver(req, object);
     }
-    let closure = req.class_named(b"Closure") == Some(class);
+    let closure = req.class_named(Bare::resolved(b"Closure")) == Some(class);
     Ok(closure && lowered == b"__invoke")
 }
 
@@ -947,8 +962,7 @@ pub(super) fn exists(
     autoload: bool,
     kinds: &[ClassKind],
 ) -> Result<bool, Thrown> {
-    let bytes = name.as_bytes().to_vec();
-    let found = lookup_class(req, &bytes, autoload)?;
+    let found = lookup_class(req, name.as_bytes(), autoload)?;
     let answer = found
         .and_then(|class| req.class_decl(class))
         .is_some_and(|decl| kinds.contains(&decl.kind));
@@ -1145,10 +1159,8 @@ fn class_alias(
         );
         return Ok(false);
     };
-    let lowered = alias_bytes
-        .strip_prefix(b"\\")
-        .unwrap_or(&alias_bytes)
-        .to_ascii_lowercase();
+    let alias = Bare::of(&alias_bytes);
+    let lowered = alias.bytes().to_ascii_lowercase();
     if reserved_class_name(&lowered) {
         let message = format!(
             "Cannot use \"{}\" as a class alias as it is reserved",
@@ -1161,7 +1173,7 @@ fn class_alias(
     if lowered == b"_" {
         deprecated(req, "Using \"_\" as a class alias is deprecated since 8.4");
     }
-    if req.class_alias(class, &lowered) {
+    if req.class_alias(class, alias) {
         return Ok(true);
     }
     let shown = String::from_utf8_lossy(&alias_bytes).into_owned();

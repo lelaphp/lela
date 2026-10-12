@@ -21,7 +21,7 @@
 //! program sees is the same.
 
 use php_macros::php_class;
-use php_unit::decl::ClassKind;
+use php_unit::decl::{Bare, ClassKind};
 
 use crate::api::abi::{
     ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, GcTable, Instance, IteratorElement,
@@ -154,7 +154,7 @@ impl Countable {
 /// what sends a `foreach` over the object to the iterator and not to
 /// its properties.
 pub(crate) fn is_traversable(req: &Request, class: ClassId) -> bool {
-    req.class_named(b"traversable")
+    req.class_named(Bare::resolved(b"traversable"))
         .is_some_and(|traversable| req.instance_of(class, traversable))
         || req.handlers_of(class).own_iterator()
 }
@@ -640,7 +640,7 @@ fn wrap(
     class_iter: Option<Box<dyn ClassIterator>>,
 ) -> Result<PhpObject, Thrown> {
     let size = iterator_size(req, funcs, data);
-    let wrapper = match req.class_named(ITERATOR_WRAPPER) {
+    let wrapper = match req.class_named(Bare::resolved(ITERATOR_WRAPPER)) {
         Some(class) => req.new_object_sized(
             class,
             Box::new(ObjectIterator {
@@ -697,7 +697,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         };
     }
     if req
-        .class_named(b"iterator")
+        .class_named(Bare::resolved(b"iterator"))
         .is_some_and(|iterator| req.instance_of(object.class(), iterator))
     {
         if iterator_methods_native(req, object) {
@@ -1168,7 +1168,7 @@ fn internal_walked(req: &Request, iterator: PhpObject) -> Option<PhpObject> {
 /// ```
 pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     const ZEND_INTERNAL_ITERATOR: usize = 72;
-    let Some(class) = req.class_named(b"internaliterator") else {
+    let Some(class) = req.class_named(Bare::resolved(b"internaliterator")) else {
         return Err(crate::api::raising::fatal(
             req,
             "InternalError: InternalIterator is not declared",

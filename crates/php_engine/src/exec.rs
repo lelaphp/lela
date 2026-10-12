@@ -20,7 +20,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Zval};
-use php_unit::decl::HookKind;
+use php_unit::decl::{Bare, HookKind};
 use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 
 use crate::api::call::Function;
@@ -1246,7 +1246,7 @@ pub(crate) struct Vm {
 /// `zend_hash_find_known_hash(EG(function_table), name)` from a kernel
 /// whose opline owns a cache slot: the lookup a primed slot spares, so
 /// every one is made here and the tests count them.
-pub(crate) fn find_function(req: &mut Request, name: &[u8]) -> Option<Function> {
+pub(crate) fn find_function(req: &mut Request, name: Bare<'_>) -> Option<Function> {
     #[cfg(test)]
     {
         req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
@@ -1257,15 +1257,15 @@ pub(crate) fn find_function(req: &mut Request, name: &[u8]) -> Option<Function> 
 /// `zend_lookup_class_ex(name, NULL, ZEND_FETCH_CLASS_NO_AUTOLOAD)`
 /// from a kernel whose opline owns a cache slot: the linked classes'
 /// half of [`find_function`], made here and nowhere else so the tests
-/// count what a primed slot spares. The lowered name is what the lookup
-/// is keyed by, so it is the half of the constant pair a caller hands
-/// over.
-pub(crate) fn find_class(req: &mut Request, lowered: &[u8]) -> Option<ClassId> {
+/// count what a primed slot spares. A caller hands over the lowered
+/// half of the constant pair, which the table finds as it finds any
+/// case.
+pub(crate) fn find_class(req: &mut Request, name: Bare<'_>) -> Option<ClassId> {
     #[cfg(test)]
     {
         req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
     }
-    req.class_named(lowered)
+    req.class_named(name)
 }
 
 /// php's `execute_fake` placeholder standing where a generator's frame
@@ -2682,7 +2682,7 @@ pub(crate) fn cached_class(
     let lowered = constant(code, ConstIdx(at.saturating_add(1)));
     let found = lowered
         .as_str_bytes()
-        .and_then(|lowered| find_class(req, lowered));
+        .and_then(|lowered| find_class(req, Bare::resolved(lowered)));
     if let (Some(slot), Some(class)) = (slot, found) {
         req.prime(frame, slot, Cached::Class(class));
     }

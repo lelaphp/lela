@@ -10,7 +10,7 @@
 //! which has none, is refused.
 
 use php_link::{Held, Resolved, ResolvedHook, resolve_property};
-use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility};
+use php_unit::decl::{Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility};
 
 use super::{Link, Member, MemberAt, Request};
 use crate::api::__private::{native_function, parameter};
@@ -46,7 +46,7 @@ impl Request {
     fn class_of_decl(&self, class: ClassId, decl: &ClassDecl) -> Option<ClassId> {
         match self.class_decl(class) {
             Some(own) if std::ptr::eq(own, decl) => Some(class),
-            _ => self.class_named(&decl.name.0),
+            _ => self.class_named((&decl.name).into()),
         }
     }
 
@@ -86,7 +86,7 @@ impl Request {
     /// row before access is read).
     fn resolved_property(&self, class: ClassId, name: &[u8]) -> Option<Resolved<'_>> {
         let lookup = |wanted: &[u8]| {
-            self.class_named(wanted)
+            self.class_named(Bare::resolved(wanted))
                 .and_then(|id| self.class_decl(id))
                 .map(|decl| Held {
                     decl,

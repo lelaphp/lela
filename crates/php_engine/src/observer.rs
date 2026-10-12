@@ -1058,7 +1058,7 @@ pub(crate) fn function_declared_at_load(req: &mut Request, unit: &Unit, at: usiz
         return;
     };
     let name = decl.name.0.to_ascii_lowercase();
-    if let Some(declared) = req.function_named(&name) {
+    if let Some(declared) = req.function_named((&decl.name).into()) {
         function_declared(req, declared, &name);
     }
 }
@@ -1076,7 +1076,7 @@ pub(crate) fn class_linked_at_load(req: &mut Request, unit: &Unit, at: usize) {
         return;
     };
     let name = decl.name.0.to_ascii_lowercase();
-    if let Some(class) = req.class_named(&name) {
+    if let Some(class) = req.class_named((&decl.name).into()) {
         class_linked(req, class, &name);
     }
 }

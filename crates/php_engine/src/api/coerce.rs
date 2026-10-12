@@ -19,7 +19,7 @@ pub use php_heap::Exponent;
 /// reads a value past `int` or the long as php does (#2634).
 pub use crate::c_number::{atoi, is_space, strtol};
 use php_heap::ZvalType;
-use php_unit::decl::Type;
+use php_unit::decl::{Bare, Type};
 
 use crate::api::abi::Callable;
 use crate::api::raising::{Thrown, arg_type_error};
@@ -1039,15 +1039,17 @@ pub(crate) fn holds(req: &mut Request, value: &Value, ty: &Type, scopes: Scopes)
         Type::Intersection(members) => members
             .iter()
             .all(|member| holds(req, &value, member, scopes)),
-        Type::Named(name) => is(req.class_named(&name.0)),
-        Type::Iterable => value.as_array().is_some() || is(req.class_named(b"Traversable")),
+        Type::Named(name) => is(req.class_named(name.into())),
+        Type::Iterable => {
+            value.as_array().is_some() || is(req.class_named(Bare::resolved(b"Traversable")))
+        }
         Type::Callable => req.is_callable_value(&value, scopes.callables),
         Type::SelfClass => is(scopes.own),
         Type::CalledClass => is(scopes.called),
         Type::ParentClass => is(scopes
             .own
             .and_then(|class| req.class_decl(class)?.parent.clone())
-            .and_then(|parent| req.class_named(&parent.0))),
+            .and_then(|parent| req.class_named((&parent).into()))),
         _ => ty.contains_code(value.type_code()),
     }
 }

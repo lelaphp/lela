@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use php_heap::{FrameRef, Intern};
 use php_link::LinkedClass;
-use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
+use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
 use php_unit::{FramelessEntry, Opcode, TopLevel, Unit};
 
 use crate::api::call::{ClassNative, Function};
@@ -21,7 +21,7 @@ use crate::exec;
 
 use super::{
     Bound, Declared, Deprecations, FrameShape, Keyed, Member, MemberAt, Named, Request,
-    UserFunction, lowered_key, preload, user_function_decl,
+    UserFunction, preload, user_function_decl,
 };
 
 /// A class's members before they are numbered ([`Request::members_of`]):
@@ -327,7 +327,7 @@ impl Request {
             }
             return Some(false);
         }
-        if let Some(existing) = self.class_named(&decl.name.0) {
+        if let Some(existing) = self.class_named((&decl.name).into()) {
             let message = self.redeclaration(existing);
             let file = decl.file.0.to_vec();
             self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
@@ -369,11 +369,11 @@ impl Request {
     /// the file runs, as php's compile-time early bind would. None when
     /// the request ended, and whether the class was bound otherwise.
     fn bind_at_load(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
-        if self.class_named(&decl.name.0).is_some() {
+        if self.class_named((&decl.name).into()).is_some() {
             return Some(false);
         }
         if let Some(parent) = &decl.parent
-            && self.class_named(&parent.0).is_none()
+            && self.class_named(parent.into()).is_none()
         {
             return Some(false);
         }
@@ -414,7 +414,7 @@ impl Request {
     /// ```
     fn link_unbound(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
         let unbound = decl.parent.is_none() && decl.interfaces.is_empty() && decl.traits.is_empty();
-        if !unbound || self.class_named(&decl.name.0).is_some() {
+        if !unbound || self.class_named((&decl.name).into()).is_some() {
             return Some(false);
         }
         self.link_declared(unit, at, decl, true).ok()
@@ -468,7 +468,7 @@ impl Request {
             .and_then(|at| unit.classes.get(at))
             .map(|decl| decl.name.0.to_ascii_lowercase());
         if let Some(name) = name
-            && let Some(class) = self.class_named(&name)
+            && let Some(class) = self.class_named(Bare::resolved(&name))
         {
             crate::observer::class_linked(self, class, &name);
         }
@@ -530,8 +530,7 @@ impl Request {
             bound: Bound::default(),
         };
         if let Some(decl) = row.decl() {
-            let key = decl.name.0.to_ascii_lowercase().into_boxed_slice();
-            self.declared.push(key, Named { place, class });
+            self.declared.push(&decl.name.0, Named { place, class });
         }
         self.own_classes.push(row);
         self.bind_members(class, record);
@@ -577,8 +576,7 @@ impl Request {
         decl: &ClassDecl,
     ) {
         let place = self.buckets.claim(unit, at);
-        let key = decl.name.0.to_ascii_lowercase().into_boxed_slice();
-        self.declared.push(key, Named { place, class });
+        self.declared.push(&decl.name.0, Named { place, class });
     }
 
     /// The members of `class`, bound, into the function table beside it:
@@ -616,7 +614,7 @@ impl Request {
     pub(super) fn bind_members(&mut self, class: ClassId, record: Option<LinkedClass<ClassId>>) {
         let parent = self
             .class_decl(class)
-            .and_then(|decl| self.class_named(&decl.parent.as_ref()?.0));
+            .and_then(|decl| self.class_named(decl.parent.as_ref()?.into()));
         let Some(members) = self
             .declared_row(class)
             .and_then(|row| self.members_of(row, class))
@@ -820,7 +818,7 @@ impl Request {
         let (from, at) = match own.properties.iter().position(|p| p.name == *name) {
             Some(at) => (declared, at),
             None => decl.traits.iter().find_map(|trait_name| {
-                let holder = self.class_named(&trait_name.0)?;
+                let holder = self.class_named(trait_name.into())?;
                 let from = self.declared_row(holder)?;
                 let at = from
                     .decl()?
@@ -876,7 +874,7 @@ impl Request {
         if composed.decl.name.0.eq_ignore_ascii_case(&body.class.0) {
             return None;
         }
-        let holder = self.class_named(&body.class.0)?;
+        let holder = self.class_named((&body.class).into())?;
         self.native_class_at(holder)?;
         self.method_function(holder, body.method)
     }
@@ -895,7 +893,7 @@ impl Request {
         let from = if own {
             declared
         } else {
-            let holder = self.class_named(&body.class.0)?;
+            let holder = self.class_named((&body.class).into())?;
             self.declared_row(holder)?
         };
         let body = exec::Body::method(&from.unit, from.at, body.method)?;
@@ -1190,7 +1188,7 @@ impl Request {
         // or `do_bind_class` finding its key gone because the opline ran
         // before: `E_COMPILE_ERROR` at the site that runs it either way.
         let existing = self
-            .class_named(&decl.name.0)
+            .class_named((&decl.name).into())
             .and_then(|existing| self.class_decl(existing))
             .or_else(|| self.unlinked_decl(&decl.name.0));
         if let Some(existing) = existing {
@@ -1267,11 +1265,11 @@ impl Request {
                 "InternalError: a DECLARE_ANON_CLASS names no class the unit files",
             ));
         };
-        if let Some(class) = self.class_named(&name) {
+        if let Some(class) = self.class_named(Bare::resolved(&name)) {
             return Ok(class);
         }
         self.bind_class(unit, key)?;
-        self.class_named(&name).ok_or_else(|| {
+        self.class_named(Bare::resolved(&name)).ok_or_else(|| {
             crate::api::raising::fatal(
                 self,
                 "InternalError: an anonymous class its declaration did not bind",
@@ -1369,7 +1367,7 @@ impl Request {
 
     /// A class as the link reads the table: its declaration, and the
     /// bodies of its methods where it was composed with traits.
-    pub(super) fn held_class(&self, name: &[u8]) -> Option<php_link::Held<'_, ClassId>> {
+    pub(super) fn held_class(&self, name: Bare<'_>) -> Option<php_link::Held<'_, ClassId>> {
         self.held_as(self.class_named(name)?)
     }
 
@@ -1394,7 +1392,7 @@ impl Request {
     /// methods a composed class took stand after its parent's.
     fn record_at_bind(&self, class: ClassId) -> Option<LinkedClass<ClassId>> {
         let row = self.declared_row(class)?;
-        self.record_over(row, &|name| self.class_named(name))
+        self.record_over(row, &|name| self.class_named(Bare::resolved(name)))
     }
 
     /// The record of the class `row` declares over the classes `named`
@@ -1430,10 +1428,7 @@ impl Request {
         name: &php_unit::decl::Name,
         what: &str,
     ) -> Result<ClassId, Thrown> {
-        let found = match self.class_named(&name.0) {
-            Some(found) => Some(found),
-            None => crate::api::call::autoload(self, &name.0)?,
-        };
+        let found = crate::api::call::autoload(self, &name.0)?;
         found.ok_or_else(|| {
             crate::api::raising::throw_error(
                 self,
@@ -1444,16 +1439,13 @@ impl Request {
     }
 
     /// `zend_hash_find(EG(function_table), lcname)`: the native of that
-    /// name, or the user function a unit of this request declared.
-    pub(crate) fn function_named(&self, name: &[u8]) -> Option<Function> {
-        if let Some(i) = self.shared.function_at(name) {
+    /// name, or the user function the request's table holds under it,
+    /// one hash lookup in each, whatever the name's case.
+    pub(crate) fn function_named(&self, name: Bare<'_>) -> Option<Function> {
+        if let Some(i) = self.shared.function_at(name.bytes()) {
             return u32::try_from(i).ok().map(Function);
         }
-        self.function_table()
-            .find(|(_, user)| {
-                user_function_decl(user).is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(name))
-            })
-            .map(|(function, _)| function)
+        self.functions.find(name.bytes()).copied()
     }
 
     /// `EG(function_table)` in its order: every native function the
@@ -1466,31 +1458,11 @@ impl Request {
     #[must_use]
     pub fn functions(&self) -> Vec<Function> {
         let natives = u32::try_from(self.shared.functions.len()).unwrap_or(u32::MAX);
-        let user = self.function_table().filter_map(|(function, user)| {
-            user_function_decl(user)
-                .filter(|decl| !decl.name.0.starts_with(b"{"))
-                .map(|_| function)
-        });
         (0..natives)
             .filter(|&at| self.shared.in_function_table(at as usize))
             .map(Function)
-            .chain(user)
+            .chain(self.functions.iter().copied())
             .collect()
-    }
-
-    /// The user functions the request's `EG(function_table)` can find,
-    /// each with its number, in the order the table took them: the
-    /// preload's, published, then the request's own rows, which hold its
-    /// closures and methods beside its functions.
-    pub(crate) fn function_table(&self) -> impl Iterator<Item = (Function, &UserFunction)> {
-        let preloaded = self
-            .preloaded_functions
-            .iter()
-            .filter_map(|function| Some((*function, self.arena.function(*function)?)));
-        let own = (0..)
-            .zip(&self.user_functions)
-            .filter_map(|(at, user)| Some((Function::local(at)?, user)));
-        preloaded.chain(own)
     }
 
     /// `zend_hash_add_ptr(CG(function_table), …)` for every function the
@@ -1525,7 +1497,7 @@ impl Request {
             return Ok(());
         }
         let name = String::from_utf8_lossy(&decl.name.0).into_owned();
-        if let Some(earlier) = self.function_named(lowered) {
+        if let Some(earlier) = self.function_named(Bare::resolved(lowered)) {
             let site = self
                 .user_function(earlier)
                 .and_then(user_function_decl)
@@ -1552,6 +1524,7 @@ impl Request {
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
         if let Some(declared) = declared {
+            self.functions.push(&decl.name.0, declared);
             crate::observer::function_declared(self, declared, lowered);
         }
         Ok(())
@@ -1676,7 +1649,8 @@ impl Request {
     fn redeclares(&self, unit: &Arc<Unit>, at: usize) -> bool {
         let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
         unit.functions.get(at).is_some_and(|(decl, _)| {
-            !self.preloaded_function(unit, body) && self.function_named(&decl.name.0).is_some()
+            !self.preloaded_function(unit, body)
+                && self.function_named((&decl.name).into()).is_some()
         })
     }
 
@@ -1722,7 +1696,7 @@ impl Request {
         if self.preloaded_function(unit, body) {
             return Some(false);
         }
-        if let Some(earlier) = self.function_named(&decl.name.0) {
+        if let Some(earlier) = self.function_named((&decl.name).into()) {
             let site = self
                 .user_function(earlier)
                 .and_then(user_function_decl)
@@ -1742,6 +1716,9 @@ impl Request {
             self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
             return None;
         }
+        let Some(declared) = Function::local(self.user_functions.len()) else {
+            return Some(false);
+        };
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body,
@@ -1749,11 +1726,14 @@ impl Request {
             flags: crate::attributes::Flags::of(&decl.attributes),
             shape: FrameShape::of(decl, exec::body_of(unit, body)),
         });
+        self.functions.push(&decl.name.0, declared);
         Some(true)
     }
 
-    pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {
-        class_in(&self.shared, &self.declared, &self.aliases, name)
+    /// `zend_hash_find(EG(class_table), lcname)`: the class the table
+    /// holds under `name`, whatever its case ([`class_in`]).
+    pub(crate) fn class_named(&self, name: Bare<'_>) -> Option<ClassId> {
+        class_in(&self.shared, &self.declared, &self.aliases, name.bytes())
     }
 
     /// The request's strings, which the units it compiles for itself
@@ -2006,23 +1986,23 @@ impl Request {
     }
 
     /// `zend_register_class_alias_ex`'s `zend_hash_add` into
-    /// `EG(class_table)`: `class` under the lowered name `alias`, and
-    /// `false` where the table has that name already, a class's or
-    /// another alias's, and nothing is added. The name is the caller's
-    /// to have lowered and held to php's reserved names. A class of the
-    /// program's given its alias is linked under it for the observers
+    /// `EG(class_table)`: `class` under `alias`, which the table finds in
+    /// any case and lists lowered, and `false` where the table has that
+    /// name already, a class's or another alias's, and nothing is added.
+    /// The name is the caller's to have held to php's reserved names. A
+    /// class of the program's given its alias is linked under it for the observers
     /// (`Z/Zend/zend_API.c:3633-3636`), and an extension's class is not,
     /// as php tells none of an alias registered at `MINIT`.
-    pub(crate) fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
+    pub(crate) fn class_alias(&mut self, class: ClassId, alias: Bare<'_>) -> bool {
         if self.class_named(alias).is_some() {
             return false;
         }
         let place = self.buckets.take();
-        let lowered = alias.to_ascii_lowercase();
-        let key = lowered.clone().into_boxed_slice();
-        self.aliases.push(key, (place, lowered, class));
+        let lowered = alias.bytes().to_ascii_lowercase();
+        self.aliases
+            .push(alias.bytes(), (place, lowered.clone(), class));
         if crate::observer::classes_linked_observed(self) && !self.native_class(class) {
-            crate::observer::class_linked(self, class, &alias.to_ascii_lowercase());
+            crate::observer::class_linked(self, class, &lowered);
         }
         true
     }
@@ -2032,21 +2012,20 @@ impl Request {
 /// class or a native class's alias, a class the request declared, then
 /// an alias the request added; what [`Request::class_named`] answers.
 /// Each is one lookup in its table's keys, as `zend_hash_find` over the
-/// lowered name is: a class declared at `at` of the request's rows is
-/// the `ClassId` past the engine's classes.
+/// lowered name is, the case folded by the table and nothing lowered: a
+/// class declared at `at` of the request's rows is the `ClassId` past
+/// the engine's classes.
 fn class_in(
     shared: &Shared,
     declared: &Keyed<Named>,
     aliases: &Keyed<preload::Alias>,
     name: &[u8],
 ) -> Option<ClassId> {
-    lowered_key(name, |key| {
-        shared.class_keys.get(key).copied().or_else(|| {
-            declared
-                .find(key)
-                .map(|named| named.class)
-                .or_else(|| aliases.find(key).map(|(_, _, class)| *class))
-        })
+    shared.class_at(name).or_else(|| {
+        declared
+            .find(name)
+            .map(|named| named.class)
+            .or_else(|| aliases.find(name).map(|(_, _, class)| *class))
     })
 }
 

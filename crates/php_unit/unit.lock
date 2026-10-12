@@ -50,6 +50,10 @@ decl::Attribute
 decl::AttributeArgument
 decl::AttributeTarget
 decl::AttributeValidator
+decl::Bare
+decl::Bare::bytes
+decl::Bare::of
+decl::Bare::resolved
 decl::ClassConstDecl
 decl::ClassDecl
 decl::ClassFlags
