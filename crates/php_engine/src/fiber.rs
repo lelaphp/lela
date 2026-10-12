@@ -1782,7 +1782,7 @@ fn run_on<P: HoldsCoroutine>(
                 coroutine_of::<P>(req, object)?.execution = Some(Box::new(own));
                 let sent = php_heap::suspend(req, carried);
                 let Some(held) = coroutine_of::<P>(req, object)?.execution.take() else {
-                    let lost = php_heap::Fatal::Error(String::from(
+                    let lost = php_heap::Fatal::error(String::from(
                         "InternalError: a coroutine a suspend passed through lost its execution while it waited",
                     ));
                     return Ok(Err(lost));
