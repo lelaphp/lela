@@ -41,7 +41,7 @@ mod result;
 mod stats;
 mod wire;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, LongHandler};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -135,6 +135,10 @@ pub fn extension() -> Extension {
                 })
                 .collect(),
         )
+        .on_update_long(b"mysqlnd.net_read_buffer_size", LongHandler::Any)
+        .on_update_long(b"mysqlnd.net_read_timeout", LongHandler::Any)
+        .on_update_long(b"mysqlnd.log_mask", LongHandler::Any)
+        .on_update_long(b"mysqlnd.mempool_default_size", LongHandler::Any)
         .request_state::<State>()
         .info(mysqlnd_info)
         .version(VERSION)
@@ -164,6 +168,24 @@ pub fn extension() -> Extension {
 /// Collecting memory statistics => No
 /// Tracing => n/a
 /// ```
+///
+/// The four `OnUpdateLong` entries are read by the quantity rule, with its
+/// warning where it interprets a value:
+///
+/// ```php
+/// $code = 'ob_start(); phpinfo(INFO_MODULES); preg_match_all("/^Read (buffer size|timeout) => .*$/m", ob_get_clean(), $m); echo implode("\n", $m[0]), "\n"; var_dump(ini_set("mysqlnd.log_mask", "1y"));';
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'mysqlnd.net_read_buffer_size=1K', '-d', 'mysqlnd.net_read_timeout=0x10', '-d', 'mysqlnd.mempool_default_size=16000z', '-r', $code], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// ```
+/// ```expect process
+/// Warning: Invalid "mysqlnd.mempool_default_size" setting. Invalid quantity "16000z": unknown multiplier "z", interpreting as "16000" for backwards compatibility in Unknown on line 0
+/// Read buffer size => 1024
+/// Read timeout => 16
+///
+/// Warning: Invalid "mysqlnd.log_mask" setting. Invalid quantity "1y": unknown multiplier "y", interpreting as "1" for backwards compatibility in Command line code on line 1
+/// string(1) "0"
+/// 0
+/// ```
 fn mysqlnd_info(req: &mut Request) {
     let long = |req: &Request, name: &[u8]| -> String {
         req.ini_get(name)
@@ -176,8 +198,9 @@ fn mysqlnd_info(req: &mut Request) {
         if ini_bool(req, name) { "Yes" } else { "No" }
     };
     let cmd = long(req, b"mysqlnd.net_cmd_buffer_size");
-    let read = long(req, b"mysqlnd.net_read_buffer_size");
-    let timeout = long(req, b"mysqlnd.net_read_timeout");
+    // The two `OnUpdateLong` entries, as their quantities.
+    let read = req.ini_long(b"mysqlnd.net_read_buffer_size").to_string();
+    let timeout = req.ini_long(b"mysqlnd.net_read_timeout").to_string();
     let stats = yes(req, b"mysqlnd.collect_statistics");
     let memory = yes(req, b"mysqlnd.collect_memory_statistics");
     let tracing = req.ini_value(b"mysqlnd.debug").map_or_else(
