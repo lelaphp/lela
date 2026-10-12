@@ -481,12 +481,11 @@ fn preload_weight(preloaded: &Preloaded) -> u64 {
 /// The source a `zend_compile_file` link `handed` down, or else the bytes
 /// of the file at `path`; none where it cannot be read.
 pub(crate) fn source_or_read<'a>(handed: Option<&'a [u8]>, path: &[u8]) -> Option<Cow<'a, [u8]>> {
-    match handed {
-        Some(handed) => Some(Cow::Borrowed(handed)),
-        None => std::fs::read(String::from_utf8_lossy(path).as_ref())
-            .ok()
-            .map(Cow::Owned),
+    if let Some(handed) = handed {
+        return Some(Cow::Borrowed(handed));
     }
+    let path = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path);
+    std::fs::read(path).ok().map(Cow::Owned)
 }
 
 /// Now, in whole seconds since the epoch, php's `time_t`.

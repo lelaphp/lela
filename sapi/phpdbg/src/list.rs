@@ -3,8 +3,6 @@
 //! places, the current one marked, and the `zend_compile_file` link that
 //! keeps them as each file compiles.
 
-use std::os::unix::ffi::OsStrExt as _;
-
 use php_ext::abi::{Beneath, Compiled, chain};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -25,9 +23,9 @@ fn source<'s>(session: &'s Session, file: &[u8]) -> Option<&'s [u8]> {
 }
 
 /// `phpdbg_compile_file` (`Z/sapi/phpdbg/phpdbg_list.c:229-275`), the
-/// debugger's `zend_compile_file`: the file's bytes copied before the
-/// ones beneath compile it, as `zend_stream_fixup` reads them, and where
-/// they compiled it, kept with its oplines among the session's sources
+/// debugger's `zend_compile_file`: the file's bytes read before the ones
+/// beneath compile them, `zend_stream_fixup`, nothing compiled where they
+/// do not read, and where they compiled, kept with its oplines among the session's sources
 /// under the compiled file's name, in place of what an earlier compile of
 /// it kept, and the breakpoints pending on its name resolved
 /// (`phpdbg_resolve_pending_file_break`). So an included file is listed
@@ -81,14 +79,43 @@ fn source<'s>(session: &'s Session, file: &[u8]) -> Option<&'s [u8]> {
 /// prompt> [Could not find information about included file...]
 /// prompt>
 /// ```
+///
+/// A file a stream wrapper serves is compiled through the link as well,
+/// its oplines kept for `phpdbg_get_executable`:
+///
+/// ```php
+/// class M { public $context; private $s;
+///     function stream_open($p, $m, $o, &$op) { $this->s = "<?php\necho \"in mem\\n\";\n"; return true; }
+///     function stream_read($n) { $r = $this->s; $this->s = ''; return $r; }
+///     function stream_eof() { return $this->s === ''; }
+///     function stream_stat() { return []; }
+///     function stream_set_option($o, $a, $b) { return false; }
+///     function url_stat($p, $f) { return []; } }
+/// stream_wrapper_register('mem', 'M');
+/// include 'mem://x';
+/// foreach (phpdbg_get_executable() as $file => $lines) echo basename($file), " ", implode(",", array_keys($lines)), "\n";
+/// ```
+/// ```request phpdbg
+/// r
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> in mem
+/// witness.php 3,4,5,6,7,8,9,10,11
+/// x 2
+/// [Script ended normally]
+/// prompt>
+/// ```
 pub fn compile_file(
     req: &mut Request,
     beneath: Beneath<'_, chain::CompileFile>,
 ) -> Result<Option<Compiled>, Thrown> {
-    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(beneath.path()));
-    let copied = std::fs::read(path).ok();
-    let compiled = beneath.serve(req)?;
-    if let (Some(bytes), Some(code)) = (copied, compiled.as_ref().and_then(Compiled::op_array)) {
+    let Some(bytes) = beneath.read(req) else {
+        return Ok(None);
+    };
+    let compiled = beneath.with_source(&bytes).serve(req)?;
+    if let Some(code) = compiled.as_ref().and_then(Compiled::op_array) {
         let file = code.filename().to_vec();
         let ops = read::ops_of(&code);
         session::with(|s| {

@@ -159,6 +159,17 @@ pub enum ProgramFile {
     Listed,
 }
 
+impl ProgramFile {
+    /// Whether `php_execute_script_ex` puts the program's file in
+    /// `EG(included_files)` before `auto_prepend_file`, as it does for a
+    /// `zend_file_handle` the host opened as a `FILE *` and for no other
+    /// (`Z/main/main.c:2610-2619`); any other enters the table as it
+    /// compiles ([`Request::note_compiled_program`]).
+    pub(crate) fn noted_before_prepend(self) -> bool {
+        self == ProgramFile::Opened
+    }
+}
+
 /// Where `php_execute_script` serves a wrapped program
 /// (`Z/main/main.c:2596-2604`): in the working directory the request
 /// started in, under `SAPI_OPTION_NO_CHDIR`, or in the program's own
@@ -4880,6 +4891,8 @@ impl Engine {
             return false;
         }
         let compiled = self.primary(req, source, written);
+        // A source the host served under a name was noted as it was
+        // expanded ([`Request::expand_primary_file`]).
         if script && source.is_none() && compiled.is_some() {
             req.note_compiled_program();
         }
@@ -4952,14 +4965,14 @@ impl Engine {
             (Primary::Wrapped, _) => HandlePath::Host,
             (Primary::Bare, _) => HandlePath::Opened,
         };
-        Engine::compile_file(req, &script, written.unwrap_or(&script), handle)
+        Engine::compile_program(req, &script, written.unwrap_or(&script), handle)
     }
 
-    /// The file at `path`, named `written` by the host, compiled for the
-    /// request through a `zend_file_handle` of the kind `handle` names,
-    /// `zend_compile_file` ([`Request::compile_file`]); what a link
-    /// threw is left pending and nothing compiled.
-    fn compile_file(
+    /// The program or the router at `path`, named `written` by the host,
+    /// compiled for the request through a `zend_file_handle` of the kind
+    /// `handle` names, `zend_compile_file` ([`Request::compile_file`]);
+    /// what a link threw is left pending and nothing compiled.
+    fn compile_program(
         req: &mut Request,
         path: &[u8],
         written: &[u8],
@@ -5051,7 +5064,7 @@ impl Engine {
         let path = req
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
-        let ran = match Engine::compile_file(req, &path, router, HandlePath::Kept) {
+        let ran = match Engine::compile_program(req, &path, router, HandlePath::Kept) {
             Some(Ok(unit)) => serve_unit(req, &unit, entry),
             Some(Err(refused)) => {
                 refused_program(req, &refused, &path);

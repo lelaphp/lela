@@ -117,7 +117,7 @@ pub enum Interrupt {}
 
 /// `zend_compile_file` (`Z/Zend/zend_compile.c:87`): the compiled file,
 /// with beneath every link the engine's cached compile of it, the unit
-/// cache's lookup and compile ([`Request::cached_file`]), in which
+/// cache's lookup and compile ([`Request::cached_source`]), in which
 /// opcache's admission decides as the one question the cache asks
 /// (ADR-0005, #2457). A link wraps it and may post-process what it
 /// answers, as phpdbg's `phpdbg_compile_file` keeps a file's source, or
@@ -193,11 +193,11 @@ impl sealed::Kind for Interrupt {
 /// file's own, and the file the stream that link opened holds.
 #[derive(Clone, Copy)]
 pub struct FileArgs<'a> {
-    path: &'a [u8],
-    written: Option<&'a [u8]>,
-    handle: HandlePath,
-    source: Option<&'a [u8]>,
-    opened: Option<&'a [u8]>,
+    pub(crate) path: &'a [u8],
+    pub(crate) written: Option<&'a [u8]>,
+    pub(crate) handle: HandlePath,
+    pub(crate) source: Option<&'a [u8]>,
+    pub(crate) opened: Option<&'a [u8]>,
 }
 
 impl<'a> FileArgs<'a> {
@@ -209,6 +209,14 @@ impl<'a> FileArgs<'a> {
             source: None,
             opened: None,
         }
+    }
+
+    /// Whether the compile opens the file as a stream, as php's
+    /// `zend_stream_fixup` opens a `zend_file_handle` that holds no stream
+    /// yet: not the program the host opened, nor a wrapper's stream, nor
+    /// a file a link handed a source of, read from a stream of its own.
+    pub(crate) fn opens_stream(&self) -> bool {
+        self.source.is_none() && !matches!(self.handle, HandlePath::Host | HandlePath::Stream)
     }
 }
 
@@ -232,8 +240,7 @@ impl sealed::Kind for CompileFile {
         if let Some(opened) = args.opened {
             req.hold_opened(opened, args.handle);
         }
-        let cached = req.cached_source(args.path, args.written, args.handle, args.source);
-        Ok(cached.map(Compiled))
+        Ok(req.cached_source(args).map(Compiled))
     }
 }
 
@@ -261,6 +268,19 @@ impl<'a> Beneath<'a, CompileFile> {
                 ..self.args
             },
         }
+    }
+
+    /// `zend_stream_fixup` over the `zend_file_handle`: the bytes the file
+    /// compiles from, the source a link above handed down or the file's
+    /// own, read as the compile beneath would read them, with the stream
+    /// it would open opened (and a kept one held), as phpdbg's
+    /// `phpdbg_compile_file` copies them before it serves the one it
+    /// saved; none where the file does not read. A link that hands them on
+    /// with [`Beneath::with_source`] has the ones beneath compile those
+    /// bytes, opening nothing more.
+    #[must_use]
+    pub fn read(&self, req: &mut Request) -> Option<Vec<u8>> {
+        req.read_file_source(self.args)
     }
 
     /// The ones beneath told that the stream the link put in the

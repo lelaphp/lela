@@ -18,6 +18,7 @@ use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
 use crate::exec::IncludeKind;
+use crate::supplied::chain::FileArgs;
 use crate::unit_cache::{Asked, Cached, Disk, Filed, Held, Levels, UnitKey, full_path};
 
 /// What the `zend_file_handle` a file is compiled through holds when
@@ -43,6 +44,11 @@ pub(crate) enum HandlePath {
     /// (`Z/sapi/cli/php_cli_server.c:2138`, `:2282`), so the file its open
     /// made is held open until then ([`Request::require_kept`]).
     Kept,
+    /// A stream a wrapper opened, `php_stream_open_for_zend_ex` over a
+    /// URL ([`Request::include_stream`]): its bytes compiled as the
+    /// request's own, which no cache holds, since opcache keeps plain
+    /// files alone, whatever path the stream names as opened.
+    Stream,
 }
 
 /// The unit cache for one request: [`Request::unit_cache`].
@@ -385,7 +391,7 @@ impl Request {
         written: Option<&[u8]>,
         handle: HandlePath,
     ) -> Cached {
-        self.cached_source(path, written, handle, None)
+        self.cached_source(FileArgs::new(path, written, handle))
     }
 
     /// [`Request::cached_file`] where a `zend_compile_file` link may have
@@ -395,8 +401,8 @@ impl Request {
     /// it is held under the file's names as the file's own would be, as
     /// opcache's `persistent_compile_file` caches what the compile it
     /// saved, phar's, made of an archive's stub. The link opened the
-    /// stream it read, so the compile opens none, as for the program the
-    /// host opened ([`HandlePath::Host`]).
+    /// stream it read, so the compile opens none
+    /// ([`FileArgs::opens_stream`]).
     ///
     /// ```php
     /// function member($name, $data) {
@@ -423,21 +429,24 @@ impl Request {
     /// int(1)
     /// int(1)
     /// ```
-    pub(crate) fn cached_source(
-        &mut self,
-        path: &[u8],
-        written: Option<&[u8]>,
-        handle: HandlePath,
-        source: Option<&[u8]>,
-    ) -> Cached {
+    pub(crate) fn cached_source(&mut self, args: FileArgs<'_>) -> Cached {
+        let FileArgs {
+            path,
+            written,
+            handle,
+            source,
+            ..
+        } = args;
         if self.preloading.is_some() {
             return self.preload_file(path);
         }
         let shared = Arc::clone(&self.shared);
         let full = full_path(path, &self.cwd);
-        let handle = source.map_or(handle, |_| HandlePath::Host);
+        if handle == HandlePath::Stream {
+            return self.compiled_alone(args, &full);
+        }
         let (validation, lookup, protection, file_cache, memory) = match self.admission(&full) {
-            Admission::KeptOut => return self.kept_out(path, &full, handle, source),
+            Admission::KeptOut => return self.kept_out(args, &full),
             Admission::Held {
                 validation,
                 lookup,
@@ -527,33 +536,30 @@ impl Request {
         // it to look it up by its full path, and not for a hit whose key
         // the cache files: one by the full path, or read back from the
         // file cache, after the key missed is opened all the same.
-        if handle != HandlePath::Host
-            && cached.is_some()
-            && (filed != Filed::Hit || resolved || !by_key)
-        {
+        if args.opens_stream() && cached.is_some() && (filed != Filed::Hit || resolved || !by_key) {
             self.open_include_stream(&full, handle);
         }
         cached
     }
 
     /// A file the answer keeps out of the cache, `blacklist_misses`
-    /// counted: compiled as this request's own from the `source` handed
-    /// down or the file's bytes, which are opened as a stream as php
-    /// opens them.
-    fn kept_out(
-        &mut self,
-        path: &[u8],
-        full: &[u8],
-        handle: HandlePath,
-        source: Option<&[u8]>,
-    ) -> Cached {
+    /// counted, compiled as this request's own ([`Request::compiled_alone`]).
+    fn kept_out(&mut self, args: FileArgs<'_>, full: &[u8]) -> Cached {
         self.arena.files.note_blacklisted();
-        let source = crate::unit_cache::source_or_read(source, path)?;
-        if handle != HandlePath::Host {
-            self.open_include_stream(full, handle);
+        self.compiled_alone(args, full)
+    }
+
+    /// A file no cache holds compiled as this request's own, from the
+    /// `source` handed down or the file's bytes, which are opened as a
+    /// stream where php opens them ([`FileArgs::opens_stream`]): one the
+    /// answer keeps out, and a wrapper's stream ([`HandlePath::Stream`]).
+    fn compiled_alone(&mut self, args: FileArgs<'_>, full: &[u8]) -> Cached {
+        let source = crate::unit_cache::source_or_read(args.source, args.path)?;
+        if args.opens_stream() {
+            self.open_include_stream(full, args.handle);
         }
         let shared = Arc::clone(&self.shared);
-        Some(shared.compile_for(self, &source, path, SourceKind::File))
+        Some(shared.compile_for(self, &source, args.path, SourceKind::File))
     }
 
     /// `do_validate_timestamps` over a held copy whose stat is due

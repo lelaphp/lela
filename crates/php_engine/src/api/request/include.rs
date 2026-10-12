@@ -128,8 +128,16 @@ impl Request {
         written: Option<&[u8]>,
         handle: HandlePath,
     ) -> Result<Option<Result<Arc<Unit>, CompileError>>, Thrown> {
+        self.compile_through(FileArgs::new(path, written, handle))
+    }
+
+    /// [`Request::compile_file`] over the `zend_file_handle` `args`
+    /// describe.
+    fn compile_through(
+        &mut self,
+        args: FileArgs<'_>,
+    ) -> Result<Option<Result<Arc<Unit>, CompileError>>, Thrown> {
         let shared = Arc::clone(&self.shared);
-        let args = FileArgs::new(path, written, handle);
         let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
         Ok(top.serve(self)?.map(|compiled| compiled.0))
     }
@@ -183,6 +191,20 @@ impl Request {
         self.hold_file(&script, until);
     }
 
+    /// [`Beneath::read`](crate::api::abi::Beneath::read) over the file
+    /// `args` name.
+    pub(crate) fn read_file_source(&mut self, args: FileArgs<'_>) -> Option<Vec<u8>> {
+        if let Some(source) = args.source {
+            return Some(source.to_vec());
+        }
+        let source = crate::unit_cache::source_or_read(None, args.path)?.into_owned();
+        if args.opens_stream() {
+            let full = crate::unit_cache::full_path(args.path, &self.cwd);
+            self.open_include_stream(&full, args.handle);
+        }
+        Some(source)
+    }
+
     /// The file at the full path `path`, which a `zend_compile_file`
     /// link's stream holds open in the place of a `zend_file_handle` of
     /// the kind `handle` names, held as long as that `zend_file_handle`
@@ -222,11 +244,12 @@ impl Request {
     /// with its links resolved, which is the name the unit compiles under
     /// and the page `php_statpage` stats, and put in `EG(included_files)`
     /// there only where the host opened it as a `FILE *`, the CLI's
-    /// [`ProgramFile::Opened`]; php-cgi's and php-fpm's
-    /// `zend_file_handle` carries an `opened_path` and the built-in server's is a bare name, so the
-    /// table takes theirs as it compiles, after the prepend file has been
-    /// served ([`Request::note_compiled_program`]); the name as given
-    /// where it expands to nothing. A source the host
+    /// ([`ProgramFile::noted_before_prepend`]); php-cgi's and php-fpm's
+    /// `zend_file_handle` carries an `opened_path` and the built-in
+    /// server's is a bare name, so the table takes theirs as it compiles,
+    /// after the prepend file has been served
+    /// ([`Request::note_compiled_program`]); the name as given where it
+    /// expands to nothing. A source the host
     /// `served` under a name is the file php would have opened by it, its
     /// name expanded into the table and compiled under, so `__FILE__` and
     /// a diagnostic's file are the table's path (#1569); one named
@@ -253,7 +276,7 @@ impl Request {
         }
         let script = script.unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
-        if self.description.program_file == ProgramFile::Opened {
+        if self.description.program_file.noted_before_prepend() {
             self.note_included(&expanded).ok();
         }
         self.description.script_name = Some(expanded);
@@ -290,7 +313,7 @@ impl Request {
     /// t.php pre.php,t.php
     /// ```
     pub(crate) fn note_compiled_program(&mut self) {
-        if self.description.program_file == ProgramFile::Opened {
+        if self.description.program_file.noted_before_prepend() {
             return;
         }
         if let Some(script) = self.description.script_name.clone() {
@@ -679,10 +702,21 @@ impl Request {
             return self.failed_opening(kind, written);
         };
         let path = opened_path.as_deref().unwrap_or(path);
-        let shared = Arc::clone(&self.shared);
-        let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
-            Ok(unit) => unit,
-            Err(refused) => return Err(self.refused_include(&refused, path, SourceKind::File)),
+        // Compiled through every `zend_compile_file` link, the stream's
+        // bytes handed down as the stream php's handle holds.
+        let args = FileArgs {
+            source: Some(&source),
+            ..FileArgs::new(path, Some(written), HandlePath::Stream)
+        };
+        let outer = self.include.including.replace((kind, self.vm.depth()));
+        let compiled = self.compile_through(args);
+        self.include.including = outer;
+        let unit = match compiled? {
+            Some(Ok(unit)) => unit,
+            Some(Err(refused)) => {
+                return Err(self.refused_include(&refused, path, SourceKind::File));
+            }
+            None => return self.failed_opening(kind, written),
         };
         self.note_included(path)?;
         Ok(Opened::Unit(unit))

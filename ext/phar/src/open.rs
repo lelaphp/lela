@@ -771,6 +771,7 @@ fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Stub>, Thrown
     let Some(a) = archives(req).get(id) else {
         return Ok(None);
     };
+    let compressed = a.flags & FILE_COMPRESSION_MASK != 0;
     if a.is_tar() || a.is_zip() {
         let url = [b"phar://".as_slice(), path, b"/.phar/stub.php"].concat();
         let opening = php_ext::request::Opening {
@@ -782,17 +783,14 @@ fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Stub>, Thrown
         let Some(stream) = req.open_stream_with(&url, b"rb", opening)? else {
             return Ok(None);
         };
-        let over_archive = archives(req)
-            .get(id)
-            .is_some_and(|a| a.flags & FILE_COMPRESSION_MASK == 0);
         let source = archive::copy_all(req, *stream);
         stream.free(req);
         return Ok(Some(Stub {
             source: source?,
-            over_archive,
+            over_archive: !compressed,
         }));
     }
-    if a.flags & FILE_COMPRESSION_MASK != 0 {
+    if compressed {
         let source = a.fp.as_ref().map(|fp| fp.bytes.to_vec());
         return Ok(source.map(|source| Stub {
             source,
