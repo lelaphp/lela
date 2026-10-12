@@ -38,6 +38,8 @@ ResponseHead
 Routed
 Uncaught
 WebRequest
+c_number::atoi
+c_number::strtol
 fork
 getopt::Getopt
 getopt::Need

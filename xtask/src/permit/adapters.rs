@@ -18,7 +18,7 @@ use super::rules::{Judgement, Kind, deny_output, judge};
 use super::{INSTRUMENT, STALE_RULE, UNJUDGED_RULE};
 use crate::built::{self, Judge, Refusal};
 use crate::key::Snapshot;
-use crate::manifest::{self, Manifest, Where};
+use crate::manifest::{self, Manifest};
 use crate::reading::{Reading, Status, Store};
 
 /// Which adapter judges the call: the command hook records every
@@ -174,7 +174,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
                 println!("{output}");
             }
             record_the_approvals(&checkout, &call, &judgement);
-            record_the_operation(&manifest, &workspace, &call, &judgement);
+            record_the_operation(&workspace, &call, &judgement);
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
@@ -208,15 +208,16 @@ fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
 }
 
 /// The session whose `git merge`, `rebase` or kin this admits, as the
-/// starter of the operation it begins ([`operation::record`]), where a
-/// rule judges by it; a manifest with no `where = "operating"` rule
-/// records nothing. Best effort, as recording the decision is.
-fn record_the_operation(manifest: &Manifest, root: &Path, call: &Call, judgement: &Judgement) {
+/// starter of the operation it begins ([`operation::record`]), whatever
+/// the manifest holds: an operation can bring the first `where =
+/// "operating"` rule into the working tree it stands in, and a starter
+/// recorded only under such a rule left that one foreign to every session
+/// (#2694). Best effort, as recording the decision is.
+fn record_the_operation(root: &Path, call: &Call, judgement: &Judgement) {
     let Some(command) = call.command() else {
         return;
     };
-    if judgement.denial().is_some() || !manifest.rules.iter().any(|r| r.within == Where::Operating)
-    {
+    if judgement.denial().is_some() {
         return;
     }
     if let Err(err) = operation::record(root, call, &Line::read(command)) {
@@ -280,29 +281,13 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{Call, Manifest, Where, judge, record_the_operation};
-    use crate::manifest::{OneOrMany, Rule};
+    use super::{Call, Manifest, judge, record_the_operation};
+    use crate::manifest::Where;
     use crate::scratch::Tree;
 
-    /// The whole path a starter takes (#2476): the adapter records the
-    /// session whose `git merge` it admits, and the judge then lets that
-    /// session's `git add` through the merge and refuses another's. A
-    /// manifest without a `where = "operating"` rule records nothing.
-    #[test]
-    fn the_session_whose_merge_permit_admitted_stages_through_it_and_no_other() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let without = Manifest::load(workspace).unwrap();
-        let mut manifest = without.clone();
-        let mut rule = Rule::named("probe.operating", "");
-        rule.scope = OneOrMany::None;
-        rule.tool = OneOrMany::One("Bash".to_owned());
-        rule.within = Where::Operating;
-        rule.predicate.deny = None;
-        rule.predicate.deny_argv = Some(vec!["add".to_owned()]);
-        rule.predicate.with = OneOrMany::One("git".to_owned());
-        manifest.rules.push(rule);
-
-        let dir = Tree::new("permit-operating").unwrap();
+    /// A repository of one commit on `main`.
+    fn repository(name: &str) -> Tree {
+        let dir = Tree::new(name).unwrap();
         for args in [
             &["init", "-q", "-b", "main"][..],
             &[
@@ -326,22 +311,125 @@ mod tests {
                     .success()
             );
         }
-        let bash = |session: &str, line: &str| {
-            let call = serde_json::json!({"tool_name": "Bash", "session_id": session, "tool_input": {"command": line}});
-            Call::parse(&call.to_string()).unwrap()
+        dir
+    }
+
+    fn bash(session: &str, line: &str) -> Call {
+        let call = serde_json::json!({"tool_name": "Bash", "session_id": session, "tool_input": {"command": line}});
+        Call::parse(&call.to_string()).unwrap()
+    }
+
+    /// `session`'s `git merge` admitted and recorded under `manifest`, and
+    /// the merge it started then standing, as git leaves one stopped
+    /// before its commit.
+    fn started(manifest: &Manifest, dir: &Path, session: &str) {
+        let start = bash(session, "git merge --no-commit topic");
+        let admitted = judge(manifest, dir, &start).unwrap();
+        record_the_operation(dir, &start, &admitted);
+        std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
+    }
+
+    /// The trap of #2694: a merge started under a manifest with no `where
+    /// = "operating"` rule, whose working tree then carries `git.operation`
+    /// as the merge that lands it does, is still its starter's to step,
+    /// abort and commit, and still another session's to be refused.
+    #[test]
+    fn a_merge_started_before_the_operating_row_landed_is_still_its_starters() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let manifest = Manifest::load(workspace).unwrap();
+        let mut without = manifest.clone();
+        without.rules.retain(|r| r.within != Where::Operating);
+        let dir = repository("permit-operating");
+        started(&without, &dir, "s1");
+
+        let judged = |session: &str, line: &str| {
+            let judgement = judge(&manifest, &dir, &bash(session, line)).unwrap();
+            judgement.denial().map(|f| f.rule.clone())
         };
-        let start = bash("s1", "git merge --no-commit topic");
-        let admitted = judge(&without, &dir, &start).unwrap();
-        record_the_operation(&without, &dir, &start, &admitted);
-        assert!(!dir.join("target").exists(), "inert without the rule");
-        record_the_operation(&manifest, &dir, &start, &admitted);
+        for line in [
+            "git merge --continue",
+            "git merge --abort",
+            "git commit -F m -- a",
+            "git add -- a",
+        ] {
+            assert_eq!(judged("s1", line), None, "{line}");
+            assert_eq!(
+                judged("s2", line).as_deref(),
+                Some("git.operation"),
+                "{line}"
+            );
+        }
+    }
+
+    /// `git.operation` as the manifest carries it (#2530, #2617): its
+    /// `allow-starter-continue.json`, the starter's own `git merge
+    /// --continue`, passes the merge that session started, which the
+    /// fixture walks cannot record, and the same line from another session
+    /// is refused.
+    #[test]
+    fn the_git_operation_row_lets_the_starter_conclude_its_own_merge() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let manifest = Manifest::load(workspace).unwrap();
+        let fixture = "xtask/fixtures/rules/git.operation/allow-starter-continue.json";
+        let own = Call::parse(&std::fs::read_to_string(workspace.join(fixture)).unwrap()).unwrap();
+        let dir = repository("permit-operating-starter");
+        started(&manifest, &dir, &own.session_id);
+        let judged = |call: &Call| {
+            let judgement = judge(&manifest, &dir, call).unwrap();
+            judgement.denial().map(|f| f.rule.clone())
+        };
+        assert_eq!(judged(&own), None);
+        let other = bash("another-hand", own.command().unwrap());
+        assert_eq!(judged(&other).as_deref(), Some("git.operation"));
+    }
+
+    /// #2720 as it happened: an agent's `git merge` is admitted, and before
+    /// the merge writes its marker a sibling agent of the same session has
+    /// a line admitted that `cd`s into its own worktree past its first
+    /// command and runs `git merge --ff-only` there. The merge stays its
+    /// starter's: `allow-starter-commit.json` and the starter's abort pass,
+    /// and `deny-sibling-commit.json` and the sibling's abort are refused.
+    #[test]
+    fn a_sibling_s_line_between_a_start_and_its_marker_leaves_the_merge_its_starters() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let manifest = Manifest::load(workspace).unwrap();
+        let fixture = |name: &str| {
+            let path = workspace
+                .join("xtask/fixtures/rules/git.operation")
+                .join(name);
+            Call::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let own = fixture("allow-starter-commit.json");
+        let sibling = fixture("deny-sibling-commit.json");
+        let saying = |call: &Call, line: &str| {
+            let mut call = call.clone();
+            call.tool_input.command = Some(line.to_owned());
+            call
+        };
+        let dir = repository("permit-operating-sibling");
+        let admit = |call: &Call| {
+            let admitted = judge(&manifest, &dir, call).unwrap();
+            assert!(admitted.denial().is_none(), "{admitted:?}");
+            record_the_operation(&dir, call, &admitted);
+        };
+        admit(&saying(&own, "git merge --no-ff --no-commit t2634"));
+        let elsewhere = format!(
+            "S=/var/empty; cat $S/owner; cd /var/empty/t2645; git merge --ff-only main; \
+             cd {}; git log --oneline -3",
+            dir.display()
+        );
+        admit(&saying(&sibling, &elsewhere));
         std::fs::write(dir.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
 
-        let add = |session: &str| {
-            let judged = judge(&manifest, &dir, &bash(session, "git add -- a")).unwrap();
-            judged.denial().map(|f| f.rule.clone())
+        let judged = |call: &Call| {
+            let judgement = judge(&manifest, &dir, call).unwrap();
+            judgement.denial().map(|f| f.rule.clone())
         };
-        assert_eq!(add("s1"), None);
-        assert_eq!(add("s2").as_deref(), Some("probe.operating"));
+        let refused = Some("git.operation");
+        assert_eq!(judged(&own), None);
+        assert_eq!(judged(&saying(&own, "git merge --abort")), None);
+        assert_eq!(judged(&sibling).as_deref(), refused);
+        let abort = saying(&sibling, "git merge --abort");
+        assert_eq!(judged(&abort).as_deref(), refused);
     }
 }

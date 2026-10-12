@@ -13,7 +13,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
-use super::{long, lower, memnstr};
+use super::{Decimal, long, lower, memnstr};
 
 /// `str_replace(array|string $search, array|string $replace,
 /// string|array $subject, &$count = null): string|array`: each search
@@ -286,6 +286,36 @@ fn replace_bytes(
 /// strtr(): Argument #2 ($from) must be of type array, string given
 /// ```
 ///
+/// The pairs are looked up as php's table holds them: an integer key as
+/// its decimal, a longer key before a shorter one at one position, a key
+/// longer than the string never, a value read as a string where it is
+/// written (an object's `__toString` once per match, the single pair's
+/// before its key is looked at), and the empty key warned of once, before
+/// any value is read.
+///
+/// ```php
+/// var_dump(strtr("a1b-2c10", [1 => "one", -2 => "m2", 10 => "ten", "b" => "B"]), strtr("01 1", ["01" => "x", 1 => "y"]), strtr("abcabc", ["abc" => "1", "ab" => "2", "bca" => "3"]), strtr("ab", ["abc" => "long", "a" => "A"]), strtr("aaa", ["a" => 1, "aa" => 2.5, "x" => null]), strtr("a", [1 => "x", 2 => "y"]), strtr("xyz", ["" => "e", "y" => "Y"]));
+/// class S { function __toString(): string { echo "S\n"; return "s"; } }
+/// var_dump(strtr("aXa", ["a" => new S, "Q" => "q"]), strtr("bb", ["" => new S]));
+/// ```
+/// ```expect
+/// Warning: strtr(): Ignoring replacement of empty string in %s on line 2
+/// string(11) "aoneBm2cten"
+/// string(3) "x y"
+/// string(2) "11"
+/// string(2) "Ab"
+/// string(4) "2.51"
+/// string(1) "a"
+/// string(3) "xYz"
+/// S
+/// S
+/// S
+///
+/// Warning: strtr(): Ignoring replacement of empty string in %s on line 4
+/// string(3) "sXs"
+/// string(2) "bb"
+/// ```
+///
 /// The parse is php's, chosen by the count, so a count it refuses is
 /// refused before any argument is read.
 ///
@@ -312,6 +342,7 @@ pub(super) fn strtr(
     if given <= 2 {
         arity(req, 2, Some(2))?;
         let string = string.hold(req)?;
+        // `Z_PARAM_ARRAY_HT`, where the stub declares `string|array $from`.
         let from = coerce_param(req, &from.value(), &Type::Array, 2)?;
         let Some(from) = from.as_array().copied() else {
             return PhpString::new(req, b"");
@@ -323,6 +354,7 @@ pub(super) fn strtr(
     }
     arity(req, 3, Some(3))?;
     let string = string.hold(req)?;
+    // `Z_PARAM_STR`, where the stub declares `string|array $from`.
     let from = coerce_param(req, &from.value(), &Type::String, 2)?;
     // `Z_PARAM_STRING`: a `null` is the deprecation, which names the
     // declared `?string`, and the empty string.
@@ -350,59 +382,88 @@ pub(super) fn strtr(
     PhpString::new(req, &out)
 }
 
-/// `php_strtr_array` and `php_strtr_array_ex`.
+/// `php_strtr_array` (`Z/ext/standard/string.c:3398`): no pair is the string as it stands, one pair is
+/// `php_char_to_str_ex` or `php_str_to_str_ex` over its key, its value
+/// read before the key is looked at, and more are
+/// `php_strtr_array_ex`'s scan.
 fn strtr_array(
     req: &mut Request,
     string: PhpString,
     from: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
+    if from.len() > 1 {
+        return strtr_pairs(req, string, from);
+    }
+    let Some((key, value)) = walk::rows(req, from).next() else {
+        return Ok(Owner::take(req, string));
+    };
+    let digits;
+    let k = match &key {
+        Key::Int(n) => {
+            digits = Decimal::of(*n);
+            digits.as_bytes()
+        }
+        Key::Str(k) => k.as_bytes(),
+    };
     let s = string.as_bytes();
-    // `php_strtr_array_ex` (`Z/ext/standard/string.c:2919`) reads the
-    // pattern table's keys and finds each match's value in it as it
-    // writes, the table the argument holds: the rows are read under the
-    // borrowed request, views the argument keeps while a value's
-    // `__toString` runs.
-    let entries: Vec<(Key, Value)> = walk::rows(req, from)
-        .map(|(key, value)| (key, value.deref()))
-        .collect();
-    if entries.is_empty() {
+    let replaced = with_string(req, &value, |with| {
+        (!k.is_empty()).then(|| replace_bytes(s, k, with, true))
+    })?;
+    let Some((out, n)) = replaced else {
+        docref(req, Level::Warning, "Ignoring replacement of empty string");
+        return Ok(Owner::take(req, string));
+    };
+    if n == 0 {
         return Ok(Owner::take(req, string));
     }
-    let key_bytes = |key: &Key| -> Vec<u8> {
-        match key {
-            Key::Int(n) => n.to_string().into_bytes(),
-            Key::Str(k) => k.as_bytes().to_vec(),
-        }
-    };
-    if entries.len() == 1 {
-        let (key, value) = &entries[0];
-        let k = key_bytes(key);
-        let replaced = with_string(req, value, |with| {
-            (!k.is_empty()).then(|| replace_bytes(s, &k, with, true))
-        })?;
-        let Some((out, n)) = replaced else {
-            docref(req, Level::Warning, "Ignoring replacement of empty string");
-            return Ok(Owner::take(req, string));
-        };
-        if n == 0 {
-            return Ok(Owner::take(req, string));
-        }
-        return PhpString::new(req, &out);
-    }
-    let mut patterns: Vec<(Vec<u8>, Value)> = Vec::with_capacity(entries.len());
+    PhpString::new(req, &out)
+}
+
+/// `php_strtr_array_ex` (`Z/ext/standard/string.c:2919`): one walk of
+/// the pattern table gathers the first bytes and the lengths its keys
+/// come in, and the scan looks a slice of the subject up in the table
+/// itself, by hash, only where its first byte begins a key and only at
+/// the lengths a key has, longest first, so the longest key matching at
+/// a position is replaced and the scan moves past it. php rebuilds the
+/// table with its integer keys as strings where it has any; the
+/// symtable lookup finds what that rebuilt table would, since no string
+/// key of an array is a canonical decimal integer.
+fn strtr_pairs(
+    req: &mut Request,
+    string: PhpString,
+    from: PhpArray,
+) -> Result<Owner<PhpString>, Thrown> {
+    let s = string.as_bytes();
+    let mut firsts = Bits::default();
+    let mut lengths = Bits::default();
     let (mut minlen, mut maxlen) = (128 * 1024usize, 0usize);
-    for (key, value) in &entries {
-        let k = key_bytes(key);
-        if matches!(key, Key::Str(_)) && k.is_empty() {
-            docref(req, Level::Warning, "Ignoring replacement of empty string");
+    let (mut numeric, mut empty) = (false, false);
+    for (key, _) in walk::rows(req, from) {
+        let digits;
+        let k = match &key {
+            Key::Int(n) => {
+                numeric = true;
+                digits = Decimal::of(*n);
+                digits.as_bytes()
+            }
+            Key::Str(k) => k.as_bytes(),
+        };
+        let Some(&first) = k.first() else {
+            empty = true;
             continue;
-        }
+        };
         if k.len() > s.len() {
             continue;
         }
         maxlen = maxlen.max(k.len());
         minlen = minlen.min(k.len());
-        patterns.push((k, *value));
+        lengths.insert(k.len());
+        firsts.insert(usize::from(first));
+    }
+    // An array holds one empty key at most, so php's warning from inside
+    // its walk is this one, before any value is read.
+    if empty {
+        docref(req, Level::Warning, "Ignoring replacement of empty string");
     }
     if minlen > maxlen {
         return Ok(Owner::take(req, string));
@@ -410,18 +471,27 @@ fn strtr_array(
     let mut out: Option<Vec<u8>> = None;
     let (mut pos, mut old_pos) = (0usize, 0usize);
     while pos + minlen <= s.len() {
-        let mut len = maxlen.min(s.len() - pos);
-        while len >= minlen {
-            let key = &s[pos..pos + len];
-            if let Some((_, value)) = patterns.iter().find(|(k, _)| k.as_slice() == key) {
-                let buffer = out.get_or_insert_with(Vec::new);
-                buffer.extend_from_slice(&s[old_pos..pos]);
-                with_string(req, value, |with| buffer.extend_from_slice(with))?;
-                old_pos = pos + len;
-                pos = old_pos - 1;
-                break;
+        if firsts.contains(usize::from(s[pos])) {
+            let mut len = maxlen.min(s.len() - pos);
+            while len >= minlen {
+                if lengths.contains(len) {
+                    let key = &s[pos..pos + len];
+                    let found = if numeric {
+                        from.find_symtable(key)
+                    } else {
+                        from.find(key)
+                    };
+                    if let Some(value) = found {
+                        let buffer = out.get_or_insert_with(|| Vec::with_capacity(s.len()));
+                        buffer.extend_from_slice(&s[old_pos..pos]);
+                        with_string(req, &value, |with| buffer.extend_from_slice(with))?;
+                        old_pos = pos + len;
+                        pos = old_pos - 1;
+                        break;
+                    }
+                }
+                len -= 1;
             }
-            len -= 1;
         }
         pos += 1;
     }
@@ -431,6 +501,45 @@ fn strtr_array(
             PhpString::new(req, &buffer)
         }
         None => Ok(Owner::take(req, string)),
+    }
+}
+
+/// A set of small numbers, `php_strtr_array_ex`'s `bitset` of first
+/// bytes and `num_bitset` of key lengths: the first 256 in place, so a byte or a
+/// short key's length costs no allocation, and a longer length in words
+/// grown as one is inserted.
+#[derive(Default)]
+struct Bits {
+    short: [u64; 4],
+    long: Vec<u64>,
+}
+
+impl Bits {
+    #[inline]
+    fn insert(&mut self, n: usize) {
+        let (word, bit) = (n / 64, 1u64 << (n % 64));
+        match self.short.get_mut(word) {
+            Some(w) => *w |= bit,
+            None => self.insert_long(word - self.short.len(), bit),
+        }
+    }
+
+    #[cold]
+    fn insert_long(&mut self, word: usize, bit: u64) {
+        if self.long.len() <= word {
+            self.long.resize(word + 1, 0);
+        }
+        self.long[word] |= bit;
+    }
+
+    #[inline]
+    fn contains(&self, n: usize) -> bool {
+        let (word, bit) = (n / 64, 1u64 << (n % 64));
+        let w = match self.short.get(word) {
+            Some(w) => *w,
+            None => self.long.get(word - self.short.len()).copied().unwrap_or(0),
+        };
+        w & bit != 0
     }
 }
 

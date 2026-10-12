@@ -11,6 +11,9 @@ publish = false
 # and a clippy run, under every feature, lints it (#140).
 [features]
 extra = []
+# Turned on by the fixture's `sapi/cli` and not by its `sapi/makala`
+# (#2606).
+loud = []
 
 [[bin]]
 name = "heap-extra"

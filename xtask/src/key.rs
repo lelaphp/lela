@@ -263,7 +263,7 @@ impl Snapshot {
 
     /// The tracked files as `commit` holds them, read once per process
     /// and commit.
-    pub(crate) fn commit(root: &Path, commit: &str) -> Result<Arc<Snapshot>> {
+    pub fn commit(root: &Path, commit: &str) -> Result<Arc<Snapshot>> {
         let read = COMMITS.get_or_init(|| Mutex::new(BTreeMap::new()));
         let at = (root.to_path_buf(), commit.to_owned());
         if let Some(snapshot) = read.lock().ok().and_then(|held| held.get(&at).cloned()) {

@@ -1428,7 +1428,7 @@ impl<H: Host> Parser<'_, '_, H> {
 fn overflowed(s: &[u8]) -> bool {
     let t = s
         .iter()
-        .filter(|c| !crate::c_number::is_space(**c))
+        .filter(|c| !crate::c_number::is_whitespace(**c))
         .collect::<Vec<_>>();
     let digits = t
         .strip_prefix(&[&b'-'])

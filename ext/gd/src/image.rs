@@ -181,15 +181,16 @@ const fn level(gd: i32) -> Level {
 /// `GD_ERROR`s are its XPM reader, which php declares no native over
 /// without XPM support, and the PNG and JPEG handlers' unrecoverable
 /// jumps, so the level's mapping is pinned by the crate's test alone.
+/// The text is libgd's bytes, raised as php's `%s` prints them.
 pub(crate) fn raise(req: &mut Request, reported: Reported) -> Result<(), Thrown> {
     for (gd, text) in reported {
-        let text = String::from_utf8_lossy(&text);
         match level(gd) {
             Level::Error => {
                 let function = req.active_function_name();
-                return Err(fatal(req, &format!("{function}(): {text}")));
+                let message = [function.as_bytes(), b"(): ", &text].concat();
+                return Err(fatal(req, &message));
             }
-            level => docref(req, level, text.as_bytes()),
+            level => docref(req, level, &text),
         }
     }
     Ok(())

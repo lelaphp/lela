@@ -535,7 +535,13 @@ impl Request {
     /// held, recorded or thrown reads its text, and what the handlers
     /// are handed is one string of the request's, made once where the
     /// engine formatted the text, as `zend_error_va_list` makes it.
-    fn note_message_in(&mut self, level: Level, raised: Message, file: &[u8], line: u32) -> bool {
+    pub(super) fn note_message_in(
+        &mut self,
+        level: Level,
+        raised: Message,
+        file: &[u8],
+        line: u32,
+    ) -> bool {
         if let Some(held) = self.diagnostics.startup.as_mut() {
             let bytes = match raised {
                 Message::Text(text) => text.to_vec(),

@@ -46,12 +46,17 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     // records a ticket, which the tree the tests run in need not be.
     let ticketed = checkout("fixtures-ticketed", Some(1));
     // One scoped to `where = "operating"` in a checkout whose merge no
-    // session of the fixture's started (#2476).
+    // session of the fixture's started (#2476), and every other `Bash`
+    // rule in a checkout where none stands, since the tests' own checkout
+    // holds a merge while its merge commit's hook runs them; a write is
+    // judged against the workspace's files.
     let merging = operating("fixtures-operating");
+    let quiet = checkout("fixtures-quiet", None);
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
         let kind = Kind::of(rule);
         let workspace = || match rule.within {
+            Where::Anywhere if rule.tool.iter().any(|t| t == "Bash") => quiet.path(),
             Where::Anywhere => workspace(),
             Where::Ticketed => ticketed.path(),
             Where::Operating => merging.path(),
@@ -105,10 +110,15 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             }
         }
         // `allow-main.json` is a neighbour in main's checkout, where a
-        // ticketed rule does not judge, and its own test holds it there.
-        let neighbours = named("allow")
-            .into_iter()
-            .filter(|p| rule.within == Where::Anywhere || !p.ends_with("allow-main.json"));
+        // ticketed rule does not judge, and an `allow-starter*.json` one
+        // in a checkout whose operation the fixture's session started,
+        // which a walk does not record: each one's own test holds it.
+        let neighbours = named("allow").into_iter().filter(|p| {
+            let starter = p
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("allow-starter"));
+            !starter && (rule.within == Where::Anywhere || !p.ends_with("allow-main.json"))
+        });
         for neighbour in neighbours {
             let judgement = judge(&manifest, workspace(), &call(&neighbour)).unwrap();
             assert!(
@@ -206,7 +216,8 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
     let manifest = with_the_pathspec_rule(Manifest::load(workspace()).unwrap());
     let rule = manifest.rule("git.pathspec").unwrap();
     let dir = fixtures().join("rules/git.pathspec");
-    let judged = judge(&manifest, workspace(), &call(&dir.join("deny.json"))).unwrap();
+    let quiet = checkout("pathspec-quiet", None);
+    let judged = judge(&manifest, quiet.path(), &call(&dir.join("deny.json"))).unwrap();
     let denial = judged
         .denial()
         .unwrap_or_else(|| panic!("the denial did not fire: {judged:?}"));
@@ -217,7 +228,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
         denial.reason()
     );
     assert!(denial.reason().contains(&rule.text), "{}", denial.reason());
-    let judged = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+    let judged = judge(&manifest, quiet.path(), &call(&dir.join("allow.json"))).unwrap();
     assert!(
         judged.findings.iter().all(|f| f.rule != "git.pathspec"),
         "the neighbour fired: {judged:?}"
@@ -229,7 +240,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
         "git add -- .",
         "git -C /Users/x/dax-php commit -F /tmp/msg",
     ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
         assert_eq!(
             judged.denial().map(|f| f.rule.as_str()),
             Some("git.pathspec"),
@@ -243,7 +254,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
         "git worktree add -b t/x .claude/worktrees/t/x main",
         "cargo add serde",
     ] {
-        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
         assert!(judged.denial().is_none(), "{line}: {judged:?}");
     }
 }
@@ -2807,38 +2818,17 @@ fn operating(name: &str) -> Tree {
     dir
 }
 
-/// The `git.operation` row #2476 proposes, as the tracked manifest
-/// carries it or as the constructors build it.
-fn with_the_operation_rule(mut manifest: Manifest) -> Manifest {
-    if manifest.rule("git.operation").is_none() {
-        let mut rule = Rule::named("git.operation", "");
-        rule.scope = OneOrMany::None;
-        rule.tool = OneOrMany::One("Bash".to_owned());
-        rule.within = Where::Operating;
-        rule.predicate.deny = None;
-        rule.predicate.deny_argv = Some(
-            ["add", "stage", "commit", "rm", "mv"]
-                .map(str::to_owned)
-                .to_vec(),
-        );
-        rule.predicate.with = OneOrMany::One("git".to_owned());
-        "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage lands in its commit: wait for it to end, or stage and commit in a worktree (#2476)."
-            .clone_into(&mut rule.text);
-        manifest.rules.push(rule);
-    }
-    manifest
-}
-
-/// The rule #2476 proposes, `git.operation`, judged before a person lands
-/// its row: `git add -- <path>` and a commit by pathspec are refused in a
-/// checkout with `MERGE_HEAD` present, the denial naming the merge and the
-/// checkout, and both are let through in one without it; a leading `cd`
-/// into the merging checkout is refused from anywhere, and what reads the
-/// index is let through. Once the tracked manifest carries the row, the
-/// walk above holds its fixtures and this adds the checkout without one.
+/// `git.operation` (#2476, as #2530 ruled it): `git add -- <path>`, a
+/// commit by pathspec, another hand's `git merge --continue` and a `git
+/// restore --staged` are refused in a checkout with `MERGE_HEAD` present,
+/// the denial naming the merge and the checkout, and each is let through
+/// in one without it; a leading `cd` into the merging checkout is refused
+/// from anywhere, every subcommand the widened argv names is refused
+/// there, and what reads the index is let through. The walks above hold
+/// the fixtures where a merge stands; this adds the checkout without one.
 #[test]
-fn the_proposed_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
-    let manifest = with_the_operation_rule(Manifest::load(workspace()).unwrap());
+fn the_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
+    let manifest = Manifest::load(workspace()).unwrap();
     let merging = operating("operation-merging");
     let quiet = checkout("operation-quiet", None);
     let rule = |root: &Path, line: &str| {
@@ -2846,7 +2836,12 @@ fn the_proposed_git_operation_rule_refuses_staging_where_another_hand_s_merge_st
         judged.denial().map(Finding::reason)
     };
     let dir = fixtures().join("rules/git.operation");
-    for name in ["deny.json", "deny-commit.json"] {
+    for name in [
+        "deny.json",
+        "deny-commit.json",
+        "deny-continue.json",
+        "deny-restore.json",
+    ] {
         let judged = judge(&manifest, merging.path(), &call(&dir.join(name))).unwrap();
         let denial = judged
             .denial()
@@ -2872,6 +2867,24 @@ fn the_proposed_git_operation_rule_refuses_staging_where_another_hand_s_merge_st
     assert!(rule(quiet.path(), add).is_none());
     let moved = format!("cd {} && {add}", merging.path().display());
     assert!(rule(quiet.path(), &moved).is_some_and(|r| r.contains("git.operation")));
+    for line in [
+        "git reset -- AGENTS.md",
+        "git apply --cached x.patch",
+        "git rm -q --cached -- a",
+        "git mv a b",
+        "git stage -- a",
+        "git cherry-pick --skip",
+        "git revert --abort",
+        "git rebase --continue",
+        "git am --skip",
+        "git merge --abort",
+    ] {
+        let reason = rule(merging.path(), line);
+        assert!(
+            reason.is_some_and(|r| r.contains("git.operation")),
+            "{line}"
+        );
+    }
     for line in [
         "git status --short",
         "git diff --cached -- AGENTS.md",
@@ -3010,8 +3023,9 @@ fn the_builder_subset_rule_denies_the_lane_in_a_ticketed_checkout_alone() {
 fn the_nightly_rule_denies_the_runner_where_it_is_run_and_not_a_message_line() {
     let manifest = Manifest::load(workspace()).unwrap();
     let dir = fixtures().join("rules/lanes.nightly");
+    let quiet = checkout("nightly-quiet", None);
     let rule = |file: &str| {
-        let judged = judge(&manifest, workspace(), &call(&dir.join(file))).unwrap();
+        let judged = judge(&manifest, quiet.path(), &call(&dir.join(file))).unwrap();
         judged.denial().map(|f| f.rule.clone())
     };
     let denied = Some("lanes.nightly".to_owned());
@@ -3054,7 +3068,9 @@ fn the_nightly_rule_judges_what_the_call_runs_and_not_a_heredoc_that_cites_it() 
 /// A rule scoped `where = "ticketed"` is judged in a checkout whose branch
 /// records a ticket, but for an `allow-main*` call, the merge check's,
 /// which passes in main's checkout alone. A rule with an `exempt_label`
-/// asks the tracker, which a walk does not, and is held by its own test.
+/// asks the tracker, and an `allow-starter*` call passes an operation its
+/// session started, which a walk does not record: each is held by its
+/// own test.
 #[test]
 fn every_bash_rule_holds_to_each_of_its_fixtures() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -3083,7 +3099,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        for name in &names {
+        for name in names.iter().filter(|n| !n.starts_with("allow-starter")) {
             let root = match rule.within {
                 Where::Ticketed if name.starts_with("allow-main") => main.path(),
                 Where::Ticketed => ticketed.path(),

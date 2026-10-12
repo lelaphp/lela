@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=a58244dcdb8a3b50f1cab39e6285fd299868988ca8144c5913ea97c14935dad6 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=a8c41570d0f43f2203d5531c70214984a7472aaf88d5b24e4850c1963acceab1 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -74,7 +74,7 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 - `cargo xtask <instrument>` runs one instrument; `cargo xtask --help` lists the ones built so far. The smallest proof is the instrument for the crate you touched. The harness itself is tested by `cargo test -p xtask`, and every manifest rule has a fixture under `xtask/fixtures/` that must fail.
 - A change to behaviour comes with a witness beside the kernel or native, pinned by `--accept`. The witness is the test; write it before the body when you can. The phpt subset for an extension is every `.phpt` under `php-src/ext/<name>`, as run-tests.php walks the directory. A bench number is a claim a person signs off, with the A/A control read by a person: state the measurement, never the conclusion.
-- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. The message file is named for the branch or its ticket and never `msg.txt`, for the same reason the staging is by pathspec: the scratchpad is one directory per project, shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box inside an agent's ticket that reads *a person decides* is one box that is both, and it closes nothing however finished the code is.
+- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. A merge, cherry-pick, revert or rebase in progress in the checkout commits the whole index, whoever staged it; where one stands that you did not start, `permit` refuses the git commands that write its index or step it (add, commit, reset, restore, and a --continue among them), so wait for it to end or work in your own worktree. The message file is named for the branch or its ticket and never `msg.txt`, for the same reason the staging is by pathspec: the scratchpad is one directory per project, shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box inside an agent's ticket that reads *a person decides* is one box that is both, and it closes nothing however finished the code is.
 
 ## Documentation and where code lives
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=0b6a52fcef6da7ee54d611ba319f5f2a45e343944b85a69ec18f62366584fc4d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 404 |  |
 
-<!-- /computed in=b86ae848cc47eaf7d80ecae04522de8e29634af6ba0eff796aff72baebe8d8a5 out=cbe1e22b551a9ba7e1bd9333fc6a8d4f456346b5c11629020c0912b2e59978ea -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -156,6 +156,7 @@ third-engine-design.md
 | generated.committed |  | generated |
 | git.no-verify |  | deny_argv |
 | git.no-amend |  | deny_argv |
+| git.operation |  | deny_argv |
 | ticket.close |  | deny_argv |
 | ticket.close-api |  | deny_pattern |
 | ticket.reply-unfiled |  | deny_pattern |
@@ -169,7 +170,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern |
 | divergence.reason |  | check |
 
-<!-- /computed in=59d0ff0bcb381067a7362a1e967183212e80e6f67ae0b0666e2fb95b4d404ce4 out=3916f245ed29dcdb46bed5244958ed4fc90a0540f6bdc467177e77c9bdf08ea7 -->
+<!-- /computed in=45d01a88676a780d87281ed975b966f605061637a8e24440f930d4df31bf6a72 out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -187,7 +188,7 @@ Commands:
   usage              What a session spent per turn: `record` reads the plugin's `SessionUsage` on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the protocol: paired reps with the A/A control and the load average, one reading per bar, exit 0 always
-  budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
+  budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code, a stale generated file and a `build.rs` that bakes its crate's directory in
   clippy             `cargo clippy` with every warning denied, on every target of each crate and in release where it names `debug_assertions`, as the readings `done` reads; one per crate and profile
   test               `cargo test` on each crate, as the reading `done` reads; one reading per crate, with what passed, failed, was ignored and was filtered out in its numbers
   miri               `cargo miri test` on `php_heap`, or on the crates named, as the lane design §9 runs per commit; one reading per crate, with what ran, failed and was ignored in its numbers
@@ -210,7 +211,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=90ebf66c69cc5fe472f68a41f74a69e4ca73146d1add3d3c4e4ecdccd2951525 out=607732a408bc68e0472d3a3d5f9c666e4b79f8771e867ec56a0dbe7f3b5d86ed -->
+<!-- /computed in=39190a4376fc397d39c881de84fc9341486a3d4d3baa3b9232516be333bb3d6e out=4e2f456144c5db93cafae3e5c76a2c53c43947b8bcdbaf092ed171daaa414359 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

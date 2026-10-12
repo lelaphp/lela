@@ -32,3 +32,8 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 syn.workspace = true
+
+[dev-dependencies]
+# tests/new_sapi.rs: a stand-in's parameter types as written, held to the
+# real facade's (#2545); already in the lock under syn.
+quote.workspace = true

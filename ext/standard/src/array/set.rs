@@ -101,7 +101,10 @@ fn arrays_of(req: &mut Request, values: &[Value]) -> Result<Vec<PhpArray>, Throw
     Ok(arrays)
 }
 
-/// `Z_PARAM_ARRAY` over one value of the variadic, `coerce_param`'s.
+/// `Z_PARAM_ARRAY` over one value of the variadic, `coerce_param`'s:
+/// the declared `array ...$arrays` for the natives [`listed`] reads, and
+/// the form php's `"+f"` reads past the untyped `...$rest` that ends in
+/// the callbacks for the ones [`rested`] reads.
 fn array_at(req: &mut Request, position: u32, value: &Value) -> Result<PhpArray, Thrown> {
     let held = php_ext::coerce::coerce_param(req, value, &Type::Array, position)?;
     match held.as_array() {

@@ -24,6 +24,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
+use crate::api::coerce::atoi;
 use crate::api::layer::{Readiness, SockOpt};
 use crate::api::values::{Emalloc, Owner};
 
@@ -911,24 +912,10 @@ fn parse_ip_address(name: &[u8]) -> Result<(String, u16), String> {
     Ok((host, atoi_port(&name[colon + 1..])))
 }
 
-/// `atoi` of a `port`, cut to the `unsigned short` php hands `htons`.
+/// C's `atoi` of a `port`, cut to the `unsigned short` php hands
+/// `htons`: the int's low 16 bits.
 fn atoi_port(text: &[u8]) -> u16 {
-    let text = text.trim_ascii_start();
-    let (negative, digits) = match text.first() {
-        Some(b'-') => (true, &text[1..]),
-        Some(b'+') => (false, &text[1..]),
-        _ => (false, text),
-    };
-    let mut value: i64 = 0;
-    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        value = value
-            .saturating_mul(10)
-            .saturating_add(i64::from(digit - b'0'));
-    }
-    if negative {
-        value = -value;
-    }
-    u16::try_from(value.rem_euclid(0x1_0000)).unwrap_or(0)
+    u16::try_from(atoi(text) & 0xFFFF).unwrap_or(0)
 }
 
 /// `php_network_getaddresses` (`Z/main/network.c:148`): the addresses

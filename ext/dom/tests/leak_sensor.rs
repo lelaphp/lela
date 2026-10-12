@@ -143,8 +143,9 @@ fn an_xpath_callback_evaluates_and_registers_on_its_own_evaluator() {
 /// one after. php frees the `xmlXPathContext` libxml is evaluating with
 /// (`xmlXPathFreeContext` in `dom_xpath_construct`) and reads it freed,
 /// answering `function count not found` and `false`; the engine's answer
-/// is the one an evaluator still open gives (proposed `php-ub` row
-/// `php-ub:dom-xpath-constructed-in-callback`, #2318).
+/// is the one an evaluator still open gives
+/// (`trace:dom-xpath-constructed-in-callback` in `docs/divergence.toml`,
+/// #2318, #2511).
 #[test]
 fn an_evaluator_constructed_anew_in_its_own_callback_evaluates_to_its_end() {
     served(

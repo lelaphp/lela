@@ -279,28 +279,10 @@ enum Set {
     Pm(Pm),
 }
 
-/// C's `atoi`.
-pub(crate) fn atoi(bytes: &[u8]) -> i32 {
-    let bytes = bytes.trim_ascii_start();
-    let (negative, digits) = match bytes.first() {
-        Some(b'-') => (true, &bytes[1..]),
-        Some(b'+') => (false, &bytes[1..]),
-        _ => (false, bytes),
-    };
-    let mut value: i64 = 0;
-    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        value = value.wrapping_mul(10).wrapping_add(i64::from(digit - b'0'));
-    }
-    let value = if negative {
-        value.wrapping_neg()
-    } else {
-        value
-    };
-    // `atoi`'s wrap into an int, as php's `(int) strtol` keeps the low bits.
-    #[allow(clippy::cast_possible_truncation)]
-    let low = value as i32;
-    i32::try_from(value).unwrap_or(low)
-}
+/// C's `atoi`, which `fpm_conf.c` reads its numbers with: the engine's
+/// one reading, which the sockets' and the per-directory cache's readers
+/// take from here too.
+pub(crate) use php_sapi::c_number::atoi;
 
 /// `fpm_conf_set_boolean`'s reading.
 pub(crate) fn boolean(value: &[u8]) -> Result<bool, &'static str> {

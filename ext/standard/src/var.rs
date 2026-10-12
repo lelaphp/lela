@@ -22,6 +22,8 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, GiveUp, Guarded, Hold, Unwritten};
 use php_ext::values::{Key, Owner, PhpString, RecursionGuard, SmartStr, Value};
 
+use crate::string::Decimal;
+
 pub(crate) mod debug;
 pub(crate) mod serialize;
 pub(crate) mod unserialize;
@@ -1149,7 +1151,8 @@ fn var_export(
     #[php(default = false)] r#return: bool,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
     let returned = r#return;
-    let mut out = Vec::new();
+    // One buffer for the whole export, as php's one `smart_str`.
+    let mut out = Vec::with_capacity(OPENED);
     export(req, &mut out, &value, 1)?;
     // What a reader of an object's properties left pending, a lazy
     // object's initializer that threw, is thrown once what was read is
@@ -1211,9 +1214,10 @@ pub fn export(
     } else if let Some(n) = value.as_int() {
         // `ZEND_LONG_MIN` written whole would read back as a float.
         if n == i64::MIN {
-            out.extend_from_slice(format!("{}-1", i64::MIN + 1).as_bytes());
+            push_long(out, i64::MIN + 1);
+            out.extend_from_slice(b"-1");
         } else {
-            out.extend_from_slice(n.to_string().as_bytes());
+            push_long(out, n);
         }
     } else if let Some(f) = value.as_float() {
         // `smart_str_append_double` with `zero_fraction`: the text, and
@@ -1245,7 +1249,7 @@ pub fn export(
         let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
             out.extend(std::iter::repeat_n(b' ', level + 1));
             match row.key() {
-                Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
+                Key::Int(n) => push_long(out, *n),
                 Key::Str(s) => quoted(out, s.as_bytes()),
             }
             out.extend_from_slice(b" => ");
@@ -1350,7 +1354,7 @@ fn export_object(
                     escaped(out, name);
                     out.push(b'\'');
                 }
-                Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
+                Key::Int(n) => push_long(out, *n),
             }
             out.extend_from_slice(b" => ");
             export(req, out, row.value(), level + 2)?;
@@ -1371,6 +1375,16 @@ fn export_object(
         out.extend_from_slice(b"))");
     }
     Ok(())
+}
+
+/// What the export's buffer opens with, so a small value is written
+/// without growing it; php's `smart_str` opens at `SMART_STR_START_LEN`,
+/// 231 bytes, and a `Vec`'s capacity is not observable.
+const OPENED: usize = 256;
+
+/// `smart_str_append_long`: `n` in decimal, written into the buffer.
+fn push_long(out: &mut Vec<u8>, n: i64) {
+    out.extend_from_slice(Decimal::of(n).as_bytes());
 }
 
 /// `var_export does not handle circular references`, the warning php

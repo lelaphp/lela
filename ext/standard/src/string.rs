@@ -904,6 +904,40 @@ fn long(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
+/// A `zend_long` in decimal, the digits on the stack:
+/// `zend_print_long_to_buf` (`Z/Zend/zend_operators.h:993`) into its
+/// `char buf[MAX_LENGTH_OF_LONG + 1]`, what `zend_long_to_str` and
+/// `smart_str_append_long` write without a string of their own.
+pub(crate) struct Decimal {
+    buf: [u8; 20],
+    start: usize,
+}
+
+impl Decimal {
+    pub(crate) fn of(n: i64) -> Decimal {
+        let mut buf = [0u8; 20];
+        let mut start = buf.len();
+        let mut rest = n.unsigned_abs();
+        loop {
+            start -= 1;
+            buf[start] = b'0' + u8::try_from(rest % 10).unwrap_or(0);
+            rest /= 10;
+            if rest == 0 {
+                break;
+            }
+        }
+        if n < 0 {
+            start -= 1;
+            buf[start] = b'-';
+        }
+        Decimal { buf, start }
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
+}
+
 /// `bin2hex(string $string): string`, `php_bin2hex`: each byte as two
 /// lowercase hex digits.
 ///

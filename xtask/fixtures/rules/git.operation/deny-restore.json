@@ -1,0 +1,1 @@
+{"tool_name":"Bash","session_id":"another-hand","tool_input":{"command":"git restore --staged -- AGENTS.md","description":"Unstage one file from the merge's index"}}

@@ -11,14 +11,10 @@
 use std::cmp::Ordering;
 
 use php_ext::attr::php_function;
+use php_ext::coerce::is_space;
 use php_ext::values::PhpString;
 
 use crate::ffi::locale::{self as c, Class};
-
-/// `isspace(3)` under the thread's `LC_CTYPE`.
-fn is_space(byte: u8) -> bool {
-    c::is(Class::Space, byte)
-}
 
 /// `isdigit(3)` under the thread's `LC_CTYPE`.
 fn is_digit(byte: u8) -> bool {

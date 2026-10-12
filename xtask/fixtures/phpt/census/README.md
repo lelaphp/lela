@@ -1,5 +1,5 @@
 One subset's run as `xtask phpt` keeps it, at
-`target/phpt-runs/<tree>/<scope>.json`, with what each missed test keeps
+`target/harness/phpt-runs/<tree>/<scope>.json`, with what each missed test keeps
 under `misses` (#1185): its first differing lines and its signature. Every
 kind of signature stands in it once, two tests share the `Warning` and the
 unread construct, and three share `undefined function array_any`, so the

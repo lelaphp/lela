@@ -64,7 +64,7 @@ use php_ext::abi::{Instance, OrFalse, Path as PathArg, Refusals, This};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{OwnedStream as _, Request, Resolve, Stream, Streams, Whence};
+use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Resolve, Stream, Streams, Whence};
 use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::set_default_dir;
@@ -607,11 +607,8 @@ fn glob(
     #[php(default = 0)] flags: i64,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let PathArg(pattern) = pattern;
-    if pattern.len() >= crate::virtual_cwd::MAXPATHLEN {
-        let text = format!(
-            "Pattern exceeds the maximum allowed length of {} characters",
-            crate::virtual_cwd::MAXPATHLEN
-        );
+    if pattern.len() >= MAXPATHLEN {
+        let text = format!("Pattern exceeds the maximum allowed length of {MAXPATHLEN} characters");
         docref(req, Level::Warning, &text);
         return Ok(OrFalse::False);
     }
@@ -633,7 +630,7 @@ fn glob(
         prefixed.push(b'/');
         prefixed.extend_from_slice(&work);
         // `snprintf(work_pattern, MAXPATHLEN, ...)`.
-        prefixed.truncate(crate::virtual_cwd::MAXPATHLEN - 1);
+        prefixed.truncate(MAXPATHLEN - 1);
         work = prefixed;
     }
     // Every available bit fits an `int`.

@@ -138,11 +138,7 @@ pub(crate) mod constants {
 
 /// `php_error_docref` of one [`Warning`].
 fn warn(req: &mut Request, warning: &Warning) {
-    docref(
-        req,
-        Level::Warning,
-        String::from_utf8_lossy(&warning.1).as_bytes(),
-    );
+    docref(req, Level::Warning, &warning.1);
 }
 
 /// A string value of the request's.

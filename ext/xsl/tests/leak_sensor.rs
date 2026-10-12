@@ -60,8 +60,8 @@ fn a_callback_transforms_and_registers_on_its_own_processor() {
 /// php frees the stylesheet libxslt is transforming with
 /// (`xsltFreeStylesheet` in `XSLTProcessor::importStylesheet`) and dies
 /// on SIGSEGV after the nested transformation's `nested: 'deep'`
-/// (proposed `php-ub` row `php-ub:xsl-stylesheet-replaced-in-callback`,
-/// #2319).
+/// (`trace:xsl-stylesheet-replaced-in-callback` in
+/// `docs/divergence.toml`, #2319, #2511).
 #[test]
 fn a_stylesheet_replaced_in_its_own_callback_transforms_to_its_end() {
     let one = sheet("<xsl:value-of select=\"php:function(\\'inner\\', string(/r))\"/>");

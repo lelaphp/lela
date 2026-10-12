@@ -147,7 +147,17 @@ fn imagecreatefromstring(
 
 /// `_php_image_create_from`: the file opened through php's streams and
 /// read whole, then libgd's reader over it, `gd.jpeg_ignore_warning`
-/// read for a plain file's JPEG as php's `FILE *` path reads it.
+/// read for a plain file's JPEG as php's `FILE *` path reads it. A file
+/// libgd cannot read is named in the warning as its bytes, as php's `%s`
+/// prints a name that is not UTF-8.
+///
+/// ```php
+/// set_error_handler(function ($n, $s) { echo $n, " ", bin2hex(strstr($s, '"')), "\n"; return true; });
+/// imagecreatefromgif("data:,GIF89a\xff");
+/// ```
+/// ```expect
+/// 2 22646174613a2c474946383961ff22206973206e6f7420612076616c6964204749462066696c65
+/// ```
 fn create_from(
     req: &mut Request,
     filename: Path,
@@ -188,10 +198,8 @@ fn create_from(
     stream.free(req);
     let image = image?;
     if image.is_none() {
-        let text = format!(
-            "\"{}\" is not a valid {name} file",
-            String::from_utf8_lossy(path)
-        );
+        let after = format!("\" is not a valid {name} file");
+        let text = [b"\"".as_slice(), path, after.as_bytes()].concat();
         docref(req, Level::Warning, &text);
     }
     wrap(req, image)
@@ -914,7 +922,16 @@ fn imagewbmp(
 
 /// `_php_image_output`: `imagegd` and `imagegd2` write a path through
 /// `VCWD_FOPEN`, or stdout where none is given, from the temporary file
-/// libgd wrote whole; no `gdIOCtx`, as php makes none for them.
+/// libgd wrote whole; no `gdIOCtx`, as php makes none for them. A path
+/// it cannot open is named in the warning as its bytes.
+///
+/// ```php
+/// set_error_handler(function ($n, $s) { echo $n, " ", bin2hex(strstr($s, '"')), "\n"; return true; });
+/// imagegd(imagecreatetruecolor(1, 1), "/nonexistent/\xff.gd");
+/// ```
+/// ```expect
+/// 2 222f6e6f6e6578697374656e742fff2e67642220666f722077726974696e67
+/// ```
 fn output_gd(
     req: &mut Request,
     image: Instance<GdImage>,
@@ -933,10 +950,7 @@ fn output_gd(
             }
             let opening = Opening::default();
             let Some(stream) = req.open_stream_with(path, b"wb", opening)? else {
-                let text = format!(
-                    "Unable to open \"{}\" for writing",
-                    String::from_utf8_lossy(path)
-                );
+                let text = [b"Unable to open \"".as_slice(), path, b"\" for writing"].concat();
                 docref(req, Level::Warning, &text);
                 return Ok(false);
             };

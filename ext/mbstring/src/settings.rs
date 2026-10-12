@@ -26,6 +26,7 @@ use crate::tables::{
 };
 use crate::text::value_error;
 use php_ext::abi::IniStage;
+use php_ext::coerce::is_space;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
@@ -128,9 +129,11 @@ impl Substitute {
 
 /// `strtol(s, &end, 0)` where `*end` must be the terminator: a whole
 /// C integer, decimal, `0x` hex or `0` octal, with leading space and a
-/// sign, cut to `int` as php's assignment cuts it.
+/// sign, cut to `int` as php's assignment cuts it. Kept beside the face's
+/// `strtol`, which reads base 10 and answers no end; the space it skips
+/// is the face's, C's `isspace` under the thread's `LC_CTYPE`.
 fn strtol(text: &[u8]) -> Option<i32> {
-    let start = text.iter().position(|b| !b" \t\n\r\x0b\x0c".contains(b))?;
+    let start = text.iter().position(|b| !is_space(*b))?;
     let text = &text[start..];
     let (negative, digits) = match text.first() {
         Some(b'-') => (true, &text[1..]),

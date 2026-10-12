@@ -13,6 +13,7 @@
 
 use php_ext::abi::{OrFalse, Path, Ref, Untyped};
 use php_ext::attr::{php_const, php_function};
+use php_ext::coerce::is_space;
 use php_ext::decl::{ConstDecl, ConstExpr, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
@@ -1409,12 +1410,6 @@ fn get_wbmp(s: &mut Stream<'_>, want_size: bool) -> Option<GfxInfo> {
     Some(g)
 }
 
-/// C's `isspace` in the "C" locale, as `sscanf` at
-/// `Z/ext/standard/image.c:1010` applies it.
-fn is_c_space(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
-
 /// `sscanf(line, "#define %s %d", name, &value) == 2`,
 /// `Z/ext/standard/image.c:1010`, as the oracle's libc
 /// (BSD `vfscanf`) does it: the number is at most 512 characters, read by
@@ -1423,9 +1418,9 @@ fn scan_define(line: &[u8]) -> Option<(&[u8], i32)> {
     // sscanf sees a C string: stop at the first NUL.
     let line = line.split(|&b| b == 0).next().unwrap_or(&[]);
     let mut rest = line.strip_prefix(b"#define")?;
-    let skip = |r: &[u8]| -> usize { r.iter().take_while(|&&b| is_c_space(b)).count() };
+    let skip = |r: &[u8]| -> usize { r.iter().take_while(|&&b| is_space(b)).count() };
     rest = rest.get(skip(rest)..)?;
-    let name_len = rest.iter().take_while(|&&b| !is_c_space(b)).count();
+    let name_len = rest.iter().take_while(|&&b| !is_space(b)).count();
     if name_len == 0 {
         return None;
     }

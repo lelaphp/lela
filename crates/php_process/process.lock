@@ -10,6 +10,7 @@ dup_fd
 fd_table_size
 fork
 inherit_fd
+is_space
 listen_fd
 new_socket
 peek_fd

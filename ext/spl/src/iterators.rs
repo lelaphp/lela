@@ -1582,6 +1582,9 @@ impl RecursiveCachingIterator {
             this.object(),
             "RecursiveCachingIterator",
             |req| {
+                // `spl_dual_it_construct`'s `"O|l"` over
+                // `spl_ce_RecursiveIterator`, where the stub declares
+                // `Iterator $iterator`.
                 let ty = <Instance<RecursiveIterator> as FromArgument>::declared();
                 let ty = ty.unwrap_or(Type::Object);
                 let held = coerce_param(req, &iterator.value(), &ty, 1)?;

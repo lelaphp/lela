@@ -17,15 +17,18 @@
 //!
 //! Both are served one corpus, the HTTP-served subset: the tests of the
 //! phpt lane's served subset (`phpt::http`, #2348) that one file serves
-//! whole, each its `--FILE--`
-//! and the request its sections describe as run-tests.php's CGI
-//! translation of them ([`cgi::request`]) reads back as HTTP, under its
-//! `--INI--`. A test that runs only after its `--SKIPIF--`, reads a file
-//! beside it in place of `--FILE--`, cleans up after itself, redirects to
-//! another test, sends a compressed body or takes arguments is left out,
-//! since none of that crosses one request to one file. The soak adds the
-//! bench workloads committed under `docs/perf/workloads/` (measurement
-//! protocol §11), each a `GET` of its own.
+//! whole, each its `--FILE--`, or the file its `--FILE_EXTERNAL--` names
+//! (#2651), written under the name the phpt lane writes it, the one its
+//! request names (`frontcontroller21.php`), and the request its sections
+//! describe as run-tests.php's CGI translation of them ([`cgi::request`])
+//! reads back as HTTP, under its `--INI--`. A test that cleans up after
+//! itself, redirects to another test, sends a compressed body or takes
+//! arguments is left out, since none of that crosses one request to one
+//! file. A test with a `--SKIPIF--` is compared where the pinned php's run
+//! of the section does not say skip and left out where it does; the soak,
+//! which runs no section, leaves it out. The soak adds the bench workloads
+//! committed under `docs/perf/workloads/` (measurement protocol §11), each
+//! a `GET` of its own.
 //!
 //! **What a by-design difference is.** Where makala answers a test
 //! otherwise than php's SAPIs by design, an accepted `makala:` row of the
@@ -52,7 +55,7 @@ use crate::oracle::hosts::MAKALA;
 use crate::oracle::profile;
 use crate::phpt::environment::Environment;
 use crate::phpt::file::Phpt;
-use crate::phpt::{adapter, cgi, http};
+use crate::phpt::{Test, adapter, cgi, http};
 use crate::reading::{Reading, plural};
 use crate::witness::makala::Http;
 
@@ -60,25 +63,21 @@ use crate::witness::makala::Http;
 pub(crate) const SCOPE: &str = "sapi/makala";
 
 /// The sections whose test the corpus leaves out, the reasons above.
-const LEFT_OUT: [&str; 7] = [
-    "SKIPIF",
-    "FILE_EXTERNAL",
-    "REDIRECTTEST",
-    "CLEAN",
-    "GZIP_POST",
-    "DEFLATE_POST",
-    "ARGS",
-];
+const LEFT_OUT: [&str; 5] = ["REDIRECTTEST", "CLEAN", "GZIP_POST", "DEFLATE_POST", "ARGS"];
 
 /// Where the bench workloads stand, relative to the workspace root.
 const WORKLOADS: &str = "docs/perf/workloads";
 
-/// One request of the corpus: what names it, the whole file it runs, the
-/// request as a client sends it and the ini entries it is served under.
+/// One request of the corpus: what names it, the whole file it runs and
+/// the name it is written under, the request as a client sends it and the
+/// ini entries it is served under.
 #[derive(Debug, Clone)]
 pub(crate) struct Entry {
     pub(crate) id: String,
     pub(crate) program: Vec<u8>,
+    pub(crate) script: String,
+    /// The `--SKIPIF--` the entry is compared only after, where it has one.
+    pub(crate) skipif: Option<Vec<u8>>,
     pub(crate) http: Http,
     pub(crate) ini: Vec<String>,
 }
@@ -97,13 +96,13 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: Command) -> Result<Read
 }
 
 /// The tests of the pinned tree at `tree` one file serves whole, in the
-/// order of their paths, and how many CGI-shaped tests it left out: the
+/// order of their paths, and the CGI-shaped tests it left out: the
 /// served subset's tests (`phpt::http`), which says which tests are
 /// CGI-shaped for every lane of the production server.
-pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, usize)> {
+pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, Vec<String>)> {
     let mut files = http::subset(tree).tests()?;
     files.sort();
-    let (mut entries, mut left) = (Vec::new(), 0);
+    let (mut entries, mut left) = (Vec::new(), Vec::new());
     for path in files {
         let Ok(phpt) = Phpt::load(&path) else {
             continue;
@@ -111,18 +110,21 @@ pub(crate) fn subset(tree: &Path) -> Result<(Vec<Entry>, usize)> {
         let file = path.strip_prefix(tree).unwrap_or(&path);
         match entry(&phpt, &path, file) {
             Some(entry) => entries.push(entry),
-            None => left += 1,
+            None => left.push(file.display().to_string()),
         }
     }
     Ok((entries, left))
 }
 
-/// The entry a CGI-shaped test is, or none where it is left out.
+/// The entry a CGI-shaped test is, or none where it is left out. Its
+/// program is `--FILE--`, which holds the external file's bytes where the
+/// test names one.
 fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
     let program = phpt.section("FILE")?;
     if LEFT_OUT.iter().any(|section| phpt.has(section)) {
         return None;
     }
+    let written = Test::own(path.to_path_buf()).beside(None);
     let mut env = Environment::from(Vec::new());
     env.reset();
     env.extend(crate::phpt::env_of(phpt, path));
@@ -130,14 +132,19 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
     Some(Entry {
         id: file.display().to_string(),
         program: program.to_vec(),
+        script: written.file_name()?.to_str()?.to_owned(),
+        skipif: phpt.filled("SKIPIF").map(<[u8]>::to_vec),
         http: Http::described(&request),
         ini: adapter::ini_of(phpt, path).ok()?,
     })
 }
 
 /// The bench workloads of the workspace at `root`, each a `GET` with no
-/// ini of its own, in the order of their names.
+/// ini of its own, in the order of their names, written under the recipe's
+/// `script_name`, the request the server's bench series has sent since it
+/// began (#2351).
 pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
+    let script = Manifest::load(root)?.pin.recipe.script_name;
     let dir = root.join(WORKLOADS);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -148,13 +155,13 @@ pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
     paths
         .into_iter()
         .map(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
             Ok(Entry {
-                id: format!(
-                    "{WORKLOADS}/{}",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                ),
+                id: format!("{WORKLOADS}/{name}"),
                 program: std::fs::read(&path)
                     .with_context(|| format!("reading {}", path.display()))?,
+                script: script.clone(),
+                skipif: None,
                 http: Http::get(),
                 ini: Vec::new(),
             })
@@ -284,9 +291,9 @@ mod tests {
     use crate::scratch::Tree;
 
     /// A CGI-shaped test one file serves whole is an entry with its
-    /// `--INI--`, a multi-line cookie folded onto one field; one with a
-    /// `--SKIPIF--` is left out, and one that is not CGI-shaped is no
-    /// part of the subset.
+    /// `--INI--`, a multi-line cookie folded onto one field, and one with a
+    /// `--SKIPIF--` carries it; one with a `--CLEAN--` is left out, and one
+    /// that is not CGI-shaped is no part of the subset.
     #[test]
     fn the_subset_is_the_cgi_shaped_tests_one_file_serves_whole() {
         let tree = Tree::new("makala-subset").unwrap();
@@ -299,16 +306,42 @@ mod tests {
             test("--INI--\nprecision=4\n--COOKIE--\na=1;\nb=2\n"),
         )
         .unwrap();
-        tree.write("tests/b.phpt", test("--SKIPIF--\n<?php\n--GET--\nx=1\n"))
+        tree.write("tests/b.phpt", test("--CLEAN--\n<?php\n--GET--\nx=1\n"))
+            .unwrap();
+        tree.write("tests/d.phpt", test("--SKIPIF--\n<?php\n--GET--\nx=1\n"))
             .unwrap();
         tree.write("tests/c.phpt", test("")).unwrap();
         let (entries, left) = subset(tree.path()).unwrap();
-        assert_eq!(left, 1);
+        assert_eq!(left, ["tests/b.phpt"]);
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, ["tests/a.phpt"]);
+        assert_eq!(ids, ["tests/a.phpt", "tests/d.phpt"]);
+        assert_eq!(entries[0].script, "a.php", "the name the phpt lane writes");
+        assert_eq!(entries[1].skipif.as_deref(), Some(&b"<?php\n"[..]));
         assert_eq!(entries[0].ini, ["precision=4"]);
         assert_eq!(entries[0].program, b"<?php echo 1;\n");
         assert_eq!(entries[0].http.field("Cookie"), b"a=1; b=2");
+    }
+
+    /// A test whose program is `--FILE_EXTERNAL--` is an entry (#2651):
+    /// its program the external file's bytes, written under the name the
+    /// phpt lane writes it, the one its request names.
+    #[test]
+    fn a_test_whose_program_is_an_external_file_is_an_entry_under_its_request_s_name() {
+        let tree = Tree::new("makala-external").unwrap();
+        std::fs::create_dir_all(tree.path().join("tests/files")).unwrap();
+        tree.write("tests/files/fc.phar", b"<?php __HALT_COMPILER(); \x00phar")
+            .unwrap();
+        let test = "--TEST--\nt\n--ENV--\nSCRIPT_NAME=/fc21.phar.php\nREQUEST_URI=/fc21.phar.php/index.php\nPATH_INFO=/index.php\n--FILE_EXTERNAL--\nfiles/fc.phar\n--EXPECTHEADERS--\nContent-type: text/html\n--EXPECT--\n1\n";
+        tree.write("tests/fc21.phar.phpt", test).unwrap();
+        let (entries, left) = subset(tree.path()).unwrap();
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].program, b"<?php __HALT_COMPILER(); \x00phar");
+        assert_eq!(entries[0].script, "fc21.phar.php");
+        assert_eq!(
+            entries[0].http.target(&entries[0].script),
+            b"/fc21.phar.php/index.php"
+        );
     }
 
     /// An uploaded file's temporary name reads as one token, and a path

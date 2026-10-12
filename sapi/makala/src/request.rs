@@ -59,6 +59,26 @@ pub(crate) struct Head {
     pub(crate) fields: Vec<(Vec<u8>, Vec<u8>)>,
     pub(crate) peer: SocketAddr,
     pub(crate) local: SocketAddr,
+    pub(crate) scheme: Scheme,
+}
+
+/// Whether a request came clear or under TLS (#2343).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scheme {
+    /// Clear, on the `--listen` port.
+    Http,
+    /// Under TLS, on the `--listen-tls` port.
+    Https,
+}
+
+impl Scheme {
+    /// Its name, as a URL and `REQUEST_SCHEME` spell it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Scheme::Http => "http",
+            Scheme::Https => "https",
+        }
+    }
 }
 
 impl Head {
@@ -400,7 +420,16 @@ fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> 
             b"SERVER_PROTOCOL".to_vec(),
             head.protocol.as_bytes().to_vec(),
         ),
-        (b"REQUEST_SCHEME".to_vec(), b"http".to_vec()),
+        (
+            b"REQUEST_SCHEME".to_vec(),
+            head.scheme.name().as_bytes().to_vec(),
+        ),
+    ];
+    // nginx's `HTTPS $https if_not_empty`: `on` under TLS, else none.
+    if head.scheme == Scheme::Https {
+        env.push((b"HTTPS".to_vec(), b"on".to_vec()));
+    }
+    env.extend([
         (b"GATEWAY_INTERFACE".to_vec(), b"CGI/1.1".to_vec()),
         (
             b"SERVER_SOFTWARE".to_vec(),
@@ -424,7 +453,7 @@ fn environment(head: &Head, root: &[u8], program: &Translated, query: &[u8]) -> 
         ),
         (b"SERVER_NAME".to_vec(), host),
         (b"REDIRECT_STATUS".to_vec(), b"200".to_vec()),
-    ];
+    ]);
     // nginx's `fastcgi_pass_request_headers`: each field after the
     // parameters, a name sent twice joined as nginx joins it since 1.23,
     // and a name with `_` in it left out, as nginx ignores one by its
@@ -655,7 +684,10 @@ mod tests {
         .map(Into::into)
         .collect();
         let options = Options::parse(&argv).unwrap_or_else(|e| panic!("{e}"));
-        let listener = TcpListener::bind(options.listen).unwrap_or_else(|e| panic!("{e}"));
+        let listen = options
+            .listen
+            .unwrap_or_else(|| panic!("a --listen address"));
+        let listener = TcpListener::bind(listen).unwrap_or_else(|e| panic!("{e}"));
         let addr = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
         let (queue, pool) = Pool::start(&options, |job: Job| {
             let Job { head, mut sink, .. } = job;
@@ -687,7 +719,11 @@ mod tests {
         std::thread::spawn(move || {
             let _pool = pool;
             if let Ok(side) = crate::connection::ConnectionSide::new() {
-                side.run(options.limits, router, listener, queue).ok();
+                let listeners = vec![crate::connection::Listener {
+                    socket: listener,
+                    tls: None,
+                }];
+                side.run(options.limits, router, listeners, queue).ok();
             }
         });
         addr

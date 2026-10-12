@@ -108,15 +108,16 @@ fn an_extension_is_interrupted_at_the_period_it_asked_for() {
     );
 }
 
-/// ADR-0010: the engine joins every thread it runs, and the timer's
-/// does not outlive the request that asked for a periodic interrupt,
-/// though the extension never stopped it: by the time `rshutdown` is
-/// served the engine's schedule has let go of the request's interrupt,
-/// leaving the request, its deadlines and the sampler's own clone; once
-/// the request is gone the sampler's clone is the only one left, and
-/// with no other request timed the engine runs no timer thread.
+/// ADR-0010: nothing of a periodic interrupt outlives the request that
+/// asked for it, though the extension never stopped it: by the time
+/// `rshutdown` is served the engine's schedule has let go of the
+/// request's interrupt, leaving the request, its deadlines and the
+/// sampler's own clone; once the request is gone the sampler's clone is
+/// the only one left, and the engine's timer thread waits parked for the
+/// next request with nothing scheduled (#2541), joined only before a
+/// fork and at the engine's end.
 #[test]
-fn no_thread_outlives_the_request_that_asked() {
+fn nothing_of_a_periodic_outlives_the_request_that_asked() {
     static SEEN: Mutex<Seen> = Mutex::new(Seen::NONE);
     let engine = sampling!(SEEN);
     engine.serve_capture(BUSY, Capture::default());
@@ -129,7 +130,7 @@ fn no_thread_outlives_the_request_that_asked() {
     let holders = seen.interrupt.take().map(|interrupt| interrupt.holders());
     assert_eq!(holders, Some(1), "the sampler's clone alone");
     assert!(
-        !engine.shared.timer.runs_thread(),
-        "the timer's thread joined"
+        engine.shared.timer.parks_with_no_request(),
+        "the timer's thread parked with nothing scheduled"
     );
 }

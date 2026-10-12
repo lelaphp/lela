@@ -52,7 +52,7 @@ use constants::{
 };
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::coerce::{to_long, value_name, with_string};
+use php_ext::coerce::{atoi, to_long, value_name, with_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable,
@@ -165,24 +165,13 @@ fn sapi_filter(
     // value its `atoi`, so the empty string is 0.
     let flags = req
         .ini_value(b"filter.default_flags")
-        .map_or(FILTER_FLAG_NO_ENCODE_QUOTES, atoi);
+        .map_or(FILTER_FLAG_NO_ENCODE_QUOTES, |value| i64::from(atoi(value)));
     let run = Run {
         flags,
         options: None,
         native: "filter",
     };
     zval_filter(req, raw, default, &run).map(Some)
-}
-
-/// C's `atoi`.
-fn atoi(bytes: &[u8]) -> i64 {
-    let text = String::from_utf8_lossy(bytes);
-    let text = text.trim_start();
-    let end = text
-        .char_indices()
-        .find(|(at, c)| !(c.is_ascii_digit() || (*at == 0 && (*c == '-' || *c == '+'))))
-        .map_or(text.len(), |(at, _)| at);
-    text[..end].parse().unwrap_or(0)
 }
 
 /// `PHP_RSHUTDOWN_FUNCTION(filter)`: `IF_G`'s arrays given up.

@@ -31,7 +31,7 @@ use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
 pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
-pub use crate::virtual_cwd::Resolve;
+pub use crate::virtual_cwd::{MAXPATHLEN, Resolve};
 pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
 /// `zend_call_stack`: a thread's machine stack as the platform describes
@@ -246,9 +246,6 @@ pub struct Request {
     description: RequestDescription,
     /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).
     inspect: inspect::Inspected,
-    /// The request in flight, which no fork but its own happens beside
-    /// (#1807, [`Request::fork`]).
-    _inside: crate::fork::Inside,
     /// The calls' state ([`calls::Calls`]).
     calls: calls::Calls,
     /// The VM stack the request runs on and its frames (design §5.6).
@@ -475,6 +472,11 @@ pub struct Request {
     /// which its load declares by one insert each
     /// ([`Request::declare_classes`]).
     early_bound: Option<(Arc<Unit>, crate::unit_cache::EarlyBound)>,
+    /// The request in flight, which no fork but its own happens beside
+    /// (#1807, [`Request::fork`]): entered before its deadlines are laid
+    /// on the engine's timer and left after they are taken out, so no
+    /// fork copies the timer's mutex as the request holds it.
+    _inside: crate::fork::Inside,
     /// The request's heap, every value of the request a block of it:
     /// declared last, so it is dropped last, after every field that may
     /// hold one. A debug build's owner left in an extension's state after
@@ -820,13 +822,15 @@ impl Request {
             .enter(|arena| shared.units.restart(&arena.files));
         let typed_ini = shared.typed_ini;
         let mut req = Request {
-            // Read before `shared` moves in, as fields are in the order written.
+            // Fields are made in the order written: the request stands
+            // inside the engine before its deadlines are laid, and the
+            // paths are read before `shared` moves in.
+            _inside: crate::fork::Inside::enter(),
             paths: paths::Paths::startup(&shared),
             limits: limits::Limits::new(&shared.timer),
             shared,
             description,
             inspect: inspect::Inspected::default(),
-            _inside: crate::fork::Inside::enter(),
             heap,
             vm,
             annexes: crate::exec::Annexes::default(),

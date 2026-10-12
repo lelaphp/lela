@@ -652,6 +652,31 @@ impl PhpArray {
         self.0.str_find(name).map(Value::of_zval)
     }
 
+    /// The value under the key these bytes name, a view of it: php's
+    /// `zend_symtable_str_find` (`Z/Zend/zend_hash.h:631`), the integer key where the bytes are a
+    /// canonical decimal integer in range (`ZEND_HANDLE_NUMERIC_STR`) and
+    /// the string key otherwise, allocating nothing. Where [`find`] reads
+    /// a name as written, this reads one as a program's `$a["1"]` does:
+    /// `"1"` finds the integer key `1`, and `"01"` the string key `"01"`.
+    /// `strtr` over pairs with integer keys looks its candidates up so:
+    ///
+    /// ```php
+    /// var_dump(strtr("1 01 -2 -0", [1 => "one", "01" => "zero-one", -2 => "minus-two", 0 => "zero"]));
+    /// ```
+    /// ```expect
+    /// string(28) "one zero-one minus-two -zero"
+    /// ```
+    ///
+    /// [`find`]: PhpArray::find
+    #[must_use]
+    pub fn find_symtable(&self, name: &[u8]) -> Option<Value> {
+        match php_heap::canonical_int(name) {
+            Some(n) => self.0.get(php_heap::Key::Long(n)),
+            None => self.0.str_find(name),
+        }
+        .map(Value::of_zval)
+    }
+
     /// Whether `key` is present, `array_key_exists`.
     #[must_use]
     pub fn contains(&self, key: &Key) -> bool {
