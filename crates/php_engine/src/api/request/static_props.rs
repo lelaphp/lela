@@ -29,8 +29,9 @@ pub(super) struct StaticProps {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     slots: WordMap<PropertyInfo, Value>,
-    /// The rows in the order their slots were laid down, which the
-    /// teardown gives them up in.
+    /// The rows in the order their slots were laid down, which a debug
+    /// build's teardown gives them up in.
+    #[cfg(debug_assertions)]
     laid: Vec<PropertyInfo>,
 }
 
@@ -195,6 +196,7 @@ impl Request {
             None => Value::null(),
         };
         self.static_props.slots.insert(info, value);
+        #[cfg(debug_assertions)]
         self.static_props.laid.push(info);
         Ok(())
     }
