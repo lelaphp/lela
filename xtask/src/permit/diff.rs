@@ -105,7 +105,9 @@ impl Judged {
 pub(crate) struct Diffed {
     pub path: String,
     pub content: String,
-    pub displaced: String,
+    /// What the base carries at the path, or in a merge what each parent
+    /// does.
+    pub displaced: Vec<String>,
 }
 
 /// Judge `files`, each a path relative to `root` and the content that
@@ -179,31 +181,31 @@ fn displaced(root: &Path, rev: &str, path: &str) -> String {
 
 /// The staged files with their staged content: what a commit would take,
 /// against what `HEAD` carries. A deleted file has nothing to judge. In a
-/// merge the commit displaces both parents, so what it is judged against
-/// is `HEAD`'s text and the merged parent's, each whole: a hit either
-/// parent carried, such as an `exit=` the branch's `witness --accept`
-/// captured, is that parent's and not the merge's (#1312), a block over
-/// several lines among them, whose lines the merge base may carry apart
-/// (#2783); and a file the merge takes whole from the merged parent is
-/// that parent's, judged at its own commits, so the merge is not asked
-/// of it. A line neither parent carried is the merge's.
+/// merge the commit displaces both parents, so it is judged against each
+/// parent's text whole ([`super::rules::adds`]): a hit either parent
+/// carried, such as an `exit=` the branch's `witness --accept` captured,
+/// is that parent's and not the merge's (#1312), a block over several
+/// lines among them, whose lines the merge base may carry apart (#2783);
+/// and a file the merge takes whole from the merged parent is that
+/// parent's, judged at its own commits, so the merge is not asked of it.
+/// A hit neither parent carried as often is the merge's.
 fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
     let theirs = git::git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], None).ok();
     let mut files = Vec::new();
     for change in git::staged(root)?.into_iter().filter(|c| !c.deleted) {
         if let Some(content) = git::staged_content(root, &change.path)? {
-            let mut before = displaced(root, "HEAD", &change.path);
+            let mut parents = vec![displaced(root, "HEAD", &change.path)];
             if let Some(theirs) = &theirs {
                 let merged = displaced(root, theirs.trim(), &change.path);
                 if merged == content {
                     continue;
                 }
-                before = format!("{before}\n\n{merged}");
+                parents.push(merged);
             }
             files.push(Diffed {
                 path: change.path,
                 content,
-                displaced: before,
+                displaced: parents,
             });
         }
     }
@@ -228,7 +230,7 @@ pub(crate) fn working_files(
         files.push(Diffed {
             path: change.path.clone(),
             content: String::from_utf8_lossy(&bytes).into_owned(),
-            displaced: displaced(root, base, &change.path),
+            displaced: vec![displaced(root, base, &change.path)],
         });
     }
     Ok(files)

@@ -92,7 +92,7 @@ pub(super) fn captured(
     };
     // Every hit stands in the file already, counted: the text adds none
     // over what is on disk, so what fired is the tree's and not the call's.
-    if super::rules::adds(regex, written, &text) {
+    if super::rules::adds(regex, written, std::slice::from_ref(&text)) {
         return false;
     }
     let Some(krate) = manifest.crate_of(path) else {

@@ -2798,6 +2798,56 @@ fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits
     );
 }
 
+/// A capture fence both parents inherit from the merge base stands once,
+/// not once per parent (#2783): a merge that writes a second copy of it
+/// adds one, and is denied.
+#[test]
+fn a_second_copy_of_a_fence_both_parents_inherit_is_the_merges() {
+    let root = scratch("merge-capture-twice");
+    let git = |args: &[&str]| {
+        let unhooked = [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+        ];
+        sh(&root, &[&unhooked[..], args].concat());
+    };
+    let capture = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect capture\n/// 1\n/// ```\npub fn captured() {}\n";
+    lay_down(&root, &format!("{capture}pub fn tail() {{}}\n"));
+    git(&["add", "--", CRATE]);
+    git(&["commit", "-q", "-m", "the base"]);
+    git(&["checkout", "-q", "-b", "other-side"]);
+    write(
+        &root,
+        FILE,
+        &format!("{capture}pub fn tail() {{}}\npub fn theirs() {{}}\n"),
+    );
+    git(&["commit", "-q", "-am", "the other side"]);
+    git(&["checkout", "-q", "-"]);
+    write(
+        &root,
+        FILE,
+        &format!("pub fn mine() {{}}\n{capture}pub fn tail() {{}}\n"),
+    );
+    git(&["commit", "-q", "-am", "this side"]);
+    git(&["merge", "-q", "--no-ff", "--no-commit", "other-side"]);
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 0, "{out}{err}");
+
+    let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
+    write(
+        &root,
+        FILE,
+        &format!("{merged}{}", capture.replace("captured", "again")),
+    );
+    git(&["add", "--", FILE]);
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("witness.capture-authored"), "{out}");
+}
+
 /// The evidence travels with the commits (#1448): a verdict a branch's
 /// `--accept` captured, and the reading `witness` took over the branch's
 /// commit, stand on main after a merge that also moved the crate, so
