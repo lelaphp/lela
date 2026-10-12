@@ -6295,6 +6295,34 @@ class C {
         assert!(dump.contains(m), "php's C::m, {dump}");
     }
 
+    /// `zend_compile_static_call` over a class bound early (#2016):
+    /// `zend_get_compatible_func_or_null` finds the method in the linked
+    /// class's `function_table`, which holds what it inherited, so
+    /// `B::foo($x)` over `A::foo(&$a)` is `DO_UCALL` with `$x` sent by
+    /// reference, as `Zend/tests/lsb/lsb_013.phpt` dumps, and a private
+    /// method inherited stays `DO_FCALL`.
+    #[test]
+    fn a_static_call_to_an_inherited_method_is_do_ucall() {
+        let dump = dump_of(
+            b"<?php
+class A { static function foo(&$a) {} private static function p() {} }
+class B extends A {}
+B::foo($x);
+B::p();
+",
+        );
+        assert!(
+            dump.contains(
+                "0000 INIT_STATIC_METHOD_CALL 1 string(\"B\") string(\"foo\")\n\
+                 0001 SEND_REF CV0($x) 1\n\
+                 0002 DO_UCALL\n\
+                 0003 INIT_STATIC_METHOD_CALL 0 string(\"B\") string(\"p\")\n\
+                 0004 DO_FCALL\n"
+            ),
+            "php's $_main, {dump}"
+        );
+    }
+
     /// `zend_try_early_bind` while the file compiles (#2689): the class
     /// being bound is in no table yet, so a type its parent's method
     /// writes naming it finds nothing, `zend_can_early_bind` comes to

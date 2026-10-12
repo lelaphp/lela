@@ -17254,12 +17254,13 @@ impl Emit<'_> {
     /// `zend_get_compatible_func_or_null` over `CG(class_table)`: whether
     /// the class named, one the engine declared ([`Options::classes`])
     /// or one this file has bound before the call, has a public method
-    /// of the name; a private or protected one is compatible only from
-    /// the class itself while it compiles, `ce == CG(active_class_entry)`,
-    /// which finds its own method too ([`Self::table_method`]). The
-    /// name is resolved as the fetch resolves it ([`Self::class_name`]),
-    /// which is the name a declaration of the file took under the same
-    /// namespace.
+    /// of the name, its own or one it inherited
+    /// ([`Self::linked_method`]); a private or protected one is
+    /// compatible only from the class itself while it compiles,
+    /// `ce == CG(active_class_entry)`, which finds its own method too
+    /// ([`Self::table_method`]). The name is resolved as the fetch
+    /// resolves it ([`Self::class_name`]), which is the name a
+    /// declaration of the file took under the same namespace.
     #[cfg(test)]
     fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
         self.known_method_of(&self.class_name(class), method)
@@ -17268,43 +17269,80 @@ impl Emit<'_> {
 
     /// [`Self::known_method`] over a name already resolved, with the
     /// method's parameters as `zend_compile_args` reads them.
+    ///
+    /// A method the class inherits is in its table once the early bind
+    /// has linked it, so a call to it is the method's, `DO_UCALL` for a
+    /// user's, with its arguments sent by its parameters:
+    ///
+    /// ```php
+    /// class A { static function f(&$r) { $r = static::class; } }
+    /// class B extends A {}
+    /// B::f($x);
+    /// echo $x, "\n";
+    /// ```
+    /// ```expect
+    /// B
+    /// ```
     fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<(Known, Callee)> {
-        let class = class.to_ascii_lowercase();
-        let method = method.to_ascii_lowercase();
-        if let Some((_, decl)) = self.known_classes.find(&class) {
-            return decl
-                .methods
-                .iter()
-                .find(|m| {
-                    m.function.name.0.to_ascii_lowercase() == method
-                        && m.visibility == Visibility::Public
-                })
-                .map(|m| (Known::Native, Callee::of(&m.function.parameters)));
+        // `zend_hash_find_ptr(CG(class_table), lcname)`: a class the
+        // engine declared or one of the file bound early, linked, and
+        // never one a `DECLARE_CLASS` binds, which the table holds
+        // under its key. The protected arm of
+        // `zend_get_compatible_func_or_null` asks for a linked
+        // `CG(active_class_entry)`, and no class is linked while its
+        // body compiles, so only a public method is compatible here.
+        if let Some(decl) = self.bound_class(class) {
+            let (holder, found) = self.linked_method(decl, method)?;
+            if found.visibility != Visibility::Public {
+                return None;
+            }
+            let callee = Callee::of(&found.function.parameters);
+            if self.known_classes.find(&holder.name.0).is_some() {
+                return Some((Known::Native, callee));
+            }
+            let flagged = attributes::deprecated_or_no_discard(&found.function.attributes);
+            return Some((Known::User { flagged }, callee));
         }
-        // `zend_hash_find_ptr(CG(class_table), lcname)`, else
-        // `CG(active_class_entry)`: a class of the file bound early, or
-        // the one whose body is compiling, and never one a
-        // `DECLARE_CLASS` binds, which the table holds under its key.
-        let active = self.active_class.as_ref().map(|active| active.at);
-        let at = self.bound.iter().copied().chain(active).find(|at| {
-            self.classes
-                .get(*at)
-                .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(&class))
-        })?;
+        // Else `CG(active_class_entry)` by its name, the class whose
+        // body is compiling, which may call any method of its own.
+        let active = self.active_class.as_ref()?;
+        if !active.name.eq_ignore_ascii_case(class) {
+            return None;
+        }
         // The methods `zend_enum_register_funcs` gives an enum are the
         // engine's, added at the link: php's compile-time table has none
         // of them, so a call to one is compiled as to a method unknown.
-        if self.classes.get(at)?.kind == ClassKind::Enum
-            && matches!(method.as_slice(), b"cases" | b"from" | b"tryfrom")
+        let lowered = method.to_ascii_lowercase();
+        if active.kind == ClassKind::Enum
+            && matches!(lowered.as_slice(), b"cases" | b"from" | b"tryfrom")
         {
             return None;
         }
-        // `ce == CG(active_class_entry)`: the class compiling may call
-        // any method of its own.
-        let own = active == Some(at);
-        self.table_method(at, &method)
-            .filter(|m| m.visibility == Visibility::Public || own)
+        self.table_method(active.at, method)
             .map(|m| (Known::User { flagged: m.flagged }, m.callee))
+    }
+
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)` over a class
+    /// `CG(class_table)` holds linked: its own method of the name, else
+    /// the one its parent's table holds, which `do_inherit_method` put
+    /// in its own, with the class that declared it. A class bound while
+    /// the file compiles implements no interface and uses no trait, and
+    /// one the engine declared declares what it implements, so the
+    /// parents' tables are the whole of it.
+    fn linked_method<'d>(
+        &'d self,
+        mut class: &'d ClassDecl,
+        method: &[u8],
+    ) -> Option<(&'d ClassDecl, &'d MethodDecl)> {
+        for _ in 0..64 {
+            if let Some(found) =
+                (class.methods.iter()).find(|m| m.function.name.0.eq_ignore_ascii_case(method))
+            {
+                return Some((class, found));
+            }
+            class = self.bound_class(&class.parent.as_ref()?.0)?;
+        }
+        None
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered
