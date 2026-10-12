@@ -565,10 +565,10 @@ pub(crate) struct Emit<'a> {
     hooks: Vec<HookBody>,
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
-    filename: Name,
+    filename: &'a Name,
     /// The request's working directory, [`Options::cwd`], what `__DIR__`
     /// is where the file's name has no directory.
-    cwd: Vec<u8>,
+    cwd: &'a [u8],
     /// `CG(context).brk_cont_array`: every loop and `switch` of the op
     /// array, in the order begun, and `current_brk_cont`, the innermost
     /// one open.
@@ -1195,7 +1195,7 @@ impl<'a> Emit<'a> {
     #[allow(clippy::too_many_lines)] // the emitter laid down a field a line
     fn new(
         parsed: &'a Parsed,
-        options: &Options<'a>,
+        options: &'a Options<'a>,
         strings: &'a mut dyn Intern,
         halt: Option<i64>,
     ) -> Emit<'a> {
@@ -1240,7 +1240,7 @@ impl<'a> Emit<'a> {
             const_exprs: Vec::new(),
             vars: Vec::new(),
             http_response_header: ResponseHeader::Predefined,
-            safepoints: vec![OplineIdx(0)],
+            safepoints: entry_safepoints(),
             temporaries: 0,
             cache_slots: 0,
             line: 1,
@@ -1262,8 +1262,8 @@ impl<'a> Emit<'a> {
             numeric_dims: Vec::new(),
             methods: Vec::new(),
             hooks: Vec::new(),
-            filename: options.filename.clone(),
-            cwd: options.cwd.clone(),
+            filename: &options.filename,
+            cwd: &options.cwd,
             loops: Vec::new(),
             current_loop: None,
             jumps: Vec::new(),
@@ -1389,6 +1389,14 @@ struct Saved {
     numeric_dims: Vec<ConstIdx>,
     active_property: Option<Vec<u8>>,
     active_hook: Option<HookKind>,
+}
+
+/// An op array's safepoints as it begins: the entry, number zero, with
+/// room for its returns, since every op array has one at least.
+fn entry_safepoints() -> Vec<OplineIdx> {
+    let mut safepoints = Vec::with_capacity(4);
+    safepoints.push(OplineIdx(0));
+    safepoints
 }
 
 /// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
@@ -4725,7 +4733,7 @@ impl Emit<'_> {
             const_exprs: std::mem::take(&mut self.const_exprs),
             vars: std::mem::take(&mut self.vars),
             http_response_header: std::mem::take(&mut self.http_response_header),
-            safepoints: std::mem::replace(&mut self.safepoints, vec![OplineIdx(0)]),
+            safepoints: std::mem::replace(&mut self.safepoints, entry_safepoints()),
             temporaries: std::mem::take(&mut self.temporaries),
             cache_slots: std::mem::take(&mut self.cache_slots),
             loops: std::mem::take(&mut self.loops),
@@ -17277,7 +17285,7 @@ impl Emit<'_> {
             Magic::Dir => {
                 let dirname = dirname(&self.filename.0);
                 if dirname == b"." {
-                    self.cwd.clone()
+                    self.cwd.to_vec()
                 } else {
                     dirname
                 }
@@ -19104,8 +19112,8 @@ mod tests {
             numeric_dims: Vec::new(),
             methods: Vec::new(),
             hooks: Vec::new(),
-            filename: options.filename.clone(),
-            cwd: options.cwd.clone(),
+            filename: &options.filename,
+            cwd: &options.cwd,
             loops: Vec::new(),
             current_loop: None,
             jumps: Vec::new(),
