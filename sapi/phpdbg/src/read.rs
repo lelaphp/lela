@@ -112,7 +112,7 @@ pub struct Class {
 }
 
 /// The oplines of `code`, each opcode with its line.
-fn ops_of(code: &OpArrayView<'_>) -> Vec<(Opcode, u32)> {
+pub fn ops_of(code: &OpArrayView<'_>) -> Vec<(Opcode, u32)> {
     code.oplines().map(|op| (op.opcode(), op.line())).collect()
 }
 

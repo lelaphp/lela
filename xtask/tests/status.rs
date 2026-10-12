@@ -29,7 +29,7 @@ fn status(root: &Path, args: &[&str]) -> (bool, String, String) {
 
 /// `status` with the hook's stdin, the JSON head every hook event carries.
 fn status_with_stdin(root: &Path, args: &[&str], stdin: &str) -> (bool, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .arg("status")
@@ -572,7 +572,7 @@ fn status_with_pin(
     tree: Option<&Path>,
     promise: Option<&str>,
 ) -> (bool, String, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
     command.arg("--root").arg(root).arg("status").args(args);
     match tree {
         Some(tree) => command.env(TREE_VARIABLE, tree),

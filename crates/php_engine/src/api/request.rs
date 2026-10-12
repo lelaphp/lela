@@ -27,7 +27,7 @@ use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
 pub use crate::engine::Standard;
-use crate::engine::{RequestDescription, Shared};
+use crate::engine::{OutputSink, RequestDescription, Shared};
 use crate::exec::{self, Vm};
 pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
@@ -124,7 +124,6 @@ mod response;
 #[cfg(debug_assertions)]
 mod sensing;
 pub use crate::output::HttpStatus;
-pub(crate) use response::Sink;
 pub use response::{
     BufferHandler, BufferInit, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp,
     StartHandler,
@@ -777,8 +776,23 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
 }
 
 impl Request {
-    #[allow(clippy::too_many_lines)] // one line per field of the request
+    /// A request no host lent a sink, which keeps what it writes in one
+    /// of its own that no host reads: the engine's startup, its end where
+    /// the host left no sink ([`EngineBuilder::ends_into`](crate::engine::EngineBuilder::ends_into)), and a unit
+    /// test's.
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
+        Request::lent(shared, description, Box::new(response::Kept::default()))
+    }
+
+    /// A request the host lent `sink`, which every call reaches as the
+    /// request makes it and which [`Request::release_sink`] hands back
+    /// (design §4.3 seam 4).
+    #[allow(clippy::too_many_lines)] // one line per field of the request
+    pub(crate) fn lent(
+        shared: Arc<Shared>,
+        description: RequestDescription,
+        sink: Box<dyn OutputSink + Send>,
+    ) -> Request {
         let cwd = description.cwd.clone();
         let exit_status = description.exit_status;
         let output = Output::activate(description.web.as_ref());
@@ -820,7 +834,7 @@ impl Request {
             state: state::RequestState::default(),
             ini: ini::Ini::new(typed_ini),
             diagnostics: diagnostics::Diagnostics::default(),
-            response: response::Response::new(output),
+            response: response::Response::new(sink, output),
             ending: None,
             exit_status,
             resources,

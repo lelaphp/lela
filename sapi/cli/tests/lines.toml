@@ -436,6 +436,58 @@ http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 [[line.serve.request]]
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 
+# The program's file enters `EG(included_files)` before `auto_prepend_file`
+# only where the host opened it as a `FILE *`, the CLI's, which
+# `php_execute_script_ex` expands into the table (`Z/main/main.c:2610-2619`);
+# the built-in server hands a bare name (`zend_stream_init_filename`), which
+# `zend_execute_script` puts in the table once the program has compiled
+# (`Z/Zend/zend.c:1971-1974`), after the prepend file (#2558). The prepend
+# file and the program each print the table's names.
+[[line]]
+name = "the-cli-notes-its-program-before-the-prepend-file"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "t.php"]
+files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
+
+[[line]]
+name = "the-built-in-server-notes-its-program-as-it-compiles"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# An archive phar's `zend_compile_file` answers as `auto_prepend_file`:
+# `phar_compile_file` puts the stub's stream in the `zend_file_handle`'s
+# place, and over an uncompressed tar that stream reads the archive itself,
+# so the archive is held open, with no `O_CLOEXEC`, until
+# `php_execute_script_ex` destroys the handle once the append file has run,
+# before the shutdown functions; a gzipped archive's stub reads a
+# decompressed copy, and nothing of the archive is held (#2561). The first
+# run lays the two archives down.
+[[line]]
+name = "an-archive-phar-auto-file-is-held-while-the-program-runs"
+args = ["-n", "mk.php"]
+files = { "mk.php" = '''
+<?php
+function member($name, $data) {
+    $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', sprintf('%011o', strlen($data)), '00000000000', '        ', '0', '', 'ustar', '00', '');
+    $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+    return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+}
+$stub = '<?php require dirname(__FILE__) . "/lib.php"; $f = __FILE__; register_shutdown_function(fn () => print("shutdown " . held($f) . "\n")); echo "prepend ", held($f), "\n"; __HALT_COMPILER();';
+$tar = member('.phar/stub.php', $stub);
+$tar .= member('.phar/signature.bin', pack('VV', 2, 20) . sha1($tar, true)) . str_repeat("\0", 1024);
+file_put_contents(__DIR__ . '/pre.phar.tar', $tar);
+file_put_contents(__DIR__ . '/gz.phar.tar.gz', gzencode($tar));
+''', "lib.php" = '''<?php function held($f) { $l = shell_exec("ls -iLd /dev/fd/* 2>/dev/null"); return preg_match_all("/^ *" . fileinode($f) . " /m", $l); }''', "t.php" = '''<?php echo "program ", held(__DIR__ . "/pre.phar.tar") + held(__DIR__ . "/gz.phar.tar.gz"), "\n";''', "app.php" = '''<?php echo "append ", held(__DIR__ . "/pre.phar.tar") + held(__DIR__ . "/gz.phar.tar.gz"), "\n";''' }
+[[line.then]]
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.phar.tar", "-d", "auto_append_file={dir}/app.php", "t.php"]
+[[line.then]]
+args = ["-n", "-d", "auto_prepend_file={dir}/gz.phar.tar.gz", "-d", "auto_append_file={dir}/app.php", "t.php"]
+
 # A path holding a NUL: the walk's `stat(2)` reads it up to the NUL and finds
 # the file there, and the translated path keeps the NUL, which php -S "can't
 # handle" (`Z/sapi/cli/php_cli_server.c:2127`, `:2155`). A static file's is

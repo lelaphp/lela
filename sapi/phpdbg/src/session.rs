@@ -125,11 +125,13 @@ pub struct Logged {
     pub line: u32,
 }
 
-/// A file the session saw compiled, and its code's oplines.
+/// A file the session saw compiled, `phpdbg_file_source`: its code's
+/// oplines, and the bytes it was compiled from, which a listing reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub file: Vec<u8>,
     pub ops: Vec<(Opcode, u32)>,
+    pub bytes: Vec<u8>,
 }
 
 /// Whose code the loop reaches: the program's, or what `ev` evaluates
@@ -207,8 +209,9 @@ pub struct Session {
     /// `PHPDBG_G(oplog_list)`: each oplog `phpdbg_start_oplog` opened and
     /// no `phpdbg_end_oplog` closed yet, the last the one written to.
     pub oplogs: Vec<Vec<Logged>>,
-    /// `PHPDBG_G(file_sources)`: each file whose code the loop reached, in
-    /// that order, with its oplines, as `phpdbg_get_executable` walks them.
+    /// `PHPDBG_G(file_sources)`: each file compiled, in the order of its
+    /// last compile, with its oplines, as `phpdbg_get_executable` walks
+    /// them, and its source, as a listing reads it ([`crate::list`]).
     pub sources: Vec<Source>,
     /// The frame the loop is stepping, the nearest user frame to a native
     /// it calls, which `phpdbg_break_next` reads.

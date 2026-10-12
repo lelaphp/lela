@@ -77,7 +77,7 @@ fn a_crate_with_a_failing_test_reads_fail_with_the_passed_and_the_failed_counted
 #[test]
 fn the_binary_writes_the_reading_and_exits_nonzero_on_a_failure() {
     let root = repository("test-binary");
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root.path())
         .args(["test", "--crate", "php_heap"])

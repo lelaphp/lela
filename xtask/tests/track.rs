@@ -76,7 +76,7 @@ fn on_a_branch(name: &str) -> Tree {
 
 /// The binary, from `root`: exit code, stdout, stderr.
 fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(args)

@@ -344,10 +344,6 @@ impl OutputSink for Sink {
     fn write_stderr(&mut self, bytes: &[u8]) {
         std::io::stderr().lock().write_all(bytes).ok();
     }
-
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(Sink))
-    }
 }
 
 /// What a request wrote, one write at a time, on each of its streams.

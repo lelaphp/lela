@@ -798,7 +798,7 @@ fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
     shell(&cargo, build);
     let temp = root.join("tmp");
     fs::create_dir_all(&temp).unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .args(["--root", &root.display().to_string()])
         .args(["phpt", "--subset", "ext/fixture", "--jobs", "1"])
         .env("CARGO", &cargo)

@@ -362,6 +362,66 @@ impl _ZendTestFiber {
     /// bool(true)
     /// NULL
     /// ```
+    ///
+    /// A `Fiber` such a suspend passed through waits running, and
+    /// `ReflectionFiber` reads it where php's `fiber->execute_data` was
+    /// left by its start, its bottom frame: the executing line is the
+    /// resumer's, the line that started it, and the trace from it is
+    /// empty, php cutting the chain under the bottom (#2505):
+    ///
+    /// ```php
+    /// $test = new _ZendTestFiber(function (): void {
+    ///     $fiber = new Fiber(function (): void {
+    ///         $x = 1;
+    ///         _ZendTestFiber::suspend(10);
+    ///         echo "back\n";
+    ///     });
+    ///     $GLOBALS['f'] = $fiber;
+    ///     $fiber->start();
+    /// });
+    /// var_dump($test->start());
+    /// $r = new ReflectionFiber($f);
+    /// try { var_dump($r->getExecutingLine()); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// try { var_dump(count($r->getTrace())); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// var_dump($f->isRunning(), basename($r->getExecutingFile()) === basename(__FILE__));
+    /// $test->resume();
+    /// ```
+    /// ```expect
+    /// int(10)
+    /// int(9)
+    /// int(0)
+    /// bool(true)
+    /// bool(true)
+    /// back
+    /// ```
+    ///
+    /// A `Fiber` that resumed another before the suspend passed through
+    /// both stands where that resume wrote php's pointer, its `start`
+    /// call, which still stands, and is read from there:
+    ///
+    /// ```php
+    /// $test = new _ZendTestFiber(function (): void {
+    ///     $a = new Fiber(function (): void {
+    ///         $b = new Fiber(function (): void {
+    ///             _ZendTestFiber::suspend(10);
+    ///         });
+    ///         $GLOBALS['b'] = $b;
+    ///         $b->start();
+    ///     });
+    ///     $GLOBALS['a'] = $a;
+    ///     $a->start();
+    /// });
+    /// $test->start();
+    /// foreach (['a', 'b'] as $n) {
+    ///     $r = new ReflectionFiber($GLOBALS[$n]);
+    ///     echo $n, ": ", $r->getExecutingLine(), " ", count($r->getTrace()), "\n";
+    /// }
+    /// $test->resume();
+    /// ```
+    /// ```expect
+    /// a: 8 2
+    /// b: 8 0
+    /// ```
     fn suspend(
         req: &mut Request,
         #[php(default = null)] value: Value,
