@@ -203,9 +203,40 @@ fn rshutdown(req: &mut Request) {
 /// once there, so a pass is registered always and acts as one where the
 /// entry stands on: a line printed for each file opcache compiles and
 /// stores, and none for a file it serves as stored, nor where opcache
-/// is off (`optimizer_register_pass.phpt`). A witness of it would start
-/// a child with the entry on, which the witness lane serves by a `php`
-/// built without this extension, so it stands once #2721 does.
+/// is off (`optimizer_register_pass.phpt`). The witness starts a child
+/// with the entry on, served by a `php` carrying this extension (#2721):
+/// the passes are called in registration order over each file opcache compiles,
+/// and over none it serves as stored, nor where opcache is off.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/passes' . getmypid(); @mkdir($dir);
+/// file_put_contents("$dir/main.php", '<?php echo "main\n"; include __DIR__ . "/inc.php"; include __DIR__ . "/inc.php";');
+/// file_put_contents("$dir/inc.php", '<?php echo "inc\n";');
+/// touch("$dir/main.php", time() - 10); touch("$dir/inc.php", time() - 10);
+/// foreach ([['1', '1'], ['0', '1'], ['1', '0']] as [$cache, $passes]) {
+///     $p = proc_open([PHP_BINARY, '-n', '-d', "opcache.enable_cli=$cache", '-d', 'opcache.jit=off', '-d', "zend_test.register_passes=$passes", "$dir/main.php"], [1 => ['pipe', 'w']], $pipes);
+///     echo stream_get_contents($pipes[1]), "--\n"; proc_close($p);
+/// }
+/// exec('rm -rf ' . escapeshellarg($dir));
+/// ```
+/// ```expect process
+/// pass1
+/// pass2
+/// main
+/// pass1
+/// pass2
+/// inc
+/// inc
+/// --
+/// main
+/// inc
+/// inc
+/// --
+/// main
+/// inc
+/// inc
+/// --
+/// ```
 fn pass1(req: &mut Request, _: &[u8]) {
     registered_pass(req, b"pass1\n");
 }
