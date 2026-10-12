@@ -146,6 +146,7 @@ unsafe extern "C" {
     fn gdImageCreate(sx: c_int, sy: c_int) -> Ptr;
     fn gdImageCreateTrueColor(sx: c_int, sy: c_int) -> Ptr;
     fn gdImageDestroy(im: Ptr);
+    fn gdImageClone(src: Ptr) -> Ptr;
     fn gdImageCreateFromPngPtr(size: c_int, data: *mut c_void) -> Ptr;
     fn gdImageCreateFromGifPtr(size: c_int, data: *mut c_void) -> Ptr;
     fn gdImageCreateFromWBMPPtr(size: c_int, data: *mut c_void) -> Ptr;
@@ -1046,9 +1047,49 @@ impl Im {
         }
     }
 
+    /// `gdImageRotateInterpolated`: for a palette image under
+    /// `GD_NEAREST_NEIGHBOUR`, at an angle no square case takes, the
+    /// rotation is made here from what libgd exports, and every other
+    /// call is libgd's.
     pub(crate) fn rotate(self, angle: f32, bg: i32) -> Option<Image> {
+        if !self.rotates_palette_by_nearest(angle, bg) {
+            // SAFETY: a live image; libgd answers a new one or NULL.
+            return Image::of(unsafe { gdImageRotateInterpolated(self.at(), angle, bg) });
+        }
+        let bg = match usize::try_from(bg) {
+            Ok(i) if i < MAX_COLORS => {
+                let im = self.fields();
+                // `gdTrueColorAlpha`, as libgd composes it.
+                (im.alpha[i] << 24)
+                    .wrapping_add(im.red[i] << 16)
+                    .wrapping_add(im.green[i] << 8)
+                    .wrapping_add(im.blue[i])
+            }
+            _ => bg,
+        };
         // SAFETY: a live image; libgd answers a new one or NULL.
-        Image::of(unsafe { gdImageRotateInterpolated(self.at(), angle, bg) })
+        let clone = Image::of(unsafe { gdImageClone(self.at()) })?;
+        if !clone.im().palette_to_true_color() {
+            return None;
+        }
+        // SAFETY: the clone is a live truecolor image, which libgd
+        // rotates without the palette path; it answers a new one or NULL.
+        Image::of(unsafe { gdImageRotateInterpolated(clone.im().at(), angle, bg) })
+    }
+
+    /// Whether this image and angle are the ones `rotate` makes here, as
+    /// `gdImageRotateInterpolated` reads them: its checks in its order,
+    /// `angle_rounded` as it rounds it.
+    fn rotates_palette_by_nearest(self, angle: f32, bg: i32) -> bool {
+        /// `GD_NEAREST_NEIGHBOUR`.
+        const NEAREST_NEIGHBOUR: c_int = 16;
+        #[allow(clippy::cast_possible_truncation)]
+        let hundredths = (angle * 100.0).floor() as i32;
+        let square = matches!(
+            hundredths % 36_000,
+            0 | 9_000 | -9_000 | 18_000 | -18_000 | 27_000 | -27_000
+        );
+        !self.true_color() && bg >= 0 && !square && self.interpolation_id() == NEAREST_NEIGHBOUR
     }
 
     pub(crate) fn crop(self, rect: Rect) -> Option<Image> {
