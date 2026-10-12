@@ -6815,6 +6815,38 @@ $a[0]->p[1] = $a;
         );
     }
 
+    /// A parameter's default is `zend_const_expr_to_zval`'s: under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` no constant is
+    /// substituted, so `self::X` stays the `IS_CONSTANT_AST` the dump prints
+    /// as `zval(type=11)`, while a class's name is none and
+    /// `zend_try_compile_const_expr_resolve_class_name` resolves `self::class`
+    /// and `parent::class` in a class with a parent, and `Baz::class`, to
+    /// their strings. The dump is the oracle's under `[regime.dump]` at 8.5.9
+    /// (#2685).
+    #[test]
+    fn a_class_name_in_a_parameter_default_folds_to_its_string() {
+        assert_eq!(
+            dump_of(b"<?php class P {} class C extends P { function f($a = self::class, $b = parent::class, $c = Baz::class, $d = self::X) {} }"),
+            "\n$_main:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \nC::f:\n\
+             \x20    ; (lines=5, args=4, vars=4, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 CV0($a) = RECV_INIT 1 string(\"C\")\n\
+             0001 CV1($b) = RECV_INIT 2 string(\"P\")\n\
+             0002 CV2($c) = RECV_INIT 3 string(\"Baz\")\n\
+             0003 CV3($d) = RECV_INIT 4 zval(type=11)\n\
+             0004 RETURN null\n\
+             "
+        );
+    }
+
     /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` (#384): a
     /// default naming a constant is not folded, so its `RECV_INIT`
     /// carries the `IS_CONSTANT_AST` value the oracle dumps as

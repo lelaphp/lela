@@ -2424,37 +2424,6 @@ impl Emit<'_> {
         }
     }
 
-    /// Whether a constant expression names a constant, which
-    /// `zend_compile_params` leaves unsubstituted in a parameter's
-    /// default: a constant by name or a class constant, anywhere in the
-    /// tree. `true`, `false` and `null` are php's own values and name
-    /// none.
-    fn names_a_constant(&self, expr: tree::Expr) -> bool {
-        let tree = &self.parsed.tree;
-        match self.peel(expr) {
-            tree::Expr::NameRef(token) => self.constant_name(token).is_none(),
-            tree::Expr::ScopedAccessExpr(_) => true,
-            tree::Expr::UnaryExpr(id) => tree[id]
-                .operand
-                .is_some_and(|operand| self.names_a_constant(operand)),
-            tree::Expr::BinaryExpr(id) => {
-                let node = &tree[id];
-                self.names_a_constant(node.lhs)
-                    || node.rhs.is_some_and(|rhs| self.names_a_constant(rhs))
-            }
-            tree::Expr::ArrayExpr(id) => tree[id].array_elements.iter().any(|element| {
-                let element = &tree[*element];
-                element
-                    .key
-                    .is_some_and(|key| self.names_a_constant(tree[key].key))
-                    || element
-                        .value
-                        .is_some_and(|value| self.names_a_constant(value))
-            }),
-            _ => false,
-        }
-    }
-
     /// `zend_try_ct_eval_const`'s three special names: `true`, `false`
     /// and `null`, whatever their case and with or without the leading
     /// `\` `zend_resolve_const_name` strips, which php's compiler
@@ -4693,27 +4662,45 @@ impl Emit<'_> {
         done
     }
 
-    /// A parameter's default as `zend_compile_params` folds it, under
-    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one naming
-    /// a constant is not folded: the name stays as written, and what
-    /// stands in the constant table is the `IS_CONSTANT_AST` zval over
-    /// the expression, which the engine evaluates on the pass that
-    /// copies it and Reflection reads back as the name.
+    /// A parameter's default as `zend_compile_params` folds it,
+    /// `zend_const_expr_to_zval` with `allow_dynamic` under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`: no constant
+    /// is substituted, a class's own included, so a default naming one
+    /// stays the `IS_CONSTANT_AST` zval over the expression, which the
+    /// engine evaluates on the pass that copies it and Reflection reads
+    /// back as the name; a class's name is no constant, and
+    /// `zend_try_compile_const_expr_resolve_class_name` resolves
+    /// `Name::class`, and `self::class` and `parent::class` where the
+    /// scope is known, to the string.
+    ///
+    /// ```php
+    /// class P {}
+    /// class C extends P {
+    ///     const X = 1;
+    ///     function f($a = self::class, $b = parent::class . '!', $c = Baz::class, $d = self::X, $e = [self::class], $f = PHP_INT_SIZE) {}
+    /// }
+    /// foreach ((new ReflectionMethod('C', 'f'))->getParameters() as $p) {
+    ///     echo $p->isDefaultValueConstant() ? 'constant ' : 'value ', var_export($p->getDefaultValue(), true), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// value 'C'
+    /// value 'P!'
+    /// value 'Baz'
+    /// constant 1
+    /// value array (
+    ///   0 => 'C',
+    /// )
+    /// constant 8
+    /// ```
     fn parameter_default(
         &mut self,
         parameter: &walk::Parameter,
     ) -> Result<Option<Zval>, CompileError> {
-        Ok(match parameter.default {
-            Some(expr) if self.names_a_constant(expr) => {
-                let unevaluated = self.dynamic_const_expr(expr)?;
-                Some(self.unevaluated(unevaluated))
-            }
-            // `zend_const_expr_to_zval` with `allow_dynamic`: the fold
-            // where `zend_eval_const_expr` folds it, the tree for the
-            // engine to evaluate at the `RECV_INIT` otherwise.
-            Some(expr) => Some(self.const_expr_to_zval(expr)?),
-            None => None,
-        })
+        parameter
+            .default
+            .map(|expr| self.const_expr_to_zval(expr))
+            .transpose()
     }
 
     /// `zend_const_expr_to_zval` with `allow_dynamic`: the fold where
