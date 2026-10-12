@@ -656,10 +656,23 @@ fn entered<T: Tier, D: Telling>(
     start: u32,
     told: D,
 ) -> Result<Stepped, Fatal> {
-    if start < exec::entry_of(code)
-        && let Some(threw) = exec::prologue(req, callee, code, told)?
-    {
-        return Ok(Stepped::Threw(threw));
+    if start < exec::entry_of(code) {
+        // The parameters php's `RECV` passes on its first test, read off
+        // the frame in one run where nothing observes the opcode; the
+        // handlers serve the rest from the first that does not pass.
+        let at = if told.tells(php_unit::Opcode::Recv) {
+            start
+        } else {
+            exec::recv_passed(req, callee, code, start)
+        };
+        if at != start {
+            req.vm_mut().stand(callee, at);
+        }
+        if at < exec::entry_of(code)
+            && let Some(threw) = exec::prologue(req, callee, code, told)?
+        {
+            return Ok(Stepped::Threw(threw));
+        }
     }
     activated::<T>(req, callee)
 }

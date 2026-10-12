@@ -109,6 +109,37 @@ impl Kind {
     }
 }
 
+/// Every cell `UNDEF`, as `i_init_func_execute_data` leaves the CVs a
+/// call did not pass: a frame of a few slots, nearly every one, written
+/// by stores of a known width in place, and only a larger one through
+/// `memset`, which costs more than the stores for a frame of one or
+/// two slots.
+#[inline(always)] // once per push, in the push's inline path
+#[allow(clippy::inline_always)]
+fn undefine(cells: &mut [Zval]) {
+    match cells.len() {
+        0 => {}
+        1 => undefine_first::<1>(cells),
+        2 => undefine_first::<2>(cells),
+        3 => undefine_first::<3>(cells),
+        4 => undefine_first::<4>(cells),
+        5 => undefine_first::<5>(cells),
+        6 => undefine_first::<6>(cells),
+        7 => undefine_first::<7>(cells),
+        8 => undefine_first::<8>(cells),
+        _ => cells.fill(Zval::UNDEF),
+    }
+}
+
+/// The first `N` cells `UNDEF`, a width the stores know.
+#[inline(always)] // as `undefine`
+#[allow(clippy::inline_always)]
+fn undefine_first<const N: usize>(cells: &mut [Zval]) {
+    if let Some(first) = cells.first_chunk_mut::<N>() {
+        *first = [Zval::UNDEF; N];
+    }
+}
+
 /// One `zend_vm_stack` page: `slots` slots at `at`, the first
 /// [`PAGE_HEADER_SLOTS`] of them the header's, and `top` the first one
 /// no frame holds.
@@ -546,7 +577,7 @@ impl<H> VmStack<H> {
         // push gave the frame before its first CV, which `FITS` holds an
         // `H` to fit, aligned, and nothing else names.
         unsafe { frame.header_at().write(header) };
-        frame.cells_mut().fill(Zval::UNDEF);
+        undefine(frame.cells_mut());
         self.stand(frame)
     }
 

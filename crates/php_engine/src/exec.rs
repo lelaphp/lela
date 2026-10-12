@@ -1440,6 +1440,7 @@ impl Vm {
     /// `IS_UNDEF` until an opline or a placed argument writes it
     /// (`i_init_func_execute_data`), which is what a read of a CV warns
     /// of. A page the memory limit refuses is the fatal php raises there.
+    #[inline]
     pub(crate) fn push(
         &mut self,
         heap: &mut php_heap::Heap,
@@ -2360,6 +2361,42 @@ pub(crate) fn entry_of(code: &OpArray) -> u32 {
 pub(crate) struct Activated {
     pub(crate) frame: FrameRef,
     pub(crate) prologue: bool,
+}
+
+/// The `RECV` oplines from `start` in `code`, the op array `callee`
+/// serves, that php's handler passes on its first test, read off the
+/// frame once: each a parameter the call passed an argument for, not
+/// by reference, of a type the mask the compiler put in `op2` holds
+/// (`ZEND_RECV`'s `opline->op2.num & (1u << Z_TYPE_P(param))`,
+/// `MAY_BE_ANY` for a parameter with no type). The answer is the first
+/// opline that does not pass, where the handlers take over, at most the
+/// entry safepoint; nothing observes these, so no observer is told.
+#[inline]
+pub(crate) fn recv_passed(req: &Request, callee: FrameRef, code: &OpArray, start: u32) -> u32 {
+    let entry = entry_of(code);
+    let Some(frame) = req.vm().stack.frame(callee) else {
+        return start;
+    };
+    let passed = frame.header().num_args;
+    let slots = frame.slots();
+    let mut at = start;
+    while at < entry {
+        let Some(op) = code.oplines.get(at as usize) else {
+            break;
+        };
+        if op.opcode != php_unit::Opcode::Recv || op.op1 > passed {
+            break;
+        }
+        let Some(argument) = slots.get(op.out as usize) else {
+            break;
+        };
+        let kind = argument.kind();
+        if kind == php_heap::ZvalType::Reference || op.op2 & (1u32 << (kind as u32)) == 0 {
+            break;
+        }
+        at += 1;
+    }
+    at
 }
 
 /// The `RECV*` oplines of [`parameter_prologue`] from where `callee`
