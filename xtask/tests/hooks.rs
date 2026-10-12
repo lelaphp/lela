@@ -1,4 +1,4 @@
-//! The two git hooks under `scripts/hooks` (harness-design.md §6 wiring,
+//! The git hooks under `scripts/hooks` (harness-design.md §6 wiring,
 //! ledger 11), run by git in a scratch repository: a stand-in `cargo` on
 //! `PATH` records each call and answers as the instruments would, and
 //! hands `xtask regions` to this crate's own binary against the scratch
@@ -748,6 +748,8 @@ fn a_merge_reaches_ticket_merged_and_a_plain_commit_does_not() {
     );
 }
 
+// ---------------------------------------------------------------- pre-merge-commit
+
 /// A merge `git merge` commits itself runs no pre-commit, only
 /// pre-merge-commit, and what that hook stages never reaches the merge's
 /// tree, which git wrote before it ran; so a region `computed merge` left
@@ -785,8 +787,10 @@ fn a_merge_that_leaves_a_region_unrendered_is_refused_until_committed_through_pr
     assert_eq!(scratch.head(), before, "the merge was not committed: {out}");
     assert!(out.contains("AGENTS.md:3 layout exec unrendered"), "{out}");
     assert!(out.contains("git commit"), "{out}");
-    let checked = format!("check {}", REGIONS.join(" "));
-    assert_eq!(scratch.calls("computed"), [checked.as_str(), &checked]);
+    assert_eq!(
+        scratch.calls("computed"),
+        [format!("check {}", REGIONS.join(" "))]
+    );
     scratch.git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], false);
 
     scratch.git(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
@@ -794,6 +798,44 @@ fn a_merge_that_leaves_a_region_unrendered_is_refused_until_committed_through_pr
     assert_eq!(scratch.git(&["rev-parse", "HEAD^2"], false), t9);
     let agents = scratch.git(&["show", "HEAD:AGENTS.md"], false);
     assert!(agents.ends_with("rendered\n"), "{agents}");
+}
+
+/// computed reads the working tree and the merge commits the index: a
+/// region file whose staged copy is unrendered and whose working copy is
+/// rendered would pass `computed check` and be committed unrendered, so
+/// pre-merge-commit refuses the merge naming the file, before `computed`.
+#[test]
+fn a_merge_whose_region_file_differs_from_its_working_copy_is_refused() {
+    let scratch = scratch("unstaged-render", &Computed::Unrendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    scratch.git(&["checkout", "-q", "-b", "t9", &main], false);
+    scratch.git(
+        &["commit", "-q", "--allow-empty", "-m", "the work of #9"],
+        false,
+    );
+    scratch.git(&["checkout", "-q", &main], false);
+    let agents = fs::read_to_string(scratch.root.join("AGENTS.md")).unwrap();
+    write(&scratch.root, "AGENTS.md", &format!("{agents}rendered\n"));
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t9",
+            "-m",
+            "Merge t9: the work (#9)",
+        ],
+        true,
+    );
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(scratch.head(), before, "the merge was not committed: {out}");
+    assert!(out.contains("AGENTS.md\n"), "{out}");
+    assert!(out.contains("not what the merge would commit"), "{out}");
+    assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
 // ---------------------------------------------------------------- pre-push

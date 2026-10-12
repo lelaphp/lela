@@ -22,11 +22,18 @@ if ! command -v computed >/dev/null 2>&1; then
     echo "pre-merge-commit: computed did not run (cargo install computed), so the merge's regions are unread; the merge stands uncommitted" >&2
     exit 1
 fi
+# computed reads the working tree and the merge commits the index, so a
+# region file whose working copy is not what is staged is one `computed
+# check` cannot speak for.
 # shellcheck disable=SC2086
-if computed check $regions >/dev/null 2>&1; then
-    exit 0
+if ! git diff --quiet -- $regions; then
+    # shellcheck disable=SC2086
+    git diff --name-only -- $regions >&2
+    echo "pre-merge-commit: the working copy of the region file above is not what the merge would commit, so its regions are unread; the merge stands uncommitted: stage or restore the file, and \`git commit\` finishes it through pre-commit" >&2
+    exit 1
 fi
 # shellcheck disable=SC2086
-computed check $regions 2>&1 | grep -Ev ' fresh$' >&2
-echo "pre-merge-commit: the merge would commit the region above as it stands, and this hook cannot stage a render into it (#2744); the merge stands uncommitted: \`git commit\` finishes it through pre-commit, which renders the region" >&2
+said=$(computed check $regions 2>&1) && exit 0
+printf '%s\n' "$said" | grep -Ev ' fresh$' >&2
+echo "pre-merge-commit: the merge would commit the region above as it stands, and this hook cannot stage a render into it (#2744); the merge stands uncommitted: \`git commit\` finishes it through pre-commit, which renders the region or says why it cannot" >&2
 exit 1
