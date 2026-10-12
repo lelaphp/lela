@@ -59,6 +59,9 @@ const NOT_EMPTY_STR_TEST: &[u8] = b"zend_test.not_empty_str_test";
 /// `zend_test.print_stderr_mshutdown`.
 const PRINT_STDERR_MSHUTDOWN: &[u8] = b"zend_test.print_stderr_mshutdown";
 
+/// `zend_test.register_passes`.
+const REGISTER_PASSES: &[u8] = b"zend_test.register_passes";
+
 /// `test.c`'s `PHP_INI_BEGIN` table, in its order: each entry's name,
 /// its default, and whether a request may change it (`PHP_INI_ALL`) or
 /// only the host (`PHP_INI_SYSTEM`). `zend_test.limit_copy_file_range`
@@ -68,7 +71,7 @@ const PRINT_STDERR_MSHUTDOWN: &[u8] = b"zend_test.print_stderr_mshutdown";
 /// and here are entries alone.
 const ENTRIES: [(&[u8], &[u8], bool); 7] = [
     (b"zend_test.replace_zend_execute_ex", b"0", false),
-    (b"zend_test.register_passes", b"0", false),
+    (REGISTER_PASSES, b"0", false),
     (PRINT_STDERR_MSHUTDOWN, b"0", false),
     (QUANTITY_VALUE, b"0", true),
     (STR_TEST, b"", true),
@@ -108,6 +111,8 @@ pub fn extension() -> Extension {
         .on_modify(NOT_EMPTY_STR_TEST, on_update_not_empty);
     let builder = observer::declared(builder);
     mm_custom_handlers::declared(builder)
+        .optimizer_pass(pass1)
+        .optimizer_pass(pass2)
         .request_state::<State>()
         .rinit(rinit)
         .rshutdown(rshutdown)
@@ -191,6 +196,33 @@ fn rshutdown(req: &mut Request) {
         leaked.free(req);
     }
     mm_custom_handlers::rshutdown(req);
+}
+
+/// `pass1`, the first of the two optimizer passes `MINIT` registers
+/// under `zend_test.register_passes`, a `PHP_INI_SYSTEM` entry read
+/// once there, so a pass is registered always and acts as one where the
+/// entry stands on: a line printed for each file opcache compiles and
+/// stores, and none for a file it serves as stored, nor where opcache
+/// is off (`optimizer_register_pass.phpt`). A witness of it would start
+/// a child with the entry on, which the witness lane serves by a `php`
+/// built without this extension, so it stands once #2721 does.
+fn pass1(req: &mut Request, _: &[u8]) {
+    registered_pass(req, b"pass1\n");
+}
+
+/// `pass2`, the second, called after the first.
+fn pass2(req: &mut Request, _: &[u8]) {
+    registered_pass(req, b"pass2\n");
+}
+
+/// What each pass prints, `php_printf`, where `MINIT` registered it.
+fn registered_pass(req: &mut Request, line: &[u8]) {
+    if req
+        .ini_get(REGISTER_PASSES)
+        .is_some_and(Request::ini_parse_bool)
+    {
+        req.write(line);
+    }
 }
 
 /// `PHP_MSHUTDOWN_FUNCTION(zend_test)`: under `print_stderr_mshutdown`,

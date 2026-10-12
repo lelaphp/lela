@@ -25,7 +25,7 @@ use std::sync::Arc;
 use php_link::{Composed, Held, Linked, Linking, Obligation, Refused};
 use php_unit::Level;
 use php_unit::Unit;
-use php_unit::decl::{ClassDecl, ClassKind, ConstExpr, Name};
+use php_unit::decl::{Bare, ClassDecl, ClassKind, ConstExpr, Name};
 
 use super::Request;
 use crate::api::raising::Thrown;
@@ -87,12 +87,11 @@ impl Unlinked {
 }
 
 impl Request {
-    fn unlinked_named(&self, name: &[u8]) -> Option<usize> {
-        let name = name.strip_prefix(b"\\").unwrap_or(name);
+    fn unlinked_named(&self, name: Bare<'_>) -> Option<usize> {
         self.links.unlinked.iter().position(|unlinked| {
             unlinked
                 .decl()
-                .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(name))
+                .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(name.bytes()))
         })
     }
 
@@ -100,19 +99,22 @@ impl Request {
     /// way, which `zend_lookup_class_ex` without
     /// `ZEND_FETCH_CLASS_ALLOW_UNLINKED` finds and neither answers nor
     /// autoloads.
-    pub(crate) fn link_under_way(&self, name: &[u8]) -> bool {
+    pub(crate) fn link_under_way(&self, name: Bare<'_>) -> bool {
         self.unlinked_named(name).is_some()
     }
 
     /// The declaration of the class `name` whose link is under way.
     pub(super) fn unlinked_decl(&self, name: &[u8]) -> Option<&ClassDecl> {
-        self.links.unlinked.get(self.unlinked_named(name)?)?.decl()
+        self.links
+            .unlinked
+            .get(self.unlinked_named(Bare::resolved(name))?)?
+            .decl()
     }
 
     /// Whether `name` is `ZEND_ACC_NEARLY_LINKED`, which a parent or an
     /// interface fetched for a link may be.
     pub(super) fn nearly_linked(&self, name: &[u8]) -> bool {
-        self.unlinked_named(name)
+        self.unlinked_named(Bare::resolved(name))
             .and_then(|at| self.links.unlinked.get(at))
             .is_some_and(|unlinked| matches!(unlinked.stage, Stage::Nearly { .. }))
     }
@@ -152,7 +154,7 @@ impl Request {
     /// #1 {main} in %s on line 9
     /// ```
     pub(super) fn link_abandoned(&mut self, name: &[u8], thrown: Thrown, checked: bool) -> Thrown {
-        let Some(at) = self.unlinked_named(name) else {
+        let Some(at) = self.unlinked_named(Bare::resolved(name)) else {
             return thrown;
         };
         let unlinked = self.links.unlinked.remove(at);
@@ -211,10 +213,9 @@ impl Request {
         let foreign = std::cell::Cell::new(false);
         let linking = {
             let lookup = |name: &[u8]| {
-                let bare = name.strip_prefix(b"\\").unwrap_or(name);
-                let own = bare.eq_ignore_ascii_case(&decl.name.0);
-                let written: Box<[u8]> = bare.into();
-                if let Some(held) = self.held_class(name) {
+                let own = name.eq_ignore_ascii_case(&decl.name.0);
+                let written: Box<[u8]> = name.into();
+                if let Some(held) = self.held_class(Bare::resolved(name)) {
                     let found = held.record.as_ref().map(|(class, _)| *class);
                     if !own {
                         names.borrow_mut().push((written, found));
@@ -224,7 +225,7 @@ impl Request {
                 if !own {
                     names.borrow_mut().push((written, None));
                 }
-                let at = self.unlinked_named(name)?;
+                let at = self.unlinked_named(Bare::resolved(name))?;
                 let unlinked = self.links.unlinked.get(at)?;
                 read.borrow_mut().push(at);
                 foreign.set(foreign.get() || !own);
@@ -291,7 +292,10 @@ impl Request {
             .map(|c| (c.name.0.clone(), c.value.clone()))
             .collect();
         for name in &decl.traits {
-            let Some(used) = self.class_named(&name.0).and_then(|c| self.class_decl(c)) else {
+            let Some(used) = self
+                .class_named(name.into())
+                .and_then(|c| self.class_decl(c))
+            else {
                 continue;
             };
             properties.extend(
@@ -413,7 +417,7 @@ impl Request {
             .get(usize::try_from(at).unwrap_or(usize::MAX))
             .map(|decl| decl.name.0.to_vec())
             .unwrap_or_default();
-        let standing = self.unlinked_named(&name);
+        let standing = self.unlinked_named(Bare::resolved(&name));
         if obligations.is_empty() || standing.is_none() {
             if let Some(standing) = standing {
                 self.links.unlinked.remove(standing);
@@ -492,7 +496,7 @@ impl Request {
     /// bool(true)
     /// ```
     fn resolve_obligations(&mut self, name: &[u8]) -> Result<(), Thrown> {
-        let Some(at) = self.unlinked_named(name) else {
+        let Some(at) = self.unlinked_named(Bare::resolved(name)) else {
             return Ok(());
         };
         let Some(unlinked) = self.links.unlinked.get(at) else {
@@ -516,7 +520,7 @@ impl Request {
         if let Linked::Refused(refused) = &linking.outcome {
             return Err(self.link_refused(refused));
         }
-        if let Some(standing) = self.unlinked_named(name) {
+        if let Some(standing) = self.unlinked_named(Bare::resolved(name)) {
             self.links.unlinked.remove(standing);
         }
         self.bind_declared(&unit, at, linking.composed, linking.record);
@@ -603,7 +607,7 @@ impl Request {
             return None;
         }
         let shared = |name: &Name| {
-            self.class_named(&name.0)
+            self.class_named(name.into())
                 .filter(|class| class.is_published())
         };
         let parent = match &decl.parent {
@@ -731,7 +735,7 @@ impl Request {
                 let mut needs_autoload = false;
                 let mut holds = true;
                 for (name, class) in &entry.dependencies {
-                    match self.class_named(name) {
+                    match self.class_named(Bare::resolved(name)) {
                         Some(found) if found == *class => {}
                         Some(_) => {
                             holds = false;
@@ -881,7 +885,7 @@ impl Request {
             );
         }
         self.pause_recording(recording);
-        if let Some(standing) = self.unlinked_named(&decl.name.0) {
+        if let Some(standing) = self.unlinked_named((&decl.name).into()) {
             self.links.unlinked.remove(standing);
         }
         self.declare_published(unit, at, entry.class, decl);
@@ -946,8 +950,8 @@ mod tests {
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
             assert!(req.eval_stringl(code.as_bytes(), b"loader").is_ok());
-            let c = req.class_named(b"c");
-            let q = req.class_named(b"q");
+            let c = req.class_named(php_unit::decl::Bare::resolved(b"c"));
+            let q = req.class_named(php_unit::decl::Bare::resolved(b"q"));
             assert!(c.is_some_and(ClassId::is_published), "C is published");
             assert!(
                 q.is_some_and(|q| !q.is_published()),

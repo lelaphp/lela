@@ -55,6 +55,7 @@
 // safepoint or a fatal are the ones that name the tier or return an `Err`.
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
+use php_unit::decl::Bare;
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
 
@@ -779,7 +780,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
         bound,
         fake: false,
     };
-    let Some(class) = req.class_named(b"closure") else {
+    let Some(class) = req.class_named(Bare::resolved(b"closure")) else {
         return Err(Fatal::error(
             "InternalError: a DECLARE_LAMBDA_FUNCTION with no Closure class declared",
         ));
@@ -1347,8 +1348,8 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     let callee = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
     let resolved = if let Some(object) = callee.as_object().copied() {
         dynamic_call_object(req, object)
-    } else if let Some(name) = callee.as_str_bytes().map(<[u8]>::to_vec) {
-        dynamic_call_string(req, &name, req.vm().this(frame))
+    } else if let Some(name) = callee.as_str_bytes() {
+        dynamic_call_string(req, name, req.vm().this(frame))
     } else if let Some(array) = callee.as_array().copied() {
         dynamic_call_array(req, array, req.vm().this(frame))
     } else {
@@ -1437,18 +1438,21 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
 /// `zend_std_get_static_method` finds it, with its access rule and
 /// php's refusal of an instance method named on the class; any other
 /// string is the function of that name with a leading `\` skipped, and
-/// the `Error` naming it as written where there is none.
+/// the `Error` naming it as written where there is none. The operand
+/// holds the string while the function is found, which reaches no PHP
+/// code; a class's autoloaders are PHP code that may free it, so the
+/// class's name is copied.
 fn dynamic_call_string(
     req: &mut Request,
     name: &[u8],
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
     if let Some(at) = crate::api::request::compound_split(name) {
+        let name = name.to_vec();
         let class = dynamic_call_class(req, &name[..at])?;
         return dynamic_call_static(req, class, &name[at + 2..], this);
     }
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    let Some(function) = exec::find_function(req, &bare.to_ascii_lowercase()) else {
+    let Some(function) = exec::find_function(req, Bare::of(name)) else {
         return Err(crate::api::raising::throw_error(
             req,
             "Error",
@@ -1749,7 +1753,7 @@ fn init_call(
                 .as_str_bytes()
                 .or(named.as_str_bytes())
                 .unwrap_or_default();
-            exec::find_function(req, key)
+            exec::find_function(req, Bare::resolved(key))
         });
         if let Some(function) = found {
             req.prime(frame, slot, Cached::Function(function));
@@ -11157,7 +11161,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
                 .as_str_bytes()
-                .is_some_and(|name| exec::find_function(req, name).is_some());
+                .is_some_and(|name| exec::find_function(req, Bare::resolved(name)).is_some());
             let answer = if found { Cached::Miss } else { Cached::Hit };
             req.prime(frame, slot, answer);
             answer
@@ -22228,7 +22232,7 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
     let Some(object) = value.as_object() else {
         return crate::api::raising::throw_error(req, "Error", "Can only throw objects");
     };
-    let throwable = req.class_named(b"throwable");
+    let throwable = req.class_named(Bare::resolved(b"throwable"));
     if !throwable.is_some_and(|of| req.instance_of(object.class(), of)) {
         return crate::api::raising::throw_error(
             req,
@@ -23587,7 +23591,7 @@ mod tests {
             Ok(Stepped::Same(frame))
         );
         assert_eq!(req.vm().lookups, 1, "the first pass looks the table up");
-        let strlen = req.function_named(b"strlen");
+        let strlen = req.function_named(Bare::resolved(b"strlen"));
         assert!(strlen.is_some());
         assert_eq!(
             req.cached(frame, CacheSlot(init.out)),
@@ -23684,12 +23688,14 @@ mod tests {
     fn called_twice(mut req: Request, unit: &Arc<Unit>) {
         let main = req.pushed(Arc::clone(unit));
         req.declare_functions(unit);
-        let f = req.function_named(b"f").unwrap_or(Function::PASS);
+        let f = req
+            .function_named(Bare::resolved(b"f"))
+            .unwrap_or(Function::PASS);
         let code = crate::exec::body_of(unit, exec::Body::Function(0))
             .cloned()
             .unwrap_or_default();
         let init = code.oplines.first().copied().unwrap_or_default();
-        let strlen = req.function_named(b"strlen");
+        let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         for call in 1..=2 {
             let mut header = exec::Header::call(f, 0);
@@ -23769,7 +23775,7 @@ mod tests {
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
-        let strlen = req.function_named(b"strlen");
+        let strlen = req.function_named(Bare::resolved(b"strlen"));
 
         assert_eq!(
             served!(req, frame, at => init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init)),
@@ -23881,7 +23887,7 @@ mod tests {
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let clause = code.oplines.first().copied().unwrap_or_default();
-        let error = req.class_named(b"error");
+        let error = req.class_named(Bare::resolved(b"error"));
         assert!(error.is_some(), "the engine declares Error");
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
@@ -23964,7 +23970,7 @@ mod tests {
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
-        let closure = req.class_named(b"closure");
+        let closure = req.class_named(Bare::resolved(b"closure"));
         assert!(closure.is_some(), "the engine declares Closure");
         let callee = closure.and_then(|class| req.method_named(class, b"fromcallable"));
         assert!(callee.is_some(), "Closure::fromCallable is a static method");
@@ -24004,7 +24010,7 @@ mod tests {
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
-        let exception = req.class_named(b"exception");
+        let exception = req.class_named(Bare::resolved(b"exception"));
         assert!(exception.is_some(), "the engine declares Exception");
 
         for pass in 1..=2 {
@@ -24072,8 +24078,8 @@ mod tests {
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
-        let exception = req.class_named(b"exception");
-        let error = req.class_named(b"error");
+        let exception = req.class_named(Bare::resolved(b"exception"));
+        let error = req.class_named(Bare::resolved(b"error"));
         assert!(
             exception.is_some() && error.is_some(),
             "the engine declares both"
@@ -24215,7 +24221,7 @@ mod tests {
         });
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
-        let named = req.class_named(b"stdclass");
+        let named = req.class_named(Bare::resolved(b"stdclass"));
         assert!(named.is_some(), "the engine declares stdClass");
         let class = named.unwrap_or(ClassId(u32::MAX));
         for slot in [0, 8, 16] {
@@ -24640,7 +24646,7 @@ mod tests {
     fn the_walk_over_an_object_of_properties_the_scope_may_not_see_finds_nothing() {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let named = req.class_named(b"exception");
+        let named = req.class_named(Bare::resolved(b"exception"));
         assert!(named.is_some(), "the engine declares Exception");
         let class = named.unwrap_or(ClassId(u32::MAX));
         let made = crate::api::call::new_object_made(&mut req, class);

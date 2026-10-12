@@ -2508,6 +2508,13 @@ pub use php_heap::ResourceType;
 /// sorted through [`PhpArray::sort_by`], which runs the same function.
 pub use php_heap::zend_sort;
 
+/// The engine's one hash of a name as a `BuildHasher`, for a native's
+/// own `HashMap` keyed by a name compared byte for byte, as ext/date's
+/// `DATEG(tzcache)` is: every table by name hashes a name this way
+/// (#2157), and the face hands it on so an extension needs no hash crate
+/// of its own, which would be a package for a person to admit.
+pub use php_link::NameHasher;
+
 /// What an object's two lazy bits say of it (design §5.4): a ghost or a
 /// proxy nothing has initialised, a proxy that forwards to its
 /// instance, or neither, which a dumper reads to print `lazy ghost ` or

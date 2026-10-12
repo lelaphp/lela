@@ -130,6 +130,7 @@ abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::observer
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::opcodes
+abi::ExtensionBuilder::optimizer_pass
 abi::ExtensionBuilder::post_deactivate
 abi::ExtensionBuilder::post_startup
 abi::ExtensionBuilder::process_state
@@ -429,6 +430,8 @@ coerce::value_name
 coerce::with_string
 decl::Attribute
 decl::AttributeArgument
+decl::AttributeTarget
+decl::AttributeValidator
 decl::ClassConstDecl
 decl::ClassDecl
 decl::ClassFlags
@@ -1183,6 +1186,7 @@ values::Key::lookup
 values::Key::to_prop_name
 values::Layout
 values::Laziness
+values::NameHasher
 values::Owner
 values::Owner::append
 values::Owner::bool

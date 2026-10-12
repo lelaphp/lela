@@ -13,7 +13,7 @@
 
 use std::marker::PhantomData;
 
-use php_unit::decl::{ConstExpr, Name, Type};
+use php_unit::decl::{Bare, ConstExpr, Name, Type};
 
 use crate::api::abi::Callable;
 use crate::api::abi::class::Class;
@@ -206,7 +206,7 @@ fn default_value(
         if let Some(kept) = req.default_argument(key) {
             return Ok(kept);
         }
-        let scope = scope.and_then(|name| req.class_named(name));
+        let scope = scope.and_then(|name| req.class_named(Bare::resolved(name)));
         crate::api::call::eval_const_expr_made(req, expr, scope)?
     };
     let held = if admits(mask, &value) {
