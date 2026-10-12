@@ -12,23 +12,27 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
+use php_proto::c_str;
 use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape, Stat};
 
 use crate::ini::enabled;
 use crate::{Engine, IniEvent, IniValue, Method, ResponseHead, WebRequest};
 
 /// The file system as `init_request_info` and the built-in server's path
-/// rules (`php_proto::vpath`) ask it.
+/// rules (`php_proto::vpath`) ask it, each path read as `realpath(3)` and
+/// `stat(2)` read the C string php hands them: up to its first NUL. So
+/// `run.php\0.txt` finds `run.php`, as php -S's walk finds it before
+/// refusing the path for its NUL (#2695).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Disk;
 
 impl Files for Disk {
     fn resolves(&self, path: &[u8]) -> bool {
-        std::fs::canonicalize(path_of(path)).is_ok()
+        std::fs::canonicalize(path_of(c_str(path))).is_ok()
     }
 
     fn stat(&self, path: &[u8]) -> Option<Stat> {
-        let meta = std::fs::metadata(path_of(path)).ok()?;
+        let meta = std::fs::metadata(path_of(c_str(path))).ok()?;
         Some(if meta.is_dir() {
             Stat::Directory
         } else if meta.is_file() {
@@ -264,5 +268,21 @@ mod tests {
             ),
             b""
         );
+    }
+
+    /// A path is asked of the disk as far as its first NUL, as `stat(2)`
+    /// and `realpath(3)` read a C string: `t.txt\0.php` is `t.txt`, and a
+    /// path cut short of anything there finds nothing (#2695).
+    #[test]
+    fn the_disk_reads_a_path_up_to_its_first_nul() {
+        let dir = std::env::temp_dir().join(format!("php-sapi-disk-nul-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        assert!(std::fs::write(dir.join("t.txt"), "four").is_ok());
+        let named = |rest: &str| [dir.as_os_str().as_encoded_bytes(), rest.as_bytes()].concat();
+        assert_eq!(Disk.stat(&named("/t.txt\0.php")), Some(Stat::File(4)));
+        assert_eq!(Disk.stat(&named("\0/t.txt")), Some(Stat::Directory));
+        assert!(Disk.resolves(&named("/t.txt\0/x")));
+        assert_eq!(Disk.stat(&named("/t.tx\0t")), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

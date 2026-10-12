@@ -273,7 +273,16 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
         script_name: info.path_translated.clone(),
         ..RequestDescription::default()
     };
-    let (_, sink) = engine.serve(description, Box::new(sink), || look(&info));
+    // A program whose path holds a NUL is never run, as
+    // `php_cli_server_dispatch_script` refuses it: the request ends with
+    // the head it has (`vpath::holds_nul`, #2695).
+    let (_, sink) = engine.serve(description, Box::new(sink), || {
+        if php_proto::vpath::holds_nul(&program.path_translated) {
+            HostServes::Nothing
+        } else {
+            look(&info)
+        }
+    });
     // Dropped here, the sink says the body is whole.
     drop(sink);
 }

@@ -54,8 +54,8 @@ pub use class::{
     Typed,
 };
 pub use marshal::{
-    False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null, NullDefault,
-    OrFalse, Passed, Path, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
+    Absent, False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null,
+    NullDefault, OrFalse, Passed, Path, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
 };
 /// The encoding functions' vocabulary (`zend_multibyte_functions`),
 /// which the compiler's scanner calls and an extension implements for

@@ -1058,6 +1058,18 @@ impl Request {
                 &format!("Call to undefined function {name}()"),
             ));
         };
+        self.serve_entry(function, entry, on_throw)
+    }
+
+    /// [`Request::serve_native`] past the entry's lookup, for a caller
+    /// that holds `function`'s entry already, as a frameless call's
+    /// handler reads it off the frameless table (`ZEND_FLF_HANDLER`).
+    pub(crate) fn serve_entry(
+        &mut self,
+        function: Function,
+        entry: crate::api::abi::Entry,
+        on_throw: OnThrow,
+    ) -> Result<Value, Thrown> {
         let begun = crate::observer::native_call(self, function);
         #[cfg(debug_assertions)]
         let outer = self

@@ -743,12 +743,12 @@ pub fn coerce_param(
     hold(req, value, ty, position).map(|held| held.value)
 }
 
-/// [`coerce_param`] over the argument at `position` and the type the
+/// [`coerce_param`] over `given`, the argument the call passed at
+/// `position` as the entry read it off the call, and the type the
 /// native being served declares for it, `arg_info->type`, the one
 /// declaration Reflection reads too, so no native writes its parameter's
-/// type a second time: `None` where the call gave no argument there,
-/// which is where `Z_PARAM_OPTIONAL` leaves the default standing, and
-/// the value as passed where the parameter declares no type. A variadic
+/// type a second time: the value as passed where the parameter declares
+/// no type. A variadic
 /// position is held to the variadic's type.
 ///
 /// ```php
@@ -786,13 +786,7 @@ pub fn coerce_param(
 /// SplObjectStorage::addAll(): Argument #1 ($storage) must be of type SplObjectStorage, ArrayObject given
 /// Closure::bind(): Argument #1 ($closure) must be of type Closure, stdClass given
 /// ```
-pub fn argument(req: &mut Request, position: u32) -> Result<Option<Value>, Thrown> {
-    let Some(given) = req
-        .argument(position)
-        .filter(|given| !matches!(given.as_ref(), ValueRef::Undef))
-    else {
-        return Ok(None);
-    };
+pub(crate) fn argument(req: &mut Request, given: Value, position: u32) -> Result<Value, Thrown> {
     // `Z_PARAM_OBJECT_OF_CLASS` over a class resolved once: an instance
     // is held by identity, and anything else goes on to the declared
     // type, which raises what it raises.
@@ -802,17 +796,18 @@ pub fn argument(req: &mut Request, position: u32) -> Result<Option<Value>, Throw
             .as_object()
             .is_some_and(|object| req.instance_of(object.class(), class))
         {
-            return Ok(Some(value));
+            return Ok(value);
         }
     }
     match req.active_parameter_type(position) {
-        Some(ty) => coerce_param(req, &given, &ty, position).map(Some),
-        None => Ok(Some(given.deref())),
+        Some(ty) => coerce_param(req, &given, &ty, position),
+        None => Ok(given.deref()),
     }
 }
 
-/// `Z_PARAM_FUNC` and `Z_PARAM_FUNC_OR_NULL` over the argument at
-/// `position`, held to the `callable` or `?callable` the native
+/// `Z_PARAM_FUNC` and `Z_PARAM_FUNC_OR_NULL` over `given`, the argument
+/// as it stands on the call at `position` (`UNDEF` where the call gave
+/// none), held to the `callable` or `?callable` the native
 /// declares there as [`argument`] holds any parameter, and to
 /// `callable` where the declaration names no callable, which is the
 /// macro's own form: the callee `zend_is_callable_ex` resolved it to,
@@ -843,13 +838,14 @@ pub fn argument(req: &mut Request, position: u32) -> Result<Option<Value>, Throw
 /// array_map(): Argument #1 ($callback) must be a valid callback or null, class C does not have a method "nope"
 /// usort(): Argument #2 ($callback) must be a valid callback, no array or string given
 /// ```
-pub fn callable_argument(req: &mut Request, position: u32) -> Result<Option<Callable>, Thrown> {
-    let Some(given) = req
-        .argument(position)
-        .filter(|given| !matches!(given.as_ref(), ValueRef::Undef))
-    else {
+pub(crate) fn callable_argument(
+    req: &mut Request,
+    given: Value,
+    position: u32,
+) -> Result<Option<Callable>, Thrown> {
+    if matches!(given.as_ref(), ValueRef::Undef) {
         return Ok(None);
-    };
+    }
     let ty = req
         .active_parameter_type(position)
         .filter(|ty| callable_type(ty).is_some())

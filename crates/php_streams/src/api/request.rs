@@ -1181,8 +1181,8 @@ impl FromArgument for Stream {
             )),
         }
     }
-    fn hold(req: &mut Request, position: u32) -> Result<Option<Self>, Thrown> {
-        let Some(resource) = Resource::hold(req, position)? else {
+    fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
+        let Some(resource) = Resource::hold(req, given, position)? else {
             return Ok(None);
         };
         match Stream::from_value(req, &resource.as_value()) {
