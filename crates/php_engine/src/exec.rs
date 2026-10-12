@@ -2066,7 +2066,26 @@ pub(crate) struct MethodName {
 /// `zend_std_get_method` lowers a name it was given no key for
 /// (`ZSTR_ALLOCA_ALLOC`, `zend_str_tolower_copy`), and allocated only
 /// past [`INLINE_NAME`] bytes, where php's `do_alloca` goes to the
-/// heap too.
+/// heap too. A name is found under any case whichever of the three
+/// holds it, a name past the stack's bytes too:
+///
+/// ```php
+/// class C {
+///     function hello() { return "hello"; }
+///     static function make() { return "make"; }
+///     function aMethodWhoseNameIsLongerThanSixtyFourBytesSoItsLoweredFormIsAllocated() { return "long"; }
+/// }
+/// $o = new C; $n = 'HeLLo'; $s = 'MAKE';
+/// $long = 'AMETHODWHOSENAMEISLONGERTHANSIXTYFOURBYTESSOITSLOWEREDFORMISALLOCATED';
+/// echo $o->$n(), " ", [$o, 'HELLO'](), " ", C::$s(), " ", ['C', 'Make'](), " ", $o->$long(), "\n";
+/// var_dump(method_exists($o, 'HELLO'), method_exists('C', $long), is_callable([$o, 'Nope']));
+/// ```
+/// ```expect
+/// hello hello make make long
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
 pub(crate) enum Lowered<'a> {
     Borrowed(&'a [u8]),
     Inline { bytes: [u8; INLINE_NAME], len: u8 },

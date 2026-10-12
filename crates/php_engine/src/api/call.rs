@@ -1023,7 +1023,7 @@ pub(crate) fn call_method_made(
     arguments: &[Value],
 ) -> Result<Value, Thrown> {
     let class = object.class();
-    let Some(function) = req.method_named(class, &method.to_ascii_lowercase()) else {
+    let Some(function) = req.method_named(class, method) else {
         let class = req.class_name(class);
         return Err(throw_error(
             req,
@@ -1056,13 +1056,12 @@ pub fn known_method(
     name: &Name,
     this: Option<PhpObject>,
 ) -> Option<Callable> {
-    let lowered = name.0.to_ascii_lowercase();
     // A hook, `$name::get` or `$name::set`, is no row of the class's
     // table; a reflector over one holds the hook itself, as php's
     // `reflection_method_factory` holds its `zend_function`.
     let function = match hook_name(&name.0) {
         Some((property, kind)) => req.property_hook_function(class, property, kind)?,
-        None => req.method_named(class, &lowered)?,
+        None => req.method_named(class, &name.0)?,
     };
     let spelled = format!(
         "{}::{}",
@@ -3049,7 +3048,6 @@ fn method_callable(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     let ce = const_class(req, &class.0, scope)?;
-    let lowered = method.0.to_ascii_lowercase();
     let magic = req.method_named(ce, b"__callstatic").is_some();
     let magic_refused = |req: &mut Request| {
         throw_error(
@@ -3058,7 +3056,7 @@ fn method_callable(
             "Creating a callable for the magic __callStatic() method is not supported in constant expressions",
         )
     };
-    let found = req.method_named(ce, &lowered);
+    let found = req.method_named(ce, &method.0);
     let reached = found.is_some_and(|function| req.method_accessible_from(function, scope));
     if magic && !reached {
         return Err(magic_refused(req));

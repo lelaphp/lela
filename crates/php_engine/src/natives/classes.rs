@@ -858,7 +858,7 @@ fn method_exists(
     let Some(class) = class else {
         return Ok(false);
     };
-    let lowered = method.as_bytes().to_ascii_lowercase();
+    let lowered = crate::exec::Lowered::of(method.as_bytes());
     if let Some(function) = req.method_named(class, &lowered) {
         let private = req
             .method_decl(function)
@@ -884,7 +884,7 @@ fn method_exists(
         on = table.method_receiver(req, object);
     }
     let closure = req.class_named(Bare::resolved(b"Closure")) == Some(class);
-    Ok(closure && lowered == b"__invoke")
+    Ok(closure && *lowered == *b"__invoke")
 }
 
 /// `property_exists($object_or_class, string $property): bool`, php's

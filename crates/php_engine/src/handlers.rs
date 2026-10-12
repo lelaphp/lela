@@ -1518,7 +1518,7 @@ fn dynamic_call_array(
     let (function, receiver) = method_on(
         req,
         object,
-        &method.to_ascii_lowercase(),
+        &exec::Lowered::of(&method),
         &second,
         Undefined::OnHanded,
     )?;
@@ -1579,7 +1579,7 @@ fn dynamic_call_static(
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
     let written = Value::string(req.string(method)?);
-    let found = static_method(req, class, &method.to_ascii_lowercase(), &written, this);
+    let found = static_method(req, class, &exec::Lowered::of(method), &written, this);
     req.release(written);
     let (function, _) = found?;
     if req
@@ -5196,9 +5196,14 @@ pub(crate) fn init_static_method_call<T: Tier>(
         OperandKind::Const => {
             let written = exec::constant(code, ConstIdx(op.op2));
             let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
-            let lowered = lowered.as_str_bytes().unwrap_or_default().to_vec();
             let this = req.vm().this(frame);
-            match static_method(req, class, &lowered, &written, this) {
+            match static_method(
+                req,
+                class,
+                lowered.as_str_bytes().unwrap_or_default(),
+                &written,
+                this,
+            ) {
                 Ok((function, never_cached)) => {
                     uncached = never_cached;
                     function
@@ -5238,24 +5243,24 @@ fn static_method(
     written: &Value,
     this: Option<PhpObject>,
 ) -> Result<(Function, bool), Thrown> {
-    let name = written.as_str_bytes().unwrap_or_default().to_vec();
+    let name = written.as_str_bytes().unwrap_or_default();
     if let Some(function) = req
         .handlers_of(class)
-        .get_static_method(req, class, lowered, &name)?
+        .get_static_method(req, class, lowered, name)?
     {
         return Ok((function, true));
     }
     let function = match req.method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
         Some(function) => {
-            if let Some(trampoline) = req.static_trampoline(class, &name, this) {
+            if let Some(trampoline) = req.static_trampoline(class, name, this) {
                 trampoline
             } else {
-                req.check_method_access(function, &name)?;
+                req.check_method_access(function, name)?;
                 function
             }
         }
-        None => match req.static_trampoline(class, &name, this) {
+        None => match req.static_trampoline(class, name, this) {
             Some(trampoline) => trampoline,
             None => return Err(undefined_method(req, class, written)),
         },
