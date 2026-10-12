@@ -548,25 +548,21 @@ impl<'a> Inventory<'a> {
             .items
             .iter()
             .any(|item| plain_item(item).is_some_and(|(n, _)| n == name));
-        let (module_id, name) = (id.clone(), name.to_owned());
         match (child, defined) {
-            (Some(public), true) => {
-                return Ok(Target::Both {
-                    module: module_id,
-                    name,
-                    public,
-                });
-            }
-            (Some(_), false) => return Ok(Target::Module(module_id.child(&name))),
-            (None, true) => {
-                return Ok(Target::Item {
-                    module: module_id,
-                    name,
-                });
-            }
+            (Some(_), false) => return Ok(Target::Module(id.child(name))),
             (None, false) => {}
+            (child, true) => {
+                let (module, name) = (id.clone(), name.to_owned());
+                return Ok(match child {
+                    Some(public) => Target::Both {
+                        module,
+                        name,
+                        public,
+                    },
+                    None => Target::Item { module, name },
+                });
+            }
         }
-        let name = name.as_str();
         let reexports: Vec<UsePath> = module
             .items
             .iter()
