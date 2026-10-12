@@ -12,10 +12,9 @@
 //! - **The header timeout**, from a head's first byte until hyper has
 //!   parsed it: past it the server answers 408 and closes. A client that
 //!   trickles bytes does not move it. The first byte is the first the
-//!   socket reads while the connection idles: a head whose start came
-//!   in with the request before it, sent before that request's response
-//!   ended, is timed from the next read after that end, and by the
-//!   keep-alive clock until then.
+//!   socket reads while the connection idles; a head whose start hyper
+//!   read with the request before it, which a pipelining client sends,
+//!   is timed from that request's response's end ([`Boundary`], #2572).
 //! - **The minimum data rate** of the response, Kestrel's
 //!   `MinResponseDataRate`, on each write the kernel would not take
 //!   ([`WriteClock::wrote`]): past its deadline with a write stalled, the
@@ -34,9 +33,18 @@
 //! dropped until it closes its side or [`LINGER`] has passed. A socket
 //! let go outside the runtime, or as the runtime is dropped at the
 //! drain's deadline (#2344), closes at once. A lingering socket holds its descriptor, and its connection's
-//! slot under the cap, for that second beyond its connection.
+//! slot under the cap, for that second beyond its connection. A TLS
+//! connection's write side is shut by its `close_notify` first.
+//!
+//! A socket carries its bytes clear or under TLS ([`Wire`], #2343), and
+//! its clocks and the 408 run on what TLS carries. A clear connection
+//! whose first byte is a TLS record's, `0x16`, a handshake sent to the
+//! clear port, is refused: its read fails, so hyper drops it unanswered,
+//! as Bandit and Kestrel close one, and the error log says why
+//! (research/production-server.r2.md M19).
 
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
@@ -46,7 +54,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Instant, Sleep};
+use tokio_rustls::server::TlsStream;
 
+use crate::boundary::{BodyLength, Boundary};
 use crate::options::{Limits, MinDataRate};
 
 /// How long a closing socket reads and drops what its client still
@@ -55,7 +65,8 @@ const LINGER: Duration = Duration::from_secs(1);
 
 /// What a connection waits on, which says which clock of its socket
 /// runs: set by its requests as each begins and as its response ends, and
-/// by its socket as a head's first byte arrives.
+/// by its socket as a head's first byte arrives, which the bytes it has
+/// read, held against the requests they carry, say.
 pub(crate) struct Watch {
     held: Mutex<Watched>,
 }
@@ -69,6 +80,8 @@ struct Watched {
     /// the response ends: hyper polls its read again only when woken, and
     /// the keep-alive clock that starts then must be set.
     reader: Option<Waker>,
+    /// Where the bytes read stand against the requests they carry.
+    boundary: Boundary,
 }
 
 /// What a connection waits on.
@@ -91,21 +104,31 @@ impl Watch {
                 phase: Phase::Idle(Instant::now()),
                 responses: 0,
                 reader: None,
+                boundary: Boundary::default(),
             }),
         }
     }
 
-    /// A request's head is parsed and the request in hand.
-    pub(crate) fn request_began(&self) {
-        self.held().phase = Phase::Busy;
+    /// A request's head is parsed and the request in hand, its body
+    /// `length` long as hyper frames it.
+    pub(crate) fn request_began(&self, length: BodyLength) {
+        let mut held = self.held();
+        held.phase = Phase::Busy;
+        held.boundary.began(length);
     }
 
     /// A response has ended, and the connection waits for the next
-    /// request: its read is woken to set the clock.
+    /// request, whose head is timed from now where any of it has been
+    /// read: its read is woken to set the clock.
     pub(crate) fn response_ended(&self) {
         let reader = {
             let mut held = self.held();
-            held.phase = Phase::Idle(Instant::now());
+            let now = Instant::now();
+            held.phase = if held.boundary.ahead() {
+                Phase::Head(now)
+            } else {
+                Phase::Idle(now)
+            };
             held.responses += 1;
             held.reader.take()
         };
@@ -132,11 +155,41 @@ impl Watch {
         self.held().reader = Some(reader.clone());
     }
 
-    /// Bytes arrived at `now`: a head's first where the connection idled.
-    fn arrived(&self, now: Instant) {
+    /// `bytes` read at `now`: a head's first where the connection idled
+    /// and they hold the start of a request.
+    fn arrived(&self, bytes: &[u8], now: Instant) {
         let mut held = self.held();
-        if let Phase::Idle(_) = held.phase {
+        if held.boundary.read(bytes)
+            && let Phase::Idle(_) = held.phase
+        {
             held.phase = Phase::Head(now);
+        }
+    }
+}
+
+/// The first byte of a TLS record of a handshake, which no HTTP request
+/// begins with (RFC 8446 §5.1, `handshake(22)`).
+const TLS_HANDSHAKE: u8 = 0x16;
+
+/// What a connection's bytes travel over: the TCP stream itself, or TLS
+/// over it.
+pub(crate) enum Wire {
+    /// The clear listener's: HTTP on the TCP stream.
+    Clear(TcpStream),
+    /// The TLS listener's, its handshake made: HTTP under TLS. rustls
+    /// takes up to its buffer's 64 KiB of a response before a write waits
+    /// on the client, so the minimum response rate starts once that has
+    /// filled, as it starts once the kernel's send buffer has on a clear
+    /// connection.
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl Wire {
+    /// The TCP stream under it.
+    fn into_tcp(self) -> TcpStream {
+        match self {
+            Wire::Clear(stream) => stream,
+            Wire::Tls(tls) => tls.into_inner().0,
         }
     }
 }
@@ -144,8 +197,12 @@ impl Watch {
 /// The socket of one connection, with its clocks, which lingers when it
 /// is let go.
 pub(crate) struct Socket {
-    /// Taken only when the socket is let go.
-    stream: Option<TcpStream>,
+    /// What its bytes travel over, taken only when the socket is let go.
+    stream: Option<Wire>,
+    /// The peer of a clear connection whose first read has not come, which
+    /// a TLS handshake must not begin: one that does is refused and logged
+    /// under it.
+    clear_peer: Option<SocketAddr>,
     watch: Arc<Watch>,
     limits: Limits,
     /// The keep-alive idle or header timeout's wake-up, while a read waits.
@@ -176,12 +233,14 @@ impl Socket {
     /// The socket of a connection just accepted, its clocks read from
     /// `watch` and `limits`.
     pub(crate) fn new(
-        stream: TcpStream,
+        stream: Wire,
+        peer: SocketAddr,
         watch: Arc<Watch>,
         limits: Limits,
         slot: OwnedSemaphorePermit,
     ) -> Socket {
         Socket {
+            clear_peer: matches!(stream, Wire::Clear(_)).then_some(peer),
             stream: Some(stream),
             watch,
             limits,
@@ -204,19 +263,24 @@ impl Socket {
     /// The read clock passed: an idle connection reads as ended, and a
     /// head is answered 408, which hyper never sends, before the read
     /// fails and hyper drops the connection. The 408 goes straight to the
-    /// socket, past hyper's buffer, which holds nothing then unless a
-    /// write has stalled, when it is left unsent.
-    fn expire(&mut self, expiry: Expiry) -> Poll<io::Result<()>> {
+    /// wire, past hyper's buffer, which holds nothing then unless a write
+    /// has stalled, when it is left unsent; what the wire does not take at
+    /// once is left unsent too.
+    fn expire(&mut self, expiry: Expiry, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match expiry {
             Expiry::Idle => Poll::Ready(Ok(())),
             Expiry::Head => {
-                if let (Some(stream), false) = (&self.stream, self.writes.stalled) {
+                if let (Some(stream), false) = (&mut self.stream, self.writes.stalled) {
                     let answer = format!(
                         "HTTP/1.1 408 Request Timeout\r\nconnection: close\r\n\
                          content-length: 0\r\ndate: {}\r\n\r\n",
                         httpdate::fmt_http_date(SystemTime::now())
                     );
-                    stream.try_write(answer.as_bytes()).ok();
+                    let mut stream = Pin::new(stream);
+                    // The poll's outcome is dropped either way: the
+                    // connection ends on the expiry whatever was sent.
+                    let _sent = stream.as_mut().poll_write(cx, answer.as_bytes());
+                    let _flushed = stream.poll_flush(cx);
                 }
                 Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -227,7 +291,7 @@ impl Socket {
     }
 
     /// The stream, which is gone only once the socket is let go.
-    fn stream(&mut self) -> io::Result<Pin<&mut TcpStream>> {
+    fn stream(&mut self) -> io::Result<Pin<&mut Wire>> {
         self.stream
             .as_mut()
             .map(Pin::new)
@@ -328,6 +392,56 @@ fn wake_at(
     timer.as_mut().poll(cx)
 }
 
+/// Each call to the stream under the wire, clear or under TLS.
+macro_rules! on_wire {
+    ($wire:expr, $stream:ident => $call:expr) => {
+        match $wire {
+            Wire::Clear($stream) => $call,
+            Wire::Tls($stream) => $call,
+        }
+    };
+}
+
+impl AsyncRead for Wire {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        on_wire!(self.get_mut(), stream => Pin::new(stream).poll_read(cx, buf))
+    }
+}
+
+impl AsyncWrite for Wire {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        on_wire!(self.get_mut(), stream => Pin::new(stream).poll_write(cx, buf))
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        on_wire!(self.get_mut(), stream => Pin::new(stream).poll_write_vectored(cx, bufs))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        on_wire!(self, stream => stream.is_write_vectored())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        on_wire!(self.get_mut(), stream => Pin::new(stream).poll_flush(cx))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        on_wire!(self.get_mut(), stream => Pin::new(stream).poll_shutdown(cx))
+    }
+}
+
 impl AsyncRead for Socket {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -340,14 +454,30 @@ impl AsyncRead for Socket {
         if let Some((deadline, expiry)) = clock
             && deadline <= now
         {
-            return this.expire(expiry);
+            return this.expire(expiry, cx);
         }
         let filled = buf.filled().len();
         match this.stream()?.poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
-                if buf.filled().len() > filled {
-                    this.watch.arrived(now);
+                let read = &buf.filled()[filled..];
+                if read.is_empty() {
+                    return Poll::Ready(Ok(()));
                 }
+                if let Some(peer) = this.clear_peer.take()
+                    && read.first() == Some(&TLS_HANDSHAKE)
+                {
+                    // hyper reads a failed first read as the client gone,
+                    // so the refusal is logged here.
+                    crate::log::error(
+                        format!(
+                            "makala: {peer}: a TLS handshake came to the clear port, which \
+                             serves HTTP without TLS; the connection is closed unanswered"
+                        )
+                        .as_bytes(),
+                    );
+                    return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+                }
+                this.watch.arrived(read, now);
                 Poll::Ready(Ok(()))
             }
             Poll::Pending => {
@@ -356,7 +486,7 @@ impl AsyncRead for Socket {
                     return Poll::Pending;
                 };
                 if wake_at(&mut this.read_timer, deadline, cx).is_ready() {
-                    this.expire(expiry)
+                    this.expire(expiry, cx)
                 } else {
                     Poll::Pending
                 }
@@ -394,7 +524,7 @@ impl AsyncWrite for Socket {
     fn is_write_vectored(&self) -> bool {
         self.stream
             .as_ref()
-            .is_some_and(TcpStream::is_write_vectored)
+            .is_some_and(AsyncWrite::is_write_vectored)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -416,13 +546,15 @@ impl Drop for Socket {
     }
 }
 
-/// The write side shut, then what the client still sends read and
-/// dropped until it closes or [`LINGER`] passes, and the socket closed.
-async fn linger(mut stream: TcpStream, slot: Option<OwnedSemaphorePermit>) {
-    std::future::poll_fn(|cx| Pin::new(&mut stream).poll_shutdown(cx))
-        .await
-        .ok();
-    let drained = async {
+/// The write side shut, under TLS after its `close_notify`, then what the
+/// client still sends read and dropped until it closes, and the socket
+/// closed; all of it within [`LINGER`].
+async fn linger(mut wire: Wire, slot: Option<OwnedSemaphorePermit>) {
+    let lingered = async {
+        std::future::poll_fn(|cx| Pin::new(&mut wire).poll_shutdown(cx))
+            .await
+            .ok();
+        let stream = wire.into_tcp();
         let mut dropped = [0u8; 4096];
         loop {
             if stream.readable().await.is_err() {
@@ -435,6 +567,6 @@ async fn linger(mut stream: TcpStream, slot: Option<OwnedSemaphorePermit>) {
             }
         }
     };
-    tokio::time::timeout(LINGER, drained).await.ok();
+    tokio::time::timeout(LINGER, lingered).await.ok();
     drop(slot);
 }

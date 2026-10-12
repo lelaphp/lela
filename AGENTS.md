@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=c61b394133b61dd9149fba3055a9542d188f0d018cfecd985290c044f98386ff out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=a8c41570d0f43f2203d5531c70214984a7472aaf88d5b24e4850c1963acceab1 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed -->
+<!-- /computed in=5c0404aeb95e3124f003d14fc2004d36f9b4ff55fe261c9a024a61b2eaee5a6c out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -122,17 +122,17 @@ third-engine-design.md
 | seam | lock | items | ceiling |
 |---|---|---|---|
 | heap | heap.lock | 400 |  |
-| process | process.lock | 38 |  |
-| unit | unit.lock | 102 |  |
+| process | process.lock | 39 |  |
+| unit | unit.lock | 104 |  |
 | link | link.lock | 55 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1396 | 1500 |
-| sapi | sapi.lock | 47 |  |
+| api | api.lock | 1403 | 1500 |
+| sapi | sapi.lock | 49 |  |
 | tier | tier.lock | 32 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 404 |  |
+| harness | xtask.lock | 406 |  |
 
-<!-- /computed -->
+<!-- /computed in=08ec801d005fe40a9189b1c97ef0d3219d8241aa470a8ca4784b061909da854f out=e92bd9b67aa34d7743eaa199e396d566fd28b0f2daf9c641644ca85a89bdadd2 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -170,7 +170,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern |
 | divergence.reason |  | check |
 
-<!-- /computed in=563f4fe3d64f1a7212727f35e42b18a397676f448a3fe3e6b63604a6a2a3b94a out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
+<!-- /computed in=45d01a88676a780d87281ed975b966f605061637a8e24440f930d4df31bf6a72 out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

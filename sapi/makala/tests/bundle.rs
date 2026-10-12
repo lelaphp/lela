@@ -111,7 +111,7 @@ fn a_line_without_an_address_is_refused_with_the_usage() {
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         format!(
-            "makala: no --listen address\n{}",
+            "makala: no --listen nor --listen-tls address\n{}",
             php_sapi_makala::options::usage()
         )
     );
