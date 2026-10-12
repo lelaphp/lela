@@ -1011,14 +1011,16 @@ impl Worker {
 
     /// `sapi_cgi_pre_request_init`'s `.user.ini` files
     /// ([`php_sapi::cgi::user_ini`]), cached for `user_ini.cache_ttl`
-    /// seconds per directory.
+    /// seconds per directory: `PG(user_ini_cache_ttl)`, the entry as its
+    /// `OnUpdateLong` read it, `zend_ini_parse_quantity`'s value, so `1K`
+    /// is 1024 seconds.
     fn user_ini(&mut self, path_translated: &[u8], env: &Environment) -> Vec<(Vec<u8>, Vec<u8>)> {
         let Some(doc_root) = env.get(b"DOCUMENT_ROOT") else {
             return Vec::new();
         };
         let dir = php_sapi::cgi::user_ini_dir(path_translated);
         let now = crate::scoreboard::epoch();
-        let ttl = crate::conf::atoi(
+        let ttl = php_ext::request::Request::ini_parse_bytes(
             &self
                 .engine
                 .ini_get(b"user_ini.cache_ttl")
@@ -1034,7 +1036,7 @@ impl Worker {
         self.user_config.push((
             dir,
             UserConfig {
-                expires: now + i64::from(ttl),
+                expires: now.saturating_add(ttl),
                 entries: entries.clone(),
             },
         ));
