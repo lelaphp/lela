@@ -74,7 +74,7 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 - `cargo xtask <instrument>` runs one instrument; `cargo xtask --help` lists the ones built so far. The smallest proof is the instrument for the crate you touched. The harness itself is tested by `cargo test -p xtask`, and every manifest rule has a fixture under `xtask/fixtures/` that must fail.
 - A change to behaviour comes with a witness beside the kernel or native, pinned by `--accept`. The witness is the test; write it before the body when you can. The phpt subset for an extension is every `.phpt` under `php-src/ext/<name>`, as run-tests.php walks the directory. A bench number is a claim a person signs off, with the A/A control read by a person: state the measurement, never the conclusion.
-- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. A merge, cherry-pick, revert or rebase in progress in the checkout commits the whole index, whoever staged it; where one stands that you did not start, `permit` refuses the git commands that write its index or step it (add, commit, reset, restore, and a --continue among them), so wait for it to end or work in your own worktree. The message file is named for the branch or its ticket and never `msg.txt`, for the same reason the staging is by pathspec: the scratchpad is one directory per project, shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box inside an agent's ticket that reads *a person decides* is one box that is both, and it closes nothing however finished the code is.
+- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. The shell is zsh, which does not split an unquoted `$P`: write the paths out, or use an array, `P=(a b)` and `git add -- "${P[@]}"`. A merge, cherry-pick, revert or rebase in progress commits the whole index, whoever staged it; where one stands that you did not start, `permit` refuses the git commands that write its index or step it, so wait for it to end or work in your own worktree. The message file is named for the branch or its ticket, never `msg.txt`: the scratchpad is shared across the checkout's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box in an agent's ticket that reads *a person decides* closes nothing however finished the code is.
 
 ## Documentation and where code lives
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=1667fc67a6d7b87e274a3fe7eceaf267ea66e9a130aeafbee74b7d9c1df07dbf out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=968d577ae68585a77725dfad7c400b58763a8bccc41ef4a6daa9ae2758dcb1ee out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -121,18 +121,18 @@ third-engine-design.md
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 400 |  |
+| heap | heap.lock | 409 |  |
 | process | process.lock | 39 |  |
 | unit | unit.lock | 104 |  |
 | link | link.lock | 55 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1403 | 1500 |
-| sapi | sapi.lock | 50 |  |
+| api | api.lock | 1405 | 1500 |
+| sapi | sapi.lock | 51 |  |
 | tier | tier.lock | 32 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 407 |  |
+| harness | xtask.lock | 411 |  |
 
-<!-- /computed in=c61e9d9707d35824d5fb836c5de32edba053107a278baf0feae4b337722d5817 out=9395376d51886d8390ccb958a03cbf188160189f56efcde9d9be4df03fc63da3 -->
+<!-- /computed in=8556f1ed2a5887f03bd0c38b65730c91945ce8540b0a5f14c8690fdc11855e37 out=19b1be78c9d932a00a7afd0c8aa6bce00fda2a18f7fa7bde92e0f59d6a699415 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -208,10 +208,10 @@ Commands:
   vocab              The glossary as a sensor: `_Avoid_` words in public item names and rustdoc prose, never in a lock; one reading per crate
 
 Options:
-      --root <DIR>  The workspace root; defaults to the workspace this binary was built in
+      --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=39190a4376fc397d39c881de84fc9341486a3d4d3baa3b9232516be333bb3d6e out=4e2f456144c5db93cafae3e5c76a2c53c43947b8bcdbaf092ed171daaa414359 -->
+<!-- /computed in=40ca49562cf713383b25b448bf2ad3044344a027b0ec27141ca9a8b87c0e370e out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

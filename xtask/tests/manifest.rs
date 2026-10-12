@@ -6,7 +6,7 @@ use std::path::Path;
 use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, Rule, Scripts, Seam};
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn the_oracle_version_comes_from_the_pin_and_is_written_in_no_source_file() {
     let manifest = Manifest::load(workspace()).unwrap();
     let version = &manifest.pin.oracle.version;
     assert!(!version.is_empty());
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src = xtask::package_dir().join("src");
     for entry in walk(&src) {
         let text = std::fs::read_to_string(&entry).unwrap();
         assert!(

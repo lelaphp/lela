@@ -31,7 +31,7 @@ use php_macros::php_class;
 use php_unit::Opcode;
 use php_unit::decl::Bare;
 
-use crate::api::abi::{CloneObj, DtorObj, GcTable, Instance, ObjectHandlers, This};
+use crate::api::abi::{DtorObj, GcTable, Instance, ObjectHandlers, Refusals, This};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
@@ -201,8 +201,9 @@ impl ObjectHandlers for GeneratorHandlers {
         }
     }
 
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
+    /// `zend_generator_handlers.clone_obj = NULL`.
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
     }
 
     /// `zend_generator_get_constructor`.
@@ -684,9 +685,9 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
 /// and suspended: what `YIELD` and `YIELD_FROM` leave.
 pub(crate) fn suspend(req: &mut Request, generator: PhpObject) -> Result<(), Fatal> {
     let Some((frame, calls)) = req.suspend_frame()? else {
-        return Err(Fatal::Error(String::from(
+        return Err(Fatal::error(
             "InternalError: a generator suspended with no frame on the stack",
-        )));
+        ));
     };
     with(req, generator, |g| {
         g.execution = Execution::Suspended(Box::new(Suspended { frame, calls }));
@@ -832,9 +833,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
         return Ok(crate::tier::Stepped::Popped(caller));
     }
     let Some(class) = req.class_named(Bare::resolved(b"generator")) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: no Generator class is linked",
-        )));
+        return Err(Fatal::error("InternalError: no Generator class is linked"));
     };
     let object = match req.new_object(class) {
         Ok(object) => object,
@@ -886,9 +885,7 @@ pub(crate) fn running(req: &Request, frame: FrameRef) -> Result<PhpObject, Fatal
     req.frame_at(frame)
         .and_then(FrameAt::generator)
         .ok_or_else(|| {
-            Fatal::Error(String::from(
-                "InternalError: a generator opcode on a frame that is no generator's",
-            ))
+            Fatal::error("InternalError: a generator opcode on a frame that is no generator's")
         })
 }
 

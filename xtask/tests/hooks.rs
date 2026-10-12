@@ -18,7 +18,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// The region files pre-commit renders, in the order it names them; the
@@ -120,13 +120,14 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
              if [ -f '{refuse}' ] && [ \"$(cat '{refuse}')\" = \"$1 $2\" ]; then exit 1; fi\n\
              if [ \"$1 $2\" = 'xtask regions' ]; then shift 2; exec '{xtask}' --root \"$PWD\" regions \"$@\"; fi\n\
              if [ \"$1 $2\" = 'xtask api-check' ]; then sleep 1; fi\n\
-             if [ \"$1 $2\" = 'xtask test' ]; then git show :AGENTS.md > '{tested}' 2>&1; fi\n\
+             if [ \"$1 $2\" = 'xtask test' ]; then HOOKS_TESTED='{tested}' '{probe}' --exact as_xtask_test_runs_a_map_test --ignored > /dev/null 2>&1; fi\n\
              printf 'ran %s\\n' \"$*\"\n\
              exit 0\n",
             log = dir.join("cargo.log").display(),
             refuse = dir.join("refuse").display(),
             tested = dir.join("tested-AGENTS.md").display(),
-            xtask = env!("CARGO_BIN_EXE_xtask"),
+            probe = std::env::current_exe().unwrap().display(),
+            xtask = xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
         ),
     );
     executable(
@@ -293,16 +294,42 @@ impl Scratch {
         )
     }
 
-    /// A change under the crate, staged, and the commit through the hook.
-    fn stage_and_commit(&self) -> (i32, String) {
-        write(
-            &self.root,
-            "crates/php_heap/src/lib.rs",
-            "pub fn alloc() {}\npub fn free() {}\n",
-        );
-        self.git(&["add", "--", "crates/php_heap/src/lib.rs"], false);
-        self.run(&["commit", "-q", "-m", "a change under a crate"], true)
+    /// A change under the crate, staged, and the commit through the hook,
+    /// by pathspec where `by_path`.
+    fn stage_and_commit(&self, by_path: bool) -> (i32, String) {
+        let path = "crates/php_heap/src/lib.rs";
+        write(&self.root, path, "pub fn alloc() {}\npub fn free() {}\n");
+        self.git(&["add", "--", path], false);
+        let mut args = vec!["commit", "-q", "-m", "a change under a crate"];
+        if by_path {
+            args.extend(["--", path]);
+        }
+        self.run(&args, true)
     }
+}
+
+/// A map test as `xtask test` runs it under the hook: the stand-in `cargo
+/// xtask test` runs this with the hook's environment, and it runs itself
+/// again under [`xtask::test::without_git`], as the instrument runs a test
+/// executable, where it reads the map as the map tests do and writes it
+/// where `HOOKS_TESTED` names. Run by nothing else, it does nothing.
+#[test]
+#[ignore = "the stand-in `cargo xtask test` runs it under the hook"]
+fn as_xtask_test_runs_a_map_test() {
+    let Some(tested) = std::env::var_os("HOOKS_TESTED") else {
+        return;
+    };
+    if std::env::var_os("HOOKS_UNDER_TEST").is_some() {
+        let root = std::env::current_dir().unwrap();
+        let map = xtask::test::committed(&root, "AGENTS.md").unwrap_or_else(|e| format!("{e:#}"));
+        fs::write(tested, map).unwrap();
+        return;
+    }
+    let mut test = Command::new(std::env::current_exe().unwrap());
+    test.args(["--exact", "as_xtask_test_runs_a_map_test", "--ignored"])
+        .env("HOOKS_UNDER_TEST", "1");
+    xtask::test::without_git(&mut test);
+    assert!(test.status().unwrap().success());
 }
 
 // ---------------------------------------------------------------- pre-commit
@@ -311,8 +338,8 @@ impl Scratch {
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
 /// then `xtask regions --staged` over the six region files and not the
 /// gitignored local one, which reaches `computed run`, and `computed
-/// check` over the six; then `clippy` and `test`, then `witness` and `crosscheck` at once
-/// (#1252), crosscheck on the staged extensions alone (#1312). The region
+/// check` over the six; then `clippy` and `test`, then `witness` (#1252),
+/// and no `crosscheck`, whose exit the hook never read (revision 140). The region
 /// file `computed` rewrote is re-staged before `test` runs, so the map
 /// tests read the map the commit carries from the index (#1416): a hook
 /// that renders after `test` hands it the map before the render and fails
@@ -321,7 +348,7 @@ impl Scratch {
 fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let scratch = scratch("rendered", &Computed::Rendered);
     let before = scratch.head();
-    let (code, out) = scratch.stage_and_commit();
+    let (code, out) = scratch.stage_and_commit(false);
     assert_eq!(code, 0, "{out}");
     assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 
@@ -336,10 +363,9 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         "xtask vocab --staged",
         "xtask permit --diff",
     ];
-    let building = ["xtask witness --staged", "xtask crosscheck --staged"];
+    let building = ["xtask witness --staged"];
     let mut calls = scratch.calls("cargo");
     calls[1..6].sort_unstable();
-    calls[9..11].sort_unstable();
     let rendering = format!("xtask regions --staged {regions}");
     let mut expected: Vec<String> = ["fmt --check"]
         .into_iter()
@@ -350,7 +376,6 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         .map(str::to_owned)
         .collect();
     expected[1..6].sort_unstable();
-    expected[9..11].sort_unstable();
     assert_eq!(calls, expected);
     let tested = fs::read_to_string(scratch.dir.join("tested-AGENTS.md")).unwrap();
     assert!(
@@ -381,6 +406,25 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         Vec::<String>::new(),
         "nothing under harness-plugins/ was staged, so the declarations step did not run"
     );
+}
+
+/// A commit by pathspec, the shape AGENTS.md asks for, is written from a
+/// second index git hands the hook, and the checkout's own stays locked
+/// and stale through it: the map test `xtask test` runs reads the render
+/// the hook re-staged, the map the commit carries, and not the one before
+/// it, though the instrument takes git's variables from its tests (#2747).
+#[test]
+fn a_commit_by_pathspec_tests_the_map_it_carries() {
+    let scratch = scratch("rendered-by-path", &Computed::Rendered);
+    let (code, out) = scratch.stage_and_commit(true);
+    assert_eq!(code, 0, "{out}");
+    let tested = fs::read_to_string(scratch.dir.join("tested-AGENTS.md")).unwrap();
+    assert!(
+        tested.ends_with("rendered\n"),
+        "`xtask test` read the map from the checkout's index and not the commit's: {tested}"
+    );
+    let agents = scratch.git(&["show", "HEAD:AGENTS.md"], false);
+    assert!(agents.ends_with("rendered\n"), "{agents}");
 }
 
 /// The fields a stand-in `claude` call recorded after its arguments.
@@ -611,7 +655,7 @@ fn pre_commit_names_a_build_that_writes_no_declarations_and_allows_the_commit() 
 fn a_hand_edited_region_refuses_the_commit_naming_computed_check() {
     let scratch = scratch("hand-edited", &Computed::HandEdited);
     let before = scratch.head();
-    let (code, out) = scratch.stage_and_commit();
+    let (code, out) = scratch.stage_and_commit(false);
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(out.contains("run `computed check`"), "{out}");
@@ -627,7 +671,7 @@ fn a_hand_edited_region_refuses_the_commit_naming_computed_check() {
 fn a_region_whose_command_fails_refuses_the_commit() {
     let scratch = scratch("failing-render", &Computed::Failing);
     let before = scratch.head();
-    let (code, out) = scratch.stage_and_commit();
+    let (code, out) = scratch.stage_and_commit(false);
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(out.contains("exec unrendered failed; body kept"), "{out}");
@@ -641,7 +685,7 @@ fn a_region_whose_command_fails_refuses_the_commit() {
 fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
     let scratch = scratch("untrusted", &Computed::Untrusted);
     let before = scratch.head();
-    let (code, out) = scratch.stage_and_commit();
+    let (code, out) = scratch.stage_and_commit(false);
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(
@@ -654,28 +698,101 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
 }
 
 /// An instrument that fails past the first group refuses the commit by
-/// name, and the ones after it still run: every command's exit is read,
-/// none short-circuits.
+/// name: `test` still runs after a `clippy` refusal, so the commit says
+/// both, and `witness`, whose lanes' build takes minutes, is not started
+/// for a commit already refused (revision 140).
 #[test]
-fn a_failing_instrument_refuses_the_commit_and_the_rest_still_run() {
+fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
     let scratch = scratch("failing", &Computed::Rendered);
     scratch.refuse("xtask clippy");
     let before = scratch.head();
-    let (code, out) = scratch.stage_and_commit();
+    let (code, out) = scratch.stage_and_commit(false);
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(
         out.contains("pre-commit: cargo xtask clippy --staged failed"),
         "{out}"
     );
+    assert!(out.contains("refused before witness ran"), "{out}");
     let calls = scratch.calls("cargo");
-    for after in ["xtask test --staged", "xtask witness --staged"] {
-        assert!(calls.iter().any(|c| c == after), "{after}: {calls:?}");
-    }
+    assert!(
+        calls.iter().any(|c| c == "xtask test --staged"),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.starts_with("xtask witness")),
+        "{calls:?}"
+    );
     assert!(
         calls.iter().any(|c| c.starts_with("xtask regions")),
         "{calls:?}"
     );
+}
+
+/// A merge committed through `git commit` after `--no-commit`, the way
+/// /specs merges into `main`, runs `clippy` and `test` and no `witness`:
+/// the merge check's `witness --unmeasured` measures the merged tree
+/// (revision 140).
+#[test]
+fn a_merge_commit_runs_no_witness() {
+    let scratch = scratch("merge-witness", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    scratch.git(&["checkout", "-q", "-b", "t9", &main], false);
+    write(
+        &scratch.root,
+        "crates/php_heap/src/lib.rs",
+        "pub fn alloc() {}\npub fn free() {}\n",
+    );
+    scratch.git(&["commit", "-q", "-am", "the work of #9"], false);
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t9"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("a merge commit; witness is the merge check's"),
+        "{out}"
+    );
+    let calls = scratch.calls("cargo");
+    for ran in ["xtask clippy --staged", "xtask test --staged"] {
+        assert!(calls.iter().any(|c| c == ran), "{ran}: {calls:?}");
+    }
+    assert!(
+        !calls.iter().any(|c| c.starts_with("xtask witness")),
+        "{calls:?}"
+    );
+}
+
+/// git reads the file `-F` names only after pre-commit, so a missing one
+/// is refused by the hook before any instrument starts, by name; one that
+/// exists is committed (revision 140).
+#[test]
+fn a_missing_message_file_is_refused_before_anything_runs() {
+    let scratch = scratch("message-file", &Computed::Rendered);
+    let path = "crates/php_heap/src/lib.rs";
+    write(&scratch.root, path, "pub fn alloc() {}\npub fn free() {}\n");
+    scratch.git(&["add", "--", path], false);
+    let missing = scratch.dir.join("no-such.msg");
+    let before = scratch.head();
+    let (code, out) = scratch.run(
+        &["commit", "-q", "-F", missing.to_str().unwrap(), "--", path],
+        true,
+    );
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    assert!(out.contains("not a file git can read"), "{out}");
+    assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
+
+    let message = scratch.dir.join("change.msg");
+    fs::write(&message, "a change under a crate\n").unwrap();
+    let (code, out) = scratch.run(
+        &["commit", "-q", "-F", message.to_str().unwrap(), "--", path],
+        true,
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
 }
 
 /// A refusal among the instruments that only read the tree ends the hook
@@ -688,7 +805,7 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
     let scratch = scratch("vocab", &Computed::Rendered);
     scratch.refuse("xtask vocab");
     let before = scratch.head();
-    let (code, out) = scratch.stage_and_commit();
+    let (code, out) = scratch.stage_and_commit(false);
     assert_eq!(code, 1, "{out}");
     assert_eq!(scratch.head(), before, "the commit was refused: {out}");
     assert!(

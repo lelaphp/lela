@@ -45,18 +45,19 @@ pub mod syntax {
     };
 }
 
-use php_heap::{Fatal, Intern};
+use php_heap::{Fatal, FatalReason, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
-use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name, Visibility};
+use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Visibility};
 use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
 #[allow(clippy::struct_excessive_bools)] // php's compile-time ini entries and compiler options, each one fact
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
-    /// The file name the unit and its errors carry.
-    pub filename: Name,
+    /// The file name the unit and its errors carry, borrowed: the unit
+    /// takes its own copy where an op array or a declaration records it.
+    pub filename: &'a [u8],
     /// Whether the source is a file or the string an `eval` hands over.
     pub kind: SourceKind,
     /// The working directory of the request the unit compiles for,
@@ -65,7 +66,7 @@ pub struct Options<'a> {
     /// `.` (`zend_try_ct_eval_magic_const`). The host that described the
     /// request is what knows it; the compiler reads no directory of the
     /// process's own.
-    pub cwd: Vec<u8>,
+    pub cwd: &'a [u8],
     /// Whether the caller's `declare(strict_types=1)` is in force.
     pub strict_types: bool,
     /// php's `precision` ini entry as it stands while the file compiles,
@@ -164,9 +165,9 @@ pub struct Options<'a> {
 impl Default for Options<'_> {
     fn default() -> Self {
         Options {
-            filename: Name::default(),
+            filename: &[],
             kind: SourceKind::File,
-            cwd: Vec::new(),
+            cwd: &[],
             strict_types: false,
             precision: 14,
             short_open_tag: true,
@@ -529,10 +530,7 @@ fn compile_scanned<'p>(
                 // compile asked for the memory.
                 Err(fatal) => Err(CompileError {
                     level: Level::Error,
-                    message: match fatal {
-                        Fatal::Error(message) => message,
-                        Fatal::OutOfMemory(_) => String::from("Out of memory"),
-                    },
+                    message: fatal_message(fatal),
                     line: unit.main.line_end,
                     raised: unit.diagnostics,
                     thrown: false,
@@ -675,11 +673,20 @@ fn level_of(level: php_syntax::Level) -> Level {
     }
 }
 
+/// The sentence a compile ends in where the heap refused it a fatal:
+/// the fatal's own message, and php's `Out of memory` for the limit.
+pub(crate) fn fatal_message(fatal: Fatal) -> String {
+    match fatal.into_reason() {
+        FatalReason::Error(message) => message,
+        FatalReason::OutOfMemory(_) => String::from("Out of memory"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use php_link::Names;
-    use php_unit::decl::{ConstExpr, ConstantName, NameKind, Parameter, Type, Visibility};
+    use php_unit::decl::{ConstExpr, ConstantName, Name, NameKind, Parameter, Type, Visibility};
     use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
 
     /// A dump read as text by the tests below, which hold it to php's
@@ -748,12 +755,10 @@ mod tests {
         b"exit",
     ];
 
-    /// The natives with a frameless entry the tests below call, as
-    /// `ext/standard` declares them: the name, the parameters as php's
-    /// stub has them with a default where the stub has one, and the
-    /// arities of `frameless_function_infos_<name>`.
-    fn frameless_natives() -> Vec<FunctionDecl> {
-        let parameter = |name: &str, ty: Type, default: Option<ConstExpr>| Parameter {
+    /// A native's parameter as its stub declares it, by value, with its
+    /// default where it has one.
+    fn parameter(name: &str, ty: Type, default: Option<ConstExpr>) -> Parameter {
+        Parameter {
             name: Name::from(name),
             ty: Some(ty),
             by_ref: false,
@@ -765,40 +770,87 @@ mod tests {
                 php_unit::decl::ParameterDefault::Expr,
             ),
             attributes: Vec::new(),
+        }
+    }
+
+    /// The natives with a frameless entry the tests below call, as
+    /// `ext/standard` declares them, in `basic_functions.stub.php`'s
+    /// order, which is `zend_flf_functions`' among them: the name, the
+    /// parameters as php's stub has them with a default where the stub
+    /// has one, and the arities of `frameless_function_infos_<name>`;
+    /// and `join` and `strchr`, aliases php registers with none.
+    fn frameless_natives() -> Vec<FunctionDecl> {
+        let string = |name| parameter(name, Type::String, None);
+        let either = |name| parameter(name, Type::Union(vec![Type::Array, Type::String]), None);
+        let nullable =
+            |name, ty| parameter(name, Type::Nullable(Box::new(ty)), Some(ConstExpr::Null));
+        let long = |name, value| {
+            let radix = php_unit::decl::Radix::Decimal;
+            parameter(name, Type::Int, Some(ConstExpr::Long { value, radix }))
+        };
+        let haystack =
+            |more: Vec<Parameter>| [vec![string("haystack"), string("needle")], more].concat();
+        let implode = || vec![either("separator"), nullable("array", Type::Array)];
+        let before = || {
+            haystack(vec![parameter(
+                "before_needle",
+                Type::Bool,
+                Some(ConstExpr::Bool(false)),
+            )])
+        };
+        let characters = Some(ConstExpr::Str(b" ".as_slice().into()));
+        let count = Parameter {
+            by_ref: true,
+            ..parameter("count", Type::Mixed, Some(ConstExpr::Null))
         };
         [
             (
                 "trim",
                 vec![
-                    parameter("string", Type::String, None),
-                    parameter(
-                        "characters",
-                        Type::String,
-                        Some(ConstExpr::Str(b" ".as_slice().into())),
-                    ),
+                    string("string"),
+                    parameter("characters", Type::String, characters),
                 ],
                 vec![1, 2],
             ),
+            ("implode", implode(), vec![1, 2]),
+            ("join", implode(), vec![]),
             (
-                "str_contains",
-                vec![
-                    parameter("haystack", Type::String, None),
-                    parameter("needle", Type::String, None),
-                ],
-                vec![2],
+                "dirname",
+                vec![string("path"), long("levels", 1)],
+                vec![1, 2],
             ),
+            ("strstr", before(), vec![2, 3]),
+            ("strchr", before(), vec![]),
+            ("strpos", haystack(vec![long("offset", 0)]), vec![2, 3]),
+            ("str_contains", haystack(vec![]), vec![2]),
+            ("str_starts_with", haystack(vec![]), vec![2]),
             (
                 "substr",
                 vec![
-                    parameter("string", Type::String, None),
+                    string("string"),
                     parameter("offset", Type::Int, None),
-                    parameter(
-                        "length",
-                        Type::Nullable(Box::new(Type::Int)),
-                        Some(ConstExpr::Null),
-                    ),
+                    nullable("length", Type::Int),
                 ],
                 vec![2, 3],
+            ),
+            (
+                "strtr",
+                vec![
+                    string("string"),
+                    either("from"),
+                    nullable("to", Type::String),
+                ],
+                vec![2, 3],
+            ),
+            (
+                "str_replace",
+                vec![
+                    either("search"),
+                    either("replace"),
+                    either("subject"),
+                    count,
+                ],
+                vec![3],
             ),
         ]
         .into_iter()
@@ -1239,8 +1291,8 @@ mod tests {
         fn dir(filename: &[u8], cwd: &[u8]) -> Option<Vec<u8>> {
             let mut strings = php_heap::Strings::new();
             let options = Options {
-                filename: Name(filename.into()),
-                cwd: cwd.to_vec(),
+                filename,
+                cwd,
                 ..Options::default()
             };
             let unit = compile(
@@ -3614,14 +3666,57 @@ mod tests {
         assert_eq!(
             rows,
             [
-                (Opcode::FramelessIcall2, 2),
+                (Opcode::FramelessIcall2, 10),
                 (Opcode::FramelessIcall1, 0),
                 (Opcode::FramelessIcall2, 1),
-                (Opcode::FramelessIcall2, 3),
-                (Opcode::FramelessIcall2, 2),
+                (Opcode::FramelessIcall2, 12),
+                (Opcode::FramelessIcall2, 10),
             ],
-            "zend_flf_functions in registration order: trim 1, trim 2, str_contains 2, substr 2, substr 3"
+            "zend_flf_functions in registration order: trim 1, trim 2, implode 1, implode 2, dirname 1, dirname 2, strstr 2, strstr 3, strpos 2, strpos 3, str_contains 2, str_starts_with 2, substr 2, substr 3"
         );
+    }
+
+    /// A call of each of the seven natives #2673 found with no entry, at
+    /// each arity php declares for it, is a `FRAMELESS_ICALL_<n>` with
+    /// its row of `zend_flf_functions` as `basic_functions.stub.php`
+    /// orders them; a call of `join` or `strchr`, aliases php declares
+    /// no entry for, and `str_replace` with its fourth argument, above
+    /// every arity, stay the ordinary call.
+    #[test]
+    fn each_arity_php_declares_is_a_frameless_call_with_its_row() {
+        let source = b"<?php implode($a); implode($a, $b); dirname($a); dirname($a, 2); strstr($a, $b); strstr($a, $b, true); strpos($a, $b); strpos($a, $b, 1); str_starts_with($a, $b); strtr($a, $b); strtr($a, $b, $c); str_replace($a, $b, $c); join($a, $b); strchr($a, $b); str_replace($a, $b, $c, $d);";
+        let unit = unit_of(source);
+        let rows: Vec<(Opcode, u32)> = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode.is_frameless_icall())
+            .map(|op| (op.opcode, op.extended_value))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Opcode::FramelessIcall1, 2),
+                (Opcode::FramelessIcall2, 3),
+                (Opcode::FramelessIcall1, 4),
+                (Opcode::FramelessIcall2, 5),
+                (Opcode::FramelessIcall2, 6),
+                (Opcode::FramelessIcall3, 7),
+                (Opcode::FramelessIcall2, 8),
+                (Opcode::FramelessIcall3, 9),
+                (Opcode::FramelessIcall2, 11),
+                (Opcode::FramelessIcall2, 14),
+                (Opcode::FramelessIcall3, 15),
+                (Opcode::FramelessIcall3, 16),
+            ]
+        );
+        let ordinary = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode == Opcode::InitFcall)
+            .count();
+        assert_eq!(ordinary, 3, "join, strchr and str_replace of four");
     }
 
     /// A third argument rides in an `OP_DATA` after the opline
@@ -6142,6 +6237,152 @@ echo f(1), C::s(), $o->m(1), $o->p;
             vec![true, false, true]
         );
         assert_eq!(unit.methods.len(), 3);
+    }
+
+    /// `zend_compile_method_call` and `zend_compile_static_call` against
+    /// the class being compiled (#2675): `$this->p()` to a private and
+    /// `$this->f()` to a final method the class declared before the call
+    /// are `DO_UCALL` with the arguments sent by the parameters, by
+    /// reference to `&$a`, where a public one stays `DO_FCALL` and so
+    /// does the method calling itself, which is public; `self::s()` and
+    /// `C::s()` inside `class C` are `DO_UCALL` too, the second in `s`'s
+    /// own body, which `zend_begin_method_decl` put in the table before
+    /// it compiled.
+    #[test]
+    fn a_call_the_class_being_compiled_pins_down_is_do_ucall() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    private function p($a) {}
+    final public function f(&$a) {}
+    public function g($a) {}
+    public static function s($a) { return C::s($a); }
+    public function m($a) {
+        $this->p($a);
+        $this->f($a);
+        $this->g($a);
+        self::s(1);
+        return $this->m($a);
+    }
+}
+",
+        );
+        let s = "0000 CV0($a) = RECV 1\n\
+                 0001 INIT_STATIC_METHOD_CALL 1 string(\"C\") string(\"s\")\n\
+                 0002 SEND_VAR CV0($a) 1\n\
+                 0003 V1 = DO_UCALL\n\
+                 0004 RETURN V1\n\
+                 0005 RETURN null\n";
+        let m = "0000 CV0($a) = RECV 1\n\
+                 0001 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
+                 0002 SEND_VAR CV0($a) 1\n\
+                 0003 DO_UCALL\n\
+                 0004 INIT_METHOD_CALL 1 THIS string(\"f\")\n\
+                 0005 SEND_REF CV0($a) 1\n\
+                 0006 DO_UCALL\n\
+                 0007 INIT_METHOD_CALL 1 THIS string(\"g\")\n\
+                 0008 SEND_VAR_EX CV0($a) 1\n\
+                 0009 DO_FCALL\n\
+                 0010 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"s\")\n\
+                 0011 SEND_VAL int(1) 1\n\
+                 0012 DO_UCALL\n\
+                 0013 INIT_METHOD_CALL 1 THIS string(\"m\")\n\
+                 0014 SEND_VAR_EX CV0($a) 1\n\
+                 0015 V5 = DO_FCALL\n\
+                 0016 RETURN V5\n\
+                 0017 RETURN null\n";
+        assert!(dump.contains(s), "php's C::s, {dump}");
+        assert!(dump.contains(m), "php's C::m, {dump}");
+    }
+
+    /// `zend_delayed_compile_prop` under `zend_compile_encaps_list`
+    /// (#2676): `"$this->p"` inside a method reads the property off the
+    /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.
+    #[test]
+    fn this_s_property_in_a_string_is_fetched_off_this() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    public function m() { return \"$this->p {$this->p}\"; }
+}
+",
+        );
+        let m = "0000 T0 = FETCH_OBJ_R THIS string(\"p\")\n\
+                 0001 T3 = ROPE_INIT 3 T0\n\
+                 0002 T3 = ROPE_ADD 1 T3 string(\" \")\n\
+                 0003 T1 = FETCH_OBJ_R THIS string(\"p\")\n\
+                 0004 T2 = ROPE_END 2 T3 T1\n\
+                 0005 RETURN T2\n\
+                 0006 RETURN null\n";
+        assert!(dump.contains(m), "php's C::m, {dump}");
+    }
+
+    /// `zend_compile_foreach` over `$this` (#2687): by reference the
+    /// subject is compiled under `BP_VAR_W`, `FETCH_THIS` into a `VAR`
+    /// and `FE_RESET_RW` over it; by value under `BP_VAR_R`, into a
+    /// temporary.
+    #[test]
+    fn foreach_over_this_by_reference_fetches_it_into_a_var() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    public function g() { foreach ($this as &$v) {} foreach ($this as $v) {} }
+}
+",
+        );
+        let g = "0000 V1 = FETCH_THIS\n\
+                 0001 V2 = FE_RESET_RW V1 0004\n\
+                 0002 FE_FETCH_RW V2 CV0($v) 0004\n\
+                 0003 JMP 0002\n\
+                 0004 FE_FREE V2\n\
+                 0005 T3 = FETCH_THIS\n\
+                 0006 V4 = FE_RESET_R T3 0009\n\
+                 0007 FE_FETCH_R V4 CV0($v) 0009\n\
+                 0008 JMP 0007\n\
+                 0009 FE_FREE V4\n\
+                 0010 RETURN null\n";
+        assert!(dump.contains(g), "php's C::g, {dump}");
+    }
+
+    /// `zend_is_assign_to_self` through a property (#2683): `$a->x[] =
+    /// $a` and `$a[0]->p[1] = $a` read `$a` into a temporary first,
+    /// numbered after the delayed fetches, and `OP_DATA` carries it.
+    #[test]
+    fn an_assignment_to_self_through_a_property_reads_the_value_first() {
+        let dump = dump_of(
+            b"<?php
+$a = new stdClass;
+$a->x[] = $a;
+$a[0]->p[1] = $a;
+",
+        );
+        let main = "0003 T6 = QM_ASSIGN CV0($a)\n\
+                    0004 V4 = FETCH_OBJ_W (dim write) CV0($a) string(\"x\")\n\
+                    0005 ASSIGN_DIM V4 NEXT\n\
+                    0006 OP_DATA T6\n\
+                    0007 T10 = QM_ASSIGN CV0($a)\n\
+                    0008 V7 = FETCH_DIM_W CV0($a) int(0)\n\
+                    0009 V8 = FETCH_OBJ_W (dim write) V7 string(\"p\")\n\
+                    0010 ASSIGN_DIM V8 int(1)\n\
+                    0011 OP_DATA T10\n\
+                    0012 RETURN int(1)\n";
+        assert!(dump.contains(main), "php's main, {dump}");
+        // `zend_is_variable` takes no call, so the walk stops at
+        // `$a->m()`, and a `static` property's class is walked into.
+        let dump = dump_of(b"<?php\n$a->m()->x[0] = $a;\n$a::$s[0] = $a;\n");
+        let main = "0000 INIT_METHOD_CALL 0 CV0($a) string(\"m\")\n\
+                    0001 V1 = DO_FCALL\n\
+                    0002 V1 = SEPARATE V1\n\
+                    0003 V2 = FETCH_OBJ_W (dim write) V1 string(\"x\")\n\
+                    0004 ASSIGN_DIM V2 int(0)\n\
+                    0005 OP_DATA CV0($a)\n\
+                    0006 V4 = FETCH_CLASS (exception) CV0($a)\n\
+                    0007 T7 = QM_ASSIGN CV0($a)\n\
+                    0008 V5 = FETCH_STATIC_PROP_W (dim write) string(\"s\") V4\n\
+                    0009 ASSIGN_DIM V5 int(0)\n\
+                    0010 OP_DATA T7\n\
+                    0011 RETURN int(1)\n";
+        assert!(dump.contains(main), "php's main, {dump}");
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk

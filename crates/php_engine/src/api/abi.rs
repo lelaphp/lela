@@ -54,8 +54,8 @@ pub use class::{
     Typed,
 };
 pub use marshal::{
-    False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null, NullDefault,
-    OrFalse, Passed, Path, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
+    Absent, False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null,
+    NullDefault, OrFalse, Passed, Path, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
 };
 /// The encoding functions' vocabulary (`zend_multibyte_functions`),
 /// which the compiler's scanner calls and an extension implements for
@@ -529,9 +529,9 @@ pub(crate) type InterruptHook =
 /// adds.
 pub(crate) type TicksHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The compile hook, php's `zend_compile_file` as an extension overrides
-/// it: the source a file compiles from, where the extension replaces it.
+/// it: [`ExtensionBuilder::compile_file`].
 pub(crate) type CompileFileHook =
-    fn(&mut Request, Beneath<'_, chain::CompileFile>) -> Result<Option<Vec<u8>>, Thrown>;
+    fn(&mut Request, Beneath<'_, chain::CompileFile>) -> Result<Option<Compiled>, Thrown>;
 /// The string compile hook, php's `zend_compile_string` as an extension
 /// overrides it: [`ExtensionBuilder::compile_string`].
 pub(crate) type CompileStringHook =
@@ -1276,16 +1276,18 @@ impl ExtensionBuilder {
     }
 
     /// `zend_compile_file` overridden, as phar's `MINIT` overrides it
-    /// with `phar_compile_file`: before a file is compiled, by an
-    /// include, `spl_autoload` or as the primary file, `hook` is handed
-    /// its path with the one beneath ([`Beneath`]) and may answer the
-    /// source to compile under that path in place of the file's own,
-    /// which the engine compiles as the request's own unit and publishes
-    /// nowhere; `None` leaves the file to the unit cache, which is what
-    /// the chain answers beneath every link. Two extensions' hooks chain
-    /// as php's saved pointer does: the later is served first, and the
-    /// earlier where the later serves the one beneath, as phar's does for
-    /// a file it does not serve.
+    /// with `phar_compile_file` and phpdbg with `phpdbg_compile_file`:
+    /// every file compiled, by an include, `spl_autoload` or as the
+    /// primary file, is served by `hook`, handed its path with the one
+    /// beneath ([`Beneath`]), which it serves where its work is to stand
+    /// and whose compiled file it answers or reads, or hands a source of
+    /// its own to compile under the path in place of the file's
+    /// (`Beneath::with_source`). Beneath every link stands the engine's
+    /// cached compile, the unit cache's lookup and compile of the file,
+    /// with opcache's admission deciding inside it. Two extensions' hooks
+    /// chain as php's saved pointer does: the later is served first, and
+    /// the earlier where the later serves the one beneath, as phar's does
+    /// for a file it does not serve.
     #[must_use]
     pub fn compile_file(mut self, hook: CompileFileHook) -> ExtensionBuilder {
         self.supplies.compile_file = Some(hook);

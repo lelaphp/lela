@@ -12,14 +12,14 @@ use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use php_proto::http::{self, Credentials, Events, Parser};
 use php_proto::vpath;
 use php_sapi::cgi::Disk;
 use php_sapi::{
-    Aborted, Method, OutputSink, PHP_VERSION, ProgramFile, RequestDescription, ResponseHead,
-    Routed, WebRequest,
+    Aborted, Method, OutputSink, PHP_VERSION, ProgramFile, ProgramServed, RequestDescription,
+    ResponseHead, Routed, WebRequest,
 };
 
 use super::Site;
@@ -363,28 +363,30 @@ fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
     if site.router.is_none() && is_static {
         return send_static(site, client);
     }
-    if !is_static
-        && request
-            .path_translated
-            .as_ref()
-            .is_some_and(|path| path.contains(&0))
-    {
-        return error_page(site, client, 400);
-    }
-    let mut sink = WireSink {
-        wire: Arc::new(Mutex::new(Wire {
+    let sink = Box::new(WireSink {
+        wire: Wire {
             stream: client.stream.try_clone().ok(),
             version: request.version,
             host: request.header(b"host").map(<[u8]>::to_vec),
-        })),
+        },
         site: Arc::clone(site),
-    };
+    });
     let description = describe(site, &client, is_static);
-    let (_, dispatched) = site
+    let (_, dispatched, _) = site
         .engine
-        .dispatch(description, site.router.as_deref(), &mut sink);
-    if let Some(code) = dispatched.code {
-        log_response(site, &client, code, None, dispatched.fatal.as_ref());
+        .dispatch(description, site.router.as_deref(), sink);
+    match &dispatched.program {
+        Some(ProgramServed::Ran { code, fatal }) => {
+            log_response(site, &client, *code, None, fatal.as_ref());
+        }
+        // `php_cli_server_send_error_page`'s line for the 400 page that
+        // `php_request_shutdown`'s head and the connection's close leave
+        // unsent.
+        Some(ProgramServed::NulInPath) => {
+            let errno = super::strerror(&std::io::Error::last_os_error());
+            log_response(site, &client, 400, Some(&errno), None);
+        }
+        None => {}
     }
     if dispatched.routed == Routed::Declined && is_static {
         // The file, after what the router wrote under the head it did
@@ -473,8 +475,15 @@ fn server_variables(site: &Site, client: &Client) -> Vec<(Vec<u8>, Vec<u8>)> {
     if let Some(vpath) = &request.vpath {
         rows.push((b"SCRIPT_NAME".to_vec(), vpath.clone()));
     }
-    if let Some(file) = request.path_translated.as_ref().or(site.router.as_ref()) {
-        rows.push((b"SCRIPT_FILENAME".to_vec(), file.clone()));
+    // `SCRIPT_FILENAME` is registered through `strlen`, and `PHP_SELF`
+    // with the path's info through `%s%s`, so each stops at a NUL where
+    // `SCRIPT_NAME` and `PATH_INFO`, registered with their lengths, keep it.
+    let script_filename = match (&request.path_translated, &site.router) {
+        (Some(file), _) => Some(php_proto::c_str(file)),
+        (None, router) => router.as_deref(),
+    };
+    if let Some(file) = script_filename {
+        rows.push((b"SCRIPT_FILENAME".to_vec(), file.to_vec()));
     }
     if let Some(info) = &request.path_info {
         rows.push((b"PATH_INFO".to_vec(), info.clone()));
@@ -482,7 +491,10 @@ fn server_variables(site: &Site, client: &Client) -> Vec<(Vec<u8>, Vec<u8>)> {
     let vpath = request.vpath.clone().unwrap_or_default();
     match &request.path_info {
         Some(info) if !info.is_empty() => {
-            rows.push((b"PHP_SELF".to_vec(), [vpath, info.clone()].concat()));
+            rows.push((
+                b"PHP_SELF".to_vec(),
+                [php_proto::c_str(&vpath), php_proto::c_str(info)].concat(),
+            ));
         }
         _ if request.vpath.is_some() => rows.push((b"PHP_SELF".to_vec(), vpath)),
         _ => {}
@@ -582,18 +594,12 @@ impl Wire {
 /// in milliseconds: `send_through`'s `tv` of ten seconds.
 const SEND_WAIT: i32 = 10_000;
 
-/// The sink a PHP request holds, `sapi_cli_server_ub_write` and
+/// The sink a PHP request owns, `sapi_cli_server_ub_write` and
 /// `sapi_cli_server_send_headers`: the body and the head onto the
 /// [`Wire`] as the request writes them, the log onto the server's.
 struct WireSink {
-    wire: Arc<Mutex<Wire>>,
+    wire: Wire,
     site: Arc<Site>,
-}
-
-impl WireSink {
-    fn wire(&self) -> std::sync::MutexGuard<'_, Wire> {
-        self.wire.lock().unwrap_or_else(PoisonError::into_inner)
-    }
 }
 
 impl OutputSink for WireSink {
@@ -622,7 +628,7 @@ impl OutputSink for WireSink {
     /// 11 early
     /// ```
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        if self.wire().send(bytes) {
+        if self.wire.send(bytes) {
             Ok(())
         } else {
             Err(Aborted { exit_status: None })
@@ -632,9 +638,8 @@ impl OutputSink for WireSink {
     fn flush(&mut self) {}
 
     fn send_headers(&mut self, head: &ResponseHead) {
-        let mut wire = self.wire();
-        let bytes = wire.render(head);
-        let _ = wire.send(&bytes);
+        let bytes = self.wire.render(head);
+        let _ = self.wire.send(&bytes);
     }
 
     /// `sapi_cli_server_log_message`: the entry on the server's log.
@@ -646,13 +651,6 @@ impl OutputSink for WireSink {
 
     fn write_stderr(&mut self, bytes: &[u8]) {
         std::io::stderr().lock().write_all(bytes).ok();
-    }
-
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(WireSink {
-            wire: Arc::clone(&self.wire),
-            site: Arc::clone(&self.site),
-        }))
     }
 }
 
@@ -705,8 +703,8 @@ fn send_static(site: &Site, client: Client) -> Connection {
     }
     if request
         .path_translated
-        .as_ref()
-        .is_some_and(|path| path.contains(&0))
+        .as_deref()
+        .is_some_and(vpath::holds_nul)
     {
         return error_page(site, client, 400);
     }

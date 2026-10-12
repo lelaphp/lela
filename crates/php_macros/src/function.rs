@@ -18,8 +18,7 @@ use crate::{bytes, cfgs, error, php_name, root};
 pub(crate) struct Param {
     pub(crate) ident: Ident,
     pub(crate) ty: Type,
-    /// The default's `ConstExpr`, and whether it is `null`.
-    default: Option<(Tokens, bool)>,
+    default: Option<Default>,
     keys: Keys,
 }
 
@@ -33,6 +32,17 @@ pub(crate) struct Signature {
     pub(crate) params: Vec<Param>,
     /// The return type, `()` where none is written.
     pub(crate) output: Type,
+}
+
+/// A parameter's `#[php(default = ..)]`.
+struct Default {
+    /// The `ConstExpr` the declaration carries.
+    expr: Tokens,
+    /// The `Absent` the entry lays down where the call gives no argument
+    /// ([`expr::absent`]).
+    absent: Tokens,
+    /// Whether the default is `null`.
+    null: bool,
 }
 
 const PARAMETER_KEYS: &[(&str, Form)] = &[
@@ -102,7 +112,11 @@ pub(crate) fn read(sig: &mut syn::Signature) -> syn::Result<Signature> {
             Some(tokens) => {
                 let null = matches!(tokens.clone().into_iter().collect::<Vec<_>>().as_slice(),
                     [TokenTree::Ident(word)] if word == "null");
-                Some((const_expr(tokens.clone())?, null))
+                Some(Default {
+                    expr: const_expr(tokens.clone())?,
+                    absent: expr::absent(tokens.clone())?,
+                    null,
+                })
             }
             None => None,
         };
@@ -154,7 +168,10 @@ pub(crate) fn declared_parameters(params: &[Param]) -> syn::Result<Tokens> {
                     }
                 }
             },
-            |(expr, _)| quote!(#root::decl::ParameterDefault::Expr(#expr)),
+            |default| {
+                let expr = &default.expr;
+                quote!(#root::decl::ParameterDefault::Expr(#expr))
+            },
         );
         let prefer_ref = param.keys.has("prefer_ref");
         let attributes = expr::attributes(&param.keys)?;
@@ -188,7 +205,7 @@ pub(crate) fn checks(signature: &Signature, class: Option<&Ident>) -> Vec<Tokens
                 const _: () = assert!(!<#ty as #root::abi::FromArgument>::VARIADIC, #text);
             ));
         }
-        if matches!(param.default, Some((_, true))) {
+        if param.default.as_ref().is_some_and(|default| default.null) {
             out.push(quote! {
                 const _: fn() = || {
                     fn admits<T: #root::abi::NullDefault>() {}
@@ -203,9 +220,9 @@ pub(crate) fn checks(signature: &Signature, class: Option<&Ident>) -> Vec<Tokens
 }
 
 /// The entry's reads: the native recorded as entered, then what
-/// `before_args` names, then the arity, then each argument held at its
-/// position, its default evaluated where
-/// the call gave none. `scope` names the declaring class for a default
+/// `before_args` names, then the call read once, its arity held and its
+/// arguments taken as they stand on it, then each argument held at its
+/// position, its default laid down where the call gave none. `scope` names the declaring class for a default
 /// that reads `self::`; `site` is the native as the source names it, its
 /// `#[php_class]` type or none and its identifier, which `xtask witness`
 /// reads a fence's coverage by (harness §4.5 condition 2, revision 58).
@@ -229,8 +246,11 @@ pub(crate) fn prologue(
         #root::__private::entered(__request, ::core::env!("CARGO_CRATE_NAME"), #owner, #name);
     };
     let before = reads.before.as_ref().map(|path| quote!(#path(__request);));
-    let arity = if reads.manual {
-        quote!()
+    let total = params.len();
+    let arguments = if reads.manual {
+        quote! {
+            let __arguments = #root::__private::arguments::<#total>(__request, 0, None)?;
+        }
     } else {
         let steps = params.iter().map(|param| {
             let ty = &param.ty;
@@ -245,7 +265,6 @@ pub(crate) fn prologue(
                 required += 1;
             }
         });
-        let total = params.len();
         let unbounded = params.last().map_or(quote!(false), |last| {
             let ty = &last.ty;
             quote!(<#ty as #root::abi::FromArgument>::VARIADIC)
@@ -261,28 +280,32 @@ pub(crate) fn prologue(
                 }
                 required
             };
-            #root::__private::arity(__request, required, if #unbounded { None } else { Some(#total) })?;
+            let __arguments = #root::__private::arguments::<#total>(
+                __request,
+                required,
+                if #unbounded { None } else { Some(#total) },
+            )?;
         }
     };
     let holds = params.iter().enumerate().map(|(at, param)| {
         let ident = &param.ident;
         let ty = &param.ty;
         let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
-        let expr = param
-            .default
-            .as_ref()
-            .map_or_else(|| quote!(#root::decl::ConstExpr::Null), |(expr, _)| expr.clone());
+        let absent = param.default.as_ref().map_or_else(
+            || quote!(#root::abi::Absent::Value(#root::values::Value::null())),
+            |default| default.absent.clone(),
+        );
         quote! {
-            let #ident: #ty = match <#ty as #root::abi::FromArgument>::hold(__request, #position)? {
+            let #ident: #ty = match <#ty as #root::abi::FromArgument>::hold(__request, __arguments[#at], #position)? {
                 Some(held) => held,
-                None => <#ty as #root::abi::FromArgument>::from_default(__request, &#expr, #scope, #position)?,
+                None => <#ty as #root::abi::FromArgument>::from_default(__request, #absent, #scope, #position)?,
             };
         }
     });
     quote! {
         #entered
         #before
-        #arity
+        #arguments
         #(#holds)*
     }
 }
@@ -363,7 +386,9 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
         .into_iter()
         .map(|check| quote!(#(#cfg)* #check))
         .collect();
-    let module = |module: &Ident, php: &str| {
+    // php registers an alias as a `ZEND_RAW_FENTRY` with no frameless
+    // infos (`join`, `strchr`), so the native's arities are its own name's.
+    let module = |module: &Ident, php: &str, frameless: &[u32]| {
         let php = bytes(php);
         quote! {
             #(#cfg)*
@@ -388,12 +413,12 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
             }
         }
     };
-    let mut modules = vec![module(&ident, &expr::qualified(&keys, &ident)?)];
+    let mut modules = vec![module(&ident, &expr::qualified(&keys, &ident)?, &frameless)];
     if let Some(tokens) = keys.list("aliases") {
         let aliases = syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated
             .parse2(tokens.clone())?;
         for alias in aliases {
-            modules.push(module(&alias, &expr::qualified(&keys, &alias)?));
+            modules.push(module(&alias, &expr::qualified(&keys, &alias)?, &[]));
         }
     }
     Ok(quote! {

@@ -25,9 +25,12 @@
 //! are: a fixture workspace inside it carries a manifest of its own that
 //! judges the call (#57) and that no build is compiled against, so the
 //! build that judges by it is held to the checkout's. The sources are
-//! compared against the workspace this binary was built in, since that is
-//! the code it was built from, and one binary cannot run another
-//! checkout's.
+//! compared against the workspace this binary runs in ([`built_root`]),
+//! the code it must have been built from: a binary cargo reused from
+//! another checkout sharing the target directory is held to this one's
+//! sources, and is stale where they differ (#2719).
+//!
+//! [`built_root`]: crate::built_root
 //!
 //! One manifest is not held that way: a worktree's. A call in another
 //! checkout of the repository than the one this build was asked about is

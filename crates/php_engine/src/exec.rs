@@ -1023,6 +1023,7 @@ impl RuntimeCache {
     /// up every pass, which is the reading a program that was never
     /// given the slot would have had; php's would be a read past the
     /// allocation.
+    #[inline]
     pub(crate) fn get(&self, slot: CacheSlot) -> Cached {
         self.slots
             .as_ref()
@@ -1110,10 +1111,10 @@ pub(crate) fn init_runtime_cache(map: &mut RuntimeCaches, code: &OpArray, body: 
 /// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
 /// the function's first activation in the request, found laid down by
 /// every one after.
+#[inline]
 pub(crate) fn lay_runtime_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) {
-    let cache = map.map(at);
-    if cache.slots.is_none() {
-        cache.lay_down(cache_size);
+    if !map.laid(at) {
+        map.map(at).lay_down(cache_size);
     }
 }
 
@@ -1182,10 +1183,20 @@ pub(crate) enum Cached {
     /// opline take the slot in turn where php's keep one each. What the
     /// slot holds is what was asked and what answered, never how the
     /// answer was found.
+    ///
+    /// `from` is the function of the frame that wrote the pair where
+    /// that frame is no closure's, which fixes its scope, as
+    /// [`Cached::Property`]'s `function` does: a frame of that function
+    /// reads the pair back without its scope being asked. And `instance`
+    /// is whether the callee takes `$this`, the test of
+    /// `fbc->common.fn_flags` php makes, read where the pair is written,
+    /// as php reads it off the callee it holds.
     ClassAndCallee {
         class: ClassId,
         scope: Option<ClassId>,
+        from: Option<Function>,
         function: Function,
+        instance: bool,
     },
     /// The declared slot a property fetch or assignment over a constant
     /// name placed on its first pass, `CACHE_POLYMORPHIC_PTR_EX(cache_slot,
@@ -1439,6 +1450,7 @@ impl Vm {
     /// `IS_UNDEF` until an opline or a placed argument writes it
     /// (`i_init_func_execute_data`), which is what a read of a CV warns
     /// of. A page the memory limit refuses is the fatal php raises there.
+    #[inline]
     pub(crate) fn push(
         &mut self,
         heap: &mut php_heap::Heap,
@@ -1447,6 +1459,18 @@ impl Vm {
         header: Header,
     ) -> Result<FrameRef, Fatal> {
         self.stack.push_frame(heap, slots, extra_args, header)
+    }
+
+    /// The frame of an unobserved frameless call, off the VM stack's
+    /// pages ([`php_heap::VmStack::push_frameless`]): `slots` slots,
+    /// every one `IS_UNDEF` until its operand is placed; more than three
+    /// is the engine's error.
+    pub(crate) fn push_frameless(
+        &mut self,
+        slots: usize,
+        header: Header,
+    ) -> Result<FrameRef, Fatal> {
+        self.stack.push_frameless(slots, header)
     }
 
     /// A frame that was off the stack back on top of it, the half of a
@@ -1597,6 +1621,7 @@ impl Vm {
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, read off the request's map table
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
+    #[inline]
     pub(crate) fn cached(&self, map: &RuntimeCaches, frame: FrameRef, slot: CacheSlot) -> Cached {
         self.at(frame)
             .and_then(|header| map.get(header.runtime_cache()))
@@ -1680,7 +1705,7 @@ impl Vm {
 /// oplines can be read while the request is borrowed.
 pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal> {
     req.serving(frame).ok_or_else(|| {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: frame {} is serving no op array",
             frame.0
         ))
@@ -1690,7 +1715,7 @@ pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal>
 /// The op array `frame` is serving, out of its unit.
 pub(crate) fn serving_code(serving: &Serving, frame: FrameRef) -> Result<&OpArray, Fatal> {
     serving.code().ok_or_else(|| {
-        Fatal::Error(format!(
+        Fatal::error(format!(
             "InternalError: frame {} names a body its unit has not",
             frame.0
         ))
@@ -1835,13 +1860,13 @@ pub(crate) fn container(
         }
         OperandKind::Unused => req.vm().this(frame).map_or_else(
             || {
-                Err(php_heap::Fatal::Error(format!(
+                Err(php_heap::Fatal::error(format!(
                     "InternalError: {opcode} over $this on a frame with no receiver"
                 )))
             },
             |this| Ok(this.as_value()),
         ),
-        OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::Error(format!(
+        OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::error(format!(
             "InternalError: {opcode} over a constant or a temporary, which php compiles no write over"
         ))),
     }
@@ -2022,12 +2047,84 @@ impl Member {
 /// A method's name as `INIT_METHOD_CALL` and `INIT_STATIC_METHOD_CALL`
 /// carry it in `op2`: the constant pair the compiler wrote, the name as
 /// written and lowered, or the string a `CV` or a temporary holds, which
-/// the handler takes an owner of, lowers itself as `get_method` does
-/// with no key, and gives up with [`MethodName::release`].
+/// the handler takes an owner of, lowers as `get_method` does with no
+/// key ([`MethodName::lowered`]), and gives up with
+/// [`MethodName::release`].
 pub(crate) struct MethodName {
     pub(crate) written: Value,
-    pub(crate) lowered: Vec<u8>,
+    /// The second constant of a constant name's pair, the name lowered,
+    /// `RT_CONSTANT(opline, opline->op2) + 1`, which the unit holds;
+    /// none for a name the program computed.
+    lowered_constant: Option<Value>,
     owned: bool,
+}
+
+/// A name lowered for a table keyed by the lowered name, as php has
+/// one: the compiler's lowered constant, or a name with no upper-case
+/// byte, borrowed (`zend_string_tolower` answers such a name itself);
+/// otherwise lowered into a buffer on the stack where it fits, as
+/// `zend_std_get_method` lowers a name it was given no key for
+/// (`ZSTR_ALLOCA_ALLOC`, `zend_str_tolower_copy`), and allocated only
+/// past [`INLINE_NAME`] bytes, where php's `do_alloca` goes to the
+/// heap too. A name is found under any case whichever of the three
+/// holds it, a name past the stack's bytes too:
+///
+/// ```php
+/// class C {
+///     function hello() { return "hello"; }
+///     static function make() { return "make"; }
+///     function aMethodWhoseNameIsLongerThanSixtyFourBytesSoItsLoweredFormIsAllocated() { return "long"; }
+/// }
+/// $o = new C; $n = 'HeLLo'; $s = 'MAKE';
+/// $long = 'AMETHODWHOSENAMEISLONGERTHANSIXTYFOURBYTESSOITSLOWEREDFORMISALLOCATED';
+/// echo $o->$n(), " ", [$o, 'HELLO'](), " ", C::$s(), " ", ['C', 'Make'](), " ", $o->$long(), "\n";
+/// var_dump(method_exists($o, 'HELLO'), method_exists('C', $long), is_callable([$o, 'Nope']));
+/// ```
+/// ```expect
+/// hello hello make make long
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) enum Lowered<'a> {
+    Borrowed(&'a [u8]),
+    Inline { bytes: [u8; INLINE_NAME], len: u8 },
+    Allocated(Vec<u8>),
+}
+
+/// How many bytes a name [`Lowered`] lowers on the stack holds at most.
+const INLINE_NAME: usize = 64;
+
+impl<'a> Lowered<'a> {
+    /// `name` lowered, borrowed where it has no upper-case byte.
+    #[inline]
+    pub(crate) fn of(name: &'a [u8]) -> Lowered<'a> {
+        if !name.iter().any(u8::is_ascii_uppercase) {
+            return Lowered::Borrowed(name);
+        }
+        match u8::try_from(name.len()) {
+            Ok(len) if name.len() <= INLINE_NAME => {
+                let mut bytes = [0; INLINE_NAME];
+                for (into, byte) in bytes.iter_mut().zip(name) {
+                    *into = byte.to_ascii_lowercase();
+                }
+                Lowered::Inline { bytes, len }
+            }
+            _ => Lowered::Allocated(name.to_ascii_lowercase()),
+        }
+    }
+}
+
+impl std::ops::Deref for Lowered<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Lowered::Borrowed(name) => name,
+            Lowered::Inline { bytes, len } => bytes.get(..usize::from(*len)).unwrap_or_default(),
+            Lowered::Allocated(name) => name,
+        }
+    }
 }
 
 impl MethodName {
@@ -2044,21 +2141,19 @@ impl MethodName {
         op: &Opline,
     ) -> Result<MethodName, Thrown> {
         if op.op2_type == OperandKind::Const {
-            let lowered = constant(code, ConstIdx(op.op2.saturating_add(1)));
             return Ok(MethodName {
                 written: constant(code, ConstIdx(op.op2)),
-                lowered: lowered.as_str_bytes().unwrap_or_default().to_vec(),
+                lowered_constant: Some(constant(code, ConstIdx(op.op2.saturating_add(1)))),
                 owned: false,
             });
         }
         let value = operand_undef(req, frame, code, op.op2_type, op.op2);
         let held = value.deref();
-        let name = if let Some(bytes) = held.as_str_bytes() {
-            let lowered = bytes.to_ascii_lowercase();
+        let name = if held.as_str_bytes().is_some() {
             req.addref(&held);
             Ok(MethodName {
                 written: held,
-                lowered,
+                lowered_constant: None,
                 owned: true,
             })
         } else {
@@ -2073,6 +2168,15 @@ impl MethodName {
         };
         free_operand(req, frame, code, op.op2_type, op.op2);
         name
+    }
+
+    /// The name lowered: the pair's lowered constant, borrowed, or the
+    /// computed name lowered as [`Lowered::of`] lowers it.
+    pub(crate) fn lowered(&self) -> Lowered<'_> {
+        match &self.lowered_constant {
+            Some(lowered) => Lowered::Borrowed(lowered.as_str_bytes().unwrap_or_default()),
+            None => Lowered::of(self.written.as_str_bytes().unwrap_or_default()),
+        }
     }
 
     /// The owner of a name the program computed given up.
@@ -2300,11 +2404,12 @@ pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32
 ///
 /// `Some` is the frame a `RECV` raised on, whose throwable is pending;
 /// the caller decides what a raise before the activation means to it.
-/// Every call a user function is reached by crosses this: the one an
-/// opline pushed ([`enter`]) and the one a native served
-/// ([`Request::serve_user`]), so a `ReflectionMethod::invoke` verifies
-/// what `DO_UCALL` verifies, and the coercion a scalar parameter
-/// carries outside `strict_types` is served there too:
+/// Every call a user function is reached by crosses it: the one an
+/// opline pushed, which the loop serves as it takes the push
+/// ([`crate::tier`]), and the one a native served
+/// ([`Request::serve_user`]), here, so a `ReflectionMethod::invoke`
+/// verifies what `DO_UCALL` verifies, and the coercion a scalar
+/// parameter carries outside `strict_types` is served there too:
 ///
 /// ```php
 /// function f(int $a, float $b, string $c) { var_dump($a, $b, $c); }
@@ -2323,52 +2428,101 @@ pub(crate) fn parameter_prologue(
     // A frame whose push skipped every `RECV*` stands at its entry
     // already, which its activation told, and its op array is not held
     // for a run of none.
-    match activated.prologue {
-        None => Ok(None),
-        Some(entry) => prologue_from(req, activated.frame, entry),
+    if !activated.prologue {
+        return Ok(None);
     }
+    let serving = standing(req, activated.frame)?;
+    let code = serving_code(&serving, activated.frame)?;
+    let told = <crate::observer::Declared as crate::observer::Telling>::of(req);
+    prologue(req, activated.frame, code, told)
+}
+
+/// The entry safepoint of `code`, `safepoints[0]`: the first opline past
+/// the `RECV*` prologue (design §5.6), zero for an op array with none.
+pub(crate) fn entry_of(code: &OpArray) -> u32 {
+    code.safepoints.first().map_or(0, |at| at.0)
 }
 
 /// A call made a user frame ([`Request::activate_user`]): the frame, and
-/// the entry safepoint its `RECV*` prologue runs to where the activation
-/// did not skip it.
+/// whether the activation left `RECV*` oplines of its prologue to serve
+/// before the entry safepoint ([`entry_of`]).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Activated {
     pub(crate) frame: FrameRef,
-    pub(crate) prologue: Option<u32>,
+    pub(crate) prologue: bool,
 }
 
-/// The `RECV*` oplines of [`parameter_prologue`], up to the entry
-/// safepoint at `entry`.
+/// The `RECV` oplines from `start` in `code`, the op array `callee`
+/// serves, that php's handler passes on its first test, read off the
+/// frame once: each a parameter the call passed an argument for, not
+/// by reference, of a type the mask the compiler put in `op2` holds
+/// (`ZEND_RECV`'s `opline->op2.num & (1u << Z_TYPE_P(param))`,
+/// `MAY_BE_ANY` for a parameter with no type). The answer is the first
+/// opline that does not pass, where the handlers take over, at most the
+/// entry safepoint; nothing observes these, so no observer is told.
+#[inline]
+pub(crate) fn recv_passed(req: &Request, callee: FrameRef, code: &OpArray, start: u32) -> u32 {
+    let entry = entry_of(code);
+    let Some(frame) = req.vm().stack.frame(callee) else {
+        return start;
+    };
+    let passed = frame.header().num_args;
+    let slots = frame.slots();
+    let mut at = start;
+    while at < entry {
+        let Some(op) = code.oplines.get(at as usize) else {
+            break;
+        };
+        if op.opcode != php_unit::Opcode::Recv || op.op1 > passed {
+            break;
+        }
+        let Some(argument) = slots.get(op.out as usize) else {
+            break;
+        };
+        let kind = argument.kind();
+        if kind == php_heap::ZvalType::Reference || op.op2 & (1u32 << (kind as u32)) == 0 {
+            break;
+        }
+        at += 1;
+    }
+    at
+}
+
+/// The `RECV*` oplines of [`parameter_prologue`] from where `callee`
+/// stands up to the entry safepoint of `code`, the op array it serves,
+/// the observers of a declared opcode told of each as `told` says: the
+/// loop's own choice where the loop serves the push, so an engine where
+/// no extension declared an opcode tests nothing here either (design
+/// §5.8, #2287).
 #[inline(never)]
-fn prologue_from(
+pub(crate) fn prologue<D: crate::observer::Telling>(
     req: &mut Request,
     callee: FrameRef,
-    entry: u32,
+    code: &OpArray,
+    told: D,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
-    let serving = standing(req, callee)?;
-    let body = serving_code(&serving, callee)?;
+    let entry = entry_of(code);
     loop {
         let at = req.vm().opline(callee);
         if at >= entry {
             break;
         }
-        let Some(prologue) = opline_at(body, at) else {
+        let Some(prologue) = opline_at(code, at) else {
             break;
         };
-        crate::observer::tell_before(req, callee, prologue.opcode);
+        told.before(req, callee, at, prologue.opcode);
         let next = match prologue.opcode {
             php_unit::Opcode::Recv => {
-                crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             php_unit::Opcode::RecvInit => {
-                crate::handlers::recv_init::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv_init::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             php_unit::Opcode::RecvVariadic => {
-                crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, body, prologue)?
+                crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, code, prologue)?
             }
             other => {
-                return Err(php_heap::Fatal::Error(format!(
+                return Err(php_heap::Fatal::error(format!(
                     "InternalError: {} stands before the entry safepoint, and this engine serves no handler for it yet",
                     other.name()
                 )));

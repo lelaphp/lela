@@ -566,7 +566,6 @@ fn rendered<'a>(code: &str, lines: impl Iterator<Item = &'a str>, body: &[u8]) -
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
 
     use super::*;
     use crate::oracle::Pin;
@@ -578,7 +577,7 @@ mod tests {
     /// `PATH_TRANSLATED` the root and it, none where there is none (#2650).
     #[test]
     fn the_pinned_mapping_is_filled_in_nginx_s_order_with_the_fields_after() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = crate::package_dir();
         let text = fs::read_to_string(workspace.join("../oracle.toml")).unwrap();
         let pin = Pin::parse(&text).unwrap();
         let http = Http {

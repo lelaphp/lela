@@ -235,7 +235,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
         head,
         program,
         body,
-        mut sink,
+        sink,
     } = job;
     let mut env = environment(&head, root, &program, head.query());
     // php-fpm's defaults of the entries `init_request_info` reads, which
@@ -273,7 +273,18 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
         script_name: info.path_translated.clone(),
         ..RequestDescription::default()
     };
-    engine.serve_started(description, &mut sink, || look(&info));
+    // A program whose path holds a NUL is never run, as
+    // `php_cli_server_dispatch_script` refuses it: the request ends with
+    // the head it has (`vpath::holds_nul`, #2695).
+    let (_, sink) = engine.serve(description, Box::new(sink), || {
+        if php_proto::vpath::holds_nul(&program.path_translated) {
+            HostServes::Nothing
+        } else {
+            look(&info)
+        }
+    });
+    // Dropped here, the sink says the body is whole.
+    drop(sink);
 }
 
 /// What the request serves once it has started, in php-fpm's order
@@ -536,8 +547,8 @@ impl Read for Arriving {
 /// the connection dropped its response, its client gone, is
 /// [`Aborted`], which is when `connection_aborted()` turns true, as php's
 /// does on the write that finds the client gone and not before. Dropped
-/// with the request, it says the body is whole, unless the request is
-/// unwinding from a panic.
+/// once the request hands it back, it says the body is whole, and never
+/// where the request unwinds from a panic.
 pub(crate) struct Sink {
     head: Option<oneshot::Sender<ResponseHead>>,
     body: Option<mpsc::Sender<Bytes>>,
@@ -643,18 +654,6 @@ impl OutputSink for Sink {
         use std::io::Write;
         std::io::stderr().lock().write_all(bytes).ok();
     }
-
-    /// The request holds the sink while it runs, so each write reaches
-    /// the connection as it is made: the channels move to the sink the
-    /// request holds, which the engine asks for once, as the request
-    /// begins.
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(Sink {
-            head: self.head.take(),
-            body: self.body.take(),
-            whole: self.whole.take(),
-        }))
-    }
 }
 
 #[cfg(test)]
@@ -728,10 +727,9 @@ mod tests {
         let listener = TcpListener::bind(listen).unwrap_or_else(|e| panic!("{e}"));
         let addr = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
         let (queue, pool) = Pool::start(&options, |job: Job| {
+            // The sink owned as the engine's request owns it, so a panic
+            // unwinds through it.
             let Job { head, mut sink, .. } = job;
-            // The request holds its sink as the engine has it hold one,
-            // so a panic unwinds through the sink the request held.
-            let mut sink = sink.held().unwrap_or_else(|| panic!("a sink to hold"));
             match &head.target[..] {
                 b"/panic.php" => panic!("a request panicked before its head, on cue"),
                 b"/cut.php" => {

@@ -463,9 +463,9 @@ impl Request {
         if self.heap.in_memory_limit_error() {
             crate::output::discard_all(self);
         }
-        match fatal {
-            Fatal::Error(message) => self.end_in_fatal(message),
-            Fatal::OutOfMemory(bytes) => self.end_in_fatal(&format!(
+        match fatal.reason() {
+            php_heap::FatalReason::Error(message) => self.end_in_fatal(message),
+            php_heap::FatalReason::OutOfMemory(bytes) => self.end_in_fatal(&format!(
                 "Allowed memory size of {} bytes exhausted (tried to allocate {bytes} bytes)",
                 self.ini_parse_bytes_of("memory_limit")
             )),

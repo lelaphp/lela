@@ -15,7 +15,7 @@ use std::process::Command;
 use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// The shape of `php_engine::api::values::Owner` in a debug build:

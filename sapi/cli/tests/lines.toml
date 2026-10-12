@@ -435,3 +435,107 @@ stop = "SIGINT"
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
 [[line.serve.request]]
 http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# The program's file enters `EG(included_files)` before `auto_prepend_file`
+# only where the host opened it as a `FILE *`, the CLI's, which
+# `php_execute_script_ex` expands into the table (`Z/main/main.c:2610-2619`);
+# the built-in server hands a bare name (`zend_stream_init_filename`), which
+# `zend_execute_script` puts in the table once the program has compiled
+# (`Z/Zend/zend.c:1971-1974`), after the prepend file (#2558). The prepend
+# file and the program each print the table's names.
+[[line]]
+name = "the-cli-notes-its-program-before-the-prepend-file"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "t.php"]
+files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
+
+[[line]]
+name = "the-built-in-server-notes-its-program-as-it-compiles"
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /t.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# An archive phar's `zend_compile_file` answers as `auto_prepend_file`:
+# `phar_compile_file` puts the stub's stream in the `zend_file_handle`'s
+# place, and over an uncompressed tar that stream reads the archive itself,
+# so the archive is held open, with no `O_CLOEXEC`, until
+# `php_execute_script_ex` destroys the handle once the append file has run,
+# before the shutdown functions; a gzipped archive's stub reads a
+# decompressed copy, and nothing of the archive is held (#2561). The first
+# run lays the two archives down.
+[[line]]
+name = "an-archive-phar-auto-file-is-held-while-the-program-runs"
+args = ["-n", "mk.php"]
+files = { "mk.php" = '''
+<?php
+function member($name, $data) {
+    $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', sprintf('%011o', strlen($data)), '00000000000', '        ', '0', '', 'ustar', '00', '');
+    $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+    return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+}
+$stub = '<?php require dirname(__FILE__) . "/lib.php"; $f = __FILE__; register_shutdown_function(fn () => print("shutdown " . held($f) . "\n")); echo "prepend ", held($f), "\n"; __HALT_COMPILER();';
+$tar = member('.phar/stub.php', $stub);
+$tar .= member('.phar/signature.bin', pack('VV', 2, 20) . sha1($tar, true)) . str_repeat("\0", 1024);
+file_put_contents(__DIR__ . '/pre.phar.tar', $tar);
+file_put_contents(__DIR__ . '/gz.phar.tar.gz', gzencode($tar));
+''', "lib.php" = '''<?php function held($f) { $l = shell_exec("ls -iLd /dev/fd/* 2>/dev/null"); return preg_match_all("/^ *" . fileinode($f) . " /m", $l); }''', "t.php" = '''<?php echo "program ", held(__DIR__ . "/pre.phar.tar") + held(__DIR__ . "/gz.phar.tar.gz"), "\n";''', "app.php" = '''<?php echo "append ", held(__DIR__ . "/pre.phar.tar") + held(__DIR__ . "/gz.phar.tar.gz"), "\n";''' }
+[[line.then]]
+args = ["-n", "-d", "auto_prepend_file={dir}/pre.phar.tar", "-d", "auto_append_file={dir}/app.php", "t.php"]
+[[line.then]]
+args = ["-n", "-d", "auto_prepend_file={dir}/gz.phar.tar.gz", "-d", "auto_append_file={dir}/app.php", "t.php"]
+
+# A path holding a NUL: the walk's `stat(2)` reads it up to the NUL and finds
+# the file there, and the translated path keeps the NUL, which php -S "can't
+# handle" (`Z/sapi/cli/php_cli_server.c:2127`, `:2155`). A static file's is
+# refused with 400; a program's request starts and the program never runs, so
+# the client is sent the request's head and no body, while the log has the
+# 400 of the page php built and never sent; a path past the file it found is
+# that file, sent, and one past a program is its path's info, which
+# `PATH_INFO` keeps whole and `PHP_SELF` reads up to the NUL; and nothing found
+# is 404 (#2695). The text after a 400's
+# ` - ` in the log is `strerror(errno)` of whatever call last set it, EINVAL's
+# under php and none under the engine, and is masked until #2758 finds the
+# call.
+[[line]]
+name = "the-built-in-server-refuses-a-path-holding-a-nul"
+args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "run.php" = "<?php echo 'ran ', json_encode([$_SERVER['SCRIPT_NAME'], $_SERVER['PHP_SELF'], $_SERVER['PATH_INFO'] ?? null, strlen($_SERVER['SCRIPT_FILENAME'])]), \"\\n\";", "a.txt" = "hello\n" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>'], ['(\[400\]: [^\n]*) - [^\n]*', '$1 - <errno>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /run.php%00 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt%00/b.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt/b%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /run.php/x%00y HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "HEAD /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /nope%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+# The same requests under a router that declines each: the router runs
+# first, and then the file is served or refused as without one (#2695).
+[[line]]
+name = "the-built-in-server-refuses-a-path-holding-a-nul-after-the-router"
+args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}", "{dir}/router.php"]
+files = { "router.php" = "<?php echo 'routed ', strlen($_SERVER['SCRIPT_FILENAME'] ?? ''), \"\\n\"; return false;", "run.php" = "<?php echo 'ran ', json_encode([$_SERVER['SCRIPT_NAME'], $_SERVER['PHP_SELF'], $_SERVER['PATH_INFO'] ?? null, strlen($_SERVER['SCRIPT_FILENAME'])]), \"\\n\";", "a.txt" = "hello\n" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>'], ['(\[400\]: [^\n]*) - [^\n]*', '$1 - <errno>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+[[line.serve.request]]
+http = "GET /a.txt%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"

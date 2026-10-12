@@ -20,10 +20,12 @@
 //! 3. *`SERVER_SOFTWARE`.* makala names itself `makala/<version>` (#2335)
 //!    where the mapping's nginx names itself `nginx/<version>`, so makala's
 //!    name is replaced in its response by the mapping's, [`software`].
-//! 4. *An uploaded file's temporary name*, random per request, read as one
-//!    token on both sides (`super::uploads_named_alike`), as the scratch
-//!    directory each side's program stands in is by the recipe's own
-//!    normalisation, the two directories of one length.
+//! 4. *What php makes at random per request*, an uploaded file's temporary
+//!    name and a session id it made (#2706), each read as one token on
+//!    both sides (`Entry::randoms_named_alike`), as the scratch directory
+//!    each side's program stands in is by the recipe's own normalisation,
+//!    the two directories of one length, and named as `{PWD}` in the
+//!    entry's ini (`Entry::ini_in`, #2705).
 //! 5. *The order of header lines across names.* hyper's `HeaderMap`
 //!    keeps every value of a name together at the name's first place, so
 //!    makala cannot interleave two lines of one name with another's, as
@@ -168,18 +170,24 @@ fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Resu
     }
     let nginx = &oracle.pin().fastcgi()?.nginx;
     let (in_makala, in_fpm) = (by_makala.join(&entry.script), by_fpm.join(&entry.script));
+    // Each side's `{PWD}` the document root it serves, which both read
+    // through the directory's real path.
+    let (makala_ini, fpm_ini) = (
+        entry.ini_in(&by_makala.canonicalize()?),
+        entry.ini_in(&by_fpm.canonicalize()?),
+    );
     let by_makala = || -> Result<(Vec<u8>, Ports)> {
-        let answered = makala::by_makala(recipe, host, &in_makala, &entry.http, &entry.ini, &[])?;
+        let answered = makala::by_makala(recipe, host, &in_makala, &entry.http, &makala_ini, &[])?;
         let rendered = names_folded(&makala::from_http(&answered.response));
-        let rendered = super::uploads_named_alike(&software(&rendered, &answered.software, nginx));
+        let rendered = entry.randoms_named_alike(&software(&rendered, &answered.software, nginx));
         Ok((
             normalise_in(&recipe.normalise, &by_makala, rendered),
             answered.ports,
         ))
     };
     let by_php_fpm = |ports: Ports| -> Result<Vec<u8>> {
-        let (stdout, _) = makala::by_fpm(oracle, fpm, &in_fpm, &entry.http, &entry.ini, ports)?;
-        let rendered = super::uploads_named_alike(&names_folded(&makala::from_cgi(&stdout)));
+        let (stdout, _) = makala::by_fpm(oracle, fpm, &in_fpm, &entry.http, &fpm_ini, ports)?;
+        let rendered = entry.randoms_named_alike(&names_folded(&makala::from_cgi(&stdout)));
         Ok(normalise_in(&recipe.normalise, &by_fpm, rendered))
     };
     let (shown, ports) = by_makala()?;

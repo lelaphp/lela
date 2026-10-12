@@ -47,6 +47,7 @@ pub(super) fn commands(line: &str) -> Vec<Argv> {
 #[derive(Debug)]
 pub(super) struct Line {
     commands: Vec<Argv>,
+    shells: Vec<Vec<u32>>,
     text: String,
     bodies: Vec<Heretext>,
     written: Vec<String>,
@@ -73,6 +74,7 @@ impl Line {
         text.extend(&lexer.chars[at..]);
         Line {
             commands: lexer.commands,
+            shells: lexer.shells,
             text,
             bodies: lexer.bodies,
             written: lexer.written,
@@ -82,6 +84,14 @@ impl Line {
     /// Every simple command the line runs ([`commands`]).
     pub(super) fn commands(&self) -> &[Argv] {
         &self.commands
+    }
+
+    /// The shells each of [`Line::commands`] runs in, outermost first:
+    /// one id per subshell, substitution or child shell holding it, none
+    /// for the line's own, so a `cd` in one moves the commands that share
+    /// its shells alone (#2764).
+    pub(super) fn shells(&self) -> &[Vec<u32>] {
+        &self.shells
     }
 
     /// What a `deny_pattern` reads: the line with every heredoc body line
@@ -188,6 +198,11 @@ struct Lexer {
     chars: Vec<char>,
     at: usize,
     commands: Vec<Argv>,
+    /// The shells each command runs in ([`Line::shells`]), the ones open
+    /// now, and how many this lexer has opened, each one's id.
+    shells: Vec<Vec<u32>>,
+    open: Vec<u32>,
+    opened: u32,
     heredocs: Vec<Heredoc>,
     /// Where in `commands` the line being read starts, so the heredocs it
     /// opened can ask what its commands are.
@@ -209,6 +224,9 @@ impl Lexer {
             chars: line.chars().collect(),
             at: 0,
             commands: Vec::new(),
+            shells: Vec::new(),
+            open: Vec::new(),
+            opened: 0,
             heredocs: Vec::new(),
             line_start: 0,
             text_bodies: Vec::new(),
@@ -231,13 +249,35 @@ impl Lexer {
     fn nested(&mut self, line: &str) {
         let nested = Lexer::read(line);
         let offset = self.commands.len();
-        self.commands.extend(nested.commands);
+        self.adopt(nested.commands, nested.shells, nested.opened);
         self.written.extend(nested.written);
         self.bodies
             .extend(nested.bodies.into_iter().map(|body| Heretext {
                 commands: body.commands.start + offset..body.commands.end + offset,
                 text: body.text,
             }));
+    }
+
+    /// Commands another lexer read, run from the shells open here, each
+    /// in the shells that lexer opened.
+    fn adopt(&mut self, commands: Vec<Argv>, shells: Vec<Vec<u32>>, opened: u32) {
+        let first = self.opened;
+        self.opened += opened;
+        self.commands.extend(commands);
+        let open = &self.open;
+        let shells = shells.into_iter().map(|inner| {
+            let ids = inner.into_iter().map(|id| first + id);
+            open.iter().copied().chain(ids).collect()
+        });
+        self.shells.extend(shells);
+    }
+
+    /// What `read` reads run in a shell of its own.
+    fn child(&mut self, read: impl FnOnce(&mut Lexer)) {
+        self.open.push(self.opened);
+        self.opened += 1;
+        read(self);
+        self.open.pop();
     }
 
     fn bump(&mut self) -> Option<char> {
@@ -281,7 +321,7 @@ impl Lexer {
                 }
                 '$' if self.eat('(') => {
                     command.open(false);
-                    self.list(Some(')'));
+                    self.child(|lexer| lexer.list(Some(')')));
                 }
                 '#' if command.word.is_none() => {
                     while self.chars.get(self.at).is_some_and(|c| *c != '\n') {
@@ -296,7 +336,7 @@ impl Lexer {
                 }
                 '(' => {
                     self.end(&mut command);
-                    self.list(Some(')'));
+                    self.child(|lexer| lexer.list(Some(')')));
                 }
                 ';' | '&' | '|' | ')' | '\n' => {
                     self.end(&mut command);
@@ -327,7 +367,7 @@ impl Lexer {
                     }
                 },
                 '`' => self.backquote(),
-                '$' if self.eat('(') => self.list(Some(')')),
+                '$' if self.eat('(') => self.child(|lexer| lexer.list(Some(')'))),
                 c => command.push(c),
             }
         }
@@ -350,7 +390,7 @@ impl Lexer {
                 c => inner.push(c),
             }
         }
-        self.nested(&inner);
+        self.child(|lexer| lexer.nested(&inner));
     }
 
     /// `<`, `>`, `>>`, `>&`, `>|`, `<&`, `<>`, `<<<`, `<<` and `<<-`, with
@@ -410,9 +450,13 @@ impl Lexer {
         self.assigned.read(&words);
         if let Some(argv) = Argv::running(words, &self.assigned) {
             let nested = argv.nested_line();
+            let eval = argv.program() == "eval";
             self.commands.push(argv);
-            if let Some(line) = nested {
-                self.nested(&line);
+            self.shells.push(self.open.clone());
+            match nested {
+                Some(line) if eval => self.nested(&line),
+                Some(line) => self.child(|lexer| lexer.nested(&line)),
+                None => {}
             }
         }
     }
@@ -451,14 +495,12 @@ impl Lexer {
                 }
                 // Under an unquoted delimiter the shell runs a line's
                 // substitutions as it reads the body, whoever reads it next.
-                let mut substituted = Vec::new();
+                let mut read = Lexer::new(&line);
                 if heredoc.expands {
-                    let mut read = Lexer::new(&line);
                     read.expand(&mut Command::new(), None);
-                    substituted = read.commands;
                 }
                 match body {
-                    Body::Text if substituted.is_empty() => {
+                    Body::Text if read.commands.is_empty() => {
                         self.text_bodies.push(start..self.at.min(self.chars.len()));
                         whole.push_str(text);
                         whole.push('\n');
@@ -472,10 +514,10 @@ impl Lexer {
                         stdin.push('\n');
                     }
                 }
-                self.commands.append(&mut substituted);
+                self.adopt(read.commands, read.shells, read.opened);
             }
             if body == Body::Commands {
-                self.nested(&stdin);
+                self.child(|lexer| lexer.nested(&stdin));
             } else {
                 self.bodies.push(Heretext {
                     commands: line_commands.clone(),
@@ -635,15 +677,17 @@ const RESERVED: [&str; 10] = [
 ];
 
 /// Programs that run the rest of their words as a command, with the
-/// options each reads a value after.
-const WRAPPERS: [(&str, &[&str]); 7] = [
-    ("command", &[]),
-    ("builtin", &[]),
-    ("exec", &["-a"]),
-    ("nohup", &[]),
-    ("time", &[]),
-    ("env", &["-u", "-C", "-S"]),
-    ("nice", &["-n"]),
+/// options each reads a value after and the operands it reads before the
+/// command: `timeout`'s duration (#2668).
+const WRAPPERS: [(&str, &[&str], usize); 8] = [
+    ("command", &[], 0),
+    ("builtin", &[], 0),
+    ("exec", &["-a"], 0),
+    ("nohup", &[], 0),
+    ("time", &[], 0),
+    ("env", &["-u", "-C", "-S"], 0),
+    ("nice", &["-n"], 0),
+    ("timeout", &["-s", "--signal", "-k", "--kill-after"], 1),
 ];
 
 /// Programs that read commands, from a `-c` argument, a file or stdin.
@@ -691,7 +735,8 @@ impl Argv {
                 expanded = true;
                 continue;
             }
-            let Some((_, valued)) = WRAPPERS.iter().find(|(w, _)| *w == basename(word)) else {
+            let Some((_, valued, operands)) = WRAPPERS.iter().find(|(w, ..)| *w == basename(word))
+            else {
                 break;
             };
             at += 1;
@@ -702,6 +747,7 @@ impl Argv {
                     1
                 };
             }
+            at += operands;
         }
         words.drain(..at);
         if let Some(own) = xtask_own(&words) {
@@ -1049,6 +1095,20 @@ mod tests {
 
     fn words(line: &str) -> Vec<Vec<String>> {
         commands(line).into_iter().map(|argv| argv.0).collect()
+    }
+
+    /// #2764: each command names the shells it runs in, a sibling
+    /// subshell its own, `eval` the shell that runs it and a shell's `-c`
+    /// a child of it.
+    #[test]
+    fn each_command_names_the_subshells_it_runs_in() {
+        let line = Line::read("(cd a; x $(y)); (cd b); eval cd c; bash -c 'cd d; z'; w");
+        let (none, first, inner, second, child) = (vec![], vec![0], vec![0, 1], vec![2], vec![3]);
+        let expected = [
+            &first, &inner, &first, &second, &none, &none, &none, &child, &child, &none,
+        ];
+        assert_eq!(line.shells().iter().collect::<Vec<_>>(), expected);
+        assert_eq!(line.shells().len(), line.commands().len());
     }
 
     #[test]

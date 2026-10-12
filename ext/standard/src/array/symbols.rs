@@ -5,6 +5,7 @@
 //! through the face's `Request::caller_var` and `set_caller_var`. A
 //! variable declared and not yet written reads as one the frame has not.
 
+use std::borrow::Cow;
 use std::ops::ControlFlow;
 
 use php_ext::abi::{Passed, Ref, Untyped, Variadic};
@@ -21,6 +22,7 @@ use super::constants::{
     EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
     EXTR_REFS, EXTR_SKIP,
 };
+use crate::string::KeyBytes;
 
 /// `php_valid_var_name`: `[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*`.
 fn valid_var_name(name: &[u8]) -> bool {
@@ -457,10 +459,7 @@ fn target(
     prefix: &[u8],
     key: &Key,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
-    let text = match key {
-        Key::Str(s) => s.as_bytes().to_vec(),
-        Key::Int(n) => n.to_string().into_bytes(),
-    };
+    let text: &[u8] = &KeyBytes::of(key);
     let numeric = matches!(key, Key::Int(_));
     let name = match kind {
         EXTR_OVERWRITE | EXTR_IF_EXISTS | EXTR_SKIP | EXTR_PREFIX_SAME | EXTR_PREFIX_IF_EXISTS
@@ -469,62 +468,62 @@ fn target(
             None
         }
         EXTR_OVERWRITE => {
-            if !valid_var_name(&text) || (text == b"GLOBALS" && req.caller_var(&text).is_some()) {
+            if !valid_var_name(text) || (text == b"GLOBALS" && req.caller_var(text).is_some()) {
                 None
             } else {
-                Some(text)
+                Some(Cow::Borrowed(text))
             }
         }
         EXTR_IF_EXISTS => {
-            if req.caller_var(&text).is_none() || !valid_var_name(&text) || text == b"GLOBALS" {
+            if req.caller_var(text).is_none() || !valid_var_name(text) || text == b"GLOBALS" {
                 None
             } else {
-                Some(text)
+                Some(Cow::Borrowed(text))
             }
         }
         EXTR_SKIP => {
-            if !valid_var_name(&text) || text == b"this" || req.caller_var(&text).is_some() {
+            if !valid_var_name(text) || text == b"this" || req.caller_var(text).is_some() {
                 None
             } else {
-                Some(text)
+                Some(Cow::Borrowed(text))
             }
         }
         EXTR_PREFIX_SAME => {
             if text.is_empty() {
                 None
             } else {
-                let exists = req.caller_var(&text).is_some();
+                let exists = req.caller_var(text).is_some();
                 if exists || text == b"this" {
-                    if !exists && !valid_var_name(&text) {
+                    if !exists && !valid_var_name(text) {
                         None
                     } else {
-                        Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
+                        Some(Cow::Owned(prefixed(prefix, text))).filter(|name| valid_var_name(name))
                     }
                 } else {
-                    Some(text).filter(|text| valid_var_name(text))
+                    Some(Cow::Borrowed(text)).filter(|text| valid_var_name(text))
                 }
             }
         }
         EXTR_PREFIX_IF_EXISTS => {
-            if req.caller_var(&text).is_none() {
+            if req.caller_var(text).is_none() {
                 None
             } else {
-                Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
+                Some(Cow::Owned(prefixed(prefix, text))).filter(|name| valid_var_name(name))
             }
         }
         EXTR_PREFIX_ALL => {
             if text.is_empty() {
                 None
             } else {
-                Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
+                Some(Cow::Owned(prefixed(prefix, text))).filter(|name| valid_var_name(name))
             }
         }
         _ => {
             // EXTR_PREFIX_INVALID.
-            if numeric || !valid_var_name(&text) || text == b"this" {
-                Some(prefixed(prefix, &text)).filter(|name| valid_var_name(name))
+            if numeric || !valid_var_name(text) || text == b"this" {
+                Some(Cow::Owned(prefixed(prefix, text))).filter(|name| valid_var_name(name))
             } else {
-                Some(text)
+                Some(Cow::Borrowed(text))
             }
         }
     };
@@ -533,10 +532,8 @@ fn target(
     // by the string `php_prefix_varname` made otherwise.
     match (name, key) {
         (None, _) => Ok(None),
-        (Some(name), _) if name == b"this" => Err(reassign_this(req)),
-        (Some(name), Key::Str(s)) if s.as_bytes() == name.as_slice() => {
-            Ok(Some(Owner::take(req, *s)))
-        }
+        (Some(name), _) if *name == *b"this" => Err(reassign_this(req)),
+        (Some(name), Key::Str(s)) if s.as_bytes() == &*name => Ok(Some(Owner::take(req, *s))),
         (Some(name), _) => PhpString::new(req, &name).map(Some),
     }
 }

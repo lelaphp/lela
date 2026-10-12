@@ -114,7 +114,7 @@ fn posted(engine: &Engine, content_type: &str, body: &[u8], program: &str) -> (S
                 rest = after;
             }
         });
-        engine.serve(description, &mut sink);
+        engine.serve_into(description, &mut sink);
     });
     (
         String::from_utf8_lossy(&sink.stdout).into_owned(),
@@ -210,4 +210,49 @@ Content-Type: text/plain\r\n\r\nup\r\n--b--\r\n";
     assert_eq!(under("\"yes\"", "\"On\""), "1 1");
     assert_eq!(under("abc", "\"true\""), "1 0");
     assert_eq!(under("\"On\"", "abc"), "0 0");
+}
+
+/// `max_file_uploads` and `max_multipart_body_parts` have no handler in
+/// php (`Z/main/main.c:873-874`): `rfc1867_post_handler` reads each with
+/// `INI_INT`, `zend_ini_long`'s `ZEND_STRTOL(value, NULL, 0)`, so `0x1`
+/// is one upload, `08` is none (the `0` before an octal's stray `8`),
+/// and `0x3` is three parts. The oracle's php-cgi, handed the same body
+/// under the same `-d`, counts the same files and fields: `1 2`, `0 2`
+/// and `2 1` by `count()`, after the same warnings.
+#[test]
+fn max_file_uploads_and_body_parts_read_by_base_zero_strtol() {
+    let part = |name: &str, file: bool| {
+        let filename = if file {
+            format!("; filename=\"{name}.txt\"")
+        } else {
+            String::new()
+        };
+        format!("--B\r\nContent-Disposition: form-data; name=\"{name}\"{filename}\r\n\r\nx\r\n")
+    };
+    let body = [
+        part("a", true),
+        part("b", true),
+        part("c", false),
+        part("d", false),
+    ]
+    .concat()
+        + "--B--\r\n";
+    let under = |name: &str, value: &str| {
+        let engine = Engine::cli_builder().ini(name, value).build();
+        posted(
+            &engine,
+            "multipart/form-data; boundary=B",
+            body.as_bytes(),
+            "<?php foreach (['a', 'b'] as $f) { echo isset($_FILES[$f]) ? 1 : 0; } echo ' '; \
+             foreach (['c', 'd'] as $p) { echo isset($_POST[$p]) ? 1 : 0; }",
+        )
+        .0
+    };
+    let exceeded = "\nWarning: PHP Request Startup: Maximum number of allowable file uploads has been exceeded in Unknown on line 0\n";
+    assert_eq!(under("max_file_uploads", "0x1"), format!("{exceeded}10 11"));
+    assert_eq!(under("max_file_uploads", "08"), format!("{exceeded}00 11"));
+    assert_eq!(
+        under("max_multipart_body_parts", "0x3"),
+        "\nWarning: PHP Request Startup: Multipart body parts limit exceeded 3. To increase the limit change max_multipart_body_parts in php.ini. in Unknown on line 0\n11 10"
+    );
 }

@@ -36,7 +36,7 @@ fn stand_in(name: &str, said: &str, code: i32) -> Tree {
 
 /// The subcommand against `dir/root`, with only `dir/bin` on `PATH`.
 fn regions(dir: &Path, files: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(dir.join("root"))
         .arg("regions")
@@ -152,7 +152,7 @@ fn regions_is_a_subcommand_and_needs_a_file() {
     let dir = stand_in("usage", "", 0);
     let (code, out, err) = regions(&dir, &[]);
     assert_eq!(code, 2, "{out}{err}");
-    let help = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let help = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--help")
         .output()
         .unwrap();
@@ -214,7 +214,7 @@ fn laid(name: &str) -> (Tree, String) {
 fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
     let (dir, rendered) = laid("computed-staged");
     let staged = || {
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(&*dir)
             .args(["regions", "--staged", "MAP.md"])
@@ -272,7 +272,7 @@ fn a_pathspec_commit_carries_no_region_of_an_unstaged_lock() {
         &hook,
         format!(
             "#!/bin/sh\nexec '{}' --root '{}' regions --staged MAP.md\n",
-            env!("CARGO_BIN_EXE_xtask"),
+            xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
             dir.display()
         ),
     )

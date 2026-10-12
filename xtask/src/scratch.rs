@@ -1,7 +1,8 @@
 //! A scratch tree that owns itself (#194): one directory under the
 //! system's temporary directory, or under `/tmp` for a program the oracle
-//! runs ([`Tree::short`]), made by the constructor and taken away
-//! again when the value goes out of scope, however it goes out of scope.
+//! runs and the phpt run's copy of the pinned tree ([`Tree::short`]),
+//! made by the constructor and taken away again when the value goes out
+//! of scope, however it goes out of scope.
 //!
 //! The harness makes scratch trees in two places that cannot see each
 //! other — the unit tests beside a module in `xtask/src/` and the
@@ -58,6 +59,10 @@ pub const KEEP: &str = "XTASK_KEEP_SCRATCH";
 /// the sweep reads the temporary directory for, and what tells a tree of
 /// this harness's from everything else living there.
 const PREFIX: &str = "xtask-";
+
+/// Where [`Tree::short`] lays a tree, whatever `TMPDIR` says: one
+/// directory every session's runs share.
+const SHORT: &str = "/tmp";
 
 /// What a tree's lock is named: the tree's own name and this, so the two
 /// are siblings and neither is inside the other. The lock is not in the
@@ -118,7 +123,7 @@ impl Tree {
     /// #2523): under the temporary directory, the count moved with the
     /// session's `TMPDIR`.
     pub(crate) fn short(name: &str) -> Result<Tree> {
-        Tree::under(Path::new("/tmp"), &unique(name))
+        Tree::under(Path::new(SHORT), &unique(name))
     }
 
     /// The tree `xtask-<name>` under `base`, swept as the temporary
@@ -180,10 +185,14 @@ impl Tree {
 /// whenever the pid or the counter crossed a digit, and with it every
 /// number php reads off the path (#2523).
 fn unique(name: &str) -> String {
+    const _: () = assert!(NUMBERED == "-0000000-000000".len());
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let next = NEXT.fetch_add(1, Ordering::Relaxed);
     format!("{name}-{:07}-{next:06}", std::process::id())
 }
+
+/// How long the numbers [`unique`] puts after a tree's name are.
+const NUMBERED: usize = 15;
 
 /// A scratch tree, its lock, or a file a lane writes into one, that could
 /// not be made for want of space (#644). The volume it would stand on is
@@ -338,6 +347,79 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
     std::env::join_paths(paths).context("joining the stand-in's directory onto PATH")
 }
 
+/// A program copied into a scratch tree of its own and held there for as
+/// long as the value lives, so a call through [`Binary::path`] runs the
+/// program as it stood when it was held, whatever has since happened at
+/// the path it was copied from (#2756).
+///
+/// `CARGO_BIN_EXE_xtask` is `target/debug/xtask`, and cargo relinks that
+/// path by removing it and linking the new build in its place: the permit
+/// hook's `cargo build -p xtask` does so whenever a checkout's tip moves,
+/// and between the removal and the link the path names nothing, so an
+/// integration test spawning it then failed `NotFound`. On macOS the copy
+/// is an APFS clone, which costs no space and is not touched by a later
+/// write to the original; elsewhere it is a hard link to the build's file,
+/// which the relink unlinks and leaves standing, and a whole copy only
+/// where no link can be made.
+pub(crate) struct Binary {
+    _tree: Tree,
+    path: PathBuf,
+}
+
+impl Binary {
+    /// `bin` copied into a tree of its own. A `bin` that names nothing is
+    /// waited for, a second at most, since the one moment that happens is
+    /// a relink between its removal and its link.
+    pub(crate) fn hold(bin: &Path) -> Result<Binary> {
+        let name = bin
+            .file_name()
+            .context("a program path with no file name")?;
+        let tree = Tree::new("binary")?;
+        let path = tree.join(name);
+        let take = || {
+            if !cfg!(target_os = "macos") && std::fs::hard_link(bin, &path).is_ok() {
+                return Ok(());
+            }
+            std::fs::copy(bin, &path).map(drop)
+        };
+        let mut waited = 0;
+        loop {
+            match take() {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound && waited < 200 => {
+                    waited += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                copied => {
+                    copied.map_err(|err| made(err, &path, "holding a copy of the program"))?;
+                    return Ok(Binary { _tree: tree, path });
+                }
+            }
+        }
+    }
+
+    /// Where the held copy stands.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// The binary under test, `env!("CARGO_BIN_EXE_xtask")`, held once for the
+/// whole test process ([`Binary`]): what every integration test spawns.
+/// The first `bin` asked for is the one held; every caller names the same.
+/// The held tree stands until the process ends, a static is never dropped,
+/// and the next run's sweep takes it. Where it cannot be held, `bin`
+/// itself, with the reason on stderr.
+pub fn xtask(bin: &'static str) -> &'static Path {
+    static HELD: std::sync::OnceLock<Option<Binary>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        Binary::hold(Path::new(bin))
+            .inspect_err(|err| eprintln!("running {bin} itself, not a held copy: {err:#}"))
+            .ok()
+    })
+    .as_ref()
+    .map_or(Path::new(bin), Binary::path)
+}
+
 /// A scratch repository at `to` holding `workspace`'s files, tracked or
 /// not yet but not ignored and standing in the working tree
 /// ([`crate::git::files`]), as the one commit on `main`, with the hooks
@@ -436,12 +518,7 @@ pub(crate) fn committing(dir: &Path, args: &[&str]) {
 /// supposed to make impossible; it is a failure rather than a thing to
 /// work around, because the alternative is two runs in one directory.
 fn hold(tree: &Path) -> Result<(PathBuf, File)> {
-    let beside = |suffix: &str| {
-        let mut named = tree.to_path_buf().into_os_string();
-        named.push(suffix);
-        PathBuf::from(named)
-    };
-    let (taking, lock) = (beside(TAKING), beside(LOCK));
+    let (taking, lock) = (beside(tree, TAKING), beside(tree, LOCK));
     let file = File::options()
         .read(true)
         .write(true)
@@ -457,6 +534,14 @@ fn hold(tree: &Path) -> Result<(PathBuf, File)> {
     }
     std::fs::rename(&taking, &lock).map_err(|err| made(err, &lock, "naming the scratch lock"))?;
     Ok((lock, file))
+}
+
+/// The path `tree` names with `suffix` after it: its lock, or the name
+/// the lock is taken under.
+fn beside(tree: &Path, suffix: &str) -> PathBuf {
+    let mut named = tree.to_path_buf().into_os_string();
+    named.push(suffix);
+    PathBuf::from(named)
 }
 
 /// Every scratch tree a dead process left in `base`, taken away.
@@ -511,6 +596,153 @@ fn names(path: &Path, file: &File) -> bool {
     }
 }
 
+/// A process a run left standing in its scratch tree (#2663): an orphan,
+/// handed to init once its parent ended, whose command line names a path
+/// inside a tree, as a test's php names its program in the run's copy of
+/// the pinned tree and a php-fpm master that left its group by `setsid()`
+/// names its ini there in its title. Its group goes with it where it leads
+/// one, as a program's does (`oracle::Group`), and a php-fpm master's
+/// workers are in its. A process whose parent lives is some program's
+/// still, an agent's shell that names the tree among them, and is never
+/// one; nor is one that names no tree, whatever number it took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Stray {
+    pub pid: u32,
+    pub group: u32,
+    pub trees: Vec<PathBuf>,
+}
+
+impl Stray {
+    /// The strays of `listed`, the lines `ps -o pid=,ppid=,pgid=,command=`
+    /// printed, that name a tree made as `name` ([`unique`]).
+    pub(crate) fn of(listed: &str, name: &str) -> Vec<Stray> {
+        let marker = format!("/{PREFIX}{name}");
+        let numbered = |n: &str| {
+            n.bytes().enumerate().all(|(at, b)| match at {
+                0 | 8 => b == b'-',
+                _ => b.is_ascii_digit(),
+            })
+        };
+        let mut strays = Vec::new();
+        for line in listed.lines() {
+            let mut words = line.split_whitespace();
+            let mut number = || words.next().and_then(|word| word.parse::<u32>().ok());
+            let (Some(pid), Some(INIT), Some(group)) = (number(), number(), number()) else {
+                continue;
+            };
+            let trees: Vec<PathBuf> = line
+                .match_indices(&marker)
+                .filter_map(|(at, _)| {
+                    let end = at + marker.len() + NUMBERED;
+                    let before = line.get(..at)?;
+                    let start = before
+                        .rfind([' ', '(', '=', ':', ',', '\'', '"'])
+                        .map_or(0, |s| s + 1);
+                    let tree = line.get(start..end)?;
+                    let after = line.get(end..)?.chars().next();
+                    (tree.starts_with('/')
+                        && numbered(line.get(at + marker.len()..end)?)
+                        && after.is_none_or(|c| !c.is_ascii_alphanumeric()))
+                    .then(|| PathBuf::from(tree))
+                })
+                .collect();
+            if !trees.is_empty() {
+                strays.push(Stray { pid, group, trees });
+            }
+        }
+        strays
+    }
+
+    /// The process stopped with its group where it leads one, and waited
+    /// for, as long as a second, to be gone.
+    fn stop(&self) {
+        use nix::sys::signal::{Signal, kill, killpg};
+        let Ok(pid) = i32::try_from(self.pid) else {
+            return;
+        };
+        let pid = nix::unistd::Pid::from_raw(pid);
+        if self.group == self.pid {
+            killpg(pid, Signal::SIGKILL).ok();
+        } else {
+            kill(pid, Signal::SIGKILL).ok();
+        }
+        for _ in 0..100 {
+            if !crate::sysv::alive(self.pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+/// The process init is, which an orphan's parent becomes.
+const INIT: u32 = 1;
+
+/// The strays standing in trees made as `name` that `ours` takes, each
+/// stopped, and their pids: none where `ps` does not answer.
+fn stop_strays_in(name: &str, ours: impl Fn(&Path) -> bool) -> Vec<u32> {
+    let Ok(ps) = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let strays = Stray::of(&String::from_utf8_lossy(&ps.stdout), name);
+    let ours: Vec<Stray> = strays
+        .into_iter()
+        .filter(|stray| stray.trees.iter().any(|tree| ours(tree)))
+        .collect();
+    ours.iter().for_each(Stray::stop);
+    ours.iter().map(|stray| stray.pid).collect()
+}
+
+/// The strays dead runs left in their trees made as `name` by
+/// [`Tree::short`], stopped, and their pids: a tree whose lock comes, or
+/// that is gone with its lock, is a dead run's ([`reap`]); one whose lock
+/// will not come is a run's still going, whose strays are its own to stop
+/// ([`Tree::stop_strays`]); and one standing with no lock was kept
+/// ([`KEEP`]) and is never a candidate. Every session's runs lay their
+/// trees in that one directory (#2626), so the lock is the only guard: a
+/// dead run's strays are stopped by the next run of any session, and a
+/// live run's by none but itself. A cut-off System V run's programs are
+/// stopped by its own claims first (`sysv::stop_cut_off`). What a run's
+/// start does before it makes its tree, so the files a killed run's
+/// programs hold open in a tree removed under them are let go (#2663).
+pub(crate) fn stop_forsaken(name: &str) -> Vec<u32> {
+    let Ok(base) = std::fs::canonicalize(SHORT) else {
+        return Vec::new();
+    };
+    stop_strays_in(name, |tree| {
+        if tree.parent() != Some(base.as_path()) {
+            return false;
+        }
+        match File::options()
+            .read(true)
+            .write(true)
+            .open(beside(tree, LOCK))
+        {
+            Ok(lock) => lock.try_lock().is_ok(),
+            Err(err) => err.kind() == std::io::ErrorKind::NotFound && !tree.exists(),
+        }
+    })
+}
+
+impl Tree {
+    /// The strays standing in this tree, stopped, and their pids: what a run
+    /// does once every program it started in the tree has ended, for what
+    /// one of them started that left its group (#2663).
+    pub(crate) fn stop_strays(&self) -> Vec<u32> {
+        let named = self.path.file_name().and_then(|n| n.to_str());
+        let name = named
+            .and_then(|n| n.strip_prefix(PREFIX))
+            .unwrap_or_default();
+        let name = name
+            .get(..name.len().saturating_sub(NUMBERED))
+            .unwrap_or_default();
+        stop_strays_in(name, |tree| tree == self.path)
+    }
+}
+
 impl std::ops::Deref for Tree {
     type Target = Path;
 
@@ -556,8 +788,39 @@ mod tests {
 
     use std::os::unix::fs::MetadataExt;
 
-    use super::{Full, Tree, hold, made, reap};
+    use super::{Binary, Full, LOCK, Stray, Tree, beside, hold, made, reap, stop_forsaken};
     use crate::reading::{Reading, Status};
+
+    /// A held program runs as it stood when it was held (#2756): the path
+    /// it was copied from is removed after one spawn, as cargo's relink
+    /// removes `target/debug/xtask`, and the next spawn still runs; then
+    /// another program is laid at that path, and the held one is still
+    /// what runs.
+    #[test]
+    fn a_held_program_runs_after_its_path_is_removed_and_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Tree::new("binary-source").unwrap();
+        let bin = dir.join("program");
+        let lay = |text: &str| {
+            std::fs::write(&bin, format!("#!/bin/sh\necho {text}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let run = |held: &Binary| {
+            let out = std::process::Command::new(held.path()).output().unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        lay("first");
+        let held = Binary::hold(&bin).unwrap();
+        assert_eq!(run(&held), "first\n");
+        std::fs::remove_file(&bin).unwrap();
+        assert_eq!(run(&held), "first\n", "the path removed between two spawns");
+        lay("second");
+        assert_eq!(
+            run(&held),
+            "first\n",
+            "the path replaced between two spawns"
+        );
+    }
 
     /// A sweep never meets a lock before it is held (#1252): one thread
     /// takes lock after lock in a directory of its own while another sweeps
@@ -658,5 +921,103 @@ mod tests {
 
         let denied = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
         assert!(Full::of(&made(denied, &path, "opening")).is_none());
+    }
+
+    /// What a stray is read from `ps`'s lines (#2663): an orphan naming a
+    /// path in a tree made as the name, its trees each once per mention;
+    /// never a process whose parent lives, nor a path whose numbers are
+    /// not a tree's, nor a tree made as another name.
+    #[test]
+    fn a_stray_is_an_orphan_whose_command_names_a_tree_made_as_the_name() {
+        let tree = "/tmp/xtask-phpt-tree-0012345-000001";
+        let listed = format!(
+            "  501 1 501 php-fpm: master process ({tree}/sapi/fpm/tests/a.ini)\n\
+             502 1 501 php -d x={tree}/a {tree}.lock\n\
+             503 77 503 zsh -c ls {tree}/a\n\
+             504 1 504 vi /tmp/xtask-phpt-tree-marks-0012345-000001/a /tmp/xtask-phpt-tree-0012345-00000\n\
+             505 1 505 php /tmp/xtask-phpt-tree-0012345-0000012/a"
+        );
+        let strays = Stray::of(&listed, "phpt-tree");
+        let trees = |n| vec![std::path::PathBuf::from(tree); n];
+        assert_eq!(
+            strays,
+            [
+                Stray {
+                    pid: 501,
+                    group: 501,
+                    trees: trees(1)
+                },
+                Stray {
+                    pid: 502,
+                    group: 501,
+                    trees: trees(2)
+                },
+            ]
+        );
+    }
+
+    /// A dead run's stray is stopped, and nothing else is (#2663): an
+    /// orphan naming a tree whose run is gone is, with its group; an
+    /// orphan naming a tree a run still holds is another run's program and
+    /// is left to it until that run stops its own, as is one in a tree
+    /// standing with no lock, a kept one; and a process whose parent lives
+    /// is left however dead the tree it names.
+    #[test]
+    fn a_dead_runs_stray_is_stopped_and_a_live_runs_or_a_childs_never() {
+        let marks = Tree::new("strays-marks").unwrap();
+        let held = Tree::short("strays").unwrap();
+        let dead = Tree::short("strays").unwrap();
+        let dead_path = dead.path().to_path_buf();
+        drop(dead);
+        let kept = Tree::short("strays").unwrap();
+        std::fs::remove_file(beside(&kept, LOCK)).unwrap();
+        // perl forks, and the child takes a session of its own and writes
+        // its pid before its parent exits and leaves it to init.
+        let orphan = |tree: &std::path::Path, mark: &str| {
+            let mark = marks.join(mark);
+            let perl = "my $m = $ARGV[1]; if (fork) { select(undef, undef, undef, 0.05) until -s $m; exit } \
+                        POSIX::setsid(); open my $f, '>', $m; print $f $$; close $f; sleep 60";
+            let status = std::process::Command::new("perl")
+                .args(["-MPOSIX", "-e", perl])
+                .arg(tree.join("a"))
+                .arg(&mark)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            std::fs::read_to_string(&mark)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        };
+        let gone = |pid: u32| {
+            (0..200).any(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                !crate::sysv::alive(pid)
+            })
+        };
+        let (live, forsaken) = (orphan(held.path(), "live"), orphan(&dead_path, "dead"));
+        let kept_one = orphan(kept.path(), "kept");
+        let mut child = std::process::Command::new("perl")
+            .args(["-e", "sleep 60"])
+            .arg(dead_path.join("a"))
+            .spawn()
+            .unwrap();
+        let stopped = stop_forsaken("strays");
+        let child_ran = child.try_wait().unwrap().is_none();
+        child.kill().ok();
+        child.wait().ok();
+        let live_ran = crate::sysv::alive(live);
+        let held_stopped = held.stop_strays();
+        let kept_ran = crate::sysv::alive(kept_one);
+        let kept_stopped = kept.stop_strays();
+        std::fs::remove_dir_all(kept.path()).ok();
+        assert_eq!(stopped, [forsaken]);
+        assert!(gone(forsaken), "the dead run's stray {forsaken} runs on");
+        assert!(child_ran, "a child whose parent lives was stopped");
+        assert!(live_ran, "a live run's program {live} was stopped");
+        assert_eq!(held_stopped, [live]);
+        assert!(gone(live), "the run's own stray {live} runs on");
+        assert!(kept_ran, "a kept tree's {kept_one} was stopped");
+        assert_eq!(kept_stopped, [kept_one]);
     }
 }

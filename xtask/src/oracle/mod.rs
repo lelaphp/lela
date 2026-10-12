@@ -421,7 +421,7 @@ impl Source {
         if !checkout(tree) {
             return Ok(());
         }
-        let head = crate::git::git(tree, &["rev-parse", "--verify", "HEAD^{commit}"], None)
+        let head = crate::git::elsewhere(tree, &["rev-parse", "--verify", "HEAD^{commit}"])
             .with_context(|| {
                 format!(
                     "reading the commit of the php-src checkout at {}",
@@ -447,7 +447,7 @@ impl Source {
     /// word as its commit is.
     pub(crate) fn files(tree: &Path) -> Result<Vec<PathBuf>> {
         if checkout(tree) {
-            let listed = crate::git::git(tree, &["ls-files", "-z"], None)
+            let listed = crate::git::elsewhere(tree, &["ls-files", "-z"])
                 .with_context(|| format!("listing the php-src checkout at {}", tree.display()))?;
             return Ok(listed
                 .split('\0')
@@ -2136,7 +2136,8 @@ pub fn normalise_in(rules: &Normalise, dir: &Path, bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-fn replace(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
+/// `haystack` with each `needle`, which is not empty, as `with`.
+pub(crate) fn replace(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(haystack.len());
     let mut i = 0;
     while i < haystack.len() {

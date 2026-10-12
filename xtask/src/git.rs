@@ -249,6 +249,27 @@ pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
     git(root, &["rev-parse", "--verify", "--quiet", name], None).is_ok()
 }
 
+/// `git` in a repository that is not the workspace's, such as the pinned
+/// php-src tree, with every `GIT_` variable a hook inherits taken out
+/// ([`crate::batch::without_git`]): pre-commit in a linked worktree hands
+/// its instruments git's own `GIT_DIR`, under which `-C` names the
+/// directory and the workspace still answers, so the pinned tree read as
+/// standing at the workspace's `HEAD` and every commit there was refused.
+pub(crate) fn elsewhere(root: &Path, args: &[&str]) -> Result<String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(args).stdin(Stdio::null());
+    crate::batch::without_git(&mut command);
+    let out = command.output().context("running git")?;
+    if !out.status.success() {
+        bail!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    String::from_utf8(out.stdout).context("git wrote something that is not UTF-8")
+}
+
 /// Run git in `root` and return its stdout; a non-zero exit is an error
 /// carrying git's stderr.
 pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
@@ -370,6 +391,73 @@ pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
+    /// Run by [`elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir`]
+    /// with `GIT_DIR` naming another repository, as a hook in a linked
+    /// worktree runs an instrument; run by nothing else, it does nothing.
+    #[test]
+    #[ignore = "elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir runs it"]
+    fn elsewhere_under_git_dir() {
+        let Some(named) = std::env::var_os("XTASK_ELSEWHERE") else {
+            return;
+        };
+        let head = super::elsewhere(Path::new(&named), &["rev-parse", "HEAD"]).unwrap();
+        let expected = std::env::var("XTASK_ELSEWHERE_HEAD").unwrap();
+        assert_eq!(head.trim(), expected);
+    }
+
+    /// A hook's `GIT_DIR` names the repository being committed to, and
+    /// `git -C <tree>` under it reads that one; [`super::elsewhere`] reads
+    /// the tree it names, the pinned php-src's in [`crate::oracle`].
+    #[test]
+    fn elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir() {
+        let dir = crate::scratch::Tree::new("git-elsewhere").unwrap();
+        let mut heads = Vec::new();
+        for name in ["committing", "pinned"] {
+            let repo = dir.join(name);
+            std::fs::create_dir_all(&repo).unwrap();
+            for args in [
+                &["init", "-q"][..],
+                &[
+                    "-c",
+                    "user.name=x",
+                    "-c",
+                    "user.email=x@x",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    name,
+                ],
+            ] {
+                let status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_INDEX_FILE")
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            heads.push(super::elsewhere(&repo, &["rev-parse", "HEAD"]).unwrap());
+        }
+        assert_ne!(heads[0], heads[1]);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "git::tests::elsewhere_under_git_dir",
+                "--ignored",
+            ])
+            .env("GIT_DIR", dir.join("committing/.git"))
+            .env("XTASK_ELSEWHERE", dir.join("pinned"))
+            .env("XTASK_ELSEWHERE_HEAD", heads[1].trim())
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+    }
+
     #[test]
     fn blob_ids_are_git_object_ids() {
         assert_eq!(

@@ -222,6 +222,7 @@ oracle::normalise
 oracle::normalise_in
 oracle::run_by
 oracle::verdict
+package_dir
 permit::Adapter
 permit::Arguments
 permit::Call
@@ -306,6 +307,7 @@ scratch::Tree::new
 scratch::Tree::path
 scratch::cargo
 scratch::repository
+scratch::xtask
 status::Against
 status::render
 status::session
@@ -314,8 +316,10 @@ steer::Verdict
 steer::Verdict::additions
 steer::judge
 steer::run
+test::committed
 test::run
 test::run_staged
+test::without_git
 ticket::Act
 ticket::BlockedBy
 ticket::Blocker

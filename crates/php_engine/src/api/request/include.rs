@@ -16,7 +16,7 @@ use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
 use crate::exec::IncludeKind;
-use crate::supplied::chain::StringArgs;
+use crate::supplied::chain::{FileArgs, StringArgs};
 
 use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
 
@@ -88,12 +88,58 @@ impl Request {
         self.included_files.paths()
     }
 
-    /// The source the `zend_compile_file` chain answers for `path`
-    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]), entered
-    /// from the top; `None` where no link replaces it.
-    pub(crate) fn compile_file_source(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    /// `zend_compile_file` over the file at the full path `path`, named
+    /// `written` where it was, through a `zend_file_handle` of the kind
+    /// `handle` names: the links the bundle supplied
+    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]) entered from
+    /// the top, and beneath them all the engine's cached compile
+    /// ([`Request::cached_source`]). The `Err` is what a link threw; the
+    /// unit or the compiler's refusal is the `Ok`, and nothing where the
+    /// file was not there to read.
+    ///
+    /// What the compiler raises is raised at the included file's line,
+    /// as php raises it inside `zend_include_or_eval`, whichever
+    /// construct included it, and a once form serves the unit it compiled
+    /// or nothing:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/scope.inc';
+    /// file_put_contents($f, "<?php\ndeclare(encoding='UTF-8');\nif (!function_exists('scoped')) { function scoped(\$a = 1, \$b) {} }\nreturn 1;\n");
+    /// var_dump(include $f, require $f, include_once $f, require_once $f);
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: declare(encoding=...) ignored because Zend multibyte feature is turned off by settings in %s on line 2
+    ///
+    /// Deprecated: scoped(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 3
+    ///
+    /// Warning: declare(encoding=...) ignored because Zend multibyte feature is turned off by settings in %s on line 2
+    ///
+    /// Deprecated: scoped(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 3
+    /// int(1)
+    /// int(1)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    pub(crate) fn compile_file(
+        &mut self,
+        path: &[u8],
+        written: Option<&[u8]>,
+        handle: HandlePath,
+    ) -> Result<Option<Result<Arc<Unit>, CompileError>>, Thrown> {
+        self.compile_through(FileArgs::new(path, written, handle))
+    }
+
+    /// [`Request::compile_file`] over the `zend_file_handle` `args`
+    /// describe.
+    fn compile_through(
+        &mut self,
+        args: FileArgs<'_>,
+    ) -> Result<Option<Result<Arc<Unit>, CompileError>>, Thrown> {
         let shared = Arc::clone(&self.shared);
-        Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), path).serve(self)
+        let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
+        Ok(top.serve(self)?.map(|compiled| compiled.0))
     }
 
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
@@ -145,6 +191,31 @@ impl Request {
         self.hold_file(&script, until);
     }
 
+    /// [`Beneath::read`](crate::api::abi::Beneath::read) over the file
+    /// `args` name.
+    pub(crate) fn read_file_source(&mut self, args: FileArgs<'_>) -> Option<Vec<u8>> {
+        if let Some(source) = args.source {
+            return Some(source.to_vec());
+        }
+        let source = crate::unit_cache::source_or_read(None, args.path)?.into_owned();
+        if args.opens_stream() {
+            let full = crate::unit_cache::full_path(args.path, &self.cwd);
+            self.open_include_stream(&full, args.handle);
+        }
+        Some(source)
+    }
+
+    /// The file at the full path `path`, which a `zend_compile_file`
+    /// link's stream holds open in the place of a `zend_file_handle` of
+    /// the kind `handle` names, held as long as that `zend_file_handle`
+    /// stands: until the program has been served for one php keeps
+    /// ([`HandlePath::Kept`]), and not past the compile for any other.
+    pub(crate) fn hold_opened(&mut self, path: &[u8], handle: HandlePath) {
+        if handle == HandlePath::Kept {
+            self.hold_file(path, Until::Served);
+        }
+    }
+
     /// The file at the full path `path` opened and held, inherited by a
     /// process the request execs, until `until` ([`Held`]); a file that
     /// does not open is not held, as the read that compiled it has
@@ -171,8 +242,14 @@ impl Request {
     /// (`Z/main/main.c:2610-2619`), before `auto_prepend_file` runs: the
     /// file the request names made whole against its working directory
     /// with its links resolved, which is the name the unit compiles under
-    /// and the page `php_statpage` stats, put in `EG(included_files)`;
-    /// the name as given where it expands to nothing. A source the host
+    /// and the page `php_statpage` stats, and put in `EG(included_files)`
+    /// there only where the host opened it as a `FILE *`, the CLI's
+    /// ([`ProgramFile::noted_before_prepend`]); php-cgi's and php-fpm's
+    /// `zend_file_handle` carries an `opened_path` and the built-in
+    /// server's is a bare name, so the table takes theirs as it compiles,
+    /// after the prepend file has been served
+    /// ([`Request::note_compiled_program`]); the name as given where it
+    /// expands to nothing. A source the host
     /// `served` under a name is the file php would have opened by it, its
     /// name expanded into the table and compiled under, so `__FILE__` and
     /// a diagnostic's file are the table's path (#1569); one named
@@ -199,8 +276,50 @@ impl Request {
         }
         let script = script.unwrap_or_default();
         let expanded = self.expand_filepath(&script).unwrap_or(script);
-        self.note_included(&expanded).ok();
+        if self.description.program_file.noted_before_prepend() {
+            self.note_included(&expanded).ok();
+        }
         self.description.script_name = Some(expanded);
+    }
+
+    /// `zend_execute_script`'s `zend_hash_add_empty_element` of the
+    /// `zend_file_handle`'s `opened_path` once the program has compiled
+    /// (`Z/Zend/zend.c:1971-1974`): the program's file in
+    /// `EG(included_files)` under its expanded name, after what
+    /// `auto_prepend_file` included, for every host but the CLI, whose
+    /// `FILE *` put it there before ([`Request::expand_primary_file`]).
+    /// From the prepend file and from the program, `pre.php` and `t.php`
+    /// each print the table's names, under the CLI and under the built-in
+    /// server:
+    ///
+    /// ```php
+    /// $d = realpath(sys_get_temp_dir()) . '/noted' . getmypid(); @mkdir($d);
+    /// $list = '<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";';
+    /// file_put_contents("$d/pre.php", $list); file_put_contents("$d/t.php", $list);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', "auto_prepend_file=$d/pre.php", "$d/t.php"], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', "auto_prepend_file=$d/pre.php", '-S', '127.0.0.1:0', '-t', $d], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// echo file_get_contents("http://127.0.0.1:$port/t.php");
+    /// proc_terminate($p); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect process
+    /// pre.php t.php,pre.php
+    /// t.php t.php,pre.php
+    /// pre.php pre.php
+    /// t.php pre.php,t.php
+    /// ```
+    pub(crate) fn note_compiled_program(&mut self) {
+        if self.description.program_file.noted_before_prepend() {
+            return;
+        }
+        if let Some(script) = self.description.script_name.clone() {
+            // The memory limit's fatal is recorded and ends the request.
+            self.note_included(&script).ok();
+        }
     }
 
     /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four
@@ -276,6 +395,33 @@ impl Request {
 
     /// [`Request::include_file`] through a `zend_file_handle` of the kind
     /// `handle` names.
+    ///
+    /// A file that resolves and then does not read compiles to nothing,
+    /// and the include fails as one nothing opens; the reason the stream
+    /// warning gives is #2766's:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/locked.inc';
+    /// file_put_contents($f, '<?php return 1;'); chmod($f, 0);
+    /// var_dump(include $f, include_once $f);
+    /// try { require $f; } catch (Error $e) { echo get_class($e), "\n"; }
+    /// chmod($f, 0644); unlink($f);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: include(%s/locked.inc): Failed to open stream: %s in %s on line 4
+    ///
+    /// Warning: include(): Failed opening '%s/locked.inc' for inclusion (include_path='%s') in %s on line 4
+    ///
+    /// Warning: include_once(%s/locked.inc): Failed to open stream: %s in %s on line 4
+    ///
+    /// Warning: include_once(): Failed opening '%s/locked.inc' for inclusion (include_path='%s') in %s on line 4
+    /// bool(false)
+    /// bool(false)
+    ///
+    /// Warning: require(%s/locked.inc): Failed to open stream: %s in %s on line 5
+    /// Error
+    /// ```
     fn include_through(
         &mut self,
         kind: IncludeKind,
@@ -333,23 +479,16 @@ impl Request {
         if kind.once() {
             self.note_included(&path)?;
         }
-        let outer = self.include.including.replace((kind, self.vm.depth()));
-        let replaced = self.compile_file_source(&path);
-        self.include.including = outer;
-        if let Some(source) = replaced? {
-            let shared = Arc::clone(&self.shared);
-            let unit = match shared.compile_for(self, &source, &path, SourceKind::File) {
-                Ok(unit) => unit,
-                Err(refused) => {
-                    return Err(self.refused_include(&refused, &path, SourceKind::File));
-                }
-            };
-            self.note_included(&path)?;
-            return Ok(Opened::Unit(unit));
-        }
-        let cached = match held {
-            Some(held) => Some(held.unit.clone()),
-            None => self.cached_file(&path, Some(written), handle),
+        // A unit the lookup by the key served is opcache's answer above
+        // every link; any other file is compiled through them all, inside
+        // the include, as `zend_include_or_eval` calls `zend_compile_file`.
+        let cached = if let Some(held) = held {
+            Some(held.unit.clone())
+        } else {
+            let outer = self.include.including.replace((kind, self.vm.depth()));
+            let compiled = self.compile_file(&path, Some(written), handle);
+            self.include.including = outer;
+            compiled?
         };
         match cached {
             Some(Ok(unit)) => {
@@ -563,10 +702,21 @@ impl Request {
             return self.failed_opening(kind, written);
         };
         let path = opened_path.as_deref().unwrap_or(path);
-        let shared = Arc::clone(&self.shared);
-        let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
-            Ok(unit) => unit,
-            Err(refused) => return Err(self.refused_include(&refused, path, SourceKind::File)),
+        // Compiled through every `zend_compile_file` link, the stream's
+        // bytes handed down as the stream php's handle holds.
+        let args = FileArgs {
+            source: Some(&source),
+            ..FileArgs::new(path, Some(written), HandlePath::Stream)
+        };
+        let outer = self.include.including.replace((kind, self.vm.depth()));
+        let compiled = self.compile_through(args);
+        self.include.including = outer;
+        let unit = match compiled? {
+            Some(Ok(unit)) => unit,
+            Some(Err(refused)) => {
+                return Err(self.refused_include(&refused, path, SourceKind::File));
+            }
+            None => return self.failed_opening(kind, written),
         };
         self.note_included(path)?;
         Ok(Opened::Unit(unit))

@@ -19,7 +19,9 @@
 //! reads it where it stands on the chain of stacks php's
 //! `prev_execute_data` walks, the running one and each resumer's below
 //! it, and refuses it where it stands on none: a frame popped, a
-//! suspended generator's, a suspended fiber's.
+//! suspended generator's, a suspended fiber's. A write or an evaluation
+//! reaches the last two through what the generator or the fiber holds,
+//! which [`FrameId`] names ([`Request::in_frame`]).
 //!
 //! A frame's identity is given lazily: a push writes the state's one
 //! more word as none, and the number is given the first time an
@@ -62,6 +64,11 @@ pub struct FrameId {
     /// [`Request::in_frame`] looks for it while the generator is
     /// suspended and its frame on no stack.
     generator: Option<crate::api::values::PhpObject>,
+    /// The coroutine whose stack the frame stood on, a `Fiber`'s or an
+    /// extension's, no owner; none for the request's own stack: where
+    /// [`Request::in_frame`] looks for it while the coroutine is
+    /// suspended, as php reaches it through `fiber->execute_data`.
+    coroutine: Option<crate::fiber::Context>,
 }
 
 /// The number a request gives one frame and no other, held in the
@@ -128,6 +135,7 @@ impl<'a> FrameView<'a> {
             at: self.at,
             id,
             generator: state.and_then(FrameAt::generator),
+            coroutine: self.req.fibers.coroutine_on(self.stack),
         }
     }
 
@@ -399,6 +407,37 @@ impl FrameIds {
     }
 }
 
+impl FrameId {
+    /// Whether the frame stands on `vm` at the place it was kept at.
+    fn kept_at(&self, vm: &Vm) -> bool {
+        vm.at(self.at).is_some_and(|state| self.names(state))
+    }
+
+    /// Where the frame stands on `vm`, looked for over every frame, the
+    /// innermost first: a generator's pushed back elsewhere.
+    fn moved_on(&self, vm: &Vm) -> Option<FrameRef> {
+        (0..vm.depth()).rev().find_map(|at| {
+            let at = FrameRef(u32::try_from(at).ok()?);
+            vm.at(at)
+                .is_some_and(|state| self.names(state))
+                .then_some(at)
+        })
+    }
+
+    /// Where the frame stands on `vm`, its kept place first.
+    fn place_on(&self, vm: &Vm) -> Option<FrameRef> {
+        if self.kept_at(vm) {
+            return Some(self.at);
+        }
+        self.moved_on(vm)
+    }
+
+    /// Whether `state` is the frame's, and not one being popped.
+    fn names(&self, state: &exec::Header) -> bool {
+        !state.info.leaving() && state.identity.get() == Some(self.id)
+    }
+}
+
 impl Request {
     /// The frame `id` names, where it stands on the running stack or a
     /// resumer's below it; `None` where it stands on none, so a frame
@@ -409,28 +448,16 @@ impl Request {
     /// walks the whole chain.
     #[must_use]
     pub fn frame_of(&self, id: FrameId) -> Option<FrameView<'_>> {
-        let names =
-            |state: &exec::Header| !state.info.leaving() && state.identity.get() == Some(id.id);
         let found = self
             .executions()
             .enumerate()
-            .find_map(|(stack, vm)| {
-                vm.at(id.at)
-                    .is_some_and(names)
-                    .then_some((stack, vm, id.at))
-            })
+            .find_map(|(stack, vm)| id.kept_at(vm).then_some((stack, vm, id.at)))
             .or_else(|| {
                 // A generator's frame pushed back where another resumer
                 // stands.
-                self.executions().enumerate().find_map(|(stack, vm)| {
-                    let at = (0..vm.depth()).rev().find(|&at| {
-                        u32::try_from(at)
-                            .ok()
-                            .and_then(|at| vm.at(FrameRef(at)))
-                            .is_some_and(names)
-                    })?;
-                    Some((stack, vm, FrameRef(u32::try_from(at).ok()?)))
-                })
+                self.executions()
+                    .enumerate()
+                    .find_map(|(stack, vm)| Some((stack, vm, id.moved_on(vm)?)))
             });
         let (stack, vm, at) = found?;
         Some(FrameView {
@@ -495,9 +522,12 @@ impl Request {
     /// ([`Request::on_stack`]); and a suspended generator's, kept as a
     /// [`FrameId`] while it ran, which stands on top of the running
     /// stack for `f` as a resumption stands it and is suspended again
-    /// after ([`crate::generator::with_kept_frame`]). `None` for a frame
-    /// popped, and for a suspended fiber's, which no stack the request
-    /// runs on holds.
+    /// after ([`crate::generator::with_kept_frame`]). And a suspended
+    /// fiber's frame, on the stack the fiber holds, which the request runs
+    /// on for `f` with the chain ending at the fiber's bottom frame
+    /// ([`Request::on_held_stack`]). `None` for a frame popped, and for a
+    /// frame of a coroutine a suspend passed through, whose chain runs on
+    /// into its resumer's held stack, which no serve stands it on.
     pub(super) fn in_frame<R>(
         &mut self,
         id: FrameId,
@@ -505,6 +535,13 @@ impl Request {
     ) -> Option<R> {
         if let Some((stack, at)) = self.frame_of(id).map(|view| (view.stack, view.at)) {
             return self.on_stack(stack, |req| f(req, at));
+        }
+        if let Some(coroutine) = id.coroutine
+            && let Some(at) = coroutine
+                .coroutine(self)
+                .and_then(|held| id.place_on(&held.suspended()?.vm))
+        {
+            return self.on_held_stack(coroutine, |req| f(req, at));
         }
         crate::generator::with_kept_frame(self, id.generator?, id.id, f)
     }

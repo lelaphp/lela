@@ -311,17 +311,16 @@ impl Request {
         // `EG(fake_scope) = NULL` for the call and put back after it: a
         // destructor or a `__toString` a scoped write serves stands in its
         // own scope.
-        let fake = self.replace_fake_scope(None);
-        let served = self.serve_call_body(
-            function,
-            this,
-            called_scope,
-            closure,
-            arguments,
-            extra_named,
-        );
-        self.replace_fake_scope(fake);
-        served
+        self.in_fake_scope(None, |req| {
+            req.serve_call_body(
+                function,
+                this,
+                called_scope,
+                closure,
+                arguments,
+                extra_named,
+            )
+        })
     }
 
     /// [`Request::serve_call`] with no scope a write named standing.
@@ -573,7 +572,19 @@ impl Request {
     /// argument by reference, and whether only where it can
     /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past
     /// the declared ones.
+    #[inline]
     pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
+        if self
+            .user_function(function)
+            .is_some_and(|user| !user.shape.by_ref)
+        {
+            return (false, false);
+        }
+        self.declared_send_mode(function, number)
+    }
+
+    /// [`Request::arg_send_mode`] read off the declaration.
+    fn declared_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
         let Some(decl) = self.function_decl(function) else {
             return (false, false);
         };
@@ -860,6 +871,7 @@ impl Request {
     /// The user function or method `function` is, if it is one: one of
     /// the request's own rows, or the published arena's, which are
     /// numbered past the natives and the native methods (design §5.14).
+    #[inline]
     pub(crate) fn user_function(&self, function: Function) -> Option<&UserFunction> {
         match function.local_at() {
             Some(at) => self.user_functions.get(at),
@@ -1059,6 +1071,18 @@ impl Request {
                 &format!("Call to undefined function {name}()"),
             ));
         };
+        self.serve_entry(function, entry, on_throw)
+    }
+
+    /// [`Request::serve_native`] past the entry's lookup, for a caller
+    /// that holds `function`'s entry already, as a frameless call's
+    /// handler reads it off the frameless table (`ZEND_FLF_HANDLER`).
+    pub(crate) fn serve_entry(
+        &mut self,
+        function: Function,
+        entry: crate::api::abi::Entry,
+        on_throw: OnThrow,
+    ) -> Result<Value, Thrown> {
         let begun = crate::observer::native_call(self, function);
         #[cfg(debug_assertions)]
         let outer = self

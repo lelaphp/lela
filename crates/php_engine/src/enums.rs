@@ -15,11 +15,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use std::cmp::Ordering;
-
 use php_unit::decl::{ClassKind, EnumBacking, Type};
 
-use crate::api::abi::{CloneObj, Entry, ObjectHandlers};
+use crate::api::abi::{Entry, Refusals};
 use crate::api::raising::{Thrown, arg_count_error, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, Value, adopted};
@@ -79,28 +77,7 @@ impl EnumMethod {
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) struct EnumHandlers;
-
-impl ObjectHandlers for EnumHandlers {
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-
-    fn compare(
-        &self,
-        _: &mut Request,
-        left: &Value,
-        right: &Value,
-    ) -> Result<Option<Ordering>, Thrown> {
-        let same = match (left.as_object(), right.as_object()) {
-            (Some(left), Some(right)) => left.index() == right.index(),
-            _ => false,
-        };
-        Ok(same.then_some(Ordering::Equal))
-    }
-}
-
-pub(crate) static ENUM: EnumHandlers = EnumHandlers;
+pub(crate) static ENUM: Refusals = Refusals::NONE.cloning().comparison();
 
 /// The enum a call was made on, which is the scope of the three
 /// methods: an enum is final, so the called scope is the enum itself.

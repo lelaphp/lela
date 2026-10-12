@@ -3,7 +3,7 @@
 Nop
 __private::Entry
 __private::abstract_entry
-__private::arity
+__private::arguments
 __private::attribute
 __private::case_of
 __private::case_value
@@ -13,6 +13,7 @@ __private::entered
 __private::native_function
 __private::parameter
 __private::property
+abi::Absent
 abi::Admission
 abi::AfterLog
 abi::BeginHandler
@@ -25,7 +26,9 @@ abi::Beneath::line
 abi::Beneath::message
 abi::Beneath::name
 abi::Beneath::opcode
+abi::Beneath::opened
 abi::Beneath::path
+abi::Beneath::read
 abi::Beneath::serve
 abi::Beneath::source
 abi::Beneath::throwable
@@ -59,6 +62,7 @@ abi::ClassUnserialize
 abi::CloneObj
 abi::CloneObjWith
 abi::Compiled
+abi::Compiled::op_array
 abi::ConstArray
 abi::ConstValue
 abi::Coroutine
@@ -336,6 +340,7 @@ abi::chain::PostStartup
 abi::chain::ResolvePath
 abi::chain::Throw
 abi::chain::Upload
+attr::mirrors
 attr::php_class
 attr::php_const
 attr::php_function
@@ -395,10 +400,8 @@ call::write_static_prop
 coerce::BinaryOp
 coerce::Exponent
 coerce::Exponent::as_char
-coerce::argument
 coerce::atoi
 coerce::binary_op
-coerce::callable_argument
 coerce::callable_checked
 coerce::callable_name
 coerce::coerce_param
@@ -1131,7 +1134,6 @@ test::Engine::serve_capture
 test::Engine::serve_capture_as
 test::Engine::serve_capture_in
 test::Engine::serve_capture_traced_in
-test::Engine::serve_started
 test::Engine::start_up
 test::Engine::startup_errors
 test::Engine::strip

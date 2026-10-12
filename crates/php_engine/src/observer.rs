@@ -539,6 +539,19 @@ pub(crate) fn observing(req: &Request) -> bool {
     req.shared.observers != 0
 }
 
+/// Whether a frameless call of `function` is served as a full call, a
+/// frame pushed for the observers to see: php's `ZEND_OBSERVER_ENABLED
+/// && !zend_observer_handler_is_unobserved(...)` before
+/// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`), which
+/// is every call while the function's slot is unresolved and none once
+/// the observers declined it. One load and one compare while no
+/// observer is declared.
+#[inline(always)] // as `call`
+#[allow(clippy::inline_always)]
+pub(crate) fn frameless_observed(req: &Request, function: Function) -> bool {
+    observing(req) && !req.native_unobserved(function)
+}
+
 /// The call home: `frame` pushed, its prologue not yet served. One load and
 /// one compare while no observer is declared.
 #[inline(always)] // design §4.3 seam 9: the home pays the load and the branch, never a call
@@ -1118,14 +1131,14 @@ pub(crate) struct AsFiber {
 pub(crate) enum Caller {
     /// `EG(main_fiber_context)`, the request's own stack.
     Request,
-    /// The coroutine the object holds, a `Fiber`'s or an extension's.
-    Coroutine(PhpObject),
+    /// A coroutine, a `Fiber`'s or an extension's.
+    Coroutine(crate::fiber::Context),
 }
 
 impl Caller {
     /// The caller a resume from `resumer` sets, none being the request's
     /// own stack.
-    pub(crate) fn of(resumer: Option<PhpObject>) -> Caller {
+    pub(crate) fn of(resumer: Option<crate::fiber::Context>) -> Caller {
         resumer.map_or(Caller::Request, Caller::Coroutine)
     }
 
@@ -1134,7 +1147,7 @@ impl Caller {
     fn is(self, fiber: Option<PhpObject>) -> bool {
         match (self, fiber) {
             (Caller::Request, None) => true,
-            (Caller::Coroutine(caller), Some(fiber)) => caller.index() == fiber.index(),
+            (Caller::Coroutine(caller), Some(fiber)) => caller.object().index() == fiber.index(),
             (Caller::Request, Some(_)) | (Caller::Coroutine(_), None) => false,
         }
     }

@@ -13,13 +13,11 @@ use xtask::scratch::Tree;
 use xtask::vocab;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture(rule: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/rules")
-        .join(rule)
+    xtask::package_dir().join("fixtures/rules").join(rule)
 }
 
 /// A scratch workspace: the tracked manifest, pin and glossary, the fixture
@@ -61,7 +59,7 @@ fn findings(reading: &Reading) -> Vec<&str> {
 }
 
 fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(args)

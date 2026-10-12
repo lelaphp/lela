@@ -229,6 +229,23 @@ impl Request {
         (index < call.num_args()).then(|| Value::of_zval(call.frame.slot(Slot(index))))
     }
 
+    /// The call being served read once: how many arguments it was given
+    /// and the first `N` of them as [`Request::argument`] reads each,
+    /// `UNDEF` past the count; none given and all `UNDEF` outside a
+    /// native's body.
+    pub(crate) fn arguments_given<const N: usize>(&self) -> (usize, [Value; N]) {
+        let Some(call) = self.serving_call() else {
+            return (0, [Value::undef(); N]);
+        };
+        let given = call.num_args() as usize;
+        let slots = call.frame.slots();
+        let arguments = std::array::from_fn(|at| match slots.get(at) {
+            Some(zval) if at < given => Value::of_zval(*zval),
+            _ => Value::undef(),
+        });
+        (given, arguments)
+    }
+
     /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`
     /// on: the call's remaining arguments as they stand on the frame,
     /// each a view the call keeps one owner of, and none where the call
@@ -612,11 +629,20 @@ impl Request {
         self.serving_call()?.function()
     }
 
-    /// `get_active_function_name`: the declared name of the native being
-    /// served, `func->common.function_name`, whatever case the call
-    /// spelled it in.
+    /// Whether a native is being served, [`Request::active_native_function`]
+    /// standing, which the raisers read before they ask
+    /// [`Request::active_native`] for the name `php_verror` puts before
+    /// `(): `.
     pub(crate) fn vm_serving_native(&self) -> bool {
         self.active_native_function().is_some()
+    }
+
+    /// Whether the native being served is a method, whose name
+    /// `get_active_function_or_method_name` makes as a member string
+    /// (`zend_create_member_string`) where a function's is its own.
+    pub(crate) fn active_native_is_method(&self) -> bool {
+        self.active_native_function()
+            .is_some_and(|function| self.method_class(function).is_some())
     }
 
     /// The name `php_verror` puts before `(): `: the construct of an
@@ -636,14 +662,6 @@ impl Request {
     /// Warning: g(): Unable to create filter (f) in %s on line 4
     /// Undefined constant "NOPE"
     /// ```
-    /// Whether the native being served is a method, whose name
-    /// `get_active_function_or_method_name` makes as a member string
-    /// (`zend_create_member_string`) where a function's is its own.
-    pub(crate) fn active_native_is_method(&self) -> bool {
-        self.active_native_function()
-            .is_some_and(|function| self.method_class(function).is_some())
-    }
-
     pub(crate) fn active_native(&self) -> String {
         if let Some(kind) = self.include_being_opened() {
             // php reads the construct off the frame's opline, which a

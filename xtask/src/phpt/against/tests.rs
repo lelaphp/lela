@@ -5,13 +5,12 @@
 //! outside, in `tests/phpt.rs`.
 
 use std::fs;
-use std::path::Path;
 
 use super::*;
 use crate::scratch::{Tree, committing};
 
 fn fixture(name: &str) -> Run {
-    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let file = crate::package_dir()
         .join("fixtures/phpt/against")
         .join(name);
     serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap()
@@ -146,7 +145,7 @@ fn the_exit_is_the_comparisons_whatever_the_subsets_say() {
 fn a_kept_run_is_spelled_as_the_fixture_is() {
     let base = fixture("base.json");
     let text = serde_json::to_string_pretty(&base).unwrap();
-    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/against/base.json");
+    let file = crate::package_dir().join("fixtures/phpt/against/base.json");
     assert_eq!(text.trim(), fs::read_to_string(file).unwrap().trim());
 }
 

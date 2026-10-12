@@ -19,7 +19,7 @@ use xtask::oracle::{
 use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// The tracked pin, when the binary it names is on this machine; a
@@ -623,7 +623,7 @@ fn ci_files() -> Vec<(String, String)> {
 /// count.
 #[test]
 fn no_workflow_holds_a_directory_of_the_corpus() {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(workspace())
         .args(["status", "--section", "corpus", "--format", "json"])
@@ -1190,7 +1190,7 @@ since = "2026-09-07"
 /// beside an engine's that differ, with no row for the id.
 #[test]
 fn the_fixture_comparison_fails() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compare");
+    let dir = xtask::package_dir().join("fixtures/compare");
     let expected = std::fs::read(dir.join("expected.txt")).unwrap();
     let actual = std::fs::read(dir.join("actual.txt")).unwrap();
     let verdict = oracle::compare(&registry(), "witness:fixture", &expected, &actual);

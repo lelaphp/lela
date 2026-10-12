@@ -187,7 +187,7 @@ fn a_label_track_passes_over_an_unlabelled_ticket_which_is_mains() {
         (20, READY, &[]),
     ]);
     let run = |track: &str| {
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(recorded.repo())
             .args(["track", "next", "--track", track])

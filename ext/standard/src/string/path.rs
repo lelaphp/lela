@@ -185,7 +185,25 @@ pub(super) fn basename(
 /// string(1) "."
 /// dirname(): Argument #2 ($levels) must be greater than or equal to 1
 /// ```
-#[php_function]
+///
+/// Declared frameless for one argument and for two
+/// (`frameless_function_infos_dirname`), so those calls are a
+/// `FRAMELESS_ICALL_1` or `_2` over this body, and a call by name or
+/// through a callable the framed call; the two agree.
+///
+/// ```php
+/// var_dump(dirname("/a/b/c"), dirname("/a/b/c", 2), dirname(path: "/a/b/c"), call_user_func('dirname', "/a/b/c", 2), dirname(12));
+/// try { dirname("/a", 0); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(4) "/a/b"
+/// string(2) "/a"
+/// string(4) "/a/b"
+/// string(2) "/a"
+/// string(1) "."
+/// dirname(): Argument #2 ($levels) must be greater than or equal to 1
+/// ```
+#[php_function(frameless(1, 2))]
 pub(super) fn dirname(
     req: &mut Request,
     path: PhpString,

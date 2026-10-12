@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use php_ext as api;
-use php_sapi::{Aborted, Engine, OutputSink, Primary, RequestDescription, ResponseHead};
+use php_sapi::{
+    Aborted, Engine, HostServes, OutputSink, Primary, RequestDescription, ResponseHead,
+};
 
 #[path = "../../../crates/php_engine/src/tests/test_ext.rs"]
 #[allow(dead_code, reason = "the engine's own tests read the rest")]
@@ -181,7 +183,8 @@ fn plain(dir: &Path) -> Vec<Vec<String>> {
             primary: Primary::Bare,
             ..RequestDescription::default()
         },
-        &mut Kept::default(),
+        Box::new(Kept::default()),
+        || HostServes::Program,
     );
     drop(engine);
     requests(&rec.events())

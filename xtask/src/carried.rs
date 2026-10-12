@@ -137,7 +137,7 @@ mod tests {
     use std::path::Path;
 
     fn workspace() -> &'static Path {
-        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+        crate::package_dir().parent().unwrap()
     }
 
     #[test]

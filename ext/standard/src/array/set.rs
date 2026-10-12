@@ -27,6 +27,7 @@ use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk, zend_sort};
 
 use super::sort::key_value;
 use super::{copied, user_compare};
+use crate::string::KeyBytes;
 
 /// What a diff or an intersection compares values with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,7 +75,7 @@ fn parse(req: &mut Request, values: &[Value], callbacks: usize) -> Result<Parsed
     let mut found = Vec::with_capacity(callbacks);
     for offset in 0..values.len() - split {
         let position = u32::try_from(split + offset + 1).unwrap_or(u32::MAX);
-        match Callable::hold(req, position)? {
+        match Callable::hold(req, values[split + offset], position)? {
             Some(callable) => found.push(callable),
             None => {
                 return Err(fatal(
@@ -180,7 +181,7 @@ impl Compare {
         let answered = if self.key_user {
             self.user(req, &key_value(a), &key_value(b))
         } else {
-            Ok(key_text(a).cmp(&key_text(b)))
+            Ok(KeyBytes::of(a).cmp(&KeyBytes::of(b)))
         };
         self.settle(answered)
     }
@@ -208,14 +209,6 @@ impl Compare {
 /// `zend_tmp_string_release` gives up what `zval_get_tmp_string` made.
 fn string_compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thrown> {
     super::as_strings(req, a, b, Ord::cmp)
-}
-
-/// A key's text, as `zend_print_long_to_buf` prints an integer key.
-fn key_text(key: &Key) -> Vec<u8> {
-    match key {
-        Key::Int(n) => n.to_string().into_bytes(),
-        Key::Str(s) => s.as_bytes().to_vec(),
-    }
 }
 
 /// `zval_user_compare`, the comparison of the key shape: the callback's

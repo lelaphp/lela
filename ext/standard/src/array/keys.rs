@@ -24,6 +24,7 @@ use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, V
 
 use super::sort::key_value;
 use super::{copied, give_up_rows, returned};
+use crate::string::KeyBytes;
 
 /// The comparison a search makes: `fast_is_identical_function` under
 /// `$strict`, `fast_equal_check_function` otherwise, the element's
@@ -1282,15 +1283,12 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Owner<Valu
         return Ok(array.get(&key).map(|value| Owner::take(req, value.deref())));
     }
     if let Some(object) = row.as_object().copied() {
-        let text = match name {
-            Key::Int(n) => n.to_string().into_bytes(),
-            Key::Str(s) => s.as_bytes().to_vec(),
-        };
+        let text: &[u8] = &KeyBytes::of(name);
         let handlers = object.handlers(req);
-        if handlers.has_property(req, object, &text, PropertyTest::Exists)?
-            || handlers.has_property(req, object, &text, PropertyTest::Isset)?
+        if handlers.has_property(req, object, text, PropertyTest::Exists)?
+            || handlers.has_property(req, object, text, PropertyTest::Isset)?
         {
-            let value = handlers.read_property(req, object, &text, PropertyRead::Warning)?;
+            let value = handlers.read_property(req, object, text, PropertyRead::Warning)?;
             return Ok(Some(value));
         }
         return Ok(None);

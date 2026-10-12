@@ -22,11 +22,11 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/rules/harness.self")
+    xtask::package_dir().join("fixtures/rules/harness.self")
 }
 
 const SESSION: &str = "5d0c7a1e-2b4f-4e8a-9c61-0f3b8d2e7a45";
@@ -47,7 +47,7 @@ fn stdin(event: &str, session: &str, id: &str, cwd: &Path, command: &str) -> Str
 
 /// `xtask --root <root> permit <args>` with `input` on stdin.
 fn permit(root: &Path, input: &str, args: &[&str]) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .arg("permit")
@@ -412,7 +412,7 @@ fn proposal(root: &Path) -> String {
 fn steer_command(root: &Path) -> String {
     format!(
         "{} --root {} steer oracle.toml --from proposal.toml",
-        env!("CARGO_BIN_EXE_xtask"),
+        xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
         root.display()
     )
 }
@@ -568,7 +568,7 @@ fn a_file_is_put_back_to_its_unstaged_edit_and_an_untracked_one_is_left() {
 /// same line with no approval is denied before it runs (#625).
 #[test]
 fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
-    let approval = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/approval");
+    let approval = xtask::package_dir().join("fixtures/approval");
     let transcript = approval.join("admit").join(format!("{SESSION}.jsonl"));
     let approved = "# The divergence registry of the approval fixture (#2247).\n[[divergence]]\n\
                     id = \"fixture-1\"\nstatus = \"accepted\"\nreason = \"Ruled by a person in the session.\"\n";
@@ -896,4 +896,48 @@ fn a_call_by_pushd_into_its_worktree_leaves_the_main_checkout_alone() {
     a_call_in_its_worktree_leaves_the_main_checkout_alone("pushd", |wt| {
         format!("pushd {wt} && git checkout -- docs/divergence.toml && popd")
     });
+}
+
+/// #2723, through both hooks: a merge start admitted while another
+/// merge stands takes no record before it runs; once that merge has ended
+/// and the start has run, `permit --after` records the agent whose call
+/// began it, so its commit is its own and another agent's is refused. The
+/// hook here carries no `duration_ms`, so the call is dated by the record
+/// `permit` took before it.
+#[test]
+fn a_start_admitted_while_another_merge_stood_is_recorded_once_it_has_run() {
+    let root = scratch("operation-settled");
+    let main = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(&root, &["checkout", "-q", "-b", "topic"]);
+    shell(
+        &root,
+        "echo topic > topic.txt && git add topic.txt && git commit -q -m topic",
+    );
+    git(&root, &["checkout", "-q", main.trim()]);
+    let git_dir = git(&root, &["rev-parse", "--absolute-git-dir"]);
+    let marker = Path::new(git_dir.trim()).join("MERGE_HEAD");
+    let hook = |event: &str, agent: &str, command: &str| {
+        let input = serde_json::json!({"session_id": SESSION, "agent_id": agent,
+            "tool_use_id": format!("toolu_{agent}"), "hook_event_name": event,
+            "tool_name": "Bash", "cwd": root.path(),
+            "tool_input": {"command": command}});
+        let args: &[&str] = if event == "PostToolUse" {
+            &["--after"]
+        } else {
+            &[]
+        };
+        let (code, out, err) = permit(&root, &input.to_string(), args);
+        assert_eq!(code, 0, "{err}");
+        out
+    };
+    let start = "git merge --no-ff --no-commit topic";
+    std::fs::write(&marker, "0".repeat(40) + "\n").unwrap();
+    hook("PreToolUse", "host", "git status --short");
+    hook("PreToolUse", "face", start);
+    std::fs::remove_file(&marker).unwrap();
+    shell(&root, start);
+    hook("PostToolUse", "face", start);
+    let commit = "git commit -q -m merged";
+    assert!(!hook("PreToolUse", "face", commit).contains("git.operation"));
+    assert!(hook("PreToolUse", "host", commit).contains("git.operation"));
 }

@@ -37,11 +37,11 @@ const ASKED: [&str; 8] = [
 ];
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+    xtask::package_dir().join("fixtures")
 }
 
 fn read(path: &str) -> String {
@@ -302,7 +302,7 @@ fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
 }
 
 fn xtask(root: &Path, args: &[&str], stdin: Option<&str>) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut child = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(args)

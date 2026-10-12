@@ -343,7 +343,7 @@ mod tests {
     /// abort and commit, and still another session's to be refused.
     #[test]
     fn a_merge_started_before_the_operating_row_landed_is_still_its_starters() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let workspace = crate::package_dir().parent().unwrap();
         let manifest = Manifest::load(workspace).unwrap();
         let mut without = manifest.clone();
         without.rules.retain(|r| r.within != Where::Operating);
@@ -376,7 +376,7 @@ mod tests {
     /// is refused.
     #[test]
     fn the_git_operation_row_lets_the_starter_conclude_its_own_merge() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let workspace = crate::package_dir().parent().unwrap();
         let manifest = Manifest::load(workspace).unwrap();
         let fixture = "xtask/fixtures/rules/git.operation/allow-starter-continue.json";
         let own = Call::parse(&std::fs::read_to_string(workspace.join(fixture)).unwrap()).unwrap();
@@ -399,7 +399,7 @@ mod tests {
     /// and `deny-sibling-commit.json` and the sibling's abort are refused.
     #[test]
     fn a_sibling_s_line_between_a_start_and_its_marker_leaves_the_merge_its_starters() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let workspace = crate::package_dir().parent().unwrap();
         let manifest = Manifest::load(workspace).unwrap();
         let fixture = |name: &str| {
             let path = workspace

@@ -20,7 +20,7 @@ use xtask::scratch::{self, Tree};
 use xtask::status;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn write(root: &Path, path: &str, text: &str) {
@@ -79,7 +79,7 @@ fn add_building(root: &Path, args: &[&str]) -> (i32, String) {
 /// files; the tree goes with the value, once the call it served is over.
 fn stand_in() -> (Tree, OsString) {
     let bin = Tree::new("worktree-cargo").unwrap();
-    let path = scratch::cargo(&bin, Path::new(env!("CARGO_BIN_EXE_xtask"))).unwrap();
+    let path = scratch::cargo(&bin, scratch::xtask(env!("CARGO_BIN_EXE_xtask"))).unwrap();
     (bin, path)
 }
 
@@ -98,7 +98,7 @@ fn worktree(root: &Path, half: &str, args: &[&str]) -> (i32, String) {
 
 /// One half of `xtask worktree` under `path`.
 fn run(root: &Path, half: &str, args: &[&str], path: &OsString) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(["worktree", half])
@@ -382,8 +382,8 @@ fn a_branch_is_cut_from_mains_tip_through_the_add_command() {
 /// "Worktrees"; #245, #251): the dependencies are blocks the two
 /// directories share and the build compiles the workspace's own crates
 /// alone, and what the worktree holds afterwards is a `target/debug/xtask`
-/// built from its own sources, whose root is the worktree, with no
-/// `CARGO_TARGET_DIR` set and no `.cargo/config.toml` written. The clone
+/// built from its own sources, whose root is the checkout it runs in, with
+/// no `CARGO_TARGET_DIR` set and no `.cargo/config.toml` written. The clone
 /// here holds a build of its own ([`warm_clone`]), so on a volume without
 /// clonefile it is the cold branch that is held: one line saying so and a
 /// worktree ready all the same. The retire removes the seeded copy with the
@@ -420,19 +420,21 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
         "nothing tracked is written, .cargo/config.toml among it: {out}"
     );
 
-    // The binary's root is the worktree: run from elsewhere with no
-    // `--root`, it answers for the branch it was built on, not the clone's
-    // `main` and not this workspace's branch.
-    let track = Command::new(&built)
-        .args(["track", "--json"])
-        .current_dir(&root)
-        .env_remove("CARGO")
-        .env_remove("CARGO_MANIFEST_DIR")
-        .output()
-        .unwrap();
-    let facts: serde_json::Value =
-        serde_json::from_slice(&track.stdout).unwrap_or_else(|e| panic!("{e}: {out}"));
-    assert_eq!(facts["branch"], "t44", "{facts}");
+    // The binary's root is the checkout it runs in, never this
+    // workspace's (#2719): with no `--root` it answers for the worktree's
+    // branch from inside it and for the clone's `main` from the clone.
+    for (from, branch) in [(dir.as_path(), "t44"), (root.as_ref(), "main")] {
+        let track = Command::new(&built)
+            .args(["track", "--json"])
+            .current_dir(from)
+            .env_remove("CARGO")
+            .env_remove("CARGO_MANIFEST_DIR")
+            .output()
+            .unwrap();
+        let facts: serde_json::Value =
+            serde_json::from_slice(&track.stdout).unwrap_or_else(|e| panic!("{e}: {out}"));
+        assert_eq!(facts["branch"], branch, "{facts}");
+    }
 
     if warm {
         assert!(
@@ -734,7 +736,7 @@ fn an_add_records_the_ticket_and_a_retire_keeps_it_with_the_branch() {
 /// `xtask phpt` in `root` over one subset, held against `HEAD`: what it
 /// printed.
 fn phpt_against_head(root: &Path, subset: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args([
@@ -918,7 +920,7 @@ fn engine_at(path: &Path, oracle: &Path) {
 /// `xtask phpt` in the worktree at `dir` with `args`, `cargo` the file
 /// at `cargo` and the corpus the tree at `corpus`.
 fn phpt_in(dir: &Path, args: &[&str], cargo: &Path, corpus: &Path) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(dir)
         .arg("phpt")

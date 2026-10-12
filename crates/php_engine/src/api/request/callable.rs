@@ -636,10 +636,8 @@ impl Request {
         fcc: &mut Fcc,
         deprecations: Deprecations,
     ) -> Result<bool, Refusal> {
-        let lowered = name.to_ascii_lowercase();
-        let (word, resolved): (&str, Result<(ClassId, ClassId, bool), Refusal>) = match lowered
-            .as_slice()
-        {
+        let lowered = crate::exec::Lowered::of(name);
+        let (word, resolved): (&str, Result<(ClassId, ClassId, bool), Refusal>) = match &*lowered {
             b"self" => (
                 "self",
                 scope
@@ -829,14 +827,14 @@ impl Request {
                 )));
             }
         };
-        let lowered = method.to_ascii_lowercase();
+        let lowered = crate::exec::Lowered::of(&method);
         let Some(calling) = fcc.calling else {
             return Err(Refusal::Said(format!(
                 "function {}() does not exist",
                 shown(&method)
             )));
         };
-        let found = if strict && lowered == b"__construct" {
+        let found = if strict && *lowered == *b"__construct" {
             self.constructor(calling)
                 .map(|function| (Callee::Function(function), false))
         } else {

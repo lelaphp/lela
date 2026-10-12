@@ -38,6 +38,9 @@
 //! paragraphs and the one on two runs at once rest on, so any other subset
 //! removes only what its own processes are named on: a pooled run of
 //! `echo`s took another run's private queue of the same second (#2563).
+//! Such a subset holds a claim of its processes alone ([`Claim::own`]),
+//! with no window, so it covers nothing another run made and leaves
+//! nothing to reclaim.
 //!
 //! **A witness run's.** The witness lane serves most fences in the
 //! harness's own process, through the linked engine, and the oracle's
@@ -85,7 +88,12 @@
 //! one is held leaves its claim standing, its lock released, for a later
 //! run's [`reclaim`], which takes what the window holds once every run
 //! that was going in its seconds has ended. What a run's own processes
-//! are named on is its own whatever else runs.
+//! are named on is its own whatever else runs. A held claim's journal
+//! names those processes, and no other run's sweep takes an object one
+//! of them is named on. Without that, a reclaim took a phpt subset's
+//! segment as [`abandoned`], dead creator and all, between the test that
+//! made it ending and the subset's own sweep, which then counted two of
+//! the three objects its test left (#2750).
 //!
 //! **On Linux.** The System V subsets run in a private IPC namespace where
 //! `unshare` permits, so nothing they make outlives its program, and the
@@ -782,30 +790,38 @@ fn claims() -> PathBuf {
     std::env::temp_dir().join("xtask-sysv-claims")
 }
 
-/// The second from which a claim another run still holds covers the
-/// machine (#2563): the earliest making of one, none where no other run
-/// holds one. An object made since may be that run's, made in a second
-/// one of this run's windows holds too, and no window takes it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Held(Option<i64>);
+/// What the claims other runs still hold keep from a sweep: the second
+/// from which a claim with a window covers the machine (#2563), the
+/// earliest making of one, none where no other run holds one; and the
+/// processes every held claim's journal started (#2750). An object made
+/// since that second may be that run's, made in a second one of this
+/// run's windows holds too, and no window takes it; an object that names
+/// one of those processes is that run's, whenever it was made.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Held {
+    since: Option<i64>,
+    started: BTreeSet<u32>,
+}
 
 impl Held {
     /// Held from `at` too, where that is earlier.
     fn since(&mut self, at: i64) {
-        self.0 = Some(self.0.map_or(at, |held| held.min(at)));
+        self.since = Some(self.since.map_or(at, |held| held.min(at)));
     }
 
     /// Whether `object` was made, as `clock` reads it, while another run
-    /// held its claim: one whose time the kernel does not give is.
-    fn covers(self, object: &Object, clock: &Clock) -> bool {
-        self.0
+    /// held its claim, one whose time the kernel does not give being so,
+    /// or names a process another run's claim started.
+    fn covers(&self, object: &Object, clock: &Clock) -> bool {
+        self.since
             .is_some_and(|held| object.ctime.is_none_or(|ctime| clock.at(ctime) >= held))
+            || object.named.iter().any(|pid| self.started.contains(pid))
     }
 
     /// Whether a window ending at `to`, a second since the epoch, reaches a
     /// second another run's claim covers.
-    fn reaches(self, to: i64) -> bool {
-        self.0.is_some_and(|held| held <= to)
+    fn reaches(&self, to: i64) -> bool {
+        self.since.is_some_and(|held| held <= to)
     }
 }
 
@@ -852,8 +868,19 @@ impl Claims {
             let Ok(file) = File::options().write(true).open(&path) else {
                 continue;
             };
+            let own = path.extension().is_some_and(|e| e == OWN);
             if file.try_lock().is_err() {
-                claims.held.since(held);
+                let journal = Journal::read(&fs::read_to_string(&path).unwrap_or_default());
+                claims.held.started.extend(journal.pids());
+                if !own {
+                    claims.held.since(held);
+                }
+                continue;
+            }
+            if own {
+                // A run that held its processes alone and ended: its own
+                // sweep took what they left, or nothing will (#2750).
+                fs::remove_file(&path).ok();
                 continue;
             }
             let Ok(last) = file.metadata().and_then(|meta| meta.modified()) else {
@@ -948,6 +975,11 @@ impl Claims {
 /// [`reclaim`] passes over, as a scratch tree's is ([`crate::scratch`]).
 const TAKING: &str = "taking";
 
+/// What a claim of its processes alone is named ([`Claim::own`], #2750):
+/// held, it keeps every sweep from an object one of them is named on;
+/// let go, nothing reclaims it.
+const OWN: &str = "own";
+
 /// The first word of a claim's line for a program started, its number and
 /// its process after it, as a phpt subset's oracle writes one (#2448):
 /// the processes [`reclaim`] holds a cut-off run's objects by, and kills
@@ -1020,6 +1052,9 @@ pub(crate) struct Claim {
     path: PathBuf,
     _lock: File,
     from: SystemTime,
+    /// Whether the claim has a window, as a witness run's and a System V
+    /// subset's do, or is of its processes alone ([`Claim::own`]).
+    window: bool,
 }
 
 impl Claim {
@@ -1028,15 +1063,36 @@ impl Claim {
         Claim::within(&claims(), lane)
     }
 
+    /// A claim of `lane`'s processes alone, for a phpt subset outside
+    /// [`SUBSETS`] (#2750). It has no window, so it covers nothing another
+    /// run made and leaves nothing for a reclaim; while it is held, the
+    /// processes its journal names keep every other run's sweep from
+    /// what they are named on, a dead creator's segment [`abandoned`]
+    /// among them, which another run's reclaim took between the
+    /// subset's test ending and its own sweep. Swept ([`Claim::swept`]),
+    /// it takes what its processes are named on and goes.
+    pub(crate) fn own(lane: &str) -> Result<Claim> {
+        Claim::laid(&claims(), lane, false)
+    }
+
     /// A claim of `lane`'s in `dir`, from now.
     fn within(dir: &Path, lane: &str) -> Result<Claim> {
+        Claim::laid(dir, lane, true)
+    }
+
+    /// A claim of `lane`'s in `dir`, from now, with a `window` or of its
+    /// processes alone.
+    fn laid(dir: &Path, lane: &str, window: bool) -> Result<Claim> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        let path = dir.join(format!(
+        let mut path = dir.join(format!(
             "{lane}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        if !window {
+            path.set_extension(OWN);
+        }
         let taking = path.with_extension(TAKING);
         let from = SystemTime::now();
         let lock = File::create(&taking)
@@ -1049,6 +1105,7 @@ impl Claim {
             path,
             _lock: lock,
             from,
+            window,
         })
     }
 
@@ -1095,6 +1152,11 @@ impl Claim {
     /// System V subset settles: what they are named on ([`left`]), and of
     /// what names no process, what [`unnamed_left`] takes.
     pub(crate) fn swept(self, before: &Standing, spawned: &Programs) -> Result<Swept> {
+        if !self.window {
+            let swept = sweep(before, spawned);
+            fs::remove_file(&self.path).ok();
+            return swept;
+        }
         self.settled(|held| {
             let clock = Clock::now()?;
             let after = Standing::now()?;
@@ -1121,8 +1183,9 @@ impl Claim {
     fn settled(self, sweep: impl FnOnce(Held) -> Result<Swept>) -> Result<Swept> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         let held = Claims::read(dir, Some(&self.path)).held;
+        let alone = held.since.is_none();
         let swept = sweep(held)?;
-        if held == Held::default() {
+        if alone {
             fs::remove_file(&self.path).ok();
         }
         Ok(swept)
@@ -1193,6 +1256,15 @@ pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
     )?;
     claims.settle(grace, &clock);
     Ok(swept)
+}
+
+/// Each program a cut-off run's claim started and never saw end stopped,
+/// as [`reclaim`] stops them first (#2522): what every phpt run does
+/// before it stops what runs cut off left in their copies of the pinned
+/// tree (#2663), so a System V program is stopped by its claim, whose
+/// window then reaches the kill.
+pub(crate) fn stop_cut_off() {
+    Claims::read(&claims(), None).stop();
 }
 
 /// The subsets whose tests make System V objects, the four extensions of

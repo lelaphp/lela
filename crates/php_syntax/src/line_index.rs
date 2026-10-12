@@ -18,8 +18,10 @@ pub struct LineCol {
 /// every byte stays addressable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineIndex {
-    /// Byte offset of the first byte of each line. Always starts with 0.
-    line_starts: Vec<u32>,
+    /// Byte offset of the first byte of each line after the first, which
+    /// starts at 0: one entry per `\n`, so a text of one line, an `eval`
+    /// of a statement, allocates nothing for its table.
+    breaks: Vec<u32>,
     /// Total length in bytes.
     len: u32,
 }
@@ -37,19 +39,27 @@ impl LineIndex {
     #[must_use]
     pub fn new(text: &[u8]) -> LineIndex {
         let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-        let mut line_starts = vec![0_u32];
+        let mut breaks = Vec::new();
         for (pos, byte) in text.iter().enumerate().take(len as usize) {
             if *byte == b'\n' {
-                line_starts.push(u32::try_from(pos + 1).unwrap_or(u32::MAX));
+                breaks.push(u32::try_from(pos + 1).unwrap_or(u32::MAX));
             }
         }
-        LineIndex { line_starts, len }
+        LineIndex { breaks, len }
     }
 
     /// Number of lines (a trailing `\n` opens a final empty line).
     #[must_use]
     pub fn line_count(&self) -> u32 {
-        u32::try_from(self.line_starts.len()).unwrap_or(u32::MAX)
+        u32::try_from(self.breaks.len() + 1).unwrap_or(u32::MAX)
+    }
+
+    /// The offset `line` (zero-based) starts at.
+    fn start(&self, line: usize) -> Option<u32> {
+        match line.checked_sub(1) {
+            None => Some(0),
+            Some(before) => self.breaks.get(before).copied(),
+        }
     }
 
     /// Total indexed length in bytes.
@@ -69,11 +79,10 @@ impl LineIndex {
     #[must_use]
     pub fn line_col(&self, offset: u32) -> LineCol {
         let offset = offset.min(self.len);
-        let line = self
-            .line_starts
-            .partition_point(|&start| start <= offset)
-            .saturating_sub(1);
-        let col = offset - self.line_starts.get(line).copied().unwrap_or(0);
+        // The first line starts at 0, at or before every offset, so the
+        // breaks at or before it count the lines before its own.
+        let line = self.breaks.partition_point(|&start| start <= offset);
+        let col = offset - self.start(line).unwrap_or(0);
         LineCol {
             line: u32::try_from(line).unwrap_or(u32::MAX),
             col,
@@ -100,12 +109,8 @@ impl LineIndex {
     /// Byte range `(start, end)` of `line`, its `\n` included if present.
     #[must_use]
     pub fn line_range(&self, line: u32) -> Option<(u32, u32)> {
-        let start = *self.line_starts.get(line as usize)?;
-        let end = self
-            .line_starts
-            .get(line as usize + 1)
-            .copied()
-            .unwrap_or(self.len);
+        let start = self.start(line as usize)?;
+        let end = self.breaks.get(line as usize).copied().unwrap_or(self.len);
         Some((start, end))
     }
 }

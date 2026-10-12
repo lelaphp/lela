@@ -10,6 +10,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::string::Decimal;
 use php_ext::abi::{Raw, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format, to_double, to_long, to_string};
@@ -1063,15 +1064,12 @@ impl Buffer {
 /// where the alignment is left, since php cannot right-pad an integer
 /// with zeros.
 fn append_int(req: &mut Request, out: &mut Buffer, number: i64, spec: &Spec) -> Result<(), Thrown> {
-    let mut text = number.unsigned_abs().to_string();
-    let sign = if number < 0 {
-        text.insert(0, '-');
-        Sign::Negative
+    let (text, sign) = if number < 0 {
+        (Decimal::of(number), Sign::Negative)
     } else if spec.always_sign {
-        text.insert(0, '+');
-        Sign::Positive
+        (Decimal::plus(number), Sign::Positive)
     } else {
-        Sign::None
+        (Decimal::of(number), Sign::None)
     };
     let spec = integer_padding(spec);
     append_string(req, out, text.as_bytes(), &spec, sign, false)
@@ -1084,7 +1082,7 @@ fn append_uint(
     number: i64,
     spec: &Spec,
 ) -> Result<(), Thrown> {
-    let text = u64::from_ne_bytes(number.to_ne_bytes()).to_string();
+    let text = Decimal::unsigned(u64::from_ne_bytes(number.to_ne_bytes()));
     let spec = integer_padding(spec);
     append_string(req, out, text.as_bytes(), &spec, Sign::None, false)
 }
@@ -1254,6 +1252,6 @@ fn conv_fp(fmt: u8, number: f64, precision: i64) -> (String, bool) {
     let mut text = String::from(mantissa);
     text.push(char::from(fmt));
     text.push(if exponent < 0 { '-' } else { '+' });
-    text.push_str(&exponent.abs().to_string());
+    text.push_str(Decimal::unsigned(exponent.unsigned_abs()).as_str());
     (text, negative)
 }

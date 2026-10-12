@@ -17,7 +17,7 @@ use std::process::Command;
 use xtask::scratch::{self, Tree};
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn sh(root: &Path, args: &[&str]) -> String {
@@ -134,7 +134,8 @@ impl Scratch {
     /// whole of it for a test that reads the rest.
     fn stand_ins(&self) {
         let dir = self.dir.display();
-        let xtask = env!("CARGO_BIN_EXE_xtask");
+        let bin = scratch::xtask(env!("CARGO_BIN_EXE_xtask"));
+        let xtask = bin.display();
         let gh = format!(
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
         );
@@ -146,7 +147,7 @@ impl Scratch {
             fs::write(&file, text).unwrap();
             fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        scratch::cargo(&self.dir.join("bin"), Path::new(xtask)).unwrap();
+        scratch::cargo(&self.dir.join("bin"), bin).unwrap();
     }
 
     /// The open tickets, each `ready-for-agent` and unblocked, and the
@@ -268,7 +269,7 @@ impl Scratch {
             self.dir.join("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(&self.root)
             .args(["track", "work"])
@@ -295,7 +296,7 @@ impl Scratch {
     /// One section of `xtask status` over the checkout's store, as Markdown:
     /// what a person reads the run back from (#117).
     fn section(&self, name: &str) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(&self.root)
             .args(["status", "--section", name])

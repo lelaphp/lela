@@ -54,13 +54,18 @@ impl Router {
     /// before the disk is asked; else a program's where a segment of the
     /// path ends in `.php`, split there as the recipe's nginx splits it
     /// (`vpath::split_at_program`, #2693), whatever is on the disk; else
-    /// the path translated as `php -S`
-    /// translates it, a program's where `php_cli_server_dispatch` says so,
-    /// the path past it its path's info (#2637), and a static file's
-    /// otherwise, in `php_cli_server_begin_send_static`'s order: a method
-    /// that writes refused, then a path that translated to nothing, then,
-    /// under [`Hidden::Refused`], a path past the file it found or a file
-    /// of PHP's source, then a file that does not open. The walk that
+    /// the path translated as `php -S` translates it, a program's where
+    /// `php_cli_server_dispatch` says so, the path past it its path's info
+    /// (#2637), and a static file's otherwise, in
+    /// `php_cli_server_begin_send_static`'s order: a method that writes
+    /// refused, then a path that translated to nothing, then, under
+    /// [`Hidden::Refused`], a path past the file it found or a file of
+    /// PHP's source, then a file that does not open. A path holding a NUL
+    /// is never split, and `vpath::holds_nul` answers it under
+    /// [`Hidden::Refused`] as a path with nothing at it is; under
+    /// [`Hidden::Served`] a static file's is refused with 400 after a
+    /// method that writes, and a program's is routed as one, whose request
+    /// serves nothing, as `php -S` refuses them (#2695). The walk that
     /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
     /// program the walk finds; split at `y.php`, `cgi.fix_pathinfo`'s walk
     /// in php-fpm's checks finds `x.jpg`, the exploit's shape, and
@@ -82,11 +87,16 @@ impl Router {
         if let Some(program) = vpath::split_at_program(&uri, &self.root) {
             return Route::Program(program);
         }
+        let writes = [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method);
         match vpath::translate(&uri, &self.root, &Disk) {
+            Some(found) if vpath::holds_nul(&found.path_translated) => match hidden {
+                Hidden::Served if found.is_program() => Route::Program(found),
+                _ if writes => Route::Refused(Refusal::MethodNotAllowed),
+                Hidden::Served => Route::Refused(Refusal::BadRequest),
+                Hidden::Refused => Route::Refused(Refusal::NotFound),
+            },
             Some(found) if found.is_program() => Route::Program(found),
-            _ if [&b"DELETE"[..], b"PUT", b"PATCH"].contains(&method) => {
-                Route::Refused(Refusal::MethodNotAllowed)
-            }
+            _ if writes => Route::Refused(Refusal::MethodNotAllowed),
             Some(found)
                 if hidden == Hidden::Served
                     || (found.path_info.is_none()
@@ -119,6 +129,10 @@ pub(crate) enum Refusal {
     /// 405: a method that writes, of a static file, with the methods
     /// `php -S` allows.
     MethodNotAllowed,
+    /// 400: a static file's path holding a NUL, under
+    /// [`Hidden::Served`], as `php_cli_server_begin_send_static` refuses
+    /// one.
+    BadRequest,
 }
 
 impl Refusal {
@@ -128,6 +142,7 @@ impl Refusal {
         let (code, lines) = match self {
             Refusal::NotFound => (404, Vec::new()),
             Refusal::MethodNotAllowed => (405, vec![b"Allow: GET, HEAD, POST".to_vec()]),
+            Refusal::BadRequest => (400, Vec::new()),
         };
         ResponseHead {
             code,

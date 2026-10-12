@@ -17,7 +17,7 @@ use xtask::ticket::{Act, CAP, Gh, Reach, Successors, Verdict, merged, parent, ru
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// The manifest of this workspace, whose `deny = true` rules a ticket an
@@ -156,10 +156,9 @@ impl Recorded {
 /// the write by.
 #[test]
 fn a_ready_for_agent_ticket_asking_for_a_write_the_manifest_denies_fails_naming_path_and_rule() {
-    let body = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/rules/harness.self/ticket.md"),
-    )
-    .unwrap();
+    let body =
+        fs::read_to_string(xtask::package_dir().join("fixtures/rules/harness.self/ticket.md"))
+            .unwrap();
     let recorded = Recorded::lay("denied");
     recorded.labelled(111, "OPEN", &body, &["ready-for-agent", "track:main"]);
     let reading = run(
@@ -1350,10 +1349,8 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
 /// twice.
 #[test]
 fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
-    let body = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ticket/half-done.md"),
-    )
-    .unwrap();
+    let body =
+        fs::read_to_string(xtask::package_dir().join("fixtures/ticket/half-done.md")).unwrap();
     let recorded = Recorded::lay("half-done");
     recorded.issue(12, "OPEN", &body);
     let reading = run(

@@ -12,12 +12,12 @@ use xtask::manifest::Manifest;
 use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 /// The negative-control fixture of one manifest rule (harness §4.1).
 fn fixture(rule: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    xtask::package_dir()
         .join("fixtures/rules")
         .join(rule)
         .join("divergence.toml")
@@ -63,7 +63,7 @@ fn committed(name: &str) -> Tree {
 }
 
 fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(args)

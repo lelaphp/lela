@@ -66,7 +66,7 @@ pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use collector::GcStatus;
 pub use compare::{Scalar, compare, compare_constants, identical, identical_constants};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
-pub use hooks::{Fatal, GcTable, HeapHooks};
+pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{
@@ -371,7 +371,7 @@ impl Heap {
     ) -> Result<Str, Fatal> {
         let header = Str::allocation_size(l);
         let Some(size) = n.checked_mul(m).and_then(|bytes| bytes.checked_add(header)) else {
-            return Err(Fatal::Error(format!(
+            return Err(Fatal::error(format!(
                 "Possible integer overflow in memory allocation ({n} * {m} + {header})"
             )));
         };
@@ -621,6 +621,19 @@ impl Heap {
         }
         Heap::release(hooks, z);
         true
+    }
+
+    /// Whether giving up one owner of `z` serves nothing past the
+    /// decrement: another owner stands, and the value is in the
+    /// collector's buffer already or can be no possible root
+    /// (`!GC_MAY_LEAK`), so `gc_check_possible_root` takes nothing and no
+    /// collection follows ([`Heap::release`]). What a frame's leave asks
+    /// of the receiver it owns before giving it up with no PHP code
+    /// served, as `OBJ_RELEASE` in `zend_leave_helper` serves none for
+    /// such an object.
+    #[must_use]
+    pub fn releases_quietly(z: Zval) -> bool {
+        counted_header(z).is_some_and(|header| header.refcount() > 1 && !header.may_leak())
     }
 
     /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
@@ -1169,7 +1182,7 @@ mod tests {
         }
         assert_eq!(
             fatal,
-            Some(Fatal::Error(
+            Some(Fatal::error(
                 "Allowed memory size of 2097152 bytes exhausted (tried to allocate 12288 bytes)"
                     .to_string()
             ))
@@ -1198,7 +1211,7 @@ mod tests {
         assert_eq!(held.len(), 254);
         assert_eq!(
             fatal,
-            Fatal::Error(
+            Fatal::error(
                 "Allowed memory size of 2097152 bytes exhausted (tried to allocate 8192 bytes)"
                     .to_string()
             )
@@ -1230,7 +1243,7 @@ mod tests {
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         assert_eq!(
             fatal,
-            Fatal::Error(
+            Fatal::error(
                 "Allowed memory size of 4194304 bytes exhausted (tried to allocate 12288 bytes)"
                     .to_string()
             )
@@ -1243,7 +1256,7 @@ mod tests {
         // list, so the sweep collects nothing and the limit stands.
         assert_eq!(
             heap.string(&[b'x'; 1760]).err(),
-            Some(Fatal::Error(
+            Some(Fatal::error(
                 "Allowed memory size of 4194304 bytes exhausted (tried to allocate 28672 bytes)"
                     .to_string()
             ))
@@ -1283,7 +1296,9 @@ mod tests {
             "Possible integer overflow in memory allocation ({} + {page})",
             usize::MAX
         );
-        assert!(matches!(refused, Some(Fatal::Error(ref text)) if *text == said));
+        assert!(
+            matches!(refused.map(Fatal::into_reason), Some(FatalReason::Error(text)) if text == said)
+        );
         assert_eq!(heap.memory_usage(false), before);
         let small = heap.block(16);
         assert!(small.is_ok(), "the heap still allocates");
@@ -1379,7 +1394,7 @@ mod tests {
         owners::dropped(z);
         assert_eq!(
             heap.take_sensed(),
-            Some(Fatal::Error(format!(
+            Some(Fatal::error(format!(
                 "InternalError: the owner made at {second} was dropped without being handed to a sink or given up, or one of the other owners of its block, made at {first}"
             )))
         );
@@ -1390,7 +1405,7 @@ mod tests {
         owners::dropped(z);
         assert_eq!(
             heap.take_sensed(),
-            Some(Fatal::Error(format!(
+            Some(Fatal::error(format!(
                 "InternalError: the owner made at {first} was dropped without being handed to a sink or given up"
             )))
         );
@@ -1427,8 +1442,8 @@ mod tests {
         Heap::release(&mut hooks, z);
         Heap::release(&mut hooks, z);
         assert!(matches!(
-            hooks.heap.take_sensed(),
-            Some(Fatal::Error(message)) if message.starts_with("InternalError: a release of the block at ")
+            hooks.heap.take_sensed().map(Fatal::into_reason),
+            Some(FatalReason::Error(message)) if message.starts_with("InternalError: a release of the block at ")
         ));
         hooks.heap.fatal_leaving(false);
         owners::made(owned, site);
@@ -1460,7 +1475,7 @@ mod tests {
         let at = s.address().as_ptr().addr();
         assert_eq!(
             hooks.heap.take_sensed(),
-            Some(Fatal::Error(format!(
+            Some(Fatal::error(format!(
                 "InternalError: a read of the block at {at:#x}, which the heap has freed, at {}:{site}:22",
                 file!()
             )))
@@ -1498,7 +1513,7 @@ mod tests {
         let at = s.address().as_ptr().addr();
         assert_eq!(
             hooks.heap.take_sensed(),
-            Some(Fatal::Error(format!(
+            Some(Fatal::error(format!(
                 "InternalError: a release of the block at {at:#x}, which the heap has freed, at {}:{site}:9",
                 file!()
             )))
@@ -1508,8 +1523,8 @@ mod tests {
 
         hooks.heap.addref(z);
         assert!(matches!(
-            hooks.heap.take_sensed(),
-            Some(Fatal::Error(message)) if message.starts_with("InternalError: an addref of the block at ")
+            hooks.heap.take_sensed().map(Fatal::into_reason),
+            Some(FatalReason::Error(message)) if message.starts_with("InternalError: an addref of the block at ")
         ));
 
         // The string's own release, which decrements through the type
@@ -1519,7 +1534,7 @@ mod tests {
         let site = line!() - 1;
         assert_eq!(
             hooks.heap.take_sensed(),
-            Some(Fatal::Error(format!(
+            Some(Fatal::error(format!(
                 "InternalError: a release of the block at {at:#x}, which the heap has freed, at {}:{site}:20",
                 file!()
             )))
@@ -1561,8 +1576,8 @@ mod tests {
         );
         stale.addref();
         assert!(matches!(
-            hooks.heap.take_sensed(),
-            Some(Fatal::Error(message))
+            hooks.heap.take_sensed().map(Fatal::into_reason),
+            Some(FatalReason::Error(message))
                 if message.starts_with(&format!("InternalError: an addref of the block at {at:#x}, which the heap has freed"))
         ));
 
@@ -1608,7 +1623,7 @@ mod tests {
         assert_eq!(held - heap.memory_usage(false), 32, "counted off once");
         assert_eq!(
             heap.take_sensed(),
-            Some(Fatal::Error(format!(
+            Some(Fatal::error(format!(
                 "InternalError: a free of the 32-byte block at {:#x}, which the heap has freed",
                 at.as_ptr().addr()
             )))
@@ -1656,7 +1671,7 @@ mod tests {
                 leave(&mut heap);
                 assert_eq!(
                     heap.take_sensed(),
-                    Some(Fatal::Error(format!(
+                    Some(Fatal::error(format!(
                         "InternalError: a write into the 56-byte block at {:#x} after the heap freed it, found as it left the quarantine",
                         at.as_ptr().addr()
                     ))),
@@ -1705,7 +1720,7 @@ mod tests {
                 assert_eq!(again, at, "the oldest held slot first, and no new run");
                 assert_eq!(
                     heap.take_sensed(),
-                    Some(Fatal::Error(format!(
+                    Some(Fatal::error(format!(
                         "InternalError: a write into the 3072-byte block at {:#x} after the heap freed it, found as it left the quarantine",
                         written.as_ptr().addr()
                     )))
@@ -1790,7 +1805,7 @@ mod tests {
             };
             assert_eq!(
                 hooks.heap.take_sensed(),
-                Some(Fatal::Error(format!(
+                Some(Fatal::error(format!(
                     "InternalError: an addref of the block at {block:#x}, which the heap has freed, at {}:{site}:13",
                     file!()
                 ))),
@@ -1824,7 +1839,7 @@ mod tests {
             }
         };
         assert!(
-            matches!(&refused, Fatal::Error(m) if m.starts_with("Allowed memory size of 4194304 bytes exhausted"))
+            matches!(refused.reason(), FatalReason::Error(m) if m.starts_with("Allowed memory size of 4194304 bytes exhausted"))
         );
         let rendering = heap.string(&bytes);
         assert!(rendering.is_ok(), "the rendering is not refused");
@@ -1855,7 +1870,7 @@ mod tests {
         }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-            Fatal::OutOfMemory(bytes)
+            Fatal::out_of_memory(bytes)
         }
     }
 }

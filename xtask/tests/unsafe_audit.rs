@@ -7,7 +7,7 @@ use xtask::reading::Status;
 use xtask::unsafe_audit;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 #[test]

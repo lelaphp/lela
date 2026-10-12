@@ -27,7 +27,7 @@ mod common;
 use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn manifest() -> Manifest {
@@ -44,7 +44,7 @@ fn oracle() -> Option<PathBuf> {
 }
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/crosscheck")
+    xtask::package_dir().join("fixtures/crosscheck")
 }
 
 fn registry() -> Registry {
@@ -549,7 +549,7 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
         .status()
         .unwrap();
     assert!(add.success());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = std::process::Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&*root)
         .args(["crosscheck", "--staged"])

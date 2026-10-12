@@ -180,6 +180,10 @@ pub(crate) trait Telling: Copy {
     /// that tells writes it to the frame first, where an observer reads
     /// it.
     fn before(self, req: &mut Request, frame: FrameRef, at: u32, opcode: Opcode);
+
+    /// Whether the observers of `opcode` are told of it, which oplines
+    /// served past the loop's home ask first.
+    fn tells(self, opcode: Opcode) -> bool;
 }
 
 /// The loop of an engine where no extension declared an opcode: it
@@ -199,6 +203,12 @@ impl Telling for Untold {
     #[inline(always)] // as `of`
     #[allow(clippy::inline_always)]
     fn before(self, _: &mut Request, _: FrameRef, _: u32, _: Opcode) {}
+
+    #[inline(always)] // as `of`
+    #[allow(clippy::inline_always)]
+    fn tells(self, _: Opcode) -> bool {
+        false
+    }
 }
 
 /// The loop of an engine where an extension declared an opcode: the
@@ -223,14 +233,20 @@ impl Telling for Declared {
             tell(req, frame, opcode);
         }
     }
+
+    #[inline(always)] // as `before`
+    #[allow(clippy::inline_always)]
+    fn tells(self, opcode: Opcode) -> bool {
+        self.0.contains(opcode)
+    }
 }
 
-/// [`Telling::before`] where one opline is dispatched outside the loop:
-/// by a stepping host's [`crate::tier::step`], and by a frame's
-/// parameter prologue, which serves the `RECV*` php's VM dispatches
-/// ([`crate::exec::parameter_prologue`]). Neither is generic over the
-/// loop's choice, so each pays one test of the set, a word that is zero
-/// while none is declared.
+/// [`Telling::before`] where one opline is dispatched outside the loop,
+/// by a stepping host's [`crate::tier::step`], which is not generic over
+/// the loop's choice and so pays one test of the set, a word that is zero
+/// while none is declared. A parameter prologue served outside the loop
+/// reads the set the same way, through [`Declared`]
+/// ([`crate::exec::parameter_prologue`]).
 #[inline(always)] // as `Telling::before`
 #[allow(clippy::inline_always)]
 pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {

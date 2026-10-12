@@ -19,7 +19,7 @@ use crate::scratch::Tree;
 use crate::tally::Judged as OneJudged;
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compile-identity")
+    crate::package_dir().join("fixtures/compile-identity")
 }
 
 fn registry(text: &str) -> Registry {

@@ -25,11 +25,11 @@ use xtask::scratch::Tree;
 use xtask::{api_check, budget, clippy, new_sapi, unsafe_audit};
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/new-sapi")
+    xtask::package_dir().join("fixtures/new-sapi")
 }
 
 /// A scratch copy of the fixture with one commit, since a reading's stamp

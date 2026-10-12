@@ -231,6 +231,44 @@ fn serve_hidden_serves_them_as_php_s_does() {
     assert_eq!(response.body, b"Access denied.\n");
 }
 
+/// A path holding a NUL is found as far as the NUL, as `php -S`'s walk
+/// finds it (#2695): under the default it is answered as a path with
+/// nothing at it; under `--serve-hidden` as `php -S` answers it, a static
+/// file's refused with 400, a write first with 405, and a program's
+/// request started with its program never run, a 200 with no body.
+#[test]
+fn a_path_holding_a_nul_is_refused_as_php_s_refuses_it() {
+    let files = [("run.php", "<?php echo 'ran';"), ("a.txt", "hello")];
+    let refused = Server::start(&common::root("nul-refused", &files));
+    for target in ["/run.php%00.txt", "/run.php%00", "/a.txt%00.php"] {
+        let response = ask(&refused, "GET", target);
+        assert_eq!(response.status, "HTTP/1.1 404 Not Found", "{target}");
+        assert!(response.body.is_empty(), "{target}: {:?}", response.body);
+    }
+    assert_eq!(
+        ask(&refused, "PUT", "/run.php%00.txt").status,
+        "HTTP/1.1 405 Method Not Allowed"
+    );
+    let served = Server::with_args(
+        &common::root("nul-served", &files),
+        &["--threads", "2", "--serve-hidden"],
+    );
+    for (target, status) in [
+        ("/run.php%00.txt", "HTTP/1.1 400 Bad Request"),
+        ("/run.php%00", "HTTP/1.1 400 Bad Request"),
+        ("/a.txt%00.php", "HTTP/1.1 200 OK"),
+    ] {
+        let response = ask(&served, "GET", target);
+        assert_eq!(response.status, status, "{target}");
+        assert!(response.body.is_empty(), "{target}: {:?}", response.body);
+    }
+    assert_eq!(
+        ask(&served, "PUT", "/run.php%00.txt").status,
+        "HTTP/1.1 405 Method Not Allowed"
+    );
+    assert_eq!(ask(&served, "GET", "/run.php").body, b"ran");
+}
+
 /// A symlink under the root to a file outside it is followed, as `php -S`
 /// and nginx's `disable_symlinks off` follow one: a layout that links its
 /// public storage into the root depends on it.

@@ -16,11 +16,11 @@ use xtask::scratch::Tree;
 use xtask::test;
 
 fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    xtask::package_dir().parent().unwrap()
 }
 
 fn fixture() -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test/failing");
+    let dir = xtask::package_dir().join("fixtures/test/failing");
     assert!(dir.is_dir(), "no fixture at {}", dir.display());
     dir
 }
@@ -77,7 +77,7 @@ fn a_crate_with_a_failing_test_reads_fail_with_the_passed_and_the_failed_counted
 #[test]
 fn the_binary_writes_the_reading_and_exits_nonzero_on_a_failure() {
     let root = repository("test-binary");
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root.path())
         .args(["test", "--crate", "php_heap"])

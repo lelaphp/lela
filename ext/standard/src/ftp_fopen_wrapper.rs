@@ -24,6 +24,7 @@ use php_ext_uri::UriStruct;
 use crate::http_fopen_wrapper::{file_ini, url_wrap_http};
 use crate::sockets::{default_timeout, timeval};
 use crate::streamsfuncs::{notify, notify_error, notify_info};
+use crate::string::Decimal;
 use crate::url::{UriParser, php_raw_url_decode};
 
 /// `php_stream_ftp_wrapper`: `ftp`, a URL wrapper that opens streams and
@@ -778,7 +779,7 @@ fn start(
         && let ValueRef::Int(at) = value.as_ref()
         && at > 0
     {
-        command(req, control, b"REST", Some(at.to_string().as_bytes()));
+        command(req, control, b"REST", Some(Decimal::of(at).as_bytes()));
         last = get_result(req, control)?;
         if last.class() != Class::Intermediate {
             req.wrapper_log_error(&format!("Unable to resume from offset {at}"));

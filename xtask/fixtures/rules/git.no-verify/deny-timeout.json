@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"timeout 60 git commit --no-verify -m x","description":"Commit without the hook under a timeout"}}

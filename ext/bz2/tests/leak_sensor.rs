@@ -39,3 +39,31 @@ unlink($f);
     );
     assert_eq!(stdout, "file\nbool(false)\nnamed\n");
 }
+
+/// The bzip2 filters give back to the request's heap everything they
+/// took of it, the library's state among it (#2620): removed by hand,
+/// ended at their stream's end, or still attached as the request ends,
+/// a decompressor mid-stream included.
+#[test]
+fn the_filters_give_back_the_heap_they_took() {
+    let stdout = armed(
+        r#"<?php
+$s = ''; for ($i = 0; $i < 20000; $i++) $s .= md5($i);
+$f = fopen('php://memory', 'w+');
+$c = stream_filter_append($f, 'bzip2.compress', STREAM_FILTER_WRITE, ['blocks' => 2]);
+fwrite($f, $s);
+stream_filter_remove($c);
+rewind($f);
+$d = stream_filter_append($f, 'bzip2.decompress', STREAM_FILTER_READ, ['small' => true]);
+echo stream_get_contents($f) === $s ? 'round' : 'broken', "\n";
+stream_filter_remove($d);
+$g = fopen('php://memory', 'w+'); fwrite($g, bzcompress($s)); rewind($g);
+stream_filter_append($g, 'bzip2.decompress', STREAM_FILTER_READ);
+echo strlen(fread($g, 100)), "\n";
+$h = fopen('php://memory', 'w+');
+stream_filter_append($h, 'bzip2.compress', STREAM_FILTER_WRITE);
+fwrite($h, 'left');
+"#,
+    );
+    assert_eq!(stdout, "round\n100\n");
+}

@@ -47,11 +47,14 @@
 //! #2251): an `ext/*` crate's library dependency on another fails its
 //! reading unless a row a person wrote names both, and an extension's
 //! `pub` items beyond `extension()` are its `surface.lock`, regenerated
-//! and diffed as an item lock is; `--write` rewrites those too.
+//! and diffed as an item lock is; `--write` rewrites those too. A surface
+//! item's `#[mirrors]` is held against the pinned php-src ([`mirrors`],
+//! #2353).
 
 mod bundle;
 mod inventory;
 pub(crate) mod lock;
+mod mirrors;
 mod ops;
 pub(crate) mod row;
 mod surfaces;
@@ -137,7 +140,7 @@ pub(crate) fn measure(
         surfaces::write(&crates, &mut inventory)?;
     }
     let snapshot = Snapshot::disk(root)?;
-    let surfaces = Surfaces::read(root)?;
+    let surfaces = Surfaces::read(root, &manifest.pin.source)?;
     let mut readings = Vec::new();
     for seam in &manifest.seams {
         readings.push(seam_reading(
