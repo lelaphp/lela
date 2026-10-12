@@ -37,8 +37,7 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request, Sink, TypedIni,
-    placed_of,
+    BuildDefs, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request, TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -505,7 +504,14 @@ pub struct Aborted {
 
 /// Where a request's bytes go (design §4.3 seam 4): the engine owns the
 /// header list, the status and the commit moment; a sink only writes.
-pub trait OutputSink {
+/// The request owns its sink while it runs: [`Engine::serve`] takes it
+/// and hands it back when the request ends, and each call reaches it as
+/// the request makes it, the body as it leaves the `php_output` layer,
+/// the head at the commit, the log and the error stream as written,
+/// php's `sapi_module` timing, which a child process writing to the
+/// host's stdout is ordered against (#741, #946). A host that wants its
+/// own type back has it from the [`Any`] the sink is.
+pub trait OutputSink: Any {
     /// Body bytes, and whether the host could write them: [`Aborted`]
     /// where the client went away or the fd refused them, which the
     /// request meets as `php_handle_aborted_connection`.
@@ -534,18 +540,6 @@ pub trait OutputSink {
     /// diagnostic is logged and displayed in that order on one stream
     /// and in no order across two (#216).
     fn write_stderr(&mut self, bytes: &[u8]);
-    /// The sink the request holds while it runs, where the host has one
-    /// that may leave its hands: each call above then reaches the host as
-    /// the request makes it, the body as it leaves the `php_output` layer,
-    /// the header block at the commit, the error stream and the log as
-    /// written, php's `sapi_module` timing, which a child process writing
-    /// to the host's stdout is ordered against (#741). `None`, the
-    /// default, has the request keep its calls and hand them to this sink
-    /// when it ends: the log and the error stream in the order written,
-    /// then the header block, then the body.
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        None
-    }
     /// Whether the host's `flush` sends the head first, as php-fpm's
     /// `sapi_cgibin_flush` calls `sapi_send_headers`. No, by default.
     fn flush_sends_head(&self) -> bool {
@@ -600,12 +594,11 @@ pub enum Routed {
     Declined,
 }
 
-/// What a host serves in a request it looks at once the request has
-/// started ([`Engine::serve_started`]).
+/// What a host serves in a request, which it looks at once the request
+/// has started ([`Engine::serve`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostServes {
-    /// The program the request description names, served as
-    /// [`Engine::serve`] serves it.
+    /// The program the request description names.
     Program,
     /// A page the host answers with in place of a program: php-fpm's ping
     /// and status pages, and its `File not found.` and its kin.
@@ -657,9 +650,13 @@ enum Begun {
     Failed(Request),
     /// No request started: the engine's start refused, `opcache.preload`
     /// refused, or `php_module_startup` failed, and what the host is
-    /// handed instead.
-    Refused(Observables),
+    /// handed instead, with its sink.
+    Refused(Observables, Lent),
 }
+
+/// The sink a host lent the engine, owned while a request writes to it and
+/// handed back when the request ends.
+pub(crate) type Lent = Box<dyn OutputSink + Send>;
 
 /// php's `opcache.max_accelerated_files` default: the units one engine
 /// keeps before it drops half of them.
@@ -904,6 +901,9 @@ pub(crate) struct Shared {
     /// host finishes ([`Engine::started`]): serving, with what the unit
     /// cache preloaded, or refusing to serve anything.
     pub(crate) started: OnceLock<crate::preload::Started>,
+    /// Held by the one thread that finishes the startup, while
+    /// [`Shared::started`] is unset ([`Engine::started`]).
+    pub(crate) starting: Mutex<()>,
     /// `CG(map_ptr_last)`: how many map pointers the engine has handed
     /// out (design §5.14), which is the next one's offset. Every op
     /// array of a unit takes one as the unit is published
@@ -3406,6 +3406,7 @@ impl EngineBuilder {
                 default_strings,
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
+                starting: Mutex::new(()),
             }),
             end: Arc::default(),
         };
@@ -3932,21 +3933,19 @@ impl Drop for EngineEnd {
             sapi_name: shared.host.to_owned(),
             ..RequestDescription::default()
         };
-        let mut req = Request::new(Arc::clone(&shared), description);
-        let mut sink = (self.sink.get_mut())
+        let sink = (self.sink.get_mut())
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(held) = sink.as_mut().and_then(|sink| sink.held()) {
-            req.hold(held);
-        }
+        let mut req = match sink {
+            Some(sink) => Request::lent(Arc::clone(&shared), description, sink),
+            None => Request::new(Arc::clone(&shared), description),
+        };
         req.enter_phase(crate::api::request::Phase::EngineEnd);
         if let Some(hooks) = shared.supplied.stream_hooks.get() {
             (hooks.engine_end)(&mut req);
         }
         end_phase(&shared.extensions, &mut req, |e| e.engine_end);
-        if let Some(sink) = sink.as_mut() {
-            crate::preload::hand_over(&mut req, sink.as_mut());
-        }
+        drop(req.release_sink());
     }
 }
 
@@ -4142,22 +4141,23 @@ impl Engine {
     /// values the handlers of the extensions up to it met, never a later
     /// extension's nor what php raises after `zend_startup_modules`.
     /// `None` for an engine that started. Every request a refused engine
-    /// is asked for is refused so.
-    pub fn refused(&self, sink: &mut dyn OutputSink) -> Option<i32> {
-        let refused = self.shared.refused.as_ref()?;
+    /// is asked for is refused so. `sink` is handed back.
+    pub fn refused(
+        &self,
+        sink: Box<dyn OutputSink + Send>,
+    ) -> (Option<i32>, Box<dyn OutputSink + Send>) {
+        let Some(refused) = self.shared.refused.as_ref() else {
+            return (None, sink);
+        };
         let description = RequestDescription {
             sapi_name: self.shared.host.to_owned(),
             ..RequestDescription::default()
         };
-        let mut req = Request::new(Arc::clone(&self.shared), description);
-        if let Some(held) = sink.held() {
-            req.hold(held);
-        }
+        let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
         for (level, message) in &refused.raised {
             req.note_startup_error(*level, message);
         }
-        crate::preload::hand_over(&mut req, sink);
-        Some(-2)
+        (Some(-2), req.release_sink())
     }
 
     /// What php writes to the process's `stderr` while it starts up and
@@ -4475,7 +4475,15 @@ impl Engine {
     }
 
     /// The one request transaction (design §5.14): compile, seed, serve,
-    /// commit, shut down, observe.
+    /// commit, shut down, observe. The request owns `sink` while it runs,
+    /// each call reaching it as the request makes it, and hands it back
+    /// with what it observed (#946). What the request serves is `look`'s
+    /// answer, asked once `php_request_startup` returns, every extension's
+    /// `rinit` among it, as php-fpm's loop looks at its request
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1903`); a host that serves the
+    /// program the description names answers [`HostServes::Program`].
+    /// Where the start failed or was refused, `look` is never called, so
+    /// nothing the host would have logged or answered is.
     ///
     /// An engine with no extensions serves what uses Zend alone (design
     /// §4.10): the loop over the main op array, `ECHO` through the
@@ -4537,31 +4545,32 @@ impl Engine {
     ///
     /// Fatal error: The (unset) cast is no longer supported in %s on line 3
     /// ```
-    pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, Work::Serve, false).0
-    }
-
-    /// [`Engine::serve`] for a host that looks at its request only once
-    /// it has started, as php-fpm's loop does
-    /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1903`): `php_request_startup`,
-    /// every extension's `rinit` among it, then `look`, whose answer is
-    /// what the request serves. Where the start failed or was refused,
-    /// `look` is never called, so nothing the host would have logged or
-    /// answered is, and the host is handed the failure as [`Engine::serve`]
-    /// hands it.
-    pub fn serve_started(
+    pub fn serve(
         &self,
         description: RequestDescription,
-        sink: &mut dyn OutputSink,
+        sink: Box<dyn OutputSink + Send>,
         look: impl FnOnce() -> HostServes,
-    ) -> Observables {
+    ) -> (Observables, Box<dyn OutputSink + Send>) {
+        let (observed, _, sink) = self.serve_looked(description, sink, look, false);
+        (observed, sink)
+    }
+
+    /// [`Engine::serve`], with the natives the request enters recorded
+    /// where `traced` asks.
+    fn serve_looked(
+        &self,
+        description: RequestDescription,
+        sink: Lent,
+        look: impl FnOnce() -> HostServes,
+        traced: bool,
+    ) -> (Observables, Trace, Lent) {
         let source = description.source.clone();
-        let mut req = match self.begin(description, sink, false) {
+        let mut req = match self.begin(description, sink, traced) {
             Ok(req) => req,
-            Err(refused) => return refused,
+            Err((refused, sink)) => return (refused, Trace::default(), sink),
         };
         self.serve_in(&mut req, source.as_deref(), look());
-        self.shutdown(&mut req, sink).0
+        self.shutdown(&mut req)
     }
 
     /// What a started request serves, then each extension's hook for the
@@ -4595,8 +4604,12 @@ impl Engine {
     /// refused, php's status for a parse error, and 0 for one that was
     /// not, whatever the compiler warned of; the two sentences `do_cli`
     /// prints around it are the host's, read off that status.
-    pub fn lint(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, Work::Lint, false).0
+    pub fn lint(
+        &self,
+        description: RequestDescription,
+        sink: Box<dyn OutputSink + Send>,
+    ) -> (Observables, Box<dyn OutputSink + Send>) {
+        self.transaction(description, sink, Work::Lint)
     }
 
     /// The CLI's `-s`, `PHP_CLI_MODE_HIGHLIGHT` (`Z/sapi/cli/php_cli.c:969-977`):
@@ -4607,17 +4620,20 @@ impl Engine {
     pub fn highlight(
         &self,
         description: RequestDescription,
-        sink: &mut dyn OutputSink,
-    ) -> Observables {
-        self.transaction(description, sink, Work::Highlight, false)
-            .0
+        sink: Box<dyn OutputSink + Send>,
+    ) -> (Observables, Box<dyn OutputSink + Send>) {
+        self.transaction(description, sink, Work::Highlight)
     }
 
     /// The CLI's `-w`, `PHP_CLI_MODE_STRIP` (`Z/sapi/cli/php_cli.c:963-968`):
     /// as [`Engine::highlight`], with the program written as `zend_strip`
     /// writes it.
-    pub fn strip(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, Work::Strip, false).0
+    pub fn strip(
+        &self,
+        description: RequestDescription,
+        sink: Box<dyn OutputSink + Send>,
+    ) -> (Observables, Box<dyn OutputSink + Send>) {
+        self.transaction(description, sink, Work::Strip)
     }
 
     /// `preload_activate`: the auto-registered arrays the preloaded code
@@ -4630,21 +4646,20 @@ impl Engine {
         }
     }
 
-    /// The one transaction behind [`Engine::serve`], [`Engine::lint`],
+    /// The one transaction behind [`Engine::lint`],
     /// [`Engine::highlight`] and [`Engine::strip`]: `work` says what the
     /// program is for once the request has started.
     fn transaction(
         &self,
         description: RequestDescription,
-        sink: &mut dyn OutputSink,
+        sink: Lent,
         work: Work,
-        traced: bool,
-    ) -> (Observables, Trace) {
+    ) -> (Observables, Lent) {
         let source = description.source.clone();
         let cwd = description.cwd.clone();
-        let mut req = match self.begin(description, sink, traced) {
+        let mut req = match self.begin(description, sink, false) {
             Ok(req) => req,
-            Err(refused) => return (refused, Trace::default()),
+            Err(refused) => return refused,
         };
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
@@ -4671,11 +4686,7 @@ impl Engine {
                     req.write(&written);
                 }
             }
-            return self.shutdown(&mut req, sink);
-        }
-        if work == Work::Serve {
-            self.serve_in(&mut req, source.as_deref(), HostServes::Program);
-            return self.shutdown(&mut req, sink);
+            return self.shutdown_untraced(&mut req);
         }
         // `php_lint_script` compiles and drops the op array, and what
         // the compiler warned of it rendered as it compiled.
@@ -4689,7 +4700,7 @@ impl Engine {
             }
             None => {}
         }
-        self.shutdown(&mut req, sink)
+        self.shutdown_untraced(&mut req)
     }
 
     /// `php_request_startup` for `description`, and what `do_cli` does
@@ -4697,16 +4708,20 @@ impl Engine {
     /// serve; the refusal `opcache.preload` answers with where it is one,
     /// and where an extension's `rinit` raised, the startup failure every
     /// host but the built-in server ends on ([`Engine::start_failed`]).
+    #[expect(
+        clippy::result_large_err,
+        reason = "the request the Ok variant carries is many times the Err's size"
+    )]
     pub(crate) fn begin(
         &self,
         description: RequestDescription,
-        sink: &mut dyn OutputSink,
+        sink: Lent,
         traced: bool,
-    ) -> Result<Request, Observables> {
+    ) -> Result<Request, (Observables, Lent)> {
         match self.start_request(description, sink, traced) {
             Begun::Started(req) => Ok(req),
-            Begun::Failed(req) => Err(Engine::start_failed(req, sink)),
-            Begun::Refused(refused) => Err(refused),
+            Begun::Failed(req) => Err(Engine::start_failed(req)),
+            Begun::Refused(refused, sink) => Err((refused, sink)),
         }
     }
 
@@ -4728,34 +4743,25 @@ impl Engine {
 
     /// [`Engine::begin`] with a failed start handed back as the request
     /// it failed in, for the built-in server, which shuts it down.
-    fn start_request(
-        &self,
-        description: RequestDescription,
-        sink: &mut dyn OutputSink,
-        traced: bool,
-    ) -> Begun {
+    fn start_request(&self, description: RequestDescription, sink: Lent, traced: bool) -> Begun {
+        let ended = |status| Observables {
+            exit_code: status,
+            headers_sent: true,
+            ..Observables::default()
+        };
         // php never reaches `zend_post_startup` past a failed `MINIT`.
-        if let Some(status) = self.refused(sink) {
-            return Begun::Refused(Observables {
-                exit_code: status,
-                headers_sent: true,
-                ..Observables::default()
-            });
+        let (status, sink) = self.refused(sink);
+        if let Some(status) = status {
+            return Begun::Refused(ended(status), sink);
         }
-        if let crate::preload::Started::Refused(status) = self.started(&description, sink) {
-            return Begun::Refused(Observables {
-                exit_code: status,
-                headers_sent: true,
-                ..Observables::default()
-            });
+        let (started, sink) = self.started(&description, sink);
+        if let crate::preload::Started::Refused(status) = started {
+            return Begun::Refused(ended(status), sink);
         }
         let web = description.web.is_some();
-        let mut req = Request::new(Arc::clone(&self.shared), description);
+        let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
         if traced || self.shared.trace_to.is_some() {
             req.trace_natives();
-        }
-        if let Some(held) = sink.held() {
-            req.hold(held);
         }
         // `php_request_startup` (`Z/main/main.c:1890`): `sapi_activate`
         // reads the body, the `X-Powered-By` header goes on while
@@ -4773,12 +4779,7 @@ impl Engine {
         // An `E_CORE_ERROR` bailed out of `php_module_startup`, which
         // failed, and the host ends with status 1 before any request.
         if self.show_startup_raised(&mut req) {
-            crate::preload::hand_over(&mut req, sink);
-            return Begun::Refused(Observables {
-                exit_code: 1,
-                headers_sent: true,
-                ..Observables::default()
-            });
+            return Begun::Refused(ended(1), req.release_sink());
         }
         if let Err(thrown) = serve_rinits(&mut req, &self.shared.extensions) {
             // `zend_throw_exception_internal` with no frame standing
@@ -4818,7 +4819,7 @@ impl Engine {
     /// and each host's tests hold its ending, since a fence carries
     /// neither the ini nor the session file a failing `rinit` needs
     /// (#1634).
-    fn start_failed(mut req: Request, sink: &mut dyn OutputSink) -> Observables {
+    fn start_failed(mut req: Request) -> (Observables, Lent) {
         #[cfg(debug_assertions)]
         req.end_in_sensed();
         let fatal = match req.ending() {
@@ -4833,8 +4834,7 @@ impl Engine {
             uncaught: None,
             start_failed: true,
         };
-        crate::preload::hand_over(&mut req, sink);
-        observed
+        (observed, req.release_sink())
     }
 
     /// `php_execute_script` (`Z/main/main.c:2568-2648`) over the
@@ -4957,8 +4957,8 @@ impl Engine {
         &self,
         description: RequestDescription,
         router: Option<&[u8]>,
-        sink: &mut dyn OutputSink,
-    ) -> (Observables, Dispatched) {
+        sink: Box<dyn OutputSink + Send>,
+    ) -> (Observables, Dispatched, Box<dyn OutputSink + Send>) {
         let program = description.script_name.is_some();
         let mut dispatched = Dispatched {
             routed: Routed::Taken,
@@ -4973,13 +4973,14 @@ impl Engine {
             // that serves `php_request_shutdown` after the failure, so
             // the request-end phases run, and no response line is logged.
             Begun::Failed(mut req) => {
+                let (observed, sink) = self.shutdown_untraced(&mut req);
                 let observed = Observables {
                     start_failed: true,
-                    ..self.shutdown(&mut req, sink).0
+                    ..observed
                 };
-                return (observed, dispatched);
+                return (observed, dispatched, sink);
             }
-            Begun::Refused(refused) => return (refused, dispatched),
+            Begun::Refused(refused, sink) => return (refused, dispatched, sink),
         };
         if let Some(router) = router {
             dispatched.routed = self.execute_router(&mut req, router);
@@ -4994,7 +4995,8 @@ impl Engine {
         } else if dispatched.routed == Routed::Declined {
             req.discard_headers();
         }
-        (self.shutdown(&mut req, sink).0, dispatched)
+        let (observed, sink) = self.shutdown_untraced(&mut req);
+        (observed, dispatched, sink)
     }
 
     /// `php_cli_server_dispatch_router`: `router` served as
@@ -5045,13 +5047,16 @@ impl Engine {
     /// request is shut down where it was served and never moved first: a
     /// fiber still suspended holds the address it was resumed with, and
     /// is resumed with it again to be destroyed.
-    pub(crate) fn shutdown(
-        &self,
-        req: &mut Request,
-        sink: &mut dyn OutputSink,
-    ) -> (Observables, Trace) {
+    pub(crate) fn shutdown(&self, req: &mut Request) -> (Observables, Trace, Lent) {
         Engine::shutdown_program(req);
-        self.shutdown_request(req, sink)
+        self.shutdown_request(req)
+    }
+
+    /// [`Engine::shutdown`] with no trace handed back, for what records
+    /// none.
+    pub(crate) fn shutdown_untraced(&self, req: &mut Request) -> (Observables, Lent) {
+        let (observed, _, sink) = self.shutdown(req);
+        (observed, sink)
     }
 
     /// The first steps of `php_request_shutdown`, what the program still
@@ -5096,11 +5101,7 @@ impl Engine {
 
     /// The rest of `php_request_shutdown` after
     /// [`Engine::shutdown_program`], and what the host is handed.
-    pub(crate) fn shutdown_request(
-        &self,
-        req: &mut Request,
-        sink: &mut dyn OutputSink,
-    ) -> (Observables, Trace) {
+    pub(crate) fn shutdown_request(&self, req: &mut Request) -> (Observables, Trace, Lent) {
         // `PG(report_memleaks)` as `php_request_shutdown` reads it first.
         // The debug teardown below runs where the request leak sensor is
         // armed, as it is unless the engine was built with it off
@@ -5164,10 +5165,7 @@ impl Engine {
         if !req.output().headers_sent() {
             req.send_header_block();
         }
-        match req.release_sink() {
-            Sink::Held(mut held) => held.flush(),
-            Sink::Kept(kept) => kept.hand_to(sink),
-        }
+        let sink = req.release_sink();
         // What the request entered, taken last, so a destructor or a
         // shutdown function served above is in it.
         let trace = req.take_trace();
@@ -5184,19 +5182,20 @@ impl Engine {
                 start_failed: false,
             },
             trace,
+            sink,
         )
     }
 
-    /// [`Engine::serve`] with the natives the request enters recorded
-    /// and handed back beside what it observed: the witness runner's
-    /// switch (harness §4.5 condition 2, revision 58).
+    /// [`Engine::serve`] of the program with the natives the request
+    /// enters recorded and handed back beside what it observed: the
+    /// witness runner's switch (harness §4.5 condition 2, revision 58).
     #[cfg(any(feature = "test", test))]
     pub(crate) fn serve_traced(
         &self,
         description: RequestDescription,
-        sink: &mut dyn OutputSink,
-    ) -> (Observables, Trace) {
-        self.transaction(description, sink, Work::Serve, true)
+        sink: Lent,
+    ) -> (Observables, Trace, Lent) {
+        self.serve_looked(description, sink, || HostServes::Program, true)
     }
 }
 
@@ -5225,11 +5224,9 @@ fn end_phase(
 pub(crate) type Trace = Vec<crate::trace::Entered>;
 
 /// What a transaction is for once the request has started: the program
-/// served, linted, or written as `zend_highlight` or `zend_strip` writes
-/// it.
+/// linted, or written as `zend_highlight` or `zend_strip` writes it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Work {
-    Serve,
     Lint,
     Highlight,
     Strip,
@@ -5712,7 +5709,7 @@ mod tests {
     fn the_default_content_type_reaches_a_web_host_s_block_and_not_the_cli_s() {
         let engine = Engine::cli_builder().build();
         let mut web = crate::test::Capture::default();
-        engine.serve(
+        engine.serve_into(
             RequestDescription {
                 web: Some(WebRequest {
                     response_code: 200,
@@ -5729,7 +5726,7 @@ mod tests {
             b"X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n"
         );
         let mut cli = crate::test::Capture::default();
-        engine.serve(description("<?php echo 'x';"), &mut cli);
+        engine.serve_into(description("<?php echo 'x';"), &mut cli);
         assert_eq!(cli.stdout, b"x");
         assert_eq!(cli.headers, b"");
     }
@@ -5744,7 +5741,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let dir_under = |cwd: &str| {
             let mut sink = Kept::default();
-            engine.serve(
+            engine.serve_into(
                 RequestDescription {
                     cwd: PathBuf::from(cwd),
                     ..description("<?php echo __DIR__;")
@@ -5764,7 +5761,7 @@ mod tests {
         let engine = Engine::builder().ini("error_log", "syslog").build();
         let mut sink = Kept::default();
         let source = "<?php ini_set('log_errors', 1); ini_set('display_errors', 0); echo $u;";
-        engine.serve(description(source), &mut sink);
+        engine.serve_into(description(source), &mut sink);
         assert_eq!(
             sink.logged(),
             "PHP Warning:  Undefined variable $u in witness.php on line 1\n"
@@ -5773,7 +5770,7 @@ mod tests {
 
     fn served(engine: &Engine, source: &str) -> (String, Observables) {
         let mut sink = Kept::default();
-        let observables = engine.serve(description(source), &mut sink);
+        let observables = engine.serve_into(description(source), &mut sink);
         (
             String::from_utf8_lossy(&sink.body).into_owned(),
             observables,
@@ -5903,7 +5900,7 @@ mod tests {
             .build("t");
         let engine = Engine::cli_builder().extensions(&[extension]).build();
         let mut sink = crate::test::Capture::default();
-        engine.serve(
+        engine.serve_into(
             RequestDescription {
                 web: Some(WebRequest {
                     query: Some(b"a=1&b=2".to_vec()),
@@ -6532,7 +6529,7 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(
+            .serve_into(
                 description("<?php\ndeclare(ticks=0): enddeclare;"),
                 &mut logged,
             );
@@ -6547,7 +6544,7 @@ mod tests {
         let observables = Engine::cli_builder()
             .ini("error_reporting", "0")
             .build()
-            .serve(
+            .serve_into(
                 description("<?php\ndeclare(ticks=0): enddeclare;"),
                 &mut masked,
             );
@@ -6599,7 +6596,7 @@ mod tests {
             .ini("zend.max_allowed_stack_size", "512K")
             .ini("error_reporting", "0")
             .build()
-            .serve(description(&source), &mut masked);
+            .serve_into(description(&source), &mut masked);
         assert!(masked.body.is_empty(), "E_COMPILE_ERROR is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
 
@@ -6625,7 +6622,7 @@ mod tests {
         let mut displayed = Kept::default();
         declaring_nan(Engine::cli_builder())
             .build()
-            .serve(description("<?php echo NAN;"), &mut displayed);
+            .serve_into(description("<?php echo NAN;"), &mut displayed);
         assert_eq!(
             String::from_utf8_lossy(&displayed.body),
             "\nWarning: unexpected NAN value was coerced to string in witness.php on line 1\nNAN"
@@ -6640,7 +6637,7 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php echo NAN;"), &mut logged);
+            .serve_into(description("<?php echo NAN;"), &mut logged);
         assert_eq!(String::from_utf8_lossy(&logged.body), "NAN");
         assert_eq!(
             logged.logged(),
@@ -6685,7 +6682,7 @@ mod tests {
             .ini("error_append_string", "</PRE>")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\necho NAN;"), &mut around);
+            .serve_into(description("<?php\necho NAN;"), &mut around);
         assert_eq!(
             String::from_utf8_lossy(&around.body),
             format!("<PRE>\nWarning: {NAN_WARNING} in witness.php on line 2\n</PRE>NAN")
@@ -6708,7 +6705,7 @@ mod tests {
         declaring_nan(Engine::cli_builder())
             .ini("html_errors", "1")
             .build()
-            .serve(description("<?php\necho NAN;"), &mut html);
+            .serve_into(description("<?php\necho NAN;"), &mut html);
         assert_eq!(
             String::from_utf8_lossy(&html.body),
             format!(
@@ -6722,7 +6719,7 @@ mod tests {
             .ini("error_prepend_string", "<PRE>")
             .ini("error_append_string", "</PRE>")
             .build()
-            .serve(description("<?php\necho NAN;"), &mut around);
+            .serve_into(description("<?php\necho NAN;"), &mut around);
         assert_eq!(
             String::from_utf8_lossy(&around.body),
             format!(
@@ -6747,7 +6744,7 @@ mod tests {
         let mut every = Kept::default();
         declaring_nan(Engine::cli_builder())
             .build()
-            .serve(description(source), &mut every);
+            .serve_into(description(source), &mut every);
         assert_eq!(
             String::from_utf8_lossy(&every.body),
             format!("{}NAN{}NAN{}NAN", warning(2), warning(2), warning(3))
@@ -6757,7 +6754,7 @@ mod tests {
         declaring_nan(Engine::cli_builder())
             .ini("ignore_repeated_errors", "1")
             .build()
-            .serve(description(source), &mut once_a_site);
+            .serve_into(description(source), &mut once_a_site);
         assert_eq!(
             String::from_utf8_lossy(&once_a_site.body),
             format!("{}NANNAN{}NAN", warning(2), warning(3)),
@@ -6769,7 +6766,7 @@ mod tests {
             .ini("ignore_repeated_errors", "1")
             .ini("ignore_repeated_source", "1")
             .build()
-            .serve(description(source), &mut once);
+            .serve_into(description(source), &mut once);
         assert_eq!(
             String::from_utf8_lossy(&once.body),
             format!("{}NANNANNAN", warning(2)),
@@ -6793,7 +6790,7 @@ mod tests {
             .ini("error_prepend_string", "<PRE>")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\necho NAN;"), &mut fault);
+            .serve_into(description("<?php\necho NAN;"), &mut fault);
         assert_eq!(
             String::from_utf8_lossy(&fault.body),
             format!(
@@ -6821,7 +6818,7 @@ mod tests {
             .build();
         let under = |host: &str| {
             let mut kept = Kept::default();
-            engine.serve(
+            engine.serve_into(
                 RequestDescription {
                     sapi_name: String::from(host),
                     ..description("<?php\necho NAN;")
@@ -6870,7 +6867,7 @@ mod tests {
                 .ini("display_errors", value)
                 .build();
             let mut kept = Kept::default();
-            engine.serve(description("<?php\necho NAN;"), &mut kept);
+            engine.serve_into(description("<?php\necho NAN;"), &mut kept);
             (
                 String::from_utf8_lossy(&kept.body).into_owned(),
                 kept.stderr(),
@@ -6914,7 +6911,7 @@ mod tests {
             .ini("display_errors", "stderr")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\necho NAN;"), &mut kept);
+            .serve_into(description("<?php\necho NAN;"), &mut kept);
         assert_eq!(String::from_utf8_lossy(&kept.body), "NAN");
         assert_eq!(
             kept.seen,
@@ -6942,7 +6939,7 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\necho NAN, NAN;"), &mut logged);
+            .serve_into(description("<?php\necho NAN, NAN;"), &mut logged);
         assert_eq!(
             logged.logged(),
             format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2\n"),
@@ -7052,7 +7049,7 @@ mod tests {
         let name = path.to_string_lossy().as_bytes().to_vec();
         for _ in 0..2 {
             let mut sink = Kept::default();
-            let observables = engine.serve(
+            let observables = engine.serve_into(
                 RequestDescription {
                     sapi_name: String::from("cli"),
                     script_name: Some(name.clone()),
@@ -7120,7 +7117,7 @@ mod tests {
         /// ended.
         fn serve(&self, engine: &Engine, name: &str) -> (String, Observables) {
             let mut sink = Kept::default();
-            let observables = engine.serve(
+            let observables = engine.serve_into(
                 RequestDescription {
                     sapi_name: String::from("cli"),
                     script_name: Some(self.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
@@ -7255,7 +7252,7 @@ mod tests {
         );
         let serve = |name: &str| {
             let mut sink = Kept::default();
-            let observables = Engine::cli_builder().build().serve(
+            let observables = Engine::cli_builder().build().serve_into(
                 RequestDescription {
                     sapi_name: String::from("phpdbg"),
                     script_name: Some(files.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
@@ -7339,7 +7336,7 @@ mod tests {
         let expanded = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         for _ in 0..2 {
             let mut sink = Kept::default();
-            engine.serve(described(), &mut sink);
+            engine.serve_into(described(), &mut sink);
             assert_eq!(
                 String::from_utf8_lossy(&sink.body),
                 format!(
@@ -7352,7 +7349,7 @@ mod tests {
         declaring_nan(Engine::cli_builder())
             .ini("error_reporting", "0")
             .build()
-            .serve(described(), &mut masked);
+            .serve_into(described(), &mut masked);
         assert_eq!(String::from_utf8_lossy(&masked.body), "aNANz");
         std::fs::remove_file(&path).ok();
     }
@@ -7577,7 +7574,7 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\nnope();"), &mut logged);
+            .serve_into(description("<?php\nnope();"), &mut logged);
         assert!(logged.body.is_empty(), "display_errors is off");
         assert_eq!(
             logged
@@ -7593,7 +7590,7 @@ mod tests {
         Engine::cli_builder()
             .ini("error_reporting", "0")
             .build()
-            .serve(description("<?php\nnope();"), &mut masked);
+            .serve_into(description("<?php\nnope();"), &mut masked);
         assert!(masked.body.is_empty(), "E_ERROR is masked out");
         assert!(masked.log().is_empty(), "log_errors is off");
     }
@@ -7611,7 +7608,7 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\nnope();"), &mut fatal);
+            .serve_into(description("<?php\nnope();"), &mut fatal);
         assert_eq!(
             fatal.log(),
             vec![
@@ -7627,7 +7624,7 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\necho NAN;\necho NAN;"), &mut warned);
+            .serve_into(description("<?php\necho NAN;\necho NAN;"), &mut warned);
         assert_eq!(
             warned.log(),
             vec![

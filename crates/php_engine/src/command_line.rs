@@ -64,8 +64,8 @@ impl Engine {
         &self,
         description: RequestDescription,
         command: CommandLine,
-        sink: &mut dyn OutputSink,
-    ) -> Observables {
+        sink: Box<dyn OutputSink + Send>,
+    ) -> (Observables, Box<dyn OutputSink + Send>) {
         let mut req = match self.begin(description, sink, false) {
             Ok(req) => req,
             Err(refused) => return refused,
@@ -96,7 +96,7 @@ impl Engine {
                 }
             }
         }
-        self.shutdown(&mut req, sink).0
+        self.shutdown_untraced(&mut req)
     }
 
     /// `PHP_CLI_MODE_PROCESS_STDIN` (`Z/sapi/cli/php_cli.c:996-1034`):

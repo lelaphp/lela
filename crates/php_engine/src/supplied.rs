@@ -677,7 +677,7 @@ mod tests {
             builder = builder.additional_extension(host);
         }
         let mut sink = crate::test::Capture::default();
-        builder.build().serve(
+        builder.build().serve_into(
             RequestDescription {
                 web: Some(WebRequest {
                     query: Some(b"ab".to_vec()),

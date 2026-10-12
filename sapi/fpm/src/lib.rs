@@ -56,7 +56,7 @@ use std::process::ExitCode;
 
 use php_sapi::getopt::{Getopt, Opt, Taken, opt};
 use php_sapi::ini::{Search, define};
-use php_sapi::{Engine, IniFiles, RequestDescription};
+use php_sapi::{Engine, HostServes, IniFiles, RequestDescription};
 
 use crate::master::{Args, Became, EXIT_CONFIG, EXIT_OK, EXIT_USAGE, Fpm, Init};
 
@@ -292,10 +292,11 @@ pub fn main() -> ExitCode {
                 cwd: std::env::current_dir().unwrap_or_default(),
                 ..RequestDescription::default()
             };
-            let mut sink = Stdout;
             // A request whose start fails is `FPM_EXIT_SOFTWARE`
             // (`Z/sapi/fpm/fpm/fpm_main.c:1727-1734`).
-            if engine(&ini).serve(description, &mut sink).start_failed {
+            let (served, _) =
+                engine(&ini).serve(description, Box::new(Stdout), || HostServes::Program);
+            if served.start_failed {
                 crate::master::EXIT_SOFTWARE
             } else {
                 EXIT_OK

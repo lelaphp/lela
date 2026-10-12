@@ -105,14 +105,12 @@ pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn
         .lock()
         .write_all(engine.startup_errors())
         .ok();
-    let mut starting = Starting(log_message);
     let env = std::env::vars_os()
         .map(|(n, v)| (n.into_encoded_bytes(), v.into_encoded_bytes()))
         .collect();
     let cwd = std::env::current_dir().unwrap_or_default();
-    if let Some(status) =
-        (engine.refused(&mut starting)).or_else(|| engine.start_up(env, cwd, &mut starting))
-    {
+    let (refused, starting) = engine.refused(Box::new(Starting(log_message)));
+    if let Some(status) = refused.or_else(|| engine.start_up(env, cwd, starting).0) {
         std::io::stdout().lock().flush().ok();
         std::process::exit(status);
     }
@@ -124,7 +122,8 @@ pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn
 /// straight to the process's stdout (`php_output_direct`, which
 /// `php_output_startup` points at `php_output_stdout`), the error stream
 /// to its stderr, no head, and the log through the host's function, each
-/// as it is written.
+/// as it is written, so a diagnostic's log line and its display stand in
+/// the order `php_error_cb` writes them.
 struct Starting(fn(&[u8]));
 
 impl OutputSink for Starting {
@@ -145,13 +144,6 @@ impl OutputSink for Starting {
 
     fn write_stderr(&mut self, bytes: &[u8]) {
         std::io::stderr().lock().write_all(bytes).ok();
-    }
-
-    /// Each call reaches the process as it is made, so a diagnostic's
-    /// log line and its display stand in the order `php_error_cb` writes
-    /// them.
-    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
-        Some(Box::new(Starting(self.0)))
     }
 }
 

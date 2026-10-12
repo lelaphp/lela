@@ -165,7 +165,7 @@ fn lib_rs(lints: &str, name: &str, bin: &str) -> String {
          use std::io::Write;\n\
          use std::process::ExitCode;\n\
          \n\
-         use php_sapi::{{Engine, OutputSink, RequestDescription, ResponseHead}};\n\
+         use php_sapi::{{Engine, HostServes, OutputSink, RequestDescription, ResponseHead}};\n\
          \n\
          /// `sapi_module.name`: what `php_sapi_name()` answers.\n\
          pub const NAME: &str = \"{name}\";\n\
@@ -173,6 +173,7 @@ fn lib_rs(lints: &str, name: &str, bin: &str) -> String {
          /// The host's `main`: the file the line names served on one engine of\n\
          /// the bundle's enabled set with the bundle's tier bound, and the\n\
          /// process ending with the code the request ended with.\n\
+         #[must_use]\n\
          pub fn main() -> ExitCode {{\n\
          \x20   let Some(file) = std::env::args_os().nth(1) else {{\n\
          \x20       std::io::stderr()\n\
@@ -195,7 +196,8 @@ fn lib_rs(lints: &str, name: &str, bin: &str) -> String {
          \x20       script_name: Some(file.as_encoded_bytes().to_vec()),\n\
          \x20       ..RequestDescription::default()\n\
          \x20   }};\n\
-         \x20   php_sapi::exit_code(engine.serve(description, &mut Streams).exit_code)\n\
+         \x20   let (served, _) = engine.serve(description, Box::new(Streams), || HostServes::Program);\n\
+         \x20   php_sapi::exit_code(served.exit_code)\n\
          }}\n\
          \n\
          /// The process's two streams: the body on stdout, no header block, and\n\
