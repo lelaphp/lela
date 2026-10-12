@@ -709,15 +709,15 @@ mod tests {
         assert_eq!(
             measure.words(
                 Kept {
-                    target: Path::new("target/phpt-runs/pin/ext/fixture.json"),
-                    run: Some(Path::new("target/phpt-runs/tree/ext/fixture.json")),
+                    target: Path::new("target/harness/phpt-runs/pin/ext/fixture.json"),
+                    run: Some(Path::new("target/harness/phpt-runs/tree/ext/fixture.json")),
                 },
                 "keeps"
             ),
             "11 of 11 target tests met, 12 outside (11 skipped by the oracle, 1 missed by it); \
              the target and the oracle's reason for each test outside it are kept at \
-             target/phpt-runs/pin/ext/fixture.json, and the engine's verdict on each test at \
-             target/phpt-runs/tree/ext/fixture.json"
+             target/harness/phpt-runs/pin/ext/fixture.json, and the engine's verdict on each test at \
+             target/harness/phpt-runs/tree/ext/fixture.json"
         );
     }
 
