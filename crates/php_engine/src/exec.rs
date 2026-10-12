@@ -2324,7 +2324,7 @@ pub(crate) fn parameter_prologue(
     // A frame whose push skipped every `RECV*` stands at its entry
     // already, which its activation told, and its op array is not held
     // for a run of none.
-    if activated.prologue.is_none() {
+    if !activated.prologue {
         return Ok(None);
     }
     let serving = standing(req, activated.frame)?;
@@ -2333,13 +2333,19 @@ pub(crate) fn parameter_prologue(
     prologue(req, activated.frame, code, told)
 }
 
+/// The entry safepoint of `code`, `safepoints[0]`: the first opline past
+/// the `RECV*` prologue (design §5.6), zero for an op array with none.
+pub(crate) fn entry_of(code: &OpArray) -> u32 {
+    code.safepoints.first().map_or(0, |at| at.0)
+}
+
 /// A call made a user frame ([`Request::activate_user`]): the frame, and
-/// the entry safepoint its `RECV*` prologue runs to where the activation
-/// did not skip it.
+/// whether the activation left `RECV*` oplines of its prologue to serve
+/// before the entry safepoint ([`entry_of`]).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Activated {
     pub(crate) frame: FrameRef,
-    pub(crate) prologue: Option<u32>,
+    pub(crate) prologue: bool,
 }
 
 /// The `RECV*` oplines of [`parameter_prologue`] from where `callee`
@@ -2355,7 +2361,7 @@ pub(crate) fn prologue<D: crate::observer::Telling>(
     code: &OpArray,
     told: D,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
-    let entry = code.safepoints.first().map_or(0, |at| at.0);
+    let entry = entry_of(code);
     loop {
         let at = req.vm().opline(callee);
         if at >= entry {

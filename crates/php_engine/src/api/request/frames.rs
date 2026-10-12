@@ -982,7 +982,7 @@ impl Request {
         crate::observer::call(self, call);
         Ok(exec::Activated {
             frame: call,
-            prologue: (opline < shape.entry).then_some(shape.entry),
+            prologue: opline < shape.entry,
         })
     }
 

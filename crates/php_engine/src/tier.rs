@@ -197,12 +197,23 @@ pub(crate) enum Way {
 }
 
 impl Next {
+    /// The high half of each way, written by the constructors below and
+    /// read by [`Next::way`] and nowhere else.
+    const ADVANCE_WAY: u64 = 0;
+    const JUMP_WAY: u64 = 1;
+    const SAME_WAY: u64 = 2;
+    const PUSHED_WAY: u64 = 3;
+    const POPPED_WAY: u64 = 4;
+    const MOVED_WAY: u64 = 5;
+    const THREW_WAY: u64 = 6;
+    const DONE_WAY: u64 = 7;
+
     /// `ZEND_VM_NEXT_OPCODE`.
-    pub(crate) const ADVANCE: Next = Next(0);
+    pub(crate) const ADVANCE: Next = Next(Next::ADVANCE_WAY << 32);
 
     /// `ZEND_VM_SET_OPCODE(to)`.
     pub(crate) const fn jump(to: u32) -> Next {
-        Next(1 << 32 | to as u64)
+        Next(Next::JUMP_WAY << 32 | to as u64)
     }
 
     /// Where the handler sends the loop.
@@ -213,13 +224,15 @@ impl Next {
         #[allow(clippy::cast_possible_truncation)]
         let low = self.0 as u32;
         match self.0 >> 32 {
-            0 => Way::Advance,
-            1 => Way::Jump(low),
-            2 => Way::Left(Stepped::Same(FrameRef(low))),
-            3 => Way::Left(Stepped::Pushed(FrameRef(low))),
-            4 => Way::Left(Stepped::Popped(FrameRef(low))),
-            5 => Way::Left(Stepped::Moved(FrameRef(low))),
-            6 => Way::Left(Stepped::Threw(FrameRef(low))),
+            Next::ADVANCE_WAY => Way::Advance,
+            Next::JUMP_WAY => Way::Jump(low),
+            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
+            Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
+            Next::POPPED_WAY => Way::Left(Stepped::Popped(FrameRef(low))),
+            Next::MOVED_WAY => Way::Left(Stepped::Moved(FrameRef(low))),
+            Next::THREW_WAY => Way::Left(Stepped::Threw(FrameRef(low))),
+            // `DONE_WAY`, the one high half left: the fields are private,
+            // so no other is ever written.
             _ => Way::Left(Stepped::Done),
         }
     }
@@ -227,13 +240,13 @@ impl Next {
 
 impl From<Stepped> for Next {
     fn from(stepped: Stepped) -> Next {
-        let (way, frame): (u64, u32) = match stepped {
-            Stepped::Same(at) => (2, at.0),
-            Stepped::Pushed(at) => (3, at.0),
-            Stepped::Popped(at) => (4, at.0),
-            Stepped::Moved(at) => (5, at.0),
-            Stepped::Threw(at) => (6, at.0),
-            Stepped::Done => (7, 0),
+        let (way, frame) = match stepped {
+            Stepped::Same(at) => (Next::SAME_WAY, at.0),
+            Stepped::Pushed(at) => (Next::PUSHED_WAY, at.0),
+            Stepped::Popped(at) => (Next::POPPED_WAY, at.0),
+            Stepped::Moved(at) => (Next::MOVED_WAY, at.0),
+            Stepped::Threw(at) => (Next::THREW_WAY, at.0),
+            Stepped::Done => (Next::DONE_WAY, 0),
         };
         Next(way << 32 | u64::from(frame))
     }
@@ -574,8 +587,9 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             #[cfg(debug_assertions)]
             req.sensed_after(body, op)?;
             match next.way() {
-                // An index past `u32::MAX` would be past the end of the
-                // op array, and so is its wrap.
+                // `at` is the index of an opline that stands, so it is
+                // under the length of an op array, which no 24-byte opline
+                // count brings to `u32::MAX`: the add does not wrap.
                 Way::Advance => at = at.wrapping_add(1),
                 Way::Jump(to) => at = to,
                 // A return to a frame the loop entered: its op array as
@@ -626,8 +640,7 @@ fn entered<T: Tier, D: Telling>(
     code: &OpArray,
     told: D,
 ) -> Result<Stepped, Fatal> {
-    let entry = code.safepoints.first().map_or(0, |at| at.0);
-    if req.vm().opline(callee) < entry
+    if req.vm().opline(callee) < exec::entry_of(code)
         && let Some(threw) = exec::prologue(req, callee, code, told)?
     {
         return Ok(Stepped::Threw(threw));

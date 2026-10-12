@@ -87,10 +87,8 @@ impl Units {
         };
         let code = Code { place, body };
         kept.keep(frame, code);
-        if let Some(function) = header.function
-            && let Some(called) = kept.functions.get_mut(function.0 as usize % KEPT)
-        {
-            *called = Some((function, code));
+        if let Some(function) = header.function {
+            kept.keep_called(function, code);
         }
         Some(code)
     }
@@ -134,6 +132,13 @@ impl Kept {
     pub(super) fn keep(&mut self, frame: FrameRef, code: Code) {
         if let Some(entered) = self.frames.get_mut(frame.0 as usize % KEPT) {
             *entered = Some((frame, code));
+        }
+    }
+
+    /// `function`, called and serving `code`: kept for the next call.
+    fn keep_called(&mut self, function: Function, code: Code) {
+        if let Some(called) = self.functions.get_mut(function.0 as usize % KEPT) {
+            *called = Some((function, code));
         }
     }
 
