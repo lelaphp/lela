@@ -138,8 +138,9 @@ impl Kept {
     }
 
     /// Every frame the loop entered forgotten, where it goes on along an
-    /// edge a tier answered, which may have entered frames the loop did
-    /// not: each is entered again on a return to it.
+    /// edge a tier may have answered (a `Same`, or a `Threw` the tier's
+    /// `Resume` raised), which may have entered frames the loop did not:
+    /// each is entered again on a return to it.
     pub(super) fn forget(&mut self) {
         self.frames = [None; KEPT];
     }

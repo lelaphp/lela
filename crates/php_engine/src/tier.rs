@@ -535,6 +535,9 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             Stepped::Popped(frame) | Stepped::Moved(frame) => (frame, false),
             Stepped::Pushed(callee) => (callee, true),
             Stepped::Threw(frame) => {
+                // A tier's `Resume` with something raised answers here,
+                // and it may have entered frames the loop did not.
+                kept.forget();
                 let unwound = unwind_frame::<T>(req, frame)?;
                 if unwound == Stepped::Threw(frame) {
                     // The entry frame caught nothing: the throwable stays
