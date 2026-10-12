@@ -677,7 +677,7 @@ impl Request {
                     enum_backing.and_then(|backing| crate::enums::EnumMethod::of(&key, backing));
                 own.map(ClassNative::Enum).or_else(|| {
                     self.native_trait_method(row, method)
-                        .map(ClassNative::Trait)
+                        .map(|native| ClassNative::Trait { native, at: method })
                 })
             })
             .collect();

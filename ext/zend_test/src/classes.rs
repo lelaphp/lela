@@ -506,6 +506,23 @@ impl ZendAttributeTest {
 /// bool(true)
 /// bool(true)
 /// ```
+///
+/// A class that takes the method in under an alias has a copy of its
+/// own, `zend_add_trait_method`'s, named by the alias and under the
+/// alias's visibility, served by the trait's handler:
+///
+/// ```php
+/// class Foo { use _ZendTestTrait { testMethod as aliased; testMethod as protected prot; } }
+/// $f = new Foo();
+/// var_dump($f->aliased());
+/// try { $f->prot(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $f->aliased(1,2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// Call to protected method Foo::prot() from global scope
+/// Foo::aliased() expects exactly 0 arguments, 2 given
+/// ```
 #[php_class]
 pub(crate) struct _ZendTestTrait;
 

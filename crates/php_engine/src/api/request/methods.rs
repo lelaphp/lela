@@ -314,12 +314,15 @@ impl Request {
     /// The native a function number serves by: the trait's own for a
     /// native trait's method copied into a class, the function itself
     /// for any other. What php's copy shares with the trait's, its
-    /// handler, its declaration, its flags and its runtime cache, is read
-    /// through this alone (`entry_of`, `method_decl`, `function_flags`,
-    /// `native_place`); its scope is the class's (`method_class`).
+    /// handler, its flags and its runtime cache, is read through this
+    /// alone (`entry_of`, `function_flags`, `native_place`); its scope
+    /// is the class's
+    /// (`method_class`), and its declaration, the name and the
+    /// visibility an alias gave it, the class's own row
+    /// ([`Request::method_decl`]).
     pub(super) fn served_native(&self, function: Function) -> Function {
         match self.class_native_of(function) {
-            Some((_, ClassNative::Trait(native))) => native,
+            Some((_, ClassNative::Trait { native, .. })) => native,
             _ => function,
         }
     }
@@ -377,7 +380,14 @@ impl Request {
 
     /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
-        let function = self.served_native(function);
+        // `zend_add_trait_method`'s copy of a native trait's method: the
+        // using class's row, under the alias's name and visibility.
+        if let Some((class, ClassNative::Trait { at, .. })) = self.class_native_of(function) {
+            return self
+                .class_decl(class)?
+                .methods
+                .get(usize::try_from(at).ok()?);
+        }
         if let Some((class, ClassNative::Enum(method))) = self.class_native_of(function) {
             return self
                 .class_decl(class)?
