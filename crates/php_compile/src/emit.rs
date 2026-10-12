@@ -2486,10 +2486,44 @@ impl Emit<'_> {
     /// A class operand php's tree holds as a value that is no name
     /// written out, `ZEND_AST_ZVAL` with `ZEND_NAME_FQ` in its `attr`:
     /// a string or a number written where the class goes, which the
-    /// parser made a value ([`Self::written`]). Nothing for any other
-    /// expression.
+    /// parser made a value ([`Self::written`]), or the value
+    /// `zend_eval_const_expr` folded the operand to ([`eval`]). Nothing
+    /// for any other expression.
     fn class_value(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
+        if let Some(value) = self.rewritten_value(self.peel(expr)) {
+            return Ok(Some(value));
+        }
         self.written(expr)
+    }
+
+    /// `zend_compile_class_const`'s and `zend_eval_const_expr`'s reading
+    /// of a class operand before either looks for a constant of the
+    /// class being compiled: `zend_eval_const_expr` over an expression,
+    /// which leaves its rewrite for the class's compile, and then the
+    /// name `zend_resolve_class_name_ast` resolves where the operand is
+    /// a value, a name written out resolved in the namespace and a
+    /// folded value as `ZEND_NAME_FQ` ([`Self::fq_class_name`]); nothing
+    /// where the operand did not fold.
+    ///
+    /// ```php
+    /// class C { const X = 'x'; function f() { return ('C')::X . ('c' . '')::X; } }
+    /// var_dump((new C)->f(), "C"[0]::X);
+    /// ```
+    /// ```expect
+    /// string(2) "xx"
+    /// string(1) "x"
+    /// ```
+    fn constant_class(&mut self, class: ClassSpec) -> Result<Option<Vec<u8>>, CompileError> {
+        match class {
+            ClassSpec::Name(token) => {
+                let written = self.text(token).to_vec();
+                Ok(Some(self.class_name(&written)))
+            }
+            ClassSpec::Expr(expr) => match self.eval_const(expr)? {
+                Some(value) => self.fq_class_name(value).map(Some),
+                None => Ok(None),
+            },
+        }
     }
 
     /// `zend_resolve_class_name_ast` over a class operand that is a value
@@ -7411,17 +7445,13 @@ impl Emit<'_> {
             // compile-time fatals.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => {
-                    let token = match class {
-                        ClassSpec::Name(token) => Some(token),
-                        ClassSpec::Expr(_) => None,
-                    };
-                    let written = match class {
-                        ClassSpec::Name(token) => self.text(token).to_vec(),
+                    let (written, folded) = match class {
+                        ClassSpec::Name(token) => (self.text(token).to_vec(), false),
                         // `zend_eval_const_expr` folded the class to a
                         // constant, which names it where it is a string.
-                        ClassSpec::Expr(expr) => match self.constant_of(expr)? {
+                        ClassSpec::Expr(expr) => match self.eval_const(expr)? {
                             Some(value) => match value.as_str() {
-                                Some(text) => text.bytes().to_vec(),
+                                Some(text) => (text.bytes().to_vec(), true),
                                 None => {
                                     return Err(self.compile_error(
                                         "Class name must be a valid object or a string",
@@ -7441,11 +7471,14 @@ impl Emit<'_> {
                         ));
                     }
                     // `self` and `parent` keep the mark they were written
-                    // with; any other name the one resolution leaves.
-                    let (class, class_kind) = if class_fetch_type(&written) == FETCH_CLASS_DEFAULT {
-                        self.resolve_class_marked(&written)
-                    } else {
-                        (written, NameKind::NotFullyQualified)
+                    // with; any other name the one resolution leaves, a
+                    // folded one resolved as `ZEND_NAME_FQ`.
+                    let (class, class_kind) = match (class_fetch_type(&written), folded) {
+                        (FETCH_CLASS_DEFAULT, false) => self.resolve_class_marked(&written),
+                        (FETCH_CLASS_DEFAULT, true) => {
+                            (self.fq_name(&written)?, NameKind::FullyQualified)
+                        }
+                        _ => (written, NameKind::NotFullyQualified),
                     };
                     // `self::{'X'}` folds to the name; one that does
                     // not fold to a string is kept as its own tree,
@@ -7464,9 +7497,7 @@ impl Emit<'_> {
                     // `zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST`
                     // arm: a constant of the class being declared is
                     // its value ([`Self::active_class_constant`]).
-                    if let Some(token) = token
-                        && let Some(value) = self.active_class_constant(token, &name)?
-                    {
+                    if let Some(value) = self.active_class_constant(&class, &name)? {
                         return self.folded(value);
                     }
                     Ok(ConstExpr::ClassConstant {
@@ -15388,17 +15419,14 @@ impl Emit<'_> {
         line: u32,
     ) -> Result<Zval, CompileError> {
         match self.scoped_of(id, line)? {
-            Scoped::Constant {
-                class: ClassSpec::Name(token),
-                name,
-            } => {
-                let folded = match self.folded_name(&name)? {
-                    Some(name) => self.active_class_constant(token, &name)?,
-                    None => None,
+            Scoped::Constant { class, name } => {
+                let class = self.constant_class(class)?;
+                let folded = match (class, self.folded_name(&name)?) {
+                    (Some(class), Some(name)) => self.active_class_constant(&class, &name)?,
+                    _ => None,
                 };
                 folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
             }
-            Scoped::Constant { .. } => Err(self.fatal("a class constant is fetched at run time")),
             Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
             Scoped::ClassName { class } => match self.resolved_class_name(class)? {
                 Some(value) => Ok(value),
@@ -16838,10 +16866,10 @@ impl Emit<'_> {
     /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
     /// ```
     fn class_const(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
+        let resolved = self.constant_class(class)?;
         let written = self.folded_name(name)?;
-        if let ClassSpec::Name(token) = class
-            && let Some(written) = &written
-            && let Some(value) = self.active_class_constant(token, written)?
+        if let (Some(resolved), Some(written)) = (&resolved, &written)
+            && let Some(value) = self.active_class_constant(resolved, written)?
         {
             return Ok(Where::Constant(value));
         }
@@ -16880,7 +16908,7 @@ impl Emit<'_> {
         Ok(match name {
             ScopedName::Written(bytes) => Some(bytes.clone()),
             ScopedName::Computed(expr) => self
-                .constant_of(*expr)?
+                .eval_const(*expr)?
                 .and_then(|value| value.as_str().map(|s| s.bytes().to_vec())),
         })
     }
@@ -16945,19 +16973,18 @@ impl Emit<'_> {
     /// ```
     fn active_class_constant(
         &mut self,
-        token: TokenId,
+        class: &[u8],
         name: &[u8],
     ) -> Result<Option<Zval>, CompileError> {
         if self.substitution == Substitution::NoPersistent {
             return Ok(None);
         }
-        let written = self.text(token).to_vec();
         let Some(active) = self.active_name() else {
             return Ok(None);
         };
-        let refers = match class_fetch_type(&written) {
+        let refers = match class_fetch_type(class) {
             FETCH_CLASS_SELF => self.scope_known(),
-            FETCH_CLASS_DEFAULT => self.class_name(&written).eq_ignore_ascii_case(&active),
+            FETCH_CLASS_DEFAULT => class.eq_ignore_ascii_case(&active),
             _ => false,
         };
         if !refers {

@@ -4608,6 +4608,35 @@ mod tests {
         );
     }
 
+    /// `zend_compile_class_const` runs `zend_eval_const_expr` over the class
+    /// before it compiles it, so `"ab"[0]::d` reads the class `a` the
+    /// dimension folds to, one `FETCH_CLASS_CONSTANT string("a")
+    /// string("d")`, while the same dimension under a `new`, which runs no
+    /// evaluator, is the `FETCH_DIM_R` and the `FETCH_CLASS` over it. The
+    /// dump is the oracle's under `[regime.dump]` at 8.5.9 (#2691).
+    #[test]
+    fn the_class_of_a_class_constant_is_read_as_the_constant_evaluator_folds_it() {
+        assert_eq!(
+            dump_of(b"<?php echo \"ab\"[0]::d; new (\"ab\"[0]);"),
+            "\n$_main:\n\
+             \x20    ; (lines=8, args=0, vars=0, tmps=5)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T0 = FETCH_CLASS_CONSTANT string(\"a\") string(\"d\")\n\
+             0001 ECHO T0\n\
+             0002 T1 = FETCH_DIM_R string(\"ab\") int(0)\n\
+             0003 V2 = FETCH_CLASS (exception) T1\n\
+             0004 V3 = NEW 0 V2\n\
+             0005 DO_FCALL\n\
+             0006 FREE V3\n\
+             0007 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0005 - 0006 (new)\n\
+             "
+        );
+    }
+
     /// `C::class`, which was refused as not read, as the oracle's
     /// `[regime.dump]` has it: a name written out folds to its resolved
     /// spelling, `self` in a known scope to the class being compiled,
