@@ -1,7 +1,8 @@
 //! A scratch tree that owns itself (#194): one directory under the
 //! system's temporary directory, or under `/tmp` for a program the oracle
-//! runs ([`Tree::short`]), made by the constructor and taken away
-//! again when the value goes out of scope, however it goes out of scope.
+//! runs and the phpt run's copy of the pinned tree ([`Tree::short`]),
+//! made by the constructor and taken away again when the value goes out
+//! of scope, however it goes out of scope.
 //!
 //! The harness makes scratch trees in two places that cannot see each
 //! other — the unit tests beside a module in `xtask/src/` and the

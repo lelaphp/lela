@@ -1616,10 +1616,18 @@ fn around(
 /// test run there writes nothing into the pinned tree, and a file some
 /// earlier run left standing there is not in the copy to bork a test.
 ///
+/// The tree stands under `/tmp` at a path of one length ([`Tree::short`])
+/// and not under the session's `TMPDIR`, since a test's program reads its
+/// own path back: `socket-uds-too-long-filename-start.phpt` binds
+/// `__DIR__` and a long name cut to `sun_path`'s 104 bytes, and under
+/// macOS's per-user `TMPDIR` the cut fell on `sapi/fpm/tests/` itself, a
+/// directory php-fpm's bind refuses under the oracle as under the engine
+/// (#2626).
+///
 /// [`Source::files`]: crate::oracle::Source::files
 fn copy_of(source: &Path, jobs: NonZeroUsize) -> Result<Tree> {
     let files = Source::files(source)?;
-    let copy = Tree::new("phpt-tree")?;
+    let copy = Tree::short("phpt-tree")?;
     let each = files.len().div_ceil(jobs.get()).max(1);
     thread::scope(|scope| {
         let copying: Vec<_> = files

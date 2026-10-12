@@ -2011,17 +2011,17 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
 /// A run killed mid-subset leaves the pinned tree as it stood (#1183):
 /// its one test, standing in the run's copy, writes beside itself and
 /// sleeps until the run is killed, and the tree holds only what it held
-/// before. The copy it leaves, which a killed run drops nothing of, is the
-/// next run's sweep's: that run passes, and the dead one's copy is gone.
+/// before. The copy it leaves is a dead run's, swept by the next run: that
+/// run passes, and the dead one's copy is gone.
 ///
-/// Once the run is dead its copy is a dead run's, and the first scratch
-/// tree any process on the machine makes sweeps it from the temporary
-/// directory (#1473): another session's instrument, a test binary
-/// starting. So both runs take a temporary directory the test holds,
-/// `TMPDIR`, which no other process's sweep reads, and the copy the test
-/// asserts on is its own. Another process's run, in the machine's
-/// temporary directory, goes between the kill and the assertion: the sweep
-/// in the window is made, not met by chance.
+/// The copy stands under `/tmp` whatever `TMPDIR` says (#2626), where the
+/// first scratch tree any process on the machine lays there sweeps a dead
+/// run's (#1473): another session's instrument, a test binary starting.
+/// So whether the copy still stands between the kill and the next run is
+/// the machine's, not the test's; another process's run goes between them,
+/// so the sweep in the window is made, not met by chance, and the copy is
+/// gone after it whoever swept it. Both runs take a `TMPDIR` the test
+/// holds, as a test's own temporary files stand there.
 #[test]
 fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     use std::io::{BufRead, BufReader};
@@ -2088,7 +2088,7 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     assert!(swept.status.success(), "{swept:?}");
 
     assert_eq!(listing(tree.corpus.path()), before, "the pinned tree moved");
-    assert!(copy.is_dir(), "a killed run drops nothing");
+    assert!(!copy.exists(), "the sweep in the window left {copy:?}");
 
     fs::remove_file(dir.join("a-held.phpt")).unwrap();
     fs::write(
@@ -2112,7 +2112,6 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         ["pass"],
         "{run}"
     );
-    assert!(!copy.exists(), "the next run's sweep left {copy:?}");
 }
 
 /// Every path under `dir` with its bytes, a directory's as none, sorted:
