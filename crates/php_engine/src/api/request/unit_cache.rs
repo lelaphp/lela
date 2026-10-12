@@ -265,7 +265,7 @@ impl Request {
         if !held.trusted(validation, now) {
             return None;
         }
-        shared.units.hit(&held, validation, now);
+        self.arena.files.hit(&held, validation, now);
         self.accel_loaded = (held.unit.as_ref().ok().cloned()).map(|unit| (unit, AccelServed::Hit));
         self.early_bound =
             (held.unit.as_ref().ok()).map(|unit| (Arc::clone(unit), Arc::clone(&held.early)));
@@ -392,7 +392,7 @@ impl Request {
         let full = full_path(path, &self.cwd);
         let (validation, lookup, protection, file_cache, memory) = match self.admission(&full) {
             Admission::KeptOut => {
-                shared.units.note_blacklisted();
+                self.arena.files.note_blacklisted();
                 let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
                 if handle != HandlePath::Host {
                     self.open_include_stream(&full, handle);
@@ -804,6 +804,40 @@ impl UnitCache<'_> {
     /// request's start, which is handed an empty cache and an empty
     /// published arena (design §5.14), and until then what is compiled
     /// is held nowhere.
+    ///
+    /// The restart zeroes the hits, the misses and the blacklist misses,
+    /// `zend_reset_cache_vars`, so the request after it counts its own
+    /// program's miss alone. Served by the built-in server, whose
+    /// requests share the cache:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/zero' . bin2hex(random_bytes(8));
+    /// mkdir($dir);
+    /// file_put_contents("$dir/held.inc", '<?php return 1;');
+    /// file_put_contents("$dir/out.inc", '<?php return 2;');
+    /// file_put_contents("$dir/list.txt", "$dir/out.inc\n");
+    /// file_put_contents("$dir/index.php", '<?php $c = fn () => array_intersect_key(opcache_get_status(false)["opcache_statistics"], ["hits" => 0, "misses" => 0, "blacklist_misses" => 0]);
+    /// if ($_GET["step"] == "a") {
+    ///     include __DIR__ . "/held.inc"; include __DIR__ . "/held.inc"; include __DIR__ . "/out.inc";
+    ///     echo json_encode($c()), "\n";
+    ///     var_dump(opcache_reset());
+    /// } else {
+    ///     echo json_encode($c()), "\n";
+    /// }');
+    /// foreach (['held.inc', 'out.inc', 'index.php'] as $f) { touch("$dir/$f", time() - 60); }
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-d', "opcache.blacklist_filename=$dir/list.txt", '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach (['a', 'b'] as $step) { echo file_get_contents("http://127.0.0.1:$port/?step=$step"); }
+    /// proc_terminate($p); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect process
+    /// {"hits":1,"misses":2,"blacklist_misses":1}
+    /// bool(true)
+    /// {"hits":0,"misses":1,"blacklist_misses":0}
+    /// ```
     pub fn reset(&self) -> Restart {
         self.req.arena.files.schedule_restart()
     }
