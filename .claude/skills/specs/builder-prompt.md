@@ -12,7 +12,7 @@ Your scratch files, commit messages and run output alike, go in <scratchpad>/t<n
 
 Read first: AGENTS.md, CONTEXT.md, ext/AGENTS.md, the stage-commit skill, and <the ADRs and design sections the area names>.
 
-Validate in the build skill's four tiers (#663 holds them until the skill does). Pass `--jobs 3` to every `cargo xtask phpt`: three or four builders share the machine's 12 cores, and at a load of 70 a test's time limit fails what it would meet. Run phpt only through `cargo xtask phpt`, never a program of your own written into the pinned php-src tree. The one subset run, at the end, goes to a file read through `awk -f <checkout>/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
+Validate in the build skill's four tiers (#663 holds them until the skill does). Pass `--jobs 3` to every `cargo xtask phpt`: three builders and the coordinator's merges share the machine's 12 cores, and at a load of 70 a test's time limit fails what it would meet. Run phpt only through `cargo xtask phpt`, never a program of your own written into the pinned php-src tree. The one subset run, at the end, goes to a file read through `awk -f <checkout>/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
 
 Commit each piece as soon as it's done: sessions restart, and committed work survives them.
 
