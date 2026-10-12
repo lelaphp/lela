@@ -2732,6 +2732,72 @@ fn a_verdict_the_merged_branch_carried_is_the_branchs_and_not_the_merges() {
     assert!(out.contains(EXIT_AUTHORED), "{out}");
 }
 
+/// A merge displaces both parents whole (#2783): a capture fence the
+/// merged side carries is that side's, though the fence's own lines, its
+/// closing fence line among them, stand in the merge base too and a judge
+/// of the lines the side brought read the block as broken; a fence taken
+/// with the file whole is the side's as well; and a capture fence the
+/// merge itself edits, a line neither parent carried, is still denied.
+#[test]
+fn a_capture_fence_the_merged_side_carries_is_that_sides_and_one_the_merge_edits_is_denied() {
+    let root = scratch("merge-capture");
+    let git = |args: &[&str]| {
+        let unhooked = [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+        ];
+        sh(&root, &[&unhooked[..], args].concat());
+    };
+    let other = "ext/ctype/src/other.rs";
+    let capture = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect capture\n/// 1\n/// ```\n";
+    lay_down(&root, &format!("{}pub fn tail() {{}}\n", block("exit")));
+    let shared = "/// ```php\n/// exit(3);\n/// ```\npub fn other() {}\n";
+    write(&root, other, shared);
+    git(&["add", "--", CRATE]);
+    git(&["commit", "-q", "-m", "the base"]);
+    git(&["checkout", "-q", "-b", "main-side"]);
+    write(
+        &root,
+        FILE,
+        &format!(
+            "{capture}pub fn captured() {{}}\n{}pub fn tail() {{}}\n",
+            block("exit")
+        ),
+    );
+    write(&root, other, &format!("{capture}{shared}"));
+    git(&[
+        "commit",
+        "-q",
+        "-am",
+        "main's capture, pinned by --accept --streams",
+    ]);
+    git(&["checkout", "-q", "-"]);
+    write(
+        &root,
+        FILE,
+        &format!("{}pub fn tail() {{}}\npub fn mine() {{}}\n", block("exit")),
+    );
+    git(&["commit", "-q", "-am", "the branch moves on"]);
+    git(&["merge", "-q", "--no-ff", "--no-commit", "main-side"]);
+
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains("deny "), "{out}");
+
+    let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
+    write(&root, FILE, &merged.replace("/// 1\n", "/// 2\n"));
+    git(&["add", "--", FILE]);
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("witness.capture-authored") && out.contains(FILE),
+        "{out}"
+    );
+}
+
 /// The evidence travels with the commits (#1448): a verdict a branch's
 /// `--accept` captured, and the reading `witness` took over the branch's
 /// commit, stand on main after a merge that also moved the crate, so
