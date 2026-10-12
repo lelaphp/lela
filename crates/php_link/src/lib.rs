@@ -282,7 +282,7 @@ pub enum Refusal {
     /// `Cannot redeclare %s::%s()`, an enum that declares a method
     /// `zend_enum_register_funcs` gives it, named as php's known string
     /// spells it, `tryfrom` lowered.
-    EnumRedeclare { class: String, method: &'static str },
+    EnumRedeclare { class: String, method: String },
     /// `Enum %s cannot implement the Serializable interface`
     /// (`zend_verify_enum_interfaces`).
     EnumSerializable { class: String },
@@ -1115,6 +1115,21 @@ pub struct Linking<H = ()> {
     pub record: Option<LinkedClass<H>>,
 }
 
+impl<H> Linking<H> {
+    /// A link refused before any check left anything for later, with
+    /// what was raised before the refusal.
+    fn refused(refused: Refused, raised: Vec<Raised>) -> Linking<H> {
+        Linking {
+            outcome: Linked::Refused(refused),
+            raised,
+            composed: None,
+            obligations: Vec::new(),
+            autoloads: Vec::new(),
+            record: None,
+        }
+    }
+}
+
 /// What the checks left for later, `CG(delayed_autoloads)`'s names and
 /// the class's obligations in the order left. A check reads the table
 /// and leaves these, so they are held apart from what it reads.
@@ -1554,14 +1569,7 @@ pub fn link<'a, H: Copy + PartialEq>(
     values: &'a dyn Fn(&ConstExpr) -> Option<ConstExpr>,
 ) -> Linking<H> {
     if let Some(refused) = enum_funcs_refused(child) {
-        return Linking {
-            outcome: Linked::Refused(refused),
-            raised: Vec::new(),
-            composed: None,
-            obligations: Vec::new(),
-            autoloads: Vec::new(),
-            record: None,
-        };
+        return Linking::refused(refused, Vec::new());
     }
     if child.traits.is_empty() {
         return Linker::over(lookup, holder, Vec::new()).link_plain(child);
@@ -1571,14 +1579,7 @@ pub fn link<'a, H: Copy + PartialEq>(
         Ok(composition) => composition,
         Err(failed) => {
             let (refused, raised) = *failed;
-            return Linking {
-                outcome: Linked::Refused(refused),
-                raised,
-                composed: None,
-                obligations: Vec::new(),
-                autoloads: Vec::new(),
-                record: None,
-            };
+            return Linking::refused(refused, raised);
         }
     };
     let traits::Composition {
@@ -1622,13 +1623,15 @@ pub fn link<'a, H: Copy + PartialEq>(
     }
 }
 
-/// `zend_enum_register_funcs`, the first act of `zend_do_link_class`
-/// over an enum: `cases`, and for a backed enum `from` and `tryfrom`,
-/// added to its function table, where a method of its own under the
-/// name is php's `Cannot redeclare`, raised as the enum links, at its
-/// declaration. The declaration holds the enum's own methods and after
-/// them the rows [`php_unit::enum_methods`] gives every enum, so a name
-/// held twice is `zend_hash_add_ptr` failing.
+/// `zend_enum_register_funcs`, which `zend_do_link_class` runs over an
+/// enum once its parent, traits and interfaces are fetched and before
+/// it binds a trait: `cases`, and for a backed enum `from` and
+/// `tryfrom`, added to its function table, where a method of its own
+/// under the name is php's `Cannot redeclare`, raised as the enum
+/// links, at its declaration, the name spelled as php's known string
+/// spells it, lowered. The declaration holds the enum's own methods and
+/// after them the rows [`php_unit::enum_methods`] gives every enum, so
+/// a row's name held twice is `zend_hash_add_ptr` failing.
 ///
 /// ```php
 /// echo "before\n";
@@ -1656,23 +1659,20 @@ fn enum_funcs_refused(child: &ClassDecl) -> Option<Refused> {
     if child.kind != ClassKind::Enum {
         return None;
     }
-    let backed = child.backing != php_unit::decl::EnumBacking::Pure;
-    let given: &[&'static str] = if backed {
-        &["cases", "from", "tryfrom"]
-    } else {
-        &["cases"]
-    };
-    let held = |name: &str| {
-        (child.methods.iter())
-            .filter(|m| m.function.name.0.eq_ignore_ascii_case(name.as_bytes()))
+    let held = |given: &MethodDecl| {
+        child
+            .methods
+            .iter()
+            .filter(|m| same_method(m, given))
             .count()
     };
-    let method = given.iter().copied().find(|name| held(name) > 1)?;
+    let given = php_unit::enum_methods(child.backing);
+    let clash = given.iter().find(|given| held(given) > 1)?;
     Some(at_class(
         child,
         Refusal::EnumRedeclare {
             class: text(&child.name.0),
-            method,
+            method: text(&clash.function.name.0.to_ascii_lowercase()),
         },
     ))
 }
