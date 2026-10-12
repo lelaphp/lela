@@ -1844,7 +1844,48 @@ pub fn bound_variables(
 /// 0
 /// 32
 /// ```
+///
+/// The lowered name `EG(in_autoload)` holds while the loaders are
+/// served is the string php's `lc_name` is: the caller's key where it
+/// has one ([`autoload_keyed`]), the lowered constant of a `new`, a
+/// static call or a class constant, and the name itself where it has no
+/// upper-case byte, both strings already standing; a new string only
+/// past a leading `\` or where `zend_string_tolower` lowers a byte. So
+/// a loader's throw costs what php's costs at its peak:
+///
+/// ```php
+/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { class_exists('boom'); } catch (Exception $e) {} });
+/// pk(function () { try { new Boom; } catch (Exception $e) {} });
+/// pk(function () { try { Boom::f(); } catch (Exception $e) {} });
+/// pk(function () { try { class_exists('Boom'); } catch (Exception $e) {} });
+/// ```
+/// ```expect
+/// 3064 32
+/// 2312 0
+/// 2312 0
+/// 3096 0
+/// ```
+///
+/// A name the program computed with no upper-case byte, which php hands
+/// on as the string it is, is the interned string of its bytes where one
+/// stands and a new one otherwise, since the name reaches this lookup as
+/// bytes.
 pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
+    autoload_as(req, name, false)
+}
+
+/// [`autoload`] for a caller that holds the name's lowered form as a
+/// string, `zend_lookup_class_ex`'s `key`: the lowered constant of the
+/// pair the compiler wrote for a class it names, which `EG(in_autoload)`
+/// takes as it stands.
+pub(crate) fn autoload_keyed(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
+    autoload_as(req, name, true)
+}
+
+/// [`autoload`], `keyed` where the caller holds the lowered name.
+fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<ClassId>, Thrown> {
     if name.is_empty() {
         return Ok(None);
     }
@@ -1865,7 +1906,13 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
     if req.link_under_way(key) {
         return Ok(None);
     }
-    let Some(lowered) = req.autoload_enter(&bare.to_ascii_lowercase())? else {
+    let lowered = crate::exec::Lowered::of(bare);
+    // `lc_name`: the key, or `zend_string_tolower(name)`, which is the
+    // name itself where it lowers nothing; a name past a leading `\` is
+    // lowered into a string of its own.
+    let standing =
+        bare.len() == name.len() && (keyed || matches!(lowered, crate::exec::Lowered::Borrowed(_)));
+    let Some(lowered) = req.autoload_enter(&lowered, standing)? else {
         return Ok(None);
     };
     let served = req.without_site_override(|req| {

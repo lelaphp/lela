@@ -10793,7 +10793,7 @@ fn class_operand(
     }
     let written = exec::constant(code, ConstIdx(at));
     if let Some(class) =
-        crate::api::call::autoload(req, written.as_str_bytes().unwrap_or_default())?
+        crate::api::call::autoload_keyed(req, written.as_str_bytes().unwrap_or_default())?
     {
         if let Some(slot) = slot {
             req.prime(frame, slot, Cached::Class(class));
