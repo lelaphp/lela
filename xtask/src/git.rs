@@ -252,7 +252,23 @@ pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
 /// Run git in `root` and return its stdout; a non-zero exit is an error
 /// carrying git's stderr.
 pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
-    let mut child = Command::new("git")
+    run(Command::new("git"), root, args, stdin)
+}
+
+/// [`git`] asked of a repository that is not the one being worked in,
+/// such as the pinned php-src checkout: every `GIT_` variable a hook was
+/// handed taken out ([`crate::batch::without_git`]), since `GIT_DIR`,
+/// which git exports to a hook in a linked worktree, outranks `-C` and
+/// would answer for the repository being committed to.
+pub(crate) fn git_elsewhere(root: &Path, args: &[&str]) -> Result<String> {
+    let mut command = Command::new("git");
+    crate::batch::without_git(&mut command);
+    run(command, root, args, None)
+}
+
+/// `command`, git, run in `root` over `args`, with `stdin` written to it.
+fn run(mut command: Command, root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
+    let mut child = command
         .arg("-C")
         .arg(root)
         .args(args)
