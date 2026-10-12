@@ -1552,6 +1552,21 @@ impl Vm {
         Some(FrameRef(u32::try_from(at).ok()?))
     }
 
+    /// The record on top of the stack where it is the native's call
+    /// [`Vm::serving_at`] answers and no switch stands, which leaves the
+    /// walk nothing to pass over: the first record it reads is the top,
+    /// and a native's call being served is neither being built nor
+    /// being left. None otherwise, which the walk answers.
+    #[inline]
+    pub(crate) fn serving_top(&self) -> Option<&HeapFrame> {
+        if !self.switches.is_empty() {
+            return None;
+        }
+        let (_, frame) = self.stack.top()?;
+        let info = frame.header().info;
+        (info.serving_native() && !info.leaving()).then_some(frame)
+    }
+
     /// The call being served where it is a native's, php's
     /// `execute_data` inside a native: [`Vm::current_at`] where that is
     /// one, and none while a user frame is current or a call is still

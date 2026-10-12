@@ -1094,8 +1094,15 @@ impl Request {
         self.vm.at(self.building_call()?)?.function
     }
 
-    /// The call being served where it is a native's ([`Vm::serving_at`]).
+    /// The call being served where it is a native's ([`Vm::serving_at`]):
+    /// the record on top of the stack where no switch stands and it is
+    /// one, read once, which is what a native's entry reads per
+    /// argument it holds; the walk otherwise.
+    #[inline]
     pub(crate) fn serving_call(&self) -> Option<exec::FrameAt<'_>> {
+        if let Some(frame) = self.vm.serving_top() {
+            return Some(exec::FrameAt { req: self, frame });
+        }
         self.frame_at(self.vm.serving_at()?)
     }
 
