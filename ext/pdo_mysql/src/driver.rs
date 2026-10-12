@@ -12,6 +12,7 @@
 
 use std::borrow::Cow;
 
+use php_ext::coerce::atoi;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
@@ -574,23 +575,6 @@ fn driver_options(
         };
     }
     Ok(true)
-}
-
-/// C's `atoi`: optional space and sign, then digits.
-fn atoi(text: &[u8]) -> i32 {
-    let s = std::str::from_utf8(text).unwrap_or_default().trim_start();
-    let (sign, digits) = match s.as_bytes().first() {
-        Some(b'-') => (-1i64, &s[1..]),
-        Some(b'+') => (1, &s[1..]),
-        _ => (1, s),
-    };
-    let n: i64 = digits
-        .bytes()
-        .take_while(u8::is_ascii_digit)
-        .fold(0i64, |acc, d| {
-            acc.saturating_mul(10).saturating_add(i64::from(d - b'0'))
-        });
-    i32::try_from(sign * n).unwrap_or(if sign < 0 { i32::MIN } else { i32::MAX })
 }
 
 /// The `unsigned int` php reads a `zend_long` option through: its low

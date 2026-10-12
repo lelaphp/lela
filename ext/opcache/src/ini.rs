@@ -6,6 +6,7 @@
 //! and `jit_globals`, is [`Stored`], read off the text when asked.
 
 use php_ext::abi::IniStage;
+use php_ext::coerce::atoi;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::{Request, Zone};
@@ -212,23 +213,6 @@ pub(crate) fn named(name: &str) -> Option<&'static Entry> {
     ENTRIES.iter().find(|entry| entry.name == name)
 }
 
-/// `atoi`: the leading digits, after blanks and a sign, and zero where
-/// there are none.
-pub(crate) fn atoi(value: &[u8]) -> i64 {
-    let text = String::from_utf8_lossy(value);
-    let text = text.trim_start();
-    let (sign, digits) = match text.as_bytes().first() {
-        Some(b'-') => (-1, &text[1..]),
-        Some(b'+') => (1, &text[1..]),
-        _ => (1, text),
-    };
-    let end = digits
-        .bytes()
-        .position(|b| !b.is_ascii_digit())
-        .unwrap_or(digits.len());
-    digits[..end].parse::<i64>().map_or(0, |n| sign * n)
-}
-
 /// `zend_strtod` over the leading number, zero where there is none.
 fn strtod(value: &[u8]) -> f64 {
     let text = String::from_utf8_lossy(value);
@@ -255,11 +239,9 @@ impl Entry {
     pub(crate) fn stored(&self, value: &[u8]) -> Stored {
         match self.kind {
             Kind::Bool | Kind::Enable => Stored::Bool(Request::ini_parse_bool(value)),
-            Kind::Memory => Stored::Long(atoi(value).saturating_mul(1024 * 1024)),
-            Kind::MaxFiles => Stored::Long(atoi(value)),
-            Kind::MaxWasted => {
-                Stored::Double(i32::try_from(atoi(value)).map_or(0.0, f64::from) / 100.0)
-            }
+            Kind::Memory => Stored::Long(i64::from(atoi(value)).saturating_mul(1024 * 1024)),
+            Kind::MaxFiles => Stored::Long(i64::from(atoi(value))),
+            Kind::MaxWasted => Stored::Double(f64::from(atoi(value)) / 100.0),
             Kind::Real => Stored::Double(strtod(value)),
             Kind::Text | Kind::Unempty | Kind::FileCache | Kind::Jit => {
                 Stored::Text(value.to_vec())
@@ -373,7 +355,7 @@ pub(crate) fn modify<const AT: usize>(
             )
         }
         Kind::MaxFiles => {
-            let files = atoi(value);
+            let files = i64::from(atoi(value));
             refused_unless(
                 req,
                 files >= 200,

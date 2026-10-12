@@ -9,27 +9,13 @@
 
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_double, to_long, to_string, with_string};
+use php_ext::coerce::{atoi, to_double, to_long, to_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `INT_MAX`, the bound every count of the file is held to.
 const INT_MAX: i64 = 2_147_483_647;
-
-/// `atoi(&format[i])`: the digits at `at`, as C's `atoi` reads them
-/// through `strtol` and truncates to `int`.
-fn atoi(format: &[u8], at: usize) -> i64 {
-    let mut value: i64 = 0;
-    for &c in format[at..].iter().take_while(|c| c.is_ascii_digit()) {
-        value = value.saturating_mul(10).saturating_add(i64::from(c - b'0'));
-    }
-    i64::from(i32::from_ne_bytes(
-        u32::try_from(value & 0xFFFF_FFFF)
-            .unwrap_or(0)
-            .to_ne_bytes(),
-    ))
-}
 
 /// `php_pack(val, size, endianness, output)`: the long's low `size`
 /// bytes, in the order asked.
@@ -146,7 +132,7 @@ fn packed(
                 arg = -1;
                 i += 1;
             } else if c.is_ascii_digit() {
-                arg = atoi(format, i);
+                arg = i64::from(atoi(&format[i..]));
                 while i < format.len() && format[i].is_ascii_digit() {
                     i += 1;
                 }

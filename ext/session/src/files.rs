@@ -11,20 +11,15 @@
 use std::fs::{File, OpenOptions, Permissions};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
+use php_ext::coerce::is_space;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref, raise};
-use php_ext::request::Request;
+use php_ext::request::{MAXPATHLEN, Request};
 
 use crate::{State, session};
 
 /// `FILE_PREFIX`.
 const PREFIX: &[u8] = b"sess_";
-
-/// `MAXPATHLEN` on the host.
-#[cfg(target_os = "macos")]
-const MAXPATHLEN: usize = 1024;
-#[cfg(not(target_os = "macos"))]
-const MAXPATHLEN: usize = 4096;
 
 /// `O_NOFOLLOW`, which the standard library names on no platform: the
 /// BSDs' and macOS's bit, and Linux's, which the architectures number
@@ -351,20 +346,25 @@ pub(super) fn open(req: &mut Request, save_path: &[u8]) -> bool {
 }
 
 /// `ZEND_STRTOL(s, NULL, base)`: the leading number, `None` for
-/// `ERANGE`.
+/// `ERANGE`. Kept beside the face's `strtol`, which reads base 10 and
+/// saturates where `ps_files_save_path` reads base 8 too and refuses the
+/// range error; the space it skips is the face's, C's `isspace` under the
+/// thread's `LC_CTYPE`.
 fn strtol(s: &[u8], base: u32) -> Option<i64> {
-    let text = String::from_utf8_lossy(s);
-    let text = text.trim_start();
-    let (negative, body) = match text.as_bytes().first() {
+    let text = &s[s.iter().take_while(|b| is_space(**b)).count()..];
+    let (negative, body) = match text.first() {
         Some(b'-') => (true, &text[1..]),
         Some(b'+') => (false, &text[1..]),
         _ => (false, text),
     };
-    let digits: String = body.chars().take_while(|c| c.is_digit(base)).collect();
-    if digits.is_empty() {
+    let digits = body
+        .iter()
+        .take_while(|b| char::from(**b).is_digit(base))
+        .count();
+    if digits == 0 {
         return Some(0);
     }
-    let n = i64::from_str_radix(&digits, base).ok()?;
+    let n = i64::from_str_radix(std::str::from_utf8(&body[..digits]).ok()?, base).ok()?;
     Some(if negative { -n } else { n })
 }
 

@@ -204,7 +204,9 @@ fn imagefttext(
 }
 
 /// One of `imagefilter`'s trailing arguments, held to `ty` at its
-/// position as the filter's own ZPP holds it.
+/// position as the filter's own parse holds it, its `Z_PARAM_LONG`,
+/// `Z_PARAM_DOUBLE` or `Z_PARAM_BOOL`, where the stub declares `...$args`
+/// untyped.
 fn arg(req: &mut Request, args: &[Untyped<Value>], at: usize, ty: &Type) -> Result<Value, Thrown> {
     let value = args.get(at).map_or(Value::null(), |v| v.0);
     let position = u32::try_from(at + 3).unwrap_or(u32::MAX);

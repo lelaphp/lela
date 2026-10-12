@@ -58,12 +58,12 @@ use std::os::unix::fs::MetadataExt;
 use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::{Owner, PhpString};
 
 use crate::filestat::strerror;
 use crate::string::path::zend_dirname;
-use crate::virtual_cwd::{MAXPATHLEN, expand_filepath};
+use crate::virtual_cwd::expand_filepath;
 
 fn host(bytes: &[u8]) -> &std::path::Path {
     std::path::Path::new(OsStr::from_bytes(bytes))

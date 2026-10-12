@@ -9,7 +9,8 @@
 //!   the wake set it raises (design §5.8, revision 38), which `php_engine`
 //!   holds the one instance of;
 //! - [`reset_lc_ctype_locale`], the process's `LC_CTYPE`, set once before
-//!   any extension starts;
+//!   any extension starts, and [`is_space`], C's `isspace` under the
+//!   thread's;
 //! - [`process`], the process's identity, its real user and group and its
 //!   supplementary groups (revision 41);
 //! - the calls on the process's file descriptors that `std` has no answer
@@ -49,4 +50,4 @@ pub use fd::{
     new_socket, peek_fd, poll_fd, select_fds, set_fd_blocking, set_sockopt, sync_fd,
 };
 pub use fork::{Forked, Pid, fork};
-pub use locale::reset_lc_ctype_locale;
+pub use locale::{is_space, reset_lc_ctype_locale};

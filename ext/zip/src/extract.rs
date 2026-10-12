@@ -4,14 +4,11 @@
 
 use php_ext::abi::Union;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{OwnedStream as _, Request, Resolve, Streams as _, WrapperOp};
+use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Resolve, Streams as _, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, ValueRef};
 
 use crate::archive::FL_UNCHANGED;
 use crate::object::{Intern, basedir_refuses};
-
-/// `MAXPATHLEN` on macOS.
-const MAXPATHLEN: usize = 1024;
 
 /// `php_zip_make_relative_path`: an absolute path less its root, a
 /// relative one from past its last `./`.

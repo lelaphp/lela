@@ -7,7 +7,7 @@
 //! over the values the host started the engine with (#744).
 
 use php_ext::abi::{ExtensionBuilder, IniStage, OnModify};
-use php_ext::coerce::numeric_string;
+use php_ext::coerce::{atoi, numeric_string, strtol};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{self, Level, Thrown, docref};
 use php_ext::request::Request;
@@ -319,7 +319,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             true
         }
         b"session.cookie_lifetime" => {
-            if crate::atol(value) < 0 {
+            if strtol(value) < 0 {
                 raise(
                     req,
                     stage,
@@ -336,7 +336,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             } else {
                 (4..=6, 4, "session.sid_bits_per_character")
             };
-            if crate::atol(value) != usual {
+            if strtol(value) != usual {
                 deprecated(req, &format!("{what} INI setting is deprecated"));
             }
             if whole_number(value).is_some_and(|n| bounds.contains(&n)) {
@@ -410,7 +410,8 @@ fn per_dir(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> boo
     if name != b"session.upload_progress.freq" {
         return true;
     }
-    let percent = crate::atol(value);
+    // `int tmp = ZEND_ATOL(...)`: C's `atoi`.
+    let percent = i64::from(atoi(value));
     if percent < 0 {
         raise(
             req,

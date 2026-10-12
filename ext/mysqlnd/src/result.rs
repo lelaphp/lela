@@ -8,6 +8,7 @@
 //! `MYSQLND_ROW_BUFFER`s are one `emalloc` beside it, so
 //! `memory_get_usage()` and `memory_limit` see a set of rows as php's do.
 
+use php_ext::coerce::{is_space, strtol};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
@@ -1257,7 +1258,8 @@ fn text_value(
     }
     if native && php_type == PhpType::Long && field.flags & column::ZEROFILL == 0 {
         if pack_len < 8 {
-            return Ok(Owner::int(atoll(text)));
+            // C's `atoll`, the long's `strtol` on a 64-bit host.
+            return Ok(Owner::int(strtol(text)));
         }
         let v = strtoull(text);
         if field.flags & column::UNSIGNED != 0 && i64::try_from(v).is_err() {
@@ -1319,40 +1321,11 @@ fn text_stat(ty: FieldType) -> Stat {
     }
 }
 
-/// C's `atoll`: optional space and sign, the digits, saturating.
-fn atoll(text: &[u8]) -> i64 {
-    let s = text.iter().skip_while(|b| b.is_ascii_whitespace()).copied();
-    let mut negative = false;
-    let mut out: i64 = 0;
-    let mut first = true;
-    for b in s {
-        if first && (b == b'-' || b == b'+') {
-            negative = b == b'-';
-            first = false;
-            continue;
-        }
-        first = false;
-        if !b.is_ascii_digit() {
-            break;
-        }
-        let d = i64::from(b - b'0');
-        out = if negative {
-            out.saturating_mul(10).saturating_sub(d)
-        } else {
-            out.saturating_mul(10).saturating_add(d)
-        };
-    }
-    out
-}
-
 /// C's `strtoull(p, NULL, 10)`, saturating, a leading `-` negating as C
-/// does.
+/// does: kept beside the face's signed `strtol`, the white space it skips
+/// the face's `is_space`.
 fn strtoull(text: &[u8]) -> u64 {
-    let s: Vec<u8> = text
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .collect();
+    let s: Vec<u8> = text.iter().copied().skip_while(|b| is_space(*b)).collect();
     let (negative, digits) = match s.first() {
         Some(b'-') => (true, &s[1..]),
         Some(b'+') => (false, &s[1..]),

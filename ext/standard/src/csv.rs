@@ -10,11 +10,12 @@
 
 use php_ext::abi::Passed;
 use php_ext::attr::php_function;
+use php_ext::coerce::is_space;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString};
 
-use crate::ffi::locale::{self as c, Class, Mblen};
+use crate::ffi::locale::Mblen;
 
 /// `PHP_CSV_NO_ESCAPE`: the empty `$escape`.
 pub(super) const NO_ESCAPE: Option<u8> = None;
@@ -143,7 +144,7 @@ pub fn fgetcsv(
         let mut inc_len = step(&mut mblen, &buf, bptr, limit);
         if inc_len == 1 {
             let mut tmp = bptr;
-            while at(&buf, tmp) != delimiter && c::is(Class::Space, at(&buf, tmp)) {
+            while at(&buf, tmp) != delimiter && is_space(at(&buf, tmp)) {
                 tmp += 1;
             }
             if at(&buf, tmp) == enclosure && tmp < limit {

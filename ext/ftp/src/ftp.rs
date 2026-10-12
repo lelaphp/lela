@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use php_ext::coerce::strtol;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     Handshake, OptionAnswer, OwnedStream as _, Request, SocketOptions, Stream, StreamCtx,
@@ -634,7 +635,7 @@ impl Ftp {
         {
             return Ok(-1);
         }
-        Ok(atol(cstr(&self.inbuf)))
+        Ok(strtol(cstr(&self.inbuf)))
     }
 
     /// `ftp_mdtm`: `MDTM`'s `YYYYMMDDhhmmss`, read as UTC, `-1` where it
@@ -1273,23 +1274,6 @@ fn quoted(text: &[u8]) -> Option<Vec<u8>> {
     let open = text.iter().position(|&b| b == b'"')? + 1;
     let close = text[open..].iter().rposition(|&b| b == b'"')? + open;
     Some(text[open..close].to_vec())
-}
-
-/// `ZEND_ATOL`: blanks, a sign, the digits, saturating.
-fn atol(text: &[u8]) -> i64 {
-    let text = text.trim_ascii_start();
-    let (negative, digits) = match text.first() {
-        Some(b'-') => (true, &text[1..]),
-        Some(b'+') => (false, &text[1..]),
-        _ => (false, text),
-    };
-    let n = digits
-        .iter()
-        .take_while(|b| b.is_ascii_digit())
-        .fold(0i64, |n, &d| {
-            n.saturating_mul(10).saturating_add(i64::from(d - b'0'))
-        });
-    if negative { n.saturating_neg() } else { n }
 }
 
 /// `sscanf("%lu,%lu,%lu,%lu,%lu,%lu")` from the first digit of a `227`

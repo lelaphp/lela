@@ -56,7 +56,7 @@ use php_ext::coerce::{to_string, truthy};
 use php_ext::raising::{
     Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw_error, throw_value,
 };
-use php_ext::request::Request;
+use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
@@ -1589,7 +1589,6 @@ fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
 /// URI as it is; `None` where the path does not fit `MAXPATHLEN`, as both
 /// of php's resolvers refuse it.
 fn file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
-    const MAXPATHLEN: usize = 1024;
     let lower: Vec<u8> = source.iter().take(17).map(u8::to_ascii_lowercase).collect();
     let local = if lower.starts_with(b"file://localhost/") {
         &source[16..]

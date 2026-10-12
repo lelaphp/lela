@@ -24,7 +24,7 @@ mod object;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Raw, Union};
 use php_ext::attr::{php_const, php_function};
-use php_ext::coerce::{Exponent, float_format, strict_types, value_name};
+use php_ext::coerce::{Exponent, float_format, is_space, strict_types, value_name};
 use php_ext::decl::{ConstDecl, ConstExpr, Name};
 use php_ext::raising::{
     Thrown, arg_null_deprecated, argument_error, deprecated, pending, throw_error,
@@ -189,11 +189,6 @@ fn gmp_info(req: &mut Request) {
 /// A `GMP|string|int` parameter, read by hand as
 /// `GMP_Z_PARAM_INTO_MPZ_PTR` reads it.
 type Number = Raw<Union<Instance<GMP>, Union<PhpString, i64>>>;
-
-/// The C library's `isspace`.
-const fn is_space(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
 
 /// `convert_zstr_to_gmp`: leading whitespace skipped, a `0x`, `0o` or
 /// `0b` prefix read where `base` allows it, then `mpz_set_str`; a

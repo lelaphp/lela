@@ -1821,7 +1821,7 @@ pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
 /// Whether the number a string opens with, past its whitespace, is
 /// written with a `-`.
 fn negative_text(bytes: &[u8]) -> bool {
-    bytes.iter().find(|b| !crate::c_number::is_space(**b)) == Some(&b'-')
+    bytes.iter().find(|b| !crate::c_number::is_whitespace(**b)) == Some(&b'-')
 }
 
 /// `convert_object_to_type`'s warning, for an object whose class has no

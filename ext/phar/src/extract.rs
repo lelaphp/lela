@@ -8,13 +8,11 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use php_ext::abi::Union;
 use php_ext::raising::{Thrown, throw};
-use php_ext::request::{Opening, OwnedStream as _, Request, Resolve, Streams as _};
+use php_ext::request::{MAXPATHLEN, Opening, OwnedStream as _, Request, Resolve, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{PhpArray, PhpString};
 
-use crate::archive::{
-    ArchiveId, Content, ENT_COMPRESSION_MASK, ENT_PERM_MASK, MAXPATHLEN, archives, lossy,
-};
+use crate::archive::{ArchiveId, Content, ENT_COMPRESSION_MASK, ENT_PERM_MASK, archives, lossy};
 use crate::entry::{self, Target};
 use crate::path;
 

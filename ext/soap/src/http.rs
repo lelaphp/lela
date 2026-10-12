@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use php_ext::call::{call, lookup_function, new_object};
-use php_ext::coerce::{numeric_string, to_callable};
+use php_ext::coerce::{atoi, is_space, numeric_string, strtol, to_callable};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{
     Handshake, OwnedStream as _, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx,
@@ -241,16 +241,11 @@ fn find(hay: &[u8], needle: u8) -> Option<usize> {
     hay.iter().position(|c| *c == needle)
 }
 
-/// C's `isspace` in the C locale.
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
-}
-
-/// C's `(int)` of a `long`, as `atoi` truncates what `strtol` read and
-/// php stores a `zend_long` `port` in an `int`.
+/// C's `(int)` of a `long`, as php stores a `zend_long` `port` and a
+/// length in an `int`.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "C's conversion to `int`, which php's `atoi`, `int port` and `int buf_size` make"
+    reason = "C's conversion to `int`, which php's `int port` and `int buf_size` make"
 )]
 fn int_of(n: i64) -> i32 {
     n as i32
@@ -264,39 +259,6 @@ fn int_of(n: i64) -> i32 {
 )]
 fn unsigned_of(n: i64) -> u64 {
     n as u64
-}
-
-/// `atoi`: `strtol` of the leading blanks, a sign and the digits, held
-/// at `LONG_MIN`/`LONG_MAX`, then cut to an `int`.
-fn atoi(b: &[u8]) -> i32 {
-    int_of(strtol(b))
-}
-
-/// `strtol(b, NULL, 10)`.
-fn strtol(b: &[u8]) -> i64 {
-    let b = cstr(b);
-    let mut i = 0;
-    while i < b.len() && is_space(b[i]) {
-        i += 1;
-    }
-    let negative = match b.get(i) {
-        Some(b'-') => {
-            i += 1;
-            true
-        }
-        Some(b'+') => {
-            i += 1;
-            false
-        }
-        _ => false,
-    };
-    let mut n: i128 = 0;
-    while let Some(d) = b.get(i).filter(|d| d.is_ascii_digit()) {
-        n = (n * 10 + i128::from(d - b'0')).min(i128::from(i64::MAX) + 1);
-        i += 1;
-    }
-    let n = if negative { -n } else { n };
-    i64::try_from(n).unwrap_or(if negative { i64::MIN } else { i64::MAX })
 }
 
 /// `sscanf(line, "%x", &buf_size) > 0`: the hex number at the start of

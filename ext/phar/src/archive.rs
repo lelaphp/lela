@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
+use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Owner, PhpString, Value};
 
 use crate::table::Table;
@@ -56,9 +56,6 @@ pub(crate) const TAR_FILE: u8 = b'0';
 pub(crate) const TAR_LINK: u8 = b'1';
 pub(crate) const TAR_SYMLINK: u8 = b'2';
 pub(crate) const TAR_DIR: u8 = b'5';
-
-/// `MAXPATHLEN` on the host.
-pub(crate) const MAXPATHLEN: usize = 1024;
 
 /// The archive's format: `is_tar` and `is_zip`, neither for the phar
 /// format.

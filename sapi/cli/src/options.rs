@@ -9,6 +9,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use php_sapi::c_number::atoi;
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt, os};
 use php_sapi::ini::{Search, define};
 
@@ -544,7 +545,7 @@ fn mode_pass(argv: &[Vec<u8>], shell: bool) -> Settled {
                 Some(b"diff") => settled.usage = true,
                 Some(_) => *error = Some("Unknown argument for --ini\n"),
             },
-            16 => settled.repeat = atoi(&value),
+            16 => settled.repeat = i64::from(atoi(&value)),
             _ => {}
         }
     }
@@ -573,24 +574,6 @@ fn server_pass(argv: &[Vec<u8>]) -> Server {
     }
     server.router = argv.get(getopt.optind).map(|word| PathBuf::from(os(word)));
     server
-}
-
-/// C's `atoi`: leading blanks, a sign and the digits after it, 0 for
-/// anything else.
-fn atoi(bytes: &[u8]) -> i64 {
-    let text = String::from_utf8_lossy(bytes);
-    let text = text.trim_start();
-    let (negative, digits) = match text.as_bytes().first() {
-        Some(b'-') => (true, &text[1..]),
-        Some(b'+') => (false, &text[1..]),
-        _ => (false, text),
-    };
-    let end = digits
-        .bytes()
-        .position(|b| !b.is_ascii_digit())
-        .unwrap_or(digits.len());
-    let value: i64 = digits[..end].parse().unwrap_or(0);
-    if negative { -value } else { value }
 }
 
 /// Each word left on the line up to `--`, as a file to lint, as the
@@ -1150,6 +1133,8 @@ mod tests {
         assert_eq!(repeat(&["-n", "--repeat", "3", "-r", ""]), Ok(3));
         assert_eq!(repeat(&["-n", "--repeat", "2x", "-r", ""]), Ok(2));
         assert_eq!(repeat(&["-n", "--repeat", "x", "-r", ""]), Ok(0));
+        // `num_repeats` is an `int`: C's `atoi` keeps the long's low 32 bits.
+        assert_eq!(repeat(&["-n", "--repeat", "4294967298", "-r", ""]), Ok(2));
         assert_eq!(repeat(&["-n", "-r", ""]), Ok(1));
     }
 

@@ -10,6 +10,7 @@
 //! starts, before the session's own `RINIT`.
 
 use php_ext::abi::{Beneath, chain};
+use php_ext::coerce::atoi;
 use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, walk};
@@ -265,14 +266,16 @@ fn file_start(req: &mut Request, read: i64, name: &[u8], filename: &[u8]) -> Res
     update(req, false)
 }
 
-/// `session.upload_progress.freq` as `OnUpdateRfc1867Freq` keeps it: a
-/// number of bytes, or a percentage of the body as its negative.
+/// `session.upload_progress.freq` as `OnUpdateRfc1867Freq` keeps it:
+/// `int tmp = ZEND_ATOL(...)`, C's `atoi`, a number of bytes, or a
+/// percentage of the body as its negative where the text ends in `%`.
 fn freq(req: &mut Request) -> i64 {
     let text = ini(req, b"session.upload_progress.freq");
-    let text = String::from_utf8_lossy(&text);
-    match text.trim().strip_suffix('%') {
-        Some(percent) => -percent.trim().parse::<i64>().unwrap_or(0),
-        None => crate::atol(text.as_bytes()),
+    let tmp = i64::from(atoi(&text));
+    if text.last() == Some(&b'%') {
+        -tmp
+    } else {
+        tmp
     }
 }
 

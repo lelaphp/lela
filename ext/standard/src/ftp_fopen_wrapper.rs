@@ -12,11 +12,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::truthy;
+use php_ext::coerce::{atoi, is_space, strtol, truthy};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Closer, DirListing, Handshake, Notification, NotifyCode, Opening, OwnedStream as _, Request,
-    SocketOptions, Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
+    Closer, DirListing, Handshake, MAXPATHLEN, Notification, NotifyCode, Opening, OwnedStream as _,
+    Request, SocketOptions, Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{Owner, PhpArray, ValueRef};
 use php_ext_uri::UriStruct;
@@ -87,23 +87,6 @@ impl Reply {
     }
 }
 
-/// `strtol(buffer, NULL, 10)`: blanks, a sign, the digits.
-fn strtol(s: &[u8]) -> i64 {
-    let s = s.trim_ascii_start();
-    let (negative, digits) = match s.first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
-    };
-    let n = digits
-        .iter()
-        .take_while(|d| d.is_ascii_digit())
-        .fold(0i64, |n, d| {
-            n.saturating_mul(10).saturating_add(i64::from(d - b'0'))
-        });
-    if negative { -n } else { n }
-}
-
 /// The part of a byte string php's `%s` prints: what comes before its
 /// first NUL.
 fn cstr(s: &[u8]) -> &[u8] {
@@ -123,7 +106,8 @@ fn get_result(req: &mut Request, stream: Stream) -> Result<Reply, Thrown> {
         }
     }
     Ok(Reply {
-        code: strtol(cstr(&line)),
+        // `get_ftp_result` answers its `strtol` as an `int`: C's `atoi`.
+        code: i64::from(atoi(cstr(&line))),
         line,
     })
 }
@@ -501,9 +485,10 @@ fn passive(req: &mut Request, control: Stream) -> Result<Option<Passive>, Thrown
 }
 
 /// `(unsigned short) strtoul(s, &end, 10)`: the number and how many
-/// bytes it took.
+/// bytes it took. Kept beside the face's `strtol`, which answers no end
+/// and saturates a signed long; the white space it skips is the face's.
 fn strtoul_port(s: &[u8]) -> (u16, usize) {
-    let blanks = s.iter().take_while(|b| b.is_ascii_whitespace()).count();
+    let blanks = s.iter().take_while(|b| is_space(**b)).count();
     let digits = s[blanks..]
         .iter()
         .take_while(|b| b.is_ascii_digit())
@@ -611,7 +596,11 @@ fn prepare(
             }
             let mut file_size = 0;
             if let Some(space) = cstr(&last.line).iter().position(|b| *b == b' ') {
-                file_size = usize::try_from(strtol(&last.line[space + 1..])).unwrap_or(0);
+                // `size_t file_size = atoi(...)`: a negative `int` is the
+                // size it wraps to.
+                file_size =
+                    usize::try_from(i64::from(atoi(&last.line[space + 1..])).cast_unsigned())
+                        .unwrap_or(usize::MAX);
                 notify(
                     req,
                     ctx,
@@ -961,9 +950,6 @@ fn listing(
     Ok(Listed::Names(names, data))
 }
 
-/// `sizeof(ent->d_name)`, `MAXPATHLEN`.
-const MAXPATHLEN: usize = 1024;
-
 /// `php_ftp_dirstream_read`'s cut of one listed line: its base name,
 /// `php_basename`, less the last two bytes, a line's `\r\n`, as php's
 /// `tmp_len - 1` terminator lands; a lone `\n` so costs the name's last
@@ -1021,7 +1007,7 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<Owner<PhpArray>>, Th
         command(req, control, b"SIZE", Some(&file));
         let reply = get_result(req, control)?;
         let size = if reply.class() == Class::Completion {
-            strtol(reply.line.get(4..).unwrap_or_default())
+            i64::from(atoi(reply.line.get(4..).unwrap_or_default()))
         } else if dir {
             0
         } else {

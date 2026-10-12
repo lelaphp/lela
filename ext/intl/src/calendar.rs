@@ -1642,6 +1642,10 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         return Err(throw_error(req, "ArgumentCountError", message));
     }
     let calendar = if variant <= 2 {
+        // The variant's parse, `Z_PARAM_OBJ_OR_STR_OR_NULL` and
+        // `Z_PARAM_STRING_OR_NULL` for up to two arguments and `"lll|lll"`
+        // past them, where the stub declares `$timezoneOrYear`,
+        // `$localeOrMonth` and the rest untyped.
         let zone_type = Type::Union(vec![Type::Object, Type::String, Type::Null]);
         let zone = match given.first() {
             Some(v) => Some(coerce_param(req, v, &zone_type, 1)?),
@@ -1680,6 +1684,7 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
     } else {
         let mut f = [0; 6];
         for (i, v) in given.iter().enumerate() {
+            // `"lll|lll"`'s `l`, over the untyped parameters.
             let n = coerce_param(req, v, &Type::Int, u32::try_from(i + 1).unwrap_or(1))?;
             if i < variant {
                 f[i] = int32(
@@ -1734,6 +1739,8 @@ fn zone_argument(req: &mut Request, zone: Option<Value>) -> Result<ZoneArg, Thro
         Type::String,
         Type::Null,
     ]);
+    // The classes the constructor's `Z_PARAM_OBJ_OR_STR_OR_NULL` is sorted
+    // into, where the stub declares `$timezoneOrYear` untyped.
     let held = coerce_param(req, &zone, &zone_union, 1)?;
     Ok(match held.as_ref() {
         ValueRef::Object(object)
