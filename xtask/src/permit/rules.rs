@@ -258,24 +258,13 @@ fn evaluate(
         return Ok(None);
     }
     // A rule scoped by `where` judges a call only in the checkout it
-    // names: where a command it fires on runs ([`fired_in`]), whose
-    // branch records a ticket, or where an operation stands that the
-    // calling session did not start, which the denial names (#2476).
+    // names ([`judges_where`]).
     let mut foreign = None;
     if fired {
-        match rule.within {
-            Where::Anywhere => {}
-            Where::Ticketed => {
-                if !ticketed(root, rule, line) {
-                    return Ok(None);
-                }
-            }
-            Where::Operating => {
-                foreign = operation::foreign(root, line, call, |argv| fires(rule, argv));
-                if foreign.is_none() {
-                    return Ok(None);
-                }
-            }
+        match judges_where(root, rule, line, call) {
+            Standing::Outside => return Ok(None),
+            Standing::Judged => {}
+            Standing::Foreign(operation) => foreign = Some(operation),
         }
     }
     // A denial of the agent's hand on a harness file is lifted from the
@@ -295,11 +284,59 @@ fn evaluate(
     }))
 }
 
+/// Where a call stands for a rule scoped by `where`.
+enum Standing {
+    /// Outside the checkouts the rule names: it does not judge the call.
+    Outside,
+    /// Inside them, a row without `where` among them.
+    Judged,
+    /// Where an operation stands that the calling session did not start,
+    /// which the denial names (#2476).
+    Foreign(operation::Foreign),
+}
+
+/// Where the call stands for the rule's `where`: asked where a command it
+/// fires on runs ([`fired_in`]), whose branch records a ticket, which is
+/// the main checkout (#2751), or where another session's operation
+/// stands.
+fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> Standing {
+    let judged = |inside: bool| {
+        if inside {
+            Standing::Judged
+        } else {
+            Standing::Outside
+        }
+    };
+    match rule.within {
+        Where::Anywhere => Standing::Judged,
+        Where::Ticketed => judged(ticketed(root, rule, line)),
+        Where::Operating => operation::foreign(root, line, call, |argv| fires(rule, argv))
+            .map_or(Standing::Outside, Standing::Foreign),
+        Where::Main => judged(in_main(root, rule, line)),
+    }
+}
+
 /// Whether a command the rule fires on runs in a checkout whose branch
 /// records a ticket, or one the harness cannot tell does not
 /// ([`fired_in`]); a call with no line, or a line with no command the
 /// rule fires on, is asked where it stands ([`runs_in`]).
 fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
+    scoped_in(root, rule, line)
+        .iter()
+        .any(|dir| !matches!(crate::track::head_ticket(dir), Ok(None)))
+}
+
+/// Whether a command the rule fires on runs in the repository's main
+/// checkout rather than a linked worktree ([`linked`]), read where
+/// [`ticketed`] reads (#2751).
+fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
+    scoped_in(root, rule, line).iter().any(|dir| !linked(dir))
+}
+
+/// Where a `where`-scoped rule asks: each checkout a command it fires on
+/// runs in ([`fired_in`]), or, for a call with no line or a line with no
+/// such command, where the call stands ([`runs_in`]).
+fn scoped_in(root: &Path, rule: &Rule, line: Option<&Line>) -> Vec<PathBuf> {
     let mut checkouts = line.map_or_else(Vec::new, |line| {
         fired_in(root, line, |argv| fires(rule, argv))
     });
@@ -307,19 +344,39 @@ fn ticketed(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
         checkouts.push(runs_in(root, line));
     }
     checkouts
-        .iter()
-        .any(|dir| !matches!(crate::track::head_ticket(dir), Ok(None)))
+}
+
+/// Whether `dir` stands in a linked worktree: the nearest `.git` above it
+/// is the file git writes there, where the main checkout's is a
+/// directory. A directory under no `.git` is not one.
+fn linked(dir: &Path) -> bool {
+    dir.ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|git| git.exists())
+        .is_some_and(|git| git.is_file())
 }
 
 /// Whether one command of a shell line is one the rule's argv predicate,
-/// `deny_argv` or `require_argv` under its `with`, fires on; a rule
-/// judging by another predicate fires on the line whole.
+/// `deny_argv` or `require_argv` under its `with`, fires on; a
+/// `deny_pattern` fires on a command whose words it matches and its
+/// `unless_pattern` does not, so a `where` rule asks where the hit runs
+/// and not where its neighbours do (#2751); a rule judging by another
+/// predicate fires on the line whole.
 fn fires(rule: &Rule, argv: &Argv) -> bool {
     let p = &rule.predicate;
-    match (&p.deny_argv, &p.require_argv) {
-        (Some(denied), _) => argv.denies(denied, &p.with),
-        (None, Some(separator)) => argv.unbounded(separator, &p.with),
-        (None, None) => true,
+    match (&p.deny_argv, &p.require_argv, &p.deny_pattern) {
+        (Some(denied), _, _) => argv.denies(denied, &p.with),
+        (None, Some(separator), _) => argv.unbounded(separator, &p.with),
+        (None, None, Some(pattern)) => {
+            let words = argv.words().join(" ");
+            let matches = |pattern: &str| Regex::new(pattern).map(|r| r.is_match(&words));
+            matches(pattern).unwrap_or(true)
+                && !p
+                    .unless_pattern
+                    .as_deref()
+                    .is_some_and(|unless| matches(unless).unwrap_or(false))
+        }
+        (None, None, None) => true,
     }
 }
 

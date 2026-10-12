@@ -11392,6 +11392,26 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// 909
 /// 909
 /// ```
+///
+/// The operands are given up as the call ends, `FREE_OP*`, so a
+/// temporary the native read is destroyed before the statement that
+/// reads what the call returned goes on, and a string an argument's
+/// coercion made is the call's and gone with it:
+///
+/// ```php
+/// class S { function __toString(): string { return "abc"; } function __destruct() { echo "d\n"; } }
+/// var_dump(str_contains(new S, "b"));
+/// $m = memory_get_usage(); $r = strtr(new S, "a", "x"); var_dump($r, memory_get_usage() - $m);
+/// echo "after\n";
+/// ```
+/// ```expect
+/// d
+/// bool(true)
+/// d
+/// string(3) "xbc"
+/// int(32)
+/// after
+/// ```
 fn frameless_call(
     req: &mut Request,
     frame: FrameRef,
@@ -11399,7 +11419,7 @@ fn frameless_call(
     op: &Opline,
     arguments: &[(OperandKind, u32)],
 ) -> Edge {
-    let Some(entry) = req.frameless_entry(op.extended_value) else {
+    let Some((function, entry)) = req.frameless_entry(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: {} indexes frameless entry {} and the engine's table has {} entries",
             op.opcode.name(),
@@ -11407,10 +11427,8 @@ fn frameless_call(
             req.frameless_count()
         )));
     };
-    let mut header = exec::Header::call(
-        Function(entry.function),
-        u32::try_from(arguments.len()).unwrap_or(u32::MAX),
-    );
+    let mut header =
+        exec::Header::call(function, u32::try_from(arguments.len()).unwrap_or(u32::MAX));
     header.info.set_serving();
     header.info.set_frameless(true);
     let call = req.push_frameless(header)?;
@@ -11429,8 +11447,8 @@ fn frameless_call(
     // The call ends with the result whether the native threw or not, as
     // php's frameless handler and its full call for an observed one do
     // (`Z/Zend/zend_execute.c:1597`).
-    let served = req.serve_native(Function(entry.function), OnThrow::ReturnValue);
-    req.pop_call();
+    let served = req.serve_entry(function, entry, OnThrow::ReturnValue);
+    req.pop_frameless();
     let at = req.vm().opline(frame);
     let width = if arguments.len() == 3 { 2 } else { 1 };
     match served {

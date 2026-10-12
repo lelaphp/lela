@@ -75,7 +75,7 @@ fn parse(req: &mut Request, values: &[Value], callbacks: usize) -> Result<Parsed
     let mut found = Vec::with_capacity(callbacks);
     for offset in 0..values.len() - split {
         let position = u32::try_from(split + offset + 1).unwrap_or(u32::MAX);
-        match Callable::hold(req, position)? {
+        match Callable::hold(req, values[split + offset], position)? {
             Some(callable) => found.push(callable),
             None => {
                 return Err(fatal(

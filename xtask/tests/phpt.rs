@@ -2032,21 +2032,22 @@ fn two_runs_over_one_directory_at_once_never_meet_in_it() {
 /// A run killed mid-subset leaves the pinned tree as it stood (#1183):
 /// its one test, standing in the run's copy, writes beside itself and
 /// sleeps until the run is killed, and the tree holds only what it held
-/// before. The copy it leaves, which a killed run drops nothing of, is the
-/// next run's sweep's: that run passes, and the dead one's copy is gone.
-/// The test's php, sleeping past the recipe's limit, outlives the killed
-/// run and the other process's run, and the next run in the killed one's
-/// temporary directory stops it as it starts (#2663); one still running
-/// then is killed by this test, which fails.
+/// before. The copy it leaves is a dead run's, swept by the next run: that
+/// run passes, and the dead one's copy is gone.
 ///
-/// Once the run is dead its copy is a dead run's, and the first scratch
-/// tree any process on the machine makes sweeps it from the temporary
-/// directory (#1473): another session's instrument, a test binary
-/// starting. So both runs take a temporary directory the test holds,
-/// `TMPDIR`, which no other process's sweep reads, and the copy the test
-/// asserts on is its own. Another process's run, in the machine's
-/// temporary directory, goes between the kill and the assertion: the sweep
-/// in the window is made, not met by chance.
+/// The copy stands under `/tmp` whatever `TMPDIR` says (#2626), where the
+/// first scratch tree any process on the machine lays there sweeps a dead
+/// run's (#1473): another session's instrument, a test binary starting.
+/// So whether the copy still stands between the kill and the next run is
+/// the machine's, not the test's; another process's run goes between them,
+/// so the sweep in the window is made, not met by chance, and the copy is
+/// gone after it whoever swept it. The test's php, sleeping past the
+/// recipe's limit, outlives the killed run, and that other run, in a
+/// `TMPDIR` of its own, stops it as it starts: the dead copy's lock came,
+/// and in the one directory every session shares the lock is the only
+/// guard (#2663); a copy whose lock a live run holds is left alone, which
+/// `scratch`'s own test holds. A php still running after the next run is
+/// killed by this test, which fails.
 #[test]
 fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     use std::io::{BufRead, BufReader};
@@ -2112,13 +2113,13 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
     )
     .unwrap();
     let swept = other.run(&one, "Zend/tests").wait_with_output().unwrap();
-    // A run in another temporary directory leaves the killed one's php to
-    // the next run in its own.
-    let outlived_other = started_at(pid) == php;
+    // A run in another temporary directory stops the killed one's php:
+    // its copy stood in /tmp with its lock let go.
+    let stopped_by_other = started_at(pid) != php;
     assert!(swept.status.success(), "{swept:?}");
 
     assert_eq!(listing(tree.corpus.path()), before, "the pinned tree moved");
-    assert!(copy.is_dir(), "a killed run drops nothing");
+    assert!(!copy.exists(), "the sweep in the window left {copy:?}");
 
     fs::remove_file(dir.join("a-held.phpt")).unwrap();
     fs::write(
@@ -2139,8 +2140,8 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         Command::new("kill").args(["-9", pid]).status().unwrap();
     }
     assert!(
-        outlived_other,
-        "a run in another temporary directory stopped {pid}"
+        stopped_by_other,
+        "a run in another temporary directory left the dead run's php {pid}"
     );
     assert!(
         !orphan,
@@ -2155,7 +2156,6 @@ fn a_run_killed_mid_subset_leaves_the_pinned_tree_as_it_stood() {
         ["pass"],
         "{run}"
     );
-    assert!(!copy.exists(), "the next run's sweep left {copy:?}");
 }
 
 /// A process a test started that leaves its program's group, as a

@@ -1326,6 +1326,18 @@ pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
 /// ```
 pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
     let given = req.argument_count();
+    arity_of(req, given, min, max)
+}
+
+/// [`arity`] over a count the caller read off the call already, as the
+/// entry reads it with the arguments.
+#[cold]
+pub(crate) fn arity_of(
+    req: &mut Request,
+    given: usize,
+    min: usize,
+    max: Option<usize>,
+) -> Result<(), Thrown> {
     if given >= min && max.is_none_or(|max| given <= max) {
         return Ok(());
     }

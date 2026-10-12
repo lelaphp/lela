@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -F msg -- a.rs && echo 'then git merge t1234 by hand'","description":"A merge named in an echo, not run"}}

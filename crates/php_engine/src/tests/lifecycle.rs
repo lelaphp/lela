@@ -694,7 +694,7 @@ fn the_built_in_server_ends_a_request_whose_start_failed() {
     rec.mark("served");
     let sink: Capture = handed_back(sink).unwrap_or_default();
     assert!(observed.start_failed);
-    assert_eq!(dispatched.code, None);
+    assert_eq!(dispatched.program, None);
     assert!(!String::from_utf8_lossy(&sink.stdout).contains("ran"));
     assert_eq!(
         rec.events()

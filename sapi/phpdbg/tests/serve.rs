@@ -1,15 +1,13 @@
-//! The binary is php's debugger: the file its line names compiled, the
-//! prompt read off stdin, a breakpoint stopping a run between two
-//! handlers, `ev` evaluated in the frame stopped in, and the run ended
-//! as phpdbg ends one. What the pinned phpdbg writes for a session is
-//! held beside it by `xtask witness`, from `tests/lines.toml` (#1975).
+//! The binary is php's debugger: the file its line names compiled and
+//! the prompt read off stdin. What the pinned phpdbg writes for a session
+//! is held beside it by `xtask witness`, from `tests/lines.toml` (#1975,
+//! #2507); what is held here is a relation within one run, not bytes.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// What the binary wrote for `commands` over a program of `source`, and
-/// the program's path as the binary names it.
-fn debugged(name: &str, source: &str, commands: &str) -> (String, String) {
+/// What the binary wrote for `commands` over a program of `source`.
+fn debugged(name: &str, source: &str, commands: &str) -> String {
     let dir = std::env::temp_dir().join(format!("sapi-phpdbg-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let file = dir.join("t.php");
@@ -31,105 +29,7 @@ fn debugged(name: &str, source: &str, commands: &str) -> (String, String) {
         .unwrap();
     let out = child.wait_with_output().unwrap();
     std::fs::remove_dir_all(&dir).ok();
-    (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        file.display().to_string(),
-    )
-}
-
-#[test]
-fn a_run_stops_at_a_breakpoint_and_evaluates_in_the_frame() {
-    let (out, file) = debugged(
-        "break",
-        "<?php\n$i = 1;\necho PHP_SAPI, $i++, \"\\n\";\necho $i, \"\\n\";\n",
-        "b 4\nr\nev $i * 10\nc\nq\n",
-    );
-    assert_eq!(
-        out,
-        format!(
-            "[Successful compilation of {file}]\n\
-             prompt> [Breakpoint #0 added at {file}:4]\n\
-             prompt> phpdbg1\n\
-             [Breakpoint #0 at {file}:4, hits: 1]\n\
-             >00004: echo $i, \"\\n\";\n \
-             00005: \n\
-             prompt> 20\n\
-             prompt> 2\n\
-             [Script ended normally]\n\
-             prompt> "
-        )
-    );
-}
-
-#[test]
-fn a_step_stops_at_the_next_line_and_the_end_of_input_quits() {
-    let (out, file) = debugged(
-        "step",
-        "<?php\nfunction f() {\n\treturn 1;\n}\nf();\n",
-        "b f\nr\ns\n",
-    );
-    assert_eq!(
-        out,
-        format!(
-            "[Successful compilation of {file}]\n\
-             prompt> [Breakpoint #0 added at f]\n\
-             prompt> [Breakpoint #0 in f() at {file}:3, hits: 1]\n\
-             >00003: \treturn 1;\n \
-             00004: }}\n \
-             00005: f();\n\
-             prompt> >00006: \n\
-             prompt> "
-        )
-    );
-}
-
-/// A watchpoint's report writes the values through the program's
-/// output, so its first byte sends the headers and the header callback
-/// runs under the debugger, which stops in it on the same change before
-/// the report goes on (`sapi/phpdbg/tests/gh15210_002.phpt`).
-#[test]
-fn a_watch_report_sends_the_headers_and_the_callback_is_debugged() {
-    let (out, _) = debugged(
-        "watch",
-        "<?php\nheader_register_callback(function() { echo \"sent\";});\n$a = [0];\n$a[0] = 1;\n",
-        "b 4\nr\nw $a[0]\nc\nc\nq\n",
-    );
-    let report = "prompt> [Breaking on watchpoint $a[0]]\n\
-                  Old value: [Breaking on watchpoint $a[0]]\n\
-                  Old value: 0\n\
-                  New value: 1\n\
-                  >00002: header_register_callback(function() { echo \"sent\";});\n \
-                  00003: $a = [0];\n \
-                  00004: $a[0] = 1;\n\
-                  prompt> sent0\n\
-                  New value: 1\n\
-                  \n\
-                  [$a[0] has been removed, removing watchpoint]\n";
-    assert!(out.contains(report), "{out}");
-}
-
-#[test]
-fn a_native_the_prompt_serves_reads_the_session() {
-    let (out, file) = debugged(
-        "lent",
-        "<?php\nfunction f() {\n  echo \"in f\\n\";\n}\nf();\necho \"done\\n\";\n",
-        "register phpdbg_prompt\nphpdbg_prompt y>\nev phpdbg_break_function(\"f\")\nr\nq\n",
-    );
-    assert_eq!(
-        out,
-        format!(
-            "[Successful compilation of {file}]\n\
-             prompt> [Registered phpdbg_prompt]\n\
-             prompt> \n\
-             y> [Breakpoint #0 added at f]\n\
-             \n\
-             y> [Breakpoint #0 in f() at {file}:3, hits: 1]\n\
-             >00003:   echo \"in f\\n\";\n \
-             00004: }}\n \
-             00005: f();\n\
-             y> "
-        )
-    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// `clean` counts `EG(class_table)`'s keys: an alias's among them, the
@@ -139,7 +39,7 @@ fn a_native_the_prompt_serves_reads_the_session() {
 /// face's linked tables (#1911).
 #[test]
 fn clean_counts_the_class_tables_keys() {
-    let (out, _) = debugged(
+    let out = debugged(
         "clean-classes",
         "<?php\nclass A {}\ninterface I {}\ntrait T {}\nclass_alias('A', 'B');\nclass_alias('A', 'C');\necho count(get_declared_classes()) + count(get_declared_interfaces()) + count(get_declared_traits()), \"\\n\";\necho 1;\n",
         "b 8\nr\nclean\ny\nq\n",

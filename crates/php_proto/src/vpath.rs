@@ -36,6 +36,20 @@ impl Translated {
     }
 }
 
+/// Whether a translated path holds a NUL, a path `php -S` refuses
+/// (`can't handle paths that contain nul bytes`,
+/// `Z/sapi/cli/php_cli_server.c:2127`, `:2155`): the walk's
+/// `stat(2)` read it only up to the NUL ([`Files`]), so what it found is
+/// not the file the path names. A static file's is refused with 400
+/// (`php_cli_server_begin_send_static`); a program's request starts and
+/// its program is never served (`php_cli_server_dispatch_script`), so it
+/// ends with the head the request has, a 200's, and no body, while the
+/// server logs the 400 of the page it built and never sent (#2695).
+#[must_use]
+pub fn holds_nul(path_translated: &[u8]) -> bool {
+    path_translated.contains(&0)
+}
+
 /// `php_cli_server_request_translate_vpath`
 /// (`Z/sapi/cli/php_cli_server.c:1440`): `vpath` under `root`, walked back
 /// a segment at a time until `stat(2)` finds something there, what was
@@ -182,6 +196,44 @@ mod tests {
             Some(&b"/y.php"[..])
         );
         assert_eq!(found.map(|t| t.is_program()), Some(false));
+    }
+
+    /// [`TREE`] asked as `stat(2)` asks, of a C string: up to its NUL.
+    struct AsC;
+
+    impl Files for AsC {
+        fn resolves(&self, path: &[u8]) -> bool {
+            self.stat(path).is_some()
+        }
+
+        fn stat(&self, path: &[u8]) -> Option<Stat> {
+            TREE.stat(crate::c_str(path))
+        }
+    }
+
+    /// A path with a NUL is found as far as the NUL, as php -S's walk
+    /// finds it, and is translated whole, NUL and all: a program's where
+    /// it ends in `.php`, a static file's otherwise, and either one
+    /// holding the NUL php -S refuses (#2695).
+    #[test]
+    fn a_path_with_a_nul_is_found_up_to_it_and_holds_it() {
+        let found = translate(b"/t.php\0.txt", b"/r", &AsC);
+        assert_eq!(
+            found.as_ref().map(|t| &t.path_translated[..]),
+            Some(&b"/r/t.php\0.txt"[..])
+        );
+        assert_eq!(
+            found.as_ref().map(|t| holds_nul(&t.path_translated)),
+            Some(true)
+        );
+        assert_eq!(found.map(|t| t.is_program()), Some(false));
+        let program = translate(b"/up/x.jpg\0.php", b"/r", &AsC);
+        assert_eq!(program.as_ref().map(Translated::is_program), Some(true));
+        assert_eq!(program.map(|t| holds_nul(&t.path_translated)), Some(true));
+        assert_eq!(
+            translate(b"/t.php", b"/r", &AsC).map(|t| holds_nul(&t.path_translated)),
+            Some(false)
+        );
     }
 
     #[test]

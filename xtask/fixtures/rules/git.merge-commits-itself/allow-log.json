@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git log --merges -1","description":"Read the last merge"}}
