@@ -162,6 +162,30 @@ pub fn main() -> ExitCode {
 /// ini files the line's `-n` and `-c` leave and its `-d` entries over
 /// them; a startup php refuses ends the process here, before the socket
 /// is bound ([`php_sapi::start`]).
+///
+/// An entry no ini sets has the default of the build serving it, as under
+/// php-fpm: `include_path` is the build's `PHP_INCLUDE_PATH`, which
+/// `DEFAULT_INCLUDE_PATH` says, the engine's `.:` where no layout was
+/// named at its build and the pinned php-fpm's keg's PEAR directory there
+/// (#1371, #2704).
+///
+/// ```php
+/// var_dump(get_include_path() === DEFAULT_INCLUDE_PATH, ini_get('include_path') === DEFAULT_INCLUDE_PATH);
+/// ```
+/// ```request makala
+/// --GET--
+/// q=1
+/// ```
+/// ```expect capture
+/// 200
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// bool(true)
+/// bool(true)
+/// ```
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#[allow(rustdoc::invalid_codeblock_attributes)]
 fn engine(options: &Options) -> Engine {
     // On threads: never pcntl nor posix, whatever features a build of the
     // workspace unified into php_bundle (design §7.2).

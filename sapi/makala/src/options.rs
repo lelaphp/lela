@@ -44,20 +44,26 @@ pub fn usage() -> String {
 /// The stack of each request thread, php-fpm's main thread's on the
 /// reference machine (#2335): the engine reads the serving thread's
 /// bounds for php's "Maximum call stack size", so a program sees this.
-/// Held to the pinned php-fpm, serving on its main thread under the same
-/// 8 MiB limit, where recursion that runs through a native, and so takes
-/// the thread's stack, fails: the size php reports is 8 MiB to the
-/// nearest MiB under both. The bytes differ by less than a page table's
-/// worth, 8,368,128 here against php-fpm's 8,339,456 on the reference
-/// machine, since a thread's stack is whole 16 KiB pages there and the
-/// main thread's ends below its guard, a size no thread's stack can take;
-/// whether the bytes must match is a person's (#2589).
+/// Held within 64 KiB of the pinned php-fpm's, serving on its main thread
+/// under the same 8 MiB limit, as #2589 ruled, with no divergence row:
+/// the bytes cannot match, 8,368,128 here against php-fpm's 8,339,456 on
+/// the reference machine, since a thread's stack is whole 16 KiB pages
+/// there and the main thread's ends below its guard, a size no thread's
+/// stack can take, and php-fpm's number is the host's limit less its
+/// guard, not an algorithm of php's (#2616).
+///
+/// The witness recurses through a native, which takes the thread's
+/// stack, until php's check throws, and prints the message with the
+/// number masked and how many whole 64 KiB the number lies below 8 MiB:
+/// `0` under both, so both lie in the 64 KiB below 8 MiB and within
+/// 64 KiB of each other. A thread of 7.5 MiB prints `8`.
 ///
 /// ```php
 /// function down($n) { return array_map('down', [$n + 1]); }
 /// try { down(0); } catch (Error $e) {
 ///     echo preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()), "\n";
-///     echo round((int) preg_replace('/\D+/', '', strstr($e->getMessage(), ' bytes', true)) / (1 << 20)), " MiB\n";
+///     $bytes = (int) preg_replace('/\D+/', '', strstr($e->getMessage(), ' bytes', true));
+///     echo (int) floor(((8 << 20) - $bytes) / (64 << 10)), " whole 64 KiB below 8 MiB\n";
 /// }
 /// ```
 /// ```request makala
@@ -70,7 +76,7 @@ pub fn usage() -> String {
 /// content-type: text/html; charset=UTF-8
 ///
 /// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
-/// 8 MiB
+/// 0 whole 64 KiB below 8 MiB
 /// ```
 pub const REQUEST_STACK: usize = 8 << 20;
 
