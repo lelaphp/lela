@@ -666,9 +666,6 @@ impl<T: FromArgument> FromArgument for Passed<T> {
 /// type array".
 pub struct Raw<T> {
     value: Value,
-    /// The argument as it stands on the call, `UNDEF` for a default and
-    /// for a value no call passed.
-    given: Value,
     position: u32,
     held: PhantomData<fn() -> T>,
 }
@@ -685,7 +682,6 @@ impl<T> Raw<T> {
     pub(crate) fn returned(value: Value) -> Raw<T> {
         Raw {
             value,
-            given: Value::undef(),
             position: 0,
             held: PhantomData,
         }
@@ -700,12 +696,15 @@ impl<T: FromArgument> Raw<T> {
     }
 
     /// The declared coercion, with the text the entry would raise: the
-    /// argument held as it stands on the call, as the entry holds one, so
-    /// a type only a slot can serve (`callable`, which `zend_is_callable`
-    /// resolves where the argument stands) holds here too; the value as
-    /// passed where the call gave none.
+    /// argument held off its own slot as it stands now, as the entry
+    /// holds one, so a type only a slot can serve (`callable`, which
+    /// `zend_is_callable` resolves where the argument stands) holds here
+    /// too, and a second hold reads the string a first one wrote back
+    /// (`zend_parse_arg_str_weak`) rather than what it replaced; the
+    /// value as passed where the slot holds none.
     pub fn hold(&self, req: &mut Request) -> Result<T, Thrown> {
-        match T::hold(req, self.given, self.position)? {
+        let given = req.argument(self.position).unwrap_or(Value::undef());
+        match T::hold(req, given, self.position)? {
             Some(held) => Ok(held),
             None => held_as(req, self.value, self.position),
         }
@@ -723,7 +722,6 @@ impl<T: FromArgument> FromArgument for Raw<T> {
     fn from_value(_: &mut Request, value: Value) -> Result<Self, Thrown> {
         Ok(Raw {
             value,
-            given: Value::undef(),
             position: 0,
             held: PhantomData,
         })
@@ -731,7 +729,6 @@ impl<T: FromArgument> FromArgument for Raw<T> {
     fn hold(_: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         Ok(self::given(given).map(|given| Raw {
             value: given.deref(),
-            given,
             position,
             held: PhantomData,
         }))
@@ -748,7 +745,6 @@ impl<T: FromArgument> FromArgument for Raw<T> {
         let value = default_value(req, absent, scope, position, (bits::ANY, || None))?;
         Ok(Raw {
             value,
-            given: Value::undef(),
             position,
             held: PhantomData,
         })
@@ -887,11 +883,17 @@ impl<T: FromArgument> FromArgument for Variadic<T> {
     fn from_value(_: &mut Request, _: Value) -> Result<Self, Thrown> {
         Ok(Variadic(Vec::new()))
     }
-    /// The tail is read off the call from `position` on, `given` being
-    /// its first.
+    /// The tail is read off the call once, from `position` on, `given`
+    /// standing first in it.
     fn hold(req: &mut Request, _: Value, position: u32) -> Result<Option<Self>, Thrown> {
-        req.variadic_arguments(position)?;
-        tail(req, position).map(|held| Some(Variadic(held)))
+        let given = req.variadic_arguments(position)?;
+        let mut held = Vec::with_capacity(given.len());
+        for (at, given) in (position..).zip(given) {
+            if let Some(value) = T::hold(req, given, at)? {
+                held.push(value);
+            }
+        }
+        Ok(Some(Variadic(held)))
     }
 }
 
@@ -927,6 +929,8 @@ impl<T: FromArgument> FromArgument for NamedVariadic<T> {
             named: Vec::new(),
         })
     }
+    /// The positional tail is read off the call from `position` on,
+    /// `given` standing first in it, and the named arguments after it.
     fn hold(req: &mut Request, _: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let positional = tail(req, position)?;
         let past = u32::try_from(req.argument_count())
