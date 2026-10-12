@@ -6343,6 +6343,31 @@ class C {
         assert!(dump.contains(g), "php's C::g, {dump}");
     }
 
+    /// `zend_is_assign_to_self` through a property (#2683): `$a->x[] =
+    /// $a` and `$a[0]->p[1] = $a` read `$a` into a temporary first,
+    /// numbered after the delayed fetches, and `OP_DATA` carries it.
+    #[test]
+    fn an_assignment_to_self_through_a_property_reads_the_value_first() {
+        let dump = dump_of(
+            b"<?php
+$a = new stdClass;
+$a->x[] = $a;
+$a[0]->p[1] = $a;
+",
+        );
+        let main = "0003 T6 = QM_ASSIGN CV0($a)\n\
+                    0004 V4 = FETCH_OBJ_W (dim write) CV0($a) string(\"x\")\n\
+                    0005 ASSIGN_DIM V4 NEXT\n\
+                    0006 OP_DATA T6\n\
+                    0007 T10 = QM_ASSIGN CV0($a)\n\
+                    0008 V7 = FETCH_DIM_W CV0($a) int(0)\n\
+                    0009 V8 = FETCH_OBJ_W (dim write) V7 string(\"p\")\n\
+                    0010 ASSIGN_DIM V8 int(1)\n\
+                    0011 OP_DATA T10\n\
+                    0012 RETURN int(1)\n";
+        assert!(dump.contains(main), "php's main, {dump}");
+    }
+
     /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
     /// inside an array expression folds every key and value in place
     /// (`zend_try_ct_eval_array`'s first pass), so a cast over a

@@ -13117,7 +13117,23 @@ impl Emit<'_> {
     /// evaluates the right `$a` first, through a `QM_ASSIGN` into a
     /// temporary, since the write to the left one may move what the
     /// right one named. php compares the written names of the chain's
-    /// base and of the value, so `$a[0][1] = $a` is one too.
+    /// base and of the value (`zend_is_assign_to_self`), the chain walked
+    /// through every node `zend_is_variable` takes, so `$a[0][1] = $a`,
+    /// `$a->x[] = $a` and `$a[0]->p[1] = $a` are each one too.
+    ///
+    /// ```php
+    /// $a = new stdClass;
+    /// $a->x[] = $a;
+    /// var_dump($a->x[0] === $a);
+    /// $b = [new stdClass];
+    /// $b[0]->p[1] = $b;
+    /// var_dump(count($b[0]->p[1]), $b[0]->p[1][0] === $b[0]);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(1)
+    /// bool(true)
+    /// ```
     fn assigned_value(
         &mut self,
         target: tree::Expr,
@@ -13130,11 +13146,7 @@ impl Emit<'_> {
         let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
             return self.expr(value);
         };
-        let mut base = self.peel(target);
-        while let tree::Expr::SubscriptExpr(id) = base {
-            base = self.peel(self.parsed.tree[id].base);
-        }
-        let tree::Expr::SimpleVarExpr(id) = base else {
+        let tree::Expr::SimpleVarExpr(id) = self.chain_base(target) else {
             return self.expr(value);
         };
         if self.simple_var_of(id, line)? != SimpleVar::Cv(name.clone()) {
@@ -13152,6 +13164,34 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_is_assign_to_self`'s walk down a target to its first
+    /// child while `zend_is_variable` holds and the node is no
+    /// `ZEND_AST_VAR`: a dimension's base, a property's object, a
+    /// `static` property's class, a method call's receiver, a static
+    /// call's class and a call's callee. Where it stops is what the
+    /// value's name is held to.
+    fn chain_base(&self, target: tree::Expr) -> tree::Expr {
+        let mut node = self.peel(target);
+        loop {
+            let child = match node {
+                tree::Expr::SubscriptExpr(id) => self.parsed.tree[id].base,
+                tree::Expr::MemberAccessExpr(id) => self.parsed.tree[id].obj,
+                tree::Expr::ScopedAccessExpr(id) if self.names_property(id) => {
+                    self.parsed.tree[id].scope
+                }
+                // `ZEND_AST_METHOD_CALL` and `ZEND_AST_STATIC_CALL` are
+                // one `CallExpr` here, over the member they call.
+                tree::Expr::CallExpr(id) => match self.peel(self.parsed.tree[id].callee) {
+                    tree::Expr::MemberAccessExpr(member) => self.parsed.tree[member].obj,
+                    tree::Expr::ScopedAccessExpr(scoped) => self.parsed.tree[scoped].scope,
+                    callee => callee,
+                },
+                _ => return node,
+            };
+            node = self.peel(child);
+        }
     }
 
     /// `zend_compile_assign`, the `ZEND_AST_PROP` arm: the property
