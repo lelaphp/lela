@@ -10086,7 +10086,23 @@ impl Emit<'_> {
     /// `determine_switch_jumptable_type`: `long` or `string` when every
     /// case is a constant of that one type and no string case is
     /// numeric, which a hash lookup could not compare as `==` compares
-    /// it; nothing otherwise.
+    /// it; nothing otherwise. Each case is read through
+    /// `zend_eval_const_expr`, which leaves its rewrite for the case's
+    /// compile ([`eval`]), up to the first that does not fold: a
+    /// conditional over a constant is a case of the value it picks, and
+    /// a call, which the evaluator folds none of, is no constant here
+    /// though its compile may fold it.
+    ///
+    /// ```php
+    /// foreach ([5, 3] as $x) {
+    ///     switch ($x) { case 1: case 2: case 3: case 4: case true ? 5 : 6: echo "a$x,"; break; default: echo "d$x,"; }
+    ///     switch ($x) { case 1: case 2: case 4: case 6: case strlen('abc'): echo "b$x,"; }
+    /// }
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// a5,a3,b3,
+    /// ```
     fn switch_jumptable_type(
         &mut self,
         cases: &[NodeId<tree::SwitchArm>],
@@ -10096,7 +10112,7 @@ impl Emit<'_> {
             let Some(cond) = self.parsed.tree[*case].value else {
                 continue;
             };
-            let Some(value) = self.constant_of(cond)? else {
+            let Some(value) = self.eval_const(cond)? else {
                 return Ok(None);
             };
             let kind = value.kind();
@@ -10288,7 +10304,8 @@ impl Emit<'_> {
     }
 
     /// `can_match_use_jumptable` and `count_match_conds`: every
-    /// condition a constant `long` or `string`, and two or more of them;
+    /// condition a constant `long` or `string` as `zend_eval_const_expr`
+    /// leaves it ([`eval`]), and two or more of them;
     /// beside it, the conditions its `zend_eval_const_expr` replaced
     /// with the value they fold to, each one it reached that was written
     /// as more than a number or a string and folded, whose node the
@@ -10306,7 +10323,7 @@ impl Emit<'_> {
             for cond in &self.parsed.tree[conds].exprs.clone() {
                 let cond = *cond;
                 count += 1;
-                let Some(value) = self.constant_of(cond)? else {
+                let Some(value) = self.eval_const(cond)? else {
                     return Ok((false, folded));
                 };
                 if self.literal_of(cond).is_none() {

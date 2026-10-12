@@ -7730,6 +7730,54 @@ class C {
         );
     }
 
+    /// `determine_switch_jumptable_type` and `can_match_use_jumptable` read
+    /// each case through `zend_eval_const_expr`, which folds a conditional
+    /// over a constant, so five long cases the last of which is `true ? 5 :
+    /// 6` are a `SWITCH_LONG` and the case compiles to `int(5)`, and folds no
+    /// call, so a `match` over `1` and `strlen("ab")` is the chain of
+    /// `IS_IDENTICAL` though the compile folds the call to `int(2)`. The dump
+    /// is the oracle's under `[regime.dump]` at 8.5.9 (#2681).
+    #[test]
+    fn a_switch_and_a_match_read_their_cases_as_the_constant_evaluator_folds_them() {
+        assert_eq!(
+            dump_of(b"<?php switch ($x) { case 1: case 2: case 3: case 4: case true ? 5 : 6: echo 1; } echo match ($x) { 1 => 1, strlen(\"ab\") => 2, default => 3 };"),
+            "\n$_main:\n\
+             \x20    ; (lines=26, args=0, vars=1, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 SWITCH_LONG CV0($x) 1: 0012, 2: 0012, 3: 0012, 4: 0012, 5: 0012, default: 0013\n\
+             0001 T1 = IS_EQUAL CV0($x) int(1)\n\
+             0002 JMPNZ T1 0012\n\
+             0003 T1 = IS_EQUAL CV0($x) int(2)\n\
+             0004 JMPNZ T1 0012\n\
+             0005 T1 = IS_EQUAL CV0($x) int(3)\n\
+             0006 JMPNZ T1 0012\n\
+             0007 T1 = IS_EQUAL CV0($x) int(4)\n\
+             0008 JMPNZ T1 0012\n\
+             0009 T1 = IS_EQUAL CV0($x) int(5)\n\
+             0010 JMPNZ T1 0012\n\
+             0011 JMP 0013\n\
+             0012 ECHO int(1)\n\
+             0013 T2 = IS_IDENTICAL CV0($x) int(1)\n\
+             0014 JMPNZ T2 0018\n\
+             0015 T2 = IS_IDENTICAL CV0($x) int(2)\n\
+             0016 JMPNZ T2 0020\n\
+             0017 JMP 0022\n\
+             0018 T3 = QM_ASSIGN int(1)\n\
+             0019 JMP 0024\n\
+             0020 T3 = QM_ASSIGN int(2)\n\
+             0021 JMP 0024\n\
+             0022 T3 = QM_ASSIGN int(3)\n\
+             0023 JMP 0024\n\
+             0024 ECHO T3\n\
+             0025 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0023 - 0024 (tmp/var)\n\
+             "
+        );
+    }
+
     /// php's `dereferenceable_scalar` under a read (#482): a string
     /// written out, an array written out, a chain over one, a
     /// parenthesised expression and the `BP_VAR_IS` chain a `??` puts
