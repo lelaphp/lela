@@ -79,7 +79,19 @@ pub(crate) struct Entry {
     /// The `--SKIPIF--` the entry is compared only after, where it has one.
     pub(crate) skipif: Option<Vec<u8>>,
     pub(crate) http: Http,
+    /// With `{PWD}` kept, since each host serves the program from a
+    /// directory of its own: [`Entry::ini_in`] puts it there (#2705).
     pub(crate) ini: Vec<String>,
+}
+
+impl Entry {
+    /// The ini entries the entry is served under from `dir`, the
+    /// directory a host serves its program from, `{PWD}` there as the
+    /// phpt lane has the test's own directory there, where it writes the
+    /// program (`adapter::with_pwd`).
+    pub(crate) fn ini_in(&self, dir: &Path) -> Vec<String> {
+        adapter::with_pwd(&self.ini, dir)
+    }
 }
 
 /// The reading of the instrument `ask` names: `fpm-compare` or `soak`.
@@ -135,7 +147,7 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
         script: written.file_name()?.to_str()?.to_owned(),
         skipif: phpt.filled("SKIPIF").map(<[u8]>::to_vec),
         http: Http::described(&request),
-        ini: adapter::ini_of(phpt, path).ok()?,
+        ini: adapter::ini_before_pwd(phpt).ok()?,
     })
 }
 
@@ -320,6 +332,25 @@ mod tests {
         assert_eq!(entries[0].ini, ["precision=4"]);
         assert_eq!(entries[0].program, b"<?php echo 1;\n");
         assert_eq!(entries[0].http.field("Cookie"), b"a=1; b=2");
+    }
+
+    /// An entry whose `--INI--` names `{PWD}` is served under each host's
+    /// own directory there, the one the program is written in, and not
+    /// the test's directory in php-src (#2705).
+    #[test]
+    fn pwd_in_an_entry_s_ini_is_the_directory_each_host_serves() {
+        let tree = Tree::new("makala-pwd").unwrap();
+        std::fs::create_dir_all(tree.path().join("tests")).unwrap();
+        let test = "--TEST--\nt\n--INI--\nphar.cache_list={PWD}/fc21.php\n--GET--\nx=1\n--FILE--\n<?php\n--EXPECT--\n\n";
+        tree.write("tests/fc21.phpt", test).unwrap();
+        let (entries, _) = subset(tree.path()).unwrap();
+        let [entry] = &entries[..] else {
+            panic!("{entries:?}")
+        };
+        let side = |dir: &str| entry.ini_in(Path::new(dir));
+        assert_eq!(side("/srv/m"), ["phar.cache_list=/srv/m/fc21.php"]);
+        assert_eq!(side("/srv/f"), ["phar.cache_list=/srv/f/fc21.php"]);
+        assert_eq!(entry.script, "fc21.php", "the program the list names");
     }
 
     /// A test whose program is `--FILE_EXTERNAL--` is an entry (#2651):
