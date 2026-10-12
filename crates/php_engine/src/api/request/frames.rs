@@ -848,12 +848,44 @@ impl Request {
     /// [`Request::push_call`] pushes it, and any other off the stack's
     /// pages ([`php_heap::VmStack::push_frameless`]), since php serves it
     /// over no frame and it takes no room php's call does not.
+    /// A frameless native's call takes one slot per operand, as
+    /// [`Request::call_room`] sizes any native's call.
     pub(crate) fn push_frameless(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let (function, room) = self.callee_room(&header)?;
+        let Some(function) = header.function else {
+            return Err(Fatal::error("InternalError: a call pushed with no callee"));
+        };
+        let room = header.num_args as usize;
         if crate::observer::frameless_observed(self, function) {
             return self.push_room(room, header);
         }
         self.vm.push_frameless(room, header)
+    }
+
+    /// The frameless call on top popped ([`Request::push_frameless`]),
+    /// its operands given up as php's `FREE_OP*` after the frameless
+    /// handler frees them, `zval_ptr_dtor_nogc`, once the call is on no
+    /// chain. Such a call has no receiver, closure, name or extra named
+    /// arguments; one an argument's coercion gave an annex is popped as
+    /// any call is ([`Request::pop_call`]).
+    pub(crate) fn pop_frameless(&mut self) {
+        let call = self.vm.stack.current();
+        let Some(header) = self.vm.at_mut(call) else {
+            return;
+        };
+        if header.annex.is_some() {
+            return self.pop_call();
+        }
+        header.info.set_leaving(true);
+        let mut operands = [php_heap::Zval::UNDEF; 3];
+        if let Some(frame) = self.vm.stack.frame_mut(call) {
+            for (operand, slot) in operands.iter_mut().zip(frame.slots_mut()) {
+                *operand = std::mem::replace(slot, php_heap::Zval::UNDEF);
+            }
+        }
+        for operand in operands {
+            self.release_nogc(Value::of_zval(operand));
+        }
+        self.vm.stack.pop_frame(&mut self.heap);
     }
 
     /// The callee `header` names and the room its call takes
