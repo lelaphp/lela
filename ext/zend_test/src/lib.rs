@@ -41,9 +41,9 @@ mod weakmap;
 
 use std::io::Write as _;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{Extension, ExtensionBuilder, LongHandler};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Thrown, warning};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpObject, ResourceType, Value};
 
@@ -107,7 +107,7 @@ pub fn extension() -> Extension {
     let builder = iterators::declared(builder);
     let builder = object_handlers::declared(builder)
         .ini(ini())
-        .on_modify(QUANTITY_VALUE, on_update_quantity)
+        .on_update_long(QUANTITY_VALUE, LongHandler::Any)
         .on_modify(NOT_EMPTY_STR_TEST, on_update_not_empty);
     let builder = observer::declared(builder);
     mm_custom_handlers::declared(builder)
@@ -134,21 +134,6 @@ fn ini() -> Vec<IniDecl> {
             system: true,
         })
         .collect()
-}
-
-/// `OnUpdateLong`: the value a quantity, whose odd shapes warn naming
-/// the entry, `zend_ini_parse_quantity_warn`.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the `on_modify` slot's shape, which a handler that throws needs"
-)]
-fn on_update_quantity(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    let (_, complaint) = Request::ini_parse_quantity(value.unwrap_or_default());
-    if let Some(complaint) = complaint {
-        let name = String::from_utf8_lossy(QUANTITY_VALUE);
-        warning(req, &format!("Invalid \"{name}\" setting. {complaint}"));
-    }
-    Ok(true)
 }
 
 /// `OnUpdateStrNotEmpty`: the empty string refused.
