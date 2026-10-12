@@ -372,7 +372,12 @@ impl std::error::Error for InUse {}
 /// already in use (48)`.
 fn in_use(port: u16, streams: [&[u8]; 2], dir: &Path) -> Result<bool> {
     let (address, said) = (format!(":{port}"), "Address already in use");
-    let names = |text: &str| text.contains(&address) && text.contains(said);
+    // `:5000` is not `:50001`: the port is followed by no other digit.
+    let port_named = |text: &str| {
+        text.match_indices(&address)
+            .any(|(at, _)| !text[at + address.len()..].starts_with(|c: char| c.is_ascii_digit()))
+    };
+    let names = |text: &str| port_named(text) && text.contains(said);
     Ok(streams
         .into_iter()
         .any(|bytes| names(&String::from_utf8_lossy(bytes)))
@@ -812,6 +817,23 @@ mod tests {
         let (judgement, note) = judged(text, &pin(&pinned, None), &engine);
         assert!(once.exists(), "the first port was refused");
         assert_eq!(judgement, Judgement::Pass, "{note}");
+    }
+
+    /// A port is in use where a host names that port, and not a longer
+    /// one that begins with its digits, beside the words it is refused with.
+    #[test]
+    fn a_port_in_use_is_the_port_named_and_no_longer_one() {
+        let dir = Tree::new("host-line-in-use").unwrap();
+        let said = |port: u16| {
+            format!("Failed to listen on 127.0.0.1:{port} (reason: Address already in use)")
+        };
+        let in_use = |port, text: &str| super::in_use(port, [text.as_bytes(), b""], &dir).unwrap();
+        assert!(in_use(5000, &said(5000)));
+        assert!(!in_use(5000, &said(50001)));
+        assert!(!in_use(
+            5000,
+            "Failed to listen on 127.0.0.1:5000 (reason: Permission denied)"
+        ));
     }
 
     /// A server's stop waits for what its `settled` file must match after
