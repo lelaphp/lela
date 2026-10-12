@@ -4373,6 +4373,24 @@ impl Emit<'_> {
     /// NULL
     /// ```
     ///
+    /// The `Type $x = null` spelling before a required parameter is made
+    /// required too, with its type nullable and no deprecation of its
+    /// own: a call that leaves it out names it as not passed.
+    ///
+    /// ```php
+    /// function f(Foo $c = null, $d) { var_dump($c, $d); }
+    /// try { f(d: 1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// f(null, 2);
+    /// echo (new ReflectionFunction('f'))->getParameters()[0], "\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: f(): Implicitly marking parameter $c as nullable is deprecated, the explicit nullable type must be used instead in %s on line 2
+    /// f(): Argument #1 ($c) not passed
+    /// NULL
+    /// int(2)
+    /// Parameter #0 [ <required> ?Foo $c ]
+    /// ```
+    ///
     /// A function that returns by reference and is declared `void` is
     /// deprecated before its parameters are read:
     ///
@@ -4429,8 +4447,11 @@ impl Emit<'_> {
                 parameter.line,
             )?;
             let (ty, implicitly_nullable) = self.parameter_type(parameter, &mut folded, shown)?;
-            let keeps_default = !parameter.variadic
-                && (implicitly_nullable || last_required.is_none_or(|last| at > last));
+            // `zend_compile_params` makes every optional parameter before
+            // the last required one `ZEND_RECV` with no default, the
+            // `Type $x = null` spelling too, whose nullable type stands
+            // and whose deprecation alone is skipped.
+            let keeps_default = !parameter.variadic && last_required.is_none_or(|last| at > last);
             if let (Some(last), Some(_), false) = (last_required, &folded, implicitly_nullable)
                 && at < last
                 && let Some(required) = function.parameters.get(last)

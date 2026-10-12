@@ -6677,6 +6677,35 @@ $a[0]->p[1] = $a;
     }
 
     /// `zend_compile_params` under
+    /// Every optional parameter before the last required one is a
+    /// required `RECV` with no default (`zend_compile_params`,
+    /// `Z/Zend/zend_compile.c:7886`), the `Type $x = null` spelling as
+    /// much as `?Type $x = null`: the first only skips the deprecation.
+    /// The dump is the oracle's under `[regime.dump]` at 8.5.9 (#2684).
+    #[test]
+    fn an_optional_parameter_before_a_required_one_is_a_recv_whatever_its_spelling() {
+        assert_eq!(
+            dump_of(b"<?php function f(?int $a = null, $b, Foo $c = null, $d) {}"),
+            "\n$_main:\n\
+            \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+            \x20    ; (before optimizer)\n\
+            \x20    ; :1-1\n\
+            \x20    ; return  [] RANGE[0..0]\n\
+            0000 RETURN int(1)\n\
+            \nf:\n\
+            \x20    ; (lines=5, args=4, vars=4, tmps=0)\n\
+            \x20    ; (before optimizer)\n\
+            \x20    ; :1-1\n\
+            \x20    ; return  [] RANGE[0..0]\n\
+            0000 CV0($a) = RECV 1\n\
+            0001 CV1($b) = RECV 2\n\
+            0002 CV2($c) = RECV 3\n\
+            0003 CV3($d) = RECV 4\n\
+            0004 RETURN null\n\
+            "
+        );
+    }
+
     /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` (#384): a
     /// default naming a constant is not folded, so its `RECV_INIT`
     /// carries the `IS_CONSTANT_AST` value the oracle dumps as
