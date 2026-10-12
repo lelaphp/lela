@@ -168,6 +168,13 @@ impl Engine {
                     .iter()
                     .map(|held| held.path.clone())
                     .collect();
+                // `preload_optimize`: `zend_optimize_script` over the
+                // preload's own pseudo-file and then each saved script,
+                // before any is stored.
+                req.run_optimizer_passes(PRELOAD_SCRIPT);
+                for script in &scripts {
+                    req.run_optimizer_passes(script);
+                }
                 self.shared.units.publish_preload(preloaded);
                 req.save_preload_state();
                 // `preload_script_in_shared_memory`, for the preload's

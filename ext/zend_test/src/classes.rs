@@ -10,7 +10,9 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_const};
 use php_ext::call::{call, new_object};
-use php_ext::decl::{ClassDecl, ClassKind, Name, Type};
+use php_ext::decl::{
+    Attribute, AttributeTarget, AttributeValidator, ClassDecl, ClassKind, Name, Type,
+};
 use php_ext::raising::{Thrown, arg_type_error, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -75,7 +77,9 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
         .constants(constants::declared())
         .constants(ns2_constants::declared())
         .constants(sub_constants::declared())
-        .class::<ZendTestAttribute>()
+        .class_reshaped::<ZendTestAttribute>(|class| {
+            class.attribute_validator = Some(AttributeValidator(only_classes));
+        })
         .class::<ZendTestRepeatableAttribute>()
         .class::<ZendTestParameterAttribute>()
         .class_reshaped::<ZendTestPropertyAttribute>(|class| {
@@ -534,6 +538,46 @@ pub(crate) struct ZendTestAttribute;
 
 #[php_class]
 impl ZendTestAttribute {}
+
+/// `zend_attribute_validate_zendtestattribute`, the validator `MINIT`
+/// hangs on `ZendTestAttribute`: every target its `TARGET_ALL` allows
+/// but a class refused, at compile time where a program applies it.
+///
+/// ```php
+/// #[ZendTestAttribute]
+/// function foo() {
+/// }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Only classes can be marked with #[ZendTestAttribute] in %s on line 3
+/// ```
+///
+/// `#[\DelayedTargetValidation]` defers the refusal to
+/// `ReflectionAttribute::newInstance`, and a native's own use of the
+/// attribute, which no compiler saw, is never refused:
+///
+/// ```php
+/// #[DelayedTargetValidation]
+/// #[ZendTestAttribute]
+/// function f() {}
+/// class C { #[DelayedTargetValidation] #[ZendTestAttribute] const K = 1; }
+/// foreach ([new ReflectionFunction('f'), new ReflectionClassConstant('C', 'K')] as $r) {
+///     try { $r->getAttributes()[1]->newInstance(); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// }
+/// #[ZendTestAttribute] class D {}
+/// var_dump(get_class((new ReflectionClass('D'))->getAttributes()[0]->newInstance()));
+/// var_dump(get_class((new ReflectionMethod('ZendAttributeTest', 'testMethod'))->getAttributes()[0]->newInstance()));
+/// ```
+/// ```expect
+/// Error: Only classes can be marked with #[ZendTestAttribute]
+/// Error: Only classes can be marked with #[ZendTestAttribute]
+/// string(17) "ZendTestAttribute"
+/// string(17) "ZendTestAttribute"
+/// ```
+fn only_classes(_: &Attribute, target: AttributeTarget, _: Option<&[u8]>) -> Option<String> {
+    (target != AttributeTarget::Class)
+        .then(|| "Only classes can be marked with #[ZendTestAttribute]".to_owned())
+}
 
 /// `#[Attribute(Attribute::TARGET_ALL|Attribute::IS_REPEATABLE)] final
 /// class ZendTestRepeatableAttribute`.
