@@ -109,10 +109,11 @@ pub(crate) fn encoding_handler(
             None => pairs.push((url_decode(var), Vec::new())),
         }
     }
+    // `PG(max_input_vars)`, what `OnUpdateLongGEZero` stored: the
+    // quantity rule's reading of the entry.
     let max_input_vars = req
         .ini_get(b"max_input_vars")
-        .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<i64>().ok())
-        .unwrap_or(1000);
+        .map_or(0, Request::ini_parse_bytes);
     if i64::try_from(pairs.len()).unwrap_or(i64::MAX) > max_input_vars {
         let text = format!(
             "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
@@ -209,6 +210,21 @@ pub(crate) fn treat_data(
 ///   ["c"]=>
 ///   string(0) ""
 /// }
+/// ```
+///
+/// `max_input_vars` is `PG(max_input_vars)`, the quantity rule's
+/// reading, so `0x1` is one:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'max_input_vars=0x1', '-r', 'var_dump(mb_parse_str("a=1&b=2", $r), $r);'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// ```
+/// ```expect process
+/// Warning: mb_parse_str(): Input variables exceeded 1. To increase the limit change max_input_vars in php.ini. in Command line code on line 1
+/// bool(false)
+/// array(0) {
+/// }
+/// 0
 /// ```
 #[php_function]
 fn mb_parse_str(

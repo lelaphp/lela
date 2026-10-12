@@ -84,7 +84,7 @@ mod include;
 mod ini;
 pub(crate) mod ini_files;
 pub use ini::IniEntry;
-pub(crate) use ini::TypedIni;
+pub(crate) use ini::{LongEntry, LongHandler, TypedIni};
 pub use ini_files::IniFiles;
 mod hold;
 mod hooks;

@@ -261,8 +261,7 @@ impl Request {
             return true;
         }
         let path = self.cwd().join(std::ffi::OsStr::from_bytes(named));
-        let mode =
-            crate::ini_quantity::parse(self.ini_get(b"error_log_mode").unwrap_or_default()).0;
+        let mode = self.ini_long(b"error_log_mode");
         let mode = u32::try_from(mode)
             .ok()
             .filter(|mode| (1..=0o777).contains(mode))
@@ -1017,9 +1016,7 @@ impl Request {
 
     /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
     fn xmlrpc_error_number(&self) -> i64 {
-        self.ini_get(b"xmlrpc_error_number")
-            .and_then(|value| String::from_utf8_lossy(value).parse().ok())
-            .unwrap_or(0)
+        self.ini_long(b"xmlrpc_error_number")
     }
 
     /// `display_errors`, php's three values: off, the body, and the
