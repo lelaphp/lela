@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=c61b394133b61dd9149fba3055a9542d188f0d018cfecd985290c044f98386ff out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=a8c41570d0f43f2203d5531c70214984a7472aaf88d5b24e4850c1963acceab1 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=c6a0ce7e75894fd54638b517a4ea345219ee8f80cd0269ac9c141aa760e9406e out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 406 |  |
 
-<!-- /computed in=990900f53609b828c43c5d9472fbbaaf9ff4791a2a44b8b70f209bb2ca92f37a out=867402173152453e70031b1021ca95e90659bd0d7300684cd7385688a6764e45 -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate |
@@ -170,7 +170,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern |
 | divergence.reason |  | check |
 
-<!-- /computed in=563f4fe3d64f1a7212727f35e42b18a397676f448a3fe3e6b63604a6a2a3b94a out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
+<!-- /computed in=45d01a88676a780d87281ed975b966f605061637a8e24440f930d4df31bf6a72 out=d3e2c834761d6c1ba6eae3bc2e968dda586e206e970784bd42eb4230ff4f9df6 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
