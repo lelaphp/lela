@@ -1414,10 +1414,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         ));
     };
     let name = req.method_name_string(function)?;
-    let this = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let this = if req.takes_this(function) {
         req.addref(&object.as_value());
         Some(object)
     } else {
@@ -1450,7 +1447,10 @@ fn dynamic_call_string(
     if let Some(at) = crate::api::request::compound_split(name) {
         let name = name.to_vec();
         let class = dynamic_call_class(req, &name[..at])?;
-        return dynamic_call_static(req, class, &name[at + 2..], this);
+        // `zend_string_init` of the part past `::`, the name the call
+        // carries, as php's `zend_init_dynamic_call_string` makes it.
+        let method = req.string(name.get(at + 2..).unwrap_or_default())?;
+        return dynamic_call_static(req, class, method, this);
     }
     let Some(function) = exec::find_function(req, Bare::of(name)) else {
         return Err(crate::api::raising::throw_error(
@@ -1479,6 +1479,25 @@ fn dynamic_call_string(
 /// `get_method` and the receiver that may hand the call to, with the
 /// access rule `zend_std_get_method` holds it to, the receiver then the
 /// called scope; a `static` method on an object called with no receiver.
+///
+/// The method name the call carries is the member's own string with one
+/// more owner, and the class name is held across the autoloader it may
+/// serve, so a call by a pair leaves the heap where it stood, as a call
+/// by `Class::method` does with the name it cuts:
+///
+/// ```php
+/// class C { function m() { return 1; } static function s() { return 2; } }
+/// spl_autoload_register(function ($c) { eval("class $c { static function t() { return 3; } }"); });
+/// $o = new C; $n = str_repeat("m", 1); $c = str_repeat("C", 1); $d = str_repeat("D", 1);
+/// $r = [$o, $n]() + [$c, "s"]() + "C::s"() + [$d, "t"]();
+/// $b = memory_get_usage();
+/// for ($i = 0; $i < 3; $i++) { $r += [$o, $n]() + [$c, "s"]() + "C::s"() + [$d, "t"](); }
+/// var_dump($r, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(32)
+/// int(0)
+/// ```
 fn dynamic_call_array(
     req: &mut Request,
     array: PhpArray,
@@ -1502,32 +1521,49 @@ fn dynamic_call_array(
             "First array member is not a valid class name or object",
         ));
     }
-    let Some(method) = second.as_str_bytes().map(<[u8]>::to_vec) else {
+    let Some(method) = second.as_php_string().copied() else {
         return Err(refuse(req, "Second array member is not a valid method"));
     };
-    if let Some(class) = first.as_str_bytes().map(<[u8]>::to_vec) {
-        let class = dynamic_call_class(req, &class)?;
-        return dynamic_call_static(req, class, &method, this);
+    // The members' strings are the call's from here, one owner each,
+    // as php's `zend_init_dynamic_call_array` holds them: the class name
+    // across the autoloader it may serve, and the method name as the
+    // name the call carries, never a copy of either.
+    req.addref(&second);
+    if let Some(class) = first.as_php_string().copied() {
+        req.addref(&first);
+        let class = dynamic_call_class(req, class.as_bytes());
+        req.release(first);
+        return match class {
+            Ok(class) => dynamic_call_static(req, class, method, this),
+            Err(thrown) => {
+                req.release(second);
+                Err(thrown)
+            }
+        };
     }
     let Some(object) = first.as_object().copied() else {
+        req.release(second);
         return Err(refuse(
             req,
             "First array member is not a valid class name or object",
         ));
     };
-    let (function, receiver) = method_on(
+    let found = method_on(
         req,
         object,
-        &exec::Lowered::of(&method),
+        &exec::Lowered::of(method.as_bytes()),
         &second,
         Undefined::OnHanded,
-    )?;
+    );
+    let (function, receiver) = match found {
+        Ok(found) => found,
+        Err(thrown) => {
+            req.release(second);
+            return Err(thrown);
+        }
+    };
     let object = receiver.unwrap_or(object);
-    let name = req.string(&method)?;
-    let this = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let this = if req.takes_this(function) {
         req.addref(&object.as_value());
         Some(object)
     } else {
@@ -1535,7 +1571,7 @@ fn dynamic_call_array(
     };
     Ok(DynamicTarget {
         function,
-        name: Some(name),
+        name: Some(method),
         this,
         called_scope: Some(object.class()),
         closure: None,
@@ -1575,23 +1611,32 @@ fn dynamic_call_class(
 fn dynamic_call_static(
     req: &mut Request,
     class: crate::api::values::ClassId,
-    method: &[u8],
+    method: PhpString,
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
-    let written = Value::string(req.string(method)?);
-    let found = static_method(req, class, &exec::Lowered::of(method), &written, this);
-    req.release(written);
-    let (function, _) = found?;
-    if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
-        return Err(non_static_method_call(req, function));
-    }
-    let name = req.string(method)?;
+    let written = Value::string(method);
+    let found = static_method(
+        req,
+        class,
+        &exec::Lowered::of(method.as_bytes()),
+        &written,
+        this,
+    );
+    let refused = match found {
+        Ok((function, _)) if req.takes_this(function) => Err(non_static_method_call(req, function)),
+        Ok((function, _)) => Ok(function),
+        Err(thrown) => Err(thrown),
+    };
+    let function = match refused {
+        Ok(function) => function,
+        Err(thrown) => {
+            req.release(written);
+            return Err(thrown);
+        }
+    };
     Ok(DynamicTarget {
         function,
-        name: Some(name),
+        name: Some(method),
         this: None,
         called_scope: Some(class),
         closure: None,
@@ -5916,15 +5961,14 @@ fn method_on(
         };
         return Err(undefined_method(req, named.class(), written));
     };
-    if receiver.is_some() {
+    if receiver.is_some() || req.method_accessible(function) {
         return Ok((function, receiver));
     }
-    let function = if req.method_accessible(function) {
-        function
-    } else {
-        req.call_trampoline(object.class(), bytes, false)
-            .unwrap_or(function)
-    };
+    // The scope may not call it: `__call` takes the call where the class
+    // has one, and otherwise the access rule's `Error`.
+    let function = req
+        .call_trampoline(object.class(), bytes, false)
+        .unwrap_or(function);
     req.check_method_access(function, bytes)?;
     Ok((function, None))
 }

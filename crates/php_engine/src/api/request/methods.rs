@@ -598,16 +598,24 @@ impl Request {
     /// handler that threw stops the call. The answer is whether the
     /// method is a trait's, which is the callee php never caches.
     pub(crate) fn static_method_found(&mut self, function: Function) -> Result<bool, Thrown> {
-        let Some(decl) = self.method_decl(function) else {
+        let Some(is_abstract) = self.method_decl(function).map(|decl| decl.is_abstract) else {
             return Ok(false);
         };
-        let (is_abstract, name) = (decl.is_abstract, decl.function.name.clone());
         let Some(class) = self.method_class(function) else {
             return Ok(false);
         };
         let is_trait = self
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        // The name is spelled only for the `Error` or the deprecation:
+        // nearly every call is neither, and makes no string.
+        if !is_abstract && !is_trait {
+            return Ok(false);
+        }
+        let name = self
+            .method_decl(function)
+            .map(|decl| decl.function.name.clone())
+            .unwrap_or_default();
         let shown = format!(
             "{}::{}",
             self.class_name(class),

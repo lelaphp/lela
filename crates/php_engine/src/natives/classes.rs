@@ -860,10 +860,15 @@ fn method_exists(
     };
     let lowered = crate::exec::Lowered::of(method.as_bytes());
     if let Some(function) = req.method_named(class, &lowered) {
+        // An object's table answers whatever the method's visibility, so
+        // the declaration is read only for a class named by string.
+        if is_object {
+            return Ok(true);
+        }
         let private = req
             .method_decl(function)
             .is_some_and(|decl| decl.visibility == Visibility::Private);
-        return Ok(is_object || !private || req.method_class(function) == Some(class));
+        return Ok(!private || req.method_class(function) == Some(class));
     }
     // `Z_OBJ_HT_P(klass)->get_method`, and the object it hands an
     // unknown name to; a trampoline answers `false`.
