@@ -1047,14 +1047,14 @@ impl RuntimeCache {
 
 /// `ZEND_OBSERVER_DATA(function)` reached through the function rather
 /// than a frame, as `zend_observer_add_begin_handler` and its kin reach
-/// it: the observer slot of `code`'s runtime cache in the request's map
-/// table, none where the cache was never laid down, php's
+/// it: the observer slot of the runtime cache at `ptr`, the function's
+/// own ([`FrameShape`](crate::api::request::FrameShape)), in the
+/// request's map table, none where the cache was never laid down, php's
 /// `RUN_TIME_CACHE` still `NULL`.
-pub(crate) fn observer_slot_of<'map>(
-    map: &'map mut RuntimeCaches,
-    code: &OpArray,
-) -> Option<&'map mut crate::observer::Slot> {
-    let ptr = CacheAt::of(code.runtime_cache);
+pub(crate) fn observer_slot_of(
+    map: &mut RuntimeCaches,
+    ptr: CacheAt,
+) -> Option<&mut crate::observer::Slot> {
     map.get(ptr)?.slots.as_ref()?;
     Some(&mut map.map(ptr).observer)
 }
@@ -1088,16 +1088,18 @@ pub(crate) fn observer_slot_of<'map>(
 /// 3
 /// ```
 ///
-/// A closure rebound to another scope, and a trait's method in each
-/// class that uses it, reads the cache its op array has, where php
-/// gives each a cache of its own (`zend_create_closure`,
-/// `Z/Zend/zend_closures.c:794`; `zend_add_trait_method`,
-/// `Z/Zend/zend_inheritance.c:2369`) because its
-/// slots hold what the scope decides. A function, a class and a
-/// constant resolve the same in every scope; a method's callee does
-/// not, so [`Cached::ClassAndCallee`] carries the scope it was resolved
-/// from and answers no other. The day a slot here holds a property
-/// offset, a rebound closure takes its own cache there.
+/// A trait's method in each class that uses it reads a cache of its
+/// own, laid down at the map pointer its class's row was given
+/// (`zend_add_trait_method`, `Z/Zend/zend_inheritance.c:2369`, whose
+/// copy `function_add_ref` gives a fresh `run_time_cache`), since its
+/// slots hold what the scope decides: the activation lays the cache the
+/// function's [`FrameShape`](crate::api::request::FrameShape) names,
+/// which for a copy is not its op array's. A closure rebound to another
+/// scope reads the cache its op array has, where php gives it one of
+/// its own (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). A
+/// function, a class and a constant resolve the same in every scope; a
+/// method's callee does not, so [`Cached::ClassAndCallee`] carries the
+/// scope it was resolved from and answers no other.
 pub(crate) fn init_runtime_cache(map: &mut RuntimeCaches, code: &OpArray, body: Body) {
     let at = CacheAt::of(code.runtime_cache);
     if body == Body::Main {
@@ -1177,12 +1179,12 @@ pub(crate) enum Cached {
     /// into each class that uses it with a cache of its own
     /// (`zend_add_trait_method`, `Z/Zend/zend_inheritance.c:2369`), and
     /// a closure bound to another scope is given a fresh one
-    /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). This
-    /// engine's cache is one per op array, so the pair is read back only
-    /// in the scope that wrote it, and two scopes calling through one
-    /// opline take the slot in turn where php's keep one each. What the
-    /// slot holds is what was asked and what answered, never how the
-    /// answer was found.
+    /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). A trait's
+    /// method here reads a cache of its own in each class too
+    /// ([`init_runtime_cache`]); a closure rebound to another scope reads
+    /// its op array's, so the pair is read back only in the scope that
+    /// wrote it. What the slot holds is what was asked and what
+    /// answered, never how the answer was found.
     ///
     /// `from` is the function of the frame that wrote the pair where
     /// that frame is no closure's, which fixes its scope, as

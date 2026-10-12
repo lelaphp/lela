@@ -30,7 +30,73 @@ use super::{
 /// rows of its methods and hooks, each method's beside its index.
 pub(super) struct Members {
     served: Vec<Option<ClassNative>>,
-    rows: Vec<(Option<u32>, UserFunction)>,
+    rows: Vec<MemberRow>,
+}
+
+/// One member's row before it is numbered: its index among the methods,
+/// none for a hook, the function it is, and where its runtime cache is.
+struct MemberRow {
+    method: Option<u32>,
+    user: UserFunction,
+    cache: CacheOf,
+}
+
+/// Whose runtime cache a member's function reads: its op array's own
+/// map pointer, or one of its own where the function is a copy of
+/// another class's. php copies a trait's method into each class that
+/// uses it (`zend_add_trait_method`) and a trait's hooked property's
+/// hooks likewise (`zend_do_traits_property_binding`), and
+/// `function_add_ref` gives each copy a fresh `run_time_cache` map
+/// pointer (`Z/Zend/zend_compile.c:1256`), so each scope the trait's
+/// code runs in has slots of its own. The copy shares the op array. A
+/// class the request declares gives its copies caches of the request's
+/// ([`exec::RuntimeCaches::own_cache`]); a class published into the
+/// engine's arena, map pointers of the engine's, which every request
+/// lays its own cache down at.
+///
+/// So a call through one opline of the trait's code primes a slot in
+/// each class, and a class's `get_method` that would refuse an object
+/// is not asked again where the slot answers, as in php:
+///
+/// ```php
+/// class Lazy extends RecursiveIteratorIterator {
+///     function __construct($init) { if ($init) parent::__construct(new RecursiveArrayIterator([])); }
+///     function bar() { return "bar"; }
+/// }
+/// trait T { function call($it) { return $it->bar(); } }
+/// class A { use T; }
+/// class B { use T; }
+/// foreach ([[new A, new Lazy(true)], [new B, new Lazy(true)], [new A, new Lazy(false)]] as [$by, $it]) {
+///     try { echo $by->call($it), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// bar
+/// bar
+/// bar
+/// ```
+///
+/// The same classes in a file opcache holds are linked once and
+/// published, and their copies read the engine's map pointers:
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/traitcache' . bin2hex(random_bytes(8));
+/// mkdir($dir);
+/// file_put_contents("$dir/classes.php", '<?php class Lazy extends RecursiveIteratorIterator { function __construct($init) { if ($init) parent::__construct(new RecursiveArrayIterator([])); } function bar() { return "bar"; } } trait T { function call($it) { return $it->bar(); } } class A { use T; } class B { use T; }');
+/// file_put_contents("$dir/main.php", '<?php require __DIR__ . "/classes.php"; foreach ([[new A, new Lazy(true)], [new B, new Lazy(true)], [new A, new Lazy(false)]] as [$by, $it]) { try { echo $by->call($it), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; } }');
+/// touch("$dir/classes.php", time() - 10);
+/// echo shell_exec(escapeshellarg(PHP_BINARY) . " -n -d opcache.enable_cli=1 $dir/main.php");
+/// array_map('unlink', glob("$dir/*")); rmdir($dir);
+/// ```
+/// ```expect process
+/// bar
+/// bar
+/// bar
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CacheOf {
+    OpArray,
+    Copy,
 }
 
 /// What numbering a class's members settles: the function each of its
@@ -42,9 +108,9 @@ impl Members {
     /// in order and a class native left for its caller.
     fn functions(&self, numbers: std::ops::Range<u32>) -> Vec<Option<Function>> {
         let mut functions = vec![None; self.served.len()];
-        for (number, (method, _)) in numbers.zip(&self.rows) {
+        for (number, row) in numbers.zip(&self.rows) {
             if let Some(slot) =
-                method.and_then(|method| functions.get_mut(usize::try_from(method).ok()?))
+                (row.method).and_then(|method| functions.get_mut(usize::try_from(method).ok()?))
             {
                 *slot = Some(Function(number));
             }
@@ -683,12 +749,12 @@ impl Request {
             .collect();
         // The rows the class's members take, in the order php's tables
         // list them, each method's beside its place among the methods.
-        let mut rows: Vec<(Option<u32>, UserFunction)> = Vec::new();
+        let mut rows: Vec<MemberRow> = Vec::new();
         for ((method, served), decl) in (0u32..).zip(&served).zip(&decl.methods) {
             if served.is_some() {
                 continue;
             }
-            let Some((unit, body)) = self.method_body(row, method) else {
+            let Some((unit, body, cache)) = self.method_body(row, method) else {
                 continue;
             };
             let member = Some(Member {
@@ -697,16 +763,17 @@ impl Request {
             });
             let flags = crate::attributes::Flags::of(&decl.function.attributes);
             let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body));
-            rows.push((
-                Some(method),
-                UserFunction {
+            rows.push(MemberRow {
+                method: Some(method),
+                user: UserFunction {
                     unit,
                     body,
                     member,
                     flags,
                     shape,
                 },
-            ));
+                cache,
+            });
         }
         // Each hook of the class's own properties, `prop_info->hooks`,
         // a function of its own that php's function table never lists.
@@ -715,7 +782,7 @@ impl Request {
                 let Some(hook) = declared.hooks.as_ref().and_then(|hooks| hooks.of(kind)) else {
                     continue;
                 };
-                let Some((unit, body)) = self.hook_body(row, property, kind) else {
+                let Some((unit, body, cache)) = self.hook_body(row, property, kind) else {
                     continue;
                 };
                 let member = Some(Member {
@@ -724,16 +791,17 @@ impl Request {
                 });
                 let flags = crate::attributes::Flags::of(&hook.function.attributes);
                 let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body));
-                rows.push((
-                    None,
-                    UserFunction {
+                rows.push(MemberRow {
+                    method: None,
+                    user: UserFunction {
                         unit,
                         body,
                         member,
                         flags,
                         shape,
                     },
-                ));
+                    cache,
+                });
             }
         }
         Some(Members { served, rows })
@@ -747,8 +815,17 @@ impl Request {
         let count = u32::try_from(members.rows.len()).ok()?;
         let numbers = first..first.checked_add(count)?;
         let mut functions = members.functions(numbers.clone());
-        self.user_functions
-            .extend(members.rows.into_iter().map(|(_, row)| row));
+        for MemberRow {
+            mut user, cache, ..
+        } in members.rows
+        {
+            // A copy's runtime cache is the request's, as the class is,
+            // held for the rest of the request.
+            if cache == CacheOf::Copy {
+                user.shape.cache = self.map.own_cache();
+            }
+            self.user_functions.push(user);
+        }
         for (slot, served) in functions.iter_mut().zip(members.served) {
             if let Some(served) = served {
                 *slot = Function::local_class_native(self.class_natives.len());
@@ -765,9 +842,21 @@ impl Request {
         let count = u32::try_from(members.rows.len()).ok()?;
         let numbers = self.arena.reserve_functions(count)?;
         let mut functions = members.functions(numbers.clone());
-        for (number, (_, row)) in numbers.clone().zip(members.rows) {
+        for (
+            number,
+            MemberRow {
+                mut user, cache, ..
+            },
+        ) in numbers.clone().zip(members.rows)
+        {
+            // A copy published with its class takes a map pointer of the
+            // engine's, `ZEND_MAP_PTR_NEW`, as a published op array does,
+            // so every request lays its own cache down at that offset.
+            if cache == CacheOf::Copy {
+                user.shape.cache = crate::engine::new_map_ptr(&self.shared.map_ptr_last);
+            }
             self.arena
-                .publish_function(Function(number), row)
+                .publish_function(Function(number), user)
                 .then_some(())?;
         }
         for (slot, served) in functions.iter_mut().zip(members.served) {
@@ -808,15 +897,15 @@ impl Request {
         declared: &'r Declared,
         property: u32,
         kind: HookKind,
-    ) -> Option<(Arc<Unit>, exec::Body)> {
+    ) -> Option<(Arc<Unit>, exec::Body, CacheOf)> {
         let decl = declared.decl()?;
         let name = &decl.properties.get(usize::try_from(property).ok()?)?.name;
         let own = declared
             .unit
             .classes
             .get(usize::try_from(declared.at).ok()?)?;
-        let (from, at) = match own.properties.iter().position(|p| p.name == *name) {
-            Some(at) => (declared, at),
+        let (from, at, cache) = match own.properties.iter().position(|p| p.name == *name) {
+            Some(at) => (declared, at, CacheOf::OpArray),
             None => decl.traits.iter().find_map(|trait_name| {
                 let holder = self.class_named(trait_name.into())?;
                 let from = self.declared_row(holder)?;
@@ -825,11 +914,11 @@ impl Request {
                     .properties
                     .iter()
                     .position(|p| p.name == *name && p.hooks.is_some())?;
-                Some((from, at))
+                Some((from, at, CacheOf::Copy))
             })?,
         };
         let body = exec::Body::hook(&from.unit, from.at, u32::try_from(at).ok()?, kind)?;
-        Some((Arc::clone(&from.unit), body))
+        Some((Arc::clone(&from.unit), body, cache))
     }
 
     /// Where the op array of the method at `method` of a class the
@@ -883,21 +972,21 @@ impl Request {
         &'r self,
         declared: &'r Declared,
         method: u32,
-    ) -> Option<(Arc<Unit>, exec::Body)> {
+    ) -> Option<(Arc<Unit>, exec::Body, CacheOf)> {
         let Some(composed) = &declared.composed else {
             let body = exec::Body::method(&declared.unit, declared.at, method)?;
-            return Some((Arc::clone(&declared.unit), body));
+            return Some((Arc::clone(&declared.unit), body, CacheOf::OpArray));
         };
         let body = composed.bodies.get(usize::try_from(method).ok()?)?;
         let own = composed.decl.name.0.eq_ignore_ascii_case(&body.class.0);
-        let from = if own {
-            declared
+        let (from, cache) = if own {
+            (declared, CacheOf::OpArray)
         } else {
             let holder = self.class_named((&body.class).into())?;
-            self.declared_row(holder)?
+            (self.declared_row(holder)?, CacheOf::Copy)
         };
         let body = exec::Body::method(&from.unit, from.at, body.method)?;
-        Some((Arc::clone(&from.unit), body))
+        Some((Arc::clone(&from.unit), body, cache))
     }
 
     /// `do_bind_class` at a `ZEND_DECLARE_CLASS`: the declaration the

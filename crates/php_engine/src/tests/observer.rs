@@ -1661,3 +1661,46 @@ fn a_generator_is_observed_through_yield_from_throw_close_and_a_fiber() {
         ]
     );
 }
+
+/// A trait's method in each class that uses it reads a runtime cache of
+/// its own, `function_add_ref`'s fresh map pointer over
+/// `zend_add_trait_method`'s copy, so the observer is asked of it once
+/// per class, `A::f` and `B::f`, and not again for `A::f`, as
+/// `zend_test`'s observer prints it. A class a held file's link
+/// publishes takes an engine map pointer for its copy instead; the
+/// witness on `CacheOf` serves that through opcache.
+#[test]
+fn a_trait_method_is_asked_of_once_per_class_that_uses_it() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("trait_copies");
+    rec.mark("built");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\ntrait T { function f() { return 1; } }\nclass A { use T; }\nclass B { use T; }\n\
+         (new A)->f(); (new B)->f(); (new A)->f();\n",
+    );
+    rec.mark("served");
+    let methods: Vec<Event> = observed(&rec.events().between("built", "served"))
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Ext(0, ObserverInit(name) | Begin(name)) if name.ends_with("::f")
+            )
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            init(0, "A::f"),
+            begin(0, "A::f"),
+            init(0, "B::f"),
+            begin(0, "B::f"),
+            begin(0, "A::f"),
+        ]
+    );
+}

@@ -271,9 +271,7 @@ impl Request {
         if let Some(place) = self.native_place(function) {
             return self.observing.natives.get_mut(place);
         }
-        let user = self.user_function(function)?;
-        let (unit, body) = (std::sync::Arc::clone(&user.unit), user.body);
-        let code = exec::body_of(&unit, body)?;
-        exec::observer_slot_of(&mut self.map, code)
+        let cache = self.user_function(function)?.shape.cache;
+        exec::observer_slot_of(&mut self.map, cache)
     }
 }
