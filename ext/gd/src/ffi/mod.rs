@@ -1056,16 +1056,15 @@ impl Im {
             // SAFETY: a live image; libgd answers a new one or NULL.
             return Image::of(unsafe { gdImageRotateInterpolated(self.at(), angle, bg) });
         }
-        let bg = match usize::try_from(bg) {
-            Ok(i) if i < MAX_COLORS => {
-                let im = self.fields();
-                // `gdTrueColorAlpha`, as libgd composes it.
-                (im.alpha[i] << 24)
-                    .wrapping_add(im.red[i] << 16)
-                    .wrapping_add(im.green[i] << 8)
-                    .wrapping_add(im.blue[i])
-            }
-            _ => bg,
+        let bg = if usize::try_from(bg).is_ok_and(|i| i < MAX_COLORS) {
+            let [r, g, b, a] = self.rgba(bg);
+            // `gdTrueColorAlpha` of the palette entry, as libgd composes it.
+            (a << 24)
+                .wrapping_add(r << 16)
+                .wrapping_add(g << 8)
+                .wrapping_add(b)
+        } else {
+            bg
         };
         // SAFETY: a live image; libgd answers a new one or NULL.
         let clone = Image::of(unsafe { gdImageClone(self.at()) })?;
@@ -1078,8 +1077,8 @@ impl Im {
     }
 
     /// Whether this image and angle are the ones `rotate` makes here, as
-    /// `gdImageRotateInterpolated` reads them: its checks in its order,
-    /// `angle_rounded` as it rounds it.
+    /// `gdImageRotateInterpolated` reads them: its checks, `angle_rounded`
+    /// as it rounds it and its square cases as its `switch` lists them.
     fn rotates_palette_by_nearest(self, angle: f32, bg: i32) -> bool {
         /// `GD_NEAREST_NEIGHBOUR`.
         const NEAREST_NEIGHBOUR: c_int = 16;
