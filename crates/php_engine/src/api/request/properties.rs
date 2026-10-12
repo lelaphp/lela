@@ -156,11 +156,19 @@ impl Default for Properties {
 }
 
 impl Request {
-    /// `EG(fake_scope) = scope`, and the scope that stood, for a caller
-    /// that puts it back: a call stands in its own scope, and
-    /// `clone with` writes in the clone's.
-    pub(super) fn replace_fake_scope(&mut self, scope: Option<ClassId>) -> Option<ClassId> {
-        std::mem::replace(&mut self.properties.fake_scope, scope)
+    /// `EG(fake_scope) = scope` for the length of `f`, and the scope
+    /// that stood put back after it, whatever `f` answers: the one form
+    /// every save of php's fake scope takes, so `properties.fake_scope`
+    /// is written nowhere else.
+    pub(super) fn in_fake_scope<R>(
+        &mut self,
+        scope: Option<ClassId>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = std::mem::replace(&mut self.properties.fake_scope, scope);
+        let out = f(self);
+        self.properties.fake_scope = saved;
+        out
     }
 
     /// `zend_free_source_list`: the row the cell's word names, dropped
@@ -267,10 +275,7 @@ impl Request {
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let table = self.object_handlers(object.heap());
-        let saved = std::mem::replace(&mut self.properties.fake_scope, scope);
-        let done = table.write_property(self, object, name, value);
-        self.properties.fake_scope = saved;
-        done
+        self.in_fake_scope(scope, |req| table.write_property(req, object, name, value))
     }
 
     /// `f` called with `EG(fake_scope)` the class whose declaration
@@ -288,11 +293,8 @@ impl Request {
             .rev()
             .find(|(_, _, p)| &*p.name.0 == name)
             .map(|(_, declaring, _)| declaring);
-        let saved = self.properties.fake_scope;
-        self.properties.fake_scope = declaring.or(saved);
-        let done = f(self);
-        self.properties.fake_scope = saved;
-        done
+        let scope = declaring.or(self.properties.fake_scope);
+        self.in_fake_scope(scope, f)
     }
 
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
@@ -330,10 +332,7 @@ impl Request {
     /// on a class with a private constructor is the witness, in
     /// `ext/reflection`.
     pub fn with_fake_scope<R>(&mut self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
-        let saved = self.properties.fake_scope.replace(class);
-        let out = f(self);
-        self.properties.fake_scope = saved;
-        out
+        self.in_fake_scope(Some(class), f)
     }
 
     /// `ce->default_properties_count`: the declared instance properties

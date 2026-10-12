@@ -26,7 +26,7 @@ use php_macros::php_class;
 use crate::api::__private::native_function;
 use crate::api::abi::{
     Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, GcTable, Instance,
-    NamedVariadic, ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
+    NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
@@ -40,15 +40,7 @@ use crate::trampoline::{public_method, variadic};
 /// is uncloneable (`zend_register_default_exception`), and the rest
 /// `Std`'s. A user class extending a throwable is reached through this
 /// table, as php's inherits `create_object`.
-struct ThrowableHandlers;
-
-impl ObjectHandlers for ThrowableHandlers {
-    fn clone_obj(&self) -> Option<CloneObj> {
-        None
-    }
-}
-
-static THROWABLE: ThrowableHandlers = ThrowableHandlers;
+static THROWABLE: Refusals = Refusals::NONE.cloning();
 
 /// Whether `handlers` is the throwables' table: php's
 /// `zend_default_exception_new`, the `create_object` of every class
@@ -1326,7 +1318,7 @@ impl ArrayAccess {
 /// seven properties and eleven methods in its order: the private
 /// `__clone`, the constructor, `__wakeup` with its tentative `void`, the
 /// seven final getters and `__toString`. Its objects are reached through
-/// [`ThrowableHandlers`], which a user class extending it inherits, as
+/// [`THROWABLE`], which a user class extending it inherits, as
 /// php's inherits `create_object`. `Throwable` is declared on it and on
 /// `Error` alone, and the linker carries it down (design §6.2);
 /// `Stringable` is never written, `Throwable` extending it.

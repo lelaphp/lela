@@ -1749,9 +1749,8 @@ impl Request {
         // them again after, whatever a write threw; `EG(fake_scope) =
         // scope` for the writes and put back after them.
         Self::mark_reinitable(*new, true);
-        let saved = self.replace_fake_scope(scope);
-        let written = self.clone_with_writes(*new, table, properties);
-        self.replace_fake_scope(saved);
+        let written =
+            self.in_fake_scope(scope, |req| req.clone_with_writes(*new, table, properties));
         Self::mark_reinitable(*new, false);
         if let Err(thrown) = written {
             new.give_up(self);
