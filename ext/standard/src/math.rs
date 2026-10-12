@@ -947,12 +947,16 @@ fn base_to_value(req: &mut Request, text: &[u8], base: u32) -> Number {
 /// ```
 ///
 /// The white space at either end is C's `isspace` under the request's
-/// `LC_CTYPE`, 0xA0 among it under macOS's `C.UTF-8`, php's default.
+/// `LC_CTYPE`, `\v` and `\f` among it, and under `C` not 0xA0.
 ///
 /// ```php
-/// var_dump(bindec("\xa0101\xa0"));
+/// var_dump(bindec("\v101\f"));
+/// setlocale(LC_CTYPE, "C"); var_dump(bindec("\xa0101"));
 /// ```
 /// ```expect
+/// int(5)
+///
+/// Deprecated: Invalid characters passed for attempted conversion, these have been ignored in %s on line 3
 /// int(5)
 /// ```
 #[php_function]

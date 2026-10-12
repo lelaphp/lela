@@ -19,8 +19,9 @@
 
 /// C's `isspace` under the thread's `LC_CTYPE`, the request's locale
 /// where `setlocale()` installed one: the six bytes [`is_whitespace`]
-/// names in the `C` locale, and `0xA0` besides under macOS's `C.UTF-8`,
-/// php's default `LC_CTYPE`.
+/// names in the `C` locale, and under php's default `C.UTF-8` whatever
+/// the C library counts besides: `0xA0` on macOS and nothing on glibc,
+/// which `php_process`'s own test holds, so no witness pins it (#2796).
 pub use php_process::is_space;
 
 /// php's own spelling of the white space C's `isspace` reads in the `C`
@@ -37,19 +38,17 @@ pub(crate) fn is_whitespace(byte: u8) -> bool {
 /// that is not one, zero where there are none, and `LONG_MAX` or
 /// `LONG_MIN` by the sign where the digits spell a number past the long.
 ///
-/// `precision` is `ZEND_ATOL` of its text, which skips the `0xA0` that
-/// macOS's `C.UTF-8` counts as space, and not once a program has set
-/// `LC_CTYPE` to `C`; the long cut to `int` is [`atoi`]'s.
+/// `precision` is `ZEND_ATOL` of its text, which skips the white space
+/// [`is_space`] reads, and under `C` not `0xA0`; the long cut to `int`
+/// is [`atoi`]'s.
 ///
 /// ```php
-/// ini_set('precision', "\xa03"); echo 1/3, "\n";
 /// ini_set('precision', " \t\v4"); echo 1/3, "\n";
 /// ini_set('precision', "4294967301"); echo 1/3, "\n";
 /// setlocale(LC_CTYPE, "C");
 /// ini_set('precision', "\xa04"); echo 1/3, "\n";
 /// ```
 /// ```expect
-/// 0.333
 /// 0.3333
 /// 0.33333
 /// 0.3

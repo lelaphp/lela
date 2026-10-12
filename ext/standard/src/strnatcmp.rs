@@ -174,19 +174,17 @@ pub(super) fn strnatcmp(string1: PhpString, string2: PhpString) -> i64 {
 /// ```
 ///
 /// The capitals and the spaces are the request's `LC_CTYPE`'s: `\xe9`
-/// folds to `\xc9` under an ISO-8859-1 locale, and macOS's `C.UTF-8`
+/// folds to `\xc9` under an ISO-8859-1 locale, and neither it nor `C`
 /// skips `\xa0` as a space.
 ///
 /// ```php
 /// foreach (['C', 'fr_FR.ISO8859-1'] as $l) { setlocale(LC_CTYPE, $l); var_dump(strnatcasecmp("\xe9t\xe92", "\xc9T\xc910"), strnatcmp("a\xa01", "a1")); }
-/// setlocale(LC_CTYPE, 'C.UTF-8'); var_dump(strnatcmp("a\xa01", "a1"));
 /// ```
 /// ```expect locale=fr_FR.ISO8859-1
 /// int(1)
 /// int(1)
 /// int(-1)
 /// int(1)
-/// int(0)
 /// ```
 #[php_function]
 pub(super) fn strnatcasecmp(string1: PhpString, string2: PhpString) -> i64 {

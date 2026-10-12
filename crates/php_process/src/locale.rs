@@ -58,4 +58,39 @@ mod tests {
         let spaces: Vec<u8> = (0..=u8::MAX).filter(|b| is_space(*b)).collect();
         assert_eq!(spaces, b"\t\n\x0b\x0c\r ");
     }
+
+    /// Under `C.UTF-8`, php's default, the bytes past the six are the C
+    /// library's: macOS's counts `0xA0` and glibc's nothing, so this test
+    /// and not a witness, whose pin is one platform's oracle, holds that
+    /// reading (#2796). The locale is the test thread's own, so the other
+    /// tests of the process keep the `C` locale.
+    #[test]
+    fn is_space_reads_the_c_libraries_c_utf8() {
+        // SAFETY: the name is a static NUL-terminated string `newlocale`
+        // reads and keeps nothing of, and no base locale is handed over.
+        let utf8 = unsafe {
+            libc::newlocale(
+                libc::LC_CTYPE_MASK,
+                c"C.UTF-8".as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!utf8.is_null(), "the host has no C.UTF-8");
+        // SAFETY: `utf8` is the live locale `newlocale` returned, made
+        // this thread's until it is put back below.
+        let before = unsafe { libc::uselocale(utf8) };
+        let spaces: Vec<u8> = (0..=u8::MAX).filter(|b| is_space(*b)).collect();
+        // SAFETY: `before` is what `uselocale` answered, the thread's
+        // locale until the call above, so it is live.
+        unsafe { libc::uselocale(before) };
+        // SAFETY: `utf8` is no thread's locale any longer and is freed
+        // once.
+        unsafe { libc::freelocale(utf8) };
+        let past_six: &[u8] = if cfg!(target_os = "macos") {
+            b"\xa0"
+        } else {
+            b""
+        };
+        assert_eq!(spaces, [b"\t\n\x0b\x0c\r ".as_slice(), past_six].concat());
+    }
 }

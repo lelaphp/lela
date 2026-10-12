@@ -400,10 +400,10 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
 /// ```
 ///
 /// The white space `strtol` skips is C's `isspace` under the request's
-/// `LC_CTYPE`, which under macOS's `C.UTF-8`, php's default, counts 0xA0.
+/// `LC_CTYPE`, `\v` and `\f` among it, and under `C` not 0xA0.
 ///
 /// ```php
-/// var_dump(intval("\xa0 12", 16), intval("\xa012", 0));
+/// var_dump(intval("\v 12", 16), intval("\f12", 0));
 /// setlocale(LC_CTYPE, "C"); var_dump(intval("\xa012", 16));
 /// ```
 /// ```expect

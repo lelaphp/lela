@@ -233,11 +233,12 @@ fn compile(
 /// paired with its closer and nested, and the end found past escaped
 /// delimiters. The pattern between them and the modifiers after. The
 /// whitespace is C's `isspace` under the request's `LC_CTYPE`, as
-/// `pcre_get_compiled_regex_cache_ex` reads it, which counts 0xA0 under
-/// macOS's `C.UTF-8`, php's default.
+/// `pcre_get_compiled_regex_cache_ex` reads it, so under `C` 0xA0 is a
+/// delimiter like any other.
 ///
 /// ```php
-/// var_dump(preg_match("\xa0/a/", "a"), preg_match(" \v/b/", "b"));
+/// var_dump(preg_match(" \v/b/", "b"));
+/// setlocale(LC_CTYPE, "C"); var_dump(preg_match("\xa0a\xa0", "a"));
 /// ```
 /// ```expect
 /// int(1)
