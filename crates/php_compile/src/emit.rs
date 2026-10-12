@@ -276,16 +276,13 @@ impl ClassSpec {
     /// names the class the constant `FOO` holds.
     ///
     /// ```php
-    /// class B {} class C {}
-    /// const C = 'B';
-    /// $o = new B;
-    /// var_dump(new (C), new C, $o instanceof (C));
+    /// const C = 'B'; class B {} class C {} var_dump(new (C));
+    /// var_dump(new C instanceof (C), new B instanceof (C));
     /// ```
     /// ```expect
-    /// object(B)#2 (0) {
+    /// object(B)#1 (0) {
     /// }
-    /// object(C)#3 (0) {
-    /// }
+    /// bool(false)
     /// bool(true)
     /// ```
     fn of(expr: tree::Expr) -> ClassSpec {
@@ -294,6 +291,20 @@ impl ClassSpec {
             other => ClassSpec::Expr(other),
         }
     }
+}
+
+/// A class operand as php's tree holds it where a compile reads it,
+/// after any `zend_eval_const_expr` has evaluated it, decoded once from a
+/// [`ClassSpec`] ([`Emit::decoded_class`]): a name written out,
+/// `ZEND_AST_ZVAL` with the `attr` of its spelling; a value,
+/// `ZEND_AST_ZVAL` with `ZEND_NAME_FQ`, which the parser made of a string
+/// or a number written where the class goes or the evaluator folded the
+/// operand to; or an expression, compiled for the class it names.
+#[derive(Clone, Copy)]
+enum ClassOperand {
+    Name(TokenId),
+    Value(Zval),
+    Expr(tree::Expr),
 }
 
 /// What `zend_compile_class_ref` (`Z/Zend/zend_compile.c:2819`) leaves
@@ -2452,27 +2463,44 @@ impl Emit<'_> {
         self.const_name(&name)
     }
 
-    /// A class operand php's tree holds as a value that is no name
-    /// written out, `ZEND_AST_ZVAL` with `ZEND_NAME_FQ` in its `attr`:
-    /// a string or a number written where the class goes, which the
-    /// parser made a value ([`Self::written`]), or the value
-    /// `zend_eval_const_expr` folded the operand to ([`eval`]). Nothing
-    /// for any other expression.
-    fn class_value(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
+    /// The [`ClassOperand`] a class operand is as the tree stands now:
+    /// a value where the parser made one ([`Self::written`]) or
+    /// `zend_eval_const_expr` folded the expression to one ([`eval`]).
+    fn decoded_class(&mut self, class: ClassSpec) -> Result<ClassOperand, CompileError> {
+        let ClassSpec::Expr(expr) = class else {
+            return Ok(match class {
+                ClassSpec::Name(token) => ClassOperand::Name(token),
+                ClassSpec::Expr(expr) => ClassOperand::Expr(expr),
+            });
+        };
         if let Some(value) = self.rewritten_value(self.peel(expr)) {
-            return Ok(Some(value));
+            return Ok(ClassOperand::Value(value));
         }
-        self.written(expr)
+        Ok(match self.written(expr)? {
+            Some(value) => ClassOperand::Value(value),
+            None => ClassOperand::Expr(expr),
+        })
     }
 
-    /// `zend_compile_class_const`'s and `zend_eval_const_expr`'s reading
-    /// of a class operand before either looks for a constant of the
-    /// class being compiled: `zend_eval_const_expr` over an expression,
-    /// which leaves its rewrite for the class's compile, and then the
-    /// name `zend_resolve_class_name_ast` resolves where the operand is
-    /// a value, a name written out resolved in the namespace and a
-    /// folded value as `ZEND_NAME_FQ` ([`Self::fq_class_name`]); nothing
-    /// where the operand did not fold.
+    /// `zend_compile_class_const`'s and `zend_eval_const_expr`'s first
+    /// step over a class operand: `zend_eval_const_expr` over an
+    /// expression, which leaves its rewrite for the class's compile, so
+    /// what it folds to is the operand's value.
+    fn evaluated_class(&mut self, class: ClassSpec) -> Result<ClassOperand, CompileError> {
+        match class {
+            ClassSpec::Name(token) => Ok(ClassOperand::Name(token)),
+            ClassSpec::Expr(expr) => Ok(match self.eval_const(expr)? {
+                Some(value) => ClassOperand::Value(value),
+                None => ClassOperand::Expr(expr),
+            }),
+        }
+    }
+
+    /// `zend_resolve_class_name_ast` over a class operand php's tree
+    /// holds as `ZEND_AST_ZVAL`, the name `zend_try_ct_eval_class_const`
+    /// looks a constant of the class being compiled up by: a name written
+    /// out resolved in the namespace, a value as `ZEND_NAME_FQ`
+    /// ([`Self::fq_class_name`]); nothing for an expression.
     ///
     /// ```php
     /// class C { const X = 'x'; function f() { return ('C')::X . ('c' . '')::X; } }
@@ -2482,22 +2510,29 @@ impl Emit<'_> {
     /// string(2) "xx"
     /// string(1) "x"
     /// ```
-    fn constant_class(&mut self, class: ClassSpec) -> Result<Option<Vec<u8>>, CompileError> {
-        match class {
-            ClassSpec::Name(token) => {
+    fn constant_class(&mut self, operand: ClassOperand) -> Result<Option<Vec<u8>>, CompileError> {
+        match operand {
+            ClassOperand::Name(token) => {
                 let written = self.text(token).to_vec();
                 Ok(Some(self.class_name(&written)))
             }
-            ClassSpec::Expr(expr) => match self.eval_const(expr)? {
-                Some(value) => self.fq_class_name(value).map(Some),
-                None => Ok(None),
-            },
+            ClassOperand::Value(value) => self.fq_class_name(value).map(Some),
+            ClassOperand::Expr(_) => Ok(None),
         }
     }
 
+    /// The name a class operand that is a value holds: a string, and
+    /// php's `Illegal class name` for any other value.
+    fn value_class_name(&self, value: Zval) -> Result<Vec<u8>, CompileError> {
+        value
+            .as_str()
+            .map(|name| name.bytes().to_vec())
+            .ok_or_else(|| self.compile_error("Illegal class name"))
+    }
+
     /// `zend_resolve_class_name_ast` over a class operand that is a value
-    /// ([`Self::class_value`]), resolved as `ZEND_NAME_FQ`: a string,
-    /// else php's `Illegal class name`, with one leading `\` dropped and
+    /// ([`ClassOperand::Value`]), resolved as `ZEND_NAME_FQ`: its name
+    /// ([`Self::value_class_name`]) with one leading `\` dropped, and
     /// `self`, `parent` or `static` php's `'\self' is an invalid class
     /// name`.
     ///
@@ -2508,10 +2543,8 @@ impl Emit<'_> {
     /// Fatal error: '\self' is an invalid class name in %s on line 2
     /// ```
     fn fq_class_name(&self, value: Zval) -> Result<Vec<u8>, CompileError> {
-        let Some(name) = value.as_str() else {
-            return Err(self.compile_error("Illegal class name"));
-        };
-        self.fq_name(name.bytes())
+        let name = self.value_class_name(value)?;
+        self.fq_name(&name)
     }
 
     /// `zend_resolve_class_name` under `ZEND_NAME_FQ` over a name whose
@@ -7453,25 +7486,24 @@ impl Emit<'_> {
             // compile-time fatals.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => {
-                    let (written, folded) = match class {
-                        ClassSpec::Name(token) => (self.text(token).to_vec(), false),
-                        // `zend_eval_const_expr` folded the class to a
-                        // constant, which names it where it is a string.
-                        ClassSpec::Expr(expr) => match self.eval_const(expr)? {
-                            Some(value) => match value.as_str() {
-                                Some(text) => (text.bytes().to_vec(), true),
-                                None => {
-                                    return Err(self.compile_error(
-                                        "Class name must be a valid object or a string",
-                                    ));
-                                }
-                            },
+                    // `zend_eval_const_expr` folded the class to a
+                    // constant, which names it where it is a string.
+                    let operand = self.evaluated_class(class)?;
+                    let written = match operand {
+                        ClassOperand::Name(token) => self.text(token).to_vec(),
+                        ClassOperand::Value(value) => match value.as_str() {
+                            Some(text) => text.bytes().to_vec(),
                             None => {
                                 return Err(self.compile_error(
-                                    "Dynamic class names are not allowed in compile-time class constant references",
+                                    "Class name must be a valid object or a string",
                                 ));
                             }
                         },
+                        ClassOperand::Expr(_) => {
+                            return Err(self.compile_error(
+                                "Dynamic class names are not allowed in compile-time class constant references",
+                            ));
+                        }
                     };
                     if class_fetch_type(&written) == FETCH_CLASS_STATIC {
                         return Err(self.compile_error(
@@ -7481,11 +7513,11 @@ impl Emit<'_> {
                     // `self` and `parent` keep the mark they were written
                     // with; any other name the one resolution leaves, a
                     // folded one resolved as `ZEND_NAME_FQ`.
-                    let (class, class_kind) = match (class_fetch_type(&written), folded) {
-                        (FETCH_CLASS_DEFAULT, false) => self.resolve_class_marked(&written),
-                        (FETCH_CLASS_DEFAULT, true) => {
+                    let (class, class_kind) = match (class_fetch_type(&written), operand) {
+                        (FETCH_CLASS_DEFAULT, ClassOperand::Value(_)) => {
                             (self.fq_name(&written)?, NameKind::FullyQualified)
                         }
+                        (FETCH_CLASS_DEFAULT, _) => self.resolve_class_marked(&written),
                         _ => (written, NameKind::NotFullyQualified),
                     };
                     // `self::{'X'}` folds to the name; one that does
@@ -7527,7 +7559,8 @@ impl Emit<'_> {
                 // code outside any function, is kept for the scope that evaluates
                 // it (`zend_compile_const_expr_class_name`).
                 Scoped::ClassName { class } => {
-                    if let Some(folded) = self.resolved_class_name(class)? {
+                    let operand = self.decoded_class(class)?;
+                    if let Some(folded) = self.resolved_class_name(operand)? {
                         return self.folded(folded);
                     }
                     let ClassSpec::Name(token) = class else {
@@ -10310,11 +10343,10 @@ impl Emit<'_> {
         // `CG(zend_lineno)` as the subject left it, the line a condition
         // `can_match_use_jumptable` folded is created at.
         let subject_line = self.line;
-        let (uses_table, folded) = self.match_uses_jumptable(arms)?;
-        if uses_table {
+        if self.match_uses_jumptable(arms)? {
             table = Some(self.emit_table(Opcode::Match, subject));
         } else {
-            jumps = self.match_chain(subject, case_node, arms, &folded, subject_line)?;
+            jumps = self.match_chain(subject, case_node, arms, subject_line)?;
             default_jump = Some(self.push(Opline {
                 opcode: Opcode::Jmp,
                 ..Opline::default()
@@ -10344,36 +10376,29 @@ impl Emit<'_> {
 
     /// `can_match_use_jumptable` and `count_match_conds`: every
     /// condition a constant `long` or `string` as `zend_eval_const_expr`
-    /// leaves it ([`eval`]), and two or more of them;
-    /// beside it, the conditions its `zend_eval_const_expr` replaced
-    /// with the value they fold to, each one it reached that was written
-    /// as more than a number or a string and folded, whose node the
-    /// replacement gives the line the compile stands at.
+    /// leaves it, and two or more of them. Each condition the evaluator
+    /// reaches and folds is replaced with its value ([`eval`]), a node
+    /// that takes the line the compile stands at.
     fn match_uses_jumptable(
         &mut self,
         arms: &[NodeId<tree::MatchArm>],
-    ) -> Result<(bool, Vec<tree::Expr>), CompileError> {
+    ) -> Result<bool, CompileError> {
         let mut count = 0;
-        let mut folded = Vec::new();
         for arm in arms {
             let Some(conds) = self.parsed.tree[*arm].conds else {
                 continue;
             };
             for cond in &self.parsed.tree[conds].exprs.clone() {
-                let cond = *cond;
                 count += 1;
-                let Some(value) = self.eval_const(cond)? else {
-                    return Ok((false, folded));
+                let Some(value) = self.eval_const(*cond)? else {
+                    return Ok(false);
                 };
-                if self.literal_of(cond).is_none() {
-                    folded.push(cond);
-                }
                 if !matches!(value.kind(), ZvalType::Long | ZvalType::String) {
-                    return Ok((false, folded));
+                    return Ok(false);
                 }
             }
         }
-        Ok((count >= 2, folded))
+        Ok(count >= 2)
     }
 
     /// Every condition of every arm, in written order: the conditions
@@ -10428,12 +10453,13 @@ impl Emit<'_> {
         subject: Where,
         case_node: u32,
         arms: &[NodeId<tree::MatchArm>],
-        folded: &[tree::Expr],
         subject_line: u32,
     ) -> Result<Vec<u32>, CompileError> {
         let mut jumps = Vec::new();
         for cond in self.match_conds(arms) {
-            let was_folded = folded.contains(&cond);
+            // A condition the evaluator replaced with its value
+            // ([`eval`]); a value the parser made keeps its own line.
+            let was_folded = self.rewritten_value(self.peel(cond)).is_some();
             self.line = self.line_of(cond);
             let cond = self.expr(cond)?;
             if was_folded {
@@ -15428,18 +15454,22 @@ impl Emit<'_> {
     ) -> Result<Zval, CompileError> {
         match self.scoped_of(id, line)? {
             Scoped::Constant { class, name } => {
-                let class = self.constant_class(class)?;
-                let folded = match (class, self.folded_name(&name)?) {
-                    (Some(class), Some(name)) => self.active_class_constant(&class, &name)?,
-                    _ => None,
+                let operand = self.evaluated_class(class)?;
+                let folded = match self.folded_name(&name)? {
+                    Some(name) => match self.constant_class(operand)? {
+                        Some(class) => self.active_class_constant(&class, &name)?,
+                        None => None,
+                    },
+                    None => None,
                 };
                 folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
             }
             Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
-            Scoped::ClassName { class } => match self.resolved_class_name(class)? {
-                Some(value) => Ok(value),
-                None => Err(self.fatal("a class name is fetched at run time")),
-            },
+            Scoped::ClassName { class } => {
+                let operand = self.decoded_class(class)?;
+                self.resolved_class_name(operand)?
+                    .ok_or_else(|| self.fatal("a class name is fetched at run time"))
+            }
         }
     }
 
@@ -15650,14 +15680,15 @@ impl Emit<'_> {
             // second, and php evaluates them in that order.
             let value = self.eval_const(value)?;
             let key = match key {
-                Some(key) => Some(self.eval_const(key)?),
+                Some(key) => {
+                    let folded_key = self.eval_const(key)?;
+                    constant &= folded_key.is_some();
+                    folded_key
+                }
                 None => None,
             };
-            match (value, key, by_ref) {
-                (Some(value), None, false) => folded.push(FoldedElement::Pair(None, value)),
-                (Some(value), Some(Some(key)), false) => {
-                    folded.push(FoldedElement::Pair(Some(key), value));
-                }
+            match value {
+                Some(value) if !by_ref => folded.push(FoldedElement::Pair(key, value)),
                 _ => constant = false,
             }
         }
@@ -16677,27 +16708,22 @@ impl Emit<'_> {
     /// for `self` and `parent` where the scope is not known, and for a
     /// class the program computes. `self`, `parent` and `static` are
     /// held to [`Self::ensure_valid_class_fetch_type`] first.
-    fn resolved_class_name(&mut self, class: ClassSpec) -> Result<Option<Zval>, CompileError> {
-        let (written, value) = match class {
-            ClassSpec::Name(token) => (self.text(token).to_vec(), false),
-            ClassSpec::Expr(expr) => match self.class_value(expr)? {
-                Some(value) => match value.as_str() {
-                    Some(name) => (name.bytes().to_vec(), true),
-                    None => return Err(self.compile_error("Illegal class name")),
-                },
-                None => return Ok(None),
-            },
+    fn resolved_class_name(&mut self, operand: ClassOperand) -> Result<Option<Zval>, CompileError> {
+        let written = match operand {
+            ClassOperand::Name(token) => self.text(token).to_vec(),
+            ClassOperand::Value(value) => self.value_class_name(value)?,
+            ClassOperand::Expr(_) => return Ok(None),
         };
         let fetch = class_fetch_type(&written);
         self.ensure_valid_class_fetch_type(fetch)?;
-        let name = match fetch {
-            FETCH_CLASS_DEFAULT if value => self.fq_name(&written)?,
-            FETCH_CLASS_DEFAULT => self.class_name(&written),
-            FETCH_CLASS_SELF if self.scope_known() => match self.active_name() {
+        let name = match (fetch, operand) {
+            (FETCH_CLASS_DEFAULT, ClassOperand::Value(_)) => self.fq_name(&written)?,
+            (FETCH_CLASS_DEFAULT, _) => self.class_name(&written),
+            (FETCH_CLASS_SELF, _) if self.scope_known() => match self.active_name() {
                 Some(active) => active,
                 None => return Ok(None),
             },
-            FETCH_CLASS_PARENT if self.scope_known() => match self.active_parent.clone() {
+            (FETCH_CLASS_PARENT, _) if self.scope_known() => match self.active_parent.clone() {
                 Some(parent) => parent,
                 None => return Ok(None),
             },
@@ -16766,23 +16792,18 @@ impl Emit<'_> {
     /// Fatal error: Cannot use "::class" on int in %s on line 2
     /// ```
     fn class_name_of(&mut self, class: ClassSpec) -> Result<Where, CompileError> {
-        if let Some(value) = self.resolved_class_name(class)? {
+        let operand = self.decoded_class(class)?;
+        if let Some(value) = self.resolved_class_name(operand)? {
             return Ok(Where::Constant(value));
         }
-        // `class_ast->kind == ZEND_AST_ZVAL`: a value that is no string
-        // was refused above, so what stands is the fetch type of a name.
-        let value = match class {
-            ClassSpec::Name(_) => None,
-            ClassSpec::Expr(expr) => self.class_value(expr)?,
-        };
-        let (op1_type, op1) = match (class, value.as_ref().and_then(|value| value.as_str())) {
-            (ClassSpec::Name(token), _) => {
-                (OperandKind::Unused, class_fetch_type(self.text(token)))
+        // `class_ast->kind == ZEND_AST_ZVAL`: the fetch type of the name.
+        let (op1_type, op1) = match operand {
+            ClassOperand::Name(token) => (OperandKind::Unused, class_fetch_type(self.text(token))),
+            ClassOperand::Value(value) => {
+                let name = self.value_class_name(value)?;
+                (OperandKind::Unused, class_fetch_type(&name))
             }
-            (ClassSpec::Expr(_), Some(name)) => {
-                (OperandKind::Unused, class_fetch_type(name.bytes()))
-            }
-            (ClassSpec::Expr(expr), None) => match self.expr(expr)? {
+            ClassOperand::Expr(expr) => match self.expr(expr)? {
                 Where::Constant(value) => {
                     let shown = match value.kind() {
                         ZvalType::Null => "null",
@@ -16874,14 +16895,16 @@ impl Emit<'_> {
     /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
     /// ```
     fn class_const(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
-        let resolved = self.constant_class(class)?;
-        let written = self.folded_name(name)?;
-        if let (Some(resolved), Some(written)) = (&resolved, &written)
-            && let Some(value) = self.active_class_constant(resolved, written)?
+        // Both children evaluated, the class first; the class resolved
+        // only where the name folded to a string.
+        let operand = self.evaluated_class(class)?;
+        if let Some(written) = self.folded_name(name)?
+            && let Some(resolved) = self.constant_class(operand)?
+            && let Some(value) = self.active_class_constant(&resolved, &written)?
         {
             return Ok(Where::Constant(value));
         }
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let class = self.class_ref_of(operand, FETCH_CLASS_EXCEPTION)?;
         let name = match name {
             ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
             ScopedName::Computed(expr) => self.expr(*expr)?,
@@ -17291,14 +17314,20 @@ impl Emit<'_> {
     /// ([`Self::fq_class_name`]); any other expression is
     /// [`Self::computed_class_ref`]'s.
     fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef, CompileError> {
-        let written = match class {
-            ClassSpec::Name(token) => self.text(token).to_vec(),
-            ClassSpec::Expr(expr) => {
-                if let Some(value) = self.class_value(expr)? {
-                    return Ok(ClassRef::Named(self.fq_class_name(value)?));
-                }
-                return self.computed_class_ref(expr, flags);
-            }
+        let operand = self.decoded_class(class)?;
+        self.class_ref_of(operand, flags)
+    }
+
+    /// [`Self::class_ref`] over the operand decoded.
+    fn class_ref_of(
+        &mut self,
+        operand: ClassOperand,
+        flags: u32,
+    ) -> Result<ClassRef, CompileError> {
+        let written = match operand {
+            ClassOperand::Name(token) => self.text(token).to_vec(),
+            ClassOperand::Value(value) => return Ok(ClassRef::Named(self.fq_class_name(value)?)),
+            ClassOperand::Expr(expr) => return self.computed_class_ref(expr, flags),
         };
         if written.starts_with(b"\\") {
             return Ok(ClassRef::Named(self.class_name(&written)));

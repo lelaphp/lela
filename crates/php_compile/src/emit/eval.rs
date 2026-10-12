@@ -89,9 +89,10 @@ impl Emit<'_> {
     /// The fold [`Self::constant_expr`] made of a node, kept where it is
     /// `zend_eval_const_expr`'s: the node is replaced by its value.
     pub(super) fn record_fold(&mut self, expr: tree::Expr, folded: &Result<Zval, CompileError>) {
-        // A number or a string written out is the same value before the
-        // evaluator and after it, so it is kept nowhere.
-        if matches!(expr, tree::Expr::LiteralExpr(_) | tree::Expr::NowdocExpr(_)) {
+        // A value php's parser made, a number or a string written out, is
+        // the same `ZEND_AST_ZVAL` before the evaluator and after it, so
+        // it is kept nowhere and keeps the line it was written at.
+        if super::written(self.parsed, expr).is_some() {
             return;
         }
         if self.fold == Fold::EvalConstExpr
@@ -266,18 +267,12 @@ impl Emit<'_> {
         right: tree::Expr,
     ) -> Result<Zval, CompileError> {
         if self.fold == Fold::EvalConstExpr {
-            let left = self.constant_of(left)?;
-            let right = self.constant_of(right)?;
-            let Some(left) = left else {
-                return Err(self.fatal("a short circuit over a side that does not fold"));
-            };
-            let held = truth(left);
-            if held == or {
-                return Ok(Zval::bool(held));
-            }
-            return match right {
-                Some(right) => Ok(Zval::bool(truth(right))),
-                None => Err(self.fatal("a short circuit over a side that does not fold")),
+            let left = self.constant_of(left)?.map(truth);
+            let right = self.constant_of(right)?.map(truth);
+            return match (left, right) {
+                (Some(held), _) if held == or => Ok(Zval::bool(held)),
+                (Some(_), Some(right)) => Ok(Zval::bool(right)),
+                _ => Err(self.fatal("a short circuit over a side that does not fold")),
             };
         }
         let held = truth(self.constant_expr(left)?);
