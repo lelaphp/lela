@@ -4679,7 +4679,7 @@ impl Engine {
         }
         // `php_lint_script` compiles and drops the op array, and what
         // the compiler warned of it rendered as it compiled.
-        match self.primary(&mut req, source.as_deref()) {
+        match self.primary(&mut req, source.as_deref(), None) {
             Some(Ok(unit)) => {
                 note_compiled(&mut req, &unit, SourceKind::File);
             }
@@ -4845,6 +4845,10 @@ impl Engine {
     /// whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
         let script = req.primary() == Primary::Wrapped;
+        // The name the host wrote, `primary_file->filename`, which
+        // `php_execute_script_ex` leaves as it is beside the expanded
+        // `opened_path`, and which opcache makes the file's key of.
+        let written = req.script_name().map(<[u8]>::to_vec);
         let mut left = None;
         if script {
             left = req.enter_program_dir();
@@ -4853,7 +4857,7 @@ impl Engine {
         if script && source.is_none() {
             req.open_primary_file();
         }
-        let ran = self.execute_wrapped(req, source, script);
+        let ran = self.execute_wrapped(req, source, script, written.as_deref());
         req.close_served_files();
         if let Some(left) = left {
             req.leave_program_dir(left);
@@ -4862,12 +4866,19 @@ impl Engine {
     }
 
     /// [`Engine::execute_script`] with the primary file open:
-    /// `auto_prepend_file`, the program and `auto_append_file`.
-    fn execute_wrapped(&self, req: &mut Request, source: Option<&[u8]>, script: bool) -> bool {
+    /// `auto_prepend_file`, the program the host wrote as `written` and
+    /// `auto_append_file`.
+    fn execute_wrapped(
+        &self,
+        req: &mut Request,
+        source: Option<&[u8]>,
+        script: bool,
+        written: Option<&[u8]>,
+    ) -> bool {
         if script && !auto_file(req, b"auto_prepend_file", self.shared.loops.entry) {
             return false;
         }
-        let ran = match self.primary(req, source) {
+        let ran = match self.primary(req, source, written) {
             Some(Ok(unit)) => serve_unit(req, &unit, self.shared.loops.entry),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
@@ -4886,11 +4897,31 @@ impl Engine {
     /// name the request gives it, or the file the request names, under
     /// the name `php_execute_script` and not `php_lint_script` has
     /// expanded first ([`Request::expand_primary_file`]), so the unit and
-    /// its diagnostics carry the whole path.
+    /// its diagnostics carry the whole path, and filed in the unit cache
+    /// under its key as the host `written` it too, which a relative name
+    /// or one through a link makes a second key of, as
+    /// `persistent_compile_file` files it:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/keys' . getmypid(); @mkdir($dir); @symlink($dir, "$dir.link");
+    /// file_put_contents("$dir/keys.php", '<?php $s = opcache_get_status()["opcache_statistics"]; echo $s["num_cached_scripts"], " ", $s["num_cached_keys"], "\n";');
+    /// touch("$dir/keys.php", time() - 60);
+    /// foreach (["keys.php", "$dir/keys.php", "$dir.link/keys.php"] as $name) {
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', $name], [1 => ['pipe', 'w']], $pipes, $dir);
+    ///     echo stream_get_contents($pipes[1]); proc_close($p);
+    /// }
+    /// unlink("$dir.link"); unlink("$dir/keys.php"); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// 1 2
+    /// 1 1
+    /// 1 2
+    /// ```
     fn primary(
         &self,
         req: &mut Request,
         source: Option<&[u8]>,
+        written: Option<&[u8]>,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
         let laid = req.heap_mut().lay_interned_table();
         if let Err(thrown) = req.fatal_of(laid) {
@@ -4916,16 +4947,18 @@ impl Engine {
             (Primary::Wrapped, _) => HandlePath::Host,
             (Primary::Bare, _) => HandlePath::Opened,
         };
-        self.compile_file(req, &script, handle)
+        self.compile_file(req, &script, written.unwrap_or(&script), handle)
     }
 
-    /// The file at `path` compiled for the request through a
-    /// `zend_file_handle` of the kind `handle` names: what an extension's
-    /// `zend_compile_file` answers, or the unit cache's.
+    /// The file at `path`, named `written` by the host, compiled for the
+    /// request through a `zend_file_handle` of the kind `handle` names:
+    /// what an extension's `zend_compile_file` answers, or the unit
+    /// cache's.
     fn compile_file(
         &self,
         req: &mut Request,
         path: &[u8],
+        written: &[u8],
         handle: HandlePath,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
         match req.compile_file_source(path) {
@@ -4933,7 +4966,7 @@ impl Engine {
                 self.shared
                     .compile_for(req, &source, path, SourceKind::File),
             ),
-            Ok(None) => req.cached_file(path, Some(path), handle),
+            Ok(None) => req.cached_file(path, Some(written), handle),
             Err(thrown) => {
                 req.leave_pending(&thrown);
                 None
@@ -5020,7 +5053,7 @@ impl Engine {
         let path = req
             .expand_filepath(router)
             .unwrap_or_else(|| router.to_vec());
-        let ran = match self.compile_file(req, &path, HandlePath::Kept) {
+        let ran = match self.compile_file(req, &path, router, HandlePath::Kept) {
             Some(Ok(unit)) => serve_unit(req, &unit, entry),
             Some(Err(refused)) => {
                 refused_program(req, &refused, &path);
