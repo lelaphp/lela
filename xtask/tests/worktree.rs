@@ -79,7 +79,7 @@ fn add_building(root: &Path, args: &[&str]) -> (i32, String) {
 /// files; the tree goes with the value, once the call it served is over.
 fn stand_in() -> (Tree, OsString) {
     let bin = Tree::new("worktree-cargo").unwrap();
-    let path = scratch::cargo(&bin, Path::new(env!("CARGO_BIN_EXE_xtask"))).unwrap();
+    let path = scratch::cargo(&bin, scratch::xtask(env!("CARGO_BIN_EXE_xtask"))).unwrap();
     (bin, path)
 }
 
@@ -98,7 +98,7 @@ fn worktree(root: &Path, half: &str, args: &[&str]) -> (i32, String) {
 
 /// One half of `xtask worktree` under `path`.
 fn run(root: &Path, half: &str, args: &[&str], path: &OsString) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args(["worktree", half])
@@ -734,7 +734,7 @@ fn an_add_records_the_ticket_and_a_retire_keeps_it_with_the_branch() {
 /// `xtask phpt` in `root` over one subset, held against `HEAD`: what it
 /// printed.
 fn phpt_against_head(root: &Path, subset: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(root)
         .args([
@@ -918,7 +918,7 @@ fn engine_at(path: &Path, oracle: &Path) {
 /// `xtask phpt` in the worktree at `dir` with `args`, `cargo` the file
 /// at `cargo` and the corpus the tree at `corpus`.
 fn phpt_in(dir: &Path, args: &[&str], cargo: &Path, corpus: &Path) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(dir)
         .arg("phpt")

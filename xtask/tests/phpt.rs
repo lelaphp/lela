@@ -620,7 +620,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         .collect();
     fs::write(&pin, text.join("\n")).unwrap();
     let tree = fixture_tree();
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&root)
         .args(["phpt", "--subset", "Zend/tests"])
@@ -633,7 +633,7 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
         stdout.contains("Zend/tests") && !stderr.contains("neither place"),
         "the subset resolved under the fixture:\n{stdout}\n{stderr}"
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(&root)
         .args(["phpt", "--subset", "Zend/tests"])
@@ -688,7 +688,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let run = |given: &Path| {
-        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
             .arg("--root")
             .arg(given)
             .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
@@ -1873,7 +1873,7 @@ impl OneTree {
     /// The command [`OneTree::run`] spawns, for a run that needs one more
     /// variable set.
     fn command(&self, root: &Tree, subset: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        let mut command = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")));
         command
             .arg("--root")
             .arg(root.path())

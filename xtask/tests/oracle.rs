@@ -623,7 +623,7 @@ fn ci_files() -> Vec<(String, String)> {
 /// count.
 #[test]
 fn no_workflow_holds_a_directory_of_the_corpus() {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
         .arg("--root")
         .arg(workspace())
         .args(["status", "--section", "corpus", "--format", "json"])

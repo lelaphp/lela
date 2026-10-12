@@ -299,12 +299,16 @@ reading::V
 reading::epoch_seconds
 reading::now
 run
+scratch::Binary
+scratch::Binary::hold
+scratch::Binary::path
 scratch::KEEP
 scratch::Tree
 scratch::Tree::new
 scratch::Tree::path
 scratch::cargo
 scratch::repository
+scratch::xtask
 status::Against
 status::render
 status::session
