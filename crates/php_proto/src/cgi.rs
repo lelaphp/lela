@@ -37,6 +37,23 @@ impl Environment {
         }
         Some(value.to_vec())
     }
+
+    /// The environment as php reads it through a `char *`: each value
+    /// up to its first NUL ([`crate::c_str`]). A `FastCGI` parameter
+    /// carries its length and may hold a NUL, which `init_request_info`
+    /// and the request loop (`FCGI_GETENV`, `sapi_cgibin_getenv`),
+    /// `getenv()` and `$_SERVER` (`cgi_php_load_env_var`'s `strlen`) all
+    /// stop at; `apache_request_headers` alone reads the whole value
+    /// (`sapi_add_request_header`), and a process's environment holds
+    /// none.
+    #[must_use]
+    pub fn cut_at_nul(mut self) -> Environment {
+        for (_, value) in &mut self.0 {
+            let kept = crate::c_str(value).len();
+            value.truncate(kept);
+        }
+        self
+    }
 }
 
 /// What a file system answers about a path: `realpath(3)` succeeding and
@@ -763,6 +780,30 @@ mod tests {
         assert_eq!(info.content_length, 13);
         assert_eq!(info.response_code, 200);
         assert_eq!(info.auth, Some((b"user".to_vec(), Some(b"pw".to_vec()))));
+    }
+
+    /// A parameter holding a NUL is read up to it, so the file it names
+    /// is the one before the NUL, and a value with none stands whole
+    /// (#2757).
+    #[test]
+    fn a_parameter_cut_at_its_nul_names_the_file_before_it() {
+        let mut vars = env(&[
+            ("SCRIPT_FILENAME", "/d/t.php\0.txt"),
+            ("QUERY_STRING", "a=1\0&b=2"),
+            ("REQUEST_METHOD", "GET"),
+        ])
+        .cut_at_nul();
+        assert_eq!(vars.get(b"QUERY_STRING"), Some(&b"a=1"[..]));
+        assert_eq!(vars.get(b"REQUEST_METHOD"), Some(&b"GET"[..]));
+        let info = request_info(
+            &mut vars,
+            Settings::default(),
+            None,
+            &Fake(vec![b"/d/t.php"]),
+        );
+        assert_eq!(info.path_translated.as_deref(), Some(&b"/d/t.php"[..]));
+        assert_eq!(info.query.as_deref(), Some(&b"a=1"[..]));
+        assert_eq!(info.response_code, 200);
     }
 
     #[test]
