@@ -737,7 +737,7 @@ fn no_regression(
         Some(Ok(variant)) => variant,
         None => pin.clone(),
     };
-    match against::regressed(asking.snapshot, asking.base, Some(&pin), scope)? {
+    match against::regressed(asking.snapshot, asking.base, &pin, scope)? {
         Against::Held => {}
         Against::Unrun(why) => {
             let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];

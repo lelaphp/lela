@@ -173,7 +173,7 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
     assert_eq!(looked, [main.path(), &linked], "{looked:?}");
     assert_eq!(roots(&linked), [&linked, main.path()]);
 
-    let why = base.run(&looked, "ext/fixture").unwrap().unwrap_err();
+    let why = base.run(&looked, "ext/fixture", "").unwrap().unwrap_err();
     let main_named = format!("{}, ", main.display());
     assert_eq!(why.matches(&main_named).count(), 1, "{why}");
     assert_eq!(why.matches(linked_str).count(), 1, "{why}");
@@ -189,11 +189,72 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
     let file = path(&linked, &base.tree, "ext/fixture");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, serde_json::to_string_pretty(&run).unwrap()).unwrap();
-    assert_eq!(base.run(&roots(&main), "ext/fixture").unwrap(), Ok(run));
+    let recipe = run.recipe.clone();
+    assert_eq!(
+        base.run(&roots(&main), "ext/fixture", &recipe).unwrap(),
+        Ok(run)
+    );
+    // Under another pin the run is stale, and the base's call takes it
+    // again (#2725).
+    let stale = base.run(&looked, "ext/fixture", "moved").unwrap();
+    assert_eq!(
+        stale,
+        Err(format!(
+            "the run of ext/fixture kept at {0} is stale; oracle.toml changed since it was taken; take one with `cargo xtask phpt --base {0} --subset ext/fixture`",
+            base.commit
+        ))
+    );
 
     // Another spelling of the checkout is the same root, and a worktree
     // git still lists whose directory is gone is none.
     assert_eq!(roots(&main.join(".")), looked);
     fs::remove_dir_all(&linked).unwrap();
     assert_eq!(roots(&main), [main.path()]);
+}
+
+/// A carried run takes the place of one standing under another pin that
+/// was kept before it, and of no other (#2725): a base's run `phpt --base`
+/// takes again under a moved pin is found fresh in main afterwards.
+#[test]
+fn a_carried_run_replaces_an_older_one_under_another_pin_and_no_other() {
+    let (from, into) = (
+        Tree::new("carry-from").unwrap(),
+        Tree::new("carry-into").unwrap(),
+    );
+    let keep = |root: &Path, scope: &str, recipe: &str| {
+        let run = Run {
+            recipe: recipe.to_owned(),
+            ..fixture("base.json")
+        };
+        let file = path(root, "tree", scope);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, serde_json::to_string(&run).unwrap()).unwrap();
+    };
+    let recipe = |root: &Path, scope: &str| {
+        read(&[root.to_path_buf()], "tree", scope)
+            .unwrap()
+            .unwrap()
+            .recipe
+    };
+    keep(&into, "ext/stale", "old");
+    keep(&into, "ext/same", "new");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    keep(&from, "ext/stale", "new");
+    keep(&from, "ext/same", "new");
+    keep(&from, "ext/newer", "old");
+    keep(&into, "ext/newer", "new");
+    let carried = carry(&from, &into).unwrap();
+    assert_eq!(
+        carried,
+        Carried {
+            carried: 1,
+            kept: 2
+        }
+    );
+    assert_eq!(recipe(&into, "ext/stale"), "new");
+    assert_eq!(
+        recipe(&into, "ext/newer"),
+        "new",
+        "an older run never replaces a newer"
+    );
 }
