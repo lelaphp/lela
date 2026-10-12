@@ -11,10 +11,10 @@
 //!
 //! **How a node is addressed.** [`Tree`] owns [`Nodes`], the arena: one
 //! vector per node kind, so a `NodeId<ClassDecl>` is a position among the
-//! class declarations and `tree[id]` is one index into one vector. A
-//! kind's vector is made with its first node, so a small tree pays for
-//! the three kinds it holds and not for the hundred and more the schema
-//! names, in its making, its moves and its drop. Beside
+//! class declarations and `tree[id]` reads the kind's slot, then
+//! indexes that kind's vector. A kind's vector is made with its first
+//! node, so a tree pays for the kinds it holds and not for every kind
+//! the schema names, in its making, its moves and its drop. Beside
 //! the arena the tree keeps its shape, every node and every significant
 //! token as one [`Element`] in source order with the size of each node's
 //! subtree, which is what a walk that has no field to follow reads, the
@@ -235,7 +235,10 @@ pub(crate) enum Resolved {
     /// The node's struct is in the arena at this index.
     Node(u32),
     /// A required child (`!`) is absent, named `Kind.field`; no struct was
-    /// built.
+    /// built. `Nodes.kind` names the other failure that leaves a node
+    /// unbuilt, the arena having no vector to put the kind in, which the
+    /// codegen's count of slots rules out; it is reported where the
+    /// grammar's broken promises are, never put in another kind's place.
     Missing(&'static str),
     /// The kind has no struct: `ERROR`, or a token kind opened as a node.
     Untyped,
@@ -245,8 +248,8 @@ impl Nodes {
     /// The vector of the struct kind at `slot`, none while no node of
     /// the kind is built.
     fn store(&self, slot: usize) -> Option<&Store> {
-        let at = usize::from(*self.slots.get(slot)?).checked_sub(1)?;
-        self.stores.get(at)
+        let at = (*self.slots.get(slot)?)?;
+        self.stores.get(usize::from(at))
     }
 
     /// The vector of the struct kind at `slot`, made empty by `empty`
@@ -254,12 +257,15 @@ impl Nodes {
     /// kind's, or more kinds stand than a slot counts; the caller's
     /// match on the kind's variant is what reads the vector.
     fn open<T>(&mut self, slot: usize, empty: fn(Vec<T>) -> Store) -> Option<&mut Store> {
-        let at = self.slots.get_mut(slot)?;
-        if *at == 0 {
-            *at = u8::try_from(self.stores.len() + 1).ok()?;
+        let at = if let Some(at) = *self.slots.get(slot)? {
+            at
+        } else {
+            let at = u8::try_from(self.stores.len()).ok()?;
             self.stores.push(empty(Vec::new()));
-        }
-        self.stores.get_mut(usize::from(*at) - 1)
+            *self.slots.get_mut(slot)? = Some(at);
+            at
+        };
+        self.stores.get_mut(usize::from(at))
     }
 }
 
@@ -332,8 +338,8 @@ fn all<T: Child>(children: &[Element]) -> Box<[T]> {
 }
 
 /// What `items` yields, in one allocation of exactly its length: walked
-/// once to count and once to fill, which costs less than growing a vector
-/// and shrinking it into a slice.
+/// once to count and once to fill, where collecting grew a vector and
+/// then reallocated it down to a slice.
 fn exact<T>(items: impl Iterator<Item = T> + Clone) -> Box<[T]> {
     let count = items.clone().count();
     if count == 0 {

@@ -429,11 +429,10 @@ impl<'a> Model<'a> {
             .filter(|info| info.class == DefClass::StructNode)
     }
 
-    /// The slot of the struct node `name` in `Nodes`.
-    fn slot_of(&self, name: &str) -> usize {
-        self.structs()
-            .position(|info| info.def.name == name)
-            .unwrap_or(usize::MAX)
+    /// The slot of the struct node `name` in `Nodes`, none where `name`
+    /// is no struct node.
+    fn slot_of(&self, name: &str) -> Option<usize> {
+        self.structs().position(|info| info.def.name == name)
     }
 
     /// Transitive kind set of a definition.
@@ -955,7 +954,10 @@ fn emit_struct(
                  }}\n    \
              }}\n\
          }}\n",
-        slot = model.slot_of(name)
+        slot = model.slot_of(name).unwrap_or_else(|| {
+            errors.push(Error::global(format!("{name} has no slot in `Nodes`")));
+            0
+        })
     )
     .ok();
     emit_resolver(buf, model, def, fields, errors);
@@ -1146,16 +1148,16 @@ fn emit_nodes(buf: &mut String, model: &Model<'_>) {
          /// tree has and nothing for the rest.\n\
          #[derive(Clone, Debug, PartialEq, Eq)]\n\
          pub struct Nodes {{\n    \
-             /// Where each struct kind's vector stands in `stores`, by the kind's slot:\n    \
-             /// its position plus one, and zero while no node of the kind is built.\n    \
-             slots: [u8; {count}],\n    \
+             /// Where each struct kind's vector stands in `stores`, by the kind's slot,\n    \
+             /// and none while no node of the kind is built.\n    \
+             slots: [Option<u8>; {count}],\n    \
              /// The vectors, in the order their kinds' first nodes were built.\n    \
              stores: Vec<Store>,\n\
          }}\n\n\
          impl Default for Nodes {{\n    \
              fn default() -> Self {{\n        \
                  Nodes {{\n            \
-                     slots: [0; {count}],\n            \
+                     slots: [None; {count}],\n            \
                      stores: Vec::new(),\n        \
                  }}\n    \
              }}\n\
@@ -1827,7 +1829,7 @@ mod tests {
         );
         for needle in [
             "enum Store {\n    Root(Vec<Root>),\n    Decl(Vec<Decl>),",
-            "    slots: [u8; 6],",
+            "    slots: [Option<u8>; 6],",
             "fn all(nodes: &Nodes) -> &[Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes,\n            _ => &[],\n        }\n    }",
             "impl Decl {",
             "    ) -> Result<Self, &'static str> {",
