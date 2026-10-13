@@ -14,6 +14,7 @@ The data files the design cites and the extraction records behind them; each is 
 ├── pre-day-1.md
 ├── rust-replacement-2828
 ├── special-funcs.md
-└── syntax-extraction.md
+├── syntax-extraction.md
+└── uri-storage-2832
 ```
-<!-- /computed in=940862d67d3c579bda73b092c31edbb526b7c1f26eea1d189a2a40dae6381b2e out=8b5952d64d301a3ed628e73afaf00e209a90f9b3e26f8b0b92f378101cac19ff -->
+<!-- /computed in=0f2ceb0c1c2ef0304ea9b1d0859b7cf99797fac011a293ea77a613628697ee3b out=da329212505153422e5cf56130b296e5a44da09859d35f3ad636accf906ab4a4 -->
