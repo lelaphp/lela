@@ -1,6 +1,9 @@
 <?php
 // Bounded #2826 observations, not a bench. Use the verified oracle with -n.
-function row(...$fields) { echo implode("\t", $fields), "\n"; }
+// '-' encodes an empty field without trailing whitespace; 'false' remains distinct.
+function row(...$fields) {
+    echo implode("\t", array_map(fn($field) => is_bool($field) ? (int) $field : ($field === '' ? '-' : $field), $fields)), "\n";
+}
 if (($argv[2] ?? '') === 'limit') {
     ini_set('memory_limit', '2M');
     $contexts = [];
@@ -117,7 +120,21 @@ if (class_exists('ZipArchive')) {
             $zip->close();
             $zip->open($path);
             $stat = $zip->statIndex(0);
-            row('zip-entry', $name, $level, $stat['comp_method'], bin2hex($zip->getFromIndex(0, 0, ZipArchive::FL_COMPRESSED)));
+            // getFromIndex special-cases zero original size, even when FL_COMPRESSED
+            // was requested. Extract the physical entry from this bounded one-entry
+            // archive instead; preserve the distinct API observation as well.
+            $archive = file_get_contents($path);
+            $header = unpack('Vsignature/vversion/vflags/vmethod/vtime/vdate/Vcrc/Vsize/Voriginal/vname/vextra', substr($archive, 0, 30));
+            if ($header['signature'] !== 0x04034b50) {
+                throw new RuntimeException('Expected a ZIP local header');
+            }
+            $packed = substr($archive, 30 + $header['name'] + $header['extra'], $stat['comp_size']);
+            if (strlen($packed) !== $stat['comp_size']) {
+                throw new RuntimeException('Truncated physical ZIP entry');
+            }
+            $api = $zip->getFromIndex(0, 0, ZipArchive::FL_COMPRESSED);
+            row('zip-entry', $name, $level, $stat['comp_method'], bin2hex($packed),
+                $stat['comp_size'], $api === false ? 'false' : 'string', $api === false ? '' : bin2hex($api));
             $zip->close();
             unlink($path);
         }

@@ -67,6 +67,7 @@ def main():
         "test_command": "cargo test -p php_ext_zlib --lib qualification -- --nocapture --test-threads=1",
         "zlib_ri": run([str(binary), "-n", "--ri", "zlib"]).stdout.decode(),
         "test_scope": "miniz 0.8.9; linked legacy zlib system-allocation trace; no adapted backend",
+        "field_encoding": "lowercase hex bytes; '-' is empty; literal 'false' is a failed PHP return",
         "request_limit": {"exit": limit.returncode, "stdout_sha256": digest(DATA / "limit.stdout"),
                           "stderr_sha256": digest(DATA / "limit.stderr")},
         "inputs": {str(path.relative_to(ROOT)): digest(path) for path in [

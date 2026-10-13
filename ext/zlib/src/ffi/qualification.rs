@@ -18,6 +18,9 @@ fn present<T>(value: Option<T>) -> T {
 }
 
 fn unhex(text: &str) -> Vec<u8> {
+    if text == "-" {
+        return Vec::new();
+    }
     assert_eq!(text.len() % 2, 0);
     text.as_bytes()
         .chunks_exact(2)
@@ -30,6 +33,9 @@ fn unhex(text: &str) -> Vec<u8> {
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    if bytes.is_empty() {
+        return "-".into();
+    }
     bytes
         .iter()
         .flat_map(|b| {
@@ -426,4 +432,33 @@ fn mysql_source_bounded_output_rejects_expansion_without_growing() {
             hex(&output[..present(usize::try_from(length).ok())])
         );
     }
+}
+
+#[test]
+fn zip_physical_entry_bytes_are_not_the_empty_entry_api_fast_path() {
+    let rows = include_str!("../../tests/data/oracle.tsv");
+    let mut count = 0;
+    for line in rows.lines().filter(|line| line.starts_with("zip-entry\t")) {
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            8,
+            "physical bytes and API observation must be separate"
+        );
+        let bytes = unhex(fields[4]);
+        assert_eq!(bytes.len(), present(fields[5].parse::<usize>().ok()));
+        let input = present(
+            rows.lines()
+                .find(|line| line.starts_with(&format!("input\t{}\t", fields[1]))),
+        );
+        let decoded = present(miniz_oxide::inflate::decompress_to_vec(&bytes).ok());
+        assert_eq!(decoded, unhex(present(input.split('\t').nth(2))));
+        if fields[1] == "empty" {
+            assert_eq!(bytes, [3, 0]);
+            assert_eq!(fields[6], "string");
+            assert_eq!(fields[7], "-");
+        }
+        count += 1;
+    }
+    assert_eq!(count, 12);
 }
