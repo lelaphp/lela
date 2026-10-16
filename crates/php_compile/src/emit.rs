@@ -98,7 +98,8 @@ use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
-    Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
+    Arr, Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string,
+    numeric_prefix,
 };
 use php_link::{Exact, Indexed};
 use php_unit::decl::{
@@ -128,6 +129,7 @@ mod assert;
 mod attributes;
 mod by_name;
 mod chain;
+mod eval;
 mod export;
 mod extended;
 mod hooks;
@@ -262,6 +264,46 @@ enum Element {
 #[derive(Clone, Copy)]
 enum ClassSpec {
     Name(TokenId),
+    Expr(tree::Expr),
+}
+
+impl ClassSpec {
+    /// The class a `::`, a `new` or an `instanceof` stands on: a name
+    /// written out, php's `ZEND_AST_ZVAL` that `zend_compile_class_ref`
+    /// reads without compiling, or an expression it compiles. A name in
+    /// parentheses is an expression, `'(' expr ')'` in
+    /// `class_name_reference` and `fully_dereferenceable`, so `new (FOO)`
+    /// names the class the constant `FOO` holds.
+    ///
+    /// ```php
+    /// const C = 'B'; class B {} class C {} var_dump(new (C));
+    /// var_dump(new C instanceof (C), new B instanceof (C));
+    /// ```
+    /// ```expect
+    /// object(B)#1 (0) {
+    /// }
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn of(expr: tree::Expr) -> ClassSpec {
+        match expr {
+            tree::Expr::NameRef(name) => ClassSpec::Name(name),
+            other => ClassSpec::Expr(other),
+        }
+    }
+}
+
+/// A class operand as php's tree holds it where a compile reads it,
+/// after any `zend_eval_const_expr` has evaluated it, decoded once from a
+/// [`ClassSpec`] ([`Emit::decoded_class`]): a name written out,
+/// `ZEND_AST_ZVAL` with the `attr` of its spelling; a value,
+/// `ZEND_AST_ZVAL` with `ZEND_NAME_FQ`, which the parser made of a string
+/// or a number written where the class goes or the evaluator folded the
+/// operand to; or an expression, compiled for the class it names.
+#[derive(Clone, Copy)]
+enum ClassOperand {
+    Name(TokenId),
+    Value(Zval),
     Expr(tree::Expr),
 }
 
@@ -602,6 +644,9 @@ pub(crate) struct Emit<'a> {
     /// Whose fold is running, `zend_compile_expr`'s or
     /// `zend_eval_const_expr`'s ([`Fold`]).
     fold: Fold,
+    /// The nodes `zend_eval_const_expr` replaced in php's tree, which
+    /// every compile after it reads ([`eval`]).
+    rewrites: eval::Rewrites,
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
@@ -1316,6 +1361,7 @@ impl<'a> Emit<'a> {
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,
+            rewrites: eval::Rewrites::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),
@@ -1697,20 +1743,6 @@ impl Emit<'_> {
         });
     }
 
-    /// Where the diagnostics raised so far end: the mark
-    /// [`Self::unraise`] goes back to.
-    pub(crate) fn raised(&self) -> Raised {
-        Raised(self.diagnostics.len())
-    }
-
-    /// The diagnostics raised past `mark` taken back: a fold tried for
-    /// a shape that then refuses, whose expressions the ordinary call
-    /// folds again and raises again. php folds each node once, in place
-    /// (`zend_eval_const_expr`), so what it raised stands once.
-    pub(crate) fn unraise(&mut self, mark: Raised) {
-        self.diagnostics.truncate(mark.0);
-    }
-
     /// The constant string for these bytes, interned into whichever home
     /// this compilation was given: php's `zend_new_interned_string` over
     /// the string a `CONST` operand holds. A home with no memory left
@@ -1917,9 +1949,11 @@ impl Emit<'_> {
     /// `'(' expr ')'` and hands the compiler the inner node, so what a
     /// compile function looks at to sort an operand by its kind is the
     /// inner node, and the parenthesised conditional's mark is the one
-    /// thing the parentheses leave, on the node ([`Self::expr`]).
+    /// thing the parentheses leave, on the node ([`Self::expr`]). A node
+    /// `zend_eval_const_expr` replaced with one of its sides is that side
+    /// ([`Self::replaced`]).
     pub(crate) fn peel(&self, expr: tree::Expr) -> tree::Expr {
-        peel(self.parsed, expr)
+        self.replaced(peel(self.parsed, expr))
     }
 
     /// The line php's node for `expr` carries, `zend_ast.lineno`: the
@@ -2368,7 +2402,7 @@ impl Emit<'_> {
                 if let Some(called) = self.parent_hook_call(scoped, args, line)? {
                     return Ok(called);
                 }
-                let class = self.class_spec(self.parsed.tree[scoped].scope);
+                let class = ClassSpec::of(self.parsed.tree[scoped].scope);
                 let method = self.scoped_method_of(scoped)?;
                 let arguments = self.arguments(args, line)?;
                 self.static_call(class, method, &arguments)
@@ -2401,37 +2435,6 @@ impl Emit<'_> {
         }
     }
 
-    /// Whether a constant expression names a constant, which
-    /// `zend_compile_params` leaves unsubstituted in a parameter's
-    /// default: a constant by name or a class constant, anywhere in the
-    /// tree. `true`, `false` and `null` are php's own values and name
-    /// none.
-    fn names_a_constant(&self, expr: tree::Expr) -> bool {
-        let tree = &self.parsed.tree;
-        match self.peel(expr) {
-            tree::Expr::NameRef(token) => self.constant_name(token).is_none(),
-            tree::Expr::ScopedAccessExpr(_) => true,
-            tree::Expr::UnaryExpr(id) => tree[id]
-                .operand
-                .is_some_and(|operand| self.names_a_constant(operand)),
-            tree::Expr::BinaryExpr(id) => {
-                let node = &tree[id];
-                self.names_a_constant(node.lhs)
-                    || node.rhs.is_some_and(|rhs| self.names_a_constant(rhs))
-            }
-            tree::Expr::ArrayExpr(id) => tree[id].array_elements.iter().any(|element| {
-                let element = &tree[*element];
-                element
-                    .key
-                    .is_some_and(|key| self.names_a_constant(tree[key].key))
-                    || element
-                        .value
-                        .is_some_and(|value| self.names_a_constant(value))
-            }),
-            _ => false,
-        }
-    }
-
     /// `zend_try_ct_eval_const`'s three special names: `true`, `false`
     /// and `null`, whatever their case and with or without the leading
     /// `\` `zend_resolve_const_name` strips, which php's compiler
@@ -2460,14 +2463,103 @@ impl Emit<'_> {
         self.const_name(&name)
     }
 
-    /// The class a `::`, a `new` or an `instanceof` stands on: a name
-    /// written out, php's `ZEND_AST_ZVAL` that `zend_compile_class_ref`
-    /// reads without compiling, or an expression it compiles.
-    fn class_spec(&self, expr: tree::Expr) -> ClassSpec {
-        match self.peel(expr) {
-            tree::Expr::NameRef(name) => ClassSpec::Name(name),
-            other => ClassSpec::Expr(other),
+    /// The [`ClassOperand`] a class operand is as the tree stands now:
+    /// a value where the parser made one ([`Self::written`]) or
+    /// `zend_eval_const_expr` folded the expression to one ([`eval`]).
+    fn decoded_class(&mut self, class: ClassSpec) -> Result<ClassOperand, CompileError> {
+        let ClassSpec::Expr(expr) = class else {
+            return Ok(match class {
+                ClassSpec::Name(token) => ClassOperand::Name(token),
+                ClassSpec::Expr(expr) => ClassOperand::Expr(expr),
+            });
+        };
+        if let Some(value) = self.rewritten_value(self.peel(expr)) {
+            return Ok(ClassOperand::Value(value));
         }
+        Ok(match self.written(expr)? {
+            Some(value) => ClassOperand::Value(value),
+            None => ClassOperand::Expr(expr),
+        })
+    }
+
+    /// `zend_compile_class_const`'s and `zend_eval_const_expr`'s first
+    /// step over a class operand: `zend_eval_const_expr` over an
+    /// expression, which leaves its rewrite for the class's compile, so
+    /// what it folds to is the operand's value.
+    fn evaluated_class(&mut self, class: ClassSpec) -> Result<ClassOperand, CompileError> {
+        match class {
+            ClassSpec::Name(token) => Ok(ClassOperand::Name(token)),
+            ClassSpec::Expr(expr) => Ok(match self.eval_const(expr)? {
+                Some(value) => ClassOperand::Value(value),
+                None => ClassOperand::Expr(expr),
+            }),
+        }
+    }
+
+    /// `zend_resolve_class_name_ast` over a class operand php's tree
+    /// holds as `ZEND_AST_ZVAL`, the name `zend_try_ct_eval_class_const`
+    /// looks a constant of the class being compiled up by: a name written
+    /// out resolved in the namespace, a value as `ZEND_NAME_FQ`
+    /// ([`Self::fq_class_name`]); nothing for an expression.
+    ///
+    /// ```php
+    /// class C { const X = 'x'; function f() { return ('C')::X . ('c' . '')::X; } }
+    /// var_dump((new C)->f(), "C"[0]::X);
+    /// ```
+    /// ```expect
+    /// string(2) "xx"
+    /// string(1) "x"
+    /// ```
+    fn constant_class(&mut self, operand: ClassOperand) -> Result<Option<Vec<u8>>, CompileError> {
+        match operand {
+            ClassOperand::Name(token) => {
+                let written = self.text(token).to_vec();
+                Ok(Some(self.class_name(&written)))
+            }
+            ClassOperand::Value(value) => self.fq_class_name(value).map(Some),
+            ClassOperand::Expr(_) => Ok(None),
+        }
+    }
+
+    /// The name a class operand that is a value holds: a string, and
+    /// php's `Illegal class name` for any other value.
+    fn value_class_name(&self, value: Zval) -> Result<Vec<u8>, CompileError> {
+        value
+            .as_str()
+            .map(|name| name.bytes().to_vec())
+            .ok_or_else(|| self.compile_error("Illegal class name"))
+    }
+
+    /// `zend_resolve_class_name_ast` over a class operand that is a value
+    /// ([`ClassOperand::Value`]), resolved as `ZEND_NAME_FQ`: its name
+    /// ([`Self::value_class_name`]) with one leading `\` dropped, and
+    /// `self`, `parent` or `static` php's `'\self' is an invalid class
+    /// name`.
+    ///
+    /// ```php
+    /// echo ("self")::X;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: '\self' is an invalid class name in %s on line 2
+    /// ```
+    fn fq_class_name(&self, value: Zval) -> Result<Vec<u8>, CompileError> {
+        let name = self.value_class_name(value)?;
+        self.fq_name(&name)
+    }
+
+    /// `zend_resolve_class_name` under `ZEND_NAME_FQ` over a name whose
+    /// fetch type is the default one or that begins with `\`: the name
+    /// with that `\` dropped, and php's compile error where what is left
+    /// is `self`, `parent` or `static`.
+    fn fq_name(&self, name: &[u8]) -> Result<Vec<u8>, CompileError> {
+        let bare = name.strip_prefix(b"\\").unwrap_or(name);
+        if class_fetch_type(bare) != FETCH_CLASS_DEFAULT {
+            return Err(self.compile_error(format!(
+                "'\\{}' is an invalid class name",
+                String::from_utf8_lossy(bare)
+            )));
+        }
+        Ok(bare.to_vec())
     }
 
     /// The type a cast is to, php's `attr` on `ZEND_AST_CAST`: the
@@ -2536,7 +2628,7 @@ impl Emit<'_> {
 
     /// `C::NAME` and `C::$name`: a class constant or a class's
     /// property (`ZEND_AST_STATIC_PROP`), over the class a name written
-    /// out or an expression names ([`Self::class_spec`]), or its name;
+    /// out or an expression names ([`ClassSpec::of`]), or its name;
     /// a member the program names is refused as not read yet.
     fn scoped_of(
         &self,
@@ -2544,7 +2636,7 @@ impl Emit<'_> {
         line: u32,
     ) -> Result<Scoped, CompileError> {
         let node = &self.parsed.tree[id];
-        let class = self.class_spec(node.scope);
+        let class = ClassSpec::of(node.scope);
         let tree = &self.parsed.tree;
         let computed = |inner: Option<tree::Expr>, what| {
             inner
@@ -3542,7 +3634,8 @@ impl Emit<'_> {
     /// it folds to, or `null` where none is written, is what the table
     /// starts with, and one `BIND_STATIC` binds the CV to the table's
     /// entry by reference. An initializer it cannot fold leaves `null`
-    /// in the table and runs where it stands: `BIND_INIT_STATIC_OR_JMP`
+    /// in the table and runs as the evaluator left it ([`eval`]), a `??`
+    /// over `null` its right side: `BIND_INIT_STATIC_OR_JMP`
     /// steps over it once the entry holds a value, and the
     /// `BIND_STATIC` after it binds the value it computed the first
     /// time. The slot and the `ZEND_BIND_REF` bit share `extended_value`
@@ -3595,14 +3688,7 @@ impl Emit<'_> {
             let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
             let folded = match init {
                 None => Some(Zval::null()),
-                Some(init) => {
-                    let mark = self.raised();
-                    let folded = self.eval_const(init)?;
-                    if folded.is_none() {
-                        self.unraise(mark);
-                    }
-                    folded
-                }
+                Some(init) => self.eval_const(init)?,
             };
             self.static_vars.push(BoundVar {
                 name: Name(name.as_slice().into()),
@@ -4373,6 +4459,24 @@ impl Emit<'_> {
     /// NULL
     /// ```
     ///
+    /// The `Type $x = null` spelling before a required parameter is made
+    /// required too, with its type nullable and no deprecation of its
+    /// own: a call that leaves it out names it as not passed.
+    ///
+    /// ```php
+    /// function f(Foo $c = null, $d) { var_dump($c, $d); }
+    /// try { f(d: 1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// f(null, 2);
+    /// echo (new ReflectionFunction('f'))->getParameters()[0], "\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: f(): Implicitly marking parameter $c as nullable is deprecated, the explicit nullable type must be used instead in %s on line 2
+    /// f(): Argument #1 ($c) not passed
+    /// NULL
+    /// int(2)
+    /// Parameter #0 [ <required> ?Foo $c ]
+    /// ```
+    ///
     /// A function that returns by reference and is declared `void` is
     /// deprecated before its parameters are read:
     ///
@@ -4429,8 +4533,11 @@ impl Emit<'_> {
                 parameter.line,
             )?;
             let (ty, implicitly_nullable) = self.parameter_type(parameter, &mut folded, shown)?;
-            let keeps_default = !parameter.variadic
-                && (implicitly_nullable || last_required.is_none_or(|last| at > last));
+            // `zend_compile_params` makes every optional parameter before
+            // the last required one `ZEND_RECV` with no default, the
+            // `Type $x = null` spelling too, whose nullable type stands
+            // and whose deprecation alone is skipped.
+            let keeps_default = !parameter.variadic && last_required.is_none_or(|last| at > last);
             if let (Some(last), Some(_), false) = (last_required, &folded, implicitly_nullable)
                 && at < last
                 && let Some(required) = function.parameters.get(last)
@@ -4588,27 +4695,45 @@ impl Emit<'_> {
         done
     }
 
-    /// A parameter's default as `zend_compile_params` folds it, under
-    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one naming
-    /// a constant is not folded: the name stays as written, and what
-    /// stands in the constant table is the `IS_CONSTANT_AST` zval over
-    /// the expression, which the engine evaluates on the pass that
-    /// copies it and Reflection reads back as the name.
+    /// A parameter's default as `zend_compile_params` folds it,
+    /// `zend_const_expr_to_zval` with `allow_dynamic` under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`: no constant
+    /// is substituted, a class's own included, so a default naming one
+    /// stays the `IS_CONSTANT_AST` zval over the expression, which the
+    /// engine evaluates on the pass that copies it and Reflection reads
+    /// back as the name; a class's name is no constant, and
+    /// `zend_try_compile_const_expr_resolve_class_name` resolves
+    /// `Name::class`, and `self::class` and `parent::class` where the
+    /// scope is known, to the string.
+    ///
+    /// ```php
+    /// class P {}
+    /// class C extends P {
+    ///     const X = 1;
+    ///     function f($a = self::class, $b = parent::class . '!', $c = Baz::class, $d = self::X, $e = [self::class], $f = PHP_INT_SIZE) {}
+    /// }
+    /// foreach ((new ReflectionMethod('C', 'f'))->getParameters() as $p) {
+    ///     echo $p->isDefaultValueConstant() ? 'constant ' : 'value ', var_export($p->getDefaultValue(), true), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// value 'C'
+    /// value 'P!'
+    /// value 'Baz'
+    /// constant 1
+    /// value array (
+    ///   0 => 'C',
+    /// )
+    /// constant 8
+    /// ```
     fn parameter_default(
         &mut self,
         parameter: &walk::Parameter,
     ) -> Result<Option<Zval>, CompileError> {
-        Ok(match parameter.default {
-            Some(expr) if self.names_a_constant(expr) => {
-                let unevaluated = self.dynamic_const_expr(expr)?;
-                Some(self.unevaluated(unevaluated))
-            }
-            // `zend_const_expr_to_zval` with `allow_dynamic`: the fold
-            // where `zend_eval_const_expr` folds it, the tree for the
-            // engine to evaluate at the `RECV_INIT` otherwise.
-            Some(expr) => Some(self.const_expr_to_zval(expr)?),
-            None => None,
-        })
+        parameter
+            .default
+            .map(|expr| self.const_expr_to_zval(expr))
+            .transpose()
     }
 
     /// `zend_const_expr_to_zval` with `allow_dynamic`: the fold where
@@ -7276,6 +7401,19 @@ impl Emit<'_> {
     /// string(1) "C"
     /// ```
     ///
+    /// A `??` over `null` and a conditional over a constant are the side
+    /// the evaluator picked, as the default Reflection prints shows:
+    ///
+    /// ```php
+    /// function f($x = null ?? Y, $y = true ? Z : 1, $z = [1 ? W : 2, null ?? V]) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) echo $p, "\n";
+    /// ```
+    /// ```expect
+    /// Parameter #0 [ <optional> $x = Y ]
+    /// Parameter #1 [ <optional> $y = Z ]
+    /// Parameter #2 [ <optional> $z = [W, V] ]
+    /// ```
+    ///
     /// A property fetch's object is evaluated before the fetch is looked
     /// at, as `zend_eval_const_expr` walks it, so what the object
     /// refuses is refused first, and an attribute's argument is compiled
@@ -7290,6 +7428,14 @@ impl Emit<'_> {
     /// ```
     #[allow(clippy::too_many_lines)]
     fn const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
+        // `zend_compile_const_expr` walks the tree `zend_eval_const_expr`
+        // left ([`eval`]): a node it folded is its value, and a `??` or a
+        // conditional it replaced is the side it picked.
+        match self.rewrites.get(expr) {
+            Some(eval::Rewrite::Value(value)) => return self.folded(value),
+            Some(eval::Rewrite::Node(node)) => return self.const_expr(node),
+            None => {}
+        }
         let line = expr.line(self.parsed);
         self.check_stack()?;
         let tree = &self.parsed.tree;
@@ -7340,29 +7486,24 @@ impl Emit<'_> {
             // compile-time fatals.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => {
-                    let token = match class {
-                        ClassSpec::Name(token) => Some(token),
-                        ClassSpec::Expr(_) => None,
-                    };
-                    let written = match class {
-                        ClassSpec::Name(token) => self.text(token).to_vec(),
-                        // `zend_eval_const_expr` folded the class to a
-                        // constant, which names it where it is a string.
-                        ClassSpec::Expr(expr) => match self.constant_of(expr)? {
-                            Some(value) => match value.as_str() {
-                                Some(text) => text.bytes().to_vec(),
-                                None => {
-                                    return Err(self.compile_error(
-                                        "Class name must be a valid object or a string",
-                                    ));
-                                }
-                            },
+                    // `zend_eval_const_expr` folded the class to a
+                    // constant, which names it where it is a string.
+                    let operand = self.evaluated_class(class)?;
+                    let written = match operand {
+                        ClassOperand::Name(token) => self.text(token).to_vec(),
+                        ClassOperand::Value(value) => match value.as_str() {
+                            Some(text) => text.bytes().to_vec(),
                             None => {
                                 return Err(self.compile_error(
-                                    "Dynamic class names are not allowed in compile-time class constant references",
+                                    "Class name must be a valid object or a string",
                                 ));
                             }
                         },
+                        ClassOperand::Expr(_) => {
+                            return Err(self.compile_error(
+                                "Dynamic class names are not allowed in compile-time class constant references",
+                            ));
+                        }
                     };
                     if class_fetch_type(&written) == FETCH_CLASS_STATIC {
                         return Err(self.compile_error(
@@ -7370,11 +7511,14 @@ impl Emit<'_> {
                         ));
                     }
                     // `self` and `parent` keep the mark they were written
-                    // with; any other name the one resolution leaves.
-                    let (class, class_kind) = if class_fetch_type(&written) == FETCH_CLASS_DEFAULT {
-                        self.resolve_class_marked(&written)
-                    } else {
-                        (written, NameKind::NotFullyQualified)
+                    // with; any other name the one resolution leaves, a
+                    // folded one resolved as `ZEND_NAME_FQ`.
+                    let (class, class_kind) = match (class_fetch_type(&written), operand) {
+                        (FETCH_CLASS_DEFAULT, ClassOperand::Value(_)) => {
+                            (self.fq_name(&written)?, NameKind::FullyQualified)
+                        }
+                        (FETCH_CLASS_DEFAULT, _) => self.resolve_class_marked(&written),
+                        _ => (written, NameKind::NotFullyQualified),
                     };
                     // `self::{'X'}` folds to the name; one that does
                     // not fold to a string is kept as its own tree,
@@ -7393,9 +7537,7 @@ impl Emit<'_> {
                     // `zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST`
                     // arm: a constant of the class being declared is
                     // its value ([`Self::active_class_constant`]).
-                    if let Some(token) = token
-                        && let Some(value) = self.active_class_constant(token, &name)?
-                    {
+                    if let Some(value) = self.active_class_constant(&class, &name)? {
                         return self.folded(value);
                     }
                     Ok(ConstExpr::ClassConstant {
@@ -7417,7 +7559,8 @@ impl Emit<'_> {
                 // code outside any function, is kept for the scope that evaluates
                 // it (`zend_compile_const_expr_class_name`).
                 Scoped::ClassName { class } => {
-                    if let Some(folded) = self.resolved_class_name(class)? {
+                    let operand = self.decoded_class(class)?;
+                    if let Some(folded) = self.resolved_class_name(operand)? {
                         return self.folded(folded);
                     }
                     let ClassSpec::Name(token) = class else {
@@ -7802,7 +7945,7 @@ impl Emit<'_> {
         let Some(ctor) = ctor else {
             return Err(self.unread("a `new`"));
         };
-        let ClassSpec::Name(token) = self.class_spec(ctor) else {
+        let ClassSpec::Name(token) = ClassSpec::of(ctor) else {
             return Err(self.compile_error("Cannot use dynamic class name in constant expression"));
         };
         let class_line = self.line_of(ctor);
@@ -10015,7 +10158,23 @@ impl Emit<'_> {
     /// `determine_switch_jumptable_type`: `long` or `string` when every
     /// case is a constant of that one type and no string case is
     /// numeric, which a hash lookup could not compare as `==` compares
-    /// it; nothing otherwise.
+    /// it; nothing otherwise. Each case is read through
+    /// `zend_eval_const_expr`, which leaves its rewrite for the case's
+    /// compile ([`eval`]), up to the first that does not fold: a
+    /// conditional over a constant is a case of the value it picks, and
+    /// a call, which the evaluator folds none of, is no constant here
+    /// though its compile may fold it.
+    ///
+    /// ```php
+    /// foreach ([5, 3] as $x) {
+    ///     switch ($x) { case 1: case 2: case 3: case 4: case true ? 5 : 6: echo "a$x,"; break; default: echo "d$x,"; }
+    ///     switch ($x) { case 1: case 2: case 4: case 6: case strlen('abc'): echo "b$x,"; }
+    /// }
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// a5,a3,b3,
+    /// ```
     fn switch_jumptable_type(
         &mut self,
         cases: &[NodeId<tree::SwitchArm>],
@@ -10025,7 +10184,7 @@ impl Emit<'_> {
             let Some(cond) = self.parsed.tree[*case].value else {
                 continue;
             };
-            let Some(value) = self.constant_of(cond)? else {
+            let Some(value) = self.eval_const(cond)? else {
                 return Ok(None);
             };
             let kind = value.kind();
@@ -10184,11 +10343,10 @@ impl Emit<'_> {
         // `CG(zend_lineno)` as the subject left it, the line a condition
         // `can_match_use_jumptable` folded is created at.
         let subject_line = self.line;
-        let (uses_table, folded) = self.match_uses_jumptable(arms)?;
-        if uses_table {
+        if self.match_uses_jumptable(arms)? {
             table = Some(self.emit_table(Opcode::Match, subject));
         } else {
-            jumps = self.match_chain(subject, case_node, arms, &folded, subject_line)?;
+            jumps = self.match_chain(subject, case_node, arms, subject_line)?;
             default_jump = Some(self.push(Opline {
                 opcode: Opcode::Jmp,
                 ..Opline::default()
@@ -10217,36 +10375,30 @@ impl Emit<'_> {
     }
 
     /// `can_match_use_jumptable` and `count_match_conds`: every
-    /// condition a constant `long` or `string`, and two or more of them;
-    /// beside it, the conditions its `zend_eval_const_expr` replaced
-    /// with the value they fold to, each one it reached that was written
-    /// as more than a number or a string and folded, whose node the
-    /// replacement gives the line the compile stands at.
+    /// condition a constant `long` or `string` as `zend_eval_const_expr`
+    /// leaves it, and two or more of them. Each condition the evaluator
+    /// reaches and folds is replaced with its value ([`eval`]), a node
+    /// that takes the line the compile stands at.
     fn match_uses_jumptable(
         &mut self,
         arms: &[NodeId<tree::MatchArm>],
-    ) -> Result<(bool, Vec<tree::Expr>), CompileError> {
+    ) -> Result<bool, CompileError> {
         let mut count = 0;
-        let mut folded = Vec::new();
         for arm in arms {
             let Some(conds) = self.parsed.tree[*arm].conds else {
                 continue;
             };
             for cond in &self.parsed.tree[conds].exprs.clone() {
-                let cond = *cond;
                 count += 1;
-                let Some(value) = self.constant_of(cond)? else {
-                    return Ok((false, folded));
+                let Some(value) = self.eval_const(*cond)? else {
+                    return Ok(false);
                 };
-                if self.literal_of(cond).is_none() {
-                    folded.push(cond);
-                }
                 if !matches!(value.kind(), ZvalType::Long | ZvalType::String) {
-                    return Ok((false, folded));
+                    return Ok(false);
                 }
             }
         }
-        Ok((count >= 2, folded))
+        Ok(count >= 2)
     }
 
     /// Every condition of every arm, in written order: the conditions
@@ -10301,12 +10453,13 @@ impl Emit<'_> {
         subject: Where,
         case_node: u32,
         arms: &[NodeId<tree::MatchArm>],
-        folded: &[tree::Expr],
         subject_line: u32,
     ) -> Result<Vec<u32>, CompileError> {
         let mut jumps = Vec::new();
         for cond in self.match_conds(arms) {
-            let was_folded = folded.contains(&cond);
+            // A condition the evaluator replaced with its value
+            // ([`eval`]); a value the parser made keeps its own line.
+            let was_folded = self.rewritten_value(self.peel(cond)).is_some();
             self.line = self.line_of(cond);
             let cond = self.expr(cond)?;
             if was_folded {
@@ -10830,6 +10983,10 @@ impl Emit<'_> {
     /// calls ([`Self::call`]); every other node is compiled as a read's.
     fn expr_under(&mut self, expr: tree::Expr, fetch: Fetch) -> Result<Where, CompileError> {
         let node = self.peel(expr);
+        // `ZEND_AST_ZVAL` where `zend_eval_const_expr` folded the node.
+        if let Some(value) = self.rewritten_value(node) {
+            return Ok(Where::Constant(value));
+        }
         if self.memo.mode != memo::MemoMode::None {
             return self.memoized(node);
         }
@@ -11094,7 +11251,7 @@ impl Emit<'_> {
     /// `ZEND_AST_INSTANCEOF`.
     fn instanceof_expr(&mut self, id: NodeId<tree::InstanceofExpr>) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
-        let Some(class) = node.rhs.map(|rhs| self.class_spec(rhs)) else {
+        let Some(class) = node.rhs.map(ClassSpec::of) else {
             return Err(self.unread("an `instanceof`"));
         };
         self.instance_of(node.lhs, class)
@@ -11126,7 +11283,7 @@ impl Emit<'_> {
             };
             return self.new_of(&class, &arguments, line);
         }
-        let Some(class) = node.ctor.map(|ctor| self.class_spec(ctor)) else {
+        let Some(class) = node.ctor.map(ClassSpec::of) else {
             return Err(self.unread("a `new`"));
         };
         let arguments = match node.args {
@@ -13707,11 +13864,75 @@ impl Emit<'_> {
             return self.bitwise(op, left, right);
         }
         if let (Where::Constant(a), Where::Constant(b)) = (left, right)
-            && let Some(folded) = fold(op, a, b)
+            && let Some(folded) = self.arithmetic_fold(op, a, b)?
         {
             return Ok(Where::Constant(folded));
         }
         Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
+    }
+
+    /// `zend_try_ct_eval_binary_op` over the arithmetic operators: two
+    /// constant arrays under `+` are the one pair of arrays
+    /// `zend_binary_op_produces_error` lets through, which `add_function`
+    /// joins ([`Self::array_union`]); an array beside anything else, or
+    /// under any other operator, is left to the opcode, which throws;
+    /// every other pair is [`fold`]'s.
+    fn arithmetic_fold(
+        &mut self,
+        op: BinaryOp,
+        left: Zval,
+        right: Zval,
+    ) -> Result<Option<Zval>, CompileError> {
+        match (op, left.as_arr(), right.as_arr()) {
+            (BinaryOp::Add, Some(left), Some(right)) => self.array_union(left, right).map(Some),
+            (_, None, None) => Ok(fold(op, left, right)),
+            _ => Ok(None),
+        }
+    }
+
+    /// `add_function` over two arrays: the left one's entries in its
+    /// order, then each of the right one's whose key the left one has
+    /// not (`zend_hash_merge` without overwrite), laid down as one
+    /// constant array.
+    ///
+    /// ```php
+    /// var_dump([0, 1] + [2, 3, 4], ['a' => 1, 5 => 'x'] + ['a' => 2, 'b' => 3], [] + []);
+    /// $p = [0, 1] + [2];
+    /// $p[] = 'n';
+    /// var_dump($p);
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(1)
+    ///   [2]=>
+    ///   int(4)
+    /// }
+    /// array(3) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   [5]=>
+    ///   string(1) "x"
+    ///   ["b"]=>
+    ///   int(3)
+    /// }
+    /// array(0) {
+    /// }
+    /// array(3) {
+    ///   [0]=>
+    ///   int(0)
+    ///   [1]=>
+    ///   int(1)
+    ///   [2]=>
+    ///   string(1) "n"
+    /// }
+    /// ```
+    fn array_union(&mut self, left: Arr, right: Arr) -> Result<Zval, CompileError> {
+        let mut entries: Vec<(Key, Zval)> = left.iter().collect();
+        entries.extend(right.iter().filter(|(key, _)| left.get(*key).is_none()));
+        self.lay_array(&entries)
     }
 
     /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm over the two
@@ -14903,6 +15124,9 @@ impl Emit<'_> {
     /// `zend_eval_const_expr`, so it holds the dispatch and nothing else:
     /// each arm is one call whose answer is this function's.
     pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+        if let Some(evaluated) = self.evaluated(expr) {
+            return evaluated;
+        }
         // `zend_eval_const_expr` checks the stack and leaves
         // `CG(zend_lineno)` where it stands: the fold emits no opline,
         // so the line the compiler is on is the one the opline that
@@ -14910,7 +15134,7 @@ impl Emit<'_> {
         let line = expr.line(self.parsed);
         self.check_stack()?;
         let eval_const_expr = self.fold == Fold::EvalConstExpr;
-        match expr {
+        let folded = match expr {
             tree::Expr::ParenExpr(id) => self.paren_constant(id),
             tree::Expr::LiteralExpr(id) => self.literal_constant(id),
             tree::Expr::MagicConstExpr(id) => self.magic_node(id),
@@ -14947,9 +15171,10 @@ impl Emit<'_> {
                 self.no_constant("a call is no constant expression")
             }
             tree::Expr::CallExpr(id) => self.call_constant(id, line),
-            tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) | tree::Expr::NewExpr(_) => {
+            tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) => {
                 self.no_constant("a call is no constant expression")
             }
+            tree::Expr::NewExpr(id) => self.new_constant(id),
             tree::Expr::SimpleVarExpr(_)
             | tree::Expr::VarVarExpr(_)
             | tree::Expr::DynamicVarExpr(_)
@@ -14960,9 +15185,7 @@ impl Emit<'_> {
             }
             // `zend_eval_const_expr` folds no property fetch, and
             // `zend_compile_prop` emits its fetch.
-            tree::Expr::MemberAccessExpr(_) => {
-                self.no_constant("a property fetch is read as the program serves")
-            }
+            tree::Expr::MemberAccessExpr(id) => self.member_constant(id),
             // `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
             // ([`Self::dimension_fold`]); `zend_compile_dim` folds
             // nothing.
@@ -15007,7 +15230,9 @@ impl Emit<'_> {
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
                 self.no_constant("a `yield` is no constant expression")
             }
-        }
+        };
+        self.record_fold(expr, &folded);
+        folded
     }
 
     /// A node [`Self::constant_expr`] folds to nothing, refused as `why`.
@@ -15157,21 +15382,7 @@ impl Emit<'_> {
             Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
                 self.short_circuit_fold(true, left, right)
             }
-            // `zend_compile_coalesce` emits two oplines whatever stands
-            // on either side; `zend_eval_const_expr`'s
-            // `ZEND_AST_COALESCE` arm folds a left side that folds, to
-            // itself where it is not `null` and to the right side's fold
-            // where it is.
-            Some(SyntaxKind::QUESTION_QUESTION) if self.fold == Fold::EvalConstExpr => {
-                let value = self.constant_expr(left)?;
-                if value.kind() == ZvalType::Null {
-                    return self.constant_expr(right);
-                }
-                Ok(value)
-            }
-            Some(SyntaxKind::QUESTION_QUESTION) => {
-                Err(self.fatal("a `??` is no constant expression"))
-            }
+            Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce_constant(id, left, right),
             Some(kind) => match binary_op(kind) {
                 Some(op) => self.binary_constant(op, left, right),
                 None => Err(self.unread("a binary operator")),
@@ -15242,40 +15453,23 @@ impl Emit<'_> {
         line: u32,
     ) -> Result<Zval, CompileError> {
         match self.scoped_of(id, line)? {
-            Scoped::Constant {
-                class: ClassSpec::Name(token),
-                name,
-            } => {
+            Scoped::Constant { class, name } => {
+                let operand = self.evaluated_class(class)?;
                 let folded = match self.folded_name(&name)? {
-                    Some(name) => self.active_class_constant(token, &name)?,
+                    Some(name) => match self.constant_class(operand)? {
+                        Some(class) => self.active_class_constant(&class, &name)?,
+                        None => None,
+                    },
                     None => None,
                 };
                 folded.ok_or_else(|| self.fatal("a class constant is fetched at run time"))
             }
-            Scoped::Constant { .. } => Err(self.fatal("a class constant is fetched at run time")),
             Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
-            Scoped::ClassName { class } => match self.resolved_class_name(class)? {
-                Some(value) => Ok(value),
-                None => Err(self.fatal("a class name is fetched at run time")),
-            },
-        }
-    }
-
-    /// `zend_eval_const_expr`'s `ZEND_AST_CONDITIONAL` arm: the condition
-    /// folded, then the branch `zend_is_true` picks folded in its place,
-    /// the condition itself for `a ?: b`.
-    fn ternary_constant(&mut self, id: NodeId<tree::TernaryExpr>) -> Result<Zval, CompileError> {
-        let node = &self.parsed.tree[id];
-        let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
-        let otherwise = self.required(otherwise, "a conditional")?;
-        let value = self.constant_expr(cond)?;
-        if value.as_double().is_some_and(f64::is_nan) {
-            self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
-        }
-        match (truth(value), then) {
-            (true, None) => Ok(value),
-            (true, Some(then)) => self.constant_expr(then),
-            (false, _) => self.constant_expr(otherwise),
+            Scoped::ClassName { class } => {
+                let operand = self.decoded_class(class)?;
+                self.resolved_class_name(operand)?
+                    .ok_or_else(|| self.fatal("a class name is fetched at run time"))
+            }
         }
     }
 
@@ -15291,8 +15485,7 @@ impl Emit<'_> {
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Zval, CompileError> {
-        let left = self.constant_expr(left)?;
-        let right = self.constant_expr(right)?;
+        let (left, right) = self.constant_pair(left, right)?;
         self.constant_operands(op, left, right)
     }
 
@@ -15318,7 +15511,8 @@ impl Emit<'_> {
         if compares(op) {
             return Ok(self.compare_fold(op, left, right));
         }
-        fold(op, left, right).ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+        self.arithmetic_fold(op, left, right)?
+            .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
@@ -15353,8 +15547,7 @@ impl Emit<'_> {
         let Some(index) = index else {
             return Err(self.compile_error("Cannot use [] for reading"));
         };
-        let container = self.constant_expr(base)?;
-        let dim = self.constant_expr(index)?;
+        let (container, dim) = self.constant_pair(base, index)?;
         let refused = |emit: &Self| emit.fatal("a dimension this compiler leaves to the request");
         if let Some(array) = container.as_arr() {
             let key = match (dim.as_long(), dim.as_str()) {
@@ -15385,26 +15578,6 @@ impl Emit<'_> {
             };
         }
         Err(refused(self))
-    }
-
-    /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm:
-    /// the left side folded, and where its truth is the operator's
-    /// answer on its own, that bool, with the right side never folded;
-    /// else the right side's truth, since the left one has settled
-    /// nothing and the operator answers what the right one is. A side
-    /// that does not fold leaves the whole expression unfolded, which is
-    /// php's `return` out of the arm.
-    fn short_circuit_fold(
-        &mut self,
-        or: bool,
-        left: tree::Expr,
-        right: tree::Expr,
-    ) -> Result<Zval, CompileError> {
-        let held = truth(self.constant_expr(left)?);
-        if held == or {
-            return Ok(Zval::bool(held));
-        }
-        Ok(Zval::bool(truth(self.constant_expr(right)?)))
     }
 
     /// `zend_try_ct_eval_array` (`Z/Zend/zend_compile.c:10085`) over an
@@ -15490,29 +15663,37 @@ impl Emit<'_> {
     ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
         let elements = self.elements_of(elements)?;
         let mut folded: Vec<FoldedElement> = Vec::with_capacity(elements.len());
+        let mut constant = true;
         for element in elements {
-            let (key, value) = match element {
-                Element::Value { key, value } => (key, value),
-                Element::Ref { .. } => return Ok(None),
+            let (key, value, by_ref) = match element {
+                Element::Value { key, value } => (key, value, false),
+                Element::Ref { key, value } => (key, value, true),
                 Element::Unpack(value) => {
-                    let Some(value) = self.eval_const(value)? else {
-                        return Ok(None);
-                    };
-                    folded.push(FoldedElement::Unpack(value));
+                    match self.eval_const(value)? {
+                        Some(value) => folded.push(FoldedElement::Unpack(value)),
+                        None => constant = false,
+                    }
                     continue;
                 }
             };
+            // `ZEND_AST_ARRAY_ELEM` holds the value first and the key
+            // second, and php evaluates them in that order.
+            let value = self.eval_const(value)?;
             let key = match key {
-                Some(key) => match self.eval_const(key)? {
-                    Some(key) => Some(key),
-                    None => return Ok(None),
-                },
+                Some(key) => {
+                    let folded_key = self.eval_const(key)?;
+                    constant &= folded_key.is_some();
+                    folded_key
+                }
                 None => None,
             };
-            let Some(value) = self.eval_const(value)? else {
-                return Ok(None);
-            };
-            folded.push(FoldedElement::Pair(key, value));
+            match value {
+                Some(value) if !by_ref => folded.push(FoldedElement::Pair(key, value)),
+                _ => constant = false,
+            }
+        }
+        if !constant {
+            return Ok(None);
         }
         self.keyed_entries(folded)
     }
@@ -15653,7 +15834,7 @@ impl Emit<'_> {
         for (i, element) in elements.into_iter().enumerate() {
             let (key, value, by_ref) = match element {
                 Element::Unpack(value) => {
-                    let value = self.walked(value)?;
+                    let value = self.expr(value)?;
                     let (op1_type, op1) = self.operand(value);
                     if i == 0 {
                         out = self.temporary();
@@ -15680,7 +15861,7 @@ impl Emit<'_> {
             };
             let key = match key {
                 Some(key) => {
-                    let key = self.walked(key)?;
+                    let key = self.expr(key)?;
                     Some(Self::numeric_op(key))
                 }
                 None => None,
@@ -15688,7 +15869,7 @@ impl Emit<'_> {
             let (op1_type, op1) = if by_ref {
                 self.element_ref(value)?
             } else {
-                let value = self.walked(value)?;
+                let value = self.expr(value)?;
                 self.operand(value)
             };
             let (op2_type, op2) = match key {
@@ -15829,21 +16010,6 @@ impl Emit<'_> {
                 self.var_for_reference(node)
             }
             _ => Err(self.compile_error("Cannot use temporary expression in write context")),
-        }
-    }
-
-    /// `zend_eval_const_expr` over one node and then
-    /// `zend_compile_expr` over what it left, which is the order inside
-    /// an array expression: `zend_try_ct_eval_array`'s first pass folds
-    /// every key and value in place, and the emission after it reads
-    /// what the fold left, so a cast inside an array is folded where the
-    /// same cast written anywhere else is the `CAST` opline
-    /// `zend_compile_cast` emits. The constant where the node folds,
-    /// else the oplines that build it.
-    fn walked(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
-        match self.eval_const(expr)? {
-            Some(value) => Ok(Where::Constant(value)),
-            None => self.expr(expr),
         }
     }
 
@@ -16542,20 +16708,22 @@ impl Emit<'_> {
     /// for `self` and `parent` where the scope is not known, and for a
     /// class the program computes. `self`, `parent` and `static` are
     /// held to [`Self::ensure_valid_class_fetch_type`] first.
-    fn resolved_class_name(&mut self, class: ClassSpec) -> Result<Option<Zval>, CompileError> {
-        let ClassSpec::Name(token) = class else {
-            return Ok(None);
+    fn resolved_class_name(&mut self, operand: ClassOperand) -> Result<Option<Zval>, CompileError> {
+        let written = match operand {
+            ClassOperand::Name(token) => self.text(token).to_vec(),
+            ClassOperand::Value(value) => self.value_class_name(value)?,
+            ClassOperand::Expr(_) => return Ok(None),
         };
-        let written = self.text(token).to_vec();
         let fetch = class_fetch_type(&written);
         self.ensure_valid_class_fetch_type(fetch)?;
-        let name = match fetch {
-            FETCH_CLASS_DEFAULT => self.class_name(&written),
-            FETCH_CLASS_SELF if self.scope_known() => match self.active_name() {
+        let name = match (fetch, operand) {
+            (FETCH_CLASS_DEFAULT, ClassOperand::Value(_)) => self.fq_name(&written)?,
+            (FETCH_CLASS_DEFAULT, _) => self.class_name(&written),
+            (FETCH_CLASS_SELF, _) if self.scope_known() => match self.active_name() {
                 Some(active) => active,
                 None => return Ok(None),
             },
-            FETCH_CLASS_PARENT if self.scope_known() => match self.active_parent.clone() {
+            (FETCH_CLASS_PARENT, _) if self.scope_known() => match self.active_parent.clone() {
                 Some(parent) => parent,
                 None => return Ok(None),
             },
@@ -16624,22 +16792,18 @@ impl Emit<'_> {
     /// Fatal error: Cannot use "::class" on int in %s on line 2
     /// ```
     fn class_name_of(&mut self, class: ClassSpec) -> Result<Where, CompileError> {
-        if let Some(value) = self.resolved_class_name(class)? {
+        let operand = self.decoded_class(class)?;
+        if let Some(value) = self.resolved_class_name(operand)? {
             return Ok(Where::Constant(value));
         }
-        if let ClassSpec::Expr(expr) = class
-            && let tree::Expr::LiteralExpr(id) = self.peel(expr)
-            && let Some(value) = self.parsed.tree[id].value
-            && matches!(
-                TokenValue::of(self.parsed, Holder::Scalar(&self.parsed.tree[id]), value),
-                Some(TokenValue::Int(_) | TokenValue::Float(_))
-            )
-        {
-            return Err(self.compile_error("Illegal class name"));
-        }
-        let (op1_type, op1) = match class {
-            ClassSpec::Name(token) => (OperandKind::Unused, class_fetch_type(self.text(token))),
-            ClassSpec::Expr(expr) => match self.expr(expr)? {
+        // `class_ast->kind == ZEND_AST_ZVAL`: the fetch type of the name.
+        let (op1_type, op1) = match operand {
+            ClassOperand::Name(token) => (OperandKind::Unused, class_fetch_type(self.text(token))),
+            ClassOperand::Value(value) => {
+                let name = self.value_class_name(value)?;
+                (OperandKind::Unused, class_fetch_type(&name))
+            }
+            ClassOperand::Expr(expr) => match self.expr(expr)? {
                 Where::Constant(value) => {
                     let shown = match value.kind() {
                         ZvalType::Null => "null",
@@ -16731,14 +16895,16 @@ impl Emit<'_> {
     /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
     /// ```
     fn class_const(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
-        let written = self.folded_name(name)?;
-        if let ClassSpec::Name(token) = class
-            && let Some(written) = &written
-            && let Some(value) = self.active_class_constant(token, written)?
+        // Both children evaluated, the class first; the class resolved
+        // only where the name folded to a string.
+        let operand = self.evaluated_class(class)?;
+        if let Some(written) = self.folded_name(name)?
+            && let Some(resolved) = self.constant_class(operand)?
+            && let Some(value) = self.active_class_constant(&resolved, &written)?
         {
             return Ok(Where::Constant(value));
         }
-        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let class = self.class_ref_of(operand, FETCH_CLASS_EXCEPTION)?;
         let name = match name {
             ScopedName::Written(bytes) => Where::Constant(self.string(bytes)?),
             ScopedName::Computed(expr) => self.expr(*expr)?,
@@ -16773,7 +16939,7 @@ impl Emit<'_> {
         Ok(match name {
             ScopedName::Written(bytes) => Some(bytes.clone()),
             ScopedName::Computed(expr) => self
-                .constant_of(*expr)?
+                .eval_const(*expr)?
                 .and_then(|value| value.as_str().map(|s| s.bytes().to_vec())),
         })
     }
@@ -16838,19 +17004,18 @@ impl Emit<'_> {
     /// ```
     fn active_class_constant(
         &mut self,
-        token: TokenId,
+        class: &[u8],
         name: &[u8],
     ) -> Result<Option<Zval>, CompileError> {
         if self.substitution == Substitution::NoPersistent {
             return Ok(None);
         }
-        let written = self.text(token).to_vec();
         let Some(active) = self.active_name() else {
             return Ok(None);
         };
-        let refers = match class_fetch_type(&written) {
+        let refers = match class_fetch_type(class) {
             FETCH_CLASS_SELF => self.scope_known(),
-            FETCH_CLASS_DEFAULT => self.class_name(&written).eq_ignore_ascii_case(&active),
+            FETCH_CLASS_DEFAULT => class.eq_ignore_ascii_case(&active),
             _ => false,
         };
         if !refers {
@@ -17144,52 +17309,71 @@ impl Emit<'_> {
     /// written with a leading `\` is the class of that name; `self`,
     /// `parent` and `static` are their fetch type and `flags` in an
     /// unused operand, held to [`Self::ensure_valid_class_fetch_type`];
-    /// any other name is the class it resolves to. An expression is
-    /// compiled: a constant string is read as a name written with its
-    /// leading `\`, a constant of another type is php's `Illegal class
-    /// name`, and anything else is `FETCH_CLASS` over the value into a
-    /// `VAR`, `ZEND_FETCH_CLASS_DEFAULT` and `flags` in its `op1`.
+    /// any other name is the class it resolves to. A value written where
+    /// the class goes is the class it names as `ZEND_NAME_FQ`
+    /// ([`Self::fq_class_name`]); any other expression is
+    /// [`Self::computed_class_ref`]'s.
     fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef, CompileError> {
-        let written = match class {
-            ClassSpec::Name(token) => self.text(token).to_vec(),
-            ClassSpec::Expr(expr) => match self.expr(expr)? {
-                Where::Constant(value) => {
-                    let Some(name) = value.as_str() else {
-                        return Err(self.compile_error("Illegal class name"));
-                    };
-                    let name = name.bytes().to_vec();
-                    match class_fetch_type(&name) {
-                        FETCH_CLASS_DEFAULT => {
-                            let bare = name.strip_prefix(b"\\").unwrap_or(&name).to_vec();
-                            return Ok(ClassRef::Named(bare));
-                        }
-                        fetch => {
-                            self.ensure_valid_class_fetch_type(fetch)?;
-                            return Ok(ClassRef::Scope(fetch | flags));
-                        }
-                    }
-                }
-                value => {
-                    let (op2_type, op2) = self.operand(value);
-                    let out = self.temporary();
-                    self.push(Opline {
-                        opcode: Opcode::FetchClass,
-                        op1: FETCH_CLASS_DEFAULT | flags,
-                        op2_type,
-                        op2,
-                        out_type: OperandKind::Var,
-                        out,
-                        ..Opline::default()
-                    });
-                    return Ok(ClassRef::Fetched(out));
-                }
-            },
+        let operand = self.decoded_class(class)?;
+        self.class_ref_of(operand, flags)
+    }
+
+    /// [`Self::class_ref`] over the operand decoded.
+    fn class_ref_of(
+        &mut self,
+        operand: ClassOperand,
+        flags: u32,
+    ) -> Result<ClassRef, CompileError> {
+        let written = match operand {
+            ClassOperand::Name(token) => self.text(token).to_vec(),
+            ClassOperand::Value(value) => return Ok(ClassRef::Named(self.fq_class_name(value)?)),
+            ClassOperand::Expr(expr) => return self.computed_class_ref(expr, flags),
         };
         if written.starts_with(b"\\") {
             return Ok(ClassRef::Named(self.class_name(&written)));
         }
         match class_fetch_type(&written) {
             FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.class_name(&written))),
+            fetch => {
+                self.ensure_valid_class_fetch_type(fetch)?;
+                Ok(ClassRef::Scope(fetch | flags))
+            }
+        }
+    }
+
+    /// [`Self::class_ref`] over a class operand that is no value: the
+    /// expression compiled, where a constant string is read by its fetch
+    /// type, a name of the default one resolved as `ZEND_NAME_FQ`
+    /// ([`Self::fq_name`]), a constant of another type is php's `Illegal
+    /// class name`, and anything else is `FETCH_CLASS` over the value
+    /// into a `VAR`, `ZEND_FETCH_CLASS_DEFAULT` and `flags` in its `op1`.
+    fn computed_class_ref(
+        &mut self,
+        expr: tree::Expr,
+        flags: u32,
+    ) -> Result<ClassRef, CompileError> {
+        let value = match self.expr(expr)? {
+            Where::Constant(value) => value,
+            value => {
+                let (op2_type, op2) = self.operand(value);
+                let out = self.temporary();
+                self.push(Opline {
+                    opcode: Opcode::FetchClass,
+                    op1: FETCH_CLASS_DEFAULT | flags,
+                    op2_type,
+                    op2,
+                    out_type: OperandKind::Var,
+                    out,
+                    ..Opline::default()
+                });
+                return Ok(ClassRef::Fetched(out));
+            }
+        };
+        let Some(name) = value.as_str() else {
+            return Err(self.compile_error("Illegal class name"));
+        };
+        match class_fetch_type(name.bytes()) {
+            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.fq_name(name.bytes())?)),
             fetch => {
                 self.ensure_valid_class_fetch_type(fetch)?;
                 Ok(ClassRef::Scope(fetch | flags))
@@ -18847,11 +19031,6 @@ fn number(value: Zval) -> Option<Number> {
     }
 }
 
-/// How many diagnostics a compilation had raised at one point
-/// ([`Emit::raised`]).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Raised(usize);
-
 /// `zval_is_true` over a folded constant: [`Scalar::is_true`] for a
 /// scalar and, for an array, whether it holds anything
 /// (`i_zend_is_true`'s `IS_ARRAY` arm). No object, resource or
@@ -19408,6 +19587,7 @@ mod tests {
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
             fold: Fold::Compile,
+            rewrites: eval::Rewrites::default(),
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),

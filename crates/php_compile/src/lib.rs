@@ -1358,6 +1358,38 @@ mod tests {
         );
     }
 
+    /// `zend_try_ct_eval_binary_op` folds `+` over two constant arrays, the
+    /// one pair of arrays `zend_binary_op_produces_error` lets through, into
+    /// the array `add_function` makes, wherever the sum stands: assigned,
+    /// under `isset` and under `empty`, which php compiles as the `!` of it;
+    /// `-` over two arrays and `+` over an array and a number stay the
+    /// opcodes, which throw. The dump is the oracle's under `[regime.dump]` at
+    /// 8.5.9 (#2682).
+    #[test]
+    fn two_constant_arrays_under_a_plus_fold_to_the_array_php_s_add_makes() {
+        assert_eq!(
+            dump_of(b"<?php $p = [0, 1] + [2]; $q = [] + []; var_dump(isset(([0, 1] + [])[0]), empty([] + []), [1] - [1], [1] + 1);"),
+            "\n$_main:\n\
+             \x20    ; (lines=12, args=0, vars=2, tmps=6)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 ASSIGN CV0($p) array(...)\n\
+             0001 ASSIGN CV1($q) array(...)\n\
+             0002 INIT_FCALL 4 144 string(\"var_dump\")\n\
+             0003 T4 = ISSET_ISEMPTY_DIM_OBJ (isset) array(...) int(0)\n\
+             0004 SEND_VAL T4 1\n\
+             0005 SEND_VAL bool(true) 2\n\
+             0006 T5 = SUB array(...) array(...)\n\
+             0007 SEND_VAL T5 3\n\
+             0008 T6 = ADD array(...) int(1)\n\
+             0009 SEND_VAL T6 4\n\
+             0010 DO_ICALL\n\
+             0011 RETURN int(1)\n\
+             "
+        );
+    }
+
     #[test]
     fn arithmetic_php_does_not_fold_is_emitted_as_the_opcode_php_emits() {
         assert_eq!(
@@ -4528,6 +4560,83 @@ mod tests {
         );
     }
 
+    /// A class written in parentheses is an expression, `'(' expr ')'` in
+    /// `class_name_reference` and `fully_dereferenceable`, so `new (C)`,
+    /// `(C)::X` and `instanceof (C)` read the constant `C` and fetch the
+    /// class it names (`FETCH_CONSTANT`, `FETCH_CLASS`) where `new C` names
+    /// the class `C`; a string written where the class goes, folded by the
+    /// parser from `"A" . "B"` too, is the class it names as written
+    /// (`ZEND_NAME_FQ`). The dump is the oracle's under `[regime.dump]` at
+    /// 8.5.9 (#2680).
+    #[test]
+    fn a_class_in_parentheses_is_the_expression_and_a_string_the_class_it_names() {
+        assert_eq!(
+            dump_of(b"<?php new (C); new C; echo (C)::X, (\"A\" . \"B\")::class, \"Foo\"::X, (\"\\\\Foo\")::X; var_dump($a instanceof (C));"),
+            "\n$_main:\n\
+             \x20    ; (lines=24, args=0, vars=1, tmps=15)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T1 = FETCH_CONSTANT string(\"C\")\n\
+             0001 V2 = FETCH_CLASS (exception) T1\n\
+             0002 V3 = NEW 0 V2\n\
+             0003 DO_FCALL\n\
+             0004 FREE V3\n\
+             0005 V5 = NEW 0 string(\"C\")\n\
+             0006 DO_FCALL\n\
+             0007 FREE V5\n\
+             0008 T7 = FETCH_CONSTANT string(\"C\")\n\
+             0009 V8 = FETCH_CLASS (exception) T7\n\
+             0010 T9 = FETCH_CLASS_CONSTANT V8 string(\"X\")\n\
+             0011 ECHO T9\n\
+             0012 ECHO string(\"AB\")\n\
+             0013 T10 = FETCH_CLASS_CONSTANT string(\"Foo\") string(\"X\")\n\
+             0014 ECHO T10\n\
+             0015 T11 = FETCH_CLASS_CONSTANT string(\"Foo\") string(\"X\")\n\
+             0016 ECHO T11\n\
+             0017 INIT_FCALL 1 96 string(\"var_dump\")\n\
+             0018 T12 = FETCH_CONSTANT string(\"C\")\n\
+             0019 V13 = FETCH_CLASS (no-autoload) (silent) (exception) T12\n\
+             0020 T14 = INSTANCEOF CV0($a) V13\n\
+             0021 SEND_VAL T14 1\n\
+             0022 DO_ICALL\n\
+             0023 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0003 - 0004 (new)\n\
+             \x20    5: 0006 - 0007 (new)\n\
+             "
+        );
+    }
+
+    /// `zend_compile_class_const` runs `zend_eval_const_expr` over the class
+    /// before it compiles it, so `"ab"[0]::d` reads the class `a` the
+    /// dimension folds to, one `FETCH_CLASS_CONSTANT string("a")
+    /// string("d")`, while the same dimension under a `new`, which runs no
+    /// evaluator, is the `FETCH_DIM_R` and the `FETCH_CLASS` over it. The
+    /// dump is the oracle's under `[regime.dump]` at 8.5.9 (#2691).
+    #[test]
+    fn the_class_of_a_class_constant_is_read_as_the_constant_evaluator_folds_it() {
+        assert_eq!(
+            dump_of(b"<?php echo \"ab\"[0]::d; new (\"ab\"[0]);"),
+            "\n$_main:\n\
+             \x20    ; (lines=8, args=0, vars=0, tmps=5)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T0 = FETCH_CLASS_CONSTANT string(\"a\") string(\"d\")\n\
+             0001 ECHO T0\n\
+             0002 T1 = FETCH_DIM_R string(\"ab\") int(0)\n\
+             0003 V2 = FETCH_CLASS (exception) T1\n\
+             0004 V3 = NEW 0 V2\n\
+             0005 DO_FCALL\n\
+             0006 FREE V3\n\
+             0007 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0005 - 0006 (new)\n\
+             "
+        );
+    }
+
     /// `C::class`, which was refused as not read, as the oracle's
     /// `[regime.dump]` has it: a name written out folds to its resolved
     /// spelling, `self` in a known scope to the class being compiled,
@@ -6677,6 +6786,67 @@ $a[0]->p[1] = $a;
     }
 
     /// `zend_compile_params` under
+    /// Every optional parameter before the last required one is a
+    /// required `RECV` with no default (`zend_compile_params`,
+    /// `Z/Zend/zend_compile.c:7886`), the `Type $x = null` spelling as
+    /// much as `?Type $x = null`: the first only skips the deprecation.
+    /// The dump is the oracle's under `[regime.dump]` at 8.5.9 (#2684).
+    #[test]
+    fn an_optional_parameter_before_a_required_one_is_a_recv_whatever_its_spelling() {
+        assert_eq!(
+            dump_of(b"<?php function f(?int $a = null, $b, Foo $c = null, $d) {}"),
+            "\n$_main:\n\
+            \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+            \x20    ; (before optimizer)\n\
+            \x20    ; :1-1\n\
+            \x20    ; return  [] RANGE[0..0]\n\
+            0000 RETURN int(1)\n\
+            \nf:\n\
+            \x20    ; (lines=5, args=4, vars=4, tmps=0)\n\
+            \x20    ; (before optimizer)\n\
+            \x20    ; :1-1\n\
+            \x20    ; return  [] RANGE[0..0]\n\
+            0000 CV0($a) = RECV 1\n\
+            0001 CV1($b) = RECV 2\n\
+            0002 CV2($c) = RECV 3\n\
+            0003 CV3($d) = RECV 4\n\
+            0004 RETURN null\n\
+            "
+        );
+    }
+
+    /// A parameter's default is `zend_const_expr_to_zval`'s: under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` no constant is
+    /// substituted, so `self::X` stays the `IS_CONSTANT_AST` the dump prints
+    /// as `zval(type=11)`, while a class's name is none and
+    /// `zend_try_compile_const_expr_resolve_class_name` resolves `self::class`
+    /// and `parent::class` in a class with a parent, and `Baz::class`, to
+    /// their strings. The dump is the oracle's under `[regime.dump]` at 8.5.9
+    /// (#2685).
+    #[test]
+    fn a_class_name_in_a_parameter_default_folds_to_its_string() {
+        assert_eq!(
+            dump_of(b"<?php class P {} class C extends P { function f($a = self::class, $b = parent::class, $c = Baz::class, $d = self::X) {} }"),
+            "\n$_main:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \nC::f:\n\
+             \x20    ; (lines=5, args=4, vars=4, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 CV0($a) = RECV_INIT 1 string(\"C\")\n\
+             0001 CV1($b) = RECV_INIT 2 string(\"P\")\n\
+             0002 CV2($c) = RECV_INIT 3 string(\"Baz\")\n\
+             0003 CV3($d) = RECV_INIT 4 zval(type=11)\n\
+             0004 RETURN null\n\
+             "
+        );
+    }
+
     /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` (#384): a
     /// default naming a constant is not folded, so its `RECV_INIT`
     /// carries the `IS_CONSTANT_AST` value the oracle dumps as
@@ -7548,6 +7718,124 @@ class C {
         assert_eq!(
             dims[2].as_str().map(|s| s.bytes().to_vec()),
             Some(b"k".to_vec())
+        );
+    }
+
+    /// php passes a `static` variable's initializer through
+    /// `zend_eval_const_expr` before it compiles it, and the evaluator
+    /// replaces a `??` whose left side is `null` with its right side, so
+    /// `static $v = null ?? A[1] ?? 1;` compiles `A[1] ?? 1`: one `COALESCE`
+    /// over the `FETCH_DIM_IS`. Outside an initializer nothing folds the
+    /// `??`, and `$x = null ?? $a ?? 1;` keeps both. The dump is the oracle's
+    /// under `[regime.dump]` at 8.5.9 (#2681).
+    #[test]
+    fn a_static_initializer_compiles_what_the_constant_evaluator_left_of_it() {
+        assert_eq!(
+            dump_of(b"<?php function f() { static $v = null ?? A[1] ?? 1; } $x = null ?? $a ?? 1;"),
+            "\n$_main:\n\
+             \x20    ; (lines=6, args=0, vars=2, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T2 = COALESCE null 0004\n\
+             0001 T3 = COALESCE CV1($a) 0003\n\
+             0002 T3 = QM_ASSIGN int(1)\n\
+             0003 T2 = QM_ASSIGN T3\n\
+             0004 ASSIGN CV0($x) T2\n\
+             0005 RETURN int(1)\n\
+             \nf:\n\
+             \x20    ; (lines=7, args=0, vars=1, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 BIND_INIT_STATIC_OR_JMP CV0($v) 0006\n\
+             0001 T1 = FETCH_CONSTANT string(\"A\")\n\
+             0002 T2 = FETCH_DIM_IS T1 int(1)\n\
+             0003 T3 = COALESCE T2 0005\n\
+             0004 T3 = QM_ASSIGN int(1)\n\
+             0005 BIND_STATIC (ref) CV0($v) T3\n\
+             0006 RETURN null\n\
+             "
+        );
+    }
+
+    /// `zend_try_ct_eval_array` evaluates every key and value of an array
+    /// before it knows whether the array folds, and what the evaluator left
+    /// of each is what `zend_compile_array` compiles where it does not: a
+    /// conditional over a constant is the branch it picks, a cast over a
+    /// constant its value, a `??` over `null` its right side. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 (#2681).
+    #[test]
+    fn an_array_element_compiles_what_the_constant_evaluator_left_of_it() {
+        assert_eq!(
+            dump_of(b"<?php $x = [true ? $a : 2, $k => (int) \"4\"]; $d = [&$e, 1 ? 2 : 3]; static $s = [null ?? $b];"),
+            "\n$_main:\n\
+             \x20    ; (lines=10, args=0, vars=7, tmps=5)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 T7 = INIT_ARRAY 2 (packed) CV1($a) NEXT\n\
+             0001 T7 = ADD_ARRAY_ELEMENT int(4) CV2($k)\n\
+             0002 ASSIGN CV0($x) T7\n\
+             0003 T9 = INIT_ARRAY 2 (packed) (ref) CV4($e) NEXT\n\
+             0004 T9 = ADD_ARRAY_ELEMENT int(2) NEXT\n\
+             0005 ASSIGN CV3($d) T9\n\
+             0006 BIND_INIT_STATIC_OR_JMP CV5($s) 0009\n\
+             0007 T11 = INIT_ARRAY 1 (packed) CV6($b) NEXT\n\
+             0008 BIND_STATIC (ref) CV5($s) T11\n\
+             0009 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    7: 0001 - 0002 (tmp/var)\n\
+             \x20    9: 0004 - 0005 (tmp/var)\n\
+             "
+        );
+    }
+
+    /// `determine_switch_jumptable_type` and `can_match_use_jumptable` read
+    /// each case through `zend_eval_const_expr`, which folds a conditional
+    /// over a constant, so five long cases the last of which is `true ? 5 :
+    /// 6` are a `SWITCH_LONG` and the case compiles to `int(5)`, and folds no
+    /// call, so a `match` over `1` and `strlen("ab")` is the chain of
+    /// `IS_IDENTICAL` though the compile folds the call to `int(2)`. The dump
+    /// is the oracle's under `[regime.dump]` at 8.5.9 (#2681).
+    #[test]
+    fn a_switch_and_a_match_read_their_cases_as_the_constant_evaluator_folds_them() {
+        assert_eq!(
+            dump_of(b"<?php switch ($x) { case 1: case 2: case 3: case 4: case true ? 5 : 6: echo 1; } echo match ($x) { 1 => 1, strlen(\"ab\") => 2, default => 3 };"),
+            "\n$_main:\n\
+             \x20    ; (lines=26, args=0, vars=1, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 SWITCH_LONG CV0($x) 1: 0012, 2: 0012, 3: 0012, 4: 0012, 5: 0012, default: 0013\n\
+             0001 T1 = IS_EQUAL CV0($x) int(1)\n\
+             0002 JMPNZ T1 0012\n\
+             0003 T1 = IS_EQUAL CV0($x) int(2)\n\
+             0004 JMPNZ T1 0012\n\
+             0005 T1 = IS_EQUAL CV0($x) int(3)\n\
+             0006 JMPNZ T1 0012\n\
+             0007 T1 = IS_EQUAL CV0($x) int(4)\n\
+             0008 JMPNZ T1 0012\n\
+             0009 T1 = IS_EQUAL CV0($x) int(5)\n\
+             0010 JMPNZ T1 0012\n\
+             0011 JMP 0013\n\
+             0012 ECHO int(1)\n\
+             0013 T2 = IS_IDENTICAL CV0($x) int(1)\n\
+             0014 JMPNZ T2 0018\n\
+             0015 T2 = IS_IDENTICAL CV0($x) int(2)\n\
+             0016 JMPNZ T2 0020\n\
+             0017 JMP 0022\n\
+             0018 T3 = QM_ASSIGN int(1)\n\
+             0019 JMP 0024\n\
+             0020 T3 = QM_ASSIGN int(2)\n\
+             0021 JMP 0024\n\
+             0022 T3 = QM_ASSIGN int(3)\n\
+             0023 JMP 0024\n\
+             0024 ECHO T3\n\
+             0025 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0023 - 0024 (tmp/var)\n\
+             "
         );
     }
 
@@ -9061,6 +9349,31 @@ class C {
                 String::from_utf8_lossy(source)
             );
         }
+    }
+
+    /// `zend_try_compile_cv` takes a CV only for a name php's tree holds as
+    /// `ZEND_AST_ZVAL`: `${1}` and `${'1'}` are the CV `$1`, while `${true}`
+    /// names it by `ZEND_AST_CONST`, which `zend_compile_simple_var_no_cv`
+    /// compiles, converts to a string and fetches by name, `FETCH_W (local)`
+    /// under the write and `FETCH_R (local)` under the read. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 (#2686).
+    #[test]
+    fn a_name_written_as_a_constant_other_than_a_string_is_fetched_by_name_not_a_cv() {
+        assert_eq!(
+            dump_of(b"<?php ${true} = 1; ${1}; ${'1'}; echo ${true}, ${1};"),
+            "\n$_main:\n\
+             \x20    ; (lines=6, args=0, vars=1, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 V1 = FETCH_W (local) string(\"1\")\n\
+             0001 ASSIGN V1 int(1)\n\
+             0002 T3 = FETCH_R (local) string(\"1\")\n\
+             0003 ECHO T3\n\
+             0004 ECHO CV0($1)\n\
+             0005 RETURN int(1)\n\
+             "
+        );
     }
 
     /// #690's shapes under the oracle's `[regime.dump]`: a `global` over
