@@ -19,11 +19,12 @@
 //! at the tool call, and makala against itself over each bench workload. A
 //! series is two arms that are two things, the production server against
 //! php-fpm behind a `FastCGI` client over the same workload (#2351,
-//! `makala::bench`), held to no bound: a bound is a number a person writes
-//! in the manifest once the series is read, not one this instrument
-//! invents (#1902's and #2336's rulings), so its reading states the
-//! measurement and the distance still to go to its second arm, harness
-//! §3's "`FastCGI` ≥ php-fpm", and passes whatever they are.
+//! `makala::bench`). Its reading states the measurement and the distance
+//! still to go to its second arm, harness §3's "`FastCGI` ≥ php-fpm",
+//! which holds nothing (#1902). A series with a `[[bench]]` tolerance is
+//! held by [`series`]'s rule, beside a baseline the store keeps: one
+//! established regression warns, two in a row fail the reading and the
+//! run (#2659); one without a tolerance passes whatever it measured.
 //!
 //! **Why the A/A verdict is a reading and not a refusal.** §4.3 is a
 //! quartile rule with no confidence level, so it resolves some unmeasured
@@ -40,6 +41,7 @@
 //! paired rig is honest about it.
 
 pub(crate) mod row;
+mod series;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -129,6 +131,9 @@ struct Bar {
     about: String,
     a: Arm,
     b: Arm,
+    /// A series and not an A/A control: the negative control of the rule a nightly bar is held by (protocol §12).
+    #[serde(default)]
+    series: bool,
 }
 
 impl Bar {
@@ -140,13 +145,20 @@ impl Bar {
         toml::from_str(&text).with_context(|| format!("{} is not a bar", path.display()))
     }
 
-    /// The bar as the run measures it, an A/A control of two processes.
+    /// The bar as the run measures it, two processes, an A/A control
+    /// unless the file says it is a series.
     fn declared(self) -> Declared {
-        let Bar { id, about, a, b } = self;
+        let Bar {
+            id,
+            about,
+            a,
+            b,
+            series,
+        } = self;
         Declared {
             id,
             about,
-            held: Held::Control,
+            held: if series { Held::Series } else { Held::Control },
             start: Box::new(move || {
                 let spawned = |arm: Arm| -> Result<Box<dyn Side>> {
                     let program = resolve(&arm.program)?;
@@ -295,9 +307,9 @@ pub(crate) enum Held {
     /// An A/A control: a pass while the paired delta's sign is swamped
     /// (§2, §4.3).
     Control,
-    /// A series: two arms that differ, held to no bound until a person
-    /// writes one, its reading a pass that states the measurement and the
-    /// distance to go to the second arm (#1902, #2336).
+    /// A series: two arms that differ, its reading stating the measurement
+    /// and the distance to go to the second arm, and held by [`series`]'s
+    /// rule where the manifest gives it a tolerance (#1902, #2336, #2659).
     Series,
 }
 
@@ -553,6 +565,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
         about: "the judge at the tool call, arm against arm".to_owned(),
         a: arm("permit-a"),
         b: arm("permit-b"),
+        series: false,
     };
     let mut bars = vec![permit.declared()];
     bars.extend(crate::makala::bench::declared(root)?);
@@ -587,14 +600,19 @@ pub(crate) fn refuse_a_hosted_runner(environment: Option<&str>) -> Result<()> {
 /// `pass` or `fail` against the bar and the exit is 0 whatever it says,
 /// since a bench number is a claim a person reads with the A/A control
 /// (AGENTS.md; harness-design.md §4.2, §4.4).
+///
+/// A bar held to a tolerance reads its earlier nights and its baseline
+/// from `log` where one is handed, the published history, since each
+/// nightly job starts from an empty store; and from the store's own
+/// otherwise.
 pub fn run(
     root: &Path,
     store: &Store,
     bar: Option<&str>,
     from: Option<&Path>,
     reps: usize,
-    label: Label,
-    note: &str,
+    (label, note): (Label, &str),
+    log: Option<&Path>,
 ) -> Result<()> {
     if label.needs_note() && note.trim().is_empty() {
         bail!(
@@ -616,6 +634,19 @@ pub fn run(
         }
     }
     let snapshot = Snapshot::disk(root)?;
+    let tolerances = crate::manifest::Manifest::load(root)?.tolerances;
+    let log = match log {
+        None => store.history(INSTRUMENT)?.readings,
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading the history at {}", path.display()))?;
+            let mut log = crate::reading::Log::handed(&text).readings;
+            log.retain(|reading| reading.instrument == INSTRUMENT);
+            log
+        }
+    };
+    let failed = store.root().join(FAILED);
+    std::fs::remove_dir_all(&failed).ok();
     let (mut readings, mut refused) = (Vec::new(), Vec::new());
     for Declared {
         id,
@@ -657,24 +688,42 @@ pub fn run(
             names: [sides[0].name(), sides[1].name()],
         };
         print!("{}", rendered(&bar, &measured, reps, label, load));
-        readings.push(recorded(
-            &bar,
-            &measured,
-            (reps, label, note),
-            load,
-            &snapshot,
-        )?);
+        let mut reading = recorded(&bar, &measured, (reps, label, note), load, &snapshot)?;
+        let held = (tolerances.iter().find(|t| t.bar == id))
+            .map(|tolerance| series::hold(tolerance, &log, &mut reading));
+        readings.push(reading);
+        if let Some((baseline, regressed)) = held {
+            readings.extend(baseline);
+            if let Some(regressed) = regressed {
+                std::fs::create_dir_all(&failed)?;
+                let ticket = failed.join(format!("{}.md", id.replace('/', "-")));
+                std::fs::write(&ticket, ticket_of(&id, &regressed))?;
+                refused.push(regressed);
+            }
+        }
     }
     store.record_measurement(&readings)?;
     if !refused.is_empty() {
         bail!(
-            "{} bar{} refused the run, each recorded as a failing reading: {}",
+            "{} bar{} refused the run or regressed two nights running, each recorded as a failing reading: {}",
             refused.len(),
             if refused.len() == 1 { "" } else { "s" },
             refused.join("; ")
         );
     }
     Ok(())
+}
+
+/// Where a run leaves, under the store, one ticket per bar that regressed
+/// two nights running, for the nightly lane to file (#2659).
+pub(crate) const FAILED: &str = "bench-regressed";
+
+/// The ticket a bar that regressed two nights running is filed as: its
+/// title on the first line, a blank line, its body.
+fn ticket_of(bar: &str, regressed: &str) -> String {
+    format!(
+        "bench: {bar} regressed beyond its tolerance two nights running\n\n## What happened\n\n{regressed} ({PROTOCOL} §12).\n\n## Acceptance criteria\n\n- [ ] The cause is named among those commits, and the bar's nightly reading holds again\n\n## Blocked by\n\nNone\n"
+    )
 }
 
 /// A measured bar as its rendering and its reading name it.
@@ -729,7 +778,7 @@ fn rendered(
 
 /// What the bar is held to, as its rendering and its reading say it.
 fn held_by(bar: &Shown<'_>, measured: &Measured) -> String {
-    let series = "a series held to no bound until a person writes one (#1902, #2336)";
+    let series = "a series, held to its tolerance where `[[bench]]` gives one (#2659)";
     match (bar.held, to_go(measured)) {
         (Held::Control, _) => format!("the bar is the A/A control of {PROTOCOL} §2"),
         (Held::Series, Some(to_go)) => format!(

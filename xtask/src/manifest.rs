@@ -3,7 +3,7 @@
 //! pin's grammar is the oracle module's.
 //!
 //! The grammar is `[oracle] [budget] [telemetry] [[crate]] [[seam]]
-//! [[edge]] [[rule]] [[week]]`, each rule carrying exactly one predicate
+//! [[edge]] [[rule]] [[week]] [[bench]]`, each rule carrying exactly one predicate
 //! and each week's read naming an instrument `xtask` has, as a status or
 //! a number against a bound. A manifest with a key outside the grammar is
 //! refused with the offending key named; so is a rule with zero or two
@@ -63,6 +63,10 @@ pub struct Manifest {
     /// to; `None` where the file has no table, which `status` says.
     #[serde(default)]
     pub divergence: Option<DivergenceTable>,
+    /// `[[bench]]`: each perf bar's tolerance and the nights it was
+    /// derived over (#2659); a bar without a row is a series held to none.
+    #[serde(rename = "bench", default)]
+    pub(crate) tolerances: Vec<Tolerance>,
     /// The pin the `[oracle]` row names, loaded from that file by the
     /// oracle module, whose grammar it is.
     #[serde(skip)]
@@ -93,6 +97,20 @@ pub struct Telemetry {
 #[non_exhaustive]
 pub struct DivergenceTable {
     pub target: u64,
+}
+
+/// One `[[bench]]` row (#2659): a bar's tolerance, the 75th percentile of
+/// its A/A control's nightly |paired delta| over `from` to `to`, floored at
+/// 2%, in percentage points of the second arm; the first baseline is the
+/// median of the bar's own nights over the same dates.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Tolerance {
+    pub bar: String,
+    #[serde(rename = "tolerance_pct")]
+    pub pct: f64,
+    pub from: toml::value::Datetime,
+    pub to: toml::value::Datetime,
 }
 
 /// `[parity]`: the suites php builds that parity does not count (design
@@ -945,6 +963,7 @@ impl Manifest {
             lock_homes: BTreeMap::new(),
             parity: Parity::default(),
             divergence: None,
+            tolerances: Vec::new(),
             pin: Pin::default(),
             root: PathBuf::new(),
         }

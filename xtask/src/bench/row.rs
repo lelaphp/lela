@@ -34,6 +34,9 @@ pub(crate) struct Row {
     verdict: Option<&'static str>,
     /// How far a series has to go to its bar, %; none for a control.
     to_go_pct: Option<f64>,
+    /// The baseline a series with a tolerance is held to, %, and on a
+    /// `<bar>/baseline` row the value it moved to (#2659).
+    baseline_pct: Option<f64>,
     reps: Option<u64>,
     /// The load average over 1, 5 and 15 minutes as the run began.
     load: Option<[f64; 3]>,
@@ -55,6 +58,7 @@ impl PerReading for Row {
                 .zip(quartiles)
                 .map(|(reps, (q1, q3))| sign(usize::try_from(reps).unwrap_or(usize::MAX), q1, q3)),
             to_go_pct: n("to_go_pct"),
+            baseline_pct: n("baseline_pct"),
             reps,
             load: n("load_1")
                 .zip(n("load_5"))

@@ -446,8 +446,8 @@ fn bench_command(root: &Path, store: &Store, ask: &cli::Bench) -> Result<()> {
         ask.bar.as_deref(),
         ask.from.as_deref(),
         ask.reps,
-        ask.label,
-        ask.note.as_deref().unwrap_or_default(),
+        (ask.label, ask.note.as_deref().unwrap_or_default()),
+        ask.log.as_deref(),
     )
 }
 
