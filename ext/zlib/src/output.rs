@@ -8,7 +8,7 @@
 use php_ext::abi::{IniStage, OrFalse};
 use php_ext::attr::php_function;
 use php_ext::coerce::with_string;
-use php_ext::raising::{Level, Thrown, docref, raise};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
 };
@@ -121,15 +121,17 @@ fn globals(req: &mut Request) -> &mut Globals {
 }
 
 /// `zlib.output_compression` read as `OnUpdate_zlib_output_compression`
-/// reads it: `off` and `on` in any case, else a quantity, whose warning
-/// comes back beside it.
-fn parse(value: &[u8]) -> (i64, Option<String>) {
+/// reads it: `off` and `on` in any case, else the quantity `quantity`
+/// reads, cut to php's `int`.
+fn parse(value: &[u8], quantity: impl FnOnce(&[u8]) -> i64) -> i64 {
     if value.eq_ignore_ascii_case(b"off") {
-        (0, None)
+        0
     } else if value.eq_ignore_ascii_case(b"on") {
-        (1, None)
+        1
     } else {
-        Request::ini_parse_quantity(value)
+        #[allow(clippy::cast_possible_truncation)] // php's `(int)` cast
+        let cut = quantity(value) as i32;
+        i64::from(cut)
     }
 }
 
@@ -159,9 +161,20 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
 }
 
 /// `zlib.output_compression_level` as `OnUpdateLong` stored it.
+///
+/// The engine serves the entry's `OnUpdateLong`, which warns where the
+/// quantity rule interprets the value:
+///
+/// ```php
+/// var_dump(ini_set('zlib.output_compression_level', '9x'), ini_get('zlib.output_compression_level'));
+/// ```
+/// ```expect
+/// Warning: Invalid "zlib.output_compression_level" setting. Invalid quantity "9x": unknown multiplier "x", interpreting as "9" for backwards compatibility in %s on line 2
+/// string(2) "-1"
+/// string(2) "9x"
+/// ```
 fn level(req: &Request) -> i64 {
-    let value = req.ini_get(LEVEL.as_bytes()).unwrap_or(b"-1");
-    Request::ini_parse_quantity(value).0
+    req.ini_long(LEVEL.as_bytes())
 }
 
 /// What `php_zlib_output_handler_ex` handed on: nothing, where it only
@@ -357,7 +370,7 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
 /// holds, and the handler started where it asks for one.
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     let value = req.ini_get(COMPRESSION.as_bytes()).unwrap_or(b"0");
-    let (compression, _) = parse(value);
+    let compression = parse(value, Request::ini_parse_bytes);
     let globals = globals(req);
     globals.coding = Coding::None;
     globals.compression = compression;
@@ -385,11 +398,9 @@ pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// ```
 pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let value = value.unwrap_or_default();
-    let (compression, invalid) = parse(value);
-    if let Some(error) = invalid {
-        let text = format!("Invalid \"{COMPRESSION}\" setting. {error}");
-        raise(req, Level::Warning, &text);
-    }
+    let compression = parse(value, |value| {
+        req.ini_parse_quantity_warn(COMPRESSION.as_bytes(), value)
+    });
     let handler = req.ini_get(b"output_handler").unwrap_or_default();
     if !handler.is_empty() && compression != 0 {
         docref(

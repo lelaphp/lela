@@ -747,6 +747,58 @@ pub enum Lookup {
 /// and makes `ini_set()` answer `false`.
 pub type OnModify = fn(&mut Request, Option<&[u8]>) -> Result<bool, Thrown>;
 
+/// php's standard handler of a whole-number entry, `OnUpdateLong` or
+/// `OnUpdateLongGEZero` (`Z/Zend/zend_ini.c:972-993`), which the engine
+/// serves for an entry declared with it
+/// ([`ExtensionBuilder::on_update_long`]) as it serves core's: the value
+/// read by `zend_ini_parse_quantity_warn`
+/// ([`Request::ini_parse_quantity_warn`]), warning where the rule
+/// interprets it, at startup, at `ini_set()` and as the request ends,
+/// and read back with [`Request::ini_long`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongHandler {
+    /// `OnUpdateLong`: any value is taken.
+    Any,
+    /// `OnUpdateLongGEZero`: a negative value is refused, and the entry
+    /// keeps what it held.
+    AtLeastZero,
+}
+
+impl LongHandler {
+    /// Whether the handler takes the quantity `value` read as.
+    pub(crate) fn takes(self, value: i64) -> bool {
+        self == LongHandler::Any || value >= 0
+    }
+}
+
+/// An entry's handler as the engine holds it, php's `on_modify` slot:
+/// one the extension wrote, or php's standard whole-number one, which
+/// the engine serves. An entry has at most one.
+#[derive(Clone, Copy)]
+pub(crate) enum IniHandler {
+    Written(OnModify),
+    Long(LongHandler),
+}
+
+impl IniHandler {
+    /// The handler served for the entry `name` taking `value`: whether
+    /// it takes it.
+    pub(crate) fn serve(
+        self,
+        req: &mut Request,
+        name: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<bool, Thrown> {
+        match self {
+            IniHandler::Written(handler) => handler(req, value),
+            IniHandler::Long(handler) => {
+                let quantity = req.ini_parse_quantity_warn(name, value.unwrap_or_default());
+                Ok(handler.takes(quantity))
+            }
+        }
+    }
+}
+
 /// The stage an [`OnModify`] is served at, php's `ZEND_INI_STAGE_*`
 /// (`Z/Zend/zend_ini.h`) as this engine reaches them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,7 +891,7 @@ pub(crate) struct ExtensionEntry {
     /// declared, `PHP_VERSION` where it declared none.
     pub(crate) version: &'static str,
     pub(crate) ini: Vec<IniDecl>,
-    pub(crate) on_modify: Vec<(Vec<u8>, OnModify)>,
+    pub(crate) on_modify: Vec<(Vec<u8>, IniHandler)>,
     pub(crate) dependencies: Vec<Dependency>,
     pub(crate) request_state: Option<StateBuilder>,
     pub(crate) process_state: Option<ProcessStateBuilder>,
@@ -956,7 +1008,7 @@ pub struct ExtensionBuilder {
     classes: Vec<NativeClassDecl>,
     constants: Vec<ConstDecl>,
     ini: Vec<IniDecl>,
-    on_modify: Vec<(Vec<u8>, OnModify)>,
+    on_modify: Vec<(Vec<u8>, IniHandler)>,
     dependencies: Vec<Dependency>,
     request_state: Option<StateBuilder>,
     process_state: Option<ProcessStateBuilder>,
@@ -1096,7 +1148,20 @@ impl ExtensionBuilder {
     /// once over the value the host set as the engine is built.
     #[must_use]
     pub fn on_modify(mut self, name: &[u8], handler: OnModify) -> ExtensionBuilder {
-        self.on_modify.push((name.to_vec(), handler));
+        self.on_modify
+            .push((name.to_vec(), IniHandler::Written(handler)));
+        self
+    }
+
+    /// The ini entry `name`, one of the extension's own, declared with
+    /// php's `OnUpdateLong` or `OnUpdateLongGEZero` ([`LongHandler`]),
+    /// which the engine serves where [`ExtensionBuilder::on_modify`]'s
+    /// handler would be. The extension reads the value with
+    /// [`Request::ini_long`].
+    #[must_use]
+    pub fn on_update_long(mut self, name: &[u8], handler: LongHandler) -> ExtensionBuilder {
+        self.on_modify
+            .push((name.to_vec(), IniHandler::Long(handler)));
         self
     }
 

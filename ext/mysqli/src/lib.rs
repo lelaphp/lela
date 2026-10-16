@@ -51,7 +51,9 @@ mod props;
 mod result;
 mod stmt;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Lent, Pool};
+use php_ext::abi::{
+    Dependency, DependencyKind, Extension, ExtensionBuilder, Lent, LongHandler, Pool,
+};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
@@ -325,6 +327,9 @@ pub fn extension() -> Extension {
                 })
                 .collect(),
         )
+        .on_update_long(b"mysqli.max_links", LongHandler::Any)
+        .on_update_long(b"mysqli.max_persistent", LongHandler::Any)
+        .on_update_long(b"mysqli.default_port", LongHandler::Any)
         .constants(constants::declared())
         .class::<extras::mysqli_sql_exception>()
         .class::<extras::mysqli_driver>()
@@ -705,14 +710,6 @@ pub(crate) fn ini_string(req: &Request, name: &[u8]) -> Option<Vec<u8>> {
     req.ini_get(name)
         .filter(|v| !v.is_empty())
         .map(<[u8]>::to_vec)
-}
-
-/// The ini entry as `OnUpdateLong` reads it.
-pub(crate) fn ini_long(req: &Request, name: &[u8]) -> i64 {
-    req.ini_get(name)
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .unwrap_or(0)
 }
 
 /// The ini entry as `OnUpdateBool` reads it.

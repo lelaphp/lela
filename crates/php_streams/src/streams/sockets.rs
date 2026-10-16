@@ -363,12 +363,10 @@ pub(crate) fn seconds(timeout: i64) -> Option<Duration> {
     u64::try_from(timeout).ok().map(Duration::from_secs)
 }
 
-/// `FG(default_socket_timeout)`, the ini entry's seconds, sixty where
-/// the bundle declares none.
+/// `FG(default_socket_timeout)`, the ini entry's seconds, the quantity
+/// its `OnUpdateLong` read; sixty where the bundle declares none.
 fn default_timeout(req: &Request) -> Option<Duration> {
-    let secs = req.ini_get(b"default_socket_timeout").map_or(60, |text| {
-        String::from_utf8_lossy(text).trim().parse().unwrap_or(0)
-    });
+    let secs = (req.ini_get(b"default_socket_timeout")).map_or(60, Request::ini_parse_bytes);
     seconds(secs)
 }
 

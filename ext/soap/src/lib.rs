@@ -39,7 +39,9 @@ mod shared;
 mod table;
 mod xml;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage};
+use php_ext::abi::{
+    Dependency, DependencyKind, Extension, ExtensionBuilder, IniStage, LongHandler,
+};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
@@ -205,6 +207,25 @@ fn ini_entry(name: &[u8], default: &[u8]) -> IniDecl {
 /// string(4) "/tmp"
 /// string(1) "5"
 /// ```
+///
+/// `soap.wsdl_cache_ttl` and `soap.wsdl_cache_limit` are `OnUpdateLong`'s,
+/// read by the quantity rule with its warning at startup, at `ini_set()`
+/// and as the request ends:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'soap.wsdl_cache_ttl=1Dx', '-r', 'var_dump(ini_set("soap.wsdl_cache_limit", "0x"), ini_set("soap.wsdl_cache_ttl", "60"));'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// ```
+/// ```expect process
+/// Warning: Invalid "soap.wsdl_cache_ttl" setting. Invalid quantity "1Dx": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
+///
+/// Warning: Invalid "soap.wsdl_cache_limit" setting. Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in Command line code on line 1
+/// string(1) "5"
+/// string(3) "1Dx"
+///
+/// Warning: Invalid "soap.wsdl_cache_ttl" setting. Invalid quantity "1Dx": unknown multiplier "x", interpreting as "1" for backwards compatibility in Unknown on line 0
+/// 0
+/// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
@@ -228,6 +249,8 @@ pub fn extension() -> Extension {
             ini_entry(ini::CACHE_LIMIT, b"5"),
         ])
         .on_modify(ini::CACHE_DIR, on_update_cache_dir)
+        .on_update_long(ini::CACHE_TTL, LongHandler::Any)
+        .on_update_long(ini::CACHE_LIMIT, LongHandler::Any)
         .dependencies(vec![
             dependency("date", DependencyKind::Required),
             dependency("libxml", DependencyKind::Required),

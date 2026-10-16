@@ -15,7 +15,7 @@ use super::hash_bytes::HashBytes;
 use super::{
     DISPLAY_ERRORS_STDERR, ExtensionId, InfoRow, IniFiles, Request, display_errors_mode_of,
 };
-use crate::api::abi::{IniStage, IniVerdict, OnModify};
+use crate::api::abi::{IniHandler, IniStage, IniVerdict, LongHandler};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpString, Value, adopted_some};
 use crate::c_number::{atoi, strtol, strtol_prefixed};
@@ -187,53 +187,95 @@ impl TypedIni {
     }
 }
 
-/// The handler `main.c` declares a whole-number entry with, each of
-/// which reads the value by `zend_ini_parse_quantity_warn`
-/// ([`Request::ini_quantity_warn`]) and stores it for
-/// [`Request::ini_long`].
+/// How a core entry's handler reads its value, before anything else it
+/// does: by `zend_ini_parse_quantity_warn`, as `OnUpdateLong` and
+/// `OnUpdateLongGEZero` read and as `OnUpdateAssertions`,
+/// `OnUpdateFiberStackSize` and `OnUpdateMaxAllowedStackSize` read
+/// first, or by `zend_ini_parse_uquantity_warn`, as
+/// `OnChangeMaxMemoryLimit`, `OnChangeMemoryLimit` and
+/// `OnUpdateReservedStackSize` read first. The warning is
+/// [`Request::ini_parse_quantity_warn`]'s, raised at startup, at
+/// `ini_set()` and as the request ends; an extension's entry declared
+/// with [`LongHandler`] is served the same rule through its handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LongHandler {
-    /// `OnUpdateLong` (`Z/Zend/zend_ini.c:972`): any value.
-    Any,
-    /// `OnUpdateLongGEZero` (`Z/Zend/zend_ini.c:980`): a negative value
-    /// is refused, and the entry keeps what it held.
-    AtLeastZero,
+pub(crate) enum CoreQuantity {
+    /// `zend_ini_parse_quantity_warn`, a negative refused where the
+    /// handler is `OnUpdateLongGEZero`.
+    Signed(LongHandler),
+    /// `zend_ini_parse_uquantity_warn`.
+    Unsigned,
 }
 
-/// One of [`LongHandler::ENTRIES`]: the entry's name and its handler.
-pub(crate) type LongEntry = (&'static [u8], LongHandler);
+/// One of [`CoreQuantity::ENTRIES`]: the entry's name and its reading.
+pub(crate) type CoreQuantityEntry = (&'static [u8], CoreQuantity);
 
-impl LongHandler {
-    /// `main.c`'s entries under the two handlers, in the order
-    /// `PHP_INI_BEGIN()` declares them (`Z/main/main.c:807-885`), which
-    /// is the order their startup warnings are raised in.
-    pub(crate) const ENTRIES: [LongEntry; 12] = [
-        (b"xmlrpc_error_number", LongHandler::Any),
-        (b"max_input_time", LongHandler::Any),
-        (b"output_buffering", LongHandler::Any),
-        (b"error_log_mode", LongHandler::Any),
-        (b"upload_max_filesize", LongHandler::Any),
-        (b"post_max_size", LongHandler::Any),
-        (b"max_input_nesting_level", LongHandler::AtLeastZero),
-        (b"max_input_vars", LongHandler::AtLeastZero),
-        (b"realpath_cache_size", LongHandler::Any),
-        (b"realpath_cache_ttl", LongHandler::Any),
-        (b"user_ini.cache_ttl", LongHandler::Any),
-        (b"hard_timeout", LongHandler::Any),
+impl CoreQuantity {
+    /// The core entries read by the quantity rule, in the order
+    /// `php_module_startup` registers them, which is the order their
+    /// startup warnings are raised in: `main.c`'s in its `PHP_INI_BEGIN()`
+    /// order (`Z/main/main.c:807-885`), then `zend.c`'s, which
+    /// `zend_register_standard_ini_entries` registers after them
+    /// (`Z/Zend/zend.c:262-279`).
+    pub(crate) const ENTRIES: [CoreQuantityEntry; 18] = [
+        (
+            b"xmlrpc_error_number",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
+        (b"max_input_time", CoreQuantity::Signed(LongHandler::Any)),
+        (b"output_buffering", CoreQuantity::Signed(LongHandler::Any)),
+        (b"error_log_mode", CoreQuantity::Signed(LongHandler::Any)),
+        (
+            b"upload_max_filesize",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
+        (b"post_max_size", CoreQuantity::Signed(LongHandler::Any)),
+        (
+            b"max_input_nesting_level",
+            CoreQuantity::Signed(LongHandler::AtLeastZero),
+        ),
+        (
+            b"max_input_vars",
+            CoreQuantity::Signed(LongHandler::AtLeastZero),
+        ),
+        (b"max_memory_limit", CoreQuantity::Unsigned),
+        (b"memory_limit", CoreQuantity::Unsigned),
+        (
+            b"realpath_cache_size",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
+        (
+            b"realpath_cache_ttl",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
+        (
+            b"user_ini.cache_ttl",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
+        (b"hard_timeout", CoreQuantity::Signed(LongHandler::Any)),
+        (b"zend.assertions", CoreQuantity::Signed(LongHandler::Any)),
+        (b"fiber.stack_size", CoreQuantity::Signed(LongHandler::Any)),
+        (
+            b"zend.max_allowed_stack_size",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
+        (b"zend.reserved_stack_size", CoreQuantity::Unsigned),
     ];
 
     /// Whether the handler refuses `value`: `OnUpdateLongGEZero`'s
     /// negative quantity.
     pub(crate) fn refuses(self, value: &[u8]) -> bool {
-        self == LongHandler::AtLeastZero && Request::ini_parse_bytes(value) < 0
+        match self {
+            CoreQuantity::Signed(handler) => !handler.takes(Request::ini_parse_bytes(value)),
+            CoreQuantity::Unsigned => false,
+        }
     }
 
-    /// The handler of the core entry `name`, `None` where it has
-    /// neither.
-    pub(crate) fn of(name: &[u8]) -> Option<LongHandler> {
-        (LongHandler::ENTRIES.iter())
+    /// The reading of the core entry `name`, `None` where its handler
+    /// reads no quantity.
+    pub(crate) fn of(name: &[u8]) -> Option<CoreQuantity> {
+        (CoreQuantity::ENTRIES.iter())
             .find(|(entry, _)| *entry == name)
-            .map(|(_, handler)| *handler)
+            .map(|(_, reading)| *reading)
     }
 }
 
@@ -451,15 +493,17 @@ impl Request {
         // before it serves `on_modify`.
         let held = self.ini_value(name).map(<[u8]>::to_vec);
         self.ini_hold(name, held.as_deref());
+        // The core handler reads its quantity before anything else it
+        // does, and warns where the rule interprets it.
+        if let Some(reading) = CoreQuantity::of(name) {
+            self.core_quantity_warn(name, reading, new_value.unwrap_or_default());
+        }
         if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, new_value) {
             return Ok(None);
         }
         // The core table's other rules read `NULL` as the empty string,
         // as php's do.
         let value = new_value.unwrap_or_default();
-        if LongHandler::of(name).is_some() {
-            self.ini_quantity_warn(name, value);
-        }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
             return Ok(None);
         }
@@ -508,7 +552,7 @@ impl Request {
         }
         let value = new_value.map(|_| value);
         if let Some(handler) = self.ini_handler(name)
-            && !handler(self, value)?
+            && !handler.serve(self, name, value)?
         {
             return Ok(None);
         }
@@ -587,8 +631,8 @@ impl Request {
         }
     }
 
-    /// The `on_modify` an extension gave the entry `name`.
-    fn ini_handler(&self, name: &[u8]) -> Option<OnModify> {
+    /// The handler an extension gave the entry `name`.
+    fn ini_handler(&self, name: &[u8]) -> Option<IniHandler> {
         self.shared.extensions.iter().find_map(|e| {
             e.on_modify
                 .iter()
@@ -676,15 +720,15 @@ impl Request {
         let changed: Vec<Vec<u8>> = self.ini.changed.iter().map(|(n, ..)| n.clone()).collect();
         for name in changed {
             let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
-            // A long entry's handler reads its startup value again, and
-            // warns again where the quantity rule interprets it.
-            if LongHandler::of(&name).is_some() {
-                self.ini_quantity_warn(&name, original.as_deref().unwrap_or_default());
+            // A core handler that reads a quantity reads its startup
+            // value again, and warns again where the rule interprets it.
+            if let Some(reading) = CoreQuantity::of(&name) {
+                self.core_quantity_warn(&name, reading, original.as_deref().unwrap_or_default());
             }
             if let Some(handler) = self.ini_handler(&name) {
                 // Each rule under its own `zend_try`: what it bails out
                 // with leaves it, and the next entry is restored.
-                handler(self, original.as_deref()).ok();
+                handler.serve(self, &name, original.as_deref()).ok();
                 self.catch_bailout();
             }
             if let Some(at) = self.ini.changed.iter().position(|(n, ..)| *n == name) {
@@ -876,7 +920,7 @@ impl Request {
             {
                 IniVerdict::Rejected
             }
-            _ if LongHandler::of(name).is_some_and(|handler| handler.refuses(value)) => {
+            _ if CoreQuantity::of(name).is_some_and(|reading| reading.refuses(value)) => {
                 IniVerdict::Rejected
             }
             _ => IniVerdict::Accepted,
@@ -971,8 +1015,10 @@ impl Request {
     /// stored it in `PG`, `SG` or `EG`, `zend_ini_parse_quantity`'s value
     /// ([`crate::ini_quantity`]): `1K` is 1024 and `0x10` is 16. What the
     /// rule interprets for backwards compatibility was raised when the
-    /// value was set ([`Request::ini_quantity_warn`]), and a negative an
-    /// `OnUpdateLongGEZero` entry refused never reached it.
+    /// value was set ([`Request::ini_parse_quantity_warn`]), and a
+    /// negative an `OnUpdateLongGEZero` entry refused never reached it.
+    /// What an extension reads an entry it declared with
+    /// [`LongHandler`] by, where php's reads the field the handler wrote.
     ///
     /// ```php
     /// $run = function (string ...$ini) {
@@ -1007,7 +1053,8 @@ impl Request {
     /// 0 1000 3q
     /// 0
     /// ```
-    pub(crate) fn ini_long(&self, name: &[u8]) -> i64 {
+    #[must_use]
+    pub fn ini_long(&self, name: &[u8]) -> i64 {
         self.ini_get(name).map_or(0, Request::ini_parse_bytes)
     }
 
@@ -1020,11 +1067,14 @@ impl Request {
     }
 
     /// `zend_ini_parse_quantity_warn` (`Z/Zend/zend_ini.c:859`) for the
-    /// entry `name` taking `value`, whose quantity [`Request::ini_long`]
-    /// reads: php's `Invalid
-    /// "name" setting.` warning before the rule's sentence where the rule
-    /// interprets the value for backwards compatibility, at `Unknown` on
-    /// line 0 while the engine starts and where the program stands after.
+    /// entry `name` taking `value`: the quantity [`Request::ini_long`]
+    /// reads, and php's `Invalid "name" setting.` warning before the
+    /// rule's sentence where the rule interprets the value for backwards
+    /// compatibility, at `Unknown` on line 0 while the engine starts and
+    /// as the request ends, and where the program stands between. What
+    /// an entry declared with [`LongHandler`] is read by, and what a
+    /// handler an extension wrote reads its whole-number entry by, as
+    /// `OnUpdateSessionGcProbability` and `OnUpdateBacktrackLimit` do.
     ///
     /// ```php
     /// var_dump(ini_set('error_log_mode', '0600 '), ini_set('error_log_mode', '7x'), ini_get('error_log_mode'));
@@ -1050,8 +1100,104 @@ impl Request {
     /// Warning: Invalid "error_log_mode" setting. Invalid quantity "7x": unknown multiplier "x", interpreting as "7" for backwards compatibility in Unknown on line 0
     /// 0
     /// ```
-    pub(crate) fn ini_quantity_warn(&mut self, name: &[u8], value: &[u8]) {
-        if let (_, Some(sentence)) = crate::ini_quantity::parse(value) {
+    pub fn ini_parse_quantity_warn(&mut self, name: &[u8], value: &[u8]) -> i64 {
+        let (quantity, sentence) = crate::ini_quantity::parse(value);
+        self.ini_setting_warn(name, sentence);
+        quantity
+    }
+
+    /// `zend_ini_parse_uquantity_warn` (`Z/Zend/zend_ini.c:873`):
+    /// [`Request::ini_parse_quantity_warn`] under the unsigned rule,
+    /// where `-1` alone among the negatives is taken, as the maximum, and
+    /// any other is out of range. `memory_limit`'s handler reads by it
+    /// before it sets the limit, at startup, at `ini_set()` and as the
+    /// request ends:
+    ///
+    /// ```php
+    /// $code = 'echo ini_get("memory_limit"), "\n"; var_dump(ini_set("memory_limit", "200Mq"), ini_set("memory_limit", "-2"), ini_set("memory_limit", "256M")); echo "end\n";';
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'memory_limit=0x10000000x', '-r', $code], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'memory_limit=100Mx', '-r', 'echo ini_get("memory_limit"), "\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// ```
+    /// ```expect process
+    /// Warning: Invalid "memory_limit" setting. Invalid quantity "0x10000000x": unknown multiplier "x", interpreting as "0x10000000" for backwards compatibility in Unknown on line 0
+    /// 0x10000000x
+    ///
+    /// Warning: Invalid "memory_limit" setting. Invalid quantity "200Mq": unknown multiplier "q", interpreting as "200" for backwards compatibility in Command line code on line 1
+    ///
+    /// Warning: Failed to set memory limit to 200 bytes (Current memory usage is 2097152 bytes) in Command line code on line 1
+    ///
+    /// Warning: Invalid "memory_limit" setting. Invalid quantity "-2": value is out of range, using overflow result for backwards compatibility in Command line code on line 1
+    ///
+    /// Warning: Failed to set memory limit to 2 bytes (Current memory usage is 2097152 bytes) in Command line code on line 1
+    /// bool(false)
+    /// bool(false)
+    /// string(11) "0x10000000x"
+    /// end
+    ///
+    /// Warning: Invalid "memory_limit" setting. Invalid quantity "0x10000000x": unknown multiplier "x", interpreting as "0x10000000" for backwards compatibility in Unknown on line 0
+    /// 0
+    ///
+    /// Warning: Invalid "memory_limit" setting. Invalid quantity "100Mx": unknown multiplier "x", interpreting as "100" for backwards compatibility in Unknown on line 0
+    ///
+    /// Warning: Failed to set memory limit to 100 bytes (Current memory usage is 2097152 bytes) in Unknown on line 0
+    /// 128M
+    /// 0
+    /// ```
+    pub(crate) fn ini_parse_uquantity_warn(&mut self, name: &[u8], value: &[u8]) -> u64 {
+        let (quantity, sentence) = crate::ini_quantity::parse_unsigned(value);
+        self.ini_setting_warn(name, sentence);
+        quantity
+    }
+
+    /// The core entry `name` taking `value` read as its handler reads it
+    /// first ([`CoreQuantity`]), with the warning. `zend.assertions`'
+    /// `OnUpdateAssertions` warns at startup, after `main.c`'s entries,
+    /// at `ini_set()`, before it refuses a move to or from a negative,
+    /// and as the request ends:
+    ///
+    /// ```php
+    /// $code = 'echo ini_get("zend.assertions"), "\n"; var_dump(ini_set("zend.assertions", "1y"), ini_set("zend.assertions", "0z"), ini_set("zend.assertions", "-1x")); echo "end\n";';
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'zend.assertions=0x', '-d', 'max_input_time=2x', '-r', $code], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+    /// ```
+    /// ```expect process
+    /// Warning: Invalid "max_input_time" setting. Invalid quantity "2x": unknown multiplier "x", interpreting as "2" for backwards compatibility in Unknown on line 0
+    ///
+    /// Warning: Invalid "zend.assertions" setting. Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in Unknown on line 0
+    /// 0x
+    ///
+    /// Warning: Invalid "zend.assertions" setting. Invalid quantity "1y": unknown multiplier "y", interpreting as "1" for backwards compatibility in Command line code on line 1
+    ///
+    /// Warning: Invalid "zend.assertions" setting. Invalid prefix "0z", interpreting as "0" for backwards compatibility in Command line code on line 1
+    ///
+    /// Warning: Invalid "zend.assertions" setting. Invalid quantity "-1x": unknown multiplier "x", interpreting as "-1" for backwards compatibility in Command line code on line 1
+    ///
+    /// Warning: zend.assertions may be completely enabled or disabled only in php.ini in Command line code on line 1
+    /// string(2) "0x"
+    /// string(2) "1y"
+    /// bool(false)
+    /// end
+    ///
+    /// Warning: Invalid "zend.assertions" setting. Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in Unknown on line 0
+    /// 0
+    /// ```
+    pub(crate) fn core_quantity_warn(&mut self, name: &[u8], reading: CoreQuantity, value: &[u8]) {
+        match reading {
+            CoreQuantity::Signed(_) => {
+                self.ini_parse_quantity_warn(name, value);
+            }
+            CoreQuantity::Unsigned => {
+                self.ini_parse_uquantity_warn(name, value);
+            }
+        }
+    }
+
+    /// php's `Invalid "name" setting.` warning before the quantity
+    /// rule's sentence, where it said one.
+    fn ini_setting_warn(&mut self, name: &[u8], sentence: Option<String>) {
+        if let Some(sentence) = sentence {
             let name = String::from_utf8_lossy(name);
             let message = format!("Invalid \"{name}\" setting. {sentence}");
             crate::api::raising::warning(self, &message);
@@ -2004,6 +2150,49 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&taken.stdout),
             "string(1) \"2\"\nstring(1) \"2\"\n"
+        );
+    }
+
+    /// An extension's entries declared with `OnUpdateLong` and
+    /// `OnUpdateLongGEZero` ([`crate::api::abi::LongHandler`]), served by
+    /// the engine as php serves them: the quantity's warning at startup,
+    /// in declaration order, at `ini_set()` and as the request ends, and
+    /// a negative the second refuses, at startup keeping the default and
+    /// at `ini_set()` answering `false`. No witness holds it, because the
+    /// entries are no entries of the oracle's; the extensions' own
+    /// witnesses hold php's (`session.cache_expire`,
+    /// `mysqli.default_port`).
+    #[test]
+    fn an_extension_entry_declared_on_update_long_is_read_by_the_quantity_rule() {
+        use crate::api::abi::LongHandler;
+        let entry = |name: &[u8], default: &[u8]| php_unit::decl::IniDecl {
+            name: php_unit::decl::Name(name.into()),
+            default: Some(default.into()),
+            user: true,
+            per_dir: true,
+            system: true,
+        };
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![entry(b"t.any", b"1"), entry(b"t.positive", b"2")])
+            .on_update_long(b"t.positive", LongHandler::AtLeastZero)
+            .on_update_long(b"t.any", LongHandler::Any)
+            .build("longs");
+        let served = Engine::cli_builder()
+            .extensions(&[extension])
+            .ini("t.positive", "-1x")
+            .ini("t.any", "3q")
+            .build()
+            .serve_capture(
+                "<?php var_dump(ini_get('t.positive'), ini_set('t.positive', '-1'), ini_set('t.any', '1K'), ini_set('t.positive', '0x'), ini_get('t.positive'));",
+                crate::test::Capture::default(),
+            );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "\nWarning: Invalid \"t.any\" setting. Invalid quantity \"3q\": unknown multiplier \"q\", interpreting as \"3\" for backwards compatibility in Unknown on line 0\n\
+             \nWarning: Invalid \"t.positive\" setting. Invalid quantity \"-1x\": unknown multiplier \"x\", interpreting as \"-1\" for backwards compatibility in Unknown on line 0\n\
+             \nWarning: Invalid \"t.positive\" setting. Invalid quantity \"0x\": no digits after base prefix, interpreting as \"0\" for backwards compatibility in Standard input code on line 1\n\
+             string(1) \"2\"\nbool(false)\nstring(2) \"3q\"\nstring(1) \"2\"\nstring(2) \"0x\"\n\
+             \nWarning: Invalid \"t.any\" setting. Invalid quantity \"3q\": unknown multiplier \"q\", interpreting as \"3\" for backwards compatibility in Unknown on line 0\n"
         );
     }
 }

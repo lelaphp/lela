@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use php_ext::coerce::{atoi, strtol};
+use php_ext::coerce::atoi;
 use php_ext::request::{MAXPATHLEN, Request, StreamCtx};
 use php_ext::values::{Owner, PhpObject, Value, ValueRef};
 use php_ext_standard::md5::Md5;
@@ -1224,11 +1224,6 @@ fn temp_name(attempt: u32) -> String {
 
 // ---- `get_sdl`
 
-/// An ini entry read as `OnUpdateLong` reads it.
-fn ini_long(req: &Request, name: &[u8]) -> i64 {
-    req.ini_get(name).map_or(0, strtol)
-}
-
 /// `cache_wsdl` as `SoapClient` and `SoapServer` default it:
 /// `soap.wsdl_cache` (`OnUpdateCacheMode`'s `char`) where
 /// `soap.wsdl_cache_enabled` is on, else none.
@@ -1295,7 +1290,7 @@ pub(crate) fn get_sdl(
         }
     }
     let key_uri = uri[..uri_len].to_vec();
-    let ttl = ini_long(req, ini::CACHE_TTL);
+    let ttl = req.ini_long(ini::CACHE_TTL);
 
     if cache_wsdl & WSDL_CACHE_MEMORY != 0
         && let Some((sdl, time)) = req.state::<State>().mem_cache.get_str(&key_uri)
@@ -1473,7 +1468,7 @@ fn cache_in_memory(req: &mut Request, cache_wsdl: i64, uri: &[u8], t: i64, sdl: 
     if cache_wsdl & WSDL_CACHE_MEMORY == 0 {
         return sdl;
     }
-    let limit = ini_long(req, ini::CACHE_LIMIT);
+    let limit = req.ini_long(ini::CACHE_LIMIT);
     let cache = &mut req.state::<State>().mem_cache;
     let full = i64::try_from(cache.len()).unwrap_or(i64::MAX);
     if limit > 0 && limit <= full {

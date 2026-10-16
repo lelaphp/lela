@@ -29,7 +29,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, Instance};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::read_prop;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Thrown, argument_error, throw, throw_error, warning};
+use php_ext::raising::{Thrown, argument_error, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
@@ -113,20 +113,16 @@ fn bcmath_info(req: &mut Request) {
     reason = "the `on_modify` slot's shape, which a handler that throws needs"
 )]
 fn on_update_scale(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
-    let value = value.unwrap_or_default();
-    let (scale, error) = Request::ini_parse_quantity(value);
-    if let Some(error) = error {
-        let name = String::from_utf8_lossy(SCALE);
-        warning(req, &format!("Invalid \"{name}\" setting. {error}"));
-    }
+    let scale = req.ini_parse_quantity_warn(SCALE, value.unwrap_or_default());
     Ok((0..=i64::from(i32::MAX)).contains(&scale))
 }
 
 /// `BCG(bc_precision)`: the scale `bcmath.scale` holds, which
 /// [`on_update_scale`] accepted.
 fn default_scale(req: &Request) -> usize {
-    let value = req.ini_get(SCALE).map_or(0, Request::ini_parse_bytes);
-    usize::try_from(value).unwrap_or(0).min(INT_MAX)
+    usize::try_from(req.ini_long(SCALE))
+        .unwrap_or(0)
+        .min(INT_MAX)
 }
 
 /// `bcmath_check_scale`: a scale in `0..=INT_MAX`, or php's

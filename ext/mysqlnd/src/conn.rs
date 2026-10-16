@@ -284,8 +284,12 @@ impl ConnData {
         let cmd_buffer = ini(req, b"mysqlnd.net_cmd_buffer_size", NET_CMD_BUFFER_MIN_SIZE);
         net.set_cmd_buffer(req, cmd_buffer as usize, persistent)?;
         let vio = alloc(req, VIO)?;
-        net.options.net_read_buffer_size = ini(req, b"mysqlnd.net_read_buffer_size", 32768);
-        net.options.timeout_read = ini(req, b"mysqlnd.net_read_timeout", 86400);
+        // The two `OnUpdateLong` entries' quantities, cut to `unsigned int`.
+        let quantity = |req: &Request, name: &[u8]| -> u32 {
+            u32::try_from(req.ini_long(name) & 0xFFFF_FFFF).unwrap_or(u32::MAX)
+        };
+        net.options.net_read_buffer_size = quantity(req, b"mysqlnd.net_read_buffer_size");
+        net.options.timeout_read = quantity(req, b"mysqlnd.net_read_timeout");
         let payload_decoder_factory = alloc(req, PAYLOAD_DECODER_FACTORY + PLUGIN_ROOM)?;
         let mut upsert = Upsert::default();
         upsert.affected_rows_to_error();

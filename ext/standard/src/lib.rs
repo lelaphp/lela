@@ -149,7 +149,9 @@ pub use url::UriParser;
 pub use exec::escape_shell_cmd as php_escape_shell_cmd;
 pub use mail::{build_headers as php_mail_build_headers, php_mail};
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
+use php_ext::abi::{
+    Dependency, DependencyKind, Extension, ExtensionBuilder, LongHandler, OnModify,
+};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{EngineWrapper, Request, STREAM_HOOKS, Streams};
 
@@ -784,6 +786,8 @@ pub fn extension() -> Extension {
     ini_handlers()
         .into_iter()
         .fold(builder, |b, (name, handler)| b.on_modify(name, handler))
+        .on_update_long(b"default_socket_timeout", LongHandler::Any)
+        .on_update_long(b"unserialize_max_depth", LongHandler::Any)
         .request_state::<State>()
         .stream_hooks(STREAM_HOOKS)
         .info(basic_functions::minfo)

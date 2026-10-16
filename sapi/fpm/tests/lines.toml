@@ -355,3 +355,21 @@ params = [["SCRIPT_FILENAME", "{dir}/run.php\u0000"], ["REQUEST_METHOD", "GET"]]
 params = [["SCRIPT_FILENAME", "{dir}/a.txt\u0000.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/run.php/x\u0000y"], ["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/run.php"], ["PATH_INFO", "/x\u0000y"]]
+
+# `user_ini.cache_ttl` is `PG(user_ini_cache_ttl)`, the quantity its
+# `OnUpdateLong` read (#2745): `-0x1` is -1, so the `.user.ini` read for the
+# first request has expired by the second, which reads it again and sees the
+# first request's rewrite; C's `atoi` reads 0, and a second request in the
+# same second would take the cached entries.
+[[line]]
+name = "the-user-ini-cache-ttl-is-a-quantity"
+args = ["-R", "-n", "-F", "-d", "user_ini.cache_ttl=-0x1", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", ".user.ini" = "precision=5\n", "a.php" = '''<?php echo ini_get('precision'), "\n"; file_put_contents(__DIR__ . '/.user.ini', "precision=7\n");''', "b.php" = '''<?php echo ini_get('precision'), "\n";''' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/a.php"], ["REQUEST_METHOD", "GET"], ["DOCUMENT_ROOT", "{dir}"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/b.php"], ["REQUEST_METHOD", "GET"], ["DOCUMENT_ROOT", "{dir}"]]

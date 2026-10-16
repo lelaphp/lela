@@ -17,8 +17,8 @@ use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::user::{Slot, method_of, store};
 use crate::{
-    Module, State, Status, answer, headers_sent, ini, ini_bool, ini_long, pending, sent_error,
-    session, started_error, string_value,
+    Module, State, Status, answer, headers_sent, ini, ini_bool, pending, sent_error, session,
+    started_error, string_value,
 };
 
 /// `php_can_change_session_setting`: `false` after php's warning while a
@@ -492,7 +492,7 @@ fn session_cache_expire(
     #[php(default = null)] value: Option<i64>,
 ) -> Result<OrFalse<i64>, Thrown> {
     let expires = value;
-    let current = ini_long(req, b"session.cache_expire");
+    let current = req.ini_long(b"session.cache_expire");
     if expires.is_some() && req.state::<State>().status == Status::Active {
         started_error(
             req,
@@ -861,7 +861,7 @@ fn session_get_cookie_params(req: &mut Request) -> Result<Owner<PhpArray>, Throw
     ];
     for (key, entry, kind) in rows {
         let value = match kind {
-            0 => Owner::int(ini_long(req, entry)),
+            0 => Owner::int(req.ini_long(entry)),
             1 => {
                 let text = ini(req, entry);
                 string_value(req, &text)?

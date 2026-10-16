@@ -5,7 +5,7 @@
 //! entry holds is its text; what php's handler stored, `accel_directives`
 //! and `jit_globals`, is [`Stored`], read off the text when asked.
 
-use php_ext::abi::IniStage;
+use php_ext::abi::{ExtensionBuilder, IniStage, LongHandler};
 use php_ext::coerce::atoi;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
@@ -290,11 +290,7 @@ pub(crate) fn long(req: &Request, name: &str) -> i64 {
 /// `zend_ini_parse_quantity_warn`: the value, and php's warning naming
 /// the entry for a shape it reads for backwards compatibility.
 fn quantity(req: &mut Request, name: &str, value: &[u8]) -> i64 {
-    let (parsed, complaint) = Request::ini_parse_quantity(value);
-    if let Some(complaint) = complaint {
-        warning(req, &format!("Invalid \"{name}\" setting. {complaint}"));
-    }
-    parsed
+    req.ini_parse_quantity_warn(name.as_bytes(), value)
 }
 
 /// The `ZEND_INI_MH` of entry number `AT`, which the engine serves with
@@ -328,6 +324,7 @@ pub(crate) fn modify<const AT: usize>(
     Ok(match entry.kind {
         Kind::Bool | Kind::Text | Kind::FileCache | Kind::Real => true,
         Kind::Unempty => !value.is_empty(),
+        // A `Kind::Long` entry's handler is the engine's ([`handler`]).
         Kind::Long | Kind::JitDebug => {
             quantity(req, name, value);
             true
@@ -590,11 +587,25 @@ fn jit_digits(value: &[u8]) -> bool {
 
 /// Every entry's handler registered on `builder`, in table order.
 macro_rules! handlers {
-    ($builder:expr; $($at:literal),*) => {
-        $builder$(.on_modify(crate::ini::ENTRIES[$at].name.as_bytes(), crate::ini::modify::<$at>))*
-    };
+    ($builder:expr; $($at:literal),*) => {{
+        let builder = $builder;
+        $(let builder = crate::ini::handler::<$at>(builder);)*
+        builder
+    }};
 }
 pub(crate) use handlers;
+
+/// Entry `AT`'s handler on `builder`: `OnUpdateLong`, which the engine
+/// serves, for a [`Kind::Long`] entry, and [`modify`] for the rest.
+pub(crate) fn handler<const AT: usize>(builder: ExtensionBuilder) -> ExtensionBuilder {
+    match ENTRIES.get(AT) {
+        Some(entry) if entry.kind == Kind::Long => {
+            builder.on_update_long(entry.name.as_bytes(), LongHandler::Any)
+        }
+        Some(entry) => builder.on_modify(entry.name.as_bytes(), modify::<AT>),
+        None => builder,
+    }
+}
 
 /// `ACCEL_LOG_FATAL` to `ACCEL_LOG_DEBUG`, the levels
 /// `opcache.log_verbosity_level` admits up to.

@@ -7,14 +7,15 @@
 
 use std::io::Read;
 
+use php_ext::coerce::strtol;
 use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, Name};
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::PhpArray;
 
 use crate::{
-    Format, Module, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool, ini_long,
-    pending, sent_error, serializers, session_array, shown, started_error, throw_error, user,
+    Format, Module, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool, pending,
+    sent_error, serializers, session_array, shown, started_error, throw_error, user,
 };
 
 /// `PS_MAX_SID_LENGTH`.
@@ -141,11 +142,11 @@ pub(super) fn valid_key(key: &[u8]) -> bool {
 /// bool(false)
 /// ```
 pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
-    let length = usize::try_from(ini_long(req, b"session.sid_length"))
+    let length = usize::try_from(strtol(&ini(req, b"session.sid_length")))
         .ok()
         .filter(|n| (22..=MAX_SID_LENGTH).contains(n))
         .unwrap_or(32);
-    let bits = u32::try_from(ini_long(req, b"session.sid_bits_per_character"))
+    let bits = u32::try_from(strtol(&ini(req, b"session.sid_bits_per_character")))
         .ok()
         .filter(|n| (4..=6).contains(n))
         .unwrap_or(4);
@@ -623,8 +624,8 @@ pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
     let Some(module) = state.module else {
         return Ok(-1);
     };
-    let probability = Request::ini_parse_bytes(&ini(req, b"session.gc_probability"));
-    let divisor = Request::ini_parse_bytes(&ini(req, b"session.gc_divisor")).max(1);
+    let probability = req.ini_long(b"session.gc_probability");
+    let divisor = req.ini_long(b"session.gc_divisor").max(1);
     let mut collect = immediate;
     if !collect && probability > 0 {
         let mut draw = [0u8; 8];
@@ -637,7 +638,7 @@ pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
     if !collect {
         return Ok(-1);
     }
-    let maxlifetime = ini_long(req, b"session.gc_maxlifetime");
+    let maxlifetime = req.ini_long(b"session.gc_maxlifetime");
     let collected = module_gc(req, module, maxlifetime);
     Ok(absorb(req, collected)?.unwrap_or(-1))
 }
@@ -975,7 +976,7 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     cookie.extend_from_slice(&ini(req, b"session.name"));
     cookie.push(b'=');
     cookie.extend_from_slice(&url_encode(id));
-    let lifetime = ini_long(req, b"session.cookie_lifetime");
+    let lifetime = req.ini_long(b"session.cookie_lifetime");
     if lifetime > 0 {
         let t = now().saturating_add(lifetime);
         if t > 0 {
@@ -1037,7 +1038,7 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         );
         return Ok(-2);
     }
-    let expire = ini_long(req, b"session.cache_expire").saturating_mul(60);
+    let expire = req.ini_long(b"session.cache_expire").saturating_mul(60);
     let limiter = crate::c_str(&limiter).to_ascii_lowercase();
     let past = "Expires: Thu, 19 Nov 1981 08:52:00 GMT".to_owned();
     let private = format!("Cache-Control: private, max-age={expire}");

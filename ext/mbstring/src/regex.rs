@@ -280,13 +280,23 @@ pub(crate) fn info(req: &mut Request) {
 }
 
 /// `mbstring.regex_stack_limit` and `mbstring.regex_retry_limit`, each
-/// where it fits an `unsigned int`.
+/// the quantity its `OnUpdateLong` read, where it fits an `unsigned int`.
+///
+/// A retry limit of `0x1` is one retry, and the match that needs more
+/// fails:
+///
+/// ```php
+/// var_dump(mb_ereg('(a|ab)*c', 'abababababc'), ini_set('mbstring.regex_retry_limit', '0x1'), mb_ereg('(a|ab)*c', 'abababababc'), ini_set('mbstring.regex_stack_limit', '1q'));
+/// ```
+/// ```expect
+/// Warning: Invalid "mbstring.regex_stack_limit" setting. Invalid quantity "1q": unknown multiplier "q", interpreting as "1" for backwards compatibility in %s on line 2
+/// bool(true)
+/// string(7) "1000000"
+/// bool(false)
+/// string(6) "100000"
+/// ```
 fn limits(req: &Request) -> (Option<u32>, Option<u32>) {
-    let read = |name: &[u8]| -> Option<u32> {
-        let text = req.ini_get(name)?;
-        let n: i64 = std::str::from_utf8(text).ok()?.trim().parse().ok()?;
-        u32::try_from(n).ok()
-    };
+    let read = |name: &[u8]| -> Option<u32> { u32::try_from(req.ini_long(name)).ok() };
     (
         read(b"mbstring.regex_stack_limit"),
         read(b"mbstring.regex_retry_limit"),

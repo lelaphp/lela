@@ -15,8 +15,6 @@ const ARENA_HEADER: usize = 24;
 const ALIGNMENT: usize = 8;
 /// `sizeof(MYSQLND_MEMORY_POOL)`, which the pool carves out of itself.
 const POOL_SIZE: usize = 24;
-/// `mysqlnd.mempool_default_size`'s default.
-const DEFAULT_SIZE: usize = 16000;
 
 /// `ZEND_MM_ALIGNED_SIZE`.
 fn aligned(size: usize) -> usize {
@@ -104,13 +102,12 @@ impl Pool {
     /// first block, at least the header, with the pool carved out of it;
     /// the `Err` is the memory limit's fatal.
     pub(crate) fn create(req: &mut Request) -> Result<Pool, Thrown> {
-        let size = req
-            .ini_get(b"mysqlnd.mempool_default_size")
-            .map_or(DEFAULT_SIZE, |v| {
-                // `OnUpdateLong`'s `zend_long`, read as `size_t`.
-                let n = Request::ini_parse_quantity(v).0.cast_unsigned();
-                usize::try_from(n).unwrap_or(usize::MAX)
-            });
+        // `OnUpdateLong`'s `zend_long`, read as `size_t`.
+        let size = usize::try_from(
+            req.ini_long(b"mysqlnd.mempool_default_size")
+                .cast_unsigned(),
+        )
+        .unwrap_or(usize::MAX);
         let first = Emalloc::new(req, size.max(ARENA_HEADER))?;
         let mut pool = Pool {
             blocks: vec![first],

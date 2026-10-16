@@ -230,6 +230,35 @@ fn not_found(req: &mut Request, stage: IniStage, message: &str) -> bool {
 /// string(0) ""
 /// string(4) "/tmp"
 /// ```
+///
+/// The whole-number entries are read by the quantity rule, with php's
+/// warning where it interprets a value, at startup, at `ini_set()` and as
+/// the request ends: `OnUpdateSessionLong`'s `OnUpdateLong`,
+/// `OnUpdateCookieLifetime`'s `OnUpdateLongGEZero`, and the bound
+/// `OnUpdateSessionGcProbability` holds the quantity to.
+///
+/// ```php
+/// $code = 'ob_start(); var_dump(ini_get("session.gc_maxlifetime"), session_cache_expire(), ini_set("session.cache_expire", "1K"), session_cache_expire(), ini_set("session.gc_probability", "-1x"), ini_set("session.cookie_lifetime", "-0x2"), session_get_cookie_params()["lifetime"]); ob_end_flush();';
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'session.gc_maxlifetime=1K', '-d', 'session.cache_expire=0x10q', '-r', $code], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// ```
+/// ```expect process
+/// Warning: Invalid "session.cache_expire" setting. Invalid quantity "0x10q": unknown multiplier "q", interpreting as "0x10" for backwards compatibility in Unknown on line 0
+///
+/// Warning: Invalid "session.gc_probability" setting. Invalid quantity "-1x": unknown multiplier "x", interpreting as "-1" for backwards compatibility in Command line code on line 1
+///
+/// Warning: ini_set(): session.gc_probability must be greater than or equal to 0 in Command line code on line 1
+/// string(2) "1K"
+/// int(16)
+/// string(5) "0x10q"
+/// int(1024)
+/// bool(false)
+/// bool(false)
+/// int(0)
+///
+/// Warning: Invalid "session.cache_expire" setting. Invalid quantity "0x10q": unknown multiplier "q", interpreting as "0x10" for backwards compatibility in Unknown on line 0
+/// 0
+/// ```
 #[allow(clippy::too_many_lines)] // one arm per `PHP_INI_MH` of session.c
 fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> bool {
     let kind = ENTRIES
@@ -318,6 +347,8 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             req.state::<State>().format = Some(format);
             true
         }
+        // `OnUpdateCookieLifetime`: `atol`'s negative refused with its
+        // warning, then `OnUpdateLongGEZero`'s quantity.
         b"session.cookie_lifetime" => {
             if strtol(value) < 0 {
                 raise(
@@ -328,6 +359,11 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
                 );
                 return false;
             }
+            req.ini_parse_quantity_warn(name, value) >= 0
+        }
+        // `OnUpdateSessionLong`: `OnUpdateLong` once the checks above hold.
+        b"session.gc_maxlifetime" | b"session.cache_expire" => {
+            req.ini_parse_quantity_warn(name, value);
             true
         }
         b"session.sid_length" | b"session.sid_bits_per_character" => {
@@ -354,7 +390,12 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             );
             false
         }
-        b"session.gc_probability" if Request::ini_parse_bytes(value) < 0 => {
+        // `OnUpdateSessionGcProbability` and `OnUpdateSessionDivisor`:
+        // the quantity, then the bound.
+        b"session.gc_probability" => {
+            if req.ini_parse_quantity_warn(name, value) >= 0 {
+                return true;
+            }
             raise(
                 req,
                 stage,
@@ -363,7 +404,10 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: IniStage) -> b
             );
             false
         }
-        b"session.gc_divisor" if Request::ini_parse_bytes(value) <= 0 => {
+        b"session.gc_divisor" => {
+            if req.ini_parse_quantity_warn(name, value) > 0 {
+                return true;
+            }
             raise(
                 req,
                 stage,

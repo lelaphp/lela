@@ -40,7 +40,6 @@ mod user;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IntoReturn};
 use php_ext::attr::php_const;
-use php_ext::coerce::strtol;
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpRef, PhpString, Value};
@@ -353,12 +352,6 @@ fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown>
 /// An ini entry's text, the engine default where the request set none.
 fn ini(req: &Request, name: &[u8]) -> Vec<u8> {
     req.ini_get(name).map(<[u8]>::to_vec).unwrap_or_default()
-}
-
-/// A long entry as `OnUpdateLong` stores it, `ZEND_STRTOL`'s leading
-/// number.
-fn ini_long(req: &Request, name: &[u8]) -> i64 {
-    strtol(&ini(req, name))
 }
 
 /// A boolean entry as `OnUpdateBool` stores it.

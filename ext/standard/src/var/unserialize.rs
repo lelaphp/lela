@@ -416,11 +416,27 @@ impl VarHash {
     }
 }
 
-/// `unserialize_max_depth`, the depth a fresh var hash is held to.
+/// `unserialize_max_depth`, the depth a fresh var hash is held to: the
+/// quantity the entry's `OnUpdateLong` read.
+///
+/// `0x1` is a depth of one; `default_socket_timeout`, `file.c`'s
+/// `OnUpdateLong` entry, warns where the rule interprets its value:
+///
+/// ```php
+/// var_dump(ini_set('unserialize_max_depth', '0x1'), unserialize(serialize([[1]])), ini_set('default_socket_timeout', '5y'));
+/// ```
+/// ```expect
+/// Warning: unserialize(): Maximum depth of 1 exceeded. The depth limit can be changed using the max_depth unserialize() option or the unserialize_max_depth ini setting in %s on line 2
+///
+/// Warning: unserialize(): Error at offset 14 of 24 bytes in %s on line 2
+///
+/// Warning: Invalid "default_socket_timeout" setting. Invalid quantity "5y": unknown multiplier "y", interpreting as "5" for backwards compatibility in %s on line 2
+/// string(4) "4096"
+/// bool(false)
+/// string(2) "60"
+/// ```
 fn default_depth(req: &Request) -> i64 {
-    req.ini_get(b"unserialize_max_depth")
-        .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<i64>().ok())
-        .unwrap_or(4096)
+    req.ini_long(b"unserialize_max_depth")
 }
 
 /// One reader over one string, php's `p` and `max` beside the var hash

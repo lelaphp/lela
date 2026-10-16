@@ -46,7 +46,7 @@ pub use regex::Regex;
 use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Thrown, warning};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString};
 
@@ -129,7 +129,11 @@ impl Default for Limits {
             jit: false,
         };
         for (name, default) in INI {
-            limits.update(name.as_bytes(), default.as_bytes());
+            limits.update(
+                name.as_bytes(),
+                default.as_bytes(),
+                Request::ini_parse_bytes,
+            );
         }
         limits
     }
@@ -137,21 +141,19 @@ impl Default for Limits {
 
 impl Limits {
     /// The entry `name` holding `value`, as its `OnUpdate*` reads it:
-    /// `OnUpdateLong`'s quantity for a limit, answering the text's error
-    /// where it is no quantity, and `OnUpdateBool` for `pcre.jit`.
-    fn update(&mut self, name: &[u8], value: &[u8]) -> Option<String> {
+    /// `OnUpdateLong`'s quantity for a limit, read by `quantity`, and
+    /// `OnUpdateBool` for `pcre.jit`.
+    fn update(&mut self, name: &[u8], value: &[u8], quantity: impl FnOnce(&[u8]) -> i64) {
         let held = match name {
             b"pcre.backtrack_limit" => &mut self.backtrack,
             b"pcre.recursion_limit" => &mut self.recursion,
             b"pcre.jit" => {
                 self.jit = Request::ini_parse_bool(value);
-                return None;
+                return;
             }
-            _ => return None,
+            _ => return,
         };
-        let (quantity, error) = Request::ini_parse_quantity(value);
-        *held = limit(quantity);
-        error
+        *held = limit(quantity(value));
     }
 }
 
@@ -169,7 +171,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
     let mut limits = Limits::default();
     for (name, _) in INI {
         if let Some(value) = req.ini_get(name.as_bytes()) {
-            limits.update(name.as_bytes(), value);
+            limits.update(name.as_bytes(), value, Request::ini_parse_bytes);
         }
     }
     req.state::<State>().limits = limits;
@@ -186,13 +188,11 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 )]
 fn on_update<const AT: usize>(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
     let (name, _) = INI[AT];
-    let error = req
-        .state::<State>()
-        .limits
-        .update(name.as_bytes(), value.unwrap_or_default());
-    if let Some(error) = error {
-        warning(req, &format!("Invalid \"{name}\" setting. {error}"));
-    }
+    let mut limits = req.state::<State>().limits;
+    limits.update(name.as_bytes(), value.unwrap_or_default(), |value| {
+        req.ini_parse_quantity_warn(name.as_bytes(), value)
+    });
+    req.state::<State>().limits = limits;
     Ok(true)
 }
 
