@@ -579,8 +579,7 @@ fn has_to_string(req: &mut Request, class: ClassId) -> bool {
         {
             return true;
         }
-        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
-        at = parent.and_then(|p| php_ext::call::lookup_class(req, &p).ok().flatten());
+        at = req.class_parent(here);
     }
     false
 }

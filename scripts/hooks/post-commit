@@ -6,7 +6,8 @@
 # own ready record names, one per ticket of a branch (#2358); a ticket
 # named with no ready record is left open, as a part of it landed when a
 # box is unticked and an open ticket blocks it at the tracker (#2394), and
-# as unready, named for `done`, otherwise. `xtask ticket merged` closes nothing off `main`: a
+# as unclosed, named for `done`, otherwise, as is one the tracker could
+# not read or close (#2804). `xtask ticket merged` closes nothing off `main`: a
 # merge made elsewhere closes its tickets when `main` is fast-forwarded to
 # it, through post-merge. The commit stands whatever the close says, since
 # a hook after the commit cannot take it back, so a failure is said on the

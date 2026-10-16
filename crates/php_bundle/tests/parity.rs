@@ -18,7 +18,7 @@ mod extension;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use php_ext::test::{Capture, Engine};
@@ -209,9 +209,18 @@ fn an_alias_declares_no_frameless_entry() {
     assert!(extension::join::declared().0.frameless.is_empty());
 }
 
+/// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
+/// the test, never the path `env!` compiled in: cargo reuses a test binary
+/// across two checkouts that share a target directory (#2790).
+fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .expect("cargo sets CARGO_MANIFEST_DIR for a test it runs")
+}
+
 /// The oracle's binary, from the one file that pins it.
 fn oracle() -> PathBuf {
-    let pin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../oracle.toml");
+    let pin = manifest_dir().join("../../oracle.toml");
     let text = std::fs::read_to_string(&pin).unwrap_or_default();
     let path = text
         .lines()
@@ -252,7 +261,7 @@ fn with_prelude(script: &str) -> String {
 #[test]
 #[ignore = "runs the oracle and rewrites the pinned output"]
 fn recapture() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
+    let dir = manifest_dir().join("tests/parity");
     let mut renderings = signatures(&run_oracle(&rendering_script(MIRRORS)));
     renderings.extend(signatures(&run_oracle(&with_prelude(&rendering_script(
         SHAPES,

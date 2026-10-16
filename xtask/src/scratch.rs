@@ -40,6 +40,7 @@
 //! it either — being kept outlives the process that asked for it, which is
 //! the whole point of asking.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -603,15 +604,17 @@ fn names(path: &Path, file: &File) -> bool {
     }
 }
 
-/// A process a run left standing in its scratch tree (#2663): an orphan,
-/// handed to init once its parent ended, whose command line names a path
-/// inside a tree, as a test's php names its program in the run's copy of
-/// the pinned tree and a php-fpm master that left its group by `setsid()`
-/// names its ini there in its title. Its group goes with it where it leads
-/// one, as a program's does (`oracle::Group`), and a php-fpm master's
-/// workers are in its. A process whose parent lives is some program's
-/// still, an agent's shell that names the tree among them, and is never
-/// one; nor is one that names no tree, whatever number it took.
+/// A process a run left standing in its scratch tree (#2663): an orphan
+/// ([`Orphan`]) whose command line names a path inside a tree, as a
+/// test's php names its program in the run's copy of the pinned tree and
+/// a php-fpm master that left its group by `setsid()` names its ini there
+/// in its title, or, naming none, whose working directory is inside one,
+/// as a `setsid`'d `sleep` or a daemon given a relative path is (#2760).
+/// Its group goes with it where it leads one, as a program's does
+/// (`oracle::Group`), and a php-fpm master's workers are in its. A
+/// process whose parent lives is some program's still, an agent's shell
+/// that names the tree among them, and is never one; nor is one in no
+/// tree, whatever number it took.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Stray {
     pub pid: u32,
@@ -619,41 +622,73 @@ pub(crate) struct Stray {
     pub trees: Vec<PathBuf>,
 }
 
+/// A process whose parent is one an orphan is handed to ([`adopters`]),
+/// as `ps -o pid=,ppid=,pgid=,uid=,command=` lists it: this user's alone,
+/// the only ones a sweep may signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Orphan<'a> {
+    pub pid: u32,
+    pub group: u32,
+    pub command: &'a str,
+}
+
+impl<'a> Orphan<'a> {
+    /// The orphans of `listed` whose user is `uid` and whose parent is
+    /// among `adopters`.
+    pub(crate) fn of(listed: &'a str, adopters: &[u32], uid: u32) -> Vec<Orphan<'a>> {
+        let read = |line: &'a str| {
+            let (mut rest, mut numbers) = (line, [0u32; 4]);
+            for number in &mut numbers {
+                let text = rest.trim_start();
+                let (word, after) = text.split_at(text.find(char::is_whitespace)?);
+                *number = word.parse().ok()?;
+                rest = after;
+            }
+            let [pid, parent, group, user] = numbers;
+            let orphan = Orphan {
+                pid,
+                group,
+                command: rest.trim_start(),
+            };
+            (user == uid && adopters.contains(&parent)).then_some(orphan)
+        };
+        listed.lines().filter_map(read).collect()
+    }
+}
+
 impl Stray {
-    /// The strays of `listed`, the lines `ps -o pid=,ppid=,pgid=,command=`
-    /// printed, that name a tree made as `name` ([`unique`]).
-    pub(crate) fn of(listed: &str, name: &str) -> Vec<Stray> {
+    /// The strays among `orphans` in a tree made as `name` ([`unique`]):
+    /// the trees each command line names, each once per mention, or the
+    /// one its working directory is in, which `cwds` reads of those that
+    /// name none, in one call.
+    pub(crate) fn of(
+        orphans: &[Orphan],
+        name: &str,
+        cwds: impl FnOnce(&[u32]) -> BTreeMap<u32, PathBuf>,
+    ) -> Vec<Stray> {
         let marker = format!("/{PREFIX}{name}");
-        let numbered = |n: &str| {
-            n.bytes().enumerate().all(|(at, b)| match at {
-                0 | 8 => b == b'-',
-                _ => b.is_ascii_digit(),
-            })
+        let named: Vec<Vec<PathBuf>> = orphans
+            .iter()
+            .map(|orphan| trees_in(orphan.command, &marker))
+            .collect();
+        let unnamed: Vec<u32> = orphans
+            .iter()
+            .zip(&named)
+            .filter_map(|(orphan, trees)| trees.is_empty().then_some(orphan.pid))
+            .collect();
+        let cwds = cwds(&unnamed);
+        let standing = |pid| {
+            let cwd = cwds.get(&pid).and_then(|cwd| cwd.to_str());
+            cwd.map(|cwd| trees_in(cwd, &marker)).unwrap_or_default()
         };
         let mut strays = Vec::new();
-        for line in listed.lines() {
-            let mut words = line.split_whitespace();
-            let mut number = || words.next().and_then(|word| word.parse::<u32>().ok());
-            let (Some(pid), Some(INIT), Some(group)) = (number(), number(), number()) else {
-                continue;
-            };
-            let trees: Vec<PathBuf> = line
-                .match_indices(&marker)
-                .filter_map(|(at, _)| {
-                    let end = at + marker.len() + NUMBERED;
-                    let before = line.get(..at)?;
-                    let start = before
-                        .rfind([' ', '(', '=', ':', ',', '\'', '"'])
-                        .map_or(0, |s| s + 1);
-                    let tree = line.get(start..end)?;
-                    let after = line.get(end..)?.chars().next();
-                    (tree.starts_with('/')
-                        && numbered(line.get(at + marker.len()..end)?)
-                        && after.is_none_or(|c| !c.is_ascii_alphanumeric()))
-                    .then(|| PathBuf::from(tree))
-                })
-                .collect();
+        for (orphan, mut trees) in orphans.iter().zip(named) {
+            if trees.is_empty() {
+                trees = standing(orphan.pid);
+                trees.truncate(1);
+            }
             if !trees.is_empty() {
+                let (pid, group) = (orphan.pid, orphan.group);
                 strays.push(Stray { pid, group, trees });
             }
         }
@@ -682,25 +717,121 @@ impl Stray {
     }
 }
 
+/// The trees `text` names a path in, `marker` a tree's name after its
+/// `/`, each once per mention: the path starts at the text's start or
+/// after a space, a bracket, a quote, `=`, `:` or `,`, and the name's
+/// numbers are a tree's ([`unique`]).
+fn trees_in(text: &str, marker: &str) -> Vec<PathBuf> {
+    let numbered = |n: &str| {
+        n.bytes().enumerate().all(|(at, b)| match at {
+            0 | 8 => b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+    };
+    text.match_indices(marker)
+        .filter_map(|(at, _)| {
+            let end = at + marker.len() + NUMBERED;
+            let before = text.get(..at)?;
+            let start = before
+                .rfind([' ', '(', '=', ':', ',', '\'', '"'])
+                .map_or(0, |s| s + 1);
+            let tree = text.get(start..end)?;
+            let after = text.get(end..)?.chars().next();
+            (tree.starts_with('/')
+                && numbered(text.get(at + marker.len()..end)?)
+                && after.is_none_or(|c| !c.is_ascii_alphanumeric()))
+            .then(|| PathBuf::from(tree))
+        })
+        .collect()
+}
+
 /// The process init is, which an orphan's parent becomes.
 const INIT: u32 = 1;
 
+/// The processes an orphan of this process's programs is handed to: init,
+/// and on Linux the subreaper this process stands under, where one is
+/// (`PR_SET_CHILD_SUBREAPER`, which `systemd --user` sets for a desktop
+/// session), whose children are otherwise read as some program's (#2761).
+/// Read once, by the parent the kernel gives a `sleep` its shell left.
+fn adopters() -> &'static [u32] {
+    static ADOPTERS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    ADOPTERS.get_or_init(|| {
+        let left = std::process::Command::new("sh")
+            .args(["-c", "sleep 5 </dev/null >/dev/null 2>&1 & echo $!"])
+            .output();
+        let left = left.ok().and_then(|out| String::from_utf8(out.stdout).ok());
+        let Some(pid) = left.and_then(|pid| pid.trim().parse::<i32>().ok()) else {
+            return vec![INIT];
+        };
+        let parent = std::process::Command::new("ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output();
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL).ok();
+        let parent = parent
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok());
+        let parent = parent.and_then(|ppid| ppid.trim().parse::<u32>().ok());
+        std::iter::once(INIT)
+            .chain(parent.filter(|&p| p != INIT))
+            .collect()
+    })
+}
+
+/// The working directory of each of `pids`, as the kernel has it:
+/// `/proc/<pid>/cwd` on Linux and `lsof` elsewhere; none for a process
+/// gone, or where `lsof` does not answer.
+fn cwds(pids: &[u32]) -> BTreeMap<u32, PathBuf> {
+    if pids.is_empty() {
+        return BTreeMap::new();
+    }
+    if cfg!(target_os = "linux") {
+        let cwd = |pid: u32| std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        return pids
+            .iter()
+            .filter_map(|&pid| Some((pid, cwd(pid)?)))
+            .collect();
+    }
+    let listed: Vec<String> = pids.iter().map(u32::to_string).collect();
+    let Ok(lsof) = std::process::Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fpn", "-p", &listed.join(",")])
+        .output()
+    else {
+        return BTreeMap::new();
+    };
+    let (mut cwds, mut pid) = (BTreeMap::new(), None);
+    for line in String::from_utf8_lossy(&lsof.stdout).lines() {
+        match line.split_at_checked(1) {
+            Some(("p", n)) => pid = n.parse::<u32>().ok(),
+            Some(("n", path)) => {
+                pid.map(|pid| cwds.insert(pid, PathBuf::from(path)));
+            }
+            _ => {}
+        }
+    }
+    cwds
+}
+
 /// The strays standing in trees made as `name` that `ours` takes, each
-/// stopped, and their pids: none where `ps` does not answer.
+/// stopped, and their pids in order: none where `ps` does not answer.
 fn stop_strays_in(name: &str, ours: impl Fn(&Path) -> bool) -> Vec<u32> {
     let Ok(ps) = std::process::Command::new("ps")
-        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,command="])
+        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,uid=,command="])
         .output()
     else {
         return Vec::new();
     };
-    let strays = Stray::of(&String::from_utf8_lossy(&ps.stdout), name);
+    let listed = String::from_utf8_lossy(&ps.stdout);
+    let uid = nix::unistd::geteuid().as_raw();
+    let orphans = Orphan::of(&listed, adopters(), uid);
+    let strays = Stray::of(&orphans, name, cwds);
     let ours: Vec<Stray> = strays
         .into_iter()
         .filter(|stray| stray.trees.iter().any(|tree| ours(tree)))
         .collect();
     ours.iter().for_each(Stray::stop);
-    ours.iter().map(|stray| stray.pid).collect()
+    let mut pids: Vec<u32> = ours.iter().map(|stray| stray.pid).collect();
+    pids.sort_unstable();
+    pids
 }
 
 /// The strays dead runs left in their trees made as `name` by
@@ -795,7 +926,12 @@ mod tests {
 
     use std::os::unix::fs::MetadataExt;
 
-    use super::{Binary, Full, LOCK, Stray, Tree, beside, hold, made, reap, stop_forsaken};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::{
+        Binary, Full, INIT, LOCK, Orphan, Stray, Tree, beside, hold, made, reap, stop_forsaken,
+    };
     use crate::reading::{Reading, Status};
 
     /// A held program runs as it stood when it was held (#2756): the path
@@ -946,47 +1082,108 @@ mod tests {
         assert!(Full::of(&made(denied, &path, "opening")).is_none());
     }
 
-    /// What a stray is read from `ps`'s lines (#2663): an orphan naming a
-    /// path in a tree made as the name, its trees each once per mention;
-    /// never a process whose parent lives, nor a path whose numbers are
-    /// not a tree's, nor a tree made as another name.
+    /// What a stray is read from `ps`'s lines (#2663): an orphan, this
+    /// user's process whose parent is one an orphan is handed to (#2761),
+    /// naming a path in a tree made as the name, its trees each once per
+    /// mention, or naming none and standing in one (#2760); never a
+    /// process whose parent lives or another user's, nor a path whose
+    /// numbers are not a tree's, nor a tree made as another name.
     #[test]
-    fn a_stray_is_an_orphan_whose_command_names_a_tree_made_as_the_name() {
+    fn a_stray_is_an_orphan_naming_a_tree_made_as_the_name_or_standing_in_one() {
         let tree = "/tmp/xtask-phpt-tree-0012345-000001";
         let listed = format!(
-            "  501 1 501 php-fpm: master process ({tree}/sapi/fpm/tests/a.ini)\n\
-             502 1 501 php -d x={tree}/a {tree}.lock\n\
-             503 77 503 zsh -c ls {tree}/a\n\
-             504 1 504 vi /tmp/xtask-phpt-tree-marks-0012345-000001/a /tmp/xtask-phpt-tree-0012345-00000\n\
-             505 1 505 php /tmp/xtask-phpt-tree-0012345-0000012/a"
+            "  501     1   501     7 php-fpm: master process ({tree}/sapi/fpm/tests/a.ini)\n\
+             502 1 501 7 php -d x={tree}/a {tree}.lock\n\
+             503 77 503 7 zsh -c ls {tree}/a\n\
+             504 1 504 7 vi /tmp/xtask-phpt-tree-marks-0012345-000001/a /tmp/xtask-phpt-tree-0012345-00000\n\
+             505 1 505 7 php /tmp/xtask-phpt-tree-0012345-0000012/a\n\
+             506 1 506 8 php {tree}/a\n\
+             507 90 507 7 sleep 120\n\
+             508 1 508 7 sleep 120\n\
+             509 77 509 7 sleep 120"
         );
-        let strays = Stray::of(&listed, "phpt-tree");
-        let trees = |n| vec![std::path::PathBuf::from(tree); n];
+        let orphans = Orphan::of(&listed, &[INIT, 90], 7);
+        let pids: Vec<u32> = orphans.iter().map(|orphan| orphan.pid).collect();
+        assert_eq!(pids, [501, 502, 504, 505, 507, 508]);
+        let cwds = BTreeMap::from([
+            (507, PathBuf::from(format!("{tree}/ext/sysvmsg (deleted)"))),
+            (508, PathBuf::from("/tmp")),
+            (509, PathBuf::from(tree)),
+        ]);
+        let trees = |n| vec![PathBuf::from(tree); n];
+        let stray = |pid, group, trees| Stray { pid, group, trees };
         assert_eq!(
-            strays,
+            Stray::of(&orphans, "phpt-tree", |unnamed| {
+                assert_eq!(unnamed, [504, 505, 507, 508], "the orphans naming no tree");
+                cwds
+            }),
             [
-                Stray {
-                    pid: 501,
-                    group: 501,
-                    trees: trees(1)
-                },
-                Stray {
-                    pid: 502,
-                    group: 501,
-                    trees: trees(2)
-                },
+                stray(501, 501, trees(1)),
+                stray(502, 501, trees(2)),
+                stray(507, 507, trees(1))
             ]
         );
     }
 
-    /// A dead run's stray is stopped, and nothing else is (#2663): an
-    /// orphan naming a tree whose run is gone is, with its group; an
-    /// orphan naming a tree a run still holds is another run's program and
-    /// is left to it until that run stops its own, as is one in a tree
-    /// standing with no lock, a kept one; and a process whose parent lives
-    /// is left however dead the tree it names.
+    /// A dead run's stray is stopped, and nothing else is (#2663, #2760):
+    /// an orphan naming a tree whose run is gone is, with its group, and so
+    /// is one that names none and stands in a tree whose run is dead; an
+    /// orphan in a tree a run still holds, named or standing there, is
+    /// another run's program and is left to it until that run stops its
+    /// own, as is one in a tree standing with no lock, a kept one; an
+    /// orphan standing outside any tree is never stopped; and a process
+    /// whose parent lives is left however dead the tree it names or
+    /// stands in.
     #[test]
     fn a_dead_runs_stray_is_stopped_and_a_live_runs_or_a_childs_never() {
+        let _alone = alone();
+        strays_stopped();
+    }
+
+    /// Held by each test that runs [`strays_stopped`], in this process or
+    /// a child, for its length: one's first tree sweeps another's.
+    fn alone() -> std::sync::MutexGuard<'static, ()> {
+        static STRAYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        STRAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The same under a subreaper (#2761): a test process run under a perl
+    /// that took `PR_SET_CHILD_SUBREAPER`, as `systemd --user` takes it,
+    /// and reaps every child it is handed, so each orphan's parent is the
+    /// perl and not init.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn under_a_subreaper_a_dead_runs_stray_is_stopped_and_a_live_runs_or_a_childs_never() {
+        const UNDER: &str = "XTASK_TEST_UNDER_A_SUBREAPER";
+        if std::env::var_os(UNDER).is_some() {
+            let parent = nix::unistd::getppid().as_raw().unsigned_abs();
+            assert_eq!(super::adopters(), [INIT, parent]);
+            strays_stopped();
+            return;
+        }
+        let _alone = alone();
+        // prctl(PR_SET_CHILD_SUBREAPER, 1), by its number on this machine.
+        let prctl = if cfg!(target_arch = "aarch64") {
+            "167"
+        } else {
+            "157"
+        };
+        let perl = "syscall($ARGV[0] + 0, 36, 1, 0, 0, 0) == 0 or die \"prctl: $!\"; shift; \
+                    my $p = fork // die; exec @ARGV or die \"exec: $!\" unless $p; \
+                    while ((my $w = waitpid(-1, 0)) > 0) { exit($? ? 1 : 0) if $w == $p }";
+        let status = std::process::Command::new("perl")
+            .args(["-e", perl, prctl])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "scratch::tests::under_a_subreaper_a_dead_runs_stray_is_stopped_and_a_live_runs_or_a_childs_never"])
+            .env(UNDER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "the test under a subreaper: {status}");
+    }
+
+    fn strays_stopped() {
         let marks = Tree::new("strays-marks").unwrap();
         let held = Tree::short("strays").unwrap();
         let dead = Tree::short("strays").unwrap();
@@ -994,16 +1191,21 @@ mod tests {
         drop(dead);
         let kept = Tree::short("strays").unwrap();
         std::fs::remove_file(beside(&kept, LOCK)).unwrap();
+        // A run killed outright: its tree stands, its lock let go just
+        // before the sweep, so no other process's sweep removes it first.
+        let mut cut = Tree::short("strays").unwrap();
         // perl forks, and the child takes a session of its own and writes
-        // its pid before its parent exits and leaves it to init.
-        let orphan = |tree: &std::path::Path, mark: &str| {
+        // its pid before its parent exits and leaves it to its adopter;
+        // it names a path in `tree` on its command line, or stands in it.
+        let orphan = |tree: &std::path::Path, named: bool, mark: &str| {
             let mark = marks.join(mark);
             let perl = "my $m = $ARGV[1]; if (fork) { select(undef, undef, undef, 0.05) until -s $m; exit } \
                         POSIX::setsid(); open my $f, '>', $m; print $f $$; close $f; sleep 60";
             let status = std::process::Command::new("perl")
                 .args(["-MPOSIX", "-e", perl])
-                .arg(tree.join("a"))
+                .arg(if named { tree.join("a") } else { "-".into() })
                 .arg(&mark)
+                .current_dir(if named { marks.path() } else { tree })
                 .status()
                 .unwrap();
             assert!(status.success());
@@ -1012,35 +1214,60 @@ mod tests {
                 .parse::<u32>()
                 .unwrap()
         };
-        let gone = |pid: u32| {
-            (0..200).any(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                !crate::sysv::alive(pid)
+        let gone = |pids: &[u32]| {
+            pids.iter().all(|&pid| {
+                (0..200).any(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    !crate::sysv::alive(pid)
+                })
             })
         };
-        let (live, forsaken) = (orphan(held.path(), "live"), orphan(&dead_path, "dead"));
-        let kept_one = orphan(kept.path(), "kept");
+        let living = [orphan(&held, true, "live"), orphan(&held, false, "in")];
+        let mut forsaken = [orphan(&dead_path, true, "dead"), orphan(&cut, false, "cut")];
+        let kept_one = orphan(&kept, true, "kept");
+        let outside = orphan(&marks, false, "outside");
+        // A child of this process names the dead tree and stands in the cut one.
         let mut child = std::process::Command::new("perl")
             .args(["-e", "sleep 60"])
             .arg(dead_path.join("a"))
+            .current_dir(&cut)
             .spawn()
             .unwrap();
+        drop(cut.held.take());
         let stopped = stop_forsaken("strays");
         let child_ran = child.try_wait().unwrap().is_none();
         child.kill().ok();
         child.wait().ok();
-        let live_ran = crate::sysv::alive(live);
+        let living_ran = living.iter().all(|&pid| crate::sysv::alive(pid));
         let held_stopped = held.stop_strays();
         let kept_ran = crate::sysv::alive(kept_one);
         let kept_stopped = kept.stop_strays();
+        let outside_ran = crate::sysv::alive(outside);
+        Stray {
+            pid: outside,
+            group: outside,
+            trees: Vec::new(),
+        }
+        .stop();
         std::fs::remove_dir_all(kept.path()).ok();
-        assert_eq!(stopped, [forsaken]);
-        assert!(gone(forsaken), "the dead run's stray {forsaken} runs on");
+        std::fs::remove_dir_all(cut.path()).ok();
+        std::fs::remove_file(beside(&cut, LOCK)).ok();
+        forsaken.sort_unstable();
+        assert_eq!(stopped, forsaken);
+        assert!(gone(&forsaken), "a dead run's stray runs on");
         assert!(child_ran, "a child whose parent lives was stopped");
-        assert!(live_ran, "a live run's program {live} was stopped");
-        assert_eq!(held_stopped, [live]);
-        assert!(gone(live), "the run's own stray {live} runs on");
+        assert!(living_ran, "a live run's program {living:?} was stopped");
+        assert_eq!(held_stopped, {
+            let mut l = living;
+            l.sort_unstable();
+            l
+        });
+        assert!(gone(&living), "the run's own stray runs on");
         assert!(kept_ran, "a kept tree's {kept_one} was stopped");
         assert_eq!(kept_stopped, [kept_one]);
+        assert!(
+            outside_ran,
+            "an orphan outside every tree, {outside}, was stopped"
+        );
     }
 }

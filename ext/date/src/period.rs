@@ -16,8 +16,7 @@ use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
 use crate::obj::{
     IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, PeriodState, class_id, hold_period, new_date,
-    new_interval, parent_of, period_fields, rows_array, std_rows, uninitialized, with_period,
-    with_time,
+    new_interval, period_fields, rows_array, std_rows, uninitialized, with_period, with_time,
 };
 
 /// `INT_MAX - 8`, the most recurrences a period may have.
@@ -240,14 +239,10 @@ fn has_more(period: &PeriodState, index: usize) -> bool {
 fn base_date_class(req: &mut Request, class: ClassId) -> Result<ClassId, Thrown> {
     let mutable = class_id(req, "DateTime")?;
     let immutable = class_id(req, "DateTimeImmutable")?;
-    let mut at = class;
-    while at != mutable && at != immutable {
-        match parent_of(req, at) {
-            Some(parent) => at = parent,
-            None => break,
-        }
-    }
-    Ok(at)
+    let found = req
+        .lineage(class)
+        .find(|&at| at == mutable || at == immutable || req.class_parent(at).is_none());
+    Ok(found.unwrap_or(class))
 }
 
 /// The element a walk of the period stands at `index` steps past its

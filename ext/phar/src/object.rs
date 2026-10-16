@@ -1845,16 +1845,5 @@ fn zpp_name_and_value(
 /// `instanceof_function` for two classes, over the parents alone, which
 /// is all a class extending `PharFileInfo` can reach it by.
 fn extends(req: &mut Request, class: ClassId, of: ClassId) -> bool {
-    let mut at = Some(class);
-    for _ in 0..64 {
-        let Some(class) = at else {
-            return false;
-        };
-        if class == of {
-            return true;
-        }
-        let parent = req.class_decl(class).and_then(|decl| decl.parent.clone());
-        at = parent.and_then(|name| lookup_class(req, &name.0).ok().flatten());
-    }
-    false
+    req.lineage(class).any(|class| class == of)
 }

@@ -1865,7 +1865,7 @@ fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(
             );
             return Err(throw_error(req, "Error", &message));
         }
-        at = crate::parent_of(req, class);
+        at = req.class_parent(class);
     }
     Ok(())
 }

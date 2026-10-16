@@ -2456,7 +2456,7 @@ fn declares_constructor(req: &mut Request, class: ClassId) -> Result<bool, Throw
         if declares {
             return Ok(true);
         }
-        at = crate::parent_of(req, class);
+        at = req.class_parent(class);
     }
     Ok(false)
 }

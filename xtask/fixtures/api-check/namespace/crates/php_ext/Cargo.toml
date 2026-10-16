@@ -1,0 +1,10 @@
+[package]
+name = "php_ext"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+php_macros = { path = "../php_macros" }
+
+[lints]
+workspace = true

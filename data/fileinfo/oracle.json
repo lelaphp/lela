@@ -1,0 +1,1438 @@
+{
+  "oracle": {
+    "version": "8.5.9",
+    "md5": "315162bd4382e9b7a0aa6668edf4c097",
+    "sha256": "e775a8b4a6610f39420340ded62321a90d05ee03feecfcad9122fc4c6d1f6adf",
+    "source_commit": "dd6e76cce27aaa0ed9f7520648ed1081dfb6af36",
+    "pin_sha256": "fede04a861990b04ec9d511f7f949bec9f4ed37d446a20f9cd783e00dc7112f7",
+    "recipe": {
+      "script_name": "witness.php",
+      "preamble": "<?php\n",
+      "args": [
+        "-n"
+      ],
+      "ini": [
+        "output_handler=",
+        "open_basedir=",
+        "disable_functions=",
+        "output_buffering=Off",
+        "error_reporting=30719",
+        "fatal_error_backtraces=Off",
+        "display_errors=1",
+        "display_startup_errors=1",
+        "log_errors=0",
+        "html_errors=0",
+        "track_errors=0",
+        "report_zend_debug=0",
+        "docref_root=",
+        "docref_ext=.html",
+        "error_prepend_string=",
+        "error_append_string=",
+        "auto_prepend_file=",
+        "auto_append_file=",
+        "ignore_repeated_errors=0",
+        "precision=14",
+        "serialize_precision=-1",
+        "memory_limit=128M",
+        "opcache.fast_shutdown=0",
+        "opcache.file_update_protection=0",
+        "opcache.revalidate_freq=0",
+        "opcache.jit_hot_loop=1",
+        "opcache.jit_hot_func=1",
+        "opcache.jit_hot_return=1",
+        "opcache.jit_hot_side_exit=1",
+        "opcache.jit_max_root_traces=100000",
+        "opcache.jit_max_side_traces=100000",
+        "opcache.jit_max_exit_counters=100000",
+        "opcache.protect_memory=1",
+        "zend.assertions=1",
+        "zend.exception_ignore_args=0",
+        "zend.exception_string_param_max_len=15",
+        "short_open_tag=0",
+        "date.timezone=UTC"
+      ],
+      "env_clear": true,
+      "env": {
+        "TEST_PHP_EXECUTABLE": "/opt/homebrew/Cellar/php/8.5.9/bin/php",
+        "TZ": "UTC",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PHPRC": "/dev/null",
+        "MYSQL_TEST_HOST": "127.0.0.1",
+        "PDO_MYSQL_TEST_DSN": "mysql:host=127.0.0.1;dbname=test",
+        "PDO_MYSQL_TEST_HOST": "127.0.0.1",
+        "PDO_MYSQL_TEST_USER": "root",
+        "HOME": "{RUN}/home",
+        "TMPDIR": "{RUN}/tmp"
+      },
+      "limits": {
+        "timeout_s": 60
+      },
+      "normalise": {
+        "crlf_to_lf": true,
+        "trim": " \t\n\r\u0000\u000b",
+        "scratch_token": "%SCRATCH%",
+        "extension_number_token": "%N%"
+      }
+    },
+    "closure": {
+      "aom": "3.15.2",
+      "apr": "1.7.6",
+      "apr-util": "1.6.5_1",
+      "argon2": "20190702_1",
+      "autoconf": "2.73",
+      "brotli": "1.2.0",
+      "ca-certificates": "2026-09-25",
+      "curl": "8.22.0_1",
+      "dav1d": "1.5.4",
+      "fontconfig": "2.18.3",
+      "freetds": "1.5.19_1",
+      "freetype": "2.14.3",
+      "gd": "2.3.3_6",
+      "gettext": "1.0",
+      "giflib": "6.1.3",
+      "gmp": "6.3.0",
+      "icu4c@78": "78.3",
+      "jpeg-turbo": "3.2.0",
+      "json-c": "0.19",
+      "krb5": "1.22.2_2",
+      "libavif": "1.4.2",
+      "libnghttp2": "1.70.0",
+      "libnghttp3": "1.18.0",
+      "libngtcp2": "1.25.0_1",
+      "libpng": "1.6.59",
+      "libpq": "18.6_1",
+      "libpsl": "0.23.3",
+      "libsodium": "1.0.22",
+      "libssh2": "1.11.1_7",
+      "libtiff": "4.7.2",
+      "libtool": "2.6.2",
+      "libunistring": "1.4.2",
+      "libvmaf": "3.2.1",
+      "libzip": "1.12_1",
+      "lz4": "1.10.0",
+      "m4": "1.4.21",
+      "net-snmp": "5.9.5.2_2",
+      "oniguruma": "6.9.10",
+      "openldap": "2.7.1_1",
+      "openssl@3": "3.6.5",
+      "openssl@4": "4.0.3",
+      "pcre2": "10.49",
+      "readline": "8.3.6",
+      "sqlite": "3.53.4",
+      "tidy-html5": "5.8.0",
+      "unixodbc": "2.3.14",
+      "webp": "1.6.0",
+      "xz": "5.8.4",
+      "zstd": "1.5.7_1"
+    },
+    "closure_assertion": {
+      "command": [
+        "cargo",
+        "xtask",
+        "witness",
+        "--crate",
+        "ext/fileinfo",
+        "--item",
+        "extension"
+      ],
+      "status": 0,
+      "stdout": "pass witness ext/fileinfo: ext/fileinfo: 1 witnesses pass over 0 kernels or natives\nwitness: a run narrowed to the fences on extension writes no reading\n",
+      "after_status": 0,
+      "after_stdout": "pass witness ext/fileinfo: ext/fileinfo: 1 witnesses pass over 0 kernels or natives\nwitness: a run narrowed to the fences on extension writes no reading\n"
+    }
+  },
+  "host": {
+    "system": "Darwin",
+    "machine": "arm64"
+  },
+  "probe_pins": {
+    "descriptors.php": "732b6ea4981efe7b836c58813f30376dd5f004bbbcca9cc7a9c9aae45e76c3d8",
+    "recognition.php": "39d93c5e77bef3996949ed7cd3978c5de7f34393bd3b12bb092334ac72937b41",
+    "regex-storage.php": "533e520433d513e185422f64515bc6c1fc05261772139339badf8333c2665475",
+    "storage.php": "df2231f64fb02e9f5c36396ff5f4d4080eba1bdd93400b9c6033a4ca732dc00d",
+    "streams.php": "f95b67479a84933241e191fd72b398f972379921bc556786ed7705695308bf44",
+    "transactions.php": "1af82a01c61570dad58d326fe74f29ce8b011626fd6d30048f426937c5d98108"
+  },
+  "runner_sha256": "76bcd099b00cf383d9f1c21f13a3ef87294b1262ac5d40dab966dfa7902eb940",
+  "fixtures": {
+    "native.mgc": {
+      "bytes": 864,
+      "sha256": "dea246b3ab7c2e71390afa3d2a980048f2f604bd032efcc08f81d82bf65079c4"
+    },
+    "swapped.mgc": {
+      "bytes": 864,
+      "sha256": "449151a228cf07a28bca96a4800eae1e0c1ca4ff75df015a2a3fcb126b1a7372"
+    },
+    "bad-version.mgc": {
+      "bytes": 864,
+      "sha256": "3d57d15ffdae85686f1346d56e547689a8ce20f4f7b608b19777307ca3ab43f2"
+    },
+    "bad-count.mgc": {
+      "bytes": 864,
+      "sha256": "5d22f7c28dc65f0eee24b60a870c039d1cc2c2d9877c81080e9ee935cd66ae08"
+    },
+    "truncated.mgc": {
+      "bytes": 863,
+      "sha256": "acac6c0f80a4e25bc8b32326d08f9bbcc342938d4f46dff1db390fff48a47d6d"
+    },
+    "bad-regex": {
+      "bytes": 18,
+      "sha256": "9d2cdc99891e21e1205a3cd1ada8488e0a70c3b6a5c0a6689f3341a789188060"
+    },
+    "bad-type": {
+      "bytes": 20,
+      "sha256": "5599b38d62b915bee88a307fa340d15a564f06ca1eaa767fc5e28f9097a09c0e"
+    },
+    "lazy-bad-regex.mgc": {
+      "bytes": 864,
+      "sha256": "abafdd3b4e0f1abd2d9346a18910cdf23d45b4a7a0b10200b1c58c73070dff9e"
+    },
+    "capture-zero": {
+      "bytes": 23,
+      "sha256": "9666bf88f34b007e5d7163c763e176125538027bab9624041269ab9d72730993"
+    },
+    "capture-many": {
+      "bytes": 123,
+      "sha256": "d437be1b7095e701fc40e7bda39c26c46148bafbcb15c2da8ae89d75d89cfdc0"
+    },
+    "captures": {
+      "bytes": 34,
+      "sha256": "79876efd67acfa6a1df9426e8902e7dee5ca096b03d6b0541aab5a91252d7a99"
+    },
+    "regex-limit": {
+      "bytes": 23,
+      "sha256": "5b9bb4759bc48d3a49f0108f5f265e05c097874ddb6cf271a1421a423a3f787e"
+    },
+    "continuations": {
+      "bytes": 75,
+      "sha256": "035dffc07d8d2da1e583a995321e586f5a76c6e0492c98aecb7090e79022ec4b"
+    },
+    "tail": {
+      "bytes": 20,
+      "sha256": "e464f08128c1a69961b08423ed3e8bcf631ffa6afbc6f0af172afbc6aab2c163"
+    },
+    "buffer-failure": {
+      "bytes": 864,
+      "sha256": "95e1652fbffa11379cdd8bb09b6c4d6681eb0d9063dc1eb97512a3fc7ed7d56a"
+    },
+    "long-output": {
+      "bytes": 155,
+      "sha256": "410f0743698e3f86e94e88ab858817c34437aea23e175d7047244e293fbaec80"
+    },
+    "tail-input": {
+      "bytes": 7340136,
+      "sha256": "05b02e1eef8ef51447c9be42e0aba450013d80ac59b0b90057bdad75d9488517"
+    },
+    "cdf-input": {
+      "bytes": 99840,
+      "sha256": "310620b6652865fe3da98e2e234a7cc64ba5fb1122e6fb555f8bebf3b6df6a4a"
+    },
+    "large.mgc": {
+      "bytes": 17280432,
+      "sha256": "4b65c326f3e463417cdf6c3d070fb0fc764e5cc60a197d96594720aed91b1f5f"
+    }
+  },
+  "sources": {
+    "ext/fileinfo/build.rs": {
+      "sha256": "19737bf3f5b6c4b0a1f11ebb3663def005d8c636aef6f175b6948f937f417761",
+      "bytes": 1987,
+      "physical_lines": 47
+    },
+    "ext/fileinfo/config.m4": {
+      "sha256": "3914b02305e21f46355110e809db3ef49ef9c749f70c7121e56e940640099817",
+      "bytes": 1176,
+      "physical_lines": 49
+    },
+    "ext/fileinfo/data_file.c": {
+      "sha256": "99b83a3d65bfb81f115b72b5e5378bfc777f17b27a44216278644d471adecbc4",
+      "bytes": 20506735,
+      "physical_lines": 10117
+    },
+    "ext/fileinfo/libmagic/apprentice.c": {
+      "sha256": "8616dc5bc81a4b7f0c478990b60d0acb636c3be300c36b2a72a05f90fce0dd7c",
+      "bytes": 81166,
+      "physical_lines": 3673
+    },
+    "ext/fileinfo/libmagic/apptype.c": {
+      "sha256": "391bc7765a616a4f805995425720dca79cf82e11525d2493cd424069b770a09d",
+      "bytes": 4537,
+      "physical_lines": 169
+    },
+    "ext/fileinfo/libmagic/ascmagic.c": {
+      "sha256": "991ff1b0edafe49f6e6b9a8a454eb9561adfe91cb9205064f13f7a65b1ef340d",
+      "bytes": 9840,
+      "physical_lines": 390
+    },
+    "ext/fileinfo/libmagic/buffer.c": {
+      "sha256": "12c3b468ee137492e3f5e5d6b197d18c057d6fea1e0a1662afbdc5e94a9e0541",
+      "bytes": 2807,
+      "physical_lines": 99
+    },
+    "ext/fileinfo/libmagic/cdf.c": {
+      "sha256": "99c29381403fa467189d30734d2e54111f6a573318128ae9b0bc1ca444a5fc20",
+      "bytes": 42563,
+      "physical_lines": 1648
+    },
+    "ext/fileinfo/libmagic/cdf.h": {
+      "sha256": "d41950885b03825d333c023a2519d9b974c4cb16636eb459b15ef07ca88d2c63",
+      "bytes": 11670,
+      "physical_lines": 351
+    },
+    "ext/fileinfo/libmagic/cdf_time.c": {
+      "sha256": "debae74538959e0c1a862dfa952f55b4e55f0fee45e6b9537eadb04ecbf6807c",
+      "bytes": 4708,
+      "physical_lines": 203
+    },
+    "ext/fileinfo/libmagic/compress.c": {
+      "sha256": "78d8453ce46ffa394009eb99fe47ed22272d61eb694331440b3611b39cffb25e",
+      "bytes": 29619,
+      "physical_lines": 1234
+    },
+    "ext/fileinfo/libmagic/config.h": {
+      "sha256": "6dfff22fb66c8d0531a91a39cc2290a976333b96f356a09f73e5e9147dac958a",
+      "bytes": 293,
+      "physical_lines": 18
+    },
+    "ext/fileinfo/libmagic/der.c": {
+      "sha256": "c892b2839af15f29c18d36e1bcf7e9642019493dbce686b7f86dff6fc78a649c",
+      "bytes": 11652,
+      "physical_lines": 460
+    },
+    "ext/fileinfo/libmagic/der.h": {
+      "sha256": "19db1ba2e4403876e445a1f6054966b02327fcd58dbc2282546208a525cf7742",
+      "bytes": 1500,
+      "physical_lines": 28
+    },
+    "ext/fileinfo/libmagic/encoding.c": {
+      "sha256": "9df89e23065575b7cca3b2ae7ed67e64e98a6dbf6f5aaf3195fc6a4129a70f15",
+      "bytes": 22653,
+      "physical_lines": 658
+    },
+    "ext/fileinfo/libmagic/file.h": {
+      "sha256": "575b2303b8e22ce55ea75213ff71c34e2e5c1ef96042f68981caacacd3fceb85",
+      "bytes": 21011,
+      "physical_lines": 680
+    },
+    "ext/fileinfo/libmagic/fsmagic.c": {
+      "sha256": "a02bd373622fe74f9705d75e33130cba2e52c72ebd04df2175c64e5b80fe2f44",
+      "bytes": 6795,
+      "physical_lines": 256
+    },
+    "ext/fileinfo/libmagic/funcs.c": {
+      "sha256": "f6b02bae988d635b6864780bfe3abeae4168e98f548ce144a3e1acb7b23f04ab",
+      "bytes": 18786,
+      "physical_lines": 858
+    },
+    "ext/fileinfo/libmagic/is_csv.c": {
+      "sha256": "2163b24b9a73c389669c55ee6e02735391e040f3ec327d91a030bf8787da6180",
+      "bytes": 4601,
+      "physical_lines": 199
+    },
+    "ext/fileinfo/libmagic/is_json.c": {
+      "sha256": "ecf8078bab5854b02f9ba7b7f016080b01c833430fa104c8942e3b72e576d93e",
+      "bytes": 10511,
+      "physical_lines": 500
+    },
+    "ext/fileinfo/libmagic/is_simh.c": {
+      "sha256": "5c7cb6005dcd28438d3efdd7c720debc296940146ac6652d10c98651d73c719e",
+      "bytes": 4873,
+      "physical_lines": 209
+    },
+    "ext/fileinfo/libmagic/is_tar.c": {
+      "sha256": "946201c5efb8ebad9d9567c44982e2585bf8bc552420e20592188addd183a2ec",
+      "bytes": 5359,
+      "physical_lines": 179
+    },
+    "ext/fileinfo/libmagic/magic.c": {
+      "sha256": "2a3672c053775db12870637343ab6b9ce7deeb88ae5560dc6cc18dbe6e5c8ede",
+      "bytes": 9490,
+      "physical_lines": 416
+    },
+    "ext/fileinfo/libmagic/magic.h": {
+      "sha256": "e90c17420473599d3957c4283c67af5c23e91689f8982219bfb58738a1094ae3",
+      "bytes": 6028,
+      "physical_lines": 166
+    },
+    "ext/fileinfo/libmagic/print.c": {
+      "sha256": "2e7f7f54c3028f131c666d6b262e0e39dbc3a7e6d4df4f2cca00980bb6740eba",
+      "bytes": 10266,
+      "physical_lines": 390
+    },
+    "ext/fileinfo/libmagic/readcdf.c": {
+      "sha256": "ace4cd0c188f3d7def465d9e406e539c8d831d06a6ec81b0311c60dd90c8be2b",
+      "bytes": 16370,
+      "physical_lines": 671
+    },
+    "ext/fileinfo/libmagic/softmagic.c": {
+      "sha256": "a369e063c98fca0ce3f0e074adf514f9a89e976318bd6cbb0e7851b383f5ef2e",
+      "bytes": 59825,
+      "physical_lines": 2519
+    },
+    "ext/fileinfo/libmagic/strcasestr.c": {
+      "sha256": "0acc71ef0bf501b24d11cf7668b8f4e9db6cd95869a9136d18ddfd46a83312c9",
+      "bytes": 2827,
+      "physical_lines": 84
+    },
+    "ext/fileinfo/libmagic/tar.h": {
+      "sha256": "349ad8be69ed82d5f89d8c958d523bec87a4b264a6877b356b9322ae5902a33f",
+      "bytes": 2628,
+      "physical_lines": 73
+    },
+    "ext/fileinfo/shim/php.h": {
+      "sha256": "4207f474432aaeb3324943f3a8ecdb66c2eae68f0ca28b0a025945d0cd320c0b",
+      "bytes": 6678,
+      "physical_lines": 196
+    },
+    "ext/fileinfo/shim/php_libmagic.h": {
+      "sha256": "2d6480b49ddaec8c110dcff137e23ba71400bd7cb82257f194ca535a319d7ffc",
+      "bytes": 2048,
+      "physical_lines": 43
+    },
+    "ext/fileinfo/shim/shim.c": {
+      "sha256": "f9cc193ea60e2ce7a39dff3689372b4c6d6b4a4b401fd677c248cd0038af274c",
+      "bytes": 17419,
+      "physical_lines": 663
+    },
+    "ext/fileinfo/src/ffi/mod.rs": {
+      "sha256": "585cc92c87c6d3cb300dee57080a65dffa2a9e1aee0c082d44c41980c0810eb3",
+      "bytes": 7655,
+      "physical_lines": 214
+    },
+    "ext/fileinfo/src/lib.rs": {
+      "sha256": "1292c0e857e8563cfe93412fd042d506486b4a39299d2b0f36a19a6d5b59f105",
+      "bytes": 24023,
+      "physical_lines": 685
+    },
+    "ext/fileinfo/tests/capture.rs": {
+      "sha256": "e28fab9d907a1b5074076d456ae98e091a645d6481dbd704c2dc7d5b2c0cf0aa",
+      "bytes": 497,
+      "physical_lines": 14
+    },
+    "ext/fileinfo/tests/storage.rs": {
+      "sha256": "e0e0dc9cf317536fa1a489a120e8b952af2aa591ba157479b740cce2bef47c33",
+      "bytes": 5796,
+      "physical_lines": 172
+    }
+  },
+  "configured": [
+    "libmagic/apprentice.c",
+    "libmagic/apptype.c",
+    "libmagic/ascmagic.c",
+    "libmagic/buffer.c",
+    "libmagic/cdf_time.c",
+    "libmagic/cdf.c",
+    "libmagic/compress.c",
+    "libmagic/der.c",
+    "libmagic/encoding.c",
+    "libmagic/fsmagic.c",
+    "libmagic/funcs.c",
+    "libmagic/is_csv.c",
+    "libmagic/is_json.c",
+    "libmagic/is_simh.c",
+    "libmagic/is_tar.c",
+    "libmagic/magic.c",
+    "libmagic/print.c",
+    "libmagic/readcdf.c",
+    "libmagic/softmagic.c",
+    "libmagic/strcasestr.c"
+  ],
+  "builtin_database": {
+    "sha256": "d9545ebe36da3ad435a915022374bd8f0715050e526680ccdc1dfb4b96badb9f",
+    "bytes": 10355712,
+    "used_bytes": 10355472,
+    "padding_bytes": 240,
+    "record_bytes": 432,
+    "version": 19,
+    "binary_rules": 16771,
+    "text_rules": 7199,
+    "types": {
+      "5": 5457,
+      "1": 5384,
+      "20": 733,
+      "46": 1204,
+      "17": 351,
+      "11": 2941,
+      "13": 90,
+      "19": 91,
+      "8": 2388,
+      "3": 314,
+      "24": 31,
+      "49": 82,
+      "43": 3,
+      "10": 2378,
+      "29": 6,
+      "2": 116,
+      "7": 1106,
+      "26": 254,
+      "4": 185,
+      "25": 228,
+      "35": 11,
+      "18": 3,
+      "38": 16,
+      "41": 39,
+      "14": 2,
+      "28": 8,
+      "54": 4,
+      "57": 4,
+      "9": 22,
+      "47": 27,
+      "31": 2,
+      "16": 2,
+      "37": 3,
+      "12": 12,
+      "50": 23,
+      "21": 3,
+      "15": 8,
+      "48": 113,
+      "45": 321,
+      "42": 1,
+      "23": 1,
+      "6": 1,
+      "34": 2
+    },
+    "continuation_levels": {
+      "0": 3979,
+      "1": 9596,
+      "2": 4643,
+      "3": 2458,
+      "4": 1196,
+      "5": 643,
+      "6": 392,
+      "7": 356,
+      "8": 187,
+      "9": 164,
+      "10": 60,
+      "11": 36,
+      "12": 33,
+      "13": 50,
+      "14": 40,
+      "15": 56,
+      "16": 26,
+      "17": 19,
+      "18": 14,
+      "19": 3,
+      "20": 2,
+      "21": 3,
+      "22": 2,
+      "23": 2,
+      "24": 1,
+      "25": 2,
+      "26": 1,
+      "27": 2,
+      "28": 1,
+      "29": 2,
+      "30": 1
+    }
+  },
+  "workload": {
+    "sha256": "0f420c1eeb51021470403e5b18b518a89f43f5eb5e921c61a781717dff1ca6f2",
+    "observations": [
+      {
+        "profile": "buffer",
+        "status": 0,
+        "stdout": "buffer 0b13ca8ea0d0e1244c8e144a5d3c3eb3c053e6d4fe6ea0ee5dd02de1cde28e59\n",
+        "stderr": ""
+      },
+      {
+        "profile": "file",
+        "status": 0,
+        "stdout": "file 0b13ca8ea0d0e1244c8e144a5d3c3eb3c053e6d4fe6ea0ee5dd02de1cde28e59\n",
+        "stderr": ""
+      },
+      {
+        "profile": "wrapper",
+        "status": 0,
+        "stdout": "wrapper 0b13ca8ea0d0e1244c8e144a5d3c3eb3c053e6d4fe6ea0ee5dd02de1cde28e59\n",
+        "stderr": ""
+      },
+      {
+        "profile": "cold",
+        "status": 0,
+        "stdout": "cold 0b13ca8ea0d0e1244c8e144a5d3c3eb3c053e6d4fe6ea0ee5dd02de1cde28e59\n",
+        "stderr": ""
+      }
+    ]
+  },
+  "observations": [
+    {
+      "probe": "transactions",
+      "arguments": [
+        "open",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"outer\",\"us-ascii\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "open",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "open",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"nested-before\",\"image\\/gif\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"outer\",\"us-ascii\"],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "open",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "stat",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"outer\",\"us-ascii\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "stat",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "stat",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"nested-before\",\"image\\/gif\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"outer\",\"us-ascii\"],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "stat",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "read",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"cast\",null],[\"close\",null],[\"outer\",\"us-asciius-ascii\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "read",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "read",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"nested-before\",\"image\\/gif\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"cast\",null],[\"close\",null],[\"outer\",\"us-asciius-ascii\"],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "read",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "cast",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"close\",null],[\"outer\",\"us-asciius-ascii\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "cast",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "cast",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"nested-before\",\"image\\/gif\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"close\",null],[\"outer\",\"us-asciius-ascii\"],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "cast",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "close",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"set-encoding\",true],[\"outer\",\"GIF image data, version 89a,\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "close",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "close",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"set-encoding\",true],[\"outer\",\"image\\/gif\"],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "close",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"cast\",null],[\"close\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "warning",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::file(): Unable to find the wrapper \\\"missing\\\" - did you forget to enable it when you configured PHP?\"],[\"warning\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"diagnostic\",\"finfo::file(): Unable to find the wrapper \\\"missing\\\" - did you forget to enable it when you configured PHP?\"],[\"warning\",null],[\"diagnostic\",\"finfo::file(missing:\\/\\/file): Failed to open stream: No such file or directory\"],[\"warning\",null],[\"outer\",false],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "warning",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::file(): Unable to find the wrapper \\\"missing\\\" - did you forget to enable it when you configured PHP?\"],[\"warning\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "warning",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::file(): Unable to find the wrapper \\\"missing\\\" - did you forget to enable it when you configured PHP?\"],[\"warning\",null],[\"nested-before\",\"image\\/gif\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"diagnostic\",\"finfo::file(): Unable to find the wrapper \\\"missing\\\" - did you forget to enable it when you configured PHP?\"],[\"warning\",null],[\"diagnostic\",\"finfo::file(missing:\\/\\/file): Failed to open stream: No such file or directory\"],[\"warning\",null],[\"outer\",false],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "warning",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::file(): Unable to find the wrapper \\\"missing\\\" - did you forget to enable it when you configured PHP?\"],[\"warning\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "deprecation",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): The $context parameter has no effect for finfo_buffer()\"],[\"deprecation\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"outer\",\"us-ascii\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "deprecation",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): The $context parameter has no effect for finfo_buffer()\"],[\"deprecation\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "deprecation",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): The $context parameter has no effect for finfo_buffer()\"],[\"deprecation\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"outer\",\"image\\/gif\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "deprecation",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): The $context parameter has no effect for finfo_buffer()\"],[\"deprecation\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "identify-warning",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"diagnostic\",\"finfo::file(): Failed identify data 0:cannot read `(null)'\"],[\"identify-warning\",null],[\"nested-before\",\"GIF image data, version 89a,\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"close\",null],[\"outer\",false],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "identify-warning",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"diagnostic\",\"finfo::file(): Failed identify data 0:cannot read `(null)'\"],[\"identify-warning\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "identify-warning",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"diagnostic\",\"finfo::file(): Failed identify data 0:cannot read `(null)'\"],[\"identify-warning\",null],[\"nested-before\",\"image\\/gif\"],[\"set-encoding\",true],[\"nested-after\",\"us-ascii\"],[\"close\",null],[\"outer\",false],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "identify-warning",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",null],[\"diagnostic\",\"finfo::file(): Failed identify data 0:cannot read `(null)'\"],[\"identify-warning\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"GIF image data, version 89a,\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "regex-warning",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Compilation failed: missing closing parenthesis at offset 1\"],[\"regex-warning\",null],[\"nested-before\",\"empty\"],[\"set-encoding\",true],[\"nested-after\",\"binary\"],[\"outer\",\"binary, ASCII text, with no line terminatorsus-ascii\"],[\"after\",\"binary\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "regex-warning",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Compilation failed: missing closing parenthesis at offset 1\"],[\"regex-warning\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"binary\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "regex-warning",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Compilation failed: missing closing parenthesis at offset 1\"],[\"regex-warning\",null],[\"nested-before\",\"application\\/x-empty\"],[\"set-encoding\",true],[\"nested-after\",\"binary\"],[\"outer\",\"binaryus-ascii\"],[\"after\",\"empty\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "regex-warning",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Compilation failed: missing closing parenthesis at offset 1\"],[\"regex-warning\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"empty\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "buffer-failure",
+        "0",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Failed identify data 0:cannot find entry `missing'\"],[\"buffer-failure\",null],[\"nested-before\",\"empty\"],[\"set-encoding\",true],[\"nested-after\",\"binary\"],[\"outer\",false],[\"after\",\"binary\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "buffer-failure",
+        "0",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Failed identify data 0:cannot find entry `missing'\"],[\"buffer-failure\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"binary\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "buffer-failure",
+        "16",
+        "mutate"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Failed identify data 0:cannot find entry `missing'\"],[\"buffer-failure\",null],[\"nested-before\",\"empty\"],[\"set-encoding\",true],[\"nested-after\",\"binary\"],[\"outer\",false],[\"after\",\"binary\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "buffer-failure",
+        "16",
+        "throw"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): Failed identify data 0:cannot find entry `missing'\"],[\"buffer-failure\",null],[\"set-encoding\",null],[\"caught\",[\"Exception\",\"callback throw\"]],[\"after\",\"binary\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "transactions",
+      "arguments": [
+        "deprecation",
+        "16",
+        "replace"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"diagnostic\",\"finfo::buffer(): The $context parameter has no effect for finfo_buffer()\"],[\"deprecation\",null],[\"replace-begin\",null],[\"replace-end\",null],[\"outer\",\"image\\/gif\"],[\"after\",\"us-ascii\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "short",
+        "file"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",2],[\"seek\",[2,0]],[\"tell\",2],[\"cast\",0],[\"close\",null],[\"answer\",\"text\\/plain\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "stat-fail",
+        "file"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"close\",null],[\"answer\",false]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "read-fail",
+        "file"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",[8192,0]],[\"diagnostic\",\"finfo::file(): Failed identify data 0:cannot read `(null)'\"],[\"close\",null],[\"answer\",false]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "nonseekable",
+        "file"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",600],[\"seek\",[600,0]],[\"cast\",0],[\"close\",null],[\"answer\",\"image\\/gif\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "rewind-fail",
+        "file"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",600],[\"seek\",[600,0]],[\"tell\",600],[\"cast\",0],[\"close\",null],[\"answer\",\"image\\/gif\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "restore-fail",
+        "file"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",600],[\"seek\",[600,0]],[\"tell\",600],[\"cast\",0],[\"close\",null],[\"answer\",\"image\\/gif\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "close-throw",
+        "file"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",600],[\"seek\",[600,0]],[\"tell\",600],[\"cast\",0],[\"close\",null],[\"caught\",[\"Exception\",\"close failed\"]]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "short",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"read\",[8192,0]],[\"eof\",2],[\"before\",2],[\"seek\",[0,0]],[\"tell\",0],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",2],[\"seek\",[2,0]],[\"tell\",2],[\"cast\",0],[\"seek\",[2,0]],[\"tell\",2],[\"answer\",\"text\\/plain\"],[\"after\",2],[\"close\",null]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "stat-fail",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "undefined-stat-copy",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"read\",[8192,0]],[\"eof\",600],[\"before\",3],[\"seek\",[0,0]],[\"tell\",0],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",600],[\"seek\",[600,0]],[\"tell\",600],[\"cast\",0],[\"seek\",[3,0]],[\"tell\",3],[\"answer\",\"image\\/gif\"],[\"after\",3],[\"close\",null]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "read-fail",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"read\",[8192,0]],[\"before\",0],[\"seek\",[0,0]],[\"tell\",0],[\"stat\",null],[\"read\",[8192,0]],[\"diagnostic\",\"mime_content_type(): Failed identify data 0:cannot read `(null)'\"],[\"seek\",[0,0]],[\"tell\",0],[\"answer\",false],[\"after\",0],[\"close\",null]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "nonseekable",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"read\",[8192,0]],[\"eof\",600],[\"before\",3],[\"seek\",[0,0]],[\"stat\",null],[\"read\",[8192,600]],[\"eof\",600],[\"seek\",[3,0]],[\"cast\",0],[\"seek\",[3,0]],[\"answer\",\"application\\/x-empty\"],[\"after\",3],[\"close\",null]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "rewind-fail",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"read\",[8192,0]],[\"eof\",600],[\"before\",3],[\"seek\",[0,0]],[\"stat\",null],[\"read\",[8192,600]],[\"eof\",600],[\"seek\",[3,0]],[\"tell\",3],[\"cast\",0],[\"seek\",[3,0]],[\"tell\",3],[\"answer\",\"application\\/x-empty\"],[\"after\",3],[\"close\",null]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "restore-fail",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"read\",[8192,0]],[\"eof\",600],[\"before\",3],[\"seek\",[0,0]],[\"tell\",0],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",600],[\"seek\",[600,0]],[\"cast\",0],[\"seek\",[3,0]],[\"answer\",\"image\\/gif\"],[\"after\",600],[\"close\",null]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "close-throw",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"read\",[8192,0]],[\"eof\",600],[\"before\",3],[\"seek\",[0,0]],[\"tell\",0],[\"stat\",null],[\"read\",[8192,0]],[\"eof\",600],[\"seek\",[600,0]],[\"tell\",600],[\"cast\",0],[\"seek\",[3,0]],[\"tell\",3],[\"answer\",\"image\\/gif\"],[\"after\",3],[\"close\",null],[\"caught\",[\"Exception\",\"close failed\"]]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "plain",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"before\",3],[\"answer\",\"text\\/plain\"],[\"after\",3]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "filtered",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"before\",3],[\"answer\",\"image\\/gif\"],[\"after\",3]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "streams",
+      "arguments": [
+        "socket",
+        "mime"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"before\",3],[\"diagnostic\",\"mime_content_type(): Stream does not support seeking\"],[\"diagnostic\",\"mime_content_type(): Stream does not support seeking\"],[\"answer\",\"text\\/plain\"],[\"after\",6]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "storage",
+      "arguments": [
+        "profiles"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[\"storage\",null,736,1176,1120,1016,216]\n[\"storage\",\"custom\",1440,1496,1464,1464,216]\n[\"storage\",\"native.mgc\",1792,2128,2088,2072,376]\n[\"storage\",\"swapped.mgc\",1632,1968,1928,1912,216]\n[\"sessions\",24464]\n[\"sessions-drop\",216]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "storage",
+      "arguments": [
+        "snapshot"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[\"snapshot\",\"first\",\"second\"]\n[\"load-time-MAGIC\",\"compiled\"]\n[\"reconstructed\",\"compiled\"]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "storage",
+      "arguments": [
+        "failure"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[\"caught\",\"absent\",\"Exception\",\"finfo::__construct(<cwd>\\/absent): Failed to open stream: No such file or directory\",\"66696e666f3a3a5f5f636f6e737472756374283c6377643e2f616273656e74293a204661696c656420746f206f70656e2073747265616d3a204e6f20737563682066696c65206f72206469726563746f7279\"]\n[\"failure-drop\",\"absent\",248]\n[\"caught\",\"bad-version.mgc\",\"Exception\",\"finfo::__construct(): offset `\\u001c\\u0004\\u001e\\ufffd\\u0012' invalid\",\"66696e666f3a3a5f5f636f6e73747275637428293a206f666673657420601c041ef1122720696e76616c6964\"]\n[\"failure-drop\",\"bad-version.mgc\",216]\n[\"caught\",\"bad-count.mgc\",\"Exception\",\"finfo::__construct(): offset `\\u001c\\u0004\\u001e\\ufffd\\u0013' invalid\",\"66696e666f3a3a5f5f636f6e73747275637428293a206f666673657420601c041ef1132720696e76616c6964\"]\n[\"failure-drop\",\"bad-count.mgc\",376]\n[\"caught\",\"truncated.mgc\",\"Exception\",\"finfo::__construct(): offset `\\u001c\\u0004\\u001e\\ufffd\\u0013' invalid\",\"66696e666f3a3a5f5f636f6e73747275637428293a206f666673657420601c041ef1132720696e76616c6964\"]\n[\"failure-drop\",\"truncated.mgc\",216]\n[\"caught\",\"bad-regex\",\"Exception\",\"finfo::__construct(): Compilation failed: missing terminating ] for character class at offset 1\",\"66696e666f3a3a5f5f636f6e73747275637428293a20436f6d70696c6174696f6e206661696c65643a206d697373696e67207465726d696e6174696e67205d20666f722063686172616374657220636c617373206174206f66667365742031\"]\n[\"failure-drop\",\"bad-regex\",216]\n[\"caught\",\"bad-type\",\"Exception\",\"finfo::__construct(): type `unknown x invalid' invalid\",\"66696e666f3a3a5f5f636f6e73747275637428293a20747970652060756e6b6e6f776e207820696e76616c69642720696e76616c6964\"]\n[\"failure-drop\",\"bad-type\",216]\n[\"diagnostic\",\"finfo_open(absent): Failed to open stream: No such file or directory\"]\n[\"diagnostic\",\"finfo_open(): using regular magic file `absent'\"]\n[\"diagnostic\",\"finfo_open(absent): Failed to open stream: No such file or directory\"]\n[\"partial-load\",\"first\"]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "storage",
+      "arguments": [
+        "retained"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[\"output\",121,888]\n[\"retained\",760]\n[\"reset\",272]\n[\"drop\",-1640]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "storage",
+      "arguments": [
+        "limit"
+      ],
+      "extra": [
+        "-d",
+        "memory_limit=8M"
+      ],
+      "standing": "defined",
+      "status": 255,
+      "stdout": "before-open\n\nFatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 17280432 bytes) in <probe>/storage.php on line 57\n",
+      "stderr": ""
+    },
+    {
+      "probe": "recognition",
+      "arguments": [],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[\"ascii\",\"text\\/plain; charset=us-ascii\"]\n[\"utf8\",\"text\\/plain; charset=utf-8\"]\n[\"utf8-bad\",\"text\\/plain; charset=iso-8859-1\"]\n[\"utf16le\",\"text\\/plain; charset=utf-16le\"]\n[\"utf16be\",\"text\\/plain; charset=utf-16be\"]\n[\"utf32le\",\"text\\/plain; charset=utf-32le\"]\n[\"utf7\",\"text\\/plain; charset=utf-7\"]\n[\"latin1\",\"text\\/plain; charset=iso-8859-1\"]\n[\"ebcdic\",\"text\\/plain; charset=ebcdic\"]\n[\"json\",\"application\\/json; charset=us-ascii\"]\n[\"json-bad\",\"text\\/plain; charset=us-ascii\"]\n[\"csv\",\"text\\/csv; charset=us-ascii\"]\n[\"cdf-truncated\",\"application\\/octet-stream; charset=binary\"]\n[\"der-truncated\",\"text\\/plain; charset=unknown-8bit\"]\n[\"gzip\",\"application\\/gzip; charset=binary\"]\n[\"nul\",\"application\\/octet-stream; charset=binary\"]\n[\"empty\",\"application\\/x-empty; charset=binary\"]\n[\"rule\",\"captures\",6,\"captures, ASCII text, with no line terminators\",0]\n[\"rule\",\"captures\",7,\"captures, ASCII text, with no line terminators\",0]\n[\"rule\",\"captures\",301,\"ASCII text, with very long lines (301), with no line terminators\",0]\n[\"rule\",\"continuations\",6,\"base version suffix\",0]\n[\"rule\",\"continuations\",7,\"ASCII text, with no line terminators\",0]\n[\"rule\",\"continuations\",301,\"ASCII text, with very long lines (301), with no line terminators\",0]\n[\"rule\",\"tail\",6,\"ASCII text, with no line terminators\",0]\n[\"rule\",\"tail\",7,\"ASCII text, with no line terminators\",0]\n[\"rule\",\"tail\",301,\"ASCII text, with very long lines (301), with no line terminators\",0]\n[\"rule\",\"regex-limit\",6,\"ASCII text, with no line terminators\",2]\n[\"rule\",\"regex-limit\",7,\"ASCII text, with no line terminators\",2]\n[\"rule\",\"regex-limit\",301,\"ASCII text, with very long lines (301), with no line terminators\",2]\n[\"PHP-captures\",[[\"GIF89a\",1],[\"G\",1],[\"I\",2],[\"F\",3],[\"89\",4],[\"a\",6]],0]\n[\"locale\",\"C\",\"C\"]\n[\"locale-match\",\"captures, ASCII text, with no line terminators\",0]\n[\"locale\",\"en_US.UTF-8\",\"en_US.UTF-8\"]\n[\"locale-match\",\"captures, ASCII text, with no line terminators\",0]\n[\"tail-file\",\"tail\"]\n[\"tail-buffer\",\"ASCII text, with very long lines (65536), with no line terminators\"]\n[\"cdf-file\",\"application\\/vnd.ms-powerpoint\"]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "regex-storage",
+      "arguments": [],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "before-compiled-load\n[\"loaded\",true]\nbefore-compiled-match\n[\"diagnostic\",\"finfo::buffer(): Compilation failed: missing closing parenthesis at offset 1\"]\n[\"matched\",\"ASCII text, with no line terminators\",1]\nafter-compiled-match\nbefore-text-load\n[\"diagnostic\",\"finfo_open(): Compilation failed: missing terminating ] for character class at offset 1\"]\n[\"diagnostic\",\"finfo_open(): Failed to load magic database at \\\"<cwd>\\/bad-regex\\\"\"]\n[\"loaded-text\",false,1]\n[\"capture-peak\",\"capture-zero\",416,\"capture, ASCII text, with no line terminators\"]\n[\"capture-peak\",\"capture-many\",123800,\"capture, ASCII text, with no line terminators\"]\n[\"recursion\",\"ASCII text, with no line terminators\",3]\n[\"captures\",[[\"GIF89a\",1],[\"G\",1],[\"I\",2],[\"F\",3],[\"89\",4],[\"a\",6]]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "descriptors",
+      "arguments": [
+        "tail"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"prefix-read\",8192],[\"cast\",0],[\"descriptor-position\",0],[\"descriptor-next\",\"\"],[\"descriptor-closed\",true],[\"close\",null],[\"answer\",\"tail\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "descriptors",
+      "arguments": [
+        "tail-short"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"prefix-read\",8192],[\"cast\",0],[\"descriptor-position\",0],[\"descriptor-next\",\"\"],[\"descriptor-closed\",true],[\"close\",null],[\"answer\",\"ASCII text, with very long lines (8192), with no line terminators\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "descriptors",
+      "arguments": [
+        "tail-pipe"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"prefix-read\",8192],[\"cast\",0],[\"descriptor-position\",0],[\"descriptor-next\",\"5441494c\"],[\"descriptor-closed\",true],[\"close\",null],[\"answer\",\"ASCII text, with very long lines (8192), with no line terminators\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "descriptors",
+      "arguments": [
+        "cdf"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"prefix-read\",8192],[\"cast\",0],[\"descriptor-position\",0],[\"descriptor-next\",\"43007500\"],[\"descriptor-closed\",true],[\"close\",null],[\"answer\",\"application\\/vnd.ms-powerpoint\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "descriptors",
+      "arguments": [
+        "plain"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"prefix-read\",8192],[\"cast\",0],[\"descriptor-position\",0],[\"descriptor-next\",\"\"],[\"descriptor-closed\",true],[\"close\",null],[\"answer\",\"ASCII text, with very long lines (8192), with no line terminators\"]]\n",
+      "stderr": ""
+    },
+    {
+      "probe": "descriptors",
+      "arguments": [
+        "missing"
+      ],
+      "extra": [],
+      "standing": "defined",
+      "status": 0,
+      "stdout": "[[\"open\",null],[\"stat\",null],[\"stat\",null],[\"prefix-read\",8192],[\"cast\",0],[\"descriptor-position\",0],[\"descriptor-next\",\"78787878\"],[\"descriptor-closed\",true],[\"close\",null],[\"answer\",\"ASCII text, with very long lines (8192), with no line terminators\"]]\n",
+      "stderr": ""
+    }
+  ]
+}

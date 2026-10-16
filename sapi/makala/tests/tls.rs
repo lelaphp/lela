@@ -19,12 +19,12 @@ mod common;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use common::{Ending, Server, eventually, read_until_closed};
+use common::{Ending, Server, eventually, manifest_dir, read_until_closed};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, ProtocolVersion, RootCertStore, StreamOwned};
@@ -34,9 +34,7 @@ const WAIT: Duration = Duration::from_secs(20);
 
 /// A fixture under `tests/tls/`.
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/tls")
-        .join(name)
+    manifest_dir().join("tests/tls").join(name)
 }
 
 /// `--certificate` for `host`'s fixtures, under its name where `named`.

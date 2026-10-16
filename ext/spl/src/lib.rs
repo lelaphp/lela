@@ -45,7 +45,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{Iter, call_method, iterate, lookup_class};
 use php_ext::coerce::{key_of, truthy};
-use php_ext::decl::{ClassKind, Name};
+use php_ext::decl::ClassKind;
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
@@ -236,18 +236,6 @@ fn class_name(req: &Request, class: ClassId) -> Vec<u8> {
     req.class_decl(class)
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default()
-}
-
-/// The class a declaration names, looked up without the autoloaders,
-/// as the linker found it.
-fn named(req: &mut Request, name: &Name) -> Option<ClassId> {
-    lookup_class(req, &name.0).ok().flatten()
-}
-
-/// `ce->parent`.
-fn parent_of(req: &mut Request, class: ClassId) -> Option<ClassId> {
-    let parent = req.class_decl(class)?.parent.clone()?;
-    named(req, &parent)
 }
 
 /// Whether `class` is, extends or implements the class `name`,

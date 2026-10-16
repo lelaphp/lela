@@ -26,7 +26,7 @@ use php_ext::abi::{
     OrFalse, Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True, Union,
 };
 use php_ext::attr::{php_class, php_const};
-use php_ext::call::{autoload, lookup_class, new_object};
+use php_ext::call::{autoload, new_object};
 use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw_error,
@@ -555,29 +555,11 @@ fn set_param(req: &mut Request, this: PhpObject, key: Vec<u8>, value: Vec<u8>) {
     }
 }
 
-/// The parent of `class`, where it has one the request knows.
-fn parent_of(req: &mut Request, class: ClassId) -> Result<Option<ClassId>, Thrown> {
-    match req.class_decl(class).and_then(|d| d.parent.clone()) {
-        Some(parent) => lookup_class(req, &parent.0),
-        None => Ok(None),
-    }
-}
-
 /// Whether `class` descends from the root of `of`'s hierarchy,
 /// `instanceof_function(ret_class, curce)`.
-fn compatible(req: &mut Request, class: ClassId, of: ClassId) -> Result<bool, Thrown> {
-    let mut root = of;
-    while let Some(parent) = parent_of(req, root)? {
-        root = parent;
-    }
-    let mut at = Some(class);
-    while let Some(c) = at {
-        if c == root {
-            return Ok(true);
-        }
-        at = parent_of(req, c)?;
-    }
-    Ok(false)
+fn compatible(req: &Request, class: ClassId, of: ClassId) -> bool {
+    let root = req.lineage(of).last().unwrap_or(of);
+    req.lineage(class).any(|c| c == root)
 }
 
 /// Where `this` keeps its callbacks, which a transformation reaches at
@@ -774,7 +756,7 @@ impl XSLTProcessor {
                 },
             );
         };
-        if !compatible(req, class, document.class())? {
+        if !compatible(req, class, document.class()) {
             result.free_document();
             let (current, given) = (class_name(req, document.class()), class_name(req, class));
             let tail = format!("be a class name compatible with {current}, {given} given");
