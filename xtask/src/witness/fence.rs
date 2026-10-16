@@ -216,6 +216,11 @@ pub struct Witness {
     /// test (`--GET--`, `--POST--`, `--POST_RAW--`, `--COOKIE--`) the CGI
     /// host is handed, read by the phpt lane's one translation of them.
     pub request: Option<String>,
+    /// The bundle feature the `php` serving a `process` fence is built
+    /// with: its crate's, where the binary under test does not turn it on
+    /// (#2721). The crate's, never the grammar's: [`super::extract`] sets
+    /// it.
+    pub feature: Option<String>,
 }
 
 impl Witness {
@@ -469,6 +474,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             server: attributes.server,
             locales: attributes.locales,
             request,
+            feature: None,
         },
         after,
     ))

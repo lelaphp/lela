@@ -8,12 +8,17 @@
 //! owner or answers `posix_getuid` reads the same one. They are not an extension-to-extension export (§4.10): no
 //! extension binds them and none takes them from another.
 //!
+//! The groups are asked in a child, whose lines the fence prints, as
+//! ext/posix's `posix_getgroups` witness asks them.
+//!
 //! ```php
-//! $g = posix_getgroups();
-//! var_dump(posix_getuid() === getmyuid(), is_int(posix_getgid()), array_is_list($g), $g === array_filter($g, 'is_int'));
+//! $child = '$g = posix_getgroups(); var_dump(array_is_list($g), $g === array_filter($g, "is_int"));';
+//! $p = proc_open([PHP_BINARY, '-n', '-r', $child], [1 => ['pipe', 'w']], $pipes);
+//! var_dump(posix_getuid() === getmyuid(), is_int(posix_getgid()));
+//! echo stream_get_contents($pipes[1]);
 //! var_dump(posix_geteuid() === posix_getuid(), posix_getegid() === posix_getgid());
 //! ```
-//! ```expect
+//! ```expect process
 //! bool(true)
 //! bool(true)
 //! bool(true)

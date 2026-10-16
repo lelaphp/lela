@@ -150,12 +150,15 @@ What standing the numbers are offered with, carried by the reading:
 | `UNLABELLED` | the default; a number with no standing claimed |
 | `SMOKE` | a run made to see the instrument work |
 | `PROVISIONAL` | a number offered with a written reservation |
-| `BASELINE-OF-RECORD` | the number later runs are held against |
+| `BASELINE-OF-RECORD` | a number offered as one later runs are held against |
 
 `PROVISIONAL` and `BASELINE-OF-RECORD` owe a note, and a run that gives one
 without a note refuses: a standing with no written reservation is a word,
 not a label. Which label a run deserves is part of the sign-off, and the
-sign-off is a person's (`harness-design.md` §4.2, §11).
+sign-off is a person's (`harness-design.md` §4.2, §11). What a nightly bar
+is held against is not a label but the ratchet's reading, the bar's
+baseline that §12 keeps in the store and moves; the label says what
+standing a person gives a run, and moves no baseline.
 
 ## 9. Honest limitations
 
@@ -172,9 +175,10 @@ The ancestor carries, and this engine has no use for yet: a corpus manifest
 and its twenty-three workloads, a group selection over them and the
 self-timed `TOTAL`/`CHECKSUM` contract their PHP prints; an on-disk unit
 cache switch and a second executor, neither of which this engine has; a
-binary-vintage tripwire over build products under the repository root; a
-regression gate holding one run against a baseline of record, with its
-quiet, shared and hosted hardware tiers; and the ancestor's request-shaped
+binary-vintage tripwire over build products under the repository root; the
+ancestor's regression gate, one run held against a baseline of record with
+quiet, shared and hosted hardware tiers, which §12's two-night rule over a
+ratcheted baseline replaces; and the ancestor's request-shaped
 kind, whose per-arm latency percentiles are descriptive and never signed.
 Each returns here when the engine has the thing it measures, as the
 request-shaped arm has, paired under §2 to §5 rather than as percentiles
@@ -200,3 +204,40 @@ says which ticket first read each.
 | `calls.php` | #2011 | #1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows |
 | `natives.php` | #2209 | a loop of native calls, each return kind #2209 names |
 | `ucall.php` | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |
+
+## 12. The tolerance a nightly bar is held to
+
+The rule every perf bar is held by, as Mitchell ruled on #1902 and #2336
+(#2659). It replaces a bound a person writes for each bar: the numbers come
+from the bar's own series by this rule, and no person sets them one by one.
+A night is one reading of the bar: its paired delta's median, Q1 and Q3
+(§4.2) as a share of the second arm's median, in percent.
+
+1. **A night fails on an established regression.** A night is an
+   established regression when its paired delta's whole inter-quartile
+   range lies worse than the bar's baseline by more than its tolerance,
+   Q1 above the baseline plus the tolerance. A `NOISE-SWAMPED` night (§4.3)
+   is never one: §1.2 applied to the bar.
+2. **Two nights in a row fail the bar.** One such night is a warning on its
+   reading. A second in a row fails the reading and the nightly lane, and
+   files a ticket naming the bar, both nights and the commits from the last
+   night that held to the first that did not.
+3. **The tolerance is the bar's own A/A spread, floored at 2%.** It is the
+   75th percentile of the bar's A/A control's nightly |paired delta| over
+   the bar's first two weeks of readings, and never below 2 points
+   (`third-engine-design.md` §9.2's revisit line for G1). The derived
+   number and the dates it came from land in `seams.toml` as one
+   `[[bench]]` row per bar, through `xtask steer`. A bar without a row is a
+   series and fails nothing.
+4. **The baseline ratchets, and is a reading.** The baseline is a reading
+   of the store, `<bar>/baseline`, never a manifest value. The first is the
+   median of the bar's nights over the tolerance's dates. It moves only
+   when two nights in a row each beat it as an established improvement,
+   the inter-quartile range wholly better by more than the tolerance, and
+   then to the worse of those two nights' medians; each move is a reading
+   of its own naming the two nights, so the history says when and why a
+   bar tightened. The nightly lane's store starts empty, so the lane reads
+   a bar's earlier nights and its baseline from the published history.
+5. **The distance to go gates nothing.** §9.2's absolute targets (1.5×,
+   1.2×, at least php-fpm) stay in each reading as the distance to go, as
+   #1902 ruled.

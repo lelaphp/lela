@@ -62,7 +62,9 @@
 //! a witness is a claim about a kernel or native, and a claim the harness
 //! cannot run is not a reading. The skip #292 gave the lane, `unlinked`,
 //! went with the reason for it; a reading carrying that number is the
-//! check revision 43 names, failing.
+//! check revision 43 names, failing. A fence marked `process` of such a
+//! crate is served by `php` built with its feature where the binary under
+//! test does not turn it on, as the phpt lane runs its subset (#2721).
 //!
 //! **What `--accept` writes.** The `expect` fence line, and nothing else:
 //! the oracle's status in place of a bare `exit` or a stale one, so the
@@ -140,6 +142,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::carried::Carried;
 use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::key::Snapshot;
@@ -973,11 +976,18 @@ pub(crate) fn extract(
 ) -> Result<Extracted> {
     let mut out = Extracted::default();
     let mut anchored = anchor::Anchored::default();
+    // The `php` that serves its `process` fences carries the crate's own
+    // extension (#2721).
+    let feature = (krate.feature.clone())
+        .filter(|_| !Carried::binary(root).is_ok_and(|carried| carried.carries(krate)));
     for path in sources::rust(root, krate)? {
         let file = root.join(&path);
         let text = fs::read_to_string(&file)
             .with_context(|| format!("{path} is not a source the fence grammar can read"))?;
         let mut found = fence::extract(Path::new(&path), &text);
+        for witness in &mut found.witnesses {
+            witness.feature.clone_from(&feature);
+        }
         if covered(rule, Path::new(&path)) {
             anchored.take(anchor::scan(
                 Path::new(&path),

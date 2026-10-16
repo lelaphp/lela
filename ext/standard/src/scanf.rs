@@ -396,10 +396,10 @@ fn strtol(buf: &[u8], base: u32, unsigned: bool) -> i64 {
 /// ```
 ///
 /// A conversion skips the white space C's `isspace` reads under the
-/// request's `LC_CTYPE`, 0xA0 among it under macOS's `C.UTF-8`.
+/// request's `LC_CTYPE`, `\v` and `\f` among it.
 ///
 /// ```php
-/// var_dump(sscanf("\xa012 x\xa0y", "%d %s%s"));
+/// var_dump(sscanf("\v12 x\fy", "%d %s%s"));
 /// ```
 /// ```expect
 /// array(3) {

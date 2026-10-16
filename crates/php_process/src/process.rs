@@ -47,6 +47,13 @@ pub fn egid() -> u32 {
 /// which `posix_getgroups` keeps; the list may or may not hold the
 /// effective group, as the platform answers.
 ///
+/// On macOS the call is the C library's `getgroups$DARWIN_EXTSN`, which
+/// php gets by building with `_DARWIN_C_SOURCE` (#2772): the user's
+/// group access list from Open Directory, `getgrouplist` of
+/// `getpwuid(getuid())`, uncapped and blind to a `setgroups(2)`, and
+/// `EINVAL` where Open Directory cannot be reached; not the
+/// kernel's list of at most 16 that the plain symbol answers.
+///
 /// # Errors
 ///
 /// The OS error either call failed with, `EINVAL` where the groups grew
@@ -54,17 +61,27 @@ pub fn egid() -> u32 {
 pub fn groups() -> io::Result<Vec<u32>> {
     // SAFETY: a count of zero asks the number alone; the null pointer is
     // not written through.
-    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    let count = unsafe { getgroups(0, std::ptr::null_mut()) };
     let Ok(len) = usize::try_from(count) else {
         return Err(io::Error::last_os_error());
     };
     let mut list: Vec<libc::gid_t> = vec![0; len];
     // SAFETY: `list` has room for `count` ids, which is the most the call
     // writes.
-    let got = unsafe { libc::getgroups(count, list.as_mut_ptr()) };
+    let got = unsafe { getgroups(count, list.as_mut_ptr()) };
     let Ok(got) = usize::try_from(got) else {
         return Err(io::Error::last_os_error());
     };
     list.truncate(got);
     Ok(list)
 }
+
+// php's `getgroups` on macOS, the variant `_DARWIN_C_SOURCE` selects in
+// `<unistd.h>`, which the `libc` crate does not bind.
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+    #[link_name = "getgroups$DARWIN_EXTSN"]
+    fn getgroups(size: libc::c_int, list: *mut libc::gid_t) -> libc::c_int;
+}
+#[cfg(not(target_vendor = "apple"))]
+use libc::getgroups;

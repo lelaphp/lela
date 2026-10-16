@@ -486,12 +486,14 @@ fn finish(a: &archive::Archive, mut sb: [i64; 13], e: Option<&archive::Entry>) -
 ///
 /// The witness names the writable regime, since only an archive opened
 /// for writing keeps its entries' write bits (`statme_baby`), and prints
-/// which of the two the process is beside what it read.
+/// which of the two the process is beside what it read. Whether group `0`
+/// is among the process's groups is asked in a child, as ext/posix's
+/// `posix_getgroups` witness asks them.
 ///
 /// ```php
 /// $p = __DIR__ . '/stat-witness.phar';
 /// $files = [
-///     'a.php' => '<?php Phar::interceptFileFuncs(); foreach (["u", "g", "o"] as $n) var_dump(is_writable("$n.w"), is_readable("$n.r"), is_executable("$n.x")); var_dump(fileowner("u.w"), filegroup("u.w"), posix_getuid() === 0, posix_getgid() === 0 || in_array(0, posix_getgroups()));',
+///     'a.php' => '<?php Phar::interceptFileFuncs(); foreach (["u", "g", "o"] as $n) var_dump(is_writable("$n.w"), is_readable("$n.r"), is_executable("$n.x")); var_dump(fileowner("u.w"), filegroup("u.w"), posix_getuid() === 0);',
 ///     'u.w' => '', 'g.w' => '', 'o.w' => '', 'u.r' => '', 'g.r' => '', 'o.r' => '', 'u.x' => '', 'g.x' => '', 'o.x' => '',
 /// ];
 /// $perm = ['a.php' => 0644, 'u.w' => 0200, 'g.w' => 0020, 'o.w' => 0002, 'u.r' => 0400, 'g.r' => 0040, 'o.r' => 0004, 'u.x' => 0100, 'g.x' => 0010, 'o.x' => 0001];
@@ -501,10 +503,12 @@ fn finish(a: &archive::Archive, mut sb: [i64; 13], e: Option<&archive::Entry>) -
 /// $data = "<?php __HALT_COMPILER(); ?>\r\n" . pack('V', strlen($m)) . $m . $body;
 /// file_put_contents($p, $data . sha1($data, true) . pack('V', 2) . 'GBMB');
 /// $phar = new Phar($p);
+/// $child = proc_open([PHP_BINARY, '-n', '-r', 'var_dump(posix_getgid() === 0 || in_array(0, posix_getgroups()));'], [1 => ['pipe', 'w']], $pipes);
 /// include "phar://$p/a.php";
+/// echo stream_get_contents($pipes[1]);
 /// unlink($p);
 /// ```
-/// ```expect regime=phar-writable
+/// ```expect regime=phar-writable process
 /// bool(false)
 /// bool(false)
 /// bool(false)

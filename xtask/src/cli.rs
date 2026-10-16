@@ -467,6 +467,11 @@ pub(crate) struct Bench {
     /// owes.
     #[arg(long, value_name = "TEXT")]
     pub note: Option<String>,
+    /// The log a bar held to a tolerance reads its earlier nights and its
+    /// baseline from, in place of the store's: the published history the
+    /// nightly lane fetches, since its store starts empty (#2659).
+    #[arg(long, value_name = "FILE")]
+    pub log: Option<PathBuf>,
 }
 
 /// What one `witness` run is asked for, flattened onto the command so the

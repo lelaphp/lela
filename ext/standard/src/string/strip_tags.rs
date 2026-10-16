@@ -39,14 +39,14 @@ use php_ext::values::{Owner, PhpArray, PhpString};
 /// ```
 ///
 /// A `<` before C's `isspace` under the request's `LC_CTYPE` opens no tag,
-/// and macOS's `C.UTF-8`, php's default, counts 0xA0 among it.
+/// and under `C` 0xA0 is none of it.
 ///
 /// ```php
-/// var_dump(bin2hex(strip_tags("a<\xa0b>c")));
+/// var_dump(bin2hex(strip_tags("a<\vb>c")));
 /// setlocale(LC_CTYPE, "C"); var_dump(bin2hex(strip_tags("a<\xa0b>c")));
 /// ```
 /// ```expect
-/// string(12) "613ca0623e63"
+/// string(12) "613c0b623e63"
 /// string(4) "6163"
 /// ```
 #[php_function]

@@ -896,6 +896,37 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     assert_eq!(judgement, Judgement::Pass, "{note}");
 }
 
+/// A `process` fence of a crate behind a feature the binary under test
+/// does not turn on is served by `php` built with that feature, and one
+/// of a crate it carries by the binary under test (#2721): in the
+/// fixture, `sapi/cli` turns `posix` on and not `zend_test`, and each
+/// stand-in prints its own name.
+#[test]
+fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = workspace().join("xtask/fixtures/witness/process-feature");
+    let manifest = Manifest::load(&root).unwrap();
+    let hosts = Tree::new("process-feature").unwrap();
+    let stand_in = |name: &str| {
+        let path = hosts
+            .write(name, format!("#!/bin/sh\necho {name}\n"))
+            .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let binary = Binary::standing(&root, crate::oracle::hosts::CLI, stand_in("default"))
+        .featuring("zend_test", stand_in("featured"));
+    for (krate, served) in [("ext/zend_test", "featured"), ("ext/posix", "default")] {
+        let krate = manifest.crate_named(krate).unwrap();
+        let found = super::extract(&root, krate, None, Target::built()).unwrap();
+        let [witness] = found.witnesses.as_slice() else {
+            panic!("{found:#?}")
+        };
+        let (ran, _) = judge::serve(&manifest.pin.oracle(), &binary, witness, None).unwrap();
+        assert_eq!(String::from_utf8_lossy(&ran.stdout).trim_end(), served);
+    }
+}
+
 /// The set rustc prints for `--print cfg` over `triple`, which it prints
 /// without the target's standard library installed.
 fn printed(triple: &str) -> Target {

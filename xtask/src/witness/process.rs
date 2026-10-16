@@ -27,14 +27,23 @@
 //! php-fpm, beside php-fpm (`served_as_fpm`, #1291); and one with a
 //! `request makala` by `sapi/makala`'s makala over HTTP, beside php-fpm
 //! under the pin's `[fastcgi]` mapping (`makala::served`, #2347).
+//!
+//! A `process` fence of a crate behind a bundle feature the binary under
+//! test does not turn on (`Witness::feature`) is served by `php` built
+//! with that feature, into the target directory the phpt lane builds that
+//! engine in ([`profile::featured`]), so the child it starts carries its
+//! own extension as the oracle's variant does, and the two lanes share
+//! one build (#2721).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
+use crate::carried::BUNDLE;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
 use crate::oracle::profile;
 use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
@@ -62,6 +71,8 @@ pub(crate) struct Binary {
     fpm: OnceLock<Result<PathBuf, String>>,
     phpdbg: OnceLock<Result<PathBuf, String>>,
     makala: OnceLock<Result<PathBuf, String>>,
+    /// `php` built with one feature of the bundle on, by feature.
+    featured: Mutex<BTreeMap<String, Result<PathBuf, String>>>,
 }
 
 impl Binary {
@@ -74,6 +85,7 @@ impl Binary {
             fpm: OnceLock::new(),
             phpdbg: OnceLock::new(),
             makala: OnceLock::new(),
+            featured: Mutex::default(),
         }
     }
 
@@ -87,6 +99,15 @@ impl Binary {
             slot.set(Ok(path)).ok();
         }
         binary
+    }
+
+    /// The same with `path` standing in for `php` built with `feature`.
+    #[cfg(test)]
+    pub(crate) fn featuring(self, feature: &str, path: PathBuf) -> Binary {
+        let mut featured = self.featured.lock().unwrap_or_else(PoisonError::into_inner);
+        featured.insert(feature.to_owned(), Ok(path));
+        drop(featured);
+        self
     }
 
     /// Where the CLI's binary is, built from the tree now if this run has
@@ -115,8 +136,32 @@ impl Binary {
         .ok_or_else(|| anyhow!("{} is no host the witness lane builds", host.krate))
     }
 
-    /// `snippet` served by the binary under the recipe, and `regime`'s
-    /// arguments and ini after it where the fence names one, as the oracle serves it; with
+    /// Where `php` built with `feature` of the bundle on is, built now
+    /// into [`profile::featured`] if this run has not built it yet; the
+    /// CLI's binary where there is no feature.
+    fn cli_with(&self, feature: Option<&str>) -> Result<PathBuf> {
+        let Some(feature) = feature else {
+            return self.cli().map(Path::to_path_buf);
+        };
+        let mut featured = self.featured.lock().unwrap_or_else(PoisonError::into_inner);
+        let built = featured.entry(feature.to_owned()).or_insert_with(|| {
+            let on = format!("{BUNDLE}/{feature}");
+            let into = profile::featured(&self.root, feature);
+            profile::build(
+                &self.root,
+                &CLI.package(),
+                CLI.binary,
+                Some(&on),
+                Some(&into),
+            )
+            .map_err(|e| format!("{e:#}"))
+        });
+        built.clone().map_err(|why| anyhow!("{why}"))
+    }
+
+    /// `snippet` served by the binary, the one built with `feature` where
+    /// there is one, under the recipe, and `regime`'s arguments and ini
+    /// after it where the fence names one, as the oracle serves it; with
     /// the natives every request it served entered, in the order they
     /// were appended.
     pub(crate) fn serve(
@@ -124,13 +169,14 @@ impl Binary {
         oracle: &Oracle<'_>,
         snippet: &str,
         regime: Option<&str>,
+        feature: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.cli()?;
+        let binary = self.cli_with(feature)?;
         traced(|env| {
             oracle.run_under(&Invocation {
                 regimes: regime.as_slice(),
                 env,
-                ..Invocation::new(binary, Program::Snippet(snippet))
+                ..Invocation::new(&binary, Program::Snippet(snippet))
             })
         })
     }

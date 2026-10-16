@@ -487,6 +487,22 @@ fn posix_setegid(req: &mut Request, group_id: i64) -> bool {
 /// bool(true)
 /// bool(true)
 /// ```
+///
+/// macOS's variant reads Open Directory, and the kernel's list
+/// does not (#2772): with the lookup denied to the child by a sandbox,
+/// the call fails with `EINVAL`, where the plain `getgroups` would still
+/// answer.
+///
+/// ```php
+/// $deny = '(version 1)(allow default)(deny mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))';
+/// $child = 'var_dump(posix_getgroups(), posix_get_last_error());';
+/// $p = proc_open(['/usr/bin/sandbox-exec', '-p', $deny, PHP_BINARY, '-n', '-r', $child], [1 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]);
+/// ```
+/// ```expect process
+/// bool(false)
+/// int(22)
+/// ```
 #[php_function]
 fn posix_getgroups(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let groups = match process::groups() {
