@@ -1439,7 +1439,8 @@ impl PhpObject {
     /// payload, as php's `zend_closure` is the object's own struct.
     #[must_use]
     pub fn closure<'a>(&self, req: &'a Request) -> Option<&'a ClosureInfo> {
-        self.native::<ClosureInfo>(req)
+        self.native::<crate::classes::ClosureObject>(req)
+            .map(|closure| &closure.info)
     }
 
     /// The variables a closure bound, by the names its declaration

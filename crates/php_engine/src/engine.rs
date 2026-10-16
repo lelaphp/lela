@@ -963,6 +963,16 @@ pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
     }
 }
 
+/// `ZEND_MAP_PTR_NEW` for a function the engine publishes beside an op
+/// array it does not own, a trait's method copied into a published
+/// class (`function_add_ref`): the next of the engine's map pointers,
+/// which each request lays its own cache down at.
+pub(crate) fn new_map_ptr(map_ptr_last: &AtomicU32) -> exec::CacheAt {
+    exec::CacheAt::of(php_unit::MapPtrOffset::Engine(
+        map_ptr_last.fetch_add(1, Ordering::Relaxed),
+    ))
+}
+
 /// One native method's entry, `zend_internal_function` on a class:
 /// where its declaration stands, the class with it where one holds it,
 /// and the function served for it.

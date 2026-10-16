@@ -8,7 +8,7 @@
 //! included by path, as `build.rs` includes it, which is also what runs
 //! its own unit tests under `cargo test`.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 // The same body `build.rs` includes; what this test does not call is not
 // dead.
@@ -19,8 +19,17 @@ mod codegen;
 use codegen::kind;
 use codegen::ungram::{self, DefClass, classify};
 
+/// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
+/// the test, never the path `env!` compiled in: cargo reuses a test binary
+/// across two checkouts that share a target directory (#2790).
+fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .expect("cargo sets CARGO_MANIFEST_DIR for a test it runs")
+}
+
 fn real_grammar_text() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("php.ungram");
+    let path = manifest_dir().join("php.ungram");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 

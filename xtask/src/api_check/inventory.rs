@@ -109,8 +109,28 @@ enum Target {
         module: ModId,
         name: String,
     },
+    /// A child module of `module` and an item there of one name, which
+    /// rustc keeps in two namespaces, `mod x;` beside `pub fn x` (#2791):
+    /// a path goes on through the module, and a `use` of the name brings
+    /// in the item and, where it is `pub`, the module.
+    Both {
+        module: ModId,
+        name: String,
+        public: bool,
+    },
     /// Outside the workspace, or not resolvable from the sources.
     Opaque,
+}
+
+impl Target {
+    /// The module a path goes on through, or a glob reads.
+    fn module(self) -> Option<ModId> {
+        match self {
+            Target::Module(m) => Some(m),
+            Target::Both { module, name, .. } => Some(module.child(&name)),
+            Target::Item { .. } | Target::Opaque => None,
+        }
+    }
 }
 
 /// The reader of public items over one workspace, caching the modules it
@@ -229,11 +249,7 @@ impl<'a> Inventory<'a> {
                     if let Some((name, vis)) = plain_item(other)
                         && is_pub(vis)
                     {
-                        let line = join(prefix, &name);
-                        for (suffix, at) in self.surface(id, &name)? {
-                            list_first(out, format!("{line}::{suffix}"), &at);
-                        }
-                        list_first(out, line, id);
+                        self.collect_item(id, &name, &join(prefix, &name), out)?;
                     }
                 }
             }
@@ -251,21 +267,50 @@ impl<'a> Inventory<'a> {
     ) -> Result<()> {
         let target = self.resolve(from, &path.segs, 0)?;
         match (&path.leaf, target) {
-            (Leaf::Glob, Target::Module(m)) => self.collect(&m, prefix, out, seen)?,
-            (Leaf::Glob, Target::Item { .. }) => {}
             (Leaf::Glob, Target::Opaque) => list_first(out, join(prefix, "*"), from),
+            (Leaf::Glob, target) => {
+                if let Some(m) = target.module() {
+                    self.collect(&m, prefix, out, seen)?;
+                }
+            }
             (Leaf::Name(alias), Target::Module(m)) => {
                 self.collect(&m, &join(prefix, alias), out, seen)?;
             }
             (Leaf::Name(alias), Target::Item { module, name }) => {
+                self.collect_item(&module, &name, &join(prefix, alias), out)?;
+            }
+            (
+                Leaf::Name(alias),
+                Target::Both {
+                    module,
+                    name,
+                    public,
+                },
+            ) => {
                 let line = join(prefix, alias);
-                for (suffix, at) in self.surface(&module, &name)? {
-                    list_first(out, format!("{line}::{suffix}"), &at);
+                self.collect_item(&module, &name, &line, out)?;
+                if public {
+                    self.collect(&module.child(&name), &line, out, seen)?;
                 }
-                list_first(out, line, &module);
             }
             (Leaf::Name(alias), Target::Opaque) => list_first(out, join(prefix, alias), from),
         }
+        Ok(())
+    }
+
+    /// The item `name` defined in `module` listed as `line`, after its
+    /// associated items ([`Inventory::surface`]).
+    fn collect_item(
+        &mut self,
+        module: &ModId,
+        name: &str,
+        line: &str,
+        out: &mut Lines,
+    ) -> Result<()> {
+        for (suffix, at) in self.surface(module, name)? {
+            list_first(out, format!("{line}::{suffix}"), &at);
+        }
+        list_first(out, line.to_owned(), module);
         Ok(())
     }
 
@@ -387,7 +432,7 @@ impl<'a> Inventory<'a> {
         };
         if matches!(target, Target::Opaque) && rest.is_empty() {
             for path in uses.iter().filter(|p| p.leaf == Leaf::Glob) {
-                if let Target::Module(m) = self.resolve(id, &path.segs, 0)?
+                if let Some(m) = self.resolve(id, &path.segs, 0)?.module()
                     && m != *id
                 {
                     target = self.find(&m, first, 0)?;
@@ -399,7 +444,7 @@ impl<'a> Inventory<'a> {
         }
         Ok(match target {
             Target::Item { module, name } => (module, name),
-            Target::Module(_) | Target::Opaque => fallback,
+            Target::Module(_) | Target::Both { .. } | Target::Opaque => fallback,
         })
     }
 
@@ -450,9 +495,9 @@ impl<'a> Inventory<'a> {
             if i + 1 == rest.len() {
                 return Ok(target);
             }
-            match target {
-                Target::Module(m) => cur = m,
-                _ => return Ok(Target::Opaque),
+            match target.module() {
+                Some(m) => cur = m,
+                None => return Ok(Target::Opaque),
             }
         }
         Ok(Target::Module(cur))
@@ -486,8 +531,8 @@ impl<'a> Inventory<'a> {
     }
 
     /// What `name` is in module `id` as its sources write it: a child
-    /// module, an item defined there, or what a `pub use` there brings in
-    /// under that name.
+    /// module, an item defined there, the two where both are ([`Target::Both`]),
+    /// or what a `pub use` there brings in under that name.
     fn find(&mut self, id: &ModId, name: &str, depth: usize) -> Result<Target> {
         if depth > 32 {
             return Ok(Target::Opaque);
@@ -495,17 +540,27 @@ impl<'a> Inventory<'a> {
         let Some(module) = self.module(id)? else {
             return Ok(Target::Opaque);
         };
-        for item in &module.items {
-            match item {
-                Item::Mod(m) if m.ident == name => return Ok(Target::Module(id.child(name))),
-                other => {
-                    if plain_item(other).is_some_and(|(n, _)| n == name) {
-                        return Ok(Target::Item {
-                            module: id.clone(),
-                            name: name.to_owned(),
-                        });
-                    }
-                }
+        let child = module.items.iter().find_map(|item| match item {
+            Item::Mod(m) if m.ident == name => Some(is_pub(&m.vis)),
+            _ => None,
+        });
+        let defined = module
+            .items
+            .iter()
+            .any(|item| plain_item(item).is_some_and(|(n, _)| n == name));
+        match (child, defined) {
+            (Some(_), false) => return Ok(Target::Module(id.child(name))),
+            (None, false) => {}
+            (child, true) => {
+                let (module, name) = (id.clone(), name.to_owned());
+                return Ok(match child {
+                    Some(public) => Target::Both {
+                        module,
+                        name,
+                        public,
+                    },
+                    None => Target::Item { module, name },
+                });
             }
         }
         let reexports: Vec<UsePath> = module
@@ -523,7 +578,7 @@ impl<'a> Inventory<'a> {
                     return self.resolve(id, &path.segs, depth + 1);
                 }
                 Leaf::Glob => {
-                    if let Target::Module(m) = self.resolve(id, &path.segs, depth + 1)?
+                    if let Some(m) = self.resolve(id, &path.segs, depth + 1)?.module()
                         && m != *id
                     {
                         let found = self.find(&m, name, depth + 1)?;

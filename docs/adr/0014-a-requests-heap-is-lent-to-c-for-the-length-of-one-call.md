@@ -6,6 +6,8 @@ narrows: third-engine-design.md revision 50 (its rejection of "a thread-local he
 
 # A request's heap is lent to C for the length of one call
 
+**Migration amendment, 2026-10-13 (#2817, #2818; ADR-0015).** This contract still governs every remaining C caller. Date's faithful Rust replacement retires the C-specific allocator convention and refusal continuation only as its operations migrate, after proof of actual storage, failure and release behaviour. It does not remove global lending while other libraries use it, authorize representative accounting, or claim that date has already migrated. Engine design §7.3 carries the replacement contract.
+
 php builds timelib with its allocator macros pointed at the request's heap. `config0.m4` writes a `timelib_config.h` that defines `timelib_malloc`, `timelib_calloc`, `timelib_realloc`, `timelib_strdup`, `timelib_strndup` and `timelib_free` as `emalloc`, `ecalloc`, `erealloc`, `estrdup`, `estrndup` and `efree`. So `memory_get_usage()` and `memory_get_peak_usage()` count every `timelib_time`, `timelib_tzinfo` and error container php's date code holds, and everything timelib allocates while it parses. The macros take no argument that could name a heap, and `emalloc` finds php's through `AG(mm_heap)`, a per-thread global. Revision 50 (#1170) rejected "a thread-local heap for timelib's `emalloc`, which §5.14 forbids", and §5.13 kept those allocations as the recorded approximation.
 
 The cost showed up as a measurement. With the date classes' structs modelled on the request's heap (#1655, afbc6814), every `memory_get_usage()` delta read the oracle's, and every peak read short:

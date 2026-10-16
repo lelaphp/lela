@@ -29,6 +29,9 @@ use libz_sys as z;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, efree, emalloc};
 
+#[cfg(test)]
+mod qualification;
+
 // SAFETY: zlib's own `zError`, which libz-sys does not declare, from the
 // library it links: an `int` in, a pointer into a static table out.
 unsafe extern "C" {

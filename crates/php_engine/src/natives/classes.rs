@@ -7,13 +7,13 @@
 //! native was called from ([`Request::scope`]).
 
 use php_macros::php_function;
-use php_unit::decl::{Bare, ClassKind, PropertyDecl, Visibility};
+use php_unit::decl::{Bare, ClassKind, Visibility};
 
 use crate::api::abi::{
     OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
 };
 use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, throw_error, warning};
-use crate::api::request::{HookedRow, Request};
+use crate::api::request::{HookedRow, PropertyInfo, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -246,24 +246,22 @@ fn is_a(
     is_a_impl(req, (object_or_class, class, allow_string), false)
 }
 
-/// `ce->properties_info` in its order: the class's own declarations,
+/// `ce->properties_info` in its order, the linked record's property
+/// rows (`LinkedClass::properties`): the class's own declarations,
 /// instance and `static`, as written, then each one inherited from the
 /// parent that the class does not declare again, in the parent's own
 /// order, which is where `zend_do_inheritance` appends them. Each row
-/// names the class that declared it, `property_info->ce`.
-fn properties_info(req: &Request, class: ClassId) -> Vec<(ClassId, PropertyDecl)> {
-    let mut table: Vec<(ClassId, PropertyDecl)> = Vec::new();
-    for here in req.lineage(class) {
-        let Some(decl) = req.class_decl(here) else {
-            continue;
-        };
-        for property in &decl.properties {
-            if !table.iter().any(|(_, p)| p.name == property.name) {
-                table.push((here, property.clone()));
-            }
-        }
-    }
-    table
+/// names the class that declared it, `property_info->ce`, and where
+/// among its declarations it stands.
+fn properties_info(req: &Request, class: ClassId) -> Vec<PropertyInfo> {
+    req.linked_class(class).map_or_else(Vec::new, |record| {
+        (record.properties.rows().iter())
+            .map(|row| PropertyInfo {
+                declaring: row.holder_in(class),
+                at: row.at,
+            })
+            .collect()
+    })
 }
 
 /// `zend_check_protected` or the class itself: whether a member of
@@ -358,6 +356,38 @@ fn visible(
 /// array(0) {
 /// }
 /// ```
+///
+/// The rows are the linked record's: a parent's private property the
+/// child does not declare again stands in the child's table and is
+/// listed for the parent's scope, after the child's own; one the child
+/// declares again is the child's row, in the child's place and under
+/// the child's visibility:
+///
+/// ```php
+/// class P { private $x = 'P x'; private $a = 'P a'; public $b = 'P b'; private static $s = 'P s'; static function vars($c) { return get_class_vars($c); } }
+/// class C extends P { public $b = 'C b'; private $a = 'C a'; public $d = 'C d'; static function own() { return get_class_vars('C'); } }
+/// var_dump(P::vars('C'), C::own());
+/// ```
+/// ```expect
+/// array(4) {
+///   ["b"]=>
+///   string(3) "C b"
+///   ["d"]=>
+///   string(3) "C d"
+///   ["x"]=>
+///   string(3) "P x"
+///   ["s"]=>
+///   string(3) "P s"
+/// }
+/// array(3) {
+///   ["b"]=>
+///   string(3) "C b"
+///   ["a"]=>
+///   string(3) "C a"
+///   ["d"]=>
+///   string(3) "C d"
+/// }
+/// ```
 #[php_function]
 fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>, Thrown> {
     let bytes = class.as_bytes().to_vec();
@@ -370,19 +400,27 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>
     };
     let scope = req.scope();
     // A virtual property has no default to list, having no slot.
-    let rows: Vec<(ClassId, PropertyDecl)> = properties_info(req, class)
+    let rows: Vec<(PropertyInfo, bool)> = properties_info(req, class)
         .into_iter()
-        .filter(|(declaring, p)| visible(req, *declaring, p.visibility, scope))
-        .filter(|(_, p)| !req.property_virtual(class, &p.name.0))
+        .filter_map(|info| {
+            let p = req.property_decl(info)?;
+            let listed = visible(req, info.declaring, p.visibility, scope)
+                && !req.property_virtual(class, &p.name.0);
+            listed.then_some((info, p.is_instance))
+        })
         .collect();
     let mut array = PhpArray::new(req)?;
     for statics in [false, true] {
-        for (declaring, property) in rows.iter().filter(|(_, p)| p.is_instance != statics) {
-            let value = match &property.default {
-                Some(expr) => crate::api::call::eval_declared(req, expr, Some(*declaring))?,
+        for &(info, _) in rows.iter().filter(|(_, instance)| *instance != statics) {
+            // The default expression alone is handed on past what writes
+            // the request, so it is what is cloned.
+            let default = req.property_decl(info).and_then(|p| p.default.clone());
+            let value = match &default {
+                Some(expr) => crate::api::call::eval_declared(req, expr, Some(info.declaring))?,
                 None => Owner::null(),
             };
-            let key = match PhpString::new(req, &property.name.0) {
+            let name = (req.property_decl(info)).map_or_else(Vec::new, |p| p.name.0.to_vec());
+            let key = match PhpString::new(req, &name) {
                 Ok(key) => key.into_key(),
                 Err(thrown) => {
                     value.give_up(req);
@@ -944,8 +982,11 @@ fn property_exists(
         return Ok(false);
     };
     let name = property.as_bytes();
-    if properties_info(req, class).iter().any(|(declaring, p)| {
-        &*p.name.0 == name && (p.visibility != Visibility::Private || *declaring == class)
+    if req.property_info(class, name).is_some_and(|info| {
+        info.declaring == class
+            || req
+                .property_decl(info)
+                .is_some_and(|p| p.visibility != Visibility::Private)
     }) {
         return Ok(true);
     }

@@ -87,6 +87,24 @@ fn the_clean_fixture_passes_every_rule() {
     }
 }
 
+/// A `pub use` of a name a crate holds as a private module and a `pub fn`
+/// re-exports the function, rustc keeping the two in two namespaces
+/// (#2791): the `namespace` fixture's `php_ext` re-exports
+/// `php_macros::marker` with no line for it in `api.lock`, which lists
+/// the private module's item instead, the lock hole the inventory read
+/// before, when it took the name for the module.
+#[test]
+fn a_reexported_fn_beside_a_module_of_its_name_wants_its_own_line() {
+    let readings = readings("namespace");
+    let api = of(&readings, "api");
+    assert_eq!(api.status, Status::Fail, "{}", api.message);
+    assert_eq!(
+        api.message,
+        "1 public items of php_ext have no line in crates/php_ext/api.lock: marker; \
+         1 lines of crates/php_ext/api.lock name no public item: marker::inner"
+    );
+}
+
 /// An `ext/*` crate's library dependency on another that no row of
 /// design §4.10's list of surfaces names with both crates fails the
 /// consumer's reading (#2251): the `surface-edge` fixture's ext/zip links

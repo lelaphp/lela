@@ -7,11 +7,17 @@ The data files the design cites and the extraction records behind them; each is 
 .
 ├── INDEX.md
 ├── api-lock-v0.md
+├── compression-2826
+├── documents-2829
 ├── extract.log
+├── fileinfo
+├── mbstring-2831
 ├── ops-extraction.md
 ├── port-map.v0.toml
 ├── pre-day-1.md
+├── rust-replacement-2828
 ├── special-funcs.md
-└── syntax-extraction.md
+├── syntax-extraction.md
+└── uri-storage-2832
 ```
-<!-- /computed in=eed7eeaf7c2084e746e452b1aa6d81d0a01f4e8784b70ae9ee5cefa2a7a1cea7 out=7a76ebb5ad351439fc4445096765933d2f7ebe5309e28773842971812343ada4 -->
+<!-- /computed in=6885a3710e09638f23cc038ebe51307994f4e30285378af57f2ff0ddef8696ce out=d6f3de59bda8f66bb3dd79b78ecdaffebd0a874f1c23277c1c43684866c1fd7d -->

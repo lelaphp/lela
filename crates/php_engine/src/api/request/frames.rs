@@ -1147,14 +1147,16 @@ impl Request {
         let function = header.function?;
         let passed = header.num_args;
         let len = top.len();
+        let own = self.closure_own_cache(header.closure);
         let user = self.user_function(function)?;
         let shape = user.shape;
+        let cache = own.unwrap_or(shape.cache);
         let refused =
             flagged && (user.flags.deprecated || user.flags.no_discard && returns_to.is_none());
         if refused
             || passed > shape.parameters
             || len < shape.slots as usize
-            || !self.map.laid(shape.cache)
+            || !self.map.laid(cache)
         {
             return None;
         }
@@ -1164,7 +1166,7 @@ impl Request {
         let laid = top.header_mut();
         laid.info.set_serving();
         laid.info.set_return_used(returns_to.is_some());
-        laid.activate(shape.cache, opline, false);
+        laid.activate(cache, opline, false);
         laid.returns_to = returns_to;
         laid.caller = exec::Caller::Opline(caller);
         crate::observer::call(self, call);
@@ -1187,11 +1189,13 @@ impl Request {
         returns_to: Option<u32>,
         caller: exec::Caller,
     ) -> Result<exec::Activated, Fatal> {
-        let (num_args, len) = self
-            .vm
-            .stack
-            .frame(call)
-            .map_or((0, 0), |frame| (frame.header().num_args, frame.len()));
+        let (num_args, len, closure) = self.vm.stack.frame(call).map_or((0, 0, None), |frame| {
+            let header = frame.header();
+            (header.num_args, frame.len(), header.closure)
+        });
+        // A closure with a cache of its own reads it in place of its
+        // function's (`zend_create_closure_ex`).
+        let cache = self.closure_own_cache(closure).unwrap_or(shape.cache);
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it past the temporaries
@@ -1209,7 +1213,7 @@ impl Request {
         }
         if let Some(frame) = self.vm.stack.frame_mut(call) {
             let laid = frame.header_mut();
-            laid.activate(shape.cache, opline, extra > 0);
+            laid.activate(cache, opline, extra > 0);
             laid.returns_to = returns_to;
             laid.caller = caller;
             let slots = frame.slots_mut();
@@ -1220,7 +1224,7 @@ impl Request {
                 }
             }
         }
-        exec::lay_runtime_cache(&mut self.map, shape.cache, shape.cache_size);
+        exec::lay_runtime_cache(&mut self.map, cache, shape.cache_size);
         crate::observer::call(self, call);
         Ok(exec::Activated {
             frame: call,
@@ -1759,4 +1763,59 @@ pub(crate) struct PlainLeave {
     moved: Option<usize>,
     strings: bool,
     receiver: Option<exec::Receiver>,
+}
+
+/// The runtime caches a closure reads, as `zend_create_closure_ex`
+/// chooses them ([`crate::classes::closure_cache`]) and an activation
+/// finds them.
+impl Request {
+    /// The cache a frame serving `closure` reads in place of its
+    /// function's: the closure's own, where it has one
+    /// (`ZEND_MAP_PTR_INIT(closure->func.op_array.run_time_cache, ptr)`);
+    /// none for a frame with no closure and a closure sharing its
+    /// function's.
+    pub(crate) fn closure_own_cache(&self, closure: Option<PhpObject>) -> Option<exec::CacheAt> {
+        match closure?
+            .native::<crate::classes::ClosureObject>(self)?
+            .cache
+        {
+            crate::classes::ClosureCache::Own(at) => Some(at),
+            crate::classes::ClosureCache::Function => None,
+        }
+    }
+
+    /// A cache of the request's own for a closure, laid down at its
+    /// first call ([`exec::RuntimeCaches::own_cache`]).
+    pub(crate) fn own_cache(&mut self) -> exec::CacheAt {
+        self.map.own_cache()
+    }
+
+    /// A closure's own cache given back with it.
+    pub(crate) fn give_back_cache(&mut self, at: exec::CacheAt) {
+        self.map.give_back(at);
+    }
+
+    /// Whether the cache at `at` is laid down, `RUN_TIME_CACHE` not
+    /// `NULL`.
+    pub(crate) fn cache_laid(&self, at: exec::CacheAt) -> bool {
+        self.map.laid(at)
+    }
+
+    /// The scope the cache at `at` was laid down for by the first closure
+    /// made over its op array ([`exec::RuntimeCache::laid_for`]).
+    pub(crate) fn laid_for(&self, at: exec::CacheAt) -> Option<crate::api::values::ClassId> {
+        self.map.get(at).and_then(|cache| cache.laid_for)
+    }
+
+    /// A real closure's op array's cache laid down by the first closure
+    /// made over it, for the scope that closure is made in.
+    pub(crate) fn lay_closure_cache(
+        &mut self,
+        at: exec::CacheAt,
+        cache_size: u32,
+        scope: Option<crate::api::values::ClassId>,
+    ) {
+        exec::lay_runtime_cache(&mut self.map, at, cache_size);
+        self.map.map(at).laid_for = scope;
+    }
 }

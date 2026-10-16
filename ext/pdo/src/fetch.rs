@@ -1362,8 +1362,7 @@ fn has_constructor(req: &mut Request, class: ClassId) -> bool {
         {
             return true;
         }
-        let parent = decl.parent.clone();
-        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
+        at = req.class_parent(class);
     }
     false
 }

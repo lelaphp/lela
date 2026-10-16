@@ -143,6 +143,12 @@ impl Request {
     /// and puts no object in the store for it; here the closure's own
     /// payload carries the scope for the length of the call and has its
     /// own back after, so no object id is spent where php spends none.
+    /// The copy reads a runtime cache of its own for the call where the
+    /// scope is not the closure's or the closure has one of its own, as
+    /// php's `emalloc`s one beside the copy and frees it after, since the
+    /// slots hold what the scope decides. A generator's frame outlives
+    /// the call, so php serves it through a closure of its own instead,
+    /// which `Closure::call` makes ([`crate::classes::ClosureObject`]).
     pub(crate) fn serve_closure_as(
         &mut self,
         object: PhpObject,
@@ -151,12 +157,28 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        use crate::classes::{ClosureCache, ClosureObject};
         let Some(closure) = object.closure(self).cloned() else {
             return Ok(Value::null());
         };
-        let held = object
-            .native_mut::<ClosureInfo>(self)
-            .map(|payload| payload.scope.replace(scope));
+        let own_cache = self
+            .user_function(closure.function)
+            .is_some()
+            .then(|| {
+                object
+                    .native::<ClosureObject>(self)
+                    .map(|payload| payload.cache)
+            })
+            .flatten()
+            .filter(|cache| closure.scope != Some(scope) || *cache != ClosureCache::Function)
+            .map(|_| self.own_cache());
+        let held = object.native_mut::<ClosureObject>(self).map(|payload| {
+            let cache = match own_cache {
+                Some(at) => std::mem::replace(&mut payload.cache, ClosureCache::Own(at)),
+                None => payload.cache,
+            };
+            (payload.info.scope.replace(scope), cache)
+        });
         let served = self.serve_call(
             closure.function,
             Some(this),
@@ -165,10 +187,14 @@ impl Request {
             arguments,
             extra_named,
         );
-        if let Some(held) = held
-            && let Some(payload) = object.native_mut::<ClosureInfo>(self)
+        if let Some((scope, cache)) = held
+            && let Some(payload) = object.native_mut::<ClosureObject>(self)
         {
-            payload.scope = held;
+            payload.info.scope = scope;
+            payload.cache = cache;
+        }
+        if let Some(at) = own_cache {
+            self.give_back_cache(at);
         }
         served
     }
@@ -1167,18 +1193,13 @@ impl Request {
     }
 
     /// The extension whose code a native is, for a debug build's heap to
-    /// tag what it allocates while the native runs: the extension that
-    /// declared the function, php's `internal_function.module`, or the
-    /// class of the method; none for a closure's or a trampoline's entry
-    /// that no extension declares, which allocates as its caller.
+    /// tag what it allocates while the native runs: php's
+    /// `internal_function.module` ([`Request::function_extension`]);
+    /// none for a closure's or a trampoline's entry that no extension
+    /// declares, which allocates as its caller.
     #[cfg(debug_assertions)]
     fn function_origin(&self, function: Function) -> Option<ExtensionId> {
-        let function = self.served_native(function);
-        self.function_extension(function).or_else(|| {
-            self.native_method(function)
-                .and_then(|method| method.at.class())
-                .and_then(|class| self.class_extension(class))
-        })
+        self.function_extension(function)
     }
 
     /// Record the natives this request enters from here on, for the

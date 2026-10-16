@@ -32,10 +32,11 @@ pub struct Call {
     pub tool_use_id: String,
     /// What the call displaces, where the caller knows it and the file at
     /// the path is not it: the diff judge's, the tracked content at the
-    /// base it measures since ([`Call::diff_of`]). The hook's JSON never
-    /// carries it, since a call at the hook displaces what is at the path.
+    /// base it measures since, or in a merge each parent's ([`Call::diff_of`],
+    /// #2783). Empty at the hook, whose JSON never carries it, since a call
+    /// there displaces what is at the path.
     #[serde(skip)]
-    pub(super) displaced: Option<String>,
+    pub(super) displaced: Vec<String>,
     /// The session's transcript, where Claude Code writes the person's
     /// answers ([`super::approval`]); the hook's, which in a subagent is
     /// the main session's.
@@ -101,9 +102,9 @@ impl Call {
     /// with what the base carries at that path beside it, so a rule that
     /// asks what the write adds is asked of the diff and not of a file
     /// against itself.
-    pub(super) fn diff_of(path: &str, content: &str, displaced: &str) -> Call {
+    pub(super) fn diff_of(path: &str, content: &str, displaced: &[String]) -> Call {
         Call {
-            displaced: Some(displaced.to_owned()),
+            displaced: displaced.to_vec(),
             ..Call::write_of(path, Some(content))
         }
     }
@@ -136,12 +137,19 @@ impl Call {
     /// `old_string` the file has not is an edit that cannot apply, and
     /// what it would write is read as if it were appended, which denies
     /// where reading it alone would excuse.
-    pub(super) fn rewrite(&self, root: &Path, path: Option<&Path>) -> Option<(String, String)> {
+    pub(super) fn rewrite(
+        &self,
+        root: &Path,
+        path: Option<&Path>,
+    ) -> Option<(Vec<String>, String)> {
         let standing = path
             .map(|path| fs::read_to_string(root.join(path)).unwrap_or_default())
             .unwrap_or_default();
         if let Some(content) = self.tool_input.content.as_deref() {
-            let before = self.displaced.clone().unwrap_or(standing);
+            let before = match &self.displaced[..] {
+                [] => vec![standing],
+                displaced => displaced.to_vec(),
+            };
             return Some((before, content.to_owned()));
         }
         let new = self.tool_input.new_string.as_deref()?;
@@ -155,7 +163,7 @@ impl Call {
         } else {
             format!("{standing}{new}")
         };
-        Some((standing, after))
+        Some((vec![standing], after))
     }
 
     pub(super) fn command(&self) -> Option<&str> {

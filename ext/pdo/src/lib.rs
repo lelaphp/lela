@@ -170,23 +170,7 @@ fn class_name(req: &Request, class: ClassId) -> String {
 /// `instanceof_function` over the parents alone, which is all PDO asks
 /// of a class: whether `class` is or extends the class named `of`.
 fn extends(req: &mut Request, class: ClassId, of: &[u8]) -> bool {
-    let mut at = Some(class);
-    let mut depth = 0;
-    while let Some(class) = at {
-        let Some(decl) = req.class_decl(class) else {
-            return false;
-        };
-        if decl.name.0.eq_ignore_ascii_case(of) {
-            return true;
-        }
-        depth += 1;
-        if depth > 64 {
-            return false;
-        }
-        at = match decl.parent.clone() {
-            Some(parent) => php_ext::call::lookup_class(req, &parent.0).ok().flatten(),
-            None => None,
-        };
-    }
-    false
+    req.lineage(class)
+        .map_while(|class| req.class_decl(class))
+        .any(|decl| decl.name.0.eq_ignore_ascii_case(of))
 }

@@ -791,7 +791,15 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     if let Some(this) = this {
         req.addref(&this.as_value());
     }
-    let made = match req.new_object_with(class, closure) {
+    // `zend_create_closure_ex` over the op array: its cache, laid down
+    // for the scope here where no closure laid it down yet.
+    let cache =
+        crate::classes::closure_cache(req, function, scope, crate::classes::ClosureCache::Function);
+    let payload = crate::classes::ClosureObject {
+        info: closure,
+        cache,
+    };
+    let made = match req.new_object_with(class, payload) {
         Ok(made) => made,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -7426,15 +7434,14 @@ fn static_prop_place(
         FetchFlag::of(op.extended_value)
     };
     let typed = flag.and_then(|_| req.declared_typed_static(class, &name));
-    let declaring = info.declaring;
     if let (Some(flag), Some(typed)) = (flag, &typed) {
-        let held = req.held_static(declaring, &name);
+        let held = req.held_static(info);
         if let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag) {
             return threw(req, frame, &thrown);
         }
     }
     if req.lacks_set_access(info) {
-        let held = req.held_static(declaring, &name).deref();
+        let held = req.held_static(info).deref();
         let unwritten = matches!(held.as_ref(), ValueRef::Undef);
         if held.as_object().is_some() || (mode == StaticFetch::Unset && unwritten) {
             let copied = held.undef_as_null();
@@ -7446,14 +7453,14 @@ fn static_prop_place(
             return threw(req, frame, &thrown);
         }
     }
-    let place = match req.bind_static_place(declaring, &name) {
+    let place = match req.bind_static_place(info) {
         Ok(place) => place,
         Err(thrown) => return threw(req, frame, &thrown),
     };
     if flag == Some(FetchFlag::Ref)
         && let Some(typed) = &typed
     {
-        static_type_source(req, typed, &name);
+        static_type_source(req, info, typed, &name);
     }
     let out = exec::temporary_slot(code, op.out);
     let previous = req.take_slot(frame, out);
@@ -7463,7 +7470,7 @@ fn static_prop_place(
     // `VAR` is that cell, with an owner, and the bind shares it rather
     // than making a second cell inside it.
     let bound = (flag == Some(FetchFlag::Ref))
-        .then(|| req.static_slot_cell(declaring, &name))
+        .then(|| req.static_slot_cell(info))
         .flatten();
     if let Some(cell) = bound {
         req.addref(&cell.as_value());
@@ -8320,8 +8327,13 @@ fn fetch_flags(
 /// int(5)
 /// NULL
 /// ```
-fn static_type_source(req: &mut Request, typed: &crate::api::request::TypedProperty, name: &[u8]) {
-    if let Some(cell) = req.static_slot_cell(typed.declaring, name)
+fn static_type_source(
+    req: &mut Request,
+    info: crate::api::request::PropertyInfo,
+    typed: &crate::api::request::TypedProperty,
+    name: &[u8],
+) {
+    if let Some(cell) = req.static_slot_cell(info)
         && !req
             .ref_type_sources(cell.heap())
             .iter()
@@ -13137,7 +13149,7 @@ fn static_place(
             }
             Ok(Some(Placed {
                 class,
-                declaring: info.declaring,
+                info,
                 name,
                 scope,
                 ty: req.property_decl(info).and_then(|p| p.ty.clone()),
@@ -13148,12 +13160,13 @@ fn static_place(
 }
 
 /// What [`static_place`] addressed: the class the opline named, the
-/// class that declared the property, the property's name, the scope the
-/// access was measured against, and the declared type the write is held
-/// to, which is php's `prop_info` beside the slot.
+/// property's row, whose class declared it and names its slot, the
+/// property's name, the scope the access was measured against, and the
+/// declared type the write is held to, which is php's `prop_info` beside
+/// the slot.
 struct Placed {
     class: crate::api::values::ClassId,
-    declaring: crate::api::values::ClassId,
+    info: crate::api::request::PropertyInfo,
     name: Vec<u8>,
     scope: Option<crate::api::values::ClassId>,
     ty: Option<php_unit::decl::Type>,
@@ -13349,7 +13362,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     };
     let Some(Placed {
         class,
-        declaring,
+        info,
         name,
         scope,
         ty,
@@ -13374,12 +13387,12 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         && (held.as_php_string().is_some()
             || ty.is_none()
                 && req
-                    .static_slot_cell(declaring, &name)
+                    .static_slot_cell(info)
                     .is_none_or(|cell| req.ref_type_sources(cell.heap()).is_empty()));
     let computed = if in_place {
         crate::ops::concat_assign(req, &held, &value, |req| {
             req.release(held);
-            req.store_static_property(declaring, &name, Value::null());
+            req.store_static_property(info, Value::null());
         })
     } else {
         kernel(req, &held, &value)
@@ -13397,7 +13410,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // `ZEND_REF_HAS_TYPE_SOURCES` ahead of the property's own type:
     // `zend_binary_assign_op_typed_ref` over the cell the slot holds.
     if let Some(cell) = req
-        .static_slot_cell(declaring, &name)
+        .static_slot_cell(info)
         .filter(|cell| !req.ref_type_sources(cell.heap()).is_empty())
     {
         if let Err(thrown) = req.assign_to_reference(cell.heap(), stepped, strict) {
@@ -13409,7 +13422,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     let stepped = match ty {
         None => stepped,
         Some(ty) => {
-            let verdict = verified_op(req, &stepped, &ty, declaring, &name, strict);
+            let verdict = verified_op(req, &stepped, &ty, info, &name, strict);
             // php gives the operation's value up and the slot keeps what
             // it held (`zval_ptr_dtor(&z_copy)`).
             match crate::ops::landed(req, stepped, verdict) {
@@ -13423,7 +13436,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // `ZVAL_COPY_VALUE(zptr, &z_copy)` and verifies nothing a second
     // time: a weak conversion raises a deprecation and php raises it
     // once.
-    req.store_static_property(declaring, &name, stepped);
+    req.store_static_property(info, stepped);
     Ok(advance_over_data(req, frame, at))
 }
 
@@ -13437,15 +13450,15 @@ fn verified_op(
     req: &mut Request,
     stepped: &Value,
     ty: &php_unit::decl::Type,
-    declaring: crate::api::values::ClassId,
+    info: crate::api::request::PropertyInfo,
     name: &[u8],
     strict: bool,
 ) -> Result<Option<Value>, Thrown> {
-    match req.static_slot_cell(declaring, name) {
+    match req.static_slot_cell(info) {
         Some(cell) if !req.ref_type_sources(cell.heap()).is_empty() => {
             crate::ops::verify_ref_assignable(req, cell.heap(), stepped, strict)
         }
-        _ => crate::ops::verify_property_type(req, stepped, ty, declaring, name, strict),
+        _ => crate::ops::verify_property_type(req, stepped, ty, info.declaring, name, strict),
     }
 }
 
@@ -13481,7 +13494,7 @@ fn static_prop_step(
     };
     let Some(Placed {
         class,
-        declaring,
+        info,
         name,
         scope,
         ty,
@@ -13505,17 +13518,17 @@ fn static_prop_step(
         None => stepped,
         Some(ty) if crate::ops::steps_past_int(&held, &stepped, &ty) => {
             let (thrown, limit) =
-                crate::ops::incdec_prop_error(req, &ty, declaring, &name, increment);
+                crate::ops::incdec_prop_error(req, &ty, info.declaring, &name, increment);
             req.release(held);
             req.release(stepped);
             // php writes the limit into the slot and raises beside it,
             // so the slot stands at its maximal value after the catch.
-            req.store_static_property(declaring, &name, limit);
+            req.store_static_property(info, limit);
             return threw(req, frame, &thrown);
         }
         Some(ty) => {
             let verdict =
-                crate::ops::verify_property_type(req, &stepped, &ty, declaring, &name, strict);
+                crate::ops::verify_property_type(req, &stepped, &ty, info.declaring, &name, strict);
             match crate::ops::landed(req, stepped, verdict) {
                 Ok(landed) => landed,
                 Err(thrown) => {
@@ -13529,7 +13542,7 @@ fn static_prop_step(
     };
     write_out(req, frame, code, op, if post { &held } else { &stepped });
     req.release(held);
-    req.store_static_property(declaring, &name, stepped);
+    req.store_static_property(info, stepped);
     Ok(advance(req, frame))
 }
 
@@ -13775,7 +13788,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     };
     let Some(Placed {
         class,
-        declaring,
+        info,
         name,
         scope,
         ty,
@@ -13822,7 +13835,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             req,
             cell.heap(),
             ty,
-            declaring,
+            info.declaring,
             &name,
             strict,
         ) {
@@ -13835,8 +13848,8 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     }
     // `ZEND_REF_DEL_TYPE_SOURCE`: the cell the slot held is no longer
     // typed by this property.
-    if let Some(old) = req.static_slot_cell(declaring, &name) {
-        req.ref_del_type_source(old.heap(), declaring, &name);
+    if let Some(old) = req.static_slot_cell(info) {
+        req.ref_del_type_source(old.heap(), info.declaring, &name);
     }
     let bound = cell.as_value();
     req.addref(&bound);
@@ -13848,7 +13861,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
         req.ref_add_type_source(
             cell.heap(),
             crate::api::request::RefSource {
-                declaring,
+                declaring: info.declaring,
                 name: name.clone(),
                 ty,
             },

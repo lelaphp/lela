@@ -31,6 +31,8 @@ cc = { workspace = true }
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
+# #2826's non-shipping qualification adds no newly locked package.
+miniz_oxide = "=0.8.9"
 # What the extensions of the test engines require, transitively, as
 # `zend_startup_module_ex` refuses an extension whose required one is not
 # started (#1925).

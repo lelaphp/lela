@@ -110,6 +110,37 @@ impl RuntimeCaches {
         }
     }
 
+    /// A cache of the request's own for a function that is no op
+    /// array's own, a trait's method copied into a class the request
+    /// declared (`function_add_ref`'s fresh map pointer): a number of
+    /// the request's, one nothing holds any longer first, held for the
+    /// rest of the request.
+    pub(crate) fn own_cache(&mut self) -> CacheAt {
+        CacheAt::Request(MapPtr::new(self.next_number()))
+    }
+
+    /// The cache at `at`, which was the request's own
+    /// ([`RuntimeCaches::own_cache`]), given back: emptied, as php's
+    /// `efree` of a closure's `ZEND_ACC_HEAP_RT_CACHE` cache frees it,
+    /// and its number handed out again. A pointer of the engine's is
+    /// never given back.
+    pub(crate) fn give_back(&mut self, at: CacheAt) {
+        if let CacheAt::Request(ptr) = at {
+            *self.request.map(ptr) = RuntimeCache::default();
+            self.free.push(ptr.offset());
+        }
+    }
+
+    /// The next number of the request's: one a unit nothing holds any
+    /// longer gave back first, else a new one.
+    fn next_number(&mut self) -> u32 {
+        self.free.pop().unwrap_or_else(|| {
+            let next = self.last;
+            self.last = self.last.saturating_add(1);
+            next
+        })
+    }
+
     /// A unit compiled for this request alone, shared from here on: each
     /// of its op arrays given a number of the request's, a number of a
     /// unit nothing holds any longer first, whose cache was emptied as
@@ -129,11 +160,7 @@ impl RuntimeCaches {
         });
         let mut numbers = Vec::new();
         for code in op_arrays_mut(&mut unit) {
-            let number = self.free.pop().unwrap_or_else(|| {
-                let next = self.last;
-                self.last = self.last.saturating_add(1);
-                next
-            });
+            let number = self.next_number();
             code.runtime_cache = MapPtrOffset::Request(number);
             numbers.push(number);
         }

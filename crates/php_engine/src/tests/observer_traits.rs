@@ -79,3 +79,47 @@ fn a_native_trait_method_is_observed_under_the_class_that_uses_it() {
         ]
     );
 }
+
+/// A native trait's method taken in under an alias is the class's own
+/// row: the observer names it by the alias, as php's copy carries the
+/// alias as its `function_name` (`zend_add_trait_method`), and an alias
+/// that makes it protected is refused from the global scope, as
+/// `zend_traits_copy_functions` gives the copy the alias's visibility.
+#[test]
+fn a_native_trait_method_taken_under_an_alias_carries_its_name_and_visibility() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[greets(), TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("native_trait_alias");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\nclass Foo { use Greets { greet as hello; greet as protected prot; } }\n\
+         var_dump((new Foo)->hello());\n\
+         try { (new Foo)->prot(); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\n",
+    );
+    rec.mark("served");
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\nCall to protected method Foo::prot() from global scope\n"
+    );
+    let calls: Vec<Event> = observed(&rec.events().between("built", "served"))
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Ext(0, Phase::ObserverInit(name) | Phase::Begin(name))
+                    if name.starts_with("Foo::")
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            event(Phase::ObserverInit("Foo::hello".to_owned())),
+            event(Phase::Begin("Foo::hello".to_owned())),
+        ]
+    );
+}

@@ -98,6 +98,14 @@ pub(crate) struct Run {
     pub corpus: String,
     /// The engine that ran: the binary's path and md5, or the linked one.
     pub engine: String,
+    /// The [`Pin::digest`] of the pin the run was taken under: under
+    /// another, the run is stale, as a reading of [`UNDER_RECIPE`] is
+    /// (#2725). A run kept before the field was reads empty, which no
+    /// digest is.
+    ///
+    /// [`UNDER_RECIPE`]: crate::reading::UNDER_RECIPE
+    #[serde(default)]
+    pub recipe: String,
     pub verdicts: BTreeMap<String, Judgement>,
     /// What each test that missed keeps, by the same key: every fail,
     /// bork and unread verdict has one.
@@ -137,6 +145,8 @@ pub(crate) struct Runs {
     tree: String,
     commit: String,
     corpus: String,
+    /// The pin's digest, which every run this one keeps carries.
+    recipe: String,
     base: Option<Base>,
 }
 
@@ -167,6 +177,7 @@ impl Runs {
             snapshot,
             commit: git::head_commit(root)?,
             corpus: format!("{} {}", source.tag, source.commit),
+            recipe: manifest.pin.digest().to_owned(),
             base,
         })
     }
@@ -227,7 +238,7 @@ impl Runs {
         // A base with no run kept is a comparison that gives no verdict and
         // never a subset left unrun: the subset's own reading stands beside
         // it, and the skip says so with its counts (#1435).
-        let diff = match (base.run(&self.roots, scope)?, run) {
+        let diff = match (base.run(&self.roots, scope, &self.recipe)?, run) {
             (Err(why), _) => Err(format!(
                 "{why}; the subset ran, and its own reading stands beside this one: {}",
                 subset.message
@@ -277,6 +288,7 @@ impl Runs {
             commit: self.commit.clone(),
             corpus: self.corpus.clone(),
             engine,
+            recipe: self.recipe.clone(),
             verdicts: tally
                 .judged
                 .iter()
@@ -308,15 +320,23 @@ impl Base {
         })
     }
 
-    /// The run of `scope` stored at the commit, from the first of `roots`
-    /// that keeps one, or why there is none, naming each root looked in.
-    fn run(&self, roots: &[PathBuf], scope: &str) -> Result<Result<Run, String>> {
-        if let Some(run) = read(roots, &self.tree, scope)? {
-            return Ok(Ok(run));
+    /// The run of `scope` stored at the commit under the pin whose digest
+    /// is `recipe`, from the first of `roots` that keeps one, or why there
+    /// is none, naming each root looked in or the run under another pin.
+    fn run(&self, roots: &[PathBuf], scope: &str, recipe: &str) -> Result<Result<Run, String>> {
+        let Base { commit, tree } = self;
+        let take = super::base::call(commit, scope);
+        match read(roots, tree, scope)? {
+            Some(run) if run.recipe == recipe => return Ok(Ok(run)),
+            Some(_) => {
+                return Ok(Err(format!(
+                    "the run of {scope} kept at {commit} is stale; {STALE}; take one with `{take}`"
+                )));
+            }
+            None => {}
         }
         let looked: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
         let looked = looked.join(", ");
-        let Base { commit, tree } = self;
         let fetch = roots.first().map_or_else(String::new, |root| {
             format!(
                 "fetch the runs CI's dashboard keeps with `{}`, or ",
@@ -324,8 +344,7 @@ impl Base {
             )
         });
         Ok(Err(format!(
-            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; {fetch}take one with `{}`, which builds the engine at {commit} in a worktree of its own and keeps the run in the main worktree",
-            super::base::call(commit, scope)
+            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; {fetch}take one with `{take}`, which builds the engine at {commit} in a worktree of its own and keeps the run in the main worktree"
         )))
     }
 }
@@ -346,12 +365,21 @@ pub(crate) fn fetch(root: &Path, tree: &str) -> String {
     )
 }
 
-/// The run of `scope` kept at `commit`'s engine tree in a workspace of
-/// the repository at `root` ([`roots`]), or why there is none: what
-/// `--against` holds a subset to, and what `phpt --base` keeps.
-pub(crate) fn kept_at(root: &Path, commit: &str, scope: &str) -> Result<Result<Run, String>> {
-    Base::at(root, commit)?.run(&roots(root), scope)
+/// The run of `scope` kept at `commit`'s engine tree under `pin` in a
+/// workspace of the repository at `root` ([`roots`]), or why there is
+/// none: what `--against` holds a subset to, and what `phpt --base` keeps.
+pub(crate) fn kept_at(
+    root: &Path,
+    pin: &Pin,
+    commit: &str,
+    scope: &str,
+) -> Result<Result<Run, String>> {
+    Base::at(root, commit)?.run(&roots(root), scope, pin.digest())
 }
+
+/// Why a kept run is stale, the words `done` gives a stale reading
+/// under [`crate::reading::UNDER_RECIPE`].
+const STALE: &str = "oracle.toml changed since it was taken";
 
 /// Where a kept run or target is looked for from the workspace at `root`:
 /// `root`, then every worktree of its repository that stands on disk, as
@@ -419,30 +447,37 @@ pub(crate) enum Against {
 /// Condition 1's `phpt` (harness §4.5, #725): every test met in the run of
 /// `scope` kept at `base`'s engine tree is met in the one kept at
 /// `snapshot`'s, a skip meeting none ([`diff`]), over the target kept under
-/// `pin` where there is one.
+/// `pin` where there is one; a run kept under another pin is stale
+/// (#2725).
 pub(crate) fn regressed(
     snapshot: &Snapshot,
     base: &str,
-    pin: Option<&Pin>,
+    pin: &Pin,
     scope: &str,
 ) -> Result<Against> {
     let roots = roots(snapshot.root());
     let tree = snapshot.tracked_over(&built_from())?;
-    let Some(run) = read(&roots, &tree, scope)? else {
-        return Ok(Against::Unrun(format!(
-            "no run of {scope} is kept at this tree's engine ({tree}); take one with `cargo xtask phpt --subset {scope}`"
-        )));
+    let run = match read(&roots, &tree, scope)? {
+        Some(run) if run.recipe == pin.digest() => run,
+        Some(_) => {
+            return Ok(Against::Unrun(format!(
+                "the run of {scope} kept at this tree's engine is stale; {STALE}"
+            )));
+        }
+        None => {
+            return Ok(Against::Unrun(format!(
+                "no run of {scope} is kept at this tree's engine ({tree}); take one with `cargo xtask phpt --subset {scope}`"
+            )));
+        }
     };
     let base = Base::at(snapshot.root(), base)?;
-    let was = match base.run(&roots, scope)? {
+    let was = match base.run(&roots, scope, pin.digest())? {
         Ok(was) => was,
         Err(_) if run.verdicts.is_empty() => return Ok(Against::Held),
         Err(why) => return Ok(Against::Unmet(why)),
     };
-    let target = pin
-        .map(|pin| Target::kept(&roots, pin, scope))
-        .transpose()?;
-    let diff = match diff(&was, &run, target.flatten().as_ref()) {
+    let target = Target::kept(&roots, pin, scope)?;
+    let diff = match diff(&was, &run, target.as_ref()) {
         Ok(diff) if diff.regressed.is_empty() => return Ok(Against::Held),
         Ok(diff) => diff,
         Err(why) => {
@@ -486,9 +521,10 @@ pub(crate) struct Carried {
 
 /// Every run the workspace at `from` keeps, copied into the one at `into`
 /// where that one keeps no run of the same scope under the same engine
-/// tree; one it keeps already is left standing. A run is keyed by the tree
-/// the engine's binary is built from, so a run taken anywhere at that tree
-/// is the same run, and the one standing is as good as the one carried. What
+/// tree; one it keeps already is left standing unless the carried one
+/// [`supersedes`] it. A run is keyed by the tree the engine's binary is
+/// built from, so a run taken anywhere at that tree under one pin is the
+/// same run, and the one standing is as good as the one carried. What
 /// `worktree retire` keeps of a worktree before removing it, so a run
 /// taken there is still found, from the main worktree among [`roots`],
 /// once the worktree is gone (#1268).
@@ -504,7 +540,7 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
             continue;
         };
         let to = into.join(RUNS).join(under);
-        if to.exists() {
+        if to.exists() && !supersedes(&file, &to) {
             carried.kept += 1;
             continue;
         }
@@ -516,6 +552,21 @@ pub(crate) fn carry(from: &Path, into: &Path) -> Result<Carried> {
         carried.carried += 1;
     }
     Ok(carried)
+}
+
+/// Whether the run kept at `file` takes the place of the one standing at
+/// `to`: taken after it and under another pin, so the one standing is
+/// stale once the carried one is fresh (#2725), as a run `phpt --base`
+/// takes again under a moved pin is.
+fn supersedes(file: &Path, to: &Path) -> bool {
+    let recipe = |path: &Path| {
+        let text = fs::read_to_string(path).ok()?;
+        serde_json::from_str::<Run>(&text)
+            .ok()
+            .map(|run| run.recipe)
+    };
+    let modified = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+    recipe(file) != recipe(to) && modified(file) > modified(to)
 }
 
 /// The head's run against the stored one, or why the two do not compare;

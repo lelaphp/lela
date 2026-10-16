@@ -1,0 +1,3 @@
+# api.lock: php_ext's public items, measured by xtask api-check.
+# The lines the module's items read as before #2791, and no line for the function.
+marker::inner

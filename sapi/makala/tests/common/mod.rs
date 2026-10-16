@@ -33,6 +33,15 @@ pub struct Server {
     pub tls: Option<SocketAddr>,
 }
 
+/// This crate's directory as cargo sets `CARGO_MANIFEST_DIR` when it runs
+/// the test, never the path `env!` compiled in: cargo reuses a test binary
+/// across two checkouts that share a target directory (#2790).
+pub fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .expect("cargo sets CARGO_MANIFEST_DIR for a test it runs")
+}
+
 impl Server {
     /// `makala -n` over `root` with two request threads, on a port of the
     /// system's.
@@ -43,7 +52,7 @@ impl Server {
     /// `makala -n` over `root` with `args` after the address, once its
     /// started line names the addresses.
     pub fn with_args(root: &Path, args: &[&str]) -> Server {
-        Server::in_dir(root, Path::new(env!("CARGO_MANIFEST_DIR")), args)
+        Server::in_dir(root, &manifest_dir(), args)
     }
 
     /// [`Server::with_args`], the process started in the working
