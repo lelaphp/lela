@@ -166,11 +166,17 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> Vec<u8> {
         let methods = unit.methods.iter().filter(|method| method.class == at);
         let mut hooks: Vec<_> = unit.hooks.iter().filter(|hook| hook.class == at).collect();
         hooks.sort_by_key(|hook| (hook.property, hook.kind == crate::decl::HookKind::Set));
+        // `!(op_array->fn_flags & ZEND_ACC_ABSTRACT)` holds the function
+        // table alone: an abstract method's body, its `RECV` prologue
+        // alone, is no op array `zend_foreach_op_array` walks, while a
+        // property's hooks are walked by scope whether abstract or not,
+        // so an interface's `get;` prints its `RETURN null`.
         let bodies = methods
             .filter_map(|method| {
                 class
                     .methods
                     .get(method.method as usize)
+                    .filter(|decl| !decl.is_abstract)
                     .map(|decl| (decl, &method.body))
             })
             .chain(hooks.into_iter().filter_map(|hook| {
@@ -181,10 +187,7 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> Vec<u8> {
                     .and_then(|hooks| hooks.of(hook.kind))
                     .map(|decl| (decl, &hook.body))
             }));
-        // `!(op_array->fn_flags & ZEND_ACC_ABSTRACT)`: an abstract
-        // method's body, its `RECV` prologue alone, is no op array
-        // `zend_foreach_op_array` walks.
-        for (decl, body) in bodies.filter(|(decl, _)| !decl.is_abstract) {
+        for (decl, body) in bodies {
             let name = [
                 crate::decl::shown_bytes(&class.name.0),
                 b"::",

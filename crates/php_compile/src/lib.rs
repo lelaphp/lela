@@ -4619,6 +4619,53 @@ mod tests {
         );
     }
 
+    /// A hook with no body, an interface's or an abstract property's, is
+    /// an op array `zend_foreach_op_array` walks, since it walks a
+    /// property's hooks by scope and holds only the function table to
+    /// `ZEND_ACC_ABSTRACT`: `get` prints `VERIFY_RETURN_TYPE` where the
+    /// property is typed and `RETURN null`, `set` its `RECV` and
+    /// `RETURN null`, and the abstract method prints nothing. The dump
+    /// is the oracle's under `[regime.dump]` at 8.5.9 (#2674).
+    #[test]
+    fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
+        assert_eq!(
+            dump_of(
+                b"<?php interface I { public mixed $i { get; } } \
+                  abstract class A { abstract public int $p { get; set; } abstract function m(); }"
+            ),
+            "\n$_main:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \n\
+             I::$i::get:\n\
+             \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 VERIFY_RETURN_TYPE\n\
+             0001 RETURN null\n\
+             \n\
+             A::$p::get:\n\
+             \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 VERIFY_RETURN_TYPE\n\
+             0001 RETURN null\n\
+             \n\
+             A::$p::set:\n\
+             \x20    ; (lines=2, args=1, vars=1, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 CV0($value) = RECV 1\n\
+             0001 RETURN null\n"
+        );
+    }
+
     /// `zend_compile_class_const` runs `zend_eval_const_expr` over the class
     /// before it compiles it, so `"ab"[0]::d` reads the class `a` the
     /// dimension folds to, one `FETCH_CLASS_CONSTANT string("a")
