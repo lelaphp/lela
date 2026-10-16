@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::attr::php_function;
-use php_ext::call::{call_method, lookup_class};
+use php_ext::call::call_method;
 use php_ext::coerce::{Exponent, float_format, with_string};
 use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw, throw_error};
@@ -752,8 +752,7 @@ fn uninitialized_typed(req: &mut Request, object: PhpObject, candidate: &[u8]) -
         if declared {
             return true;
         }
-        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
-        at = parent.and_then(|parent| lookup_class(req, &parent).ok().flatten());
+        at = req.class_parent(here);
     }
     false
 }

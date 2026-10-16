@@ -6295,6 +6295,236 @@ class C {
         assert!(dump.contains(m), "php's C::m, {dump}");
     }
 
+    /// `zend_enum_register_funcs` runs as the enum links (#2678): an
+    /// enum declaring its own `cases()`, or a backed one its own
+    /// `from()`, compiles, its `DECLARE_CLASS` and its method dumped as
+    /// `Zend/tests/enum/no-cases.phpt` and `no-from.phpt` dump them, and
+    /// the link refuses it when the opline runs.
+    #[test]
+    fn an_enum_declaring_its_own_cases_or_from_compiles() {
+        let cases = dump_of(
+            b"<?php
+enum Foo {
+    case Bar;
+    public static function cases(): array { return []; }
+}
+",
+        );
+        assert!(
+            cases.contains("0000 DECLARE_CLASS string(\"foo\")\n0001 RETURN int(1)\n"),
+            "php's $_main, {cases}"
+        );
+        assert!(
+            cases.contains(
+                "\nFoo::cases:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
+                 \x20    ; (before optimizer)\n     ; :4-4\n     ; return  [] RANGE[0..0]\n\
+                 0000 RETURN array(...)\n\
+                 0001 VERIFY_RETURN_TYPE\n\
+                 0002 RETURN null\n"
+            ),
+            "php's Foo::cases, {cases}"
+        );
+        let from = dump_of(
+            b"<?php
+enum Foo: int {
+    case Bar = 0;
+    public static function from(string|int $value): self { return $this; }
+}
+",
+        );
+        assert!(
+            from.contains("0000 DECLARE_CLASS string(\"foo\")\n0001 RETURN int(1)\n"),
+            "php's $_main, {from}"
+        );
+        assert!(
+            from.contains(
+                "0000 CV0($value) = RECV 1\n\
+                 0001 T1 = FETCH_THIS\n\
+                 0002 VERIFY_RETURN_TYPE T1\n\
+                 0003 RETURN T1\n\
+                 0004 VERIFY_RETURN_TYPE\n\
+                 0005 RETURN null\n"
+            ),
+            "php's Foo::from, {from}"
+        );
+    }
+
+    /// `zend_compile_class_decl` compiles the body in the order written
+    /// (#2797), so a property hook sees in `CG(active_class_entry)`'s
+    /// `function_table` the methods declared above its property and
+    /// none below: `$this->p()` to a private method above is php's
+    /// `DO_UCALL`, with its argument sent by the parameter, and
+    /// `$this->q($a)` to one below stays `DO_FCALL`.
+    #[test]
+    fn a_hook_knows_the_methods_declared_above_its_property() {
+        let dump = dump_of(
+            b"<?php
+class C {
+    private function p(&$r) { return 1; }
+    public $x { get => $this->p($a); }
+    public $y { get => $this->q($a); }
+    private function q(&$r) { return 2; }
+}
+",
+        );
+        let x = "0000 INIT_METHOD_CALL 1 THIS string(\"p\")\n\
+                 0001 SEND_REF CV0($a) 1\n\
+                 0002 V1 = DO_UCALL\n";
+        let y = "0000 INIT_METHOD_CALL 1 THIS string(\"q\")\n\
+                 0001 SEND_VAR_EX CV0($a) 1\n\
+                 0002 V1 = DO_FCALL\n";
+        assert!(dump.contains(x), "php's C::$x::get, {dump}");
+        assert!(dump.contains(y), "php's C::$y::get, {dump}");
+        let call = |opcode: &str| {
+            format!(
+                "0000 INIT_METHOD_CALL 0 THIS string(\"p\")\n\
+                 0001 V0 = {opcode}\n\
+                 0002 RETURN V0\n"
+            )
+        };
+        let above = dump_of(
+            b"<?php
+class C {
+    private function p() { return 1; }
+    public $x { get => $this->p(); }
+}
+",
+        );
+        assert!(above.contains(&call("DO_UCALL")), "php's dump, {above}");
+        let below = dump_of(
+            b"<?php
+class C {
+    public $x { get => $this->p(); }
+    private function p() { return 1; }
+}
+",
+        );
+        assert!(below.contains(&call("DO_FCALL")), "php's dump, {below}");
+        let scoped = dump_of(
+            b"<?php
+class C {
+    private static function p() { return 1; }
+    public $x { get => self::p() + C::p(); }
+}
+",
+        );
+        assert!(
+            scoped.contains(
+                "0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string(\"p\")\n\
+                 0001 V0 = DO_UCALL\n\
+                 0002 INIT_STATIC_METHOD_CALL 0 string(\"C\") string(\"p\")\n\
+                 0003 V1 = DO_UCALL\n"
+            ),
+            "php's dump, {scoped}"
+        );
+    }
+
+    /// `zend_compile_static_call`'s `self::` reads
+    /// `CG(active_class_entry)` itself, never the table's class of its
+    /// name: in a second `class A` declared under an `if`, `self::f($x)`
+    /// is the class being compiled's, which has no `f`, so `DO_FCALL`
+    /// with `$x` sent as to an unknown callee, though the `A` bound
+    /// early has `f(&$r)`; a hook's `self::h()` to its own private `h`
+    /// above is `DO_UCALL`.
+    #[test]
+    fn self_in_a_class_redeclaring_a_bound_name_is_the_class_compiling() {
+        let dump = dump_of(
+            b"<?php
+class A { public static function f(&$r) {} }
+if (true) {
+    class A { function g() { self::f($x); } private function h() {} public $p { get => self::h(); } }
+}
+",
+        );
+        let g = "0000 INIT_STATIC_METHOD_CALL 1 (self) (exception) string(\"f\")\n\
+                 0001 SEND_VAR_EX CV0($x) 1\n\
+                 0002 DO_FCALL\n";
+        let p = "0000 INIT_STATIC_METHOD_CALL 0 (self) (exception) string(\"h\")\n\
+                 0001 V0 = DO_UCALL\n";
+        assert!(dump.contains(g), "php's A::g, {dump}");
+        assert!(dump.contains(p), "php's A::$p::get, {dump}");
+    }
+
+    /// `zend_compile_static_call` over a class bound early (#2016):
+    /// `zend_get_compatible_func_or_null` finds the method in the linked
+    /// class's `function_table`, which holds what it inherited, so
+    /// `B::foo($x)` over `A::foo(&$a)` is `DO_UCALL` with `$x` sent by
+    /// reference, as `Zend/tests/lsb/lsb_013.phpt` dumps, and a private
+    /// method inherited stays `DO_FCALL`.
+    #[test]
+    fn a_static_call_to_an_inherited_method_is_do_ucall() {
+        let dump = dump_of(
+            b"<?php
+class A { static function foo(&$a) {} private static function p() {} }
+class B extends A {}
+B::foo($x);
+B::p();
+",
+        );
+        assert!(
+            dump.contains(
+                "0000 INIT_STATIC_METHOD_CALL 1 string(\"B\") string(\"foo\")\n\
+                 0001 SEND_REF CV0($x) 1\n\
+                 0002 DO_UCALL\n\
+                 0003 INIT_STATIC_METHOD_CALL 0 string(\"B\") string(\"p\")\n\
+                 0004 DO_FCALL\n"
+            ),
+            "php's $_main, {dump}"
+        );
+    }
+
+    /// `zend_try_early_bind` while the file compiles (#2689): the class
+    /// being bound is in no table yet, so a type its parent's method
+    /// writes naming it finds nothing, `zend_can_early_bind` comes to
+    /// `INHERITANCE_UNRESOLVED`, and the class keeps its
+    /// `DECLARE_CLASS_DELAYED`, as
+    /// `Zend/tests/type_declarations/union_types/variance/valid.phpt`
+    /// dumps; `D`, which `A`'s `B` names neither, is left the same.
+    #[test]
+    fn a_parent_naming_the_class_being_bound_leaves_it_delayed() {
+        let dump = dump_of(
+            b"<?php
+class A { public function m(B|string $a): A|string {} }
+class B extends A { public function m(A|string $a): B|string {} }
+class D extends A { public function m(A|string $a): D|string {} }
+",
+        );
+        assert!(
+            dump.contains(
+                "0000 DECLARE_CLASS_DELAYED string(\"b\") string(\"a\")\n\
+                 0001 DECLARE_CLASS_DELAYED string(\"d\") string(\"a\")\n\
+                 0002 RETURN int(1)\n"
+            ),
+            "php's $_main, {dump}"
+        );
+    }
+
+    /// `zend_compile_property_hooks`' `num_hooked_prop_variance_checks`
+    /// (#2688): a `set` hook whose parameter's type names a class not
+    /// declared yet keeps the class from the early bind and from
+    /// opcache's delayed one, so its opline is `DECLARE_CLASS` with no
+    /// parent operand, as
+    /// `Zend/tests/property_hooks/set_value_parameter_type_variance_003.phpt`
+    /// dumps.
+    #[test]
+    fn a_set_hook_unresolved_while_compiling_is_declare_class() {
+        let dump = dump_of(
+            b"<?php
+class Test {
+    public X $prop {
+        set(Y $prop) {}
+    }
+}
+interface X {}
+interface Y {}
+",
+        );
+        assert!(
+            dump.contains("0000 DECLARE_CLASS string(\"test\")\n0001 RETURN int(1)\n"),
+            "php's $_main, {dump}"
+        );
+    }
+
     /// `zend_delayed_compile_prop` under `zend_compile_encaps_list`
     /// (#2676): `"$this->p"` inside a method reads the property off the
     /// `IS_UNUSED` receiver, `FETCH_OBJ_R THIS`, as `"{$this->p}"` does.

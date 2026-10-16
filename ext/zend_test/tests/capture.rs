@@ -199,3 +199,26 @@ fn ignored_opcodes_tells_each_silence_opline_as_the_oracle_does() {
         "{out}"
     );
 }
+
+/// `zend_add_trait_method`'s copy of a native trait's method taken in
+/// under an alias carries the alias as its `function_name`, so the
+/// observer names it `Foo::aliased`, as the zend-test oracle prints it.
+#[test]
+fn an_aliased_native_trait_method_is_observed_by_its_alias() {
+    let out = served(
+        &[("enabled", "1"), ("observe_all", "1")],
+        "<?php class Foo { use _ZendTestTrait { testMethod as aliased; } } (new Foo)->aliased();",
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines.get(2..5),
+        Some(
+            &[
+                "  <!-- init Foo::aliased() -->",
+                "  <Foo::aliased>",
+                "  </Foo::aliased>"
+            ][..]
+        ),
+        "{out}"
+    );
+}

@@ -7,6 +7,7 @@ Composed
 Exact
 Folded
 Held
+HookVariance
 Indexed
 Indexed::find
 Indexed::new
@@ -48,9 +49,10 @@ Rows::rows
 Site
 TentativeReturn
 Variance
+early_bind
 link
 linked_class
 object_type
 resolve_property
-set_hook_refused
+set_hook_variance
 verify_hooked_property

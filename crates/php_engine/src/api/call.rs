@@ -117,9 +117,12 @@ pub(crate) enum ClassNative {
     Enum(crate::enums::EnumMethod),
     /// `zend_add_trait_method` over a native trait's method: the copy
     /// php lays in the using class's function table, whose handler is the
-    /// trait's native, served as the trait's own number is, and
-    /// whose scope is the using class.
-    Trait(Function),
+    /// trait's native, `native`, served as the trait's own number is, and
+    /// whose scope is the using class. Its declaration is the class's own
+    /// row, the method at `at` among the composed class's methods, which
+    /// carries the alias's name (`new_fn->common.function_name = name`)
+    /// and the alias's visibility (`zend_traits_copy_functions`).
+    Trait { native: Function, at: u32 },
 }
 
 /// What a [`Callable`] resolved to, `zend_fcall_info_cache`'s three

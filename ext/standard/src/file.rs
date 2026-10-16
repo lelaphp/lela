@@ -1800,7 +1800,6 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
         if declares(&decl.methods) {
             return Ok(true);
         }
-        let parent = decl.parent.clone();
         let traits = decl.traits.clone();
         for name in traits {
             if let Some(used) = lookup_class(req, &name.0)?
@@ -1809,10 +1808,7 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
                 return Ok(true);
             }
         }
-        at = match parent {
-            Some(name) => lookup_class(req, &name.0)?,
-            None => None,
-        };
+        at = req.class_parent(class);
     }
     Ok(false)
 }

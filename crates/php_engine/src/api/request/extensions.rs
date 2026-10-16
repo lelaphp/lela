@@ -199,12 +199,24 @@ impl Request {
     /// `internal_function.module`: the extension that declared a native
     /// function, `Core` for Zend's own and `standard` for a native of
     /// php's `standard` the engine declares itself where the bundle has
-    /// it; none for such a native in an engine without it, for a method
-    /// and for a user function.
+    /// it; for a native method, the extension of the class that declared
+    /// it, which `zend_register_functions` writes onto each of a class's
+    /// methods, so a native trait's method copied into a user class
+    /// keeps the trait's (`zend_add_trait_method` copies the whole
+    /// `zend_internal_function`); none for a native of `standard` in an
+    /// engine without it, for a trampoline no extension declares and for
+    /// a user function.
     #[must_use]
     pub fn function_extension(&self, function: Function) -> Option<ExtensionId> {
+        let function = self.served_native(function);
         let at = usize::try_from(function.0).ok()?;
-        self.shared.function_modules.get(at).copied().flatten()
+        if let Some(module) = self.shared.function_modules.get(at) {
+            return *module;
+        }
+        match self.native_method(function)?.at {
+            crate::engine::MethodAt::Declared { class, .. } => self.class_extension(class),
+            _ => None,
+        }
     }
 
     /// `ce->info.internal.module`: the extension that declared a native

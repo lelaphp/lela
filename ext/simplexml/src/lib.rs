@@ -181,20 +181,7 @@ fn element_class(req: &mut Request) -> Result<ClassId, Thrown> {
 
 /// Whether `class` is `base` or extends it.
 fn derives(req: &mut Request, class: ClassId, base: ClassId) -> bool {
-    let mut at = class;
-    for _ in 0..64 {
-        if at == base {
-            return true;
-        }
-        let Some(parent) = req.class_decl(at).and_then(|d| d.parent.clone()) else {
-            return false;
-        };
-        match lookup_class(req, &parent.0) {
-            Ok(Some(p)) => at = p,
-            _ => return false,
-        }
-    }
-    false
+    req.lineage(class).any(|at| at == base)
 }
 
 /// `php_libxml_increment_doc_ref(sxe, docp)` and the root element taken.

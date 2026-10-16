@@ -1,0 +1,6 @@
+handler:2000-01-01
+diagnostic
+after:2000-01-03
+last-errors:3
+constructor:Failed to parse time string (not-a-date) at position 0 (n): The timezone could not be found in the database
+cleared:Object of type DateTime has not been correctly initialized by calling parent::__construct() in its constructor

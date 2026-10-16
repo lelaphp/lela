@@ -1528,6 +1528,7 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "libz-sys",
+ "miniz_oxide",
  "php_ext",
  "php_ext_lexbor",
  "php_ext_standard",

@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=c8c4cd11a04d486793b6e244910b5b83f9caf34a805e1aa48892667026b77705 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=ba3ded7f45e5522bb5df1a7752458684edeffaddc2a89dee8293302525a8cfac out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -115,8 +115,9 @@ third-engine-design.md
 - ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 - ADR-0014 (accepted, 2026-10-09): A request's heap is lent to C for the length of one call
+- ADR-0015 (accepted, 2026-10-13): Rust owns engine algorithms; native bindings are transitional
 
-<!-- /computed in=1783c270cbaa14d511bb59dd0b2653187b94a0bbfe68bff527a17ecf7c0ce468 out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
+<!-- /computed in=ddd87ec4c3368ee59050c93624779d9a36df6db857b449fcbb952bb2e2236fb7 out=469f833ecbd79aea31bbed6bf7f7b2cd3c5948086c51a1d6d8f3d632f914d30e -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
@@ -124,15 +125,15 @@ third-engine-design.md
 | heap | heap.lock | 409 |  |
 | process | process.lock | 39 |  |
 | unit | unit.lock | 104 |  |
-| link | link.lock | 55 |  |
+| link | link.lock | 57 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1406 | 1500 |
+| api | api.lock | 1409 | 1500 |
 | sapi | sapi.lock | 51 |  |
 | tier | tier.lock | 32 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 411 |  |
 
-<!-- /computed in=1357e44aa47c5af7486c02997a452ad69e4a597e11254c74537e9663a3dcaba5 out=3c31aa0c5be5f711eeaae291480a5cd9b3f87feccac3abc8fdc0620326362c88 -->
+<!-- /computed in=620ad37e2ce243c4446ccda98acca0fc86eb354f24cb476f26f57b0a7769e8b6 out=c601d2ac966dbd71053e8fc5655e2193152e56933790d896192d9efc16bb576c -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

@@ -1180,10 +1180,7 @@ fn public_methods(req: &mut Request, class: ClassId) -> Vec<Vec<u8>> {
                 out.push(m.function.name.0.to_vec());
             }
         }
-        at = match &decl.parent {
-            Some(p) => lookup_class(req, &p.0).ok().flatten(),
-            None => None,
-        };
+        at = req.class_parent(c);
     }
     out
 }
