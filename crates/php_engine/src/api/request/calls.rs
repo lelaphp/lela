@@ -597,8 +597,10 @@ impl Request {
     /// `function`: whether the parameter numbered `number` takes its
     /// argument by reference, and whether only where it can
     /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past
-    /// the declared ones.
-    #[inline]
+    /// the declared ones. The shape's test is inline in the `SEND_*_EX`
+    /// handlers that ask it, and the declaration is read out of line.
+    #[inline(always)] // once per `SEND_*_EX`, in the loop's arms
+    #[allow(clippy::inline_always)]
     pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
         if self
             .user_function(function)
@@ -610,6 +612,7 @@ impl Request {
     }
 
     /// [`Request::arg_send_mode`] read off the declaration.
+    #[inline(never)]
     fn declared_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
         let Some(decl) = self.function_decl(function) else {
             return (false, false);

@@ -1561,6 +1561,21 @@ impl Vm {
         Some(FrameRef(u32::try_from(at).ok()?))
     }
 
+    /// The record on top of the stack where it is the native's call
+    /// [`Vm::serving_at`] answers and no switch stands, which leaves the
+    /// walk nothing to pass over: the first record it reads is the top,
+    /// and a native's call being served is neither being built nor
+    /// being left. None otherwise, which the walk answers.
+    #[inline]
+    pub(crate) fn serving_top(&self) -> Option<&HeapFrame> {
+        if !self.switches.is_empty() {
+            return None;
+        }
+        let (_, frame) = self.stack.top()?;
+        let info = frame.header().info;
+        (info.serving_native() && !info.leaving()).then_some(frame)
+    }
+
     /// The call being served where it is a native's, php's
     /// `execute_data` inside a native: [`Vm::current_at`] where that is
     /// one, and none while a user frame is current or a call is still
@@ -1920,6 +1935,75 @@ pub(crate) fn take_operand(
             value
         }
     }
+}
+
+/// `GET_OP*_ZVAL_PTR_DEREF(BP_VAR_R)` as a frameless call reads its
+/// operand into its record (`ZEND_FRAMELESS_ICALL_*`,
+/// `Z/Zend/zend_vm_def.h:9786`): the zval as it stands, with an owner
+/// taken only where the operand needs one to stand for the call. A
+/// `TMP` or a `VAR` is moved, its slot left `UNDEF`, and the record's
+/// owner is the one php's `FREE_OP*` gives up after the call; a `CV`'s
+/// or a `CONST`'s value that counts owners takes one more, since the
+/// native may serve code that writes over the variable while it reads
+/// the value, and one that counts none takes nothing and is given up
+/// as nothing. A `CV` nothing wrote, and a reference in any slot, are
+/// read as [`take_operand`] reads them, the warning and the value the
+/// reference holds.
+///
+/// The owner a `CV`'s string takes keeps it for the call when the
+/// autoloader the native serves writes over the variable, and a
+/// reference is read through:
+///
+/// ```php
+/// spl_autoload_register(function ($c) { $GLOBALS['n'] = null; echo "load $c\n"; });
+/// $n = str_repeat("Zz", 2);
+/// var_dump(class_exists($n), $n);
+/// $s = str_repeat("ab", 2); $r = &$s;
+/// var_dump(str_contains($r, "ba"), strtr($r, "a", "x"), $s);
+/// ```
+/// ```expect
+/// load ZzZz
+/// bool(false)
+/// NULL
+/// bool(true)
+/// string(4) "xbxb"
+/// string(4) "abab"
+/// ```
+#[inline]
+pub(crate) fn frameless_operand(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    kind: OperandKind,
+    field: u32,
+) -> Zval {
+    let at = match kind {
+        OperandKind::Const => {
+            let z = code
+                .literals
+                .get(field as usize)
+                .copied()
+                .unwrap_or_else(Zval::null);
+            req.heap_mut().addref(z);
+            return z;
+        }
+        OperandKind::Cv => field as usize,
+        OperandKind::Tmp | OperandKind::Var => temporary_slot(code, field) as usize,
+        OperandKind::Unused => return take_operand(req, frame, code, kind, field).to_zval(),
+    };
+    let Some(slot) = req.slots_mut(frame).get_mut(at) else {
+        return take_operand(req, frame, code, kind, field).to_zval();
+    };
+    let z = *slot;
+    if z.is_undef() || z.kind() == php_heap::ZvalType::Reference {
+        return take_operand(req, frame, code, kind, field).to_zval();
+    }
+    if kind == OperandKind::Cv {
+        req.heap_mut().addref(z);
+    } else {
+        *slot = Zval::UNDEF;
+    }
+    z
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done

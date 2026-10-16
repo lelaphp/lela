@@ -677,25 +677,25 @@ impl Request {
             return None;
         }
         let header = laid.header();
-        let receiver = header.this().is_some();
+        let receiver = header.receiver();
         let plain = header.function.is_some()
             && header.annex.is_none()
-            && (!receiver || quiet_receiver(header))
+            && (receiver.is_none() || quiet_receiver(receiver))
             && header.closure.is_none()
             && !header.info.call()
             && !header.info.extra_args();
         let caller = header.caller.frame().filter(|_| plain)?;
         let returns_to = header.returns_to;
-        let mut strings = false;
-        for (at, z) in laid.slots().iter().enumerate() {
-            if !z.is_refcounted() || Some(at) == moved {
-                continue;
-            }
-            if z.kind() != ZvalType::String {
-                return None;
-            }
-            strings = true;
-        }
+        // Every slot's refcounted bit folded with no branch per slot,
+        // where php's `i_free_compiled_variables` tests each CV: a frame
+        // none of whose slots owns anything, nearly every one, is
+        // answered there, and only one that owns something is walked
+        // for what.
+        let owners = laid
+            .slots()
+            .iter()
+            .fold(false, |any, z| any | z.is_refcounted());
+        let strings = owners && owns_strings_alone(laid.slots(), moved)?;
         let taken = match returns_to {
             Some(slot) => self
                 .vm
@@ -731,8 +731,13 @@ impl Request {
         if leave.strings {
             self.give_up_strings(leave.moved);
         }
-        if leave.receiver {
-            self.give_up_top_receiver();
+        match leave.receiver {
+            // `OBJ_RELEASE` of an object another owner of stands and the
+            // collector has no use for: the decrement alone.
+            Some(exec::Receiver::Owned(object))
+                if php_heap::Heap::release_quietly(object.as_value().to_zval()) => {}
+            Some(receiver) => self.give_up_receiver(receiver),
+            None => {}
         }
         self.vm.stack.pop_frame(&mut self.heap);
         if let Some(caller) = self.vm.stack.frame_mut(leave.caller) {
@@ -743,19 +748,6 @@ impl Request {
             }
             let header = caller.header_mut();
             header.opline = header.opline.saturating_add(1);
-        }
-    }
-
-    /// The receiver of the top frame given up ([`Request::leave_plainly`]).
-    #[inline(never)]
-    fn give_up_top_receiver(&mut self) {
-        if let Some(receiver) = self
-            .vm
-            .stack
-            .top()
-            .and_then(|(_, top)| top.header().receiver())
-        {
-            self.give_up_receiver(receiver);
         }
     }
 
@@ -808,7 +800,8 @@ impl Request {
         slot: CacheSlot,
         class: crate::api::values::ClassId,
     ) -> Option<(Function, bool)> {
-        let header = self.vm.at(frame)?;
+        let state = self.frame_at(frame)?;
+        let header = state.header();
         let exec::Cached::ClassAndCallee {
             class: held,
             scope,
@@ -821,19 +814,20 @@ impl Request {
         };
         let same = held == class
             && (from.is_some() && header.closure.is_none() && header.function == from
-                || scope == self.frame_scope(frame));
+                || scope == self.scope_of(state));
         same.then_some((function, instance))
     }
 
     /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3694`,
     /// `:3818`): `class` and the callee it answered into `slot`, with
+    /// whether the callee takes `$this` ([`Request::takes_this`]) and
     /// `frame`'s scope as the key [`Request::cached_callee`] reads back.
     pub(crate) fn prime_callee(
         &mut self,
         frame: FrameRef,
         slot: CacheSlot,
         class: crate::api::values::ClassId,
-        function: Function,
+        (function, instance): (Function, bool),
     ) {
         let scope = self.frame_scope(frame);
         let from = self
@@ -841,9 +835,6 @@ impl Request {
             .at(frame)
             .filter(|header| header.closure.is_none())
             .and_then(|header| header.function);
-        let instance = self
-            .method_decl(function)
-            .is_some_and(|decl| decl.is_instance);
         self.prime(
             frame,
             slot,
@@ -924,6 +915,15 @@ impl Request {
         self.prime(frame, slot, cached);
     }
 
+    /// `!(fbc->common.fn_flags & ZEND_ACC_STATIC)`: whether the method
+    /// `function` takes `$this`, read off its declaration, what a
+    /// method call's lookup asks once and the cache slot then holds
+    /// beside the callee ([`exec::Cached::ClassAndCallee`]).
+    pub(crate) fn takes_this(&self, function: Function) -> bool {
+        self.method_decl(function)
+            .is_some_and(|decl| decl.is_instance)
+    }
+
     /// The room on the VM stack a call to `function` takes when its
     /// `INIT_*` says `count` arguments are passed, past the header:
     /// `zend_vm_calc_used_stack`, the user function's CVs and
@@ -932,11 +932,20 @@ impl Request {
     /// arguments and the magic method's CVs and temporaries, at least
     /// two, as `zend_get_call_trampoline_func` sizes the frame it
     /// reuses.
+    #[inline]
     pub(crate) fn call_room(&self, function: Function, count: u32) -> usize {
+        match self.user_function(function) {
+            Some(user) => usize::try_from(user.shape.room(count)).unwrap_or(usize::MAX),
+            None => self.call_room_past_user(function, count),
+        }
+    }
+
+    /// [`Request::call_room`] of a callee that is no user function: a
+    /// native's or a trampoline's.
+    #[inline(never)]
+    fn call_room_past_user(&self, function: Function, count: u32) -> usize {
         let shape = |function: Function| Some(self.user_function(function)?.shape);
-        let room = if let Some(shape) = shape(function) {
-            shape.room(count)
-        } else if let Some(magic) = self
+        let room = if let Some(magic) = self
             .trampoline_of(function)
             .and_then(|(trampoline, _)| trampoline.magic())
             && let Some(magic) = shape(magic)
@@ -1002,7 +1011,7 @@ impl Request {
             }
         }
         for operand in operands {
-            self.release_nogc(Value::of_zval(operand));
+            self.release_zval_nogc(operand);
         }
         self.vm.stack.pop_frame(&mut self.heap);
     }
@@ -1085,8 +1094,15 @@ impl Request {
         self.vm.at(self.building_call()?)?.function
     }
 
-    /// The call being served where it is a native's ([`Vm::serving_at`]).
+    /// The call being served where it is a native's ([`Vm::serving_at`]):
+    /// the record on top of the stack where no switch stands and it is
+    /// one, read once, which is what a native's entry reads per
+    /// argument it holds; the walk otherwise.
+    #[inline]
     pub(crate) fn serving_call(&self) -> Option<exec::FrameAt<'_>> {
+        if let Some(frame) = self.vm.serving_top() {
+            return Some(exec::FrameAt { req: self, frame });
+        }
         self.frame_at(self.vm.serving_at()?)
     }
 
@@ -1534,8 +1550,20 @@ impl Request {
     /// [`Request::set_slot`] and what the slot held released after the
     /// write, the `zval_ptr_dtor` php's assignment over a slot ends with.
     pub(crate) fn replace_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
-        let previous = self.set_slot(frame, at, value);
-        self.release(previous);
+        let Some(slot) = self
+            .vm
+            .stack
+            .frame_mut(frame)
+            .and_then(|f| f.slots_mut().get_mut(at as usize))
+        else {
+            return self.release(value);
+        };
+        let old = std::mem::replace(slot, value.to_zval());
+        if old.is_refcounted() {
+            #[cfg(debug_assertions)]
+            self.sense_dirty_temporary(frame, at, old.kind());
+            php_heap::Heap::release(&mut super::Hooks(self), old);
+        }
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
@@ -1695,8 +1723,8 @@ impl Request {
 /// or owned with another owner standing and nothing for the collector
 /// to take ([`php_heap::Heap::releases_quietly`]).
 #[inline(never)]
-fn quiet_receiver(header: &exec::Header) -> bool {
-    match header.receiver() {
+fn quiet_receiver(receiver: Option<exec::Receiver>) -> bool {
+    match receiver {
         None | Some(exec::Receiver::Lent(_)) => true,
         Some(exec::Receiver::Owned(object)) => {
             php_heap::Heap::releases_quietly(object.as_value().to_zval())
@@ -1704,18 +1732,37 @@ fn quiet_receiver(header: &exec::Header) -> bool {
     }
 }
 
+/// What the slots of a frame that owns something own, but the one
+/// `moved` out of: whether any owns a string, where nothing but
+/// strings is owned; none where any owns anything else, which
+/// [`Request::leaves_plainly`] refuses.
+#[inline(never)]
+fn owns_strings_alone(slots: &[Zval], moved: Option<usize>) -> Option<bool> {
+    let mut strings = false;
+    for (at, z) in slots.iter().enumerate() {
+        if !z.is_refcounted() || Some(at) == moved {
+            continue;
+        }
+        if z.kind() != ZvalType::String {
+            return None;
+        }
+        strings = true;
+    }
+    Some(strings)
+}
+
 /// A frame [`Request::leaves_plainly`] found returns with no PHP code
 /// served: the frame it returns into and the slot of it that takes the
 /// value, where the call reads one, the slot the returned value was
 /// moved out of, whether any other slot owns a string to give up, and
-/// whether the frame has a receiver to give up.
-#[derive(Debug, Clone, Copy)]
+/// the receiver the frame gives up, where it has one.
+#[derive(Clone, Copy)]
 pub(crate) struct PlainLeave {
     pub(crate) caller: FrameRef,
     pub(crate) returns_to: Option<u32>,
     moved: Option<usize>,
     strings: bool,
-    receiver: bool,
+    receiver: Option<exec::Receiver>,
 }
 
 /// The runtime caches a closure reads, as `zend_create_closure_ex`

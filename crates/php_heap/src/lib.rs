@@ -127,6 +127,11 @@ pub struct Heap {
     /// The walks' pins past the first over blocks other than objects
     /// ([`Heap::pin_block`]).
     nested: gc::Nested,
+    /// The room [`Heap::destroy`]'s walk keeps its frames in, empty
+    /// between walks and kept for the next, so a table's destruction
+    /// allocates nothing off the request's heap; a walk inside a
+    /// destructor a walk serves finds it taken and lays its own.
+    destroying: Vec<array::Emptying>,
     /// The constant arrays of the units this request alone serves, out of
     /// this heap and immutable, so no release frees them: kept in a
     /// debug build for its teardown to free by name before the request
@@ -159,6 +164,7 @@ impl Heap {
             iterators: iterators::Iterators::default(),
             gc,
             nested: gc::Nested::default(),
+            destroying: Vec::new(),
             #[cfg(debug_assertions)]
             constant_arrays: Vec::new(),
         }
@@ -634,6 +640,25 @@ impl Heap {
     #[must_use]
     pub fn releases_quietly(z: Zval) -> bool {
         counted_header(z).is_some_and(|header| header.refcount() > 1 && !header.may_leak())
+    }
+
+    /// One owner of `z` given up where [`Heap::releases_quietly`] holds,
+    /// `GC_DELREF` and nothing after it, since `gc_check_possible_root`
+    /// would take nothing; whether it held. Where it does not, nothing
+    /// is touched and the owner is the caller's to give up through
+    /// [`Heap::release`]. What a frame's leave does with the receiver it
+    /// owns once it has asked.
+    #[must_use]
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn release_quietly(z: Zval) -> bool {
+        let Some(header) =
+            counted_header(z).filter(|header| header.refcount() > 1 && !header.may_leak())
+        else {
+            return false;
+        };
+        header.delref();
+        true
     }
 
     /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,

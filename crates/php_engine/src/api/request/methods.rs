@@ -194,14 +194,6 @@ impl Request {
         self.method_function(row.holder_in(class), row.at)
     }
 
-    /// [`Request::method_named`] for a method `class` declares itself,
-    /// none where the entry under the name is one it inherited.
-    fn own_method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
-        let MethodRow { row, .. } = self.method_row(class, name)?;
-        self.method_function(class, row.at)
-            .filter(|_| row.holder.is_none())
-    }
-
     /// `zend_hash_find_ptr(&ce->function_table, lcname)` as a
     /// [`MethodRow`]: the row of `class`'s function table under the
     /// name, whatever its case, which [`Request::row_method`] reads;
@@ -644,18 +636,38 @@ impl Request {
     /// trait, which is a method named on the trait itself and never one
     /// a class took from it, is php's deprecation, after which a
     /// handler that threw stops the call. The answer is whether the
-    /// method is a trait's, which is the callee php never caches.
-    pub(crate) fn static_method_found(&mut self, function: Function) -> Result<bool, Thrown> {
-        let Some(decl) = self.method_decl(function) else {
-            return Ok(false);
+    /// method is a trait's, which is the callee php never caches, and
+    /// whether it takes `$this`, read off the one declaration
+    /// ([`StaticFound`]).
+    pub(crate) fn static_method_found(
+        &mut self,
+        function: Function,
+    ) -> Result<StaticFound, Thrown> {
+        let Some((is_abstract, takes_this)) = self
+            .method_decl(function)
+            .map(|decl| (decl.is_abstract, decl.is_instance))
+        else {
+            return Ok(StaticFound::default());
         };
-        let (is_abstract, name) = (decl.is_abstract, decl.function.name.clone());
+        let plain = StaticFound {
+            of_trait: false,
+            takes_this,
+        };
         let Some(class) = self.method_class(function) else {
-            return Ok(false);
+            return Ok(plain);
         };
         let is_trait = self
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        // The name is spelled only for the `Error` or the deprecation:
+        // nearly every call is neither, and makes no string.
+        if !is_abstract && !is_trait {
+            return Ok(plain);
+        }
+        let name = self
+            .method_decl(function)
+            .map(|decl| decl.function.name.clone())
+            .unwrap_or_default();
         let shown = format!(
             "{}::{}",
             self.class_name(class),
@@ -677,7 +689,10 @@ impl Request {
             );
             none_pending(self)?;
         }
-        Ok(is_trait)
+        Ok(StaticFound {
+            of_trait: is_trait,
+            takes_this,
+        })
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`): a
@@ -809,16 +824,28 @@ impl Request {
     /// ```expect
     /// M
     /// ```
+    ///
+    /// php reads the scope only for a method its flags mark
+    /// `ZEND_ACC_CHANGED`, private or protected. The scope's private
+    /// method stands in only from a class above `class` that declares
+    /// it, and such a method above a public one is what
+    /// `ZEND_ACC_CHANGED` records, since no class below a public method
+    /// can declare it private: so the scope's tests answer what the
+    /// bit would, with no walk of the ancestors and no declaration read
+    /// where the scope is none or `class` itself. A call from the
+    /// private method's class reaches it, whatever a child made public:
+    ///
+    /// ```php
+    /// class M { private function f() { return "M"; } function g() { return $this->f(); } }
+    /// class P extends M { public function f() { return "P"; } }
+    /// $p = new P;
+    /// echo $p->g(), $p->f(), "\n";
+    /// ```
+    /// ```expect
+    /// MP
+    /// ```
     pub(crate) fn std_method(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         let found = self.method_named(class, lowered)?;
-        // `zend_std_get_method` reads the scope only for a method its
-        // flags mark `ZEND_ACC_CHANGED`, private or protected: a public
-        // one no class above its own declares privately is the answer
-        // whatever the scope, since the scope's private method can
-        // stand in for it only from above it.
-        if self.method_visibility(found) == Visibility::Public && !self.changed(found, lowered) {
-            return Some(found);
-        }
         let Some(scope) = self.executed_scope() else {
             return Some(found);
         };
@@ -837,32 +864,6 @@ impl Request {
             }
             _ => Some(found),
         }
-    }
-
-    /// `ZEND_ACC_CHANGED` on `function`, which
-    /// `do_inheritance_check_on_method` sets where a class above the
-    /// method's own declares a private method of its name, found here by
-    /// walking up from its class: a call from that class's scope reaches
-    /// its private method, whatever the child made public. The walk is
-    /// cut at a depth no declaration can make.
-    ///
-    /// ```php
-    /// class M { private function f() { return "M"; } function g() { return $this->f(); } }
-    /// class P extends M { public function f() { return "P"; } }
-    /// $p = new P;
-    /// echo $p->g(), $p->f(), "\n";
-    /// ```
-    /// ```expect
-    /// MP
-    /// ```
-    fn changed(&self, function: Function, lowered: &[u8]) -> bool {
-        let Some(class) = self.method_class(function) else {
-            return false;
-        };
-        self.ancestors(class).any(|class| {
-            self.own_method_named(class, lowered)
-                .is_some_and(|own| self.method_visibility(own) == Visibility::Private)
-        })
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`) with
@@ -896,4 +897,14 @@ pub(super) fn visibility_string(visibility: Visibility) -> &'static str {
         Visibility::Protected => "protected",
         Visibility::Private => "private",
     }
+}
+
+/// What [`Request::static_method_found`] read off a static call's
+/// callee, the one declaration asked once: whether it is a trait's own,
+/// which php never caches, and whether it takes `$this`, which php's
+/// `INIT_STATIC_METHOD_CALL` reads off `fbc->common.fn_flags`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StaticFound {
+    pub(crate) of_trait: bool,
+    pub(crate) takes_this: bool,
 }

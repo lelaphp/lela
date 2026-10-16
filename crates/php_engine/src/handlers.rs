@@ -1422,10 +1422,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         ));
     };
     let name = req.method_name_string(function)?;
-    let this = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let this = if req.takes_this(function) {
         req.addref(&object.as_value());
         Some(object)
     } else {
@@ -1458,7 +1455,10 @@ fn dynamic_call_string(
     if let Some(at) = crate::api::request::compound_split(name) {
         let name = name.to_vec();
         let class = dynamic_call_class(req, &name[..at])?;
-        return dynamic_call_static(req, class, &name[at + 2..], this);
+        // `zend_string_init` of the part past `::`, the name the call
+        // carries, as php's `zend_init_dynamic_call_string` makes it.
+        let method = req.string(name.get(at + 2..).unwrap_or_default())?;
+        return dynamic_call_static(req, class, method, this);
     }
     let Some(function) = exec::find_function(req, Bare::of(name)) else {
         return Err(crate::api::raising::throw_error(
@@ -1487,6 +1487,25 @@ fn dynamic_call_string(
 /// `get_method` and the receiver that may hand the call to, with the
 /// access rule `zend_std_get_method` holds it to, the receiver then the
 /// called scope; a `static` method on an object called with no receiver.
+///
+/// The method name the call carries is the member's own string with one
+/// more owner, and the class name is held across the autoloader it may
+/// serve, so a call by a pair leaves the heap where it stood, as a call
+/// by `Class::method` does with the name it cuts:
+///
+/// ```php
+/// class C { function m() { return 1; } static function s() { return 2; } }
+/// spl_autoload_register(function ($c) { eval("class $c { static function t() { return 3; } }"); });
+/// $o = new C; $n = str_repeat("m", 1); $c = str_repeat("C", 1); $d = str_repeat("D", 1);
+/// $r = [$o, $n]() + [$c, "s"]() + "C::s"() + [$d, "t"]();
+/// $b = memory_get_usage();
+/// for ($i = 0; $i < 3; $i++) { $r += [$o, $n]() + [$c, "s"]() + "C::s"() + [$d, "t"](); }
+/// var_dump($r, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(32)
+/// int(0)
+/// ```
 fn dynamic_call_array(
     req: &mut Request,
     array: PhpArray,
@@ -1510,32 +1529,49 @@ fn dynamic_call_array(
             "First array member is not a valid class name or object",
         ));
     }
-    let Some(method) = second.as_str_bytes().map(<[u8]>::to_vec) else {
+    let Some(method) = second.as_php_string().copied() else {
         return Err(refuse(req, "Second array member is not a valid method"));
     };
-    if let Some(class) = first.as_str_bytes().map(<[u8]>::to_vec) {
-        let class = dynamic_call_class(req, &class)?;
-        return dynamic_call_static(req, class, &method, this);
+    // The members' strings are the call's from here, one owner each,
+    // as php's `zend_init_dynamic_call_array` holds them: the class name
+    // across the autoloader it may serve, and the method name as the
+    // name the call carries, never a copy of either.
+    req.addref(&second);
+    if let Some(class) = first.as_php_string().copied() {
+        req.addref(&first);
+        let class = dynamic_call_class(req, class.as_bytes());
+        req.release(first);
+        return match class {
+            Ok(class) => dynamic_call_static(req, class, method, this),
+            Err(thrown) => {
+                req.release(second);
+                Err(thrown)
+            }
+        };
     }
     let Some(object) = first.as_object().copied() else {
+        req.release(second);
         return Err(refuse(
             req,
             "First array member is not a valid class name or object",
         ));
     };
-    let (function, receiver) = method_on(
+    let found = method_on(
         req,
         object,
-        &exec::Lowered::of(&method),
+        &exec::Lowered::of(method.as_bytes()),
         &second,
         Undefined::OnHanded,
-    )?;
+    );
+    let (function, receiver) = match found {
+        Ok(found) => found,
+        Err(thrown) => {
+            req.release(second);
+            return Err(thrown);
+        }
+    };
     let object = receiver.unwrap_or(object);
-    let name = req.string(&method)?;
-    let this = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let this = if req.takes_this(function) {
         req.addref(&object.as_value());
         Some(object)
     } else {
@@ -1543,7 +1579,7 @@ fn dynamic_call_array(
     };
     Ok(DynamicTarget {
         function,
-        name: Some(name),
+        name: Some(method),
         this,
         called_scope: Some(object.class()),
         closure: None,
@@ -1583,23 +1619,32 @@ fn dynamic_call_class(
 fn dynamic_call_static(
     req: &mut Request,
     class: crate::api::values::ClassId,
-    method: &[u8],
+    method: PhpString,
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
-    let written = Value::string(req.string(method)?);
-    let found = static_method(req, class, &exec::Lowered::of(method), &written, this);
-    req.release(written);
-    let (function, _) = found?;
-    if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
-        return Err(non_static_method_call(req, function));
-    }
-    let name = req.string(method)?;
+    let written = Value::string(method);
+    let found = static_method(
+        req,
+        class,
+        &exec::Lowered::of(method.as_bytes()),
+        &written,
+        this,
+    );
+    let refused = match found {
+        Ok(callee) if callee.takes_this => Err(non_static_method_call(req, callee.function)),
+        Ok(callee) => Ok(callee.function),
+        Err(thrown) => Err(thrown),
+    };
+    let function = match refused {
+        Ok(function) => function,
+        Err(thrown) => {
+            req.release(written);
+            return Err(thrown);
+        }
+    };
     Ok(DynamicTarget {
         function,
-        name: Some(name),
+        name: Some(method),
         this: None,
         called_scope: Some(class),
         closure: None,
@@ -5165,15 +5210,17 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // The pair answers where it holds this pass's class and was written
     // from this frame's scope ([`Request::cached_callee`]).
     let cached_callee = match (op.op2_type, primed) {
-        (OperandKind::Const, Cached::ClassAndCallee { .. }) => req
-            .cached_callee(frame, slot, class)
-            .map(|(function, _)| function),
+        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
+            req.cached_callee(frame, slot, class)
+        }
         _ => None,
     };
-    if let Some(function) = cached_callee {
-        return static_call_frame(req, frame, op, class, function);
+    if let Some((function, instance)) = cached_callee {
+        return static_call_frame(req, frame, op, class, (function, instance));
     }
     let mut uncached = false;
+    // Whether the callee takes `$this`, where the lookup read it.
+    let mut looked_up = None;
     let function = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.constructor(class) else {
@@ -5212,9 +5259,10 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 &written,
                 this,
             ) {
-                Ok((function, never_cached)) => {
-                    uncached = never_cached;
-                    function
+                Ok(callee) => {
+                    uncached = callee.uncached;
+                    looked_up = Some(callee.takes_this);
+                    callee.function
                 }
                 Err(thrown) => return threw(req, frame, &thrown),
             }
@@ -5228,10 +5276,11 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // a callee reached through a trampoline, one marked
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
+    let instance = looked_up.unwrap_or_else(|| req.takes_this(function));
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
-        req.prime_callee(frame, slot, class, function);
+        req.prime_callee(frame, slot, class, (function, instance));
     }
-    static_call_frame(req, frame, op, class, function)
+    static_call_frame(req, frame, op, class, (function, instance))
 }
 
 /// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
@@ -5250,13 +5299,17 @@ fn static_method(
     lowered: &[u8],
     written: &Value,
     this: Option<PhpObject>,
-) -> Result<(Function, bool), Thrown> {
+) -> Result<StaticCallee, Thrown> {
     let name = written.as_str_bytes().unwrap_or_default();
     if let Some(function) = req
         .handlers_of(class)
         .get_static_method(req, class, lowered, name)?
     {
-        return Ok((function, true));
+        return Ok(StaticCallee {
+            function,
+            uncached: true,
+            takes_this: req.takes_this(function),
+        });
     }
     let function = match req.method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
@@ -5274,8 +5327,21 @@ fn static_method(
         },
     };
     let never_cached = req.never_cached(function);
-    let of_trait = req.static_method_found(function)?;
-    Ok((function, never_cached || of_trait))
+    let found = req.static_method_found(function)?;
+    Ok(StaticCallee {
+        function,
+        uncached: never_cached || found.of_trait,
+        takes_this: found.takes_this,
+    })
+}
+
+/// The callee [`static_method`] found, whether php keeps it out of the
+/// cache slot, and whether it takes `$this`, each read once.
+#[derive(Debug, Clone, Copy)]
+struct StaticCallee {
+    function: Function,
+    uncached: bool,
+    takes_this: bool,
 }
 
 /// `INIT_STATIC_METHOD_CALL` over a method the program names, once the
@@ -5298,7 +5364,9 @@ fn static_call_named(
     let this = req.vm().this(frame);
     let found = static_method(req, class, &method.lowered(), &method.written, this);
     let edge = match found {
-        Ok((function, _)) => static_call_frame(req, frame, op, class, function),
+        Ok(callee) => {
+            static_call_frame(req, frame, op, class, (callee.function, callee.takes_this))
+        }
         Err(thrown) => threw(req, frame, &thrown),
     };
     method.release(req);
@@ -5309,13 +5377,15 @@ fn static_call_named(
 /// callee, whether the slot answered or the tables did: php's
 /// `!(fbc->common.fn_flags & ZEND_ACC_STATIC)` rule, which is applied
 /// on every pass and not only the one that resolved, and the call frame
-/// over the class as its called scope.
+/// over the class as its called scope. `callee` is the function with
+/// whether it takes `$this`, which the cache slot holds beside it and
+/// a pass that looked it up read once ([`Request::takes_this`]).
 fn static_call_frame(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
     class: crate::api::values::ClassId,
-    function: Function,
+    (function, instance): (Function, bool),
 ) -> Edge {
     // `if (!(fbc->common.fn_flags & ZEND_ACC_STATIC))`: an instance
     // method takes the calling frame's `$this` where it is an instance
@@ -5323,10 +5393,7 @@ fn static_call_frame(
     // through `self` or `parent` forwards the calling frame's called
     // scope, `Z_OBJCE(EX(This))` or `Z_CE(EX(This))`.
     let receiver = req.vm().this(frame);
-    let (this, called) = if req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance)
-    {
+    let (this, called) = if instance {
         let Some(this) = receiver.filter(|this| req.instance_of(this.class(), class)) else {
             let thrown = non_static_method_call(req, function);
             return threw(req, frame, &thrown);
@@ -5707,7 +5774,9 @@ fn inline_init_method_call(
         return Some(Err(fatal));
     }
     match (op.op1_type, at) {
-        (OperandKind::Cv, _) => req.addref(&object.as_value()),
+        // `GC_ADDREF(obj)`: the receiver is an object, so its own
+        // header's count and nothing that asks its type.
+        (OperandKind::Cv, _) => object.heap().addref(),
         (OperandKind::Tmp | OperandKind::Var, Some(at)) => {
             if let Some(slot) = req.slots_mut(frame).get_mut(at) {
                 *slot = Zval::UNDEF;
@@ -5766,11 +5835,7 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     // moved, or one more of the CV's or the constant's; a reference the
     // slot held is followed and given up.
     if !lends {
-        let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-        if taken.as_object().is_none() {
-            req.addref(&object.as_value());
-            req.release(taken);
-        }
+        take_receiver(req, frame, code, op, object);
     }
     // A receiver `method_receiver` handed over stands in for the
     // object, one owner moved from the one to the other.
@@ -5807,6 +5872,59 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     pushed(req, frame, header)
 }
 
+/// The call's owner of `object`, the receiver `INIT_METHOD_CALL` read
+/// off `op1`: a `CV` that holds the object takes one more on the
+/// object's own header (`GC_ADDREF`), and a `TMP` or a `VAR` that holds
+/// it is moved, its slot left `UNDEF`, as php's handler moves it. A
+/// slot that holds it through a reference is taken as
+/// [`exec::take_operand`] takes it, the reference followed and given
+/// up and one more owner of the object taken.
+///
+/// ```php
+/// class C { public $n = 0; function m() { return ++$this->n; } function __destruct() { echo "d\n"; } }
+/// $m = "m"; $o = new C; $r = &$o;
+/// var_dump($o->$m(), $r->$m(), (new C)->$m());
+/// echo "end\n";
+/// ```
+/// ```expect
+/// d
+/// int(1)
+/// int(2)
+/// int(1)
+/// end
+/// d
+/// ```
+fn take_receiver(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+) {
+    let at = match op.op1_type {
+        OperandKind::Cv => Some(op.op1 as usize),
+        OperandKind::Tmp | OperandKind::Var => Some(exec::temporary_slot(code, op.op1) as usize),
+        OperandKind::Const | OperandKind::Unused => None,
+    };
+    if let Some(slot) = at.and_then(|at| req.slots_mut(frame).get_mut(at))
+        && slot
+            .as_obj()
+            .is_some_and(|held| PhpObject::of(held) == object)
+    {
+        if op.op1_type == OperandKind::Cv {
+            object.heap().addref();
+        } else {
+            *slot = Zval::UNDEF;
+        }
+        return;
+    }
+    let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    if taken.as_object().is_none() {
+        req.addref(&object.as_value());
+        req.release(taken);
+    }
+}
+
 /// The callee of an `INIT_METHOD_CALL` on `object`, and the receiver
 /// its class handed the call to where one did: php's
 /// `CACHED_PTR(opline->result.num) == called_scope` first, where `op2`
@@ -5841,12 +5959,10 @@ fn method_of_call(
         &method.written,
         Undefined::OnCalled,
     )?;
+    let instance = req.takes_this(function);
     if named && receiver.is_none() && !req.never_cached(function) {
-        req.prime_callee(frame, slot, class, function);
+        req.prime_callee(frame, slot, class, (function, instance));
     }
-    let instance = req
-        .method_decl(function)
-        .is_some_and(|decl| decl.is_instance);
     Ok((function, receiver, instance))
 }
 
@@ -5921,15 +6037,14 @@ fn method_on(
         };
         return Err(undefined_method(req, named.class(), written));
     };
-    if receiver.is_some() {
+    if receiver.is_some() || req.method_accessible(function) {
         return Ok((function, receiver));
     }
-    let function = if req.method_accessible(function) {
-        function
-    } else {
-        req.call_trampoline(object.class(), bytes, false)
-            .unwrap_or(function)
-    };
+    // The scope may not call it: `__call` takes the call where the class
+    // has one, and otherwise the access rule's `Error`.
+    let function = req
+        .call_trampoline(object.class(), bytes, false)
+        .unwrap_or(function);
     req.check_method_access(function, bytes)?;
     Ok((function, None))
 }
@@ -11570,15 +11685,15 @@ fn frameless_call(
     header.info.set_frameless(true);
     let call = req.push_frameless(header)?;
     for (at, &(kind, field)) in arguments.iter().enumerate() {
-        let value = exec::take_operand(req, frame, code, kind, field);
+        let operand = exec::frameless_operand(req, frame, code, kind, field);
         let placed = req
             .vm_mut()
             .stack
             .frame_mut(call)
             .and_then(|record| record.slots_mut().get_mut(at));
         match placed {
-            Some(slot) => *slot = value.to_zval(),
-            None => req.release(value),
+            Some(slot) => *slot = operand,
+            None => req.release_zval_nogc(operand),
         }
     }
     // The call ends with the result whether the native threw or not, as

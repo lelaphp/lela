@@ -2400,7 +2400,17 @@ impl crate::Heap {
     /// released
     /// ```
     pub(crate) fn destroy(hooks: &mut dyn HeapHooks, first: Last) {
-        let mut walk: Vec<Emptying> = Vec::new();
+        // The heap's room for the walk, taken for its length and put back
+        // emptied, so a walk allocates nothing after the request's first.
+        let mut walk = std::mem::take(&mut hooks.heap().destroying);
+        Heap::destroy_into(hooks, first, &mut walk);
+        walk.clear();
+        hooks.heap().destroying = walk;
+    }
+
+    /// [`Heap::destroy`]'s walk over `walk`, empty on entry and on the
+    /// way out.
+    fn destroy_into(hooks: &mut dyn HeapHooks, first: Last, walk: &mut Vec<Emptying>) {
         let mut next = Some(first);
         loop {
             match next.take() {
@@ -2518,7 +2528,8 @@ impl crate::Heap {
 /// position of the next element to release and holding the key of the
 /// element whose value is being given up, or a reference cell whose
 /// value is being given up.
-enum Emptying {
+#[derive(Debug)]
+pub(crate) enum Emptying {
     Table { a: Arr, at: u32, key: Option<Str> },
     Cell(Ref),
 }
