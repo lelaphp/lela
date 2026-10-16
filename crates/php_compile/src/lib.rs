@@ -1009,6 +1009,17 @@ mod tests {
         assert_eq!((unit.main.line_start, unit.main.line_end), (1, 3));
     }
 
+    /// The scanner stops at `__halt_compiler();`, so the main op array
+    /// of a halted file ends on the halt's line and the data after it
+    /// counts none, as php's `halt01.phpt` dump reads `:1-5`.
+    #[test]
+    fn a_halted_file_ends_on_the_halt_s_line() {
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1;\n__halt_compiler();\ndata\n");
+        assert_eq!((unit.main.line_start, unit.main.line_end), (1, 2));
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1;\n__halt_compiler() ?>\ndata\n");
+        assert_eq!(unit.main.line_end, 3);
+    }
+
     /// The dump of one source compiled through [`compile_source`] under
     /// `short_open_tag`, which is the route the lexer is told it by.
     fn dump_under_short_open_tag(source: &[u8], short_open_tag: bool) -> String {
