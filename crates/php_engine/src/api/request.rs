@@ -710,7 +710,7 @@ pub(crate) type Placed = Box<[PropertyInfo]>;
 /// ([`Request::property_decl`]). Two words, so a class's slots hold
 /// what php's `properties_info_table` holds, pointers into the declaring
 /// class, and no copy of a declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PropertyInfo {
     /// `prop_info->ce`: the class whose declaration it is, the scope its
     /// visibility is measured against and, for a `static` one, the class

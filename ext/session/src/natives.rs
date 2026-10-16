@@ -1301,8 +1301,7 @@ fn class_has(req: &mut Request, object: php_ext::values::PhpObject, method: &[u8
         {
             return true;
         }
-        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
-        at = parent.and_then(|p| lookup_class(req, &p).ok().flatten());
+        at = req.class_parent(here);
     }
     false
 }

@@ -4,6 +4,7 @@
 //! mentions, the `unsafe` homes and the `pub` count live here, and a shell
 //! line's argv in [`super::argv`].
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -397,8 +398,9 @@ fn admitted(
     }
     let Some(line) = line else {
         let path = path?;
+        // A call at the hook displaces the one text at the path.
         let (before, after) = call.rewrite(root, Some(path))?;
-        return approvals.admits(path, Some(&before), Some(&after));
+        return approvals.admits(path, before.first().map(String::as_str), Some(&after));
     };
     let (checkout, written) = super::after::written(root, call, line);
     let pending: Option<Vec<Admission>> = written
@@ -439,9 +441,8 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// git merge --no-commit t1955` started a merge no record named (#2723).
 /// A change inside a subshell, a substitution or a child shell moves the
 /// commands in it alone, and the one after it is read where the shell
-/// stood before it ([`Line::shells`], #2764). [`standing`] does not read
-/// scopes yet, so [`runs_in`], [`fired_in`] and [`acts_in`] read a leading
-/// change inside a subshell as the whole line's (#2787).
+/// stood before it ([`Line::shells`], #2764), as [`standing`] reads the
+/// line's leading changes (#2787).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
     let (mut dir, mut pushed) = (root.to_path_buf(), Vec::new());
     let mut entered: Vec<(u32, PathBuf, Vec<PathBuf>)> = Vec::new();
@@ -507,9 +508,14 @@ pub(super) fn fired_in(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) 
 /// one checkout.
 pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
     let (dir, rest) = standing(root, line);
-    let mut named = rest
-        .iter()
-        .map(|argv| (argv.program() == "git").then(|| moved(dir.clone(), argv)));
+    let placed = line.map(|line| placed(root, line)).unwrap_or_default();
+    // Where a git command runs, a subshell's change and its `-C` read.
+    let mut named = rest.iter().map(|argv| {
+        (argv.program() == "git")
+            .then(|| placed.iter().find(|(at, _)| std::ptr::eq(*at, argv)))
+            .flatten()
+            .map(|(_, at)| at.clone())
+    });
     match named.next() {
         Some(Some(first)) if first != dir && named.all(|other| other.as_ref() == Some(&first)) => {
             first
@@ -536,15 +542,28 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// variable the line did not assign (one the environment holds), `cd`
 /// with no operand or `-`, `pushd` with an option, a stack place (`+1`)
 /// or none, and `popd` with an option or no `pushd` before it.
+///
+/// A change inside a subshell, a substitution or a child shell moves the
+/// commands in it alone, as [`placed`] reads it, and never the line:
+/// `(cd /other && git status); git add x` stands where it started, and
+/// its `git add` runs there (#2787).
 fn standing<'a>(root: &Path, line: Option<&'a Line>) -> (PathBuf, &'a [Argv]) {
-    let commands = line.map_or(&[][..], Line::commands);
+    let Some(line) = line else {
+        return (root.to_path_buf(), &[]);
+    };
+    let commands = line.commands();
     let mut dir = root.to_path_buf();
     let mut pushed = Vec::new();
-    for (at_command, argv) in commands.iter().enumerate() {
+    for (at_command, (argv, shells)) in commands.iter().zip(line.shells()).enumerate() {
         let words = argv.words();
         let exports = words.first().is_some_and(|w| w == "export")
             && words.iter().skip(1).all(|w| w.contains('='));
-        if !exports && !change(&mut dir, &mut pushed, argv) {
+        let changes = if shells.is_empty() {
+            change(&mut dir, &mut pushed, argv)
+        } else {
+            change(&mut dir.clone(), &mut pushed.clone(), argv)
+        };
+        if !exports && !changes {
             return (dir, commands.get(at_command..).unwrap_or_default());
         }
     }
@@ -596,21 +615,34 @@ fn is_rust_source(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "rs")
 }
 
-/// Whether `after` carries any hit of `regex` more often than `before`
-/// does: what a change adds, as a `deny_pattern` over a write reads it
-/// (#510). The count and not the presence, so one more copy of a line the
-/// file already carries is an addition and a line moved is not.
-pub(super) fn adds(regex: &Regex, after: &str, before: &str) -> bool {
-    let mut standing: Vec<&str> = regex.find_iter(before).map(|hit| hit.as_str()).collect();
-    regex.find_iter(after).any(
-        |hit| match standing.iter().position(|held| *held == hit.as_str()) {
-            Some(at) => {
-                standing.swap_remove(at);
+/// Whether `after` carries any hit of `regex` more often than any text of
+/// `before` does: what a change adds, as a `deny_pattern` over a write
+/// reads it (#510). The count and not the presence, so one more copy of a
+/// line the file already carries is an addition and a line moved is not.
+/// A merge displaces both parents (#1312, #2783): a hit stands as often as
+/// the parent carrying it most, never as often as the two together, so a
+/// copy of a line both inherit is still one the merge adds.
+pub(super) fn adds(regex: &Regex, after: &str, before: &[String]) -> bool {
+    let mut standing: HashMap<&str, usize> = HashMap::new();
+    for text in before {
+        let mut here: HashMap<&str, usize> = HashMap::new();
+        for hit in regex.find_iter(text) {
+            *here.entry(hit.as_str()).or_default() += 1;
+        }
+        for (hit, n) in here {
+            let held = standing.entry(hit).or_default();
+            *held = (*held).max(n);
+        }
+    }
+    regex
+        .find_iter(after)
+        .any(|hit| match standing.get_mut(hit.as_str()) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
                 false
             }
-            None => true,
-        },
-    )
+            _ => true,
+        })
 }
 
 /// Whether a write adds a use of a `deny_types` type or an invocation of
@@ -622,9 +654,12 @@ pub(super) fn adds(regex: &Regex, after: &str, before: &str) -> bool {
 /// so the word in a comment, in rustdoc prose or inside a string literal
 /// is none (#2026), as an unsafe site is not
 /// ([`rust::without_comments_or_literals`]).
-fn adds_a_denied_use(after: &str, before: &str, types: &[String], macros: &[String]) -> bool {
+fn adds_a_denied_use(after: &str, before: &[String], types: &[String], macros: &[String]) -> bool {
     let after = rust::without_comments_or_literals(after);
-    let before = rust::without_comments_or_literals(before);
+    let before: Vec<String> = before
+        .iter()
+        .map(|text| rust::without_comments_or_literals(text))
+        .collect();
     types
         .iter()
         .map(|ty| type_pattern(ty))
@@ -712,6 +747,29 @@ fn adds_a_pub_item(root: &Path, call: &Call, path: Option<&Path>) -> bool {
 mod tests {
     use super::*;
 
+    /// #2787: a leading `cd` inside a subshell moves that subshell alone,
+    /// so the line stands where it started, its `git add` runs and acts
+    /// there and is judged there; a line whose every git command runs in
+    /// the subshell's checkout acts in it, and a change outside a
+    /// subshell still moves the line.
+    #[test]
+    fn a_leading_change_inside_a_subshell_moves_that_subshell_alone() {
+        let (root, other) = (Path::new("/shell"), Path::new("/other"));
+        let line = Line::read("(cd /other && git status); git add x");
+        assert_eq!(runs_in(root, Some(&line)), root);
+        assert_eq!(acts_in(root, Some(&line)), root);
+        let adds = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "add");
+        assert_eq!(fired_in(root, &line, adds), [root]);
+        let statuses = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "status");
+        assert_eq!(fired_in(root, &line, statuses), [root, other]);
+        let inside = Line::read("(cd /other && git add x && git commit -m y)");
+        assert_eq!(runs_in(root, Some(&inside)), root);
+        assert_eq!(acts_in(root, Some(&inside)), other);
+        let outside = Line::read("cd /wt && (cd sub && ls); git add x");
+        assert_eq!(runs_in(root, Some(&outside)), Path::new("/wt"));
+        assert_eq!(acts_in(root, Some(&outside)), Path::new("/wt"));
+    }
+
     #[test]
     fn scopes_match_files_at_or_under_them() {
         let m = |p: &str, f: &str| scope_matches(p, Path::new(f));
@@ -756,7 +814,7 @@ mod tests {
     fn a_type_or_macro_named_in_prose_or_a_literal_is_no_use() {
         let types = ["std::sync::Once".to_owned(), "std::cell::Cell".to_owned()];
         let macros = ["std::thread_local".to_owned()];
-        let uses = |text: &str| adds_a_denied_use(text, "", &types, &macros);
+        let uses = |text: &str| adds_a_denied_use(text, &[], &types, &macros);
         assert!(!uses(
             "/// Once per process, whoever asks.\npub fn init() {}"
         ));
@@ -769,8 +827,8 @@ mod tests {
         assert!(uses("/// Once.\nstatic X: Once = Once::new();"));
         assert!(uses("let c = std::cell::Cell::new(1); // Once"));
         assert!(uses("thread_local! { static K: u8 = 0; }"));
-        let carried = "use std::sync::Once;\n";
-        let adds = |after: &str| adds_a_denied_use(after, carried, &types, &macros);
+        let carried = ["use std::sync::Once;\n".to_owned()];
+        let adds = |after: &str| adds_a_denied_use(after, &carried, &types, &macros);
         assert!(!adds("/// Once more.\nuse std::sync::Once;\nfn a() {}\n"));
         assert!(adds(
             "use std::sync::Once;\nstatic X: Once = Once::new();\n"

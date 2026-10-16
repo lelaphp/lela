@@ -1038,7 +1038,7 @@ impl Gh {
     /// since a close holds a successor to the closed ticket's track.
     pub fn view(&self, root: &Path, ticket: Ticket) -> Result<Issue> {
         let number = ticket.number().to_string();
-        let text = gh(
+        let text = read(
             &self.program,
             root,
             &[
@@ -1059,7 +1059,7 @@ impl Gh {
     /// Every open issue, not the labelled ones alone, so the frontier's
     /// filters are judged here, where a test can hold each of them.
     pub fn open(&self, root: &Path) -> Result<Vec<Open>> {
-        let text = gh(
+        let text = read(
             &self.program,
             root,
             &[
@@ -1109,6 +1109,37 @@ impl Gh {
         )
         .with_context(|| format!("{ticket} was not closed"))?;
         Ok(())
+    }
+}
+
+/// How often a read of the tracker is asked before its failure stands.
+/// Under load the machine runs out of ports for a moment, and `gh` fails
+/// with "can't assign requested address" a call later would not (#2804);
+/// a read changes nothing at the tracker, so asking it again is safe,
+/// where a close asked twice would comment twice.
+const READS: u32 = 3;
+
+/// What `gh` says of a number that is no issue, a failure no retry mends.
+const NO_ISSUE: &str = "Could not resolve to an issue";
+
+/// Whether `err` is the tracker's answer that the number is no issue.
+fn no_issue(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(NO_ISSUE)
+}
+
+/// [`gh`] for a call that only reads, asked up to [`READS`] times with a
+/// longer pause before each retry, but for the answer that there is no
+/// such issue.
+fn read(program: &Path, root: &Path, args: &[&str]) -> Result<String> {
+    let mut asked = 1;
+    loop {
+        match gh(program, root, args) {
+            Err(err) if asked < READS && !no_issue(&err) => {
+                std::thread::sleep(std::time::Duration::from_millis(500) * asked);
+                asked += 1;
+            }
+            answer => return answer,
+        }
     }
 }
 
@@ -1303,12 +1334,7 @@ pub fn run(
     // writes, which are a note and not a refusal.
     let (denied, steered): (Vec<&Denied>, Vec<&Denied>) =
         rows.iter().partition(|row| row.mislabelled());
-    let mut reading = Reading::stamped_over(
-        INSTRUMENT,
-        &scope(ticket),
-        &Snapshot::disk(root)?,
-        Path::new(STAMPED_OVER),
-    )?;
+    let mut reading = stamped(root, ticket)?;
     counted(&mut reading, &criteria, &denied, steered.len(), &act)?;
     session_id
         .unwrap_or_default()
@@ -1475,41 +1501,85 @@ impl Closed {
 /// whichever branch wrote it (#2358). Those with no ready record are read
 /// after every close, so a blocker the same merge closes holds nothing,
 /// and each is left open as [`left_open`] says. A ticket closed already,
-/// and a number the tracker answers no issue for, is passed over. Off
-/// `main` nothing is closed: the fast-forward that brings the merge there
-/// calls this again.
+/// and a number the tracker answers is no issue, is passed over. One the
+/// tracker cannot read, or whose close it refuses, is [`unclosed`] and the
+/// run goes on, so one failure of the network neither passes a ticket
+/// over nor loses the closes made before it (#2804). Off `main` nothing is closed: the fast-forward that brings
+/// the merge there calls this again.
 pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<Vec<Reading>> {
     if Reach::of(root)? != Reach::Landed {
         return Ok(Vec::new());
     }
-    let open = |ticket| {
-        gh.view(root, ticket)
-            .ok()
-            .filter(|issue| issue.state == State::Open)
-    };
+    // The commit `since` names now, for a message read after `HEAD` moves.
+    let parent = crate::git::git(root, &["rev-parse", "--short", since], None)?;
+    let again = format!(
+        "`xtask ticket merged --since {}` on main again",
+        parent.trim()
+    );
     let mut readings = Vec::new();
     let mut unready = Vec::new();
     for ticket in named_by_merges(root, &format!("{since}..HEAD"))? {
-        if open(ticket).is_none() {
-            continue;
-        }
-        match record_of(root, ticket)? {
-            Some(successors) => {
-                let act = Act::Close(Verdict::Done, successors, Reach::Landed);
-                readings.push(run(root, manifest, gh, act, ticket, None)?);
+        let closed = gh.view(root, ticket).and_then(|issue| {
+            if issue.state == State::Closed {
+                return Ok(None);
             }
-            None => unready.push(ticket),
+            let Some(successors) = record_of(root, ticket)? else {
+                unready.push(ticket);
+                return Ok(None);
+            };
+            let act = Act::Close(Verdict::Done, successors, Reach::Landed);
+            run(root, manifest, gh, act, ticket, None).map(Some)
+        });
+        match closed {
+            Ok(Some(reading)) if reading.status != Status::Pass => {
+                readings.push(unclosed(reading, &again)?);
+            }
+            Ok(reading) => readings.extend(reading),
+            Err(err) if no_issue(&err) => {}
+            Err(err) => readings.push(failed(root, ticket, &err, &again)?),
         }
     }
-    if unready.is_empty() {
-        return Ok(readings);
-    }
-    // The commit `since` names now, for a message read after `HEAD` moves.
-    let parent = crate::git::git(root, &["rev-parse", "--short", since], None)?;
-    for issue in unready.into_iter().filter_map(open) {
-        readings.push(left_open(root, &issue, parent.trim())?);
+    for ticket in unready {
+        match gh.view(root, ticket) {
+            Ok(issue) if issue.state == State::Closed => {}
+            Ok(issue) => readings.push(left_open(root, &issue, &again)?),
+            Err(err) if no_issue(&err) => {}
+            Err(err) => readings.push(failed(root, ticket, &err, &again)?),
+        }
     }
     Ok(readings)
+}
+
+/// A reading of `ticket`, stamped over the workspace as every reading of
+/// the instrument is.
+fn stamped(root: &Path, ticket: Ticket) -> Result<Reading> {
+    Reading::stamped_over(
+        INSTRUMENT,
+        &scope(ticket),
+        &Snapshot::disk(root)?,
+        Path::new(STAMPED_OVER),
+    )
+}
+
+/// The reading of a ticket [`merged`] could not even read or close for
+/// `err`, as [`unclosed`] says it.
+fn failed(root: &Path, ticket: Ticket, err: &anyhow::Error, again: &str) -> Result<Reading> {
+    let mut reading = stamped(root, ticket)?;
+    reading.message = format!("{err:#}");
+    unclosed(reading, again)
+}
+
+/// A ticket a merge names that it left open: failed, counted [`UNCLOSED`]
+/// so `done` names it ([`stranded`]) until a close replaces the reading,
+/// and saying how to close it.
+fn unclosed(mut reading: Reading, again: &str) -> Result<Reading> {
+    reading.status = Status::Fail;
+    reading.count(UNCLOSED, 1)?;
+    reading.message = format!(
+        "{}; the merge did not close it: close it with `xtask ticket close {}` naming what it opened, or, once what stopped it is settled, run {again}",
+        reading.message, reading.scope
+    );
+    Ok(reading)
 }
 
 /// The reading of a ticket a merge names with no ready record, which it
@@ -1517,44 +1587,37 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
 /// unticked and an open ticket still blocks it ([`BlockedBy::open`]):
 /// the build skill leaves a ticket
 /// whose last box waits on another open and wires that one on, so the
-/// reading skips the close, saying so and what holds it. Otherwise it
-/// fails, named, the merge stands, and `done` names it ([`stranded`])
-/// until a close, or [`merged`] run again once the blocker is wired,
-/// replaces it.
-fn left_open(root: &Path, issue: &Issue, parent: &str) -> Result<Reading> {
+/// reading skips the close, saying so and what holds it. Otherwise it is
+/// [`unclosed`], and where the merge lands part of it the message says
+/// how to wire the blocker on first.
+fn left_open(root: &Path, issue: &Issue, again: &str) -> Result<Reading> {
     let ticket = Ticket::new(issue.number);
-    let mut left = Reading::stamped_over(
-        INSTRUMENT,
-        &scope(ticket),
-        &Snapshot::disk(root)?,
-        Path::new(STAMPED_OVER),
-    )?;
+    let mut left = stamped(root, ticket)?;
     let blockers: Vec<String> = issue
         .blocked_by
         .open()
         .map(|number| Ticket::new(number).to_string())
         .collect();
     if blockers.is_empty() || Criteria::parse(&issue.body).unticked.is_empty() {
-        left.status = Status::Fail;
-        left.count(UNREADY, 1)?;
         left.message = format!(
-            "{ticket} is named by a merge into main and no branch has a ready record of it; not closed: close it with `xtask ticket close {n}` naming what it opened, or, where the merge lands part of it and a box waits on another ticket, wire that one on with `gh issue edit <blocker> --add-blocking {n}` and run `xtask ticket merged --since {parent}` on main again",
-            n = ticket.number()
+            "{ticket} is named by a merge into main and no branch has a ready record of it; where the merge lands part of it and a box waits on another ticket, wire that one on with `gh issue edit <blocker> --add-blocking {}` first",
+            ticket.number()
         );
-    } else {
-        left.status = Status::Skip;
-        left.count(PARTIAL, 1)?;
-        left.message = format!(
-            "{ticket} is named by a merge into main with no ready record, a box unticked, and waits on {}; the merge lands part of it, left open",
-            blockers.join(", ")
-        );
+        return unclosed(left, again);
     }
+    left.status = Status::Skip;
+    left.count(PARTIAL, 1)?;
+    left.message = format!(
+        "{ticket} is named by a merge into main with no ready record, a box unticked, and waits on {}; the merge lands part of it, left open",
+        blockers.join(", ")
+    );
     Ok(left)
 }
 
 /// The number a reading of [`merged`] counts for a ticket the merge named
-/// and left open for want of a ready record, which [`stranded`] reads.
-const UNREADY: &str = "unready";
+/// and left open, which [`stranded`] reads: for want of a ready record,
+/// or because the tracker could not be read or refused the close.
+const UNCLOSED: &str = "unclosed";
 
 /// The number a reading of [`merged`] counts for a ticket the merge
 /// landed part of: named, with no ready record, and blocked by an open
@@ -1578,9 +1641,8 @@ fn named_by_merges(root: &Path, range: &str) -> Result<Vec<Ticket>> {
 }
 
 /// What `done` names of the merges since `base` (#2358): each ticket a
-/// merge commit's subject names whose last `ticket` reading is
-/// [`merged`]'s refusal for want of a ready record, until a close
-/// replaces it. Where `base` is `HEAD`, as on `main`, the merges are
+/// merge commit's subject names whose last `ticket` reading says
+/// [`merged`] left it [`unclosed`], until a close replaces it. Where `base` is `HEAD`, as on `main`, the merges are
 /// `HEAD`'s own, so the session that made the merge reads what it
 /// stranded, and a branch laid on that tip with no commit of its own
 /// reads it the same; a branch reads the merges it carries, `main`'s
@@ -1598,7 +1660,7 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     let mut unmet = Vec::new();
     for ticket in named_by_merges(root, &range)? {
         if let Some(reading) = store.read(INSTRUMENT, &scope(ticket))?
-            && reading.numbers.contains_key(UNREADY)
+            && reading.numbers.contains_key(UNCLOSED)
         {
             unmet.push(format!("ticket: {}", reading.message));
         }
