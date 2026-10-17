@@ -13,7 +13,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _, Whence,
 };
-use php_ext::values::Value;
+use php_ext::values::{Pemalloc, Value};
 
 mod convert;
 
@@ -94,14 +94,29 @@ fn tolower_factory(
     })))
 }
 
+/// `sizeof(php_consumed_filter_data)` and `sizeof(php_chunked_filter_data)`
+/// on the oracle's LP64.
+const CONSUMED_DATA: usize = 24;
+const CHUNKED_DATA: usize = 16;
+
 /// `php_consumed_filter_data`: the stream's position at the filter's
-/// first call, and the bytes it has passed on since.
+/// first call, and the bytes it has passed on since; `data` is what php
+/// `pecalloc`s for them, `None` once the `dtor` gave it back.
 struct Consumed {
     offset: Option<i64>,
-    consumed: usize,
+    passed: usize,
+    data: Option<Pemalloc>,
 }
 
 impl StreamFilter for Consumed {
+    /// `consumed_filter_dtor`: the data given back.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if let Some(data) = self.data.take() {
+            data.free(req);
+        }
+        Ok(())
+    }
+
     /// `consumed_filter_filter` (`Z/ext/standard/filters.c:1608`): every
     /// bucket passed on and counted, and under `PSFS_FLAG_FLUSH_CLOSE`
     /// the stream sought to the position it was at first with what
@@ -125,10 +140,10 @@ impl StreamFilter for Consumed {
             *n = count;
         }
         if flags == FilterFlags::FlushClose {
-            let to = offset.saturating_add(i64::try_from(self.consumed).unwrap_or(i64::MAX));
+            let to = offset.saturating_add(i64::try_from(self.passed).unwrap_or(i64::MAX));
             stream.seek(req, to, Whence::Set);
         }
-        self.consumed += count;
+        self.passed += count;
         Ok(FilterStatus::PassOn)
     }
 }
@@ -153,19 +168,19 @@ impl StreamFilter for Consumed {
 /// string(0) ""
 /// int(10)
 /// ```
-#[allow(clippy::unnecessary_wraps)] // `FilterFactory`'s signature
 fn consumed_factory(
-    _req: &mut Request,
+    req: &mut Request,
     name: &[u8],
     _params: Option<&Value>,
-    _persistent: bool,
+    persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     if !name.eq_ignore_ascii_case(b"consumed") {
         return Ok(None);
     }
     Ok(Some(Box::new(Consumed {
         offset: None,
-        consumed: 0,
+        passed: 0,
+        data: Some(Pemalloc::new(req, CONSUMED_DATA, persistent)?),
     })))
 }
 
@@ -185,10 +200,12 @@ enum ChunkState {
 }
 
 /// `php_chunked_filter_data`: where the decoder stands, and what is left
-/// of the chunk it is in.
+/// of the chunk it is in; `data` is what php `pecalloc`s for them, `None`
+/// once the `dtor` gave it back.
 struct Dechunk {
     chunk_size: usize,
     state: ChunkState,
+    data: Option<Pemalloc>,
 }
 
 impl Dechunk {
@@ -322,6 +339,14 @@ impl Dechunk {
 }
 
 impl StreamFilter for Dechunk {
+    /// `php_chunked_dtor`: the data given back.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if let Some(data) = self.data.take() {
+            data.free(req);
+        }
+        Ok(())
+    }
+
     /// `php_chunked_filter` (`Z/ext/standard/filters.c:1827`): every
     /// bucket decoded in place, counted whole, and passed on.
     fn filter(
@@ -362,12 +387,11 @@ impl StreamFilter for Dechunk {
 /// string(12) "Hello, world"
 /// string(11) "not chunked"
 /// ```
-#[allow(clippy::unnecessary_wraps)] // `FilterFactory`'s signature
 fn dechunk_factory(
-    _req: &mut Request,
+    req: &mut Request,
     name: &[u8],
     _params: Option<&Value>,
-    _persistent: bool,
+    persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     if !name.eq_ignore_ascii_case(b"dechunk") {
         return Ok(None);
@@ -375,6 +399,7 @@ fn dechunk_factory(
     Ok(Some(Box::new(Dechunk {
         chunk_size: 0,
         state: ChunkState::SizeStart,
+        data: Some(Pemalloc::new(req, CHUNKED_DATA, persistent)?),
     })))
 }
 
