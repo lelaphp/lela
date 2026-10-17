@@ -119,6 +119,14 @@ pub(crate) struct Grants {
 /// [`MIN_THREAD_STACK`] sizes.
 pub const MAX_DEPTH: u32 = 512;
 
+/// php's `YYMAXDEPTH`, the most states its bison stack grows to before
+/// `Parse error: memory exhausted` (`Zend/zend_language_parser.c`): what
+/// a chain the grammar takes flat rather than by recursion is held to
+/// ([`Parser::fits_flat_chain`]). The oracle refuses 9,995 `~` in
+/// `$x = …;` and takes 9,994, the states the statement around the chain
+/// holds being the few between.
+pub const YYMAXDEPTH: u32 = 10_000;
+
 /// The native-stack budget of any thread that parses: 16 MiB, the
 /// measured debug-build worst case of [`MAX_DEPTH`] levels of grammar
 /// recursion (about 8 MiB, Mahout, 2026-06-12) with twice the headroom.
@@ -677,16 +685,34 @@ impl<'t> Parser<'t> {
     /// as php's `memory exhausted`.
     pub fn enter_depth(&mut self) -> bool {
         if self.depth >= MAX_DEPTH {
-            if !self.depth_reported {
-                self.depth_reported = true;
-                let span = self.current_span();
-                let line = self.line_here();
-                self.error(Diagnostic::new(span, line, "memory exhausted"));
-            }
+            self.exhausted();
             return false;
         }
         self.depth += 1;
         true
+    }
+
+    /// Whether a chain of `len` prefix operators the grammar takes flat,
+    /// one marker each and no recursion, still fits php's bison stack:
+    /// `false` once the chain and the recursion around it reach
+    /// [`YYMAXDEPTH`], with the refusal raised once per file as php's
+    /// `memory exhausted`.
+    pub fn fits_flat_chain(&mut self, len: u32) -> bool {
+        if len.saturating_add(self.depth) >= YYMAXDEPTH {
+            self.exhausted();
+            return false;
+        }
+        true
+    }
+
+    /// php's `memory exhausted`, raised once per file.
+    fn exhausted(&mut self) {
+        if !self.depth_reported {
+            self.depth_reported = true;
+            let span = self.current_span();
+            let line = self.line_here();
+            self.error(Diagnostic::new(span, line, "memory exhausted"));
+        }
     }
 
     /// Leaves one level of grammar recursion.

@@ -503,6 +503,20 @@ fn nesting_depth_cap() {
     );
 }
 
+/// A chain of one prefix operator is taken flat, so it reaches php's
+/// bison stack rather than the nesting cap: `stack_limit_013.phpt`'s 7,676
+/// `~` parse clean, as php parses them, and a chain past `YYMAXDEPTH`
+/// raises php's one `memory exhausted`.
+#[test]
+fn a_prefix_chain_reaches_yymaxdepth() {
+    for (op, depth) in [("~", 7_676_usize), ("!", 9_000), ("-", 9_000)] {
+        let src = format!("<?php $x = [{}1];\n", format!("{op} ").repeat(depth));
+        assert!(errors(&src).is_empty(), "{depth} {op} parse clean");
+    }
+    let src = format!("<?php $x = {}1;\n", "~".repeat(10_001));
+    assert_eq!(errors(&src), ["memory exhausted"], "past YYMAXDEPTH");
+}
+
 /// The cap bounds grammar recursion and nothing else: the Pratt core
 /// wraps a left-nested chain iteratively, so `1+1+…+1` is grammar depth 1
 /// and tree depth n, and the parser passes it whole, as php's bison does.

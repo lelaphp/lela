@@ -175,6 +175,17 @@ fn infix_bp(kind: K) -> Option<BindingPower> {
 const BP_NOT: u8 = 45;
 /// `++ -- ~ (cast) @ - +`.
 const BP_UNARY: u8 = 49;
+
+/// The right binding power of a `+ - ! ~` prefix, the one
+/// [`prefix`] takes a chain of flat; `None` for any other token.
+fn unary_bp(kind: K) -> Option<u8> {
+    match kind {
+        K::BANG => Some(BP_NOT),
+        K::PLUS | K::MINUS | K::TILDE => Some(BP_UNARY),
+        _ => None,
+    }
+}
+
 /// The `clone` and `new` tier, above `**`.
 const BP_CLONE: u8 = 55;
 const BP_PRINT: u8 = 9;
@@ -419,11 +430,35 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
     let done = |cm: CompletedMarker| Some(Lhs::Done(cm));
     match kind {
         K::PLUS | K::MINUS | K::BANG | K::TILDE => {
-            let m = p.start();
-            p.bump(kind);
-            let rbp = if kind == K::BANG { BP_NOT } else { BP_UNARY };
-            operand(p, rbp);
-            done(m.complete(p, K::UNARY_EXPR))
+            // A chain of these sharing one binding power, `~~~~1` or
+            // `!!$x`, is taken flat: one marker per operator and the one
+            // operand at that power, which takes every tighter infix
+            // operator before any of the chain completes, so the nodes
+            // nest as the recursion would nest them with no native frame
+            // per operator. php's bison takes such a chain to `YYMAXDEPTH`
+            // (stack_limit_013.phpt writes 7,676 `~`), far past
+            // [`crate::parser::MAX_DEPTH`].
+            let rbp = unary_bp(kind);
+            let mut chain = Vec::new();
+            while rbp.is_some() && unary_bp(p.current()) == rbp {
+                let len = u32::try_from(chain.len()).unwrap_or(u32::MAX);
+                if !p.fits_flat_chain(len) {
+                    // The rest of the chain, flat into the refused file.
+                    while unary_bp(p.current()) == rbp {
+                        p.bump_any();
+                    }
+                    break;
+                }
+                let m = p.start();
+                p.bump_any();
+                chain.push(m);
+            }
+            operand(p, rbp.unwrap_or(BP_UNARY));
+            let mut node = None;
+            while let Some(m) = chain.pop() {
+                node = Some(m.complete(p, K::UNARY_EXPR));
+            }
+            node.and_then(done)
         }
         K::PLUS_PLUS | K::MINUS_MINUS => {
             let m = p.start();
