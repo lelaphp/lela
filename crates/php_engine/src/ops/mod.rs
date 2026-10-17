@@ -53,12 +53,17 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.addref(value);
             Ok(*s)
         }
-        ValueRef::Int(n) => req.string(n.to_string().as_bytes()),
+        // `zend_long_to_str` and `zend_double_to_str` mark what they
+        // make valid UTF-8, the digits being ASCII.
+        ValueRef::Int(n) => req
+            .string(n.to_string().as_bytes())
+            .inspect(PhpString::mark_valid_utf8),
         ValueRef::Float(f) => {
             // `zend_double_to_str`: the text, then the warning php raises
             // when the value it converted was NAN.
             let text =
                 req.string(double_to_string(f, req.precision(), Exponent::Upper).as_bytes())?;
+            text.mark_valid_utf8();
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
             }
@@ -2563,11 +2568,17 @@ pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpS
     if a.len() > ZSTR_MAX_LEN - b.len() {
         return Err(throw_error(req, "Error", "String size overflow"));
     }
-    req.string_with(a.len() + b.len(), |bytes| {
+    let joined = req.string_with(a.len() + b.len(), |bytes| {
         let (head, tail) = bytes.split_at_mut(a.len());
         head.copy_from_slice(a.as_bytes());
         tail.copy_from_slice(b.as_bytes());
-    })
+    })?;
+    // `ZSTR_COPY_CONCAT_PROPERTIES_BOTH`: valid UTF-8 where both sides
+    // were known to be.
+    if a.is_valid_utf8() && b.is_valid_utf8() {
+        joined.mark_valid_utf8();
+    }
+    Ok(joined)
 }
 
 /// One side of `concat_function` as a string, `zval_get_string_func`,

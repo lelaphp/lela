@@ -19430,12 +19430,12 @@ pub(crate) fn rope_end<T: Tier>(
     }
     // `zend_string_alloc` of the pieces' joined length, then each
     // piece's bytes copied in, as php's `memcpy` loop copies them.
-    let len: usize = walk::rows(req, rope)
-        .map(|(_, v)| {
-            v.as_php_string()
-                .map_or(0, crate::api::values::PhpString::len)
-        })
-        .sum();
+    // `ZSTR_COPYABLE_CONCAT_PROPERTIES` narrowed by each piece's, so the
+    // string is valid UTF-8 where every piece was known to be.
+    let (len, utf8) = walk::rows(req, rope).fold((0_usize, true), |(len, utf8), (_, v)| {
+        v.as_php_string()
+            .map_or((len, utf8), |s| (len + s.len(), utf8 && s.is_valid_utf8()))
+    });
     let joined = crate::api::values::FreshString::new(req, len).map(|mut fresh| {
         let bytes = fresh.bytes_mut();
         let mut at: usize = 0;
@@ -19449,7 +19449,11 @@ pub(crate) fn rope_end<T: Tier>(
             }
             at = end;
         }
-        fresh.finish().hand_on()
+        let joined = fresh.finish().hand_on();
+        if utf8 {
+            joined.mark_valid_utf8();
+        }
+        joined
     });
     let held = req.take_slot(frame, rope_slot);
     req.release(held);

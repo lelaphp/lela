@@ -26,7 +26,7 @@ pub use strip_tags::strip_tags_ex;
 use constants::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
 use php_ext::abi::{OrFalse, Passed, Raw, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
-use php_ext::coerce::{coerce_param, with_string};
+use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
@@ -368,7 +368,7 @@ fn str_repeat(
     // `zend_string_safe_alloc(ZSTR_LEN(input_str), mult, 0, 0)`, then
     // php's two fills: one byte `memset`, else `memcpy` of the pattern
     // and then of the result onto itself, doubling what is laid down.
-    PhpString::product(req, pattern.len(), times, 0, |result| {
+    let repeated = PhpString::product(req, pattern.len(), times, 0, |result| {
         if pattern.len() == 1 {
             result.fill(pattern[0]);
             return;
@@ -381,7 +381,12 @@ fn str_repeat(
             rest[..step].copy_from_slice(&done[..step]);
             laid += step;
         }
-    })
+    })?;
+    // `ZSTR_COPY_CONCAT_PROPERTIES(result, input_str)`.
+    if string.is_valid_utf8() {
+        repeated.mark_valid_utf8();
+    }
+    Ok(repeated)
 }
 
 /// `strtoupper(string $string): string`, php's `PHP_FUNCTION(strtoupper)`
@@ -1700,8 +1705,9 @@ fn implode(
             ));
         }
     };
+    let glue_utf8 = glue.as_ref().is_none_or(PhpString::is_valid_utf8);
     let glue = glue.as_ref().map_or(&b""[..], PhpString::as_bytes);
-    implode_array(req, glue, pieces)
+    implode_array(req, glue, glue_utf8, pieces)
 }
 
 /// `ZEND_FRAMELESS_FUNCTION(implode, 1)` and `(implode, 2)`
@@ -1735,7 +1741,7 @@ fn implode_frameless(
         let Some(pieces) = separator.value().as_array().copied() else {
             return Err(not_an_array(req));
         };
-        return implode_array(req, b"", pieces);
+        return implode_array(req, b"", true, pieces);
     }
     let glue = coerce_param(req, &separator.value(), &Type::String, 1)?;
     let Some(glue) = glue.as_php_string().copied() else {
@@ -1747,7 +1753,7 @@ fn implode_frameless(
     let Some(pieces) = array.hold(req)? else {
         return Err(not_an_array(req));
     };
-    implode_array(req, glue.as_bytes(), pieces)
+    implode_array(req, glue.as_bytes(), glue.is_valid_utf8(), pieces)
 }
 
 /// php's `TypeError` for a separator with no array, under the name the
@@ -1763,35 +1769,58 @@ fn not_an_array(req: &mut Request) -> Thrown {
     )
 }
 
-/// `php_implode(glue, pieces)`.
+/// `php_implode(glue, pieces)`: one piece is `zval_get_string` of it;
+/// more are joined, and the string is valid UTF-8 where the glue and
+/// every piece that is a string, or became one, were known to be, an
+/// integer's digits narrowing nothing (`ZSTR_GET_COPYABLE_CONCAT_PROPERTIES`).
+/// `glue_utf8` says whether the glue was known to be valid UTF-8, as
+/// php's empty string is where no glue was given.
+///
+/// ```php
+/// $a = str_repeat("a", 2);
+/// var_dump(implode(",", [$a, 3, 2.5]), implode([$a]), implode(",", [7]));
+/// ```
+/// ```expect
+/// string(8) "aa,3,2.5"
+/// string(2) "aa"
+/// string(1) "7"
+/// ```
 fn implode_array(
     req: &mut Request,
     glue: &[u8],
+    glue_utf8: bool,
     pieces: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
     let elements: Vec<Value> = php_ext::values::walk::rows(req, pieces)
         .map(|(_, value)| value)
         .collect();
-    if elements.len() == 1
-        && let Some(s) = elements[0].deref().as_php_string()
-    {
-        return Ok(Owner::take(req, *s));
+    if let [only] = elements.as_slice() {
+        return php_ext::coerce::to_string(req, only);
     }
     let mut out = Vec::new();
+    let mut utf8 = glue_utf8;
     for (i, element) in elements.iter().enumerate() {
         if i > 0 {
             out.extend_from_slice(glue);
         }
         let element = element.deref();
-        if let Some(s) = element.as_str_bytes() {
-            out.extend_from_slice(s);
+        if let Some(s) = element.as_php_string() {
+            out.extend_from_slice(s.as_bytes());
+            utf8 &= s.is_valid_utf8();
         } else if let Some(n) = element.as_int() {
             out.extend_from_slice(Decimal::of(n).as_bytes());
         } else {
-            with_string(req, &element, |s| out.extend_from_slice(s))?;
+            let made = php_ext::coerce::to_string(req, &element)?;
+            out.extend_from_slice(made.as_bytes());
+            utf8 &= made.is_valid_utf8();
+            made.give_up(req);
         }
     }
-    PhpString::new(req, &out)
+    let joined = PhpString::new(req, &out)?;
+    if utf8 {
+        joined.mark_valid_utf8();
+    }
+    Ok(joined)
 }
 
 /// `strtok(string $string, ?string $token = null): string|false`, over

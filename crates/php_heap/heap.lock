@@ -222,6 +222,7 @@ Host::suspensions
 Intern
 Intern::constant_array
 Intern::intern
+Intern::intern_marked
 Key
 Laziness
 MapPtr

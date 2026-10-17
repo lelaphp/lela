@@ -28,10 +28,10 @@ pub(super) struct RequestStrings<'a> {
 }
 
 impl Intern for RequestStrings<'_> {
-    fn intern(&mut self, bytes: &[u8]) -> Result<php_heap::Str, Fatal> {
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<php_heap::Str, Fatal> {
         match self.shared.existing_interned(bytes) {
             Some(held) => Ok(held),
-            None => self.heap.intern(bytes),
+            None => self.heap.intern_marked(bytes, valid_utf8),
         }
     }
 

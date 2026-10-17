@@ -912,6 +912,26 @@ fn zend_test_zend_ini_str(req: &mut Request) -> Result<Owner<PhpString>, Thrown>
 /// bool(true)
 /// bool(false)
 /// ```
+///
+/// The engine marks what php's `zend_long_to_str` and
+/// `zend_double_to_str` make, a concatenation of two marked strings
+/// where the program makes it and as the compiler folds it (save where interning finds the
+/// bytes already held, as `"f" . "o" . "o"` finds the `Foo` class's
+/// lowered name), a rope of marked pieces, `str_repeat` of a marked
+/// string and `implode` of marked pieces with a marked glue:
+///
+/// ```php
+/// $f = fn ($s) => zend_test_is_string_marked_as_valid_utf8($s) ? 'y' : 'n';
+/// $a = 'a'; $b = 'b'; $x = "\xff"; $i = 12; $d = 1.5;
+/// echo $f((string) $i), $f((string) $d), $f($a . $b), $f($a . $x), $f("f" . "x" . "o"), $f("f" . "o" . "o"), "\n";
+/// echo $f("$a$b$a"), $f("$a$x"), $f(str_repeat($a, 3)), $f(str_repeat($x, 3)), "\n";
+/// echo $f(implode(",", [$a, $b])), $f(implode(",", [$a, 1, 2.5])), $f(implode(",", [$a, $x])), $f(implode($x, [$a, $b])), $f(implode([$i])), "\n";
+/// ```
+/// ```expect exit=0
+/// yyynyn
+/// ynyn
+/// yynny
+/// ```
 #[php_function]
 fn zend_test_is_string_marked_as_valid_utf8(string: PhpString) -> bool {
     string.is_valid_utf8()

@@ -859,7 +859,7 @@ impl Intern for Heap {
     /// `zend_hash_add_new`, whose first call is what lays the bucket
     /// array down. So the first string a request interns costs its own
     /// bytes and the table's 40960 beside them, exactly as php's does.
-    fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
         if let Some(frozen) = string::frozen_string(bytes) {
             return Ok(frozen);
         }
@@ -871,6 +871,9 @@ impl Intern for Heap {
         // SAFETY: the allocation is exactly the size `init` asks for and
         // nothing else holds it.
         let s = unsafe { Str::init(at, bytes, string::INTERNED) };
+        if valid_utf8 {
+            s.mark_valid_utf8();
+        }
         self.interned.add(&mut self.mm, s)?;
         Ok(s)
     }

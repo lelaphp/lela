@@ -1768,6 +1768,16 @@ impl Emit<'_> {
         }
     }
 
+    /// [`Self::string`] of bytes known to be valid UTF-8 where `utf8`
+    /// says so ([`Intern::intern_marked`]): a number's text, a fold of two
+    /// marked strings.
+    pub(crate) fn string_marked(&mut self, bytes: &[u8], utf8: bool) -> Result<Zval, CompileError> {
+        match self.strings.intern_marked(bytes, utf8) {
+            Ok(s) => Ok(Zval::string(s)),
+            Err(fatal) => Err(self.fatal_of(fatal)),
+        }
+    }
+
     /// [`Self::constant_expr`] asked for a fold: the value where the
     /// expression is a constant one, nothing where it is not, and the
     /// fatal through, since php's compiler leaves the file at
@@ -14128,7 +14138,10 @@ impl Emit<'_> {
             return Ok(None);
         };
         let joined = [a.bytes(), b.bytes()].concat();
-        Ok(Some(self.string(&joined)?))
+        // `concat_function`'s `ZSTR_COPY_CONCAT_PROPERTIES_BOTH`, then the
+        // interning that keeps a string the table already holds as it is.
+        let utf8 = a.is_valid_utf8() && b.is_valid_utf8();
+        Ok(Some(self.string_marked(&joined, utf8)?))
     }
 
     /// A constant operand of a `.` as the string `zend_compile_binary_op`
@@ -14190,12 +14203,15 @@ impl Emit<'_> {
     /// NAN1NAN
     /// ```
     pub(crate) fn stringified(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+        // `zend_long_to_str` and `zend_double_to_str` mark their text.
         if let Some(n) = value.as_long() {
-            return Ok(Some(self.string(n.to_string().as_bytes())?));
+            return Ok(Some(self.string_marked(n.to_string().as_bytes(), true)?));
         }
         if let Some(d) = value.as_double() {
-            let text =
-                self.string(double_to_string(d, self.precision, Exponent::Upper).as_bytes())?;
+            let text = self.string_marked(
+                double_to_string(d, self.precision, Exponent::Upper).as_bytes(),
+                true,
+            )?;
             if d.is_nan() {
                 self.raise(Level::Warning, "unexpected NAN value was coerced to string");
             }

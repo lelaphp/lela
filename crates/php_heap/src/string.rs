@@ -653,7 +653,17 @@ pub trait Intern {
     /// The one string for these bytes in this home, interned on the first
     /// ask, and the fatal the allocator raised when there is no memory
     /// for it.
-    fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal>;
+    fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
+        self.intern_marked(bytes, false)
+    }
+
+    /// [`Intern::intern`] of bytes the asker knows to be valid UTF-8 when
+    /// `valid_utf8` says so, php's `zend_new_interned_string` over a
+    /// string carrying `IS_STR_VALID_UTF8`: a string this ask lays down
+    /// is marked before the table takes it, and one the home already
+    /// holds is handed back as it stands, with its own flags, as
+    /// `zend_interned_string_ht_lookup` finds it.
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
 
     /// A constant array of a unit in this home (design §5.3), php's
     /// `IS_ARRAY_IMMUTABLE`: the entries in this order, the keys strings
@@ -724,7 +734,7 @@ impl Intern for Strings {
     /// (`Z/Zend/zend_string.c:267-280`): the frozen table, then this one,
     /// then a string on the system allocator, hashed and flagged before
     /// it is published.
-    fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
         if let Some(frozen) = frozen_string(bytes) {
             return Ok(frozen);
         }
@@ -733,6 +743,9 @@ impl Intern for Strings {
             return Ok(held);
         }
         let s = persistent(bytes)?;
+        if valid_utf8 {
+            s.mark_valid_utf8();
+        }
         self.table.add(hash, s);
         Ok(s)
     }
