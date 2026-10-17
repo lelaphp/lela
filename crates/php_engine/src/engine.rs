@@ -1577,7 +1577,10 @@ impl Shared {
             self.compile_ini(),
             self.declared(),
             stack,
-            &mut *strings,
+            &mut PermanentStrings {
+                names: &self.names,
+                strings: &mut strings,
+            },
         )
     }
 
@@ -1749,7 +1752,13 @@ impl Shared {
             // As in `publish`: the table is append-only and consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        crate::unit_cache::decode(body, &mut *strings)
+        crate::unit_cache::decode(
+            body,
+            &mut PermanentStrings {
+                names: &self.names,
+                strings: &mut strings,
+            },
+        )
     }
 
     /// `source`, read from the file `path` names, compiled and published
@@ -3610,6 +3619,36 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
         }
     }
     strings
+}
+
+/// php's one `interned_strings_permanent` as a shared compile reads it:
+/// the names the engine laid down at startup ([`permanent_names`]) first,
+/// so a unit's constant string that spells one is that one, flags and
+/// all, as `zend_new_interned_string` finds it, then the table units
+/// intern into, which a string that is in neither joins.
+struct PermanentStrings<'a> {
+    names: &'a Strings,
+    strings: &'a mut Strings,
+}
+
+impl Intern for PermanentStrings<'_> {
+    fn intern_marked(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+    ) -> Result<php_heap::Str, php_heap::Fatal> {
+        match self.names.find(bytes) {
+            Some(held) => Ok(held),
+            None => self.strings.intern_marked(bytes, valid_utf8),
+        }
+    }
+
+    fn constant_array(
+        &mut self,
+        entries: &[(php_heap::Key, php_heap::Zval)],
+    ) -> Result<php_heap::Arr, php_heap::Fatal> {
+        self.strings.constant_array(entries)
+    }
 }
 
 /// `interned_strings_permanent` as `MINIT` leaves it: what php interns
