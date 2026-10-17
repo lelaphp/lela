@@ -76,6 +76,26 @@ impl FFI {
     /// Failed resolving C function 'nowhere_at_all'
     /// ';' expected, got '<EOF>' at line 1
     /// ```
+    ///
+    /// A relative `$lib`, and a header's relative `FFI_LIB` for
+    /// [`FFI::load`], are opened against the request's working directory,
+    /// which `chdir()` moved, as php's `dlopen` opens them against its
+    /// process's ([`crate::preload::library_path`]):
+    ///
+    /// ```php
+    /// $d = sys_get_temp_dir() . '/witness_ffi_lib_' . getmypid();
+    /// @mkdir("$d/lib", 0777, true);
+    /// @symlink('/opt/homebrew/opt/libsodium/lib/libsodium.dylib', "$d/lib/sodium.dylib");
+    /// file_put_contents("$d/sodium.h", "#define FFI_LIB \"./lib/sodium.dylib\"\nint sodium_init(void);");
+    /// chdir($d);
+    /// var_dump(FFI::cdef('int sodium_init(void);', './lib/sodium.dylib')->sodium_init() >= 0);
+    /// var_dump(FFI::load('./sodium.h')->sodium_init() >= 0);
+    /// unlink("$d/sodium.h"); unlink("$d/lib/sodium.dylib"); rmdir("$d/lib"); rmdir($d);
+    /// ```
+    /// ```expect exit=0
+    /// bool(true)
+    /// bool(true)
+    /// ```
     fn cdef(
         req: &mut Request,
         #[php(default = "")] code: PhpString,
@@ -83,7 +103,10 @@ impl FFI {
     ) -> Result<Owner<Instance<FFI>>, Thrown> {
         validate_api_restriction(req)?;
         let lib = match lib {
-            Some(path) => match Library::open(path.as_bytes()) {
+            Some(path) => match Library::open(&crate::preload::library_path(
+                Some(&req.cwd()),
+                path.as_bytes(),
+            )) {
                 Ok(lib) => Some(lib),
                 Err(error) => {
                     let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();
@@ -863,7 +886,9 @@ fn load_read(
     shown: &str,
 ) -> Result<Owner<Instance<FFI>>, Thrown> {
     let from = types(req).len();
-    let loaded = match crate::preload::load_header(file, types(req), attr::STORED, None) {
+    let cwd = req.cwd();
+    let loaded = match crate::preload::load_header(file, Some(&cwd), types(req), attr::STORED, None)
+    {
         Ok(loaded) => loaded,
         Err(fail) => {
             let message = match fail {
