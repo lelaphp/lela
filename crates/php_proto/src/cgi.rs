@@ -158,6 +158,7 @@ pub fn request_info(
     settings: Settings,
     doc_root: Option<&[u8]>,
     files: &dyn Files,
+    number: CNumber,
 ) -> RequestInfo {
     let mut env_script_filename = env.get(b"SCRIPT_FILENAME").map(<[u8]>::to_vec);
     let env_path_translated = env.get(b"PATH_TRANSLATED").map(<[u8]>::to_vec);
@@ -397,7 +398,7 @@ pub fn request_info(
     info.path_translated = path_translated_kept.filter(|path| valid_path(path));
     info.query = env.get(b"QUERY_STRING").map(<[u8]>::to_vec);
     info.content_type = Some(content_type.unwrap_or_default());
-    info.content_length = content_length.as_deref().map_or(0, strtol);
+    info.content_length = content_length.as_deref().map_or(0, number.strtol);
     info.auth = env.get(b"HTTP_AUTHORIZATION").and_then(basic_auth);
     info
 }
@@ -435,54 +436,17 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// C's `strtol(s, NULL, 10)`, which `atol` is on a 64-bit host and
-/// `init_request_info` reads `CONTENT_LENGTH` with: the [`is_space`]
-/// bytes skipped, one sign, the digits, and the long's end by the sign
-/// where they spell a number past it. A copy of `php_engine`'s
-/// `c_number`, which `php_sapi` re-exports for the hosts: this crate names
-/// no engine crate (design §4.8), and `php_sapi` stands above it.
-fn strtol(bytes: &[u8]) -> i64 {
-    let bytes = &bytes[bytes.iter().take_while(|b| is_space(**b)).count()..];
-    let (negative, digits) = match bytes.first() {
-        Some(b'-') => (true, &bytes[1..]),
-        Some(b'+') => (false, &bytes[1..]),
-        _ => (false, bytes),
-    };
-    let mut value: i64 = 0;
-    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        let digit = i64::from(digit - b'0');
-        let next = value.checked_mul(10).and_then(|n| {
-            if negative {
-                n.checked_sub(digit)
-            } else {
-                n.checked_add(digit)
-            }
-        });
-        let Some(next) = next else {
-            return if negative { i64::MIN } else { i64::MAX };
-        };
-        value = next;
-    }
-    value
-}
-
-/// C's `atoi`, `(int) strtol(s, NULL, 10)`, which `sapi_cgi_send_headers`
-/// reads a status line's code with and `zend_ini_parse_bool` an entry:
-/// [`strtol`]'s long cut to its low 32 bits.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "C's `(int)` of `strtol`'s long, whose cut is the behaviour being copied"
-)]
-fn atoi(bytes: &[u8]) -> i32 {
-    strtol(bytes) as i32
-}
-
-/// C's `isspace` in the `C` locale: space, `\t`, `\n`, `\v`, `\f`, `\r`.
-/// php's hosts read it under the process's `LC_CTYPE`, `C.UTF-8`, which
-/// on macOS counts `0xA0` too; this crate binds no C library, so a status
-/// line or entry opening with that byte is the one place it reads otherwise.
-fn is_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+/// C's `strtol(s, NULL, 10)` and `atoi`, which `init_request_info`
+/// reads `CONTENT_LENGTH` with (`atol`, a long on a 64-bit host),
+/// `sapi_cgi_send_headers` a status line's code and `zend_ini_parse_bool`
+/// an entry. They skip what `isspace` counts under the process's
+/// `LC_CTYPE`, which is the C library's to say. This crate binds none
+/// and names no engine crate (design §4.8), so the host hands it the
+/// engine's one reading, `php_sapi::cgi::C_NUMBER`.
+#[derive(Debug, Clone, Copy)]
+pub struct CNumber {
+    pub strtol: fn(&[u8]) -> i64,
+    pub atoi: fn(&[u8]) -> i32,
 }
 
 /// `php_handle_auth_data`'s `Basic` half: the user and the password.
@@ -572,14 +536,14 @@ pub struct Shape {
 impl Shape {
     /// The shape the two entries' values give, each read as
     /// `zend_ini_parse_bool` reads it: `true`, `yes` or `on` in any case,
-    /// else [`atoi`] of it not 0.
+    /// else C's `atoi` of it not 0.
     #[must_use]
-    pub fn of(nph: &[u8], rfc2616_headers: &[u8]) -> Shape {
+    pub fn of(nph: &[u8], rfc2616_headers: &[u8], number: CNumber) -> Shape {
         let on = |value: &[u8]| {
             [&b"true"[..], b"yes", b"on"]
                 .iter()
                 .any(|word| value.eq_ignore_ascii_case(word))
-                || atoi(value) != 0
+                || (number.atoi)(value) != 0
         };
         Shape {
             opens: if on(nph) {
@@ -667,9 +631,15 @@ fn is_named(line: &[u8], name: &[u8]) -> bool {
 /// `sapi_cgi_send_headers` ([`lines`]) on the wire: each line and its CRLF,
 /// then the blank line.
 #[must_use]
-pub fn head(shape: Shape, code: i64, status_line: Option<&[u8]>, lines: &[Vec<u8>]) -> Vec<u8> {
+pub fn head(
+    shape: Shape,
+    code: i64,
+    status_line: Option<&[u8]>,
+    lines: &[Vec<u8>],
+    number: CNumber,
+) -> Vec<u8> {
     let mut out = Vec::new();
-    for line in self::lines(shape, code, status_line, lines) {
+    for line in self::lines(shape, code, status_line, lines, number) {
         out.extend_from_slice(line.bytes());
         out.extend_from_slice(b"\r\n");
     }
@@ -692,6 +662,7 @@ pub fn lines<'a>(
     code: i64,
     status_line: Option<&'a [u8]>,
     lines: &'a [Vec<u8>],
+    number: CNumber,
 ) -> Vec<Line<'a>> {
     let mut out = Vec::new();
     let mut ignore_status = false;
@@ -699,14 +670,14 @@ pub fn lines<'a>(
     if shape.opens == Opens::Always || code != 200 {
         let status = if let (Form::Line, Some(line)) = (shape.form, status_line) {
             if let Some(space) = line.iter().position(|b| *b == b' ') {
-                response_status = i64::from(atoi(&line[space + 1..]));
+                response_status = i64::from((number.atoi)(&line[space + 1..]));
             }
             Some(line.to_vec())
         } else if let Some(rest) = status_line.and_then(|line| {
             let space = line.iter().position(|b| *b == b' ')?;
             (space >= 5 && line[..5].eq_ignore_ascii_case(b"HTTP/")).then(|| &line[space..])
         }) {
-            response_status = i64::from(atoi(&rest[1..]));
+            response_status = i64::from((number.atoi)(&rest[1..]));
             let mut built = b"Status:".to_vec();
             built.extend_from_slice(rest);
             Some(built)
@@ -760,6 +731,20 @@ mod tests {
         )
     }
 
+    /// A reading of plain decimal digits for the tests, which hold no
+    /// edge C's library reads; those are `php_engine`'s `c_number` tests.
+    const DIGITS: CNumber = CNumber {
+        strtol: leading,
+        atoi: |b| i32::try_from(leading(b)).unwrap_or(0),
+    };
+
+    /// The digits a value opens with, as a number.
+    fn leading(b: &[u8]) -> i64 {
+        b.iter()
+            .take_while(|d| d.is_ascii_digit())
+            .fold(0, |n, d| n * 10 + i64::from(d - b'0'))
+    }
+
     #[test]
     fn a_request_names_its_file_method_query_and_body() {
         let mut vars = env(&[
@@ -775,6 +760,7 @@ mod tests {
             Settings::default(),
             None,
             &Fake(vec![b"/d/t.php"]),
+            DIGITS,
         );
         assert_eq!(info.path_translated.as_deref(), Some(&b"/d/t.php"[..]));
         assert_eq!(info.request_uri.as_deref(), Some(&b"/t.php"[..]));
@@ -803,6 +789,7 @@ mod tests {
             Settings::default(),
             None,
             &Fake(vec![b"/d/t.php"]),
+            DIGITS,
         );
         assert_eq!(info.path_translated.as_deref(), Some(&b"/d/t.php"[..]));
         assert_eq!(info.query.as_deref(), Some(&b"a=1"[..]));
@@ -820,6 +807,7 @@ mod tests {
             Settings::default(),
             None,
             &Fake(vec![b"/d/t.php"]),
+            DIGITS,
         );
         assert_eq!(info.path_translated.as_deref(), Some(&b"/d/t.php"[..]));
         assert_eq!(vars.get(b"PATH_INFO"), Some(&b"/a/b"[..]));
@@ -829,7 +817,13 @@ mod tests {
             Some(&b"/d/t.php/a/b"[..])
         );
         let mut none = env(&[("SCRIPT_FILENAME", "/nope/x.php")]);
-        let info = request_info(&mut none, Settings::default(), None, &Fake(Vec::new()));
+        let info = request_info(
+            &mut none,
+            Settings::default(),
+            None,
+            &Fake(Vec::new()),
+            DIGITS,
+        );
         assert_eq!((info.path_translated, info.response_code), (None, 404));
     }
 
@@ -837,11 +831,17 @@ mod tests {
     fn the_head_opens_with_the_status_where_the_code_is_not_200() {
         let lines = [b"X-Powered-By: PHP/8.5.9".to_vec(), b"Location: /".to_vec()];
         assert_eq!(
-            head(Shape::default(), 302, None, &lines),
+            head(Shape::default(), 302, None, &lines, DIGITS),
             b"Status: 302 Found\r\nX-Powered-By: PHP/8.5.9\r\nLocation: /\r\n\r\n"
         );
         assert_eq!(
-            head(Shape::default(), 404, Some(b"HTTP/1.1 404 Nope"), &[]),
+            head(
+                Shape::default(),
+                404,
+                Some(b"HTTP/1.1 404 Nope"),
+                &[],
+                DIGITS
+            ),
             b"Status: 404 Nope\r\n\r\n"
         );
         assert_eq!(
@@ -849,7 +849,8 @@ mod tests {
                 Shape::default(),
                 200,
                 None,
-                &[b"Content-type: text/html".to_vec()]
+                &[b"Content-type: text/html".to_vec()],
+                DIGITS,
             ),
             b"Content-type: text/html\r\n\r\n"
         );
@@ -858,7 +859,8 @@ mod tests {
                 Shape::default(),
                 299,
                 None,
-                &[b"Status: 299 Mine".to_vec(), b"Status: 1".to_vec()]
+                &[b"Status: 299 Mine".to_vec(), b"Status: 1".to_vec()],
+                DIGITS,
             ),
             b"Status: 299 Mine\r\n\r\n"
         );
@@ -888,7 +890,8 @@ mod tests {
                 Shape::default(),
                 304,
                 Some(b"HTTP/1.1 304 Not Modified"),
-                &lines
+                &lines,
+                DIGITS,
             ),
             [
                 Line::Status(Status(b"Status: 304 Not Modified".as_slice().into())),
@@ -897,32 +900,19 @@ mod tests {
         );
     }
 
-    /// The edges C's library reads, as `php_engine`'s `c_number` does: a
-    /// long saturating by its sign, and `atoi`'s cut of it to `int`, so
-    /// `cgi.nph=4294967296` is off as php's `zend_ini_parse_bool` reads it.
-    #[test]
-    fn strtol_and_atoi_read_the_edges_c_reads() {
-        assert_eq!(strtol(b" \t\x0b-12x"), -12);
-        assert_eq!(strtol(b"99999999999999999999"), i64::MAX);
-        assert_eq!(strtol(b"-99999999999999999999"), i64::MIN);
-        assert_eq!(atoi(b"4294967497"), 201);
-        assert_eq!(atoi(b"-2147483649"), 2_147_483_647);
-        assert_eq!(Shape::of(b"4294967296", b"0").opens, Opens::Changed);
-    }
-
     #[test]
     fn nph_opens_every_head_and_rfc2616_writes_the_status_line_whole() {
         let lines = [b"X-Powered-By: PHP/8.5.9".to_vec()];
-        let nph = Shape::of(b"1", b"0");
+        let nph = Shape::of(b"1", b"0", DIGITS);
         assert_eq!(nph.opens, Opens::Always);
         assert_eq!(
-            head(nph, 200, None, &lines),
+            head(nph, 200, None, &lines, DIGITS),
             b"Status: 200 OK\r\nX-Powered-By: PHP/8.5.9\r\n\r\n"
         );
-        let line = Shape::of(b"off", b"Yes");
+        let line = Shape::of(b"off", b"Yes", DIGITS);
         assert_eq!(line.form, Form::Line);
         assert_eq!(
-            head(line, 404, Some(b"HTTP/1.1 404 Not Found"), &[]),
+            head(line, 404, Some(b"HTTP/1.1 404 Not Found"), &[], DIGITS),
             b"HTTP/1.1 404 Not Found\r\n\r\n"
         );
         assert_eq!(
@@ -930,11 +920,15 @@ mod tests {
                 line,
                 304,
                 Some(b"HTTP/1.1 304 Not Modified"),
-                &[b"Content-Type: x".to_vec()]
+                &[b"Content-Type: x".to_vec()],
+                DIGITS,
             ),
             b"HTTP/1.1 304 Not Modified\r\n\r\n"
         );
-        assert_eq!(head(line, 200, Some(b"HTTP/1.1 200 OK"), &[]), b"\r\n");
-        assert_eq!(Shape::of(b"", b"0"), Shape::default());
+        assert_eq!(
+            head(line, 200, Some(b"HTTP/1.1 200 OK"), &[], DIGITS),
+            b"\r\n"
+        );
+        assert_eq!(Shape::of(b"", b"0", DIGITS), Shape::default());
     }
 }

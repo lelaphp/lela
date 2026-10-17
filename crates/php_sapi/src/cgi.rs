@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use php_proto::c_str;
-use php_proto::cgi::{Environment, Files, RequestInfo, Settings, Shape, Stat};
+use php_proto::cgi::{CNumber, Environment, Files, RequestInfo, Settings, Shape, Stat};
 
 use crate::ini::enabled;
 use crate::{Engine, IniEvent, IniValue, Method, ResponseHead, WebRequest};
@@ -49,6 +49,17 @@ pub fn path_of(bytes: &[u8]) -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
     PathBuf::from(OsStr::from_bytes(bytes))
 }
+
+/// C's `strtol` and `atoi` as the hosts' C library reads them, the
+/// engine's one reading (`crate::c_number`), handed to `php_proto::cgi`,
+/// which binds no C library: a `CONTENT_LENGTH`, a status line's code and
+/// a `cgi.nph` value skip what `isspace` counts under the process's
+/// `LC_CTYPE`, `0xA0` on macOS's `C.UTF-8` among them, as php-cgi's and
+/// php-fpm's do.
+pub const C_NUMBER: CNumber = CNumber {
+    strtol: crate::c_number::strtol,
+    atoi: crate::c_number::atoi,
+};
 
 /// The two entries `init_request_info` reads, `cgi.fix_pathinfo` and
 /// `cgi.discard_path`, as the engine started with them.
@@ -139,6 +150,7 @@ pub fn head(head: &ResponseHead) -> Vec<u8> {
         head.code,
         head.status_line.as_deref(),
         &head.lines,
+        C_NUMBER,
     )
 }
 
@@ -151,6 +163,7 @@ pub fn lines(head: &ResponseHead) -> Vec<php_proto::cgi::Line<'_>> {
         head.code,
         head.status_line.as_deref(),
         &head.lines,
+        C_NUMBER,
     )
 }
 
@@ -163,7 +176,7 @@ fn shape(head: &ResponseHead) -> Shape {
             .find(|(had, _)| *had == name)
             .map_or(&[][..], |(_, value)| value.as_slice())
     };
-    Shape::of(entry(b"cgi.nph"), entry(b"cgi.rfc2616_headers"))
+    Shape::of(entry(b"cgi.nph"), entry(b"cgi.rfc2616_headers"), C_NUMBER)
 }
 
 /// The directory `php_cgi_ini_activate_user_config` scans to for
@@ -250,6 +263,26 @@ pub fn ini_text(value: &IniValue) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use php_proto::cgi::{Opens, Shape};
+
+    use super::C_NUMBER;
+
+    /// The edges C's library reads, as the engine's `c_number` reads
+    /// them: a long saturating by its sign, and `atoi`'s cut of it to
+    /// `int`, so `cgi.nph=4294967296` is off as php's
+    /// `zend_ini_parse_bool` reads it.
+    #[test]
+    fn the_hosts_read_numbers_with_the_engine_s_strtol_and_atoi() {
+        assert_eq!((C_NUMBER.strtol)(b" \t\x0b-12x"), -12);
+        assert_eq!((C_NUMBER.strtol)(b"99999999999999999999"), i64::MAX);
+        assert_eq!((C_NUMBER.atoi)(b"4294967497"), 201);
+        assert_eq!(
+            Shape::of(b"4294967296", b"0", C_NUMBER).opens,
+            Opens::Changed
+        );
+        assert_eq!(Shape::of(b"1", b"0", C_NUMBER).opens, Opens::Always);
+    }
+
     use super::*;
 
     #[test]
