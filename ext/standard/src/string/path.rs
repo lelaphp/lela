@@ -9,7 +9,7 @@ use php_ext::abi::Union;
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
 
 use super::constants::{
     PATHINFO_ALL, PATHINFO_BASENAME, PATHINFO_DIRNAME, PATHINFO_EXTENSION, PATHINFO_FILENAME,
@@ -259,6 +259,18 @@ pub(super) fn dirname(
 /// string(1) "."
 /// string(0) ""
 /// ```
+///
+/// The body allocates what php's does: the `estrndup` the dirname is cut
+/// from, `php_basename`'s string held until the parts are made from it,
+/// each part a `zend_string_init`, and the whole array for one part.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); return memory_get_peak_usage() - $s; }
+/// echo pk(fn() => pathinfo("/x/a.b")), ' ', pk(fn() => pathinfo(".")), ' ', pk(fn() => pathinfo("x")), ' ', pk(fn() => pathinfo("/x/a.b", PATHINFO_EXTENSION)), ' ', pk(fn() => pathinfo("/x/a.bc", PATHINFO_EXTENSION)), "\n";
+/// ```
+/// ```expect
+/// 656 656 584 480 480
+/// ```
 #[php_function]
 pub(super) fn pathinfo(
     req: &mut Request,
@@ -267,34 +279,83 @@ pub(super) fn pathinfo(
 ) -> Result<Union<Owner<PhpArray>, Owner<PhpString>>, Thrown> {
     let opt = flags;
     let p = path.as_bytes();
-    let mut parts: Vec<(&[u8], Vec<u8>)> = Vec::new();
+    let have_basename = opt & PATHINFO_BASENAME != 0;
+    let mut tmp = PhpArray::new(req)?;
+    let built = pathinfo_parts(req, &mut tmp, p, opt, have_basename);
+    if let Err(thrown) = built {
+        tmp.give_up(req);
+        return Err(thrown);
+    }
+    if opt == PATHINFO_ALL {
+        return Ok(Union::A(tmp));
+    }
+    // `RETVAL_COPY_DEREF` of the first element, then the array let go.
+    let first = tmp
+        .cursor_current()
+        .and_then(|value| value.as_php_string().copied());
+    let answer = match first {
+        Some(first) => Ok(Owner::take(req, first)),
+        None => PhpString::new(req, b""),
+    };
+    tmp.give_up(req);
+    answer.map(Union::B)
+}
+
+/// `zend_string_init`, which allocates whatever the length, where
+/// `PhpString::new` is `ZVAL_STRINGL_FAST`'s.
+fn string_init(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+    PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(bytes))
+}
+
+/// The body of `PHP_FUNCTION(pathinfo)` that fills `tmp`, allocating
+/// what php's does in its order: the `estrndup` `php_dirname` works on,
+/// each part a `zend_string_init`, and `php_basename`'s string, held
+/// until the parts are made from it.
+fn pathinfo_parts(
+    req: &mut Request,
+    tmp: &mut Owner<PhpArray>,
+    p: &[u8],
+    opt: i64,
+    have_basename: bool,
+) -> Result<(), Thrown> {
     if opt & PATHINFO_DIRNAME != 0 {
+        let scratch = Emalloc::new(req, p.len() + 1)?;
         let dir = zend_dirname(p);
-        if !dir.is_empty() {
-            parts.push((b"dirname", dir));
-        }
+        let added = if dir.is_empty() {
+            Ok(())
+        } else {
+            string_init(req, &dir).and_then(|dir| tmp.set_str(req, b"dirname", dir.into_value()))
+        };
+        scratch.free(req);
+        added?;
     }
     let base = php_basename(p, b"").to_vec();
-    if opt & PATHINFO_BASENAME != 0 {
-        parts.push((b"basename", base.clone()));
+    let wants_base = opt & (PATHINFO_EXTENSION | PATHINFO_FILENAME) != 0;
+    let ret = if have_basename || wants_base {
+        Some(string_init(req, &base)?)
+    } else {
+        None
+    };
+    let made = (|| {
+        if have_basename && let Some(ret) = &ret {
+            let copy = Owner::take(req, **ret);
+            tmp.set_str(req, b"basename", copy.into_value())?;
+        }
+        let dot = base.iter().rposition(|c| *c == b'.');
+        if opt & PATHINFO_EXTENSION != 0
+            && let Some(dot) = dot
+        {
+            let ext = string_init(req, &base[dot + 1..])?;
+            tmp.set_str(req, b"extension", ext.into_value())?;
+        }
+        if opt & PATHINFO_FILENAME != 0 {
+            let name = string_init(req, &base[..dot.unwrap_or(base.len())])?;
+            tmp.set_str(req, b"filename", name.into_value())?;
+        }
+        Ok(())
+    })();
+    if let Some(ret) = ret {
+        ret.give_up(req);
     }
-    let dot = base.iter().rposition(|c| *c == b'.');
-    if opt & PATHINFO_EXTENSION != 0
-        && let Some(dot) = dot
-    {
-        parts.push((b"extension", base[dot + 1..].to_vec()));
-    }
-    if opt & PATHINFO_FILENAME != 0 {
-        parts.push((b"filename", base[..dot.unwrap_or(base.len())].to_vec()));
-    }
-    if opt != PATHINFO_ALL {
-        let first = parts.first().map(|(_, v)| v.clone()).unwrap_or_default();
-        return PhpString::new(req, &first).map(Union::B);
-    }
-    let mut array = PhpArray::new(req)?;
-    for (name, bytes) in parts {
-        let value = PhpString::new(req, &bytes)?.into_value();
-        array.set_str(req, name, value)?;
-    }
-    Ok(Union::A(array))
+    made
 }

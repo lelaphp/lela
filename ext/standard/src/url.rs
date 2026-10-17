@@ -10,7 +10,7 @@ use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{OwnedStream as _, Request, StreamCtx, Streams as _};
-use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::streamsfuncs::{NullContext, context_of};
@@ -396,9 +396,6 @@ pub(super) fn parse(str: &[u8]) -> Option<Url> {
     Some(ret)
 }
 
-/// One row of `parse_url`'s answer: the selector, the key, the bytes.
-type Part<'a> = (i64, &'a [u8], Option<&'a Vec<u8>>);
-
 /// `parse_url(string $url, int $component = -1):
 /// int|array|string|null|false`: the components as an array, in
 /// `scheme`, `host`, `port`, `user`, `pass`, `path`, `query`,
@@ -540,6 +537,18 @@ type Part<'a> = (i64, &'a [u8], Option<&'a Vec<u8>>);
 ///   - Return [ string ]
 /// }
 /// ```
+///
+/// The parse allocates what php's does, the `php_url` and every part,
+/// held until `php_url_free`, and the array is keyed by the interned
+/// names php's `ZSTR_KNOWN` are.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); return memory_get_peak_usage() - $s; }
+/// echo pk(fn() => parse_url("h://u:p@h:1/p?q#f")), ' ', pk(fn() => parse_url("h://h?a#b")), ' ', pk(fn() => parse_url("h://h/p?a#b", PHP_URL_QUERY)), "\n";
+/// ```
+/// ```expect
+/// 664 568 224
+/// ```
 #[php_function]
 fn parse_url(
     req: &mut Request,
@@ -550,49 +559,117 @@ fn parse_url(
     let Some(url) = parse(url.as_bytes()) else {
         return Ok(Some(OrFalse::False));
     };
-    let parts: [Part; 8] = [
-        (PHP_URL_SCHEME, b"scheme", url.scheme.as_ref()),
-        (PHP_URL_HOST, b"host", url.host.as_ref()),
-        (PHP_URL_PORT, b"port", None),
-        (PHP_URL_USER, b"user", url.user.as_ref()),
-        (PHP_URL_PASS, b"pass", url.pass.as_ref()),
-        (PHP_URL_PATH, b"path", url.path.as_ref()),
-        (PHP_URL_QUERY, b"query", url.query.as_ref()),
-        (PHP_URL_FRAGMENT, b"fragment", url.fragment.as_ref()),
+    // `php_url_parse_ex2`'s allocations: the `php_url`, then each part a
+    // `zend_string_init` in the order the parse reaches it, all of them
+    // held until `php_url_free`.
+    let resource = Emalloc::new(req, PHP_URL)?;
+    let order: [(i64, Option<&Vec<u8>>); 7] = [
+        (PHP_URL_SCHEME, url.scheme.as_ref()),
+        (PHP_URL_USER, url.user.as_ref()),
+        (PHP_URL_PASS, url.pass.as_ref()),
+        (PHP_URL_HOST, url.host.as_ref()),
+        (PHP_URL_FRAGMENT, url.fragment.as_ref()),
+        (PHP_URL_QUERY, url.query.as_ref()),
+        (PHP_URL_PATH, url.path.as_ref()),
     ];
+    let mut held: Vec<(i64, Owner<PhpString>)> = Vec::with_capacity(order.len());
+    let mut made = Ok(());
+    for (id, bytes) in order {
+        if let Some(bytes) = bytes {
+            match PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(bytes)) {
+                Ok(part) => held.push((id, part)),
+                Err(thrown) => {
+                    made = Err(thrown);
+                    break;
+                }
+            }
+        }
+    }
+    let answer = made.and_then(|()| url_components(req, key, &url, &held));
+    // `php_url_free`.
+    for (_, part) in held {
+        part.give_up(req);
+    }
+    resource.free(req);
+    answer
+}
+
+/// `sizeof(php_url)` on the oracle's LP64: seven `zend_string *` and the
+/// `unsigned short` among them.
+const PHP_URL: usize = 64;
+
+/// What `parse_url` answers from the parts `held`: the one `key` names,
+/// `RETVAL_STR_COPY`, or every part under its name in the array's order.
+fn url_components(
+    req: &mut Request,
+    key: i64,
+    url: &Url,
+    held: &[(i64, Owner<PhpString>)],
+) -> Result<Option<OrFalse<Component>>, Thrown> {
+    let held_part = |id: i64| {
+        held.iter()
+            .find(|(held, _)| *held == id)
+            .map(|(_, part)| **part)
+    };
     if key > -1 {
         if key == PHP_URL_PORT {
             return Ok(url
                 .port
                 .map(|port| OrFalse::Value(Union::A(i64::from(port)))));
         }
-        return match parts.iter().find(|(id, _, _)| *id == key) {
-            Some((_, _, Some(bytes))) => {
-                let part = PhpString::new(req, bytes)?;
-                Ok(Some(OrFalse::Value(Union::B(Union::B(part)))))
-            }
-            Some((_, _, None)) => Ok(None),
-            None => Err(arg_value_error(
+        if !matches!(
+            key,
+            PHP_URL_SCHEME
+                | PHP_URL_HOST
+                | PHP_URL_USER
+                | PHP_URL_PASS
+                | PHP_URL_PATH
+                | PHP_URL_QUERY
+                | PHP_URL_FRAGMENT
+        ) {
+            return Err(arg_value_error(
                 req,
                 2,
                 &format!("be a valid URL component identifier, {key} given"),
-            )),
-        };
+            ));
+        }
+        return Ok(
+            held_part(key).map(|found| OrFalse::Value(Union::B(Union::B(Owner::take(req, found)))))
+        );
     }
+    let names: [(i64, &[u8]); 8] = [
+        (PHP_URL_SCHEME, b"scheme"),
+        (PHP_URL_HOST, b"host"),
+        (PHP_URL_PORT, b"port"),
+        (PHP_URL_USER, b"user"),
+        (PHP_URL_PASS, b"pass"),
+        (PHP_URL_PATH, b"path"),
+        (PHP_URL_QUERY, b"query"),
+        (PHP_URL_FRAGMENT, b"fragment"),
+    ];
     let mut array = PhpArray::new(req)?;
-    for (id, name, bytes) in parts {
+    for (id, name) in names {
         let value = if id == PHP_URL_PORT {
             match url.port {
                 Some(port) => Owner::int(i64::from(port)),
                 None => continue,
             }
         } else {
-            match bytes {
-                Some(bytes) => PhpString::new(req, bytes)?.into_value(),
+            match held_part(id) {
+                Some(found) => Owner::take(req, found).into_value(),
                 None => continue,
             }
         };
-        array.set_str(req, name, value)?;
+        // `zend_hash_add_new` under `ZSTR_KNOWN(ZEND_STR_SCHEME)` and the
+        // rest: the interned name, which costs the request nothing.
+        let written = PhpString::interned(req, name).and_then(|name| {
+            let key = Key::from_string(req, Owner::take(req, name));
+            array.set(req, key, value)
+        });
+        if let Err(thrown) = written {
+            array.give_up(req);
+            return Err(thrown);
+        }
     }
     Ok(Some(OrFalse::Value(Union::B(Union::A(array)))))
 }

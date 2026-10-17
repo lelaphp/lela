@@ -379,6 +379,20 @@ type Found = (Vec<u8>, Vec<Option<Vec<u8>>>);
 /// int(1)
 /// getopt(): Argument #2 ($long_options) must be of type array, null given
 /// ```
+///
+/// The body holds what php's does for its length, the argv copy and the
+/// option table with each long option's name, past which the answer is
+/// counted; each one measured past `getopt("z")`, which holds the same
+/// argv.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); return memory_get_peak_usage() - $s; }
+/// $z = pk(fn() => getopt("z"));
+/// echo pk(fn() => getopt("a:b::c", ["dd:", "e::"])) - $z, ' ', pk(fn() => getopt("abcdefghij")) - $z, ' ', pk(fn() => getopt("", array_fill(0, 9, "long-option-name"))) - $z, "\n";
+/// ```
+/// ```expect
+/// 96 160 720
+/// ```
 #[php_function]
 fn getopt(
     req: &mut Request,
@@ -386,7 +400,6 @@ fn getopt(
     #[php(default = [])] long_options: PhpArray,
     #[php(default = null)] rest_index: Ref<Untyped<Value>>,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    use php_ext::syntax::{Getopt, Opt, Taken};
     let spec = short_options;
     rest_index.set(req, Untyped(Value::int(1)))?;
     // `$_SERVER['argv']` as `php_build_argv` wrote it, each argument a C
@@ -395,18 +408,80 @@ fn getopt(
     if argv.is_empty() {
         return Ok(OrFalse::False);
     }
+    // What php's body allocates beside its answer, all of it given back as
+    // it returns (`free_longopts`, `efree(orig_opts)`, `free_argv`).
+    let mut scratch = GetoptScratch::default();
+    let answer = getopt_in(req, spec, long_options, &rest_index, &argv, &mut scratch);
+    scratch.free(req);
+    answer
+}
+
+/// The blocks `getopt` holds for its length, as php's: the argv copy,
+/// `safe_emalloc(sizeof(char *), argc + 1, 0)` and an `estrdup` of each
+/// argument, and the option table, `parse_opts`' `safe_emalloc` grown by
+/// `safe_erealloc` for the long options, with an `estrdup` of each long
+/// option's name.
+#[derive(Default)]
+struct GetoptScratch {
+    blocks: Vec<Emalloc>,
+    opts: Option<Emalloc>,
+}
+
+/// `sizeof(opt_struct)` on the oracle's LP64.
+const OPT_STRUCT: usize = 16;
+
+impl GetoptScratch {
+    fn hold(&mut self, req: &mut Request, len: usize) -> Result<(), Thrown> {
+        self.blocks.push(Emalloc::new(req, len)?);
+        Ok(())
+    }
+
+    fn free(self, req: &mut Request) {
+        if let Some(opts) = self.opts {
+            opts.free(req);
+        }
+        for block in self.blocks.into_iter().rev() {
+            block.free(req);
+        }
+    }
+}
+
+/// `getopt` past the read of `argv`, its scratch held in `scratch`.
+fn getopt_in(
+    req: &mut Request,
+    spec: PhpString,
+    long_options: PhpArray,
+    rest_index: &Ref<Untyped<Value>>,
+    argv: &[Vec<u8>],
+    scratch: &mut GetoptScratch,
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
+    use php_ext::syntax::{Getopt, Opt, Taken};
+    scratch.hold(req, size_of::<usize>() * (argv.len() + 1))?;
+    for arg in argv {
+        scratch.hold(req, arg.len() + 1)?;
+    }
+    // `parse_opts`: a row for each letter or digit of the string up to
+    // its NUL, then the table grown to every long option and the end row.
+    let short = c_str(spec.as_bytes());
+    let len = short.iter().filter(|b| b.is_ascii_alphanumeric()).count();
+    scratch.opts = Some(Emalloc::new(req, OPT_STRUCT * len)?);
+    let count = long_options.len();
+    if let Some(opts) = scratch.opts.take() {
+        scratch.opts = Some(opts.resize(req, OPT_STRUCT * (len + count + 1))?);
+    }
     // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(p_longopts), entry)`
     // (`Z/ext/standard/basic_functions.c:1012`), no owner of the table
     // taken: the argument holds it while `__toString` runs.
     let mut longs = Vec::new();
     walk::foreach(req, long_options, Hold::None, |req, row| -> walk::Step {
-        let option = with_string(req, row.value(), |text| {
-            crate::getopt::long_option(c_str(text))
+        let (option, len) = with_string(req, row.value(), |text| {
+            (crate::getopt::long_option(c_str(text)), c_str(text).len())
         })?;
+        scratch.hold(req, len + 1)?;
         longs.push(option);
         Ok(ControlFlow::Continue(()))
     })?;
-    let mut opts: Vec<Opt<'_>> = crate::getopt::short_options(c_str(spec.as_bytes()));
+    let mut opts: Vec<Opt<'_>> = crate::getopt::short_options(short);
     opts.extend(longs.iter().map(|(name, need)| Opt {
         code: 0,
         need: *need,
@@ -419,7 +494,7 @@ fn getopt(
     // value it was given.
     let mut found: Vec<Found> = Vec::new();
     loop {
-        match walk.next(&argv) {
+        match walk.next(argv) {
             Ok(Taken::End) => break,
             Err(_) => {}
             Ok(Taken::Switch { code, row, value }) => {
@@ -445,8 +520,12 @@ fn getopt(
         };
         let mut items = Vec::new();
         for value in values {
+            // `ZVAL_STRING`, which allocates whatever the length.
             items.push(match value {
-                Some(bytes) => PhpString::new(req, &bytes)?.into_value(),
+                Some(bytes) => {
+                    PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(&bytes))?
+                        .into_value()
+                }
                 None => Owner::bool(false),
             });
         }
