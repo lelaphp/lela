@@ -40,23 +40,45 @@ fn served(src: &str, expected: &str) {
     assert_eq!(String::from_utf8_lossy(&served.stdout), expected);
 }
 
-/// `curl_multi_close()` from inside a transfer's write callback gives up
-/// the `CurlHandle` the multi held, whose object goes as the callback
-/// returns: the transfer holds its `CURL *`, which is cleaned up as the
-/// transfer ends, and the multi transfer runs to its end.
+/// `curl_multi_close()` from inside a write callback of a transfer its
+/// multi is running is refused with `curl_close()`'s Error, the multi
+/// keeping the `CurlHandle` it held while the callback lets go of the
+/// program's last other reference, and the transfer runs to its end
+/// (`trace:curl-multi-closed-in-callback`, #2647).
 #[test]
-fn a_handle_freed_by_its_own_write_callback_transfers_to_its_end() {
-    let file = Scratch::new("curl-freed-in-callback", &vec![b'x'; 40000]);
+fn a_multi_closed_by_its_own_write_callback_is_refused_and_the_transfer_runs_to_its_end() {
+    let file = Scratch::new("curl-closed-in-callback", &vec![b'x'; 40000]);
     served(
         &format!(
             "<?php $m = curl_multi_init(); $d = curl_init('{}');\n\
-             curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($m) {{ static $n = 0; if ($n++ === 0) {{ curl_multi_close($m); echo \"closed\\n\"; }} return strlen($data); }});\n\
+             curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($m) {{ static $n = 0; if ($n++ === 0) {{ try {{ curl_multi_close($m); }} catch (Error $e) {{ echo get_class($e), ': ', $e->getMessage(), \"\\n\"; }} }} return strlen($data); }});\n\
              curl_multi_add_handle($m, $d); unset($d);\n\
              do {{ $status = curl_multi_exec($m, $active); }} while ($active && $status == CURLM_OK);\n\
-             var_dump($status, curl_multi_get_handles($m));\n",
+             var_dump($status, curl_multi_get_handles($m) !== []);\n\
+             curl_multi_close($m); var_dump(curl_multi_get_handles($m));\n",
             file.url()
         ),
-        "closed\nint(0)\narray(0) {\n}\n",
+        "Error: curl_multi_close(): Attempt to close cURL handle from a callback\nint(0)\nbool(true)\narray(0) {\n}\n",
+    );
+}
+
+/// `curl_multi_close()` of another multi from inside a write callback
+/// closes it, the `CurlHandle`s it held let go, and the running transfer
+/// runs to its end.
+#[test]
+fn another_multi_closed_from_a_write_callback_is_closed() {
+    let file = Scratch::new("curl-other-closed-in-callback", &vec![b'x'; 40000]);
+    served(
+        &format!(
+            "<?php $m = curl_multi_init(); $other = curl_multi_init(); curl_multi_add_handle($other, curl_init());\n\
+             $d = curl_init('{}');\n\
+             curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($other) {{ static $n = 0; if ($n++ === 0) {{ curl_multi_close($other); echo \"closed\\n\"; }} return strlen($data); }});\n\
+             curl_multi_add_handle($m, $d); unset($d);\n\
+             do {{ $status = curl_multi_exec($m, $active); }} while ($active && $status == CURLM_OK);\n\
+             var_dump($status, curl_multi_get_handles($m) !== [], curl_multi_get_handles($other));\n",
+            file.url()
+        ),
+        "closed\nint(0)\nbool(true)\narray(0) {\n}\n",
     );
 }
 
@@ -106,11 +128,12 @@ fn a_form_whose_element_throws_closes_its_file_parts() {
     );
 }
 
-/// A `CurlHandle` whose form holds a `CURLFile` freed from inside the
-/// write callback of a transfer started from another transfer's
-/// callback: the inner transfer holds its `CURL *`, which is cleaned up
-/// as that transfer ends, while the outer one still lends the request
-/// (#2520).
+/// A `CurlHandle` whose form holds a `CURLFile`, its program's reference
+/// let go, in a transfer started from another transfer's callback, whose
+/// own write callback is refused the close of its multi: the inner
+/// transfer runs to its end and its `CurlHandle` and form are cleaned up with
+/// the request's end, while the outer one still lends the request
+/// (#2520, #2647).
 #[test]
 fn a_handle_freed_inside_a_nested_transfer_is_cleaned_up_with_no_request_lent() {
     let body = Scratch::new("curl-nested-body", &vec![b'x'; 40000]);
@@ -124,7 +147,7 @@ fn a_handle_freed_inside_a_nested_transfer_is_cleaned_up_with_no_request_lent() 
                  if ($n++ === 0) {{\n\
                      $m = curl_multi_init(); $d = curl_init($url);\n\
                      curl_setopt($d, CURLOPT_POSTFIELDS, ['file' => new CURLFile($f)]);\n\
-                     curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($m) {{ static $k = 0; if ($k++ === 0) {{ curl_multi_close($m); echo \"closed\\n\"; }} return strlen($data); }});\n\
+                     curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($m) {{ static $k = 0; if ($k++ === 0) {{ try {{ curl_multi_close($m); }} catch (Error $e) {{ echo \"refused\\n\"; }} }} return strlen($data); }});\n\
                      curl_multi_add_handle($m, $d); unset($d);\n\
                      do {{ $status = curl_multi_exec($m, $active); }} while ($active && $status == CURLM_OK);\n\
                      echo \"inner \", $status, \"\\n\";\n\
@@ -135,6 +158,6 @@ fn a_handle_freed_inside_a_nested_transfer_is_cleaned_up_with_no_request_lent() 
             body.url(),
             upload.0.display()
         ),
-        "closed\ninner 0\nbool(true)\n",
+        "refused\ninner 0\nbool(true)\n",
     );
 }

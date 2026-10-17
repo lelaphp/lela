@@ -27,6 +27,9 @@ pub(crate) struct Mh {
     push: Option<Handler>,
     /// `err.no`.
     err: i64,
+    /// Whether `curl_multi_exec` is running a transfer of this multi, so
+    /// that a callback of one of its easy handles may be on the stack.
+    running: bool,
 }
 
 /// `final class CurlMultiHandle`, `@strict-properties`,
@@ -339,8 +342,10 @@ fn curl_multi_exec(
         None => 0,
     };
     let multi = multi_of(req, multi_handle)?;
+    let was = std::mem::replace(&mut mh(req, multi_handle)?.running, true);
     #[allow(clippy::cast_possible_truncation)]
     let ((code, running), thrown) = multi.perform(req, &held, running as i32);
+    mh(req, multi_handle)?.running = was;
     if let Some(thrown) = thrown {
         return Err(thrown);
     }
@@ -466,32 +471,34 @@ fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
 /// }
 /// ```
 ///
-/// From inside a transfer's write callback it takes the `CurlHandle`
-/// whose callback it is off the multi, and the transfer runs to its end.
-/// Where the multi held the `CurlHandle`'s last reference, the
-/// transfer holds its `CURL *`, which is cleaned
-/// up as `curl_multi_exec` ends (#2317), and ext/curl's leak sensor test
-/// `a_handle_freed_by_its_own_write_callback_transfers_to_its_end`
-/// serves that shape. The fence keeps `$d`.
+/// From inside a callback of a transfer this multi is running it is
+/// refused with the Error `curl_close()` throws from a callback, and the
+/// transfer goes on (`trace:curl-multi-closed-in-callback`; ext/curl's
+/// leak sensor test
+/// `a_multi_closed_by_its_own_write_callback_is_refused_and_the_transfer_runs_to_its_end`).
+/// Another multi closes from a callback as from anywhere else.
 ///
 /// ```php
 /// $f = tempnam(sys_get_temp_dir(), 'curl');
 /// file_put_contents($f, str_repeat('x', 40000));
 /// $m = curl_multi_init();
+/// $other = curl_multi_init();
+/// curl_multi_add_handle($other, curl_init());
 /// $d = curl_init("file://$f");
-/// curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($m) {
+/// curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($other) {
 ///     static $n = 0;
-///     if ($n++ === 0) { curl_multi_close($m); echo "closed\n"; }
+///     if ($n++ === 0) { curl_multi_close($other); echo "closed\n"; }
 ///     return strlen($data);
 /// });
 /// curl_multi_add_handle($m, $d);
 /// do { $status = curl_multi_exec($m, $active); } while ($active && $status == CURLM_OK);
-/// var_dump($status, curl_multi_get_handles($m));
+/// var_dump($status, count(curl_multi_get_handles($m)), curl_multi_get_handles($other));
 /// unlink($f);
 /// ```
 /// ```expect
 /// closed
 /// int(0)
+/// int(1)
 /// array(0) {
 /// }
 /// ```
@@ -500,6 +507,13 @@ fn curl_multi_close(
     req: &mut Request,
     multi_handle: Instance<CurlMultiHandle>,
 ) -> Result<(), Thrown> {
+    if mh(req, multi_handle)?.running {
+        let text = format!(
+            "{}(): Attempt to close cURL handle from a callback",
+            req.active_function_name()
+        );
+        return Err(throw_error(req, "Error", &text));
+    }
     let multi = multi_of(req, multi_handle)?;
     let handles = std::mem::take(&mut mh(req, multi_handle)?.easy);
     for handle in handles {
