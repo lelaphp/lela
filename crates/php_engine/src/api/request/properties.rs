@@ -160,7 +160,7 @@ impl Request {
     /// that stood put back after it, whatever `f` answers: the one form
     /// every save of php's fake scope takes, so `properties.fake_scope`
     /// is written nowhere else.
-    pub(super) fn in_fake_scope<R>(
+    pub(crate) fn in_fake_scope<R>(
         &mut self,
         scope: Option<ClassId>,
         f: impl FnOnce(&mut Self) -> R,

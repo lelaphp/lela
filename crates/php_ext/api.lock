@@ -1318,6 +1318,7 @@ values::PhpObject::property_table
 values::PhpObject::props
 values::PhpObject::protect
 values::PhpObject::protect_in
+values::PhpObject::read_prop_in
 values::PhpObject::rebuild_properties
 values::PhpObject::replace_table
 values::PhpObject::row

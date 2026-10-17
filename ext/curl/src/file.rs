@@ -12,7 +12,7 @@ use php_ext::coerce::{to_string, with_string};
 use php_ext::raising::{Level, Thrown, docref, while_pending};
 use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef};
 
 use crate::ffi::{MimeBuilder, Posted};
 use crate::handle::{Curl, easy_of, made};
@@ -281,14 +281,39 @@ fn is_a(req: &mut Request, value: &Value, class: &[u8]) -> Result<Option<PhpObje
     Ok(object.instance_of(req, id).then_some(object))
 }
 
-/// A string property's bytes, `None` for one that holds no string.
+/// A string property's bytes, `None` for one that holds no string, read
+/// as `zend_read_property(ce, obj, name, /* silent */ false, &rv)` reads
+/// it in the declaring class's scope: an unset typed property is php's
+/// `Error`, the `Err`. The form walk goes on past each throw, as php's
+/// does, and the request's throwable is the first with each later one
+/// its previous.
+///
+/// ```php
+/// $f = new CURLFile('/etc/hosts'); unset($f->name);
+/// $g = new CURLFile('/etc/hosts'); unset($g->mime); unset($g->postname);
+/// $s = new CURLStringFile('d', 'p'); unset($s->data);
+/// $c = curl_init('file:///nonexistent');
+/// try { var_dump(curl_setopt($c, CURLOPT_POSTFIELDS, ['f' => $f, 'x' => 'y'])); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { var_dump(curl_setopt($c, CURLOPT_POSTFIELDS, ['g' => $g, 'x' => 'y'])); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; var_dump($e->getPrevious()?->getMessage()); }
+/// try { var_dump(curl_setopt($c, CURLOPT_POSTFIELDS, ['s' => $s])); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: curl_setopt(): Invalid filename for key f in %s on line 6
+/// Error: Typed property CURLFile::$name must not be accessed before initialization
+/// Error: Typed property CURLFile::$postname must not be accessed before initialization
+/// string(73) "Typed property CURLFile::$mime must not be accessed before initialization"
+/// Error: Typed property CURLStringFile::$data must not be accessed before initialization
+/// ```
 fn prop_bytes(
     req: &mut Request,
     object: PhpObject,
     name: &[u8],
 ) -> Result<Option<Vec<u8>>, Thrown> {
-    let value = read_prop(req, &object, name)?.deref();
-    Ok(value.as_str_bytes().map(<[u8]>::to_vec))
+    let value = object.read_prop_in(req, PropertyScope::Declaring, name)?;
+    let bytes = value.deref().as_str_bytes().map(<[u8]>::to_vec);
+    value.give_up(req);
+    Ok(bytes)
 }
 
 /// `ch->postfields` replaced by `array`, one more owner of it.
