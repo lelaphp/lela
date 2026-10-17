@@ -65,6 +65,7 @@ fn rot13_factory(
     _req: &mut Request,
     _name: &[u8],
     _params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     Ok(Some(Box::new(Strfilter { map: rot13 })))
 }
@@ -74,6 +75,7 @@ fn toupper_factory(
     _req: &mut Request,
     _name: &[u8],
     _params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     Ok(Some(Box::new(Strfilter {
         map: |b| b.to_ascii_uppercase(),
@@ -85,6 +87,7 @@ fn tolower_factory(
     _req: &mut Request,
     _name: &[u8],
     _params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     Ok(Some(Box::new(Strfilter {
         map: |b| b.to_ascii_lowercase(),
@@ -155,6 +158,7 @@ fn consumed_factory(
     _req: &mut Request,
     name: &[u8],
     _params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     if !name.eq_ignore_ascii_case(b"consumed") {
         return Ok(None);
@@ -363,6 +367,7 @@ fn dechunk_factory(
     _req: &mut Request,
     name: &[u8],
     _params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     if !name.eq_ignore_ascii_case(b"dechunk") {
         return Ok(None);

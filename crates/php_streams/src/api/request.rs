@@ -1155,10 +1155,13 @@ pub trait StreamFilter: Send {
 
 /// `php_stream_filter_factory`'s `create_filter`: a filter of the name
 /// the program asked for, which may be one a wildcard matched, with the
-/// parameters it was given; `None` is the factory's refusal, after
-/// whatever it said.
+/// parameters it was given, and `persistent`, whether the stream it is
+/// made for is (`php_stream_is_persistent`), so that a factory keeps what
+/// a persistent stream's filter allocates off the request's heap, as
+/// `pemalloc(.., persistent)` does; `None` is the factory's refusal,
+/// after whatever it said.
 pub type FilterFactory =
-    fn(&mut Request, &[u8], Option<&Value>) -> Result<Option<Box<dyn StreamFilter>>, Thrown>;
+    fn(&mut Request, &[u8], Option<&Value>, bool) -> Result<Option<Box<dyn StreamFilter>>, Thrown>;
 
 /// No declared type, the stream `PHP_Z_PARAM_STREAM` holds: a resource,
 /// as [`Resource`] holds one, and then an open stream

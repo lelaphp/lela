@@ -268,6 +268,7 @@ pub(crate) fn factory(
     _req: &mut Request,
     name: &[u8],
     _params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     Ok(charsets(name).and_then(|(from, to)| {
         let cd = Cd::open(to, from).ok()?;
