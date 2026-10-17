@@ -162,6 +162,16 @@ fn xml_load_args(
     })
 }
 
+/// The body `Dom\XMLDocument::createFromString` and `createFromFile`
+/// share. A file that does not open is php's `Cannot open file '%s'`,
+/// the name's bytes as given:
+///
+/// ```php
+/// try { @Dom\XMLDocument::createFromFile("/nonexistent/\xff.xml"); } catch (Exception $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect exit=0
+/// 43616e6e6f74206f70656e2066696c6520272f6e6f6e6578697374656e742fff2e786d6c27
+/// ```
 pub(crate) fn xml_load(
     req: &mut Request,
     given: (PhpString, i64, Option<PhpString>),
@@ -213,12 +223,9 @@ pub(crate) fn xml_load(
         }
         Parsed::Nothing | Parsed::Document(None) => {
             if from_file {
-                let name = String::from_utf8_lossy(&source).into_owned();
-                return Err(throw(
-                    req,
-                    "Exception",
-                    &format!("Cannot open file '{name}'"),
-                ));
+                // `zend_throw_exception_ex`'s `%s`: the bytes as given.
+                let message = [&b"Cannot open file '"[..], &source, b"'"].concat();
+                return Err(throw(req, "Exception", &message));
             }
             return Err(dom_throw(req, Code::InvalidState));
         }
