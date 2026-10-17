@@ -15,7 +15,7 @@
 use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::{Pemalloc, PhpArray, Value};
 
 /// `php_conv_err_t` less `PHP_CONV_ERR_SUCCESS`, the `Ok`, and the three
 /// no converter here answers.
@@ -678,11 +678,39 @@ fn conv_open(
     Ok(Some(conv))
 }
 
+/// `sizeof(php_convert_filter)` on the oracle's LP64.
+const FILTER: usize = 160;
+
+/// `sizeof` of each converter php allocates, on the oracle's LP64:
+/// `php_conv_base64_encode`, `_base64_decode`, `_qprint_encode` and
+/// `_qprint_decode`.
+const BASE64_ENCODE: usize = 56;
+const BASE64_DECODE: usize = 32;
+const QPRINT_ENCODE: usize = 64;
+const QPRINT_DECODE: usize = 56;
+
+impl Conv {
+    /// `sizeof` the converter php `pemalloc`s, and the line break it
+    /// `pestrdup`s where it keeps one.
+    fn allocated(&self) -> (usize, Option<&[u8]>) {
+        match self {
+            Conv::Base64Encode(c) => (BASE64_ENCODE, c.lbchars.as_deref()),
+            Conv::Base64Decode(_) => (BASE64_DECODE, None),
+            Conv::QprintEncode(c) => (QPRINT_ENCODE, c.lbchars.as_deref()),
+            Conv::QprintDecode(c) => (QPRINT_DECODE, c.lbchars.as_deref()),
+        }
+    }
+}
+
 /// `php_convert_filter`: the converter and the name the filter was asked
-/// for, which its warnings print.
+/// for, which its warnings print, and what php allocates for the two,
+/// with the stream's persistence: the `php_convert_filter`, the
+/// `pestrdup`'d name, the converter and its line break, given back in
+/// its `dtor`.
 pub(super) struct ConvertFilter {
     cd: Conv,
     filtername: String,
+    held: Vec<Pemalloc>,
 }
 
 impl ConvertFilter {
@@ -726,6 +754,15 @@ impl ConvertFilter {
 }
 
 impl StreamFilter for ConvertFilter {
+    /// `strfilter_convert_dtor`: the converter's line break, the
+    /// converter, the name and the filter given back.
+    fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        for block in self.held.drain(..).rev() {
+            block.free(req);
+        }
+        Ok(())
+    }
+
     /// `strfilter_convert_filter` (`Z/ext/standard/filters.c:1495`): each
     /// bucket converted, and the flush under `PSFS_FLAG_FLUSH_CLOSE`.
     fn filter(
@@ -801,11 +838,37 @@ impl StreamFilter for ConvertFilter {
 /// Warning: stream_filter_append(): Unable to create or locate filter "convert.nope" in %s on line 20
 /// bool(false)
 /// ```
+///
+/// What php allocates for a filter is counted with the stream's
+/// persistence, here and in `dechunk` and `consumed`: made, removed, and
+/// made on a persistent stream, past a filter of the name made first.
+///
+/// ```php
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// $a = pfsockopen(...explode(':', stream_socket_get_name($s, false)));
+/// $cases = [['convert.base64-encode', ['line-length' => 8]], ['convert.base64-encode', ['line-length' => 8, 'line-break-chars' => str_repeat('-', 40)]], ['convert.base64-decode', []], ['convert.quoted-printable-encode', ['line-length' => 8]], ['convert.quoted-printable-decode', ['line-break-chars' => "\n"]], ['dechunk', null], ['consumed', null]];
+/// foreach ($cases as [$name, $p]) {
+///     $f = fopen('php://memory', 'w+');
+///     $w = fopen('php://memory', 'w+'); stream_filter_append($w, $name, STREAM_FILTER_READ, $p);
+///     $m = memory_get_usage(); $h = stream_filter_append($f, $name, STREAM_FILTER_READ, $p); $made = memory_get_usage() - $m;
+///     $m = memory_get_usage(); stream_filter_remove($h); $gone = memory_get_usage() - $m;
+///     $m = memory_get_usage(); $q = stream_filter_append($a, $name, STREAM_FILTER_READ, $p); echo $name, ' ', $made, ' ', $gone, ' ', memory_get_usage() - $m, "\n";
+/// }
+/// ```
+/// ```expect
+/// convert.base64-encode 368 -336 64
+/// convert.base64-encode 368 -368 352
+/// convert.base64-decode 296 -296 32
+/// convert.quoted-printable-encode 352 -352 32
+/// convert.quoted-printable-decode 344 -344 32
+/// dechunk 96 -96 32
+/// consumed 104 -104 32
+/// ```
 pub(super) fn create(
     req: &mut Request,
     name: &[u8],
     params: Option<&Value>,
-    _persistent: bool,
+    persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     let filtername = String::from_utf8_lossy(name).into_owned();
     let options = params.map(|value| value.as_array().copied());
@@ -821,5 +884,18 @@ pub(super) fn create(
     let Some(cd) = conv_open(req, &name[dot + 1..], options)? else {
         return Ok(None);
     };
-    Ok(Some(Box::new(ConvertFilter { cd, filtername })))
+    let (size, lbchars) = cd.allocated();
+    let mut held = vec![
+        Pemalloc::new(req, FILTER, persistent)?,
+        Pemalloc::new(req, name.len() + 1, persistent)?,
+        Pemalloc::new(req, size, persistent)?,
+    ];
+    if let Some(lbchars) = lbchars {
+        held.push(Pemalloc::new(req, lbchars.len() + 1, persistent)?);
+    }
+    Ok(Some(Box::new(ConvertFilter {
+        cd,
+        filtername,
+        held,
+    })))
 }
