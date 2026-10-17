@@ -21,8 +21,20 @@ impl<'t> Input<'t> {
     /// Index `tokens`, the lexer's stream over `text`, whose texts
     /// concatenate to it.
     #[must_use]
+    #[cfg(test)]
     pub fn new(text: &'t [u8], tokens: &'t [Token]) -> Input<'t> {
-        let mut significant = Vec::with_capacity(tokens.len());
+        Input::new_in(text, tokens, Vec::new())
+    }
+
+    /// [`Input::new`] into the room `significant` lends, which
+    /// [`Input::into_significant`] hands back.
+    pub(crate) fn new_in(
+        text: &'t [u8],
+        tokens: &'t [Token],
+        mut significant: Vec<u32>,
+    ) -> Input<'t> {
+        significant.clear();
+        significant.reserve(tokens.len());
         significant.extend(
             tokens
                 .iter()
@@ -35,6 +47,13 @@ impl<'t> Input<'t> {
             tokens,
             significant,
         }
+    }
+
+    /// The significant-token table's room, emptied.
+    pub(crate) fn into_significant(self) -> Vec<u32> {
+        let mut significant = self.significant;
+        significant.clear();
+        significant
     }
 
     /// The number of significant tokens.

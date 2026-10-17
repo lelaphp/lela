@@ -47,6 +47,7 @@ use crate::SyntaxKind;
 use crate::source::TextRange;
 
 pub use builder::{Built, Event, Missing, TOMBSTONE, build};
+pub(crate) use builder::{Stacks, build_in};
 pub use dump::dump;
 
 /// The index of one node in the tree's arena, typed by the node it
