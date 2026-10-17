@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 use std::sync::{Mutex, PoisonError};
 
 use crate::api::abi::{
-    ClassIterator, ClassUnserialize, CloneObj, CloneObjWith, CurrentPlace, DebugInfo,
+    ClassIterator, ClassUnserialize, CloneObj, CloneObjWith, CoreTable, CurrentPlace, DebugInfo,
     DimensionRead, DtorObj, GcTable, IteratorElement, ObjectHandlers, PropertiesFor, PropertyPlace,
     PropertyPurpose, PropertyRead, PropertyTest, Refusals,
 };
@@ -106,6 +106,10 @@ impl ObjectHandlers for Served {
 
     fn refusals(&self) -> Refusals {
         self.table.refusals()
+    }
+
+    fn core_table(&self) -> CoreTable {
+        self.table.core_table()
     }
 
     fn dtor_obj(&self) -> DtorObj {

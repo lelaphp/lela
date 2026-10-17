@@ -170,6 +170,10 @@ impl Default for ZendGenerator {
 struct GeneratorHandlers;
 
 impl ObjectHandlers for GeneratorHandlers {
+    fn core_table(&self) -> crate::api::abi::CoreTable {
+        crate::api::abi::CoreTable::of(crate::api::abi::Core::Generator)
+    }
+
     /// `zend_generator_dtor_storage`.
     fn dtor_obj(&self) -> DtorObj {
         DtorObj::Own(dtor_storage)
@@ -309,7 +313,9 @@ static GENERATOR: GeneratorHandlers = GeneratorHandlers;
 
 /// Whether `object` is a `Generator`, `ce == zend_ce_generator`.
 pub(crate) fn is_generator(req: &Request, object: PhpObject) -> bool {
-    std::ptr::addr_eq(req.handlers_of(object.class()), &raw const GENERATOR)
+    req.handlers_of(object.class())
+        .core_table()
+        .is(crate::api::abi::Core::Generator)
 }
 
 /// `f` over the payload of `object`; none for an object that has none.

@@ -65,6 +65,8 @@ abi::Compiled
 abi::Compiled::op_array
 abi::ConstArray
 abi::ConstValue
+abi::CoreTable
+abi::CoreTable::NONE
 abi::Coroutine
 abi::Coroutine::destroy
 abi::Coroutine::init
@@ -212,6 +214,7 @@ abi::ObjectHandlers::cast_object
 abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
 abi::ObjectHandlers::compare
+abi::ObjectHandlers::core_table
 abi::ObjectHandlers::count_elements
 abi::ObjectHandlers::create_object
 abi::ObjectHandlers::current_place
