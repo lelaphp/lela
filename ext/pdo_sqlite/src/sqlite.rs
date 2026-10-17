@@ -196,7 +196,8 @@ impl Connector for Driver {
                 Db::of(&owner).replace_einfo(req, einfo).free(req);
                 Ok(Box::new(Handle {
                     place: Place::Request(owner),
-                    registrations: Vec::new(),
+                    funcs: Vec::new(),
+                    collations: Vec::new(),
                     authorizer: None,
                     transaction_mode: 0,
                     allocation,
@@ -305,7 +306,11 @@ pub(super) fn safe_filename(req: &mut Request, name: Option<&[u8]>) -> Option<Ve
 /// registered on it, the authorizer, and the transaction style.
 pub(crate) struct Handle {
     place: Place,
-    pub(crate) registrations: Vec<Registration>,
+    /// `H->funcs`, oldest first; php prepends each, so it gives them up
+    /// newest first.
+    pub(crate) funcs: Vec<Registration>,
+    /// `H->collations`, kept and given up as [`Handle::funcs`] are.
+    pub(crate) collations: Vec<Registration>,
     /// `authorizer_fcc`, the callable the connection's authorizer calls
     /// through a view of it ([`Db::set_authorizer`]).
     pub(crate) authorizer: Option<Handler>,
@@ -615,7 +620,29 @@ impl Connection for Handle {
 
     /// `pdo_sqlite_request_shutdown`, `pdo_sqlite_cleanup_callbacks`:
     /// every function and collation taken off the library and its
-    /// callables given up, so none lingers for the next request.
+    /// callables given up, so none lingers for the next request: the
+    /// authorizer, then the functions, then the collations, each list
+    /// newest first, as php prepends them (`Z/ext/pdo_sqlite/sqlite_driver.c:104-140`).
+    ///
+    /// ```php
+    /// class A { function __construct(public $n) {} function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// $db = new Pdo\Sqlite('sqlite::memory:');
+    /// $f1 = new A('f1'); $db->createFunction('f1', function () use ($f1) { return 1; }); unset($f1);
+    /// $c1 = new A('c1'); $db->createCollation('c1', function ($a, $b) use ($c1) { return 0; }); unset($c1);
+    /// $f2 = new A('f2'); $db->createFunction('f2', function () use ($f2) { return 1; }); unset($f2);
+    /// $c2 = new A('c2'); $db->createCollation('c2', function ($a, $b) use ($c2) { return 0; }); unset($c2);
+    /// $au = new A('auth'); $db->setAuthorizer(function () use ($au) { return Pdo\Sqlite::OK; }); unset($au);
+    /// unset($db);
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=0
+    /// dtor auth
+    /// dtor f2
+    /// dtor f1
+    /// dtor c2
+    /// dtor c1
+    /// end
+    /// ```
     fn persistent_shutdown(&mut self, req: &mut Request) {
         if let Some(db) = self.db() {
             db.set_authorizer(req, None);
@@ -623,7 +650,11 @@ impl Connection for Handle {
         if let Some(handler) = self.authorizer.take() {
             handler.give_up(req);
         }
-        for registration in std::mem::take(&mut self.registrations) {
+        // `H->funcs` and then `H->collations`, each walked from its head,
+        // which is the newest, as php prepends at registration.
+        let funcs = std::mem::take(&mut self.funcs);
+        let collations = std::mem::take(&mut self.collations);
+        for registration in funcs.into_iter().rev().chain(collations.into_iter().rev()) {
             for handler in registration.unregister(req) {
                 handler.give_up(req);
             }
@@ -635,7 +666,7 @@ impl Connection for Handle {
         if let Some(handler) = &self.authorizer {
             handler.visit(visit);
         }
-        for registration in &self.registrations {
+        for registration in self.funcs.iter().rev().chain(self.collations.iter().rev()) {
             registration.visit(visit);
         }
     }
@@ -1098,7 +1129,7 @@ pub(super) fn register(
         };
         match created {
             Ok(registration) => {
-                handle.registrations.push(registration);
+                handle.funcs.push(registration);
                 Ok(true)
             }
             Err((function, _)) => {
@@ -1128,7 +1159,7 @@ pub(super) fn register_collation(
         };
         match created {
             Ok(registration) => {
-                handle.registrations.push(registration);
+                handle.collations.push(registration);
                 Ok(true)
             }
             Err((handler, _)) => {
