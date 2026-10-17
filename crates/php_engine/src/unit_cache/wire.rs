@@ -220,13 +220,14 @@ impl Wire for Box<str> {
 }
 
 /// The unit's cell is no bytes: whatever reads a unit gives every
-/// closure of it the reader's one cell, which [`Unit::published`] binds.
+/// closure of it a share of the reader's one cell, and the unit the cell
+/// itself, which [`Unit::published`] binds.
 impl Wire for UnitCell {
     fn put(&self, _: &mut Vec<u8>) -> Option<()> {
         Some(())
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
-        Some(r.cell.clone())
+        Some(r.cell.share())
     }
 }
 

@@ -126,15 +126,31 @@ impl Parsed {
 /// hands the stream through the grammar to the builder and retains all
 /// of it, with the diagnostics merged into php's phase order
 /// ([`Parsed::diagnostics`]) and the broken promises the build reported.
+///
+/// The stacks that die with the parse, the significant-token table, the
+/// event stream and the builder's frames, are the thread's [`Scratch`],
+/// lent and taken back empty, so a thread that parses again reuses their
+/// room and a parse of a statement allocates none of them.
 #[must_use]
 pub fn parse(source: &[u8], options: &Options) -> Parsed {
     let file = options.file;
+    let mut scratch = SCRATCH.take();
     let lines = LineIndex::new(source);
     let lexed = lexer::lex_with_lines(file, source, &options.lex, &lines);
-    let input = parser::Input::new(source, &lexed.tokens);
-    let mut p = parser::Parser::new(&input, file, &lines);
+    let input = parser::Input::new_in(
+        source,
+        &lexed.tokens,
+        std::mem::take(&mut scratch.significant),
+    );
+    let events = std::mem::take(&mut scratch.stacks.events);
+    let mut p = parser::Parser::new_in(&input, file, &lines, events);
     grammar::source_file(&mut p);
-    let built = tree::build(&lexed.tokens, &lines, p.finish());
+    let events = p.finish();
+    scratch.significant = input.into_significant();
+    let built = tree::build_in(&lexed.tokens, &lines, events, &mut scratch.stacks);
+    if scratch.within(Scratch::KEPT) {
+        SCRATCH.set(scratch);
+    }
     let diagnostics = in_php_order(&lexed.tokens, lexed.diagnostics, built.diagnostics);
     Parsed {
         source: source.into(),
@@ -145,6 +161,29 @@ pub fn parse(source: &[u8], options: &Options) -> Parsed {
         missing: built.missing,
         filtered: Filtered::default(),
     }
+}
+
+/// The room [`parse`] lends its stages and takes back empty: one per
+/// thread, taken for a parse and put back after it, so a parse nested in
+/// another finds none and makes its own.
+#[derive(Default)]
+struct Scratch {
+    significant: Vec<u32>,
+    stacks: tree::Stacks,
+}
+
+impl Scratch {
+    /// The most room of one stack a thread keeps between parses: a parse
+    /// of a large file pays for its own and gives it up.
+    const KEPT: usize = 64 * 1024;
+
+    fn within(&self, bytes: usize) -> bool {
+        self.significant.capacity() * size_of::<u32>() <= bytes && self.stacks.within(bytes)
+    }
+}
+
+thread_local! {
+    static SCRATCH: std::cell::Cell<Scratch> = std::cell::Cell::new(Scratch::default());
 }
 
 /// The scanner's and the parser's diagnostics as one list in the order

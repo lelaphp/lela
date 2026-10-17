@@ -8070,7 +8070,7 @@ impl Emit<'_> {
         Ok(ConstExpr::Closure {
             at,
             name: Name(name.into_boxed_slice()),
-            unit: self.cell.clone(),
+            unit: self.cell.share(),
         })
     }
 
@@ -8170,7 +8170,7 @@ impl Emit<'_> {
             name_kind,
             line,
             at,
-            unit: self.cell.clone(),
+            unit: self.cell.share(),
         }
     }
 

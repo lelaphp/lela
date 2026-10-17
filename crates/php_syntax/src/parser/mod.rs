@@ -168,7 +168,18 @@ pub struct CompletedMarker {
 impl<'t> Parser<'t> {
     /// A parser at the start of `input`, `lines` being the table over the
     /// same source.
+    #[cfg(test)]
     pub fn new(input: &'t Input<'t>, file: FileId, lines: &'t LineIndex) -> Parser<'t> {
+        Parser::new_in(input, file, lines, Vec::new())
+    }
+
+    /// [`Parser::new`] writing its events into the room `events` lends.
+    pub(crate) fn new_in(
+        input: &'t Input<'t>,
+        file: FileId,
+        lines: &'t LineIndex,
+        mut events: Vec<Event>,
+    ) -> Parser<'t> {
         let burst_cap = u32::try_from(input.len())
             .unwrap_or(u32::MAX)
             .saturating_mul(4)
@@ -181,7 +192,11 @@ impl<'t> Parser<'t> {
             // A token's event and about a node's two per token: room
             // for what a parse of this many tokens emits, so the stream
             // seldom grows.
-            events: Vec::with_capacity(input.len().saturating_mul(3).saturating_add(4)),
+            events: {
+                events.clear();
+                events.reserve(input.len().saturating_mul(3).saturating_add(4));
+                events
+            },
             fuel: FUEL,
             burst: 0,
             burst_cap,

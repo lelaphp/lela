@@ -188,7 +188,49 @@ struct Builder<'a> {
 /// fail the build: a `Finish` with nothing open is dropped, and a frame
 /// still open at the end is finished.
 #[must_use]
-pub fn build(tokens: &[Token], lines: &LineIndex, mut events: Vec<Event>) -> Built {
+pub fn build(tokens: &[Token], lines: &LineIndex, events: Vec<Event>) -> Built {
+    build_in(tokens, lines, events, &mut Stacks::default())
+}
+
+/// The builder's stacks that die with the build: the open frames, their
+/// pending children, a forward-parent chain and the event stream once
+/// read. A parse lends them ([`crate::parse`]) and takes them back
+/// empty, so a thread that parses again reuses their room and a small
+/// parse allocates none of them.
+#[derive(Default)]
+pub(crate) struct Stacks {
+    pub(crate) events: Vec<Event>,
+    pending: Vec<Element>,
+    frames: Vec<Frame>,
+    chain: Vec<SyntaxKind>,
+}
+
+impl Stacks {
+    /// Whether every stack's room is within `bytes`, the most a thread
+    /// keeps between parses.
+    pub(crate) fn within(&self, bytes: usize) -> bool {
+        self.events.capacity() * size_of::<Event>() <= bytes
+            && self.pending.capacity() * size_of::<Element>() <= bytes
+            && self.frames.capacity() * size_of::<Frame>() <= bytes
+            && self.chain.capacity() * size_of::<SyntaxKind>() <= bytes
+    }
+}
+
+/// One of [`Stacks`] taken for a build, with room for `at_least`.
+fn lent<T>(stack: &mut Vec<T>, at_least: usize) -> Vec<T> {
+    let mut stack = std::mem::take(stack);
+    stack.reserve(at_least);
+    stack
+}
+
+/// [`build`] over the stacks `stacks` lends, handed back empty with
+/// `events`' room among them.
+pub(crate) fn build_in(
+    tokens: &[Token],
+    lines: &LineIndex,
+    mut events: Vec<Event>,
+    stacks: &mut Stacks,
+) -> Built {
     // The shape holds an element per `Start` and per `Token`, so it is
     // laid down once at that length, and grows only where the root takes
     // tokens the parser left unconsumed.
@@ -207,9 +249,9 @@ pub fn build(tokens: &[Token], lines: &LineIndex, mut events: Vec<Event>) -> Bui
         prev: None,
         doc_comment: None,
         elements: Vec::with_capacity(shaped),
-        pending: Vec::with_capacity(shaped.min(2 * OPEN)),
-        frames: Vec::with_capacity(OPEN),
-        chain: Vec::new(),
+        pending: lent(&mut stacks.pending, shaped.min(2 * OPEN)),
+        frames: lent(&mut stacks.frames, OPEN),
+        chain: std::mem::take(&mut stacks.chain),
         nodes: Nodes::default(),
         missing: Vec::new(),
     };
@@ -270,6 +312,15 @@ pub fn build(tokens: &[Token], lines: &LineIndex, mut events: Vec<Event>) -> Bui
     while !builder.frames.is_empty() {
         builder.finish();
     }
+    events.clear();
+    builder.pending.clear();
+    builder.chain.clear();
+    *stacks = Stacks {
+        events,
+        pending: builder.pending,
+        frames: builder.frames,
+        chain: builder.chain,
+    };
     Built {
         tree: Tree {
             elements: builder.elements.into_boxed_slice(),
