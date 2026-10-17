@@ -5037,25 +5037,25 @@ impl Emit<'_> {
         let vars = std::mem::take(&mut self.vars);
         let num_cvs = u32::try_from(vars.len()).unwrap_or(u32::MAX);
         Ok(OpArray {
-            oplines: oplines.into_boxed_slice(),
-            literals: std::mem::take(&mut self.constants).into_boxed_slice(),
-            const_exprs: std::mem::take(&mut self.const_exprs).into_boxed_slice(),
-            vars: vars.into_boxed_slice(),
+            oplines,
+            literals: std::mem::take(&mut self.constants),
+            const_exprs: std::mem::take(&mut self.const_exprs),
+            vars,
             num_cvs,
             num_tmps: self.temporaries,
-            try_catch: std::mem::take(&mut self.try_catch).into_boxed_slice(),
+            try_catch: std::mem::take(&mut self.try_catch),
             live_ranges,
-            safepoints: std::mem::take(&mut self.safepoints).into_boxed_slice(),
+            safepoints: std::mem::take(&mut self.safepoints),
             filename: Name(self.filename.into()),
             line_start,
             line_end,
             cache_size: self.cache_slots,
             runtime_cache: php_unit::MapPtrOffset::default(),
-            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into_boxed_slice(),
-            bound_vars: std::mem::take(&mut self.static_vars).into_boxed_slice(),
+            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
+            bound_vars: std::mem::take(&mut self.static_vars),
             no_receiver: self.fn_flags.is_static,
             strict_types: self.typing == Typing::Strict,
-            numeric_dims: std::mem::take(&mut self.numeric_dims).into_boxed_slice(),
+            numeric_dims: std::mem::take(&mut self.numeric_dims),
         })
     }
 

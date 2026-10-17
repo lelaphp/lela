@@ -1024,9 +1024,8 @@ mod tests {
                     op1: 0,
                     out: 1,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
-                safepoints: vec![OplineIdx(0), OplineIdx(0)].into_boxed_slice(),
+                }],
+                safepoints: vec![OplineIdx(0), OplineIdx(0)],
                 ..OpArray::default()
             },
             ..Unit::default()

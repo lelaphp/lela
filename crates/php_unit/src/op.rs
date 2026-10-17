@@ -298,20 +298,20 @@ pub struct BoundVar {
 /// number. A return's entry holds the `RETURN*` itself.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpArray {
-    pub oplines: Box<[Opline]>,
-    pub literals: Box<[Zval]>,
+    pub oplines: Vec<Opline>,
+    pub literals: Vec<Zval>,
     /// The constant expressions a constant of kind `IS_CONSTANT_AST`
     /// indexes, php's `zend_ast_ref` behind such a zval: what
     /// `zend_compile_params` leaves in a `RECV_INIT`'s `op2` for a
     /// default naming a constant, evaluated by the opline that copies it
     /// and read as written by Reflection.
-    pub const_exprs: Box<[ConstExpr]>,
-    pub vars: Box<[Name]>,
+    pub const_exprs: Vec<ConstExpr>,
+    pub vars: Vec<Name>,
     pub num_cvs: u32,
     pub num_tmps: u32,
-    pub try_catch: Box<[TryCatch]>,
-    pub live_ranges: Box<[LiveRange]>,
-    pub safepoints: Box<[OplineIdx]>,
+    pub try_catch: Vec<TryCatch>,
+    pub live_ranges: Vec<LiveRange>,
+    pub safepoints: Vec<OplineIdx>,
     pub filename: Name,
     pub line_start: u32,
     pub line_end: u32,
@@ -328,7 +328,7 @@ pub struct OpArray {
     /// per entry; a unit holds every such op array once, in
     /// [`crate::Unit::dynamic`], and the entry is its index there, so
     /// no part of a unit points into another.
-    pub dynamic_func_defs: Box<[u32]>,
+    pub dynamic_func_defs: Vec<u32>,
     /// `op_array->static_variables` (`Z/Zend/zend_compile.h:534`): the
     /// variables the op array binds through `BIND_STATIC`, in the order
     /// `zend_compile_static_var_common` added them to the table, which
@@ -337,7 +337,7 @@ pub struct OpArray {
     /// `use` variables, written or implied, first, then every `static`
     /// of the body. The values a request binds live in the request, per
     /// closure object or per function, never here.
-    pub bound_vars: Box<[BoundVar]>,
+    pub bound_vars: Vec<BoundVar>,
     /// `ZEND_ACC_STATIC` on the op array (`Z/Zend/zend_compile.h:283`):
     /// a closure written `static function` or `static fn`, which
     /// `ZEND_DECLARE_LAMBDA_FUNCTION` reads to bind it no receiver. A
@@ -363,10 +363,24 @@ pub struct OpArray {
     /// `Z/Zend/zend_vm_def.h:6822`), so `$o['10']` hands `offsetGet` the
     /// string `"10"` where `$a['10']` is the key `10` (bug #63217). The
     /// slots are ascending, as the compiler lays them down.
-    pub numeric_dims: Box<[ConstIdx]>,
+    pub numeric_dims: Vec<ConstIdx>,
 }
 
 impl OpArray {
+    /// The tables shrunk to what they hold ([`crate::Unit::compact`]).
+    pub(crate) fn compact(&mut self) {
+        self.oplines.shrink_to_fit();
+        self.literals.shrink_to_fit();
+        self.const_exprs.shrink_to_fit();
+        self.vars.shrink_to_fit();
+        self.try_catch.shrink_to_fit();
+        self.live_ranges.shrink_to_fit();
+        self.safepoints.shrink_to_fit();
+        self.dynamic_func_defs.shrink_to_fit();
+        self.bound_vars.shrink_to_fit();
+        self.numeric_dims.shrink_to_fit();
+    }
+
     /// `Z_EXTRA_P(dim) == ZEND_EXTRA_VALUE ? dim + 1 : dim`: the
     /// dimension a handler over an object reads for the `CONST` operand
     /// at `at`, which is the string as written where
@@ -385,6 +399,41 @@ impl OpArray {
 
 #[cfg(test)]
 mod tests {
+    /// A unit held for more than one request keeps no table's slack: the
+    /// emitter's vectors grow as they are written and stay so for an
+    /// `eval`'s unit, and [`crate::Unit::compact`] shrinks every op
+    /// array's, a method's among them, to what it holds.
+    #[test]
+    fn a_compacted_unit_holds_no_more_than_its_tables_hold() {
+        let grown = || {
+            let mut oplines = Vec::with_capacity(16);
+            oplines.push(Opline::default());
+            let mut literals = Vec::with_capacity(16);
+            literals.push(Zval::long(1));
+            OpArray {
+                oplines,
+                literals,
+                safepoints: Vec::with_capacity(8),
+                ..OpArray::default()
+            }
+        };
+        let mut unit = crate::Unit {
+            main: grown(),
+            methods: vec![crate::unit::MethodBody {
+                class: 0,
+                method: 0,
+                body: grown(),
+            }],
+            ..crate::Unit::default()
+        };
+        unit.compact();
+        for body in [&unit.main, &unit.methods[0].body] {
+            assert_eq!(body.oplines.capacity(), 1);
+            assert_eq!(body.literals.capacity(), 1);
+            assert_eq!(body.safepoints.capacity(), 0);
+        }
+    }
+
     use super::*;
 
     #[test]

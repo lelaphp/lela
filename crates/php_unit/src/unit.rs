@@ -150,6 +150,32 @@ impl Unit {
         shared.cell.0.set(Arc::downgrade(&shared)).ok();
         shared
     }
+
+    /// Every op array's tables shrunk to what they hold, as opcache
+    /// copies a persisted unit into shared memory at its exact size
+    /// (`zend_persist_op_array_ex`): what a unit held for more than one
+    /// request pays once, where the engine publishes it, and a unit one
+    /// request compiles for itself, an `eval`'s, never pays.
+    pub fn compact(&mut self) {
+        let Unit {
+            main,
+            functions,
+            methods,
+            hooks,
+            dynamic,
+            ..
+        } = self;
+        main.compact();
+        for (_, body) in functions.iter_mut().chain(dynamic.iter_mut()) {
+            body.compact();
+        }
+        for method in methods {
+            method.body.compact();
+        }
+        for hook in hooks {
+            hook.body.compact();
+        }
+    }
 }
 
 /// An auto-global that makes a variable: one of the names
