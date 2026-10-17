@@ -66,7 +66,8 @@ impl Request {
     /// (`Z/Zend/zend_execute_API.c:822`), the built-in handler renders a
     /// diagnostic where no handler stands, and a stream's wrapper errors
     /// are kept quiet. A fatal or an exit runs nothing and answers
-    /// `None`: php's `zend_bailout` left before the step.
+    /// `None`: php's `zend_bailout` left before the step. What a step's
+    /// call answers is [`crate::api::raising::while_pending`]'s to say.
     pub(crate) fn while_pending<R>(
         &mut self,
         pending: &Thrown,
