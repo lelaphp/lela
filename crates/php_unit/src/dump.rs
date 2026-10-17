@@ -140,25 +140,15 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> Vec<u8> {
         op_array(&mut out, &decl.name.0, num_args(decl), body, frameless);
         dynamic_defs(&mut out, unit, body, frameless, 0);
     }
-    // The class table's order: a class completes after the classes
-    // declared inside its methods, which is the order `unit.methods`
-    // holds its bodies in. A class with hooks and no method takes its
-    // place among its neighbours by declaration.
-    let mut order: Vec<u32> = Vec::new();
-    for method in &unit.methods {
-        if !order.contains(&method.class) {
-            order.push(method.class);
-        }
-    }
-    for hook in &unit.hooks {
-        if !order.contains(&hook.class) {
-            let at = order
-                .iter()
-                .position(|&class| class > hook.class)
-                .unwrap_or(order.len());
-            order.insert(at, hook.class);
-        }
-    }
+    // `CG(class_table)`'s order, as each declaration completed
+    // (`Unit::completed`); a unit built by hand without one is read in
+    // declaration order.
+    let declared = 0..u32::try_from(unit.classes.len()).unwrap_or(u32::MAX);
+    let order: Vec<u32> = if unit.completed.is_empty() {
+        declared.collect()
+    } else {
+        unit.completed.clone()
+    };
     for at in order {
         let Some(class) = unit.classes.get(at as usize) else {
             continue;

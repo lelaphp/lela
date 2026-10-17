@@ -559,6 +559,9 @@ pub(crate) struct Emit<'a> {
     /// [`Unit::top_level`]: each top-level function and class, in the
     /// order compiled.
     top_level: Vec<TopLevel>,
+    /// [`Unit::completed`]: each class of [`Emit::classes`] as its
+    /// declaration completed.
+    completed: Vec<u32>,
     /// The rest of [`Emit::classes`], each under the runtime definition
     /// key its `DECLARE_CLASS` carries, [`Unit::runtime_keys`], in the
     /// order the keys were made.
@@ -1351,6 +1354,7 @@ impl<'a> Emit<'a> {
             classes: Vec::new(),
             bound: Vec::new(),
             top_level: Vec::new(),
+            completed: Vec::new(),
             runtime_keys: Vec::new(),
             attributed_constants: Vec::new(),
             keys_before: options.keys_before,
@@ -1457,6 +1461,7 @@ pub(crate) fn unit(
         dynamic,
         methods: emit.methods,
         hooks: emit.hooks,
+        completed: emit.completed,
         diagnostics: emit.diagnostics,
         classes: emit.classes,
         arms: emit.arms,
@@ -5379,6 +5384,10 @@ impl Emit<'_> {
         if is_enum {
             self.enum_funcs_registered(at)?;
         }
+        // `zend_hash_add_ptr(CG(class_table), ...)` after the body
+        // compiled: the class enters the table after every class one of
+        // its members declared.
+        self.completed.push(u32::try_from(at).unwrap_or(u32::MAX));
         Ok(Entered {
             at,
             parent,
@@ -19584,6 +19593,7 @@ mod tests {
             classes: Vec::new(),
             bound: Vec::new(),
             top_level: Vec::new(),
+            completed: Vec::new(),
             runtime_keys: Vec::new(),
             attributed_constants: Vec::new(),
             keys_before: 0,

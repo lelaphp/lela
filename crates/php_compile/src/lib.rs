@@ -4666,6 +4666,55 @@ mod tests {
         );
     }
 
+    /// A class completes after the classes its hooks declare, so php's
+    /// `CG(class_table)` holds an anonymous class written in a hook ahead
+    /// of the class around it, and the dump prints the anonymous class's
+    /// hook and method before the hook it stands in. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 (#2690).
+    #[test]
+    fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
+        assert_eq!(
+            dump_of(
+                b"<?php class T { public $p { get => new class { \
+                  public $q { get => 1; } function m() {} }; } }"
+            ),
+            "\n$_main:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \n\
+             class@anonymous::m:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN null\n\
+             \n\
+             class@anonymous::$q::get:\n\
+             \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             0001 RETURN null\n\
+             \n\
+             T::$p::get:\n\
+             \x20    ; (lines=5, args=0, vars=0, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 V0 = DECLARE_ANON_CLASS string(\"class@anonymous\\x00:1$0\")\n\
+             0001 V1 = NEW 0 V0\n\
+             0002 DO_FCALL\n\
+             0003 RETURN V1\n\
+             0004 RETURN null\n\
+             LIVE RANGES:\n\
+             \x20    1: 0002 - 0003 (new)\n"
+        );
+    }
+
     /// `zend_compile_class_const` runs `zend_eval_const_expr` over the class
     /// before it compiles it, so `"ab"[0]::d` reads the class `a` the
     /// dimension folds to, one `FETCH_CLASS_CONSTANT string("a")

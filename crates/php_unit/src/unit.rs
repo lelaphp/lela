@@ -80,6 +80,13 @@ pub struct Unit {
     /// the declaration model as a method's is: in the order
     /// `zend_compile_property_hooks` compiled them.
     pub hooks: Vec<HookBody>,
+    /// Each class of `classes` by its index, in the order its
+    /// declaration completed, after its body, which is where php's
+    /// `zend_compile_class_decl` adds it to `CG(class_table)`
+    /// (`Z/Zend/zend_compile.c:9348`): after every class declared inside
+    /// one of its methods or hooks. A unit built by hand that leaves it
+    /// empty is read in declaration order.
+    pub completed: Vec<u32>,
     /// Every function of the file that no name binds while it compiles:
     /// one written inside a block, a loop or another body, which php
     /// compiles with `toplevel` false and binds with the
