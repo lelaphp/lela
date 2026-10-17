@@ -1313,9 +1313,10 @@ pub enum PointerMove {
     Backward,
 }
 
-/// The scope a property is written in ([`PhpObject::write_prop_in`]),
-/// what `zend_update_property_ex` sets `EG(fake_scope)` to for the
-/// write, and so which private or protected property the name reaches.
+/// The scope a property is written or read in ([`PhpObject::write_prop_in`],
+/// [`PhpObject::read_prop_in`]), what `zend_update_property_ex` and
+/// `zend_read_property_ex` set `EG(fake_scope)` to for the access, and
+/// so which private or protected property the name reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyScope {
     /// `zend_update_property_ex(prop_info->ce, ..)`: the scope of the
@@ -2046,6 +2047,40 @@ impl PhpObject {
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         req.write_property_as_declared(*self, name, value)
+    }
+
+    /// Read one property by name through the class's `read_property`
+    /// with `BP_VAR_R`, as `zend_read_property_ex(scope, obj, name,
+    /// /* silent */ false, &rv)` reads one, `EG(fake_scope)` set to
+    /// `scope` for the read: an unset typed property is php's `Error`,
+    /// the `Err`, and a name nothing holds php's `Undefined property`
+    /// warning and `null`. The answer is the caller's owner.
+    ///
+    /// ```php
+    /// $f = new CURLFile('/etc/hosts'); unset($f->name);
+    /// try { curl_setopt(curl_init(), CURLOPT_POSTFIELDS, ['f' => $f]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: curl_setopt(): Invalid filename for key f in %s on line 3
+    /// Typed property CURLFile::$name must not be accessed before initialization
+    /// ```
+    pub fn read_prop_in(
+        &self,
+        req: &mut Request,
+        scope: PropertyScope,
+        name: &[u8],
+    ) -> Result<Owner<Value>, Thrown> {
+        let table = req.object_handlers(self.heap());
+        let object = *self;
+        let read = |req: &mut Request| {
+            table.read_property(req, object, name, crate::api::abi::PropertyRead::Warning)
+        };
+        match scope {
+            PropertyScope::Declaring => req.in_declared_scope(object.class(), name, read),
+            PropertyScope::Executing => req.in_fake_scope(None, read),
+            PropertyScope::Of(ClassRef(class)) => req.in_fake_scope(Some(class), read),
+        }
     }
 
     /// Write one property by name through the class's `write_property`,

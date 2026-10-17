@@ -575,8 +575,15 @@ fn server_exception(
             .and_then(|s| s.service.as_ref())
             .is_some_and(|s| s.send_errors != 0);
         let msg = if send {
-            let m = php_ext::call::read_prop(req, &exception, b"message")?;
-            with_string(req, &m, <[u8]>::to_vec)?
+            // `zend_read_property_ex(zend_ce_error, .., /* silent */ false)`.
+            let m = exception.read_prop_in(
+                req,
+                php_ext::values::PropertyScope::Declaring,
+                b"message",
+            )?;
+            let msg = with_string(req, &m, <[u8]>::to_vec);
+            m.give_up(req);
+            msg?
         } else {
             b"Internal Error".to_vec()
         };
