@@ -140,25 +140,15 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> Vec<u8> {
         op_array(&mut out, &decl.name.0, num_args(decl), body, frameless);
         dynamic_defs(&mut out, unit, body, frameless, 0);
     }
-    // The class table's order: a class completes after the classes
-    // declared inside its methods, which is the order `unit.methods`
-    // holds its bodies in. A class with hooks and no method takes its
-    // place among its neighbours by declaration.
-    let mut order: Vec<u32> = Vec::new();
-    for method in &unit.methods {
-        if !order.contains(&method.class) {
-            order.push(method.class);
-        }
-    }
-    for hook in &unit.hooks {
-        if !order.contains(&hook.class) {
-            let at = order
-                .iter()
-                .position(|&class| class > hook.class)
-                .unwrap_or(order.len());
-            order.insert(at, hook.class);
-        }
-    }
+    // `CG(class_table)`'s order, as each declaration completed
+    // (`Unit::completed`); a unit built by hand without one is read in
+    // declaration order.
+    let declared = 0..u32::try_from(unit.classes.len()).unwrap_or(u32::MAX);
+    let order: Vec<u32> = if unit.completed.is_empty() {
+        declared.collect()
+    } else {
+        unit.completed.clone()
+    };
     for at in order {
         let Some(class) = unit.classes.get(at as usize) else {
             continue;
@@ -166,11 +156,17 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> Vec<u8> {
         let methods = unit.methods.iter().filter(|method| method.class == at);
         let mut hooks: Vec<_> = unit.hooks.iter().filter(|hook| hook.class == at).collect();
         hooks.sort_by_key(|hook| (hook.property, hook.kind == crate::decl::HookKind::Set));
+        // `!(op_array->fn_flags & ZEND_ACC_ABSTRACT)` holds the function
+        // table alone: an abstract method's body, its `RECV` prologue
+        // alone, is no op array `zend_foreach_op_array` walks, while a
+        // property's hooks are walked by scope whether abstract or not,
+        // so an interface's `get;` prints its `RETURN null`.
         let bodies = methods
             .filter_map(|method| {
                 class
                     .methods
                     .get(method.method as usize)
+                    .filter(|decl| !decl.is_abstract)
                     .map(|decl| (decl, &method.body))
             })
             .chain(hooks.into_iter().filter_map(|hook| {
@@ -181,10 +177,7 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> Vec<u8> {
                     .and_then(|hooks| hooks.of(hook.kind))
                     .map(|decl| (decl, &hook.body))
             }));
-        // `!(op_array->fn_flags & ZEND_ACC_ABSTRACT)`: an abstract
-        // method's body, its `RECV` prologue alone, is no op array
-        // `zend_foreach_op_array` walks.
-        for (decl, body) in bodies.filter(|(decl, _)| !decl.is_abstract) {
+        for (decl, body) in bodies {
             let name = [
                 crate::decl::shown_bytes(&class.name.0),
                 b"::",

@@ -1009,6 +1009,17 @@ mod tests {
         assert_eq!((unit.main.line_start, unit.main.line_end), (1, 3));
     }
 
+    /// The scanner stops at `__halt_compiler();`, so the main op array
+    /// of a halted file ends on the halt's line and the data after it
+    /// counts none, as php's `halt01.phpt` dump reads `:1-5`.
+    #[test]
+    fn a_halted_file_ends_on_the_halt_s_line() {
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1;\n__halt_compiler();\ndata\n");
+        assert_eq!((unit.main.line_start, unit.main.line_end), (1, 2));
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1;\n__halt_compiler() ?>\ndata\n");
+        assert_eq!(unit.main.line_end, 3);
+    }
+
     /// The dump of one source compiled through [`compile_source`] under
     /// `short_open_tag`, which is the route the lexer is told it by.
     fn dump_under_short_open_tag(source: &[u8], short_open_tag: bool) -> String {
@@ -4605,6 +4616,102 @@ mod tests {
              \x20    3: 0003 - 0004 (new)\n\
              \x20    5: 0006 - 0007 (new)\n\
              "
+        );
+    }
+
+    /// A hook with no body, an interface's or an abstract property's, is
+    /// an op array `zend_foreach_op_array` walks, since it walks a
+    /// property's hooks by scope and holds only the function table to
+    /// `ZEND_ACC_ABSTRACT`: `get` prints `VERIFY_RETURN_TYPE` where the
+    /// property is typed and `RETURN null`, `set` its `RECV` and
+    /// `RETURN null`, and the abstract method prints nothing. The dump
+    /// is the oracle's under `[regime.dump]` at 8.5.9 (#2674).
+    #[test]
+    fn an_abstract_hook_is_dumped_and_an_abstract_method_is_not() {
+        assert_eq!(
+            dump_of(
+                b"<?php interface I { public mixed $i { get; } } \
+                  abstract class A { abstract public int $p { get; set; } abstract function m(); }"
+            ),
+            "\n$_main:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \n\
+             I::$i::get:\n\
+             \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 VERIFY_RETURN_TYPE\n\
+             0001 RETURN null\n\
+             \n\
+             A::$p::get:\n\
+             \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 VERIFY_RETURN_TYPE\n\
+             0001 RETURN null\n\
+             \n\
+             A::$p::set:\n\
+             \x20    ; (lines=2, args=1, vars=1, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 CV0($value) = RECV 1\n\
+             0001 RETURN null\n"
+        );
+    }
+
+    /// A class completes after the classes its hooks declare, so php's
+    /// `CG(class_table)` holds an anonymous class written in a hook ahead
+    /// of the class around it, and the dump prints the anonymous class's
+    /// hook and method before the hook it stands in. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 (#2690).
+    #[test]
+    fn a_class_declared_in_a_hook_is_dumped_before_the_hook_s_class() {
+        assert_eq!(
+            dump_of(
+                b"<?php class T { public $p { get => new class { \
+                  public $q { get => 1; } function m() {} }; } }"
+            ),
+            "\n$_main:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \n\
+             class@anonymous::m:\n\
+             \x20    ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN null\n\
+             \n\
+             class@anonymous::$q::get:\n\
+             \x20    ; (lines=2, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             0001 RETURN null\n\
+             \n\
+             T::$p::get:\n\
+             \x20    ; (lines=5, args=0, vars=0, tmps=3)\n\
+             \x20    ; (before optimizer)\n\
+             \x20    ; :1-1\n\
+             \x20    ; return  [] RANGE[0..0]\n\
+             0000 V0 = DECLARE_ANON_CLASS string(\"class@anonymous\\x00:1$0\")\n\
+             0001 V1 = NEW 0 V0\n\
+             0002 DO_FCALL\n\
+             0003 RETURN V1\n\
+             0004 RETURN null\n\
+             LIVE RANGES:\n\
+             \x20    1: 0002 - 0003 (new)\n"
         );
     }
 
