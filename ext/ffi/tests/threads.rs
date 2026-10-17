@@ -34,12 +34,19 @@ fn returned_to(name: &str) -> PathBuf {
 
 /// A C library that keeps the callback and calls it from a thread of
 /// its own, `delay` after the call that handed it over, which has
-/// returned by then.
+/// returned by then. What it returned is written under a name of its own
+/// and renamed into place, so [`served`]'s poll never reads the file
+/// between its creation and its write, which a plain `fs::write` lets it
+/// read as `""` (#2699).
 fn call_later(callback: Callback, delay: Duration, name: &'static str) {
     std::thread::spawn(move || {
         std::thread::sleep(delay);
         let returned = callback(21);
-        std::fs::write(returned_to(name), returned.to_string()).ok();
+        let to = returned_to(name);
+        let written = to.with_extension("writing");
+        if std::fs::write(&written, returned.to_string()).is_ok() {
+            std::fs::rename(&written, &to).ok();
+        }
     });
 }
 
