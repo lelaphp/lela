@@ -1584,9 +1584,11 @@ impl Shared {
     /// `unit` published for every request: each op array given its
     /// map-pointer offset ([`assign_map_ptrs`]), which only a unit held
     /// for more than one request takes, as only what opcache persists
-    /// moves `CG(map_ptr_last)`.
+    /// moves `CG(map_ptr_last)`, and its tables shrunk to what they hold
+    /// ([`Unit::compact`]).
     pub(crate) fn publish_compiled(&self, mut unit: Unit) -> Arc<Unit> {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
+        unit.compact();
         unit.published()
     }
 
@@ -7785,8 +7787,7 @@ mod tests {
                 oplines: vec![php_unit::Opline {
                     opcode: php_unit::Opcode::UserOpcode,
                     ..php_unit::Opline::default()
-                }]
-                .into_boxed_slice(),
+                }],
                 ..php_unit::OpArray::default()
             },
             ..Unit::default()

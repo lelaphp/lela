@@ -781,8 +781,8 @@ mod tests {
 
     fn body(oplines: Vec<Opline>, literals: Vec<Zval>) -> OpArray {
         OpArray {
-            oplines: oplines.into_boxed_slice(),
-            literals: literals.into_boxed_slice(),
+            oplines,
+            literals,
             filename: Name::from("a.php"),
             line_start: 1,
             line_end: 1,
@@ -1050,7 +1050,7 @@ mod tests {
             ],
             vec![],
         );
-        body.vars = vec![Name::from("a"), Name::from("b")].into_boxed_slice();
+        body.vars = vec![Name::from("a"), Name::from("b")];
         body.num_cvs = 2;
         body.num_tmps = 2;
         assert_eq!(line(&body, 0), "ADD CV0($a) T2");
@@ -1091,7 +1091,7 @@ mod tests {
             ],
             vec![Zval::long(1)],
         );
-        body.vars = vec![Name::from("x")].into_boxed_slice();
+        body.vars = vec![Name::from("x")];
         body.num_cvs = 1;
         body.num_tmps = 3;
         assert_eq!(line(&body, 0), "CV0($x) = RECV 1");
@@ -1132,7 +1132,7 @@ mod tests {
             ],
             vec![],
         );
-        body.vars = vec![Name::from("a")].into_boxed_slice();
+        body.vars = vec![Name::from("a")];
         body.num_cvs = 1;
         body.num_tmps = 3;
         assert_eq!(line(&body, 0), "ASSIGN CV0($a) V2");
@@ -1164,7 +1164,7 @@ mod tests {
             }],
             vec![Zval::array(table)],
         );
-        body.vars = vec![Name::from("a")].into_boxed_slice();
+        body.vars = vec![Name::from("a")];
         body.num_cvs = 1;
         assert_eq!(
             line(&body, 0),
@@ -1216,7 +1216,7 @@ mod tests {
             vec![Zval::array(table)],
         );
         function.filename = Name(b"\xfe.php"[..].into());
-        function.vars = vec![Name(b"\xe9\0after"[..].into())].into_boxed_slice();
+        function.vars = vec![Name(b"\xe9\0after"[..].into())];
         function.num_cvs = 1;
         let unit = Unit {
             main: body(vec![], vec![]),
@@ -1493,7 +1493,7 @@ mod tests {
             })
             .collect();
         let body = OpArray {
-            vars: Box::new([Name::from("a")]),
+            vars: vec![Name::from("a")],
             num_cvs: 1,
             ..body(oplines, vec![])
         };
@@ -1522,7 +1522,7 @@ mod tests {
             ..with(op(opcode), OperandKind::Cv, 0, second, other)
         };
         let body = OpArray {
-            vars: Box::new([Name::from("a"), Name::from("b"), Name::from("t")]),
+            vars: vec![Name::from("a"), Name::from("b"), Name::from("t")],
             num_cvs: 3,
             ..body(
                 vec![
@@ -1589,18 +1589,18 @@ mod tests {
         let unit = Unit {
             main: OpArray {
                 num_cvs: 8,
-                live_ranges: Box::new([
+                live_ranges: vec![
                     range(3, LiveKind::Loop, 4, 11),
                     range(4, LiveKind::Silence, 6, 9),
                     range(7, LiveKind::Rope, 12, 14),
                     range(10, LiveKind::New, 17, 22),
                     range(14, LiveKind::TmpVar, 24, 25),
-                ]),
-                try_catch: Box::new([TryCatch {
+                ],
+                try_catch: vec![TryCatch {
                     try_op: OplineIdx(26),
                     catch_op: OplineIdx(30),
                     ..TryCatch::default()
-                }]),
+                }],
                 ..body(vec![], vec![])
             },
             ..Unit::default()
@@ -1630,7 +1630,7 @@ mod tests {
         ];
         let unit = Unit {
             main: OpArray {
-                try_catch: Box::new(ranges),
+                try_catch: ranges.to_vec(),
                 ..body(vec![], vec![])
             },
             ..Unit::default()

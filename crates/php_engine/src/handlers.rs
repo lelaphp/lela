@@ -23501,8 +23501,7 @@ mod tests {
                         out: number,
                         ..Opline::default()
                     },
-                ]
-                .into_boxed_slice(),
+                ],
                 ..OpArray::default()
             },
             ..Unit::default()
@@ -23583,9 +23582,8 @@ mod tests {
                         out: 1,
                         ..Opline::default()
                     },
-                ]
-                .into_boxed_slice(),
-                literals: vec![literal].into_boxed_slice(),
+                ],
+                literals: vec![literal],
                 ..OpArray::default()
             },
             ..Unit::default()
@@ -23658,10 +23656,8 @@ mod tests {
                         ..Opline::default()
                     },
                     Opline::default(),
-                ]
-                .into_boxed_slice(),
-                literals: vec![php_heap::Zval::long(left), php_heap::Zval::long(1)]
-                    .into_boxed_slice(),
+                ],
+                literals: vec![php_heap::Zval::long(left), php_heap::Zval::long(1)],
                 num_tmps: 1,
                 ..OpArray::default()
             },
@@ -23715,9 +23711,8 @@ mod tests {
                     op1: 0,
                     out: number,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
-                literals: vec![php_heap::Zval::null()].into_boxed_slice(),
+                }],
+                literals: vec![php_heap::Zval::null()],
                 ..OpArray::default()
             },
             ..Unit::default()
@@ -23795,9 +23790,8 @@ mod tests {
                         out: 0,
                         ..Opline::default()
                     },
-                ]
-                .into_boxed_slice(),
-                literals: vec![written, lowered, argument].into_boxed_slice(),
+                ],
+                literals: vec![written, lowered, argument],
                 num_tmps: 1,
                 cache_size: 8,
                 ..OpArray::default()
@@ -24038,14 +24032,12 @@ mod tests {
                     out: 8,
                     extended_value: 0,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
+                }],
                 literals: vec![
                     interned(&mut strings, b"Foo\\StrLen"),
                     interned(&mut strings, b"foo\\strlen"),
                     interned(&mut strings, b"strlen"),
-                ]
-                .into_boxed_slice(),
+                ],
                 cache_size: 16,
                 ..OpArray::default()
             },
@@ -24092,13 +24084,11 @@ mod tests {
                     op2: 0,
                     out: 0,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
+                }],
                 literals: vec![
                     interned(&mut strings, b"NoPe"),
                     interned(&mut strings, b"nope"),
-                ]
-                .into_boxed_slice(),
+                ],
                 cache_size: 8,
                 ..OpArray::default()
             },
@@ -24139,10 +24129,8 @@ mod tests {
                         ..Opline::default()
                     },
                     Opline::default(),
-                ]
-                .into_boxed_slice(),
-                literals: vec![interned(strings, written), interned(strings, lowered)]
-                    .into_boxed_slice(),
+                ],
+                literals: vec![interned(strings, written), interned(strings, lowered)],
                 cache_size: 8,
                 ..OpArray::default()
             },
@@ -24220,9 +24208,8 @@ mod tests {
                     op2,
                     out: 0,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
-                literals: literals.into_boxed_slice(),
+                }],
+                literals,
                 cache_size: 16,
                 ..OpArray::default()
             },
@@ -24323,14 +24310,12 @@ mod tests {
                     op2: 0,
                     out: 0,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
+                }],
                 literals: vec![
                     interned(strings, b"GetMessage"),
                     interned(strings, b"getmessage"),
-                ]
-                .into_boxed_slice(),
-                vars: vec![php_unit::decl::Name::from("o")].into_boxed_slice(),
+                ],
+                vars: vec![php_unit::decl::Name::from("o")],
                 num_cvs: 1,
                 // `zend_alloc_cache_slots(2)`: the class and the callee.
                 cache_size: 16,
@@ -24484,14 +24469,12 @@ mod tests {
                         extended_value: 16,
                         ..Opline::default()
                     },
-                ]
-                .into_boxed_slice(),
+                ],
                 literals: vec![
                     interned(&mut strings, b"NoPe"),
                     interned(&mut strings, b"nope"),
                     interned(&mut strings, b"NOPE"),
-                ]
-                .into_boxed_slice(),
+                ],
                 num_tmps: 3,
                 cache_size: 24,
                 ..OpArray::default()
@@ -24558,9 +24541,8 @@ mod tests {
                     },
                     Opline::default(),
                     Opline::default(),
-                ]
-                .into_boxed_slice(),
-                literals: vec![interned(strings, name)].into_boxed_slice(),
+                ],
+                literals: vec![interned(strings, name)],
                 cache_size: 8,
                 ..OpArray::default()
             },
@@ -24685,8 +24667,7 @@ mod tests {
                     out: 0,
                     extended_value: row,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
+                }],
                 num_tmps: 1,
                 ..OpArray::default()
             },
@@ -24721,8 +24702,7 @@ mod tests {
                     out: 0,
                     extended_value: 1_000_000,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
+                }],
                 num_tmps: 1,
                 ..OpArray::default()
             },
@@ -24748,7 +24728,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
-        let mut oplines = unit.main.oplines.to_vec();
+        let mut oplines = unit.main.oplines.clone();
         let written = strings
             .intern(b"NoPe")
             .map_or(php_heap::Zval::UNDEF, php_heap::Zval::string);
@@ -24760,7 +24740,7 @@ mod tests {
         }
         let unit = Arc::new(Unit {
             main: OpArray {
-                oplines: oplines.into_boxed_slice(),
+                oplines,
                 literals: unit
                     .main
                     .literals
@@ -24806,9 +24786,8 @@ mod tests {
                     op2: 0,
                     out_type: OperandKind::Unused,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
-                literals: vec![php_heap::Zval::long(1)].into_boxed_slice(),
+                }],
+                literals: vec![php_heap::Zval::long(1)],
                 num_cvs: 1,
                 num_tmps: 1,
                 ..OpArray::default()
@@ -24968,9 +24947,8 @@ mod tests {
                     out: 0,
                     lineno: 5,
                     ..Opline::default()
-                }]
-                .into_boxed_slice(),
-                literals: vec![php_heap::Zval::long(7)].into_boxed_slice(),
+                }],
+                literals: vec![php_heap::Zval::long(7)],
                 num_tmps: 1,
                 filename: php_unit::decl::Name::from("planted.php"),
                 ..OpArray::default()

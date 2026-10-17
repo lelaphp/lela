@@ -235,7 +235,7 @@ fn constructor_call(oplines: &[Opline], def: u32, use_at: u32) -> u32 {
 /// the operands hold it. A `FREE` flagged `ZEND_FREE_ON_RETURN` has the
 /// distance to the loop's end written into its `op2`, which is why the
 /// oplines are taken mutably.
-pub(crate) fn live_ranges(oplines: &mut [Opline], num_tmps: u32) -> Box<[LiveRange]> {
+pub(crate) fn live_ranges(oplines: &mut [Opline], num_tmps: u32) -> Vec<LiveRange> {
     let mut ranges = Ranges {
         table: Vec::new(),
         last_use: vec![None; num_tmps as usize],
@@ -330,7 +330,7 @@ pub(crate) fn live_ranges(oplines: &mut [Opline], num_tmps: u32) -> Box<[LiveRan
     {
         php_heap::zend_sort(rest, &mut |a, b| a.start.cmp(&b.start));
     }
-    ranges.table.into_boxed_slice()
+    ranges.table
 }
 
 #[cfg(test)]
