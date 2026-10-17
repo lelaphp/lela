@@ -88,9 +88,13 @@ impl Symbol {
 /// alias as it is looked up (lowered but for a constant's) to the name
 /// it imports, and the symbols the file has declared so far in the
 /// current namespace, by the key each declaration registered, with the
-/// kinds as bits.
+/// kinds as bits. Laid down on the first write, so a file that imports
+/// and declares nothing, an eval of a statement, holds none of them.
 #[derive(Default)]
-pub(super) struct Imports {
+pub(super) struct Imports(Option<Box<Tables>>);
+
+#[derive(Default)]
+struct Tables {
     classes: ByName<Vec<u8>>,
     functions: ByName<Vec<u8>>,
     consts: ByName<Vec<u8>>,
@@ -102,11 +106,16 @@ pub(super) struct Imports {
 type ByName<V> = HashMap<Vec<u8>, V, php_link::NameHasher>;
 
 impl Imports {
+    fn tables(&mut self) -> &mut Tables {
+        self.0.get_or_insert_default()
+    }
+
     fn table(&mut self, kind: Symbol) -> &mut ByName<Vec<u8>> {
+        let tables = self.tables();
         match kind {
-            Symbol::Class => &mut self.classes,
-            Symbol::Function => &mut self.functions,
-            Symbol::Const => &mut self.consts,
+            Symbol::Class => &mut tables.classes,
+            Symbol::Function => &mut tables.functions,
+            Symbol::Const => &mut tables.consts,
         }
     }
 
@@ -117,33 +126,38 @@ impl Imports {
 
     /// `zend_register_seen_symbol`.
     fn see(&mut self, key: Vec<u8>, kind: Symbol) {
-        *self.seen.entry(key).or_default() |= kind.bit();
+        *self.tables().seen.entry(key).or_default() |= kind.bit();
     }
 
     /// `zend_have_seen_symbol`.
     fn have_seen(&self, key: &[u8], kind: Symbol) -> bool {
-        self.seen
-            .get(key)
+        self.0
+            .as_ref()
+            .and_then(|tables| tables.seen.get(key))
             .is_some_and(|bits| bits & kind.bit() != 0)
     }
 
     /// The class name `alias` imports, whatever its case.
     fn class(&self, alias: &[u8]) -> Option<&[u8]> {
-        self.classes
+        let tables = self.0.as_ref().filter(|t| !t.classes.is_empty())?;
+        tables
+            .classes
             .get(&alias.to_ascii_lowercase())
             .map(Vec::as_slice)
     }
 
     /// The function name `alias` imports, whatever its case.
     fn function(&self, alias: &[u8]) -> Option<&[u8]> {
-        self.functions
+        let tables = self.0.as_ref().filter(|t| !t.functions.is_empty())?;
+        tables
+            .functions
             .get(&alias.to_ascii_lowercase())
             .map(Vec::as_slice)
     }
 
     /// The constant name `alias` imports, the case as written.
     fn constant(&self, alias: &[u8]) -> Option<&[u8]> {
-        self.consts.get(alias).map(Vec::as_slice)
+        self.0.as_ref()?.consts.get(alias).map(Vec::as_slice)
     }
 }
 
