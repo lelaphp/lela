@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use hyper::body::Bytes;
 use php_proto::cgi::{Environment, RequestInfo, Settings};
 use php_proto::vpath::Translated;
-use php_sapi::cgi::Disk;
+use php_sapi::cgi::{C_NUMBER, Disk};
 use php_sapi::{
     Aborted, Body, Chdir, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
     ResponseHead, WebRequest,
@@ -242,7 +242,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
     // this host declares none of: `cgi.fix_pathinfo` on, which finds the
     // program as named and leaves the split as it came.
     let settings = Settings::default();
-    let info = php_proto::cgi::request_info(&mut env, settings, None, &Disk);
+    let info = php_proto::cgi::request_info(&mut env, settings, None, &Disk, C_NUMBER);
     // php-fpm registers the parameters newest first, as `fcgi_hash_apply`
     // walks them (`Z/main/fastcgi.c:399-407`): the header fields first and
     // `SCRIPT_FILENAME` last, in `$_SERVER` and `getallheaders()` alike.
