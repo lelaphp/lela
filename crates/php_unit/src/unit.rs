@@ -11,34 +11,49 @@ use crate::op::OpArray;
 /// empty while the unit compiles, and bound once to the unit's shared
 /// copy by [`Unit::published`], which is what php's `ZEND_AST_OP_ARRAY`
 /// reaches directly, its `zend_op_array` pointer. Every closure node of
-/// a unit holds a share of the unit's one cell; the cell holds the unit
-/// weakly, so nothing keeps a unit alive but its sharers.
+/// a unit holds a share of the unit's one cell ([`UnitCell::share`]);
+/// the cell holds the unit weakly, so nothing keeps a unit alive but its
+/// sharers. A unit no closure shares, nearly every one, holds an empty
+/// cell, which costs its compile nothing.
 #[derive(Clone, Default)]
-pub struct UnitCell(Arc<OnceLock<Weak<Unit>>>);
+pub struct UnitCell(Option<Arc<OnceLock<Weak<Unit>>>>);
 
 impl UnitCell {
     /// The unit the cell was bound to, while it is shared; none before
     /// [`Unit::published`] and after the last share is gone.
     #[must_use]
     pub fn unit(&self) -> Option<Arc<Unit>> {
-        self.0.get().and_then(Weak::upgrade)
+        self.0.as_ref()?.get().and_then(Weak::upgrade)
+    }
+
+    /// A share of the cell for a closure of the unit, the cell laid down
+    /// on the first.
+    #[must_use]
+    pub fn share(&mut self) -> UnitCell {
+        UnitCell(Some(Arc::clone(self.0.get_or_insert_default())))
     }
 }
 
 /// Two nodes name one cell, which is one unit's.
 impl PartialEq for UnitCell {
     fn eq(&self, other: &UnitCell) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        match (&self.0, &other.0) {
+            (Some(one), Some(other)) => Arc::ptr_eq(one, other),
+            (None, None) => true,
+            _ => false,
+        }
     }
 }
 
 impl std::fmt::Debug for UnitCell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.0.get().is_some() {
-            "UnitCell(bound)"
-        } else {
-            "UnitCell(unbound)"
-        })
+        f.write_str(
+            if self.0.as_ref().is_some_and(|cell| cell.get().is_some()) {
+                "UnitCell(bound)"
+            } else {
+                "UnitCell(unbound)"
+            },
+        )
     }
 }
 
@@ -147,7 +162,9 @@ impl Unit {
         let shared = Arc::new(self);
         // A unit is published once; a clone published again keeps the
         // first binding, the cell being the clone's too.
-        shared.cell.0.set(Arc::downgrade(&shared)).ok();
+        if let Some(cell) = &shared.cell.0 {
+            cell.set(Arc::downgrade(&shared)).ok();
+        }
         shared
     }
 

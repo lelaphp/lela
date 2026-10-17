@@ -45,6 +45,7 @@ Unit::compact
 Unit::dump
 Unit::published
 UnitCell
+UnitCell::share
 UnitCell::unit
 decl::AliasModifier
 decl::Attribute
