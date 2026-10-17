@@ -199,12 +199,21 @@ impl Request {
     /// check reads it: the linked classes and those whose link is under
     /// way, a class still fetching marked as read.
     pub(super) fn link_against_table(&mut self, decl: &ClassDecl) -> Linking<ClassId> {
-        self.link_reading(decl).0
+        self.link_reading(decl, false).0
     }
 
     /// [`Request::link_against_table`] beside what the link read
     /// ([`Read`]), which the inheritance cache keys a published link by.
-    pub(super) fn link_reading(&mut self, decl: &ClassDecl) -> (Linking<ClassId>, Read) {
+    /// `early` is the bind opcache's load makes,
+    /// `zend_accel_do_delayed_early_binding`, with the class under its
+    /// runtime definition key alone: [`php_link::early_bind`], where a
+    /// check from a scope other than the class's own does not find it by
+    /// its name and leaves an obligation.
+    pub(super) fn link_reading(
+        &mut self,
+        decl: &ClassDecl,
+        early: bool,
+    ) -> (Linking<ClassId>, Read) {
         let values = self.trait_values(decl);
         let read = RefCell::new(Vec::new());
         // What a check read of another class than the one linking:
@@ -249,7 +258,11 @@ impl Request {
                     .find(|(written, _)| written == expr)
                     .map(|(_, value)| value.clone())
             };
-            php_link::link(decl, &lookup, &holder, &evaluated)
+            if early && decl.traits.is_empty() {
+                php_link::early_bind(decl, &lookup, &holder)
+            } else {
+                php_link::link(decl, &lookup, &holder, &evaluated)
+            }
         };
         let read = read.into_inner();
         let reading = Read {

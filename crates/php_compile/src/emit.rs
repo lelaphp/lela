@@ -1203,6 +1203,7 @@ fn class_flags(
             dynamic_properties
         },
         use_guards: false,
+        hooked_variance: false,
     }
 }
 
@@ -5378,6 +5379,9 @@ impl Emit<'_> {
             .active_class
             .take()
             .map_or(0, |active| active.hooked_variance_checks);
+        if let Some(decl) = self.classes.get_mut(at) {
+            decl.flags.hooked_variance = hooked_variance_checks > 0;
+        }
         self.active_parent = None;
         self.member_statements(&class.statement_lines);
         self.line = line;
@@ -7219,7 +7223,7 @@ impl Emit<'_> {
         // A class that uses traits is never bound early, so nothing
         // here composes one, and no value is evaluated; the class is in
         // no table yet, so a type its parent writes does not find it.
-        let linking = php_link::early_bind(child, &lookup);
+        let linking = php_link::early_bind(child, &lookup, &|()| None);
         // `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, silent: the
         // class is left to its opline.
         if !linking.obligations.is_empty() {

@@ -229,6 +229,12 @@ pub struct ClassFlags {
     /// `zend_add_magic_method` sets the bit; the engine asks those by
     /// name.
     pub use_guards: bool,
+    /// `ce->num_hooked_prop_variance_checks` not zero: a `set` hook's
+    /// parameter type the file could not hold to its property's while
+    /// it compiled, which only the link holds it to. php links such a
+    /// class at its opline and never while the file compiles
+    /// (`Z/Zend/zend_compile.c:9362`), an anonymous one included.
+    pub hooked_variance: bool,
 }
 
 /// What a class does with a write to a name it did not declare, php's
