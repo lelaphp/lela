@@ -49,7 +49,11 @@ enum ConstantOwner {
 /// registered.
 struct ConstantRow {
     owner: ConstantOwner,
+    /// The key `EG(zend_constants)` holds the row under: the name with
+    /// its namespace lowered, which every lookup compares against.
     name: Vec<u8>,
+    /// `c->name`, the name as it was given, which a listing shows.
+    given: Vec<u8>,
     value: Value,
     attributes: Vec<Attribute>,
     deprecated: bool,
@@ -59,6 +63,7 @@ impl ConstantRow {
     fn new(owner: ConstantOwner, name: Vec<u8>, value: Value) -> ConstantRow {
         ConstantRow {
             owner,
+            given: name.clone(),
             name,
             value,
             attributes: Vec::new(),
@@ -154,7 +159,7 @@ impl Request {
                 ConstantOwner::Extension(extension) => self.extension_name(*extension),
                 ConstantOwner::User(_) => None,
             };
-            (module, row.name.clone(), row.value)
+            (module, row.given.clone(), row.value)
         }));
         rows
     }
@@ -175,7 +180,7 @@ impl Request {
             .constants
             .iter()
             .filter(|row| matches!(row.owner, ConstantOwner::User(_)))
-            .map(|row| (row.name.clone(), row.value))
+            .map(|row| (row.given.clone(), row.value))
             .collect();
         for (name, value) in constants {
             let key = PhpString::new(self, &name)?.into_key();
@@ -234,6 +239,14 @@ impl Request {
         value: Owner<Value>,
         attributes: Vec<Attribute>,
     ) -> bool {
+        // `zend_register_constant`'s key: the namespace lowered and the
+        // name itself as written, which the row keeps as given.
+        let given = name;
+        let mut key = given.to_vec();
+        if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
+            key[..slash].make_ascii_lowercase();
+        }
+        let name = key.as_slice();
         let special = name == HALT_OFFSET
             || name.eq_ignore_ascii_case(b"true")
             || name.eq_ignore_ascii_case(b"false")
@@ -252,6 +265,7 @@ impl Request {
         self.constants.constants.push(ConstantRow {
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
+            given: given.to_vec(),
             value: value.hand_on(),
             attributes,
             deprecated,
@@ -355,6 +369,7 @@ impl Request {
         self.constants.constants.push(ConstantRow {
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
+            given: name.to_vec(),
             value: value.hand_on(),
             attributes,
             deprecated,
