@@ -5,10 +5,10 @@
 
 use std::ops::ControlFlow;
 
-use php_ext::abi::{Instance, Path, This};
+use php_ext::abi::{FromArgument as _, Instance, Path, Raw, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, read_prop, write_prop};
-use php_ext::coerce::{to_string, with_string};
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref, while_pending};
 use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::walk::{self, Hold};
@@ -121,17 +121,17 @@ impl CURLFile {
     }
 
     #[php(tentative)]
-    fn getFilename(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+    fn getFilename(req: &mut Request, this: This<Self>) -> Result<Raw<PhpString>, Thrown> {
         property(req, this.object(), b"name")
     }
 
     #[php(tentative)]
-    fn getMimeType(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+    fn getMimeType(req: &mut Request, this: This<Self>) -> Result<Raw<PhpString>, Thrown> {
         property(req, this.object(), b"mime")
     }
 
     #[php(tentative)]
-    fn getPostFilename(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+    fn getPostFilename(req: &mut Request, this: This<Self>) -> Result<Raw<PhpString>, Thrown> {
         property(req, this.object(), b"postname")
     }
 
@@ -156,11 +156,26 @@ impl CURLFile {
     }
 }
 
-/// `curlfile_get_property`: the property as a string.
-fn property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+/// `curlfile_get_property`: the property as the silent read answers it,
+/// `RETURN_COPY_DEREF`, under the method's declared `string`, so an
+/// unset one is `null`, as php checks no internal return in a release
+/// build.
+///
+/// ```php
+/// $f = new CURLFile('/etc/hosts'); unset($f->name);
+/// $g = new CURLFile('/etc/hosts'); unset($g->mime);
+/// var_dump($f->getFilename(), $g->getMimeType(), $g->getPostFilename());
+/// echo (new ReflectionMethod('CURLFile', 'getFilename'))->getTentativeReturnType(), "\n";
+/// ```
+/// ```expect
+/// NULL
+/// NULL
+/// string(0) ""
+/// string
+/// ```
+fn property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<Raw<PhpString>, Thrown> {
     let value = read_prop(req, &object, name)?.deref();
-    let string = to_string(req, &value)?;
-    Ok(string)
+    Raw::from_value(req, value)
 }
 
 /// `curlfile_ctor`.
