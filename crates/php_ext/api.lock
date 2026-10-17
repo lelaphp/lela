@@ -389,6 +389,7 @@ call::new_lazy_ghost
 call::new_lazy_proxy
 call::new_object
 call::passthrough
+call::perform_autoload
 call::property_hook
 call::property_is_virtual
 call::read_class_prop_silent

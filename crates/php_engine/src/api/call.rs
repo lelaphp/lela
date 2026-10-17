@@ -1944,6 +1944,41 @@ fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<Cla
     served
 }
 
+/// `spl_perform_autoload(class_name, lc_name)`
+/// (`Z/ext/spl/php_spl.c:413`), what `spl_autoload_call()` runs: each
+/// autoloader handed `name` as it was given, no leading `\` dropped and
+/// no validity asked, whatever the table already holds, until one
+/// declares the class under `name` lowered, which a name with a leading
+/// `\` never is; a loader that throws ends the walk with the throwable
+/// pending. [`autoload`] is `zend_lookup_class`'s, which asks the table
+/// and the name first.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "[$c]"; });
+/// foreach (['\\Zap', '\Zip', 'stdclass', '\\', '', 'a b'] as $n) { spl_autoload_call($n); }
+/// echo "\n";
+/// ```
+/// ```expect exit=0
+/// [\Zap][\Zip][stdclass][\][][a b]
+/// ```
+pub fn perform_autoload(req: &mut Request, name: PhpString) -> Result<Option<ClassId>, Thrown> {
+    let lowered = name.as_bytes().to_ascii_lowercase();
+    req.without_site_override(|req| {
+        let mut at = 0;
+        while let Some(loader) = req.autoloader(at) {
+            let returned = serve(req, loader.target(), &[Value::string(name)], &[]);
+            req.release(returned?);
+            if !lowered.starts_with(b"\\")
+                && let Some(class) = req.class_named(Bare::resolved(&lowered))
+            {
+                return Ok(Some(class));
+            }
+            at += 1;
+        }
+        Ok(None)
+    })
+}
+
 /// A constant by the key the table holds it under, `zend_get_constant`:
 /// `None` when undefined, nothing raised, no owner taken.
 pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
