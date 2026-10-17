@@ -960,6 +960,23 @@ fn strlen(string: PhpString) -> i64 {
 /// ```expect
 /// 2920 32
 /// ```
+///
+/// The constant is listed under its name as given and found whatever
+/// its namespace's case, as `zend_register_constant` keys it by the name
+/// with its namespace lowered and keeps `c->name` as written:
+///
+/// ```php
+/// define("NS1\\ns2\\Const1", "value1");
+/// var_dump(array_keys(get_defined_constants(true)["user"]), constant("ns1\\NS2\\Const1"), defined("NS1\\ns2\\const1"));
+/// ```
+/// ```expect exit=0
+/// array(1) {
+///   [0]=>
+///   string(14) "NS1\ns2\Const1"
+/// }
+/// string(6) "value1"
+/// bool(false)
+/// ```
 #[php_function]
 fn define(
     req: &mut Request,
@@ -997,11 +1014,7 @@ fn define(
     } else {
         Owner::take(req, value)
     };
-    let mut key = bytes.to_vec();
-    if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
-        key[..slash].make_ascii_lowercase();
-    }
-    Ok(req.define_constant(&key, value))
+    Ok(req.define_constant(bytes, value))
 }
 
 /// `validate_constant_array_argument`: no array in the value, through

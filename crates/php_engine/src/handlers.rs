@@ -563,16 +563,11 @@ pub(crate) fn declare_const<T: Tier>(
         Ok((value, _)) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    // `zend_register_constant`'s key: the namespace lowered and the
-    // name itself as written.
-    let mut key = written;
-    if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
-        key[..slash].make_ascii_lowercase();
-    }
     // The value's one owner is the sink's, which warns and gives it up
-    // where the name stands.
+    // where the name stands; the sink keys it as `zend_register_constant`
+    // does.
     let value = crate::api::values::Owner::adopt(value);
-    req.define_constant(&key, value);
+    req.define_constant(&written, value);
     Ok(advance(req, frame))
 }
 
@@ -663,12 +658,8 @@ pub(crate) fn declare_attributed_const<T: Tier>(
         Ok((value, _)) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let mut key = written;
-    if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
-        key[..slash].make_ascii_lowercase();
-    }
     let value = crate::api::values::Owner::adopt(value);
-    req.define_attributed_constant(&key, value, attributes);
+    req.define_attributed_constant(&written, value, attributes);
     Ok(advance_over_data(req, frame, at))
 }
 
