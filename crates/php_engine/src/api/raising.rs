@@ -762,7 +762,7 @@ pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thr
 /// object(stdClass)#1 (0) {
 /// }
 /// ```
-pub fn throw(req: &mut Request, class: &str, message: &str) -> Thrown {
+pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
     match new_throwable(req, class, message) {
         Ok(throwable) => {
             let thrown = throw_value(req, &throwable);
@@ -1062,7 +1062,7 @@ pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
 pub fn new_throwable(
     req: &mut Request,
     class: &str,
-    message: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Result<Owner<Value>, Thrown> {
     let made = new_throwable_made(req, class, message);
     adopted(made)
@@ -1072,13 +1072,15 @@ pub fn new_throwable(
 pub(crate) fn new_throwable_made(
     req: &mut Request,
     class: &str,
-    message: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Result<Value, Thrown> {
     // `zend_throw_exception` makes the message's string before the
     // object (`zend_string_init`, an allocation for the empty message and
-    // one byte as for any), so it stands across the trace.
-    let message = message.split('\0').next().unwrap_or_default();
-    let message = Owner::adopt(req.string_init(message.as_bytes())?);
+    // one byte as for any), so it stands across the trace; its `%s` reads
+    // the bytes as they are, to the first NUL.
+    let message = message.as_ref();
+    let message = message.split(|b| *b == 0).next().unwrap_or_default();
+    let message = Owner::adopt(req.string_init(message)?);
     let object = match req.new_object_of(class) {
         Ok(object) => object,
         Err(refused) => {

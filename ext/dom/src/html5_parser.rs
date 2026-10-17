@@ -982,7 +982,15 @@ pub(crate) fn create_from_string(
     finish(req, &parsed, found, options, None)
 }
 
-/// `Dom\HTMLDocument::createFromFile`'s body.
+/// `Dom\HTMLDocument::createFromFile`'s body. A file that does not
+/// open is php's `Cannot open file '%s'`, the name's bytes as given:
+///
+/// ```php
+/// try { @Dom\HTMLDocument::createFromFile("/nonexistent/\xff.html"); } catch (Exception $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect exit=0
+/// 43616e6e6f74206f70656e2066696c6520272f6e6f6e6578697374656e742fff2e68746d6c27
+/// ```
 pub(crate) fn create_from_file(
     req: &mut Request,
     path: &[u8],
@@ -1003,12 +1011,9 @@ pub(crate) fn create_from_file(
     check_options(req, 2, options)?;
     let encoding = override_encoding(req, 3, given_encoding)?;
     let Some(stream) = req.open_stream(&path, b"rb", false)? else {
-        let name = String::from_utf8_lossy(&path).into_owned();
-        return Err(throw(
-            req,
-            "Exception",
-            &format!("Cannot open file '{name}'"),
-        ));
+        // `zend_throw_exception_ex`'s `%s`: the name's bytes as they are.
+        let message = [&b"Cannot open file '"[..], &path, b"'"].concat();
+        return Err(throw(req, "Exception", &message));
     };
     // The MIME sniff: the charset of the http headers the stream carries,
     // where no encoding was given and lexbor knows the one named.

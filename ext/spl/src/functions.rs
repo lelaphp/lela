@@ -248,6 +248,9 @@ fn spl_autoload(
             .clone()
             .unwrap_or_else(|| DEFAULT_EXTENSIONS.to_vec()),
     };
+    // `PHP_FUNCTION(spl_autoload)` drops one leading `\` before it
+    // lowers the name (`Z/ext/spl/php_spl.c:304`), where
+    // `spl_autoload_call` hands its loaders the name as given.
     let bare = class.as_bytes();
     let lowered = bare
         .strip_prefix(b"\\")
@@ -278,7 +281,7 @@ fn spl_autoload(
 /// ```
 #[php_function]
 fn spl_autoload_call(req: &mut Request, class: PhpString) -> Result<(), Thrown> {
-    autoload(req, class.as_bytes())?;
+    php_ext::call::perform_autoload(req, class)?;
     Ok(())
 }
 

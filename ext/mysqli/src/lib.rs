@@ -564,7 +564,7 @@ pub(crate) fn sql_exception(
         );
         return Ok(());
     }
-    let value = new_throwable(req, "mysqli_sql_exception", &message)?;
+    let value = new_throwable(req, "mysqli_sql_exception", message.as_bytes())?;
     if let Some(object) = value.as_object().copied() {
         let facts = [
             ("sqlstate", Fact::Text(sqlstate)),
