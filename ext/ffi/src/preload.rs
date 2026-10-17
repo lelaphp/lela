@@ -6,8 +6,9 @@
 //! first time it names the scope. This is `zend_ffi_load` with its
 //! `preload` argument, `zend_ffi_preload` and `zend_ffi_parse_directives`.
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -52,12 +53,32 @@ pub(crate) fn header_file(req: &Request, path: &[u8]) -> PathBuf {
     req.cwd().join(OsStr::from_bytes(path))
 }
 
+/// The library a declaration set names, as `dlopen` is to open it while
+/// a request runs: a relative path, one that names a directory, against
+/// the request's working directory `cwd`, where php's `dlopen` resolves
+/// it against its process's, which `chdir()` moved there; a bare name,
+/// which `dlopen` searches for, and an absolute path as written. At
+/// startup no request stands and `cwd` is none.
+pub(crate) fn library_path<'a>(cwd: Option<&Path>, name: &'a [u8]) -> Cow<'a, [u8]> {
+    match cwd {
+        Some(cwd) if name.contains(&b'/') && !name.starts_with(b"/") => Cow::Owned(
+            cwd.join(OsStr::from_bytes(name))
+                .into_os_string()
+                .into_vec(),
+        ),
+        _ => Cow::Borrowed(name),
+    }
+}
+
 /// `zend_ffi_load` up to its scope: the file read, its directives, its
 /// declarations parsed into `types`, the library opened and every
 /// variable and function resolved; at startup, each held against the
-/// scope of `scopes` it adds to.
+/// scope of `scopes` it adds to. `cwd` is the request's working
+/// directory, against which a relative `FFI_LIB` is opened
+/// ([`library_path`]), none at startup.
 pub(crate) fn load_header(
     file: &Path,
+    cwd: Option<&Path>,
     types: &mut Types,
     default_attr: u32,
     scopes: Option<&[(Vec<u8>, Scope)]>,
@@ -74,7 +95,9 @@ pub(crate) fn load_header(
         .parse_decl()
         .map_err(|bail| Fail::Parse(bail.0))?;
     let lib = match lib {
-        Some(name) => Some(Library::open(&name).map_err(|error| Fail::Lib(name, error))?),
+        Some(name) => {
+            Some(Library::open(&library_path(cwd, &name)).map_err(|error| Fail::Lib(name, error))?)
+        }
         None => None,
     };
     let name = scope_name.as_deref().unwrap_or(b"C");
@@ -320,7 +343,7 @@ pub(crate) fn engine_state(start: &Start) -> Result<Preloads, Refusal> {
         for path in paths {
             let preload = attr::STORED | attr::PERSISTENT;
             let file = Path::new(OsStr::from_bytes(&path));
-            let loaded = match load_header(file, &mut types, preload, Some(&scopes)) {
+            let loaded = match load_header(file, None, &mut types, preload, Some(&scopes)) {
                 Ok(loaded) => loaded,
                 Err(fail) => {
                     let warnings = preload_warnings(&path, &fail).into_iter();
@@ -510,7 +533,8 @@ fn moved_scope(mut scope: Scope, moved: &impl Fn(TypeId) -> TypeId) -> Scope {
 pub(crate) fn register(req: &mut Request, path: &[u8]) -> Option<Scope> {
     let preload = attr::STORED | attr::PERSISTENT;
     let file = header_file(req, path);
-    let loaded = match load_header(&file, crate::types(req), preload, None) {
+    let cwd = req.cwd();
+    let loaded = match load_header(&file, Some(&cwd), crate::types(req), preload, None) {
         Ok(loaded) => loaded,
         Err(fail) => {
             for text in preload_warnings(path, &fail) {
