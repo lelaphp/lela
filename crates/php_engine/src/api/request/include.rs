@@ -477,6 +477,16 @@ impl Request {
             return self.failed_opening(kind, written);
         }
         if kind.once() {
+            // `zend_stream_open` before `zend_hash_add_empty_element(&EG(
+            // included_files), ...)`: a file the cache does not hold is
+            // opened first, and one that cannot be opened is not
+            // recorded, so a later once form tries it again.
+            if held.is_none()
+                && let Err(reason) = readable(&path)
+            {
+                self.open_stream_failed(kind, written, &reason);
+                return self.failed_opening(kind, written);
+            }
             self.note_included(&path)?;
         }
         // A unit the lookup by the key served is opcache's answer above
@@ -496,10 +506,12 @@ impl Request {
                 Ok(Opened::Unit(unit))
             }
             Some(Err(refused)) => Err(self.refused_include(&refused, &path, SourceKind::File)),
-            // The file went between the stat that resolved it and the
-            // read that would have compiled it.
+            // The file resolved and could not be read: gone since the
+            // stat, or not readable. php's plain-files opener fails with
+            // the system's `errno`, which its warning prints, so the
+            // reason is what opening the path answers now.
             None => {
-                let reason = std::io::Error::from(std::io::ErrorKind::NotFound);
+                let reason = unreadable(&path);
                 self.open_stream_failed(kind, written, &reason);
                 self.failed_opening(kind, written)
             }
@@ -1135,4 +1147,41 @@ impl Request {
         self.emit_recorded(recording);
         Thrown::of(None)
     }
+}
+
+/// Whether the file at `path` opens for reading, and the `errno` php's
+/// plain-files opener reports where it does not: `Permission denied` for
+/// a file whose permissions are 000, `No such file or directory` for one that went.
+///
+/// ```php
+/// $f = __DIR__ . '/locked.inc';
+/// file_put_contents($f, '<?php return 1;'); chmod($f, 0);
+/// var_dump(@include $f, @include_once $f);
+/// foreach (['require', 'require_once'] as $how) {
+///     try { $how === 'require' ? require $f : require_once $f; } catch (Error $e) { echo get_class($e), "\n"; }
+/// }
+/// chmod($f, 0644); var_dump(include_once $f); unlink($f);
+/// ```
+/// ```expect exit=0
+/// bool(false)
+/// bool(false)
+///
+/// Warning: require(%s/locked.inc): Failed to open stream: Permission denied in %s on line 6
+/// Error
+///
+/// Warning: require_once(%s/locked.inc): Failed to open stream: Permission denied in %s on line 6
+/// Error
+/// int(1)
+/// ```
+fn readable(path: &[u8]) -> Result<(), std::io::Error> {
+    let path = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path);
+    std::fs::File::open(path).map(drop)
+}
+
+/// Why the file at `path` cannot be read, as [`readable`] answers it; a
+/// file that opens now went and came back, and reads as gone.
+fn unreadable(path: &[u8]) -> std::io::Error {
+    readable(path)
+        .err()
+        .unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
 }
