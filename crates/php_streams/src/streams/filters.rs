@@ -26,9 +26,14 @@ use crate::api::request::{
     Brigade, FilterChain as Chain, FilterFactory, FilterFlags, FilterStatus, Request, Stream,
     StreamFilter, Supplier, Whence,
 };
-use crate::api::values::{Owner, Resource, Value};
+use crate::api::values::{Emalloc, Owner, Resource, Value};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
+
+/// `sizeof(php_stream_filter)` on the oracle's LP64, what
+/// `_php_stream_filter_alloc` (`Z/main/streams/filter.c:252`) asks
+/// `pemalloc` for.
+const HEADER: usize = 80;
 
 /// `PHP_STREAM_FILTER_READ` and `PHP_STREAM_FILTER_WRITE`.
 const FILTER_READ: i64 = 1;
@@ -39,6 +44,12 @@ const FILTER_WRITE: i64 = 2;
 /// holds one owner.
 pub(crate) struct Attached {
     ops: Box<dyn StreamFilter>,
+    /// The filter's `php_stream_filter` on the request's heap, as
+    /// `pemalloc` keeps one for a stream that is not persistent, freed
+    /// where `php_stream_filter_free` frees it; `None` for a persistent
+    /// stream's, which php keeps on `malloc`, and for one with a
+    /// resource, whose payload it is.
+    header: Option<Emalloc>,
     /// The filter's `stream filter` resource, the chain's owner of it,
     /// where one was made.
     res: Option<Owner<Resource>>,
@@ -502,6 +513,17 @@ impl PhpStream {
     }
 }
 
+/// The filter just attached to `chain`: its tail, `append`, or its head.
+fn placed(s: &mut PhpStream, chain: Chain, append: bool) -> Option<&mut Attached> {
+    let filters = s.chain_mut(chain);
+    let at = if append {
+        filters.len().checked_sub(1)?
+    } else {
+        0
+    };
+    filters.get_mut(at)
+}
+
 /// `php_stream_filter_remove(filter, 1)` past the unlinking: the
 /// filter's resource closed, where it has one, and the chain's owner of
 /// it given up, then `php_stream_filter_free`'s `dtor`, served whatever
@@ -509,13 +531,20 @@ impl PhpStream {
 /// with it, and a filter whose `dtor` serves PHP code serves none while
 /// a throwable is pending ([`crate::api::request::StreamFilter::close`]).
 fn release_filter(req: &mut Request, filter: Attached) {
-    let Attached { mut ops, res } = filter;
+    let Attached {
+        mut ops,
+        header,
+        res,
+    } = filter;
     if let Some(res) = res {
         res.close(req);
         res.give_up(req);
     }
     if let Err(thrown) = ops.close(req) {
         defer(req, thrown);
+    }
+    if let Some(header) = header {
+        header.free(req);
     }
 }
 
@@ -524,7 +553,8 @@ pub(crate) trait FilterLayer {
         &mut self,
         name: &[u8],
         params: Option<&Value>,
-    ) -> Option<Box<dyn StreamFilter>>;
+        persistent: bool,
+    ) -> Option<Attached>;
     fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown>;
 }
 
@@ -534,12 +564,33 @@ impl FilterLayer for Request {
     /// last segment and then each shorter one made `*`, asked for a
     /// filter; php's `Unable to locate filter "%s"` where no factory
     /// matched and `Unable to create or locate filter "%s"` where the
-    /// last one that did refused.
+    /// last one that did refused. `persistent` is the stream's, which
+    /// the factory is told and which keeps the filter's
+    /// `php_stream_filter` off the request's heap.
+    ///
+    /// A filter's `php_stream_filter` is counted from its making to its
+    /// free, where php's `_php_stream_filter_alloc` and
+    /// `php_stream_filter_free` count it, beside what its factory makes.
+    ///
+    /// ```php
+    /// foreach (['string.rot13', 'zlib.deflate', 'bzip2.compress'] as $name) {
+    ///     $f = fopen('php://memory', 'w+');
+    ///     $w = fopen('php://memory', 'w+'); stream_filter_append($w, $name, STREAM_FILTER_WRITE);
+    ///     $m = memory_get_usage(); $h = stream_filter_append($f, $name, STREAM_FILTER_READ); $made = memory_get_usage() - $m;
+    ///     $m = memory_get_usage(); stream_filter_remove($h); echo $name, ' ', $made, ' ', memory_get_usage() - $m, "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// string.rot13 272 -48
+    /// zlib.deflate 467184 -454896
+    /// bzip2.compress 3531920 -3518672
+    /// ```
     fn filter_create(
         &mut self,
         name: &[u8],
         params: Option<&Value>,
-    ) -> Option<Box<dyn StreamFilter>> {
+        persistent: bool,
+    ) -> Option<Attached> {
         let lookup = |req: &Request, wanted: &[u8]| -> Option<(FilterFactory, Supplier)> {
             req.streams_ref()?
                 .filters
@@ -551,7 +602,7 @@ impl FilterLayer for Request {
         // with `EG(exception)` set: refused, and the throwable kept for
         // the native.
         let create = |req: &mut Request, (found, by): (FilterFactory, Supplier)| match req
-            .serve_supplied(by, |req| found(req, name, params))
+            .serve_supplied(by, |req| found(req, name, params, persistent))
         {
             Ok(filter) => filter.map(|filter| crate::supplied::filter(by, filter)),
             Err(thrown) => {
@@ -591,7 +642,23 @@ impl FilterLayer for Request {
             );
             warning(self, &text);
         }
-        filter
+        let ops = filter?;
+        let header = if persistent {
+            None
+        } else {
+            match Emalloc::new(self, HEADER) {
+                Ok(header) => Some(header),
+                Err(thrown) => {
+                    defer(self, thrown);
+                    return None;
+                }
+            }
+        };
+        Some(Attached {
+            ops,
+            header,
+            res: None,
+        })
     }
 
     fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown> {
@@ -654,12 +721,11 @@ impl Stream {
         name: &[u8],
         chain: Chain,
     ) -> Result<bool, Thrown> {
-        let Some(ops) = req.filter_create(name, None) else {
+        let persistent = req.stream_ref(self).is_some_and(|s| s.flags.persistent);
+        let Some(filter) = req.filter_create(name, None, persistent) else {
             return Ok(false);
         };
-        req.stream_op(self, |req, s| {
-            s.attach(req, chain, Attached { ops, res: None }, true)
-        });
+        req.stream_op(self, |req, s| s.attach(req, chain, filter, true));
         match req.stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(true),
@@ -697,21 +763,20 @@ impl Stream {
                 read_write |= FILTER_WRITE;
             }
         }
+        let persistent = req.stream_ref(self).is_some_and(|s| s.flags.persistent);
         let mut last = None;
         for (bit, chain) in [(FILTER_READ, Chain::Read), (FILTER_WRITE, Chain::Write)] {
             if read_write & bit == 0 {
                 continue;
             }
-            let Some(ops) = req.filter_create(name, params) else {
+            let Some(filter) = req.filter_create(name, params, persistent) else {
                 return match req.stream_thrown().take() {
                     Some(thrown) => Err(thrown),
                     None => Ok(None),
                 };
             };
             let attached = req
-                .stream_op(self, |req, s| {
-                    s.attach(req, chain, Attached { ops, res: None }, append)
-                })
+                .stream_op(self, |req, s| s.attach(req, chain, filter, append))
                 .unwrap_or(false);
             if !attached {
                 // `php_stream_filter_remove(filter, 1)`: the filter that
@@ -732,24 +797,30 @@ impl Stream {
         let Some(chain) = last else {
             return Ok(None);
         };
+        // php's resource is the filter itself, `zend_register_resource(filter,
+        // le_stream_filter)`: the last filter's `php_stream_filter` is
+        // laid down as the resource's payload, where the header it was
+        // made with goes.
+        let header = req
+            .stream_op(self, |_, s| {
+                placed(s, chain, append).and_then(|f| f.header.take())
+            })
+            .flatten();
         let kind = req.types().filter;
-        let res = Resource::new(
-            req,
-            kind,
-            Named {
-                stream: self,
-                chain,
-            },
-        )?;
+        let named = Named {
+            stream: self,
+            chain,
+        };
+        let res = match header {
+            Some(header) => {
+                header.free(req);
+                Resource::sized(req, kind, named, HEADER)?
+            }
+            None => Resource::persistent(req, kind, named, HEADER)?,
+        };
         let mut held = Some(Owner::take(req, *res));
         req.stream_op(self, |_, s| {
-            let filters = s.chain_mut(chain);
-            let at = if append {
-                filters.len().checked_sub(1)
-            } else {
-                Some(0)
-            };
-            if let Some(filter) = at.and_then(|at| filters.get_mut(at)) {
+            if let Some(filter) = placed(s, chain, append) {
                 filter.res = held.take();
             }
         });

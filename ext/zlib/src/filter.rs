@@ -7,7 +7,7 @@ use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
 use php_ext::values::walk;
-use php_ext::values::{Key, Value, ValueRef};
+use php_ext::values::{Key, Pemalloc, Value, ValueRef};
 
 use crate::encode::MAX_MEM_LEVEL;
 use crate::ffi::{Deflate, Flush, Inflate, Status};
@@ -18,18 +18,73 @@ pub(crate) const NAME: &[u8] = b"zlib.*";
 /// The size of php's `inbuf` and `outbuf`, `0x8000`.
 const BUFFER: usize = 0x8000;
 
+/// `sizeof(php_zlib_filter_data)` on the oracle's LP64: the 112-byte
+/// `z_stream`, the two buffers and their lengths, `persistent` and
+/// `finished`.
+const DATA: usize = 152;
+
 /// `MAX_WBITS`.
 const MAX_WBITS: i64 = 15;
 
-/// `zlib.inflate`: the stream, ended and dropped once it reached its end.
+/// What `php_zlib_filter_create` allocates beside zlib's state, with the
+/// stream's persistence: `data`, the `php_zlib_filter_data`, and its
+/// `inbuf`, which each piece of a bucket is copied through, and `outbuf`,
+/// which each call writes into. zlib's own state is on the request's heap
+/// whatever the stream, as php's `php_zlib_alloc` reads a `persistent`
+/// the factory never sets.
+struct Buffers {
+    data: Pemalloc,
+    inbuf: Pemalloc,
+    outbuf: Pemalloc,
+}
+
+impl Buffers {
+    /// `pecalloc(1, sizeof(php_zlib_filter_data), persistent)` and the
+    /// two `pemalloc(0x8000, persistent)`s; the `Err` is the memory
+    /// limit's fatal.
+    fn new(req: &mut Request, persistent: bool) -> Result<Buffers, Thrown> {
+        Ok(Buffers {
+            data: Pemalloc::new(req, DATA, persistent)?,
+            inbuf: Pemalloc::new(req, BUFFER, persistent)?,
+            outbuf: Pemalloc::new(req, BUFFER, persistent)?,
+        })
+    }
+
+    /// `piece` copied into `inbuf`, as php's `memcpy` before each call:
+    /// the input, and `outbuf` to write into.
+    fn take_in(&mut self, piece: &[u8]) -> (&[u8], &mut [u8]) {
+        let inbuf = &mut self.inbuf.bytes_mut()[..piece.len()];
+        inbuf.copy_from_slice(piece);
+        (inbuf, self.outbuf.bytes_mut())
+    }
+
+    /// The first `written` bytes of `outbuf`, `estrndup(data->outbuf,
+    /// bucketlen)` for the bucket handed on.
+    fn out(&self, written: usize) -> Vec<u8> {
+        self.outbuf.bytes()[..written].to_vec()
+    }
+
+    /// The dtor's `pefree`s, in php's order.
+    fn free(self, req: &mut Request) {
+        self.inbuf.free(req);
+        self.outbuf.free(req);
+        self.data.free(req);
+    }
+}
+
+/// `zlib.inflate`: the stream, ended and dropped once it reached its end,
+/// and the buffers, `None` once the dtor freed them.
 struct Inflating {
     stream: Option<Inflate>,
+    buffers: Option<Buffers>,
 }
 
 /// `zlib.deflate`: the stream, `None` once the filter's `dtor` ended it,
-/// and `finished`, whether no flush is pending since the last bucket.
+/// the buffers, `None` once the dtor freed them, and `finished`, whether
+/// no flush is pending since the last bucket.
 struct Deflating {
     stream: Option<Deflate>,
+    buffers: Option<Buffers>,
     finished: bool,
 }
 
@@ -49,9 +104,11 @@ impl StreamFilter for Inflating {
         } else {
             Flush::Sync
         };
+        let Some(buffers) = self.buffers.as_mut() else {
+            return Ok(FilterStatus::ErrFatal);
+        };
         let mut exit = FilterStatus::FeedMe;
         let mut total = 0;
-        let mut out = vec![0; BUFFER];
         while let Some(bucket) = input.pop_front() {
             let mut bin = 0;
             while bin < bucket.len() {
@@ -59,7 +116,8 @@ impl StreamFilter for Inflating {
                     break;
                 };
                 let desired = (bucket.len() - bin).min(BUFFER);
-                let step = stream.inflate(req, &bucket[bin..bin + desired], &mut out, flush)?;
+                let (piece, out) = buffers.take_in(&bucket[bin..bin + desired]);
+                let step = stream.inflate(req, piece, out, flush)?;
                 match step.status {
                     Status::StreamEnd => {
                         if let Some(stream) = self.stream.take() {
@@ -76,7 +134,7 @@ impl StreamFilter for Inflating {
                 }
                 bin += step.read;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 }
             }
@@ -86,9 +144,9 @@ impl StreamFilter for Inflating {
             && let Some(stream) = self.stream.as_mut()
         {
             loop {
-                let step = stream.inflate(req, &[], &mut out, Flush::Finish)?;
+                let step = stream.inflate(req, &[], buffers.outbuf.bytes_mut(), Flush::Finish)?;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 }
                 if step.status != Status::Ok {
@@ -103,10 +161,14 @@ impl StreamFilter for Inflating {
     }
 
     /// `php_zlib_inflate_dtor`: `inflateEnd` where the stream has not
-    /// reached its end, the state given back.
+    /// reached its end, the state given back, then the buffers and
+    /// `data` freed.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         if let Some(stream) = self.stream.take() {
             stream.end(req);
+        }
+        if let Some(buffers) = self.buffers.take() {
+            buffers.free(req);
         }
         Ok(())
     }
@@ -123,7 +185,7 @@ impl StreamFilter for Deflating {
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown> {
-        let Some(stream) = self.stream.as_mut() else {
+        let (Some(stream), Some(buffers)) = (self.stream.as_mut(), self.buffers.as_mut()) else {
             return Ok(FilterStatus::ErrFatal);
         };
         let mode = match flags {
@@ -133,19 +195,19 @@ impl StreamFilter for Deflating {
         };
         let mut exit = FilterStatus::FeedMe;
         let mut total = 0;
-        let mut out = vec![0; BUFFER];
         while let Some(bucket) = input.pop_front() {
             let mut bin = 0;
             while bin < bucket.len() {
                 let desired = (bucket.len() - bin).min(BUFFER);
                 self.finished = mode != Flush::None;
-                let step = stream.deflate(req, &bucket[bin..bin + desired], &mut out, mode)?;
+                let (piece, out) = buffers.take_in(&bucket[bin..bin + desired]);
+                let step = stream.deflate(req, piece, out, mode)?;
                 if step.status != Status::Ok {
                     return Ok(FilterStatus::ErrFatal);
                 }
                 bin += step.read;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 }
             }
@@ -155,10 +217,10 @@ impl StreamFilter for Deflating {
         if close || (flags == FilterFlags::FlushInc && !self.finished) {
             let last = if close { Flush::Finish } else { Flush::Sync };
             loop {
-                let step = stream.deflate(req, &[], &mut out, last)?;
+                let step = stream.deflate(req, &[], buffers.outbuf.bytes_mut(), last)?;
                 self.finished = true;
                 if step.written > 0 {
-                    output.push_back(out[..step.written].to_vec());
+                    output.push_back(buffers.out(step.written));
                     exit = FilterStatus::PassOn;
                 }
                 if step.status != Status::Ok {
@@ -172,10 +234,14 @@ impl StreamFilter for Deflating {
         Ok(exit)
     }
 
-    /// `php_zlib_deflate_dtor`: `deflateEnd`, the state given back.
+    /// `php_zlib_deflate_dtor`: `deflateEnd`, the state given back, then
+    /// the buffers and `data` freed.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         if let Some(stream) = self.stream.take() {
             stream.end(req);
+        }
+        if let Some(buffers) = self.buffers.take() {
+            buffers.free(req);
         }
         Ok(())
     }
@@ -250,7 +316,9 @@ pub(crate) fn factory(
     req: &mut Request,
     name: &[u8],
     params: Option<&Value>,
+    persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+    let buffers = Buffers::new(req, persistent)?;
     if name.eq_ignore_ascii_case(b"zlib.inflate") {
         let mut window = -MAX_WBITS;
         if let Some(params) = params
@@ -265,13 +333,17 @@ pub(crate) fn factory(
                 docref(req, Level::Warning, &text);
             }
         }
-        return Ok(Inflate::new(req, window)?.ok().map(|stream| {
-            Box::new(Inflating {
-                stream: Some(stream),
-            }) as Box<dyn StreamFilter>
-        }));
+        let Ok(stream) = Inflate::new(req, window)? else {
+            buffers.free(req);
+            return Ok(None);
+        };
+        return Ok(Some(Box::new(Inflating {
+            stream: Some(stream),
+            buffers: Some(buffers),
+        })));
     }
     if !name.eq_ignore_ascii_case(b"zlib.deflate") {
+        buffers.free(req);
         return Ok(None);
     }
     let (mut level, mut window, mut memory) = (-1, -MAX_WBITS, MAX_MEM_LEVEL);
@@ -316,12 +388,13 @@ pub(crate) fn factory(
             }
         }
     }
-    Ok(Deflate::new(req, level, window, memory, 0)?
-        .ok()
-        .map(|stream| {
-            Box::new(Deflating {
-                stream: Some(stream),
-                finished: true,
-            }) as Box<dyn StreamFilter>
-        }))
+    let Ok(stream) = Deflate::new(req, level, window, memory, 0)? else {
+        buffers.free(req);
+        return Ok(None);
+    };
+    Ok(Some(Box::new(Deflating {
+        stream: Some(stream),
+        buffers: Some(buffers),
+        finished: true,
+    })))
 }

@@ -8,9 +8,9 @@ use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
 use php_ext::values::walk;
-use php_ext::values::{Emalloc, Key, Value, ValueRef};
+use php_ext::values::{Key, Pemalloc, Value, ValueRef};
 
-use crate::ffi::{Action, Code, LentCompress, LentDecompress};
+use crate::ffi::{Action, Code, Compress, Decompress, LentCompress, LentDecompress, Step};
 
 /// The name `MINIT` registers the factory under.
 pub(crate) const NAME: &[u8] = b"bzip2.*";
@@ -27,25 +27,25 @@ const DATA: usize = 128;
 const DEFAULT_BLOCKS: i64 = 4;
 const DEFAULT_WORK: i64 = 0;
 
-/// What `php_bz2_filter_create` allocates beside the library's state, on
-/// the request's heap as a filter that is not persistent has them
-/// (design §5.13): `data`, the `php_bz2_filter_data`, and its `inbuf`,
-/// which each piece of a bucket is copied through, and `outbuf`, which
-/// each call writes into.
+/// What `php_bz2_filter_create` allocates beside the library's state:
+/// `data`, the `php_bz2_filter_data`, and its `inbuf`, which each piece
+/// of a bucket is copied through, and `outbuf`, which each call writes
+/// into.
 struct Buffers {
-    data: Emalloc,
-    inbuf: Emalloc,
-    outbuf: Emalloc,
+    data: Pemalloc,
+    inbuf: Pemalloc,
+    outbuf: Pemalloc,
 }
 
 impl Buffers {
-    /// `pecalloc(1, sizeof(php_bz2_filter_data))` and the two
-    /// `pemalloc(2048)`s; the `Err` is the memory limit's fatal.
-    fn new(req: &mut Request) -> Result<Buffers, Thrown> {
+    /// `pecalloc(1, sizeof(php_bz2_filter_data), persistent)` and the two
+    /// `pemalloc(2048, persistent)`s; the `Err` is the memory limit's
+    /// fatal.
+    fn new(req: &mut Request, persistent: bool) -> Result<Buffers, Thrown> {
         Ok(Buffers {
-            data: Emalloc::new(req, DATA)?,
-            inbuf: Emalloc::new(req, BUFFER)?,
-            outbuf: Emalloc::new(req, BUFFER)?,
+            data: Pemalloc::new(req, DATA, persistent)?,
+            inbuf: Pemalloc::new(req, BUFFER, persistent)?,
+            outbuf: Pemalloc::new(req, BUFFER, persistent)?,
         })
     }
 
@@ -71,20 +71,106 @@ impl Buffers {
     }
 }
 
+/// A compressing `bz_stream`, its state on the request's heap as
+/// `php_bz2_alloc` keeps a filter's that is not persistent, or on the
+/// library's own allocator for one that is.
+enum Compressor {
+    Lent(LentCompress),
+    Own(Compress),
+}
+
+impl Compressor {
+    /// `BZ2_bzCompressInit`: the stream, or the library's refusal; the
+    /// outer `Err` is the memory limit's fatal.
+    fn new(
+        req: &mut Request,
+        blocks: i32,
+        work: i32,
+        persistent: bool,
+    ) -> Result<Result<Compressor, Code>, Thrown> {
+        if persistent {
+            return Ok(Compress::new(blocks, work).map(Compressor::Own));
+        }
+        Ok(LentCompress::new(req, blocks, work)?.map(Compressor::Lent))
+    }
+
+    fn compress(
+        &mut self,
+        req: &mut Request,
+        input: &[u8],
+        output: &mut [u8],
+        action: Action,
+    ) -> Result<Step, Thrown> {
+        match self {
+            Compressor::Lent(stream) => stream.compress(req, input, output, action),
+            Compressor::Own(stream) => Ok(stream.compress(input, output, action)),
+        }
+    }
+
+    /// `BZ2_bzCompressEnd`.
+    fn end(self, req: &mut Request) {
+        if let Compressor::Lent(stream) = self {
+            stream.end(req);
+        }
+    }
+}
+
+/// A decompressing `bz_stream`, held as [`Compressor`] holds its.
+enum Decompressor {
+    Lent(LentDecompress),
+    Own(Decompress),
+}
+
+impl Decompressor {
+    /// `BZ2_bzDecompressInit`: the stream, or the library's refusal; the
+    /// outer `Err` is the memory limit's fatal.
+    fn new(
+        req: &mut Request,
+        small: bool,
+        persistent: bool,
+    ) -> Result<Result<Decompressor, Code>, Thrown> {
+        if persistent {
+            return Ok(Decompress::new(small).map(Decompressor::Own));
+        }
+        Ok(LentDecompress::new(req, small)?.map(Decompressor::Lent))
+    }
+
+    fn decompress(
+        &mut self,
+        req: &mut Request,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<Step, Thrown> {
+        match self {
+            Decompressor::Lent(stream) => stream.decompress(req, input, output),
+            Decompressor::Own(stream) => Ok(stream.decompress(input, output)),
+        }
+    }
+
+    /// `BZ2_bzDecompressEnd`.
+    fn end(self, req: &mut Request) {
+        if let Decompressor::Lent(stream) = self {
+            stream.end(req);
+        }
+    }
+}
+
 /// `enum strm_status` with the stream it runs: none made yet, one
 /// running, or one ended and not to be made again.
 enum Status {
     Uninitialized,
-    Running(LentDecompress),
+    Running(Decompressor),
     Finished,
 }
 
-/// `bzip2.decompress`: the status, `small_footprint` and
-/// `expect_concatenated`, and the buffers, `None` once the dtor freed them.
+/// `bzip2.decompress`: the status, `small_footprint`,
+/// `expect_concatenated` and `persistent`, and the buffers, `None` once
+/// the dtor freed them.
 struct Decompressing {
     status: Status,
     small: bool,
     concatenated: bool,
+    persistent: bool,
     buffers: Option<Buffers>,
 }
 
@@ -92,7 +178,7 @@ struct Decompressing {
 /// buffers, `None` once the dtor freed them, and `is_flushed`, whether no
 /// flush is pending since the last bucket.
 struct Compressing {
-    stream: Option<LentCompress>,
+    stream: Option<Compressor>,
     buffers: Option<Buffers>,
     flushed: bool,
 }
@@ -117,7 +203,7 @@ impl StreamFilter for Decompressing {
             let mut bin = 0;
             while bin < bucket.len() {
                 if matches!(self.status, Status::Uninitialized) {
-                    let Ok(stream) = LentDecompress::new(req, self.small)? else {
+                    let Ok(stream) = Decompressor::new(req, self.small, self.persistent)? else {
                         return Ok(FilterStatus::ErrFatal);
                     };
                     self.status = Status::Running(stream);
@@ -380,12 +466,30 @@ fn param(req: &mut Request, params: &Value, name: &[u8]) -> Result<Option<Value>
 /// 100 1470464
 /// -1073280
 /// ```
+///
+/// A filter on a persistent stream keeps them on the system allocator, as
+/// `safe_pemalloc(.., 1)` does, and no request counts them.
+///
+/// ```php
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// [$host, $port] = explode(':', stream_socket_get_name($s, false));
+/// $a = pfsockopen($host, $port);
+/// $w = fopen('php://memory', 'w+'); stream_filter_append($w, 'bzip2.compress', STREAM_FILTER_WRITE);
+/// $m = memory_get_usage(); $r = stream_filter_append($a, 'string.rot13', STREAM_FILTER_READ); $base = memory_get_usage() - $m;
+/// $m = memory_get_usage(); $h = stream_filter_append($a, 'bzip2.decompress', STREAM_FILTER_READ); var_dump(memory_get_usage() - $m - $base);
+/// $m = memory_get_usage(); $c = stream_filter_append($a, 'bzip2.compress', STREAM_FILTER_READ); var_dump(memory_get_usage() - $m - $base);
+/// ```
+/// ```expect
+/// int(0)
+/// int(0)
+/// ```
 pub(crate) fn factory(
     req: &mut Request,
     name: &[u8],
     params: Option<&Value>,
+    persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
-    let buffers = Buffers::new(req)?;
+    let buffers = Buffers::new(req, persistent)?;
     if name.eq_ignore_ascii_case(b"bzip2.decompress") {
         let (mut small, mut concatenated) = (false, false);
         if let Some(params) = params {
@@ -405,6 +509,7 @@ pub(crate) fn factory(
             status: Status::Uninitialized,
             small,
             concatenated,
+            persistent,
             buffers: Some(buffers),
         })));
     }
@@ -441,7 +546,7 @@ pub(crate) fn factory(
         i32::try_from(blocks).unwrap_or(9),
         i32::try_from(work).unwrap_or(0),
     );
-    let Ok(stream) = LentCompress::new(req, blocks, work)? else {
+    let Ok(stream) = Compressor::new(req, blocks, work, persistent)? else {
         buffers.free(req);
         return Ok(None);
     };

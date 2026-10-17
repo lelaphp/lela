@@ -504,7 +504,7 @@ impl StreamFilter for UserFilter {
 }
 
 /// `user_filter_factory_create` (`Z/ext/standard/user_filters.c:231`):
-/// the class registered under the name or, for a name nobody registered
+/// php's warning and no filter for a persistent stream; else the class registered under the name or, for a name nobody registered
 /// as it is, under the nearest wildcard over it; php's warning where
 /// the class is not defined; then an object of it, no constructor
 /// called, its `filtername` and `params` set, and `onCreate()`, whose
@@ -521,11 +521,35 @@ impl StreamFilter for UserFilter {
 /// load Lazy
 /// bool(true)
 /// ```
+///
+/// ```php
+/// class Upper extends php_user_filter {}
+/// stream_filter_register('upper', 'Upper');
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// $a = pfsockopen(...explode(':', stream_socket_get_name($s, false)));
+/// var_dump(stream_filter_append($a, 'upper'));
+/// ```
+/// ```expect
+///
+/// Warning: stream_filter_append(): Cannot use a user-space filter with a persistent stream in %s on line 6
+///
+/// Warning: stream_filter_append(): Unable to create or locate filter "upper" in %s on line 6
+/// bool(false)
+/// ```
 fn user_filter_factory(
     req: &mut Request,
     name: &[u8],
     params: Option<&Value>,
+    persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+    if persistent {
+        docref(
+            req,
+            Level::Warning,
+            "Cannot use a user-space filter with a persistent stream",
+        );
+        return Ok(None);
+    }
     let map = &req.state::<State>().user_filters.map;
     let find = |wanted: &[u8]| {
         map.iter()

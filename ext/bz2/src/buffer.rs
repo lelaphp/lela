@@ -7,7 +7,7 @@ use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpString};
+use php_ext::values::{FreshString, Owner, PhpString};
 
 use crate::ffi::{Action, Code, Compress, Decompress};
 
@@ -96,6 +96,18 @@ use crate::ffi::{Action, Code, Compress, Decompress};
 /// bool(true)
 /// bool(true)
 /// ```
+///
+/// The worst-case destination stands on the request's heap while the
+/// library compresses, as php's `zend_string_alloc` holds it, so the
+/// peak reads php's:
+///
+/// ```php
+/// $s = str_repeat('abc', 1000);
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $y = bzcompress($s, 9); echo memory_get_peak_usage() - $m, "\n";
+/// ```
+/// ```expect exit=0
+/// 4096
+/// ```
 #[php_function]
 fn bzcompress(
     req: &mut Request,
@@ -124,29 +136,32 @@ fn bzcompress(
         i32::try_from(block_size).unwrap_or(9),
         i32::try_from(work_factor).unwrap_or(0),
     );
-    match compress_buffer(source, chunk, block_size, work_factor) {
-        Ok(bytes) => Ok(Union::A(PhpString::new(req, &bytes)?)),
-        Err(code) => Ok(Union::B(code.number())),
+    // `zend_string_alloc(dest_len, 0)` before the library is asked, so
+    // the worst case stands on the request's heap while it compresses,
+    // and `zend_string_truncate` to what it wrote.
+    let mut dest = FreshString::new(req, chunk)?;
+    match compress_buffer(source, dest.bytes_mut(), block_size, work_factor) {
+        Ok(written) => Ok(Union::A(dest.truncate(req, written)?.finish())),
+        Err(code) => {
+            dest.free(req);
+            Ok(Union::B(code.number()))
+        }
     }
 }
 
-/// `BZ2_bzBuffToBuffCompress` into a buffer of `capacity` bytes: one
-/// `BZ_FINISH` call over the whole input, `BZ_OUTBUFF_FULL` where it
+/// `BZ2_bzBuffToBuffCompress` into `dest`: one `BZ_FINISH` call over the
+/// whole input, how many bytes it wrote, and `BZ_OUTBUFF_FULL` where it
 /// ends short of the stream's end.
 fn compress_buffer(
     source: &[u8],
-    capacity: usize,
+    dest: &mut [u8],
     block_size: i32,
     work_factor: i32,
-) -> Result<Vec<u8>, Code> {
+) -> Result<usize, Code> {
     let mut stream = Compress::new(block_size, work_factor)?;
-    let mut dest = vec![0; capacity];
-    let step = stream.compress(source, &mut dest, Action::Finish);
+    let step = stream.compress(source, dest, Action::Finish);
     match step.code {
-        Code::StreamEnd => {
-            dest.truncate(step.written);
-            Ok(dest)
-        }
+        Code::StreamEnd => Ok(step.written),
         Code::FinishOk => Err(Code::OutbuffFull),
         failed => Err(failed),
     }

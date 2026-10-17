@@ -1235,6 +1235,11 @@ values::Owner::try_append
 values::Owner::unset
 values::Owner::unset_in_place
 values::Owner::visit
+values::Pemalloc
+values::Pemalloc::bytes
+values::Pemalloc::bytes_mut
+values::Pemalloc::free
+values::Pemalloc::new
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::clean

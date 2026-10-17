@@ -500,6 +500,7 @@ fn leaky_factory(
     _req: &mut Request,
     _name: &[u8],
     _params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     Ok(Some(Box::new(LeakyFilter)))
 }

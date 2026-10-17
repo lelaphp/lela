@@ -62,7 +62,7 @@ mod owner;
 mod smart_str;
 pub mod walk;
 pub use charset::Charset;
-pub use emalloc::Emalloc;
+pub use emalloc::{Emalloc, Pemalloc};
 pub use fresh::FreshString;
 pub use identity::Identity;
 pub use owner::{Owner, ResourceView, View};

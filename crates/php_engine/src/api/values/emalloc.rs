@@ -103,3 +103,67 @@ impl Emalloc {
         req.heap_mut().free_block(self.block);
     }
 }
+
+/// One `pemalloc(len, persistent)`: an [`Emalloc`] on the request's heap
+/// where the allocation is not persistent, else `len` bytes of the system
+/// allocator, as php's `malloc` holds them, which no request counts. What
+/// php `pemalloc`s for a stream's filter takes the stream's persistence,
+/// so a filter on a `pfsockopen` stream is counted nowhere.
+///
+/// ```php
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// [$host, $port] = explode(':', stream_socket_get_name($s, false));
+/// $a = pfsockopen($host, $port);
+/// $f = fopen('php://memory', 'w+');
+/// foreach ([$f, $a] as $stream) {
+///     $m = memory_get_usage(); $h = stream_filter_append($stream, 'bzip2.compress', STREAM_FILTER_READ); echo memory_get_usage() - $m, "\n";
+/// }
+/// ```
+/// ```expect
+/// 3531152
+/// 32
+/// ```
+#[derive(Debug)]
+pub struct Pemalloc(Held);
+
+#[derive(Debug)]
+enum Held {
+    Request(Emalloc),
+    System(Box<[u8]>),
+}
+
+impl Pemalloc {
+    /// `pecalloc(1, len, persistent)`: `len` zero bytes; the `Err` is the
+    /// memory limit's fatal.
+    pub fn new(req: &mut Request, len: usize, persistent: bool) -> Result<Pemalloc, Thrown> {
+        if persistent {
+            return Ok(Pemalloc(Held::System(vec![0; len].into_boxed_slice())));
+        }
+        Ok(Pemalloc(Held::Request(Emalloc::new(req, len)?)))
+    }
+
+    /// The bytes, as written.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        match &self.0 {
+            Held::Request(block) => block.bytes(),
+            Held::System(block) => block,
+        }
+    }
+
+    /// The bytes, to write.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        match &mut self.0 {
+            Held::Request(block) => block.bytes_mut(),
+            Held::System(block) => block,
+        }
+    }
+
+    /// `pefree(ptr, persistent)`: the allocation back to where it came
+    /// from.
+    pub fn free(self, req: &mut Request) {
+        if let Held::Request(block) = self.0 {
+            block.free(req);
+        }
+    }
+}

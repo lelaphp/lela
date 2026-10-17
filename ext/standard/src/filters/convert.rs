@@ -805,6 +805,7 @@ pub(super) fn create(
     req: &mut Request,
     name: &[u8],
     params: Option<&Value>,
+    _persistent: bool,
 ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
     let filtername = String::from_utf8_lossy(name).into_owned();
     let options = params.map(|value| value.as_array().copied());
