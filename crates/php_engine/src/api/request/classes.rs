@@ -430,10 +430,53 @@ impl Request {
     /// if it names one, is already declared, looked up without
     /// autoloading, then linked as the early bind links
     /// ([`Request::link_declared`] under `early`), and recorded so its
-    /// opline passes over it. A link that cannot resolve yet leaves the
-    /// class to the opline; one that is refused ends the request before
-    /// the file runs, as php's compile-time early bind would. None when
-    /// the request ended, and whether the class was bound otherwise.
+    /// opline passes over it. The class stands under its runtime
+    /// definition key alone, as at the compile-time early bind
+    /// ([`php_link::early_bind`]), so a check its parent's member makes
+    /// naming it does not find it and leaves the class to the opline,
+    /// which raises whatever the link refuses after the code above it;
+    /// a link refused with nothing left unresolved ends the request
+    /// before the file runs, as php's compile-time early bind would. None
+    /// when the request ended, and whether the class was bound otherwise.
+    ///
+    /// ```php
+    /// echo "ran\n";
+    /// class A { function g(B $b) {} function f(int $a) {} }
+    /// class B extends A { function g(A $b) {} function f(string $a) {} }
+    /// ```
+    /// ```expect exit=255
+    /// ran
+    ///
+    /// Fatal error: Declaration of B::f(string $a) must be compatible with A::f(int $a) in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// var_dump(class_exists('B', false));
+    /// class A { public function m(B|string $a): A|string { return 'A'; } }
+    /// class B extends A { public function m(A|string $a): B|string { return 'B'; } }
+    /// var_dump(class_exists('B', false));
+    /// ```
+    /// ```expect exit=0
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    ///
+    /// An anonymous class whose `set` hook's parameter type the file
+    /// could not hold to its property's is linked at its
+    /// `DECLARE_ANON_CLASS` ([`Request::link_unbound`]), the refusal raised
+    /// there:
+    ///
+    /// ```php
+    /// echo "before\n";
+    /// $o = new class { public X $p { set(Y $v) {} } };
+    /// class X {}
+    /// class Y {}
+    /// ```
+    /// ```expect exit=255
+    /// before
+    ///
+    /// Fatal error: Type of parameter $v of hook class@anonymous::$p::set must be compatible with property type in %s on line 3
+    /// ```
     fn bind_at_load(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
         if self.class_named((&decl.name).into()).is_some() {
             return Some(false);
@@ -455,8 +498,10 @@ impl Request {
     }
 
     /// `zend_compile_class_decl`'s `link_unbound` for the anonymous class
-    /// at `at` of `unit`: one with no parent, no interface and no trait
-    /// php links while the file compiles and holds in `CG(class_table)`
+    /// at `at` of `unit`: one with no parent, no interface, no trait and
+    /// no hook variance check left for the link
+    /// ([`php_unit::decl::ClassFlags::hooked_variance`]) php links while
+    /// the file compiles and holds in `CG(class_table)`
     /// from then on, so it is linked and bound as the unit loads, and
     /// its `DECLARE_ANON_CLASS` finds it by name
     /// ([`Request::declare_anonymous`]); any other is linked by the
@@ -479,7 +524,10 @@ impl Request {
     /// }
     /// ```
     fn link_unbound(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
-        let unbound = decl.parent.is_none() && decl.interfaces.is_empty() && decl.traits.is_empty();
+        let unbound = decl.parent.is_none()
+            && decl.interfaces.is_empty()
+            && decl.traits.is_empty()
+            && !decl.flags.hooked_variance;
         if !unbound || self.class_named((&decl.name).into()).is_some() {
             return Some(false);
         }
@@ -1398,7 +1446,7 @@ impl Request {
             self.declare_cached(unit, at, decl, &entry);
             return Ok(true);
         }
-        let (linking, read) = self.link_reading(decl);
+        let (linking, read) = self.link_reading(decl, early);
         if early && !linking.obligations.is_empty() {
             return Ok(false);
         }

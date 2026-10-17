@@ -1692,12 +1692,17 @@ fn enum_funcs_refused(child: &ClassDecl) -> Option<Refused> {
 /// ```expect
 /// B
 /// ```
-pub fn early_bind<'a>(
+///
+/// opcache's load makes the same bind, `zend_accel_do_delayed_early_binding`
+/// with the class still under its runtime definition key alone, so the
+/// engine's load links a `DECLARE_CLASS_DELAYED` class through here too,
+/// over its table's records and the keys `holder` reads.
+pub fn early_bind<'a, H: Copy + PartialEq>(
     child: &'a ClassDecl,
-    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
-) -> Linking {
-    let lookup = |name: &[u8]| lookup(name);
-    let mut linker = Linker::over(&lookup, &|()| None, Vec::new());
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a, H>>,
+    holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
+) -> Linking<H> {
+    let mut linker = Linker::over(lookup, holder, Vec::new());
     linker.standing = Standing::Compiling;
     linker.link_plain(child)
 }

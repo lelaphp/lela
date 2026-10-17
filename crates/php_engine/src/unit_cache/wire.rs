@@ -398,7 +398,7 @@ record! {
     TraitMethodRef { trait_name, method }
     ClassFlags {
         is_abstract, is_final, is_readonly, is_anonymous, is_top_level, not_serializable,
-        dynamic_properties, use_guards,
+        dynamic_properties, use_guards, hooked_variance,
     }
     ClassDecl {
         name, kind, flags, parent, interfaces, implementors, aliases, traits, adaptations,
