@@ -25,8 +25,8 @@ use php_macros::php_class;
 
 use crate::api::__private::native_function;
 use crate::api::abi::{
-    Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, GcTable, Instance,
-    NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
+    Callable, CloneObj, ConstArray, Core, CoreTable, DebugInfo, Entry, FromArgument, GcTable,
+    Instance, NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
@@ -40,22 +40,46 @@ use crate::trampoline::{public_method, variadic};
 /// is uncloneable (`zend_register_default_exception`), and the rest
 /// `Std`'s. A user class extending a throwable is reached through this
 /// table, as php's inherits `create_object`.
-static THROWABLE: Refusals = Refusals::NONE.cloning();
+static THROWABLE: ThrowableHandlers = ThrowableHandlers;
+
+/// The throwables' table: uncloneable, and Core's own
+/// ([`Core::Throwable`]), which is how [`records_throw_site`] knows it.
+struct ThrowableHandlers;
+
+impl ObjectHandlers for ThrowableHandlers {
+    fn core_table(&self) -> CoreTable {
+        CoreTable::of(Core::Throwable)
+    }
+
+    fn refusals(&self) -> Refusals {
+        Refusals::NONE.cloning()
+    }
+}
 
 /// Whether `handlers` is the throwables' table: php's
 /// `zend_default_exception_new`, the `create_object` of every class
 /// under `Throwable`, records the site of `new` on the object as it is
 /// made, and `Request::new_object` does the same for an object whose
-/// class reaches this table.
+/// class reaches this table. The table answers it ([`CoreTable`]), so
+/// an extension's table with the same refusals is never taken for it:
+///
+/// ```php
+/// $e = new Exception; $line = __LINE__;
+/// var_dump($e->getLine() === $line);
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
 pub(crate) fn records_throw_site(handlers: &'static dyn ObjectHandlers) -> bool {
-    std::ptr::addr_eq(handlers, &raw const THROWABLE)
+    handlers.core_table().is(Core::Throwable)
 }
 
 /// Whether `handlers` is a Core table whose class php gives a
 /// `create_object` with no native payload here: the throwables'
 /// `zend_default_exception_new` and `Closure`'s `zend_closure_new`.
 pub(crate) fn core_create_object(handlers: &'static dyn ObjectHandlers) -> bool {
-    records_throw_site(handlers) || std::ptr::addr_eq(handlers, &raw const CLOSURE)
+    let core = handlers.core_table();
+    core.is(Core::Throwable) || core.is(Core::Closure)
 }
 
 /// `closure_handlers` (`Z/Zend/zend_closures.c:730`): the slots
@@ -63,6 +87,10 @@ pub(crate) fn core_create_object(handlers: &'static dyn ObjectHandlers) -> bool 
 struct ClosureHandlers;
 
 impl ObjectHandlers for ClosureHandlers {
+    fn core_table(&self) -> CoreTable {
+        CoreTable::of(Core::Closure)
+    }
+
     /// `zend_closure_get_constructor`: a closure is made by the engine
     /// alone.
     ///
@@ -2409,4 +2437,23 @@ fn valid_closure_binding(
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod core_table_tests {
+    use super::{CLOSURE, THROWABLE, core_create_object, records_throw_site};
+    use crate::api::abi::{ObjectHandlers, Refusals};
+
+    /// An extension's table with the throwables' refusals, a promoted
+    /// constant as `ext/intl` and `ext/spl` write it, is no throwable's
+    /// table and makes no Core object, whatever address it is given.
+    #[test]
+    fn a_table_is_core_s_by_its_answer_and_not_by_its_bytes() {
+        const LOOKALIKE: Refusals = Refusals::NONE.cloning();
+        let lookalike: &'static dyn ObjectHandlers = &LOOKALIKE;
+        assert!(!records_throw_site(lookalike));
+        assert!(!core_create_object(lookalike));
+        assert!(records_throw_site(&THROWABLE));
+        assert!(core_create_object(&THROWABLE) && core_create_object(&CLOSURE));
+    }
 }

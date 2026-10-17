@@ -168,7 +168,7 @@ pub(crate) fn gc_entries(
     visit: &mut dyn FnMut(Obj, php_heap::ZvalRef),
 ) -> bool {
     let table = req.object_handlers(map);
-    if !std::ptr::addr_eq(table, &raw const WEAK_MAP) {
+    if !table.core_table().is(crate::api::abi::Core::WeakMap) {
         return false;
     }
     let Some(entries) = entries_of(req, PhpObject::of(map)) else {
@@ -309,6 +309,10 @@ fn entries_of(req: &Request, map: PhpObject) -> Option<PhpArray> {
 }
 
 impl ObjectHandlers for WeakMapHandlers {
+    fn core_table(&self) -> crate::api::abi::CoreTable {
+        crate::api::abi::CoreTable::of(crate::api::abi::Core::WeakMap)
+    }
+
     /// `zend_weakmap_iterator`: the iterator and its `ht_iter`.
     fn iterator_size(&self) -> usize {
         96

@@ -2360,7 +2360,48 @@ pub trait ClassIterator: Send {
 /// What a table refuses of construction, cloning and comparison it
 /// states once, as [`ObjectHandlers::refusals`], and the default
 /// `get_constructor`, `clone_obj` and `compare` serve it.
+/// Which of Core's own handler tables a table is, the identity a kernel
+/// asks where php compares a class or a handler to Core's
+/// (`zend_ce_generator`, `get_gc == zend_weakmap_get_gc`, the
+/// throwables' `zend_default_exception_new`, `Closure`'s
+/// `zend_closure_new`): answered by the table, never read off its
+/// address, which a constant the linker merges with Core's static would
+/// share. An extension's table can name only [`CoreTable::NONE`]; the
+/// others are the engine's to answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CoreTable(Core);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Core {
+    None,
+    Throwable,
+    Closure,
+    Generator,
+    WeakMap,
+}
+
+impl CoreTable {
+    /// No table of Core's: what every table an extension declares is.
+    pub const NONE: CoreTable = CoreTable(Core::None);
+
+    /// The table Core's `kind` is.
+    pub(crate) const fn of(kind: Core) -> CoreTable {
+        CoreTable(kind)
+    }
+
+    /// Whether this is Core's `kind`.
+    pub(crate) fn is(self, kind: Core) -> bool {
+        self.0 == kind
+    }
+}
+
 pub trait ObjectHandlers: Send + Sync {
+    /// Which of Core's tables this is ([`CoreTable`]); none at `Std`
+    /// and for every table an extension declares.
+    fn core_table(&self) -> CoreTable {
+        CoreTable::NONE
+    }
+
     /// The class's [`Refusals`], php's `get_constructor` that throws,
     /// null `clone_obj` and `zend_objects_not_comparable`, which the
     /// default bodies of those three slots read; none at `Std`. A table
