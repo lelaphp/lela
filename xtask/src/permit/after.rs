@@ -72,10 +72,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::INSTRUMENT;
@@ -777,20 +777,12 @@ fn hash_objects(checkout: &Path, paths: &[&str]) -> Result<Vec<String>> {
 
 /// The bytes of the blob `id`, which need not be text.
 fn cat_blob(checkout: &Path, id: &str) -> Result<Vec<u8>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(checkout)
-        .args(["cat-file", "blob", id])
-        .stdin(Stdio::null())
-        .output()
-        .context("running git cat-file")?;
-    if !out.status.success() {
-        bail!(
-            "git cat-file blob {id}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(out.stdout)
+    git::run(
+        Command::new("git"),
+        checkout,
+        &["cat-file", "blob", id],
+        None,
+    )
 }
 
 #[cfg(test)]

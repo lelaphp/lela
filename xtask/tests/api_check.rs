@@ -180,7 +180,7 @@ fn a_marker_naming_what_the_pinned_header_does_not_declare_fails() {
 fn write_lays_down_a_surface_lock_the_reading_then_holds() {
     let manifest = Manifest::load(workspace()).unwrap();
     let root = Tree::new("api-check-surface-write").unwrap();
-    xtask::scratch::repository(&fixture("surface-lock"), &root).unwrap();
+    xtask::scratch::repository(&fixture("surface-lock"), &root, &["."]).unwrap();
     let lock = root.join("ext/pcre/surface.lock");
     fs::remove_file(&lock).unwrap();
     let readings = api_check::hold(&manifest, &root, true).unwrap();
@@ -312,7 +312,7 @@ fn a_lock_in_an_order_write_would_rewrite_fails_naming_the_line_and_its_place() 
 fn a_rewritten_lock_is_stamped_over_what_write_left() {
     let manifest = Manifest::load(workspace()).unwrap();
     let root = Tree::new("api-check-write").unwrap();
-    xtask::scratch::repository(&fixture("lock-order"), &root).unwrap();
+    xtask::scratch::repository(&fixture("lock-order"), &root, &["."]).unwrap();
     let home = manifest.scope_path("heap").unwrap();
     let before = Snapshot::disk(&root).unwrap().key(&home).unwrap();
     let readings = api_check::hold(&manifest, &root, true).unwrap();

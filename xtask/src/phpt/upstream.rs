@@ -82,7 +82,7 @@ pub(crate) fn compare(
         let id = subset.id(&source.join(test));
         let ours = ours.judged.iter().find(|judged| judged.id == id);
         let ours = ours.map(|judged| judged.judgement);
-        let theirs = said.lines().find_map(|line| verdict(line, test));
+        let theirs = verdict(&said, test);
         let alike = ours.and_then(word).is_some_and(|ours| Some(ours) == theirs);
         apart += usize::from(!alike);
         println!(
@@ -167,15 +167,31 @@ fn upstream(pin: &Pin, tree: &Path, tests: &[PathBuf]) -> Result<String> {
     Ok(said)
 }
 
-/// The verdict a line of `run-tests.php` gives `test`, as `show_result`
-/// writes it with no colour: the verdict's word, the test's title and its path in
-/// brackets (run-tests.php:3258-3260).
-pub(super) fn verdict<'a>(line: &'a str, test: &Path) -> Option<&'a str> {
-    let (word, rest) = line.split_once(' ')?;
-    let result = !word.is_empty() && word.bytes().all(|b| b.is_ascii_uppercase() || b == b'&');
+/// The verdict `run-tests.php` gives `test`, as `show_result` writes it
+/// with no colour: the verdict's word, the test's title and its path in
+/// brackets (run-tests.php:3258-3260). A `BORK` of a `SKIPIF` writes what
+/// the section wrote as the title (run-tests.php:2179), so the word is the
+/// first of a record that may run lines down to the path, holding no other
+/// test's, and a line of the section's that opens with a word of capitals
+/// is not it.
+pub(super) fn verdict<'a>(said: &'a str, test: &Path) -> Option<&'a str> {
     let shown = test.display();
-    let placed = rest.contains(&format!("[{shown}]")) || rest.contains(&format!("/{shown}]"));
-    (result && placed).then_some(word)
+    let placed =
+        |line: &str| line.contains(&format!("[{shown}]")) || line.contains(&format!("/{shown}]"));
+    let lines: Vec<&str> = said.lines().collect();
+    let end = lines.iter().position(|line| placed(line))?;
+    let record = lines[..end].iter().rev().take_while(|line| {
+        !(line.contains(".phpt]") || line.starts_with("===") || line.starts_with("---"))
+    });
+    let words = std::iter::once(&lines[end])
+        .chain(record)
+        .filter_map(|line| {
+            let (word, _) = line.split_once(' ')?;
+            let result =
+                !word.is_empty() && word.bytes().all(|b| b.is_ascii_uppercase() || b == b'&');
+            result.then_some(word)
+        });
+    words.last()
 }
 
 /// What `run-tests.php` calls a verdict of this runner's: a difference a
@@ -265,6 +281,13 @@ mod tests {
         );
         assert_eq!(verdict("FAIL t [ext/a/tests/xx.phpt] ", test), None);
         assert_eq!(verdict("Tests failed: 1 [ext/a/tests/x.phpt]", test), None);
+        // A SKIPIF that warned before its skip, borked under its words.
+        let borked = "Running selected tests.\nBORK Warning: socket_sendto(): Unable to write to socket [65]: No route to host in /t/x.php on line 24\nskip unable to send multicast packet. [ext/a/tests/x.phpt] reason: invalid output from SKIPIF\n";
+        assert_eq!(verdict(borked, test), Some("BORK"));
+        let capitals = "BORK Warning: w in /t/x.php on line 2\nPHP said this\nskip [ext/a/tests/x.phpt] reason: invalid output from SKIPIF";
+        assert_eq!(verdict(capitals, test), Some("BORK"));
+        let another = "PASS y [ext/a/tests/y.phpt] \nwhat came after\n[ext/a/tests/x.phpt]";
+        assert_eq!(verdict(another, test), None);
         assert_eq!(word(Judgement::Diverged), Some("FAIL"));
     }
 }
