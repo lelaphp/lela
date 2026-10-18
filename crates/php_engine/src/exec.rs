@@ -283,8 +283,10 @@ impl Receiver {
     }
 }
 
-/// What php's `INCLUDE_OR_EVAL` keeps on the request's heap for the op
-/// array a code frame serves, freed with the frame however it ends
+/// What php's `INCLUDE_OR_EVAL`, and `zend_execute_scripts` for the
+/// primary file and the files `auto_prepend_file` and `auto_append_file`
+/// name, keep on the request's heap for the op array a code frame
+/// serves, freed with the frame however it ends
 /// (`zend_leave_helper`'s `ZEND_CALL_NESTED_CODE` arm, `destroy_op_array`
 /// and `efree_size`): the op array itself, which `zend_accel_load_script`
 /// copies out of the cache and `zend_compile` makes, and the runtime

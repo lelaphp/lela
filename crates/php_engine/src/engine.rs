@@ -5813,13 +5813,24 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
         return false;
     }
     let standing = req.vm().depth();
+    // The op array `zend_accel_load_script` copies out of the cache, or
+    // `zend_compile` makes, and its runtime cache, the request's while
+    // the file runs, as an include's are (design §6.3).
+    let Ok(copy) = crate::api::values::Emalloc::new(req, crate::exec::OP_ARRAY_SIZE) else {
+        return false;
+    };
     let frame = match req.push_frame(Arc::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
+            copy.free(req);
             req.end_in(&fatal);
             return false;
         }
     };
+    if req.hold_op_array(frame, copy).is_err() {
+        req.pop_frame();
+        return false;
+    }
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }

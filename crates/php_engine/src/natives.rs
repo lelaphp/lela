@@ -2512,9 +2512,10 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 344336 is the compiler's arena, the object store's table, the VM
-    /// stack's first page, the rooms php keeps for request state the
-    /// engine keeps elsewhere (`api::request::rooms`:
+    /// 344608 is the compiler's arena, the object store's table, the VM
+    /// stack's first page, the main op array's copy and runtime cache,
+    /// as an include's (`exec::HeapOpArray`), the rooms php keeps for
+    /// request state the engine keeps elsewhere (`api::request::rooms`:
     /// `EG(main_fiber_context)`, the working directory's copy and, on Apple's platforms,
     /// `php_execute_script`'s buffer for the directory it entered in),
     /// `EG(symbol_table)`'s data, the variables `php_hash_environment`
@@ -2568,7 +2569,7 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(344336)\n",
+            unflagged, "int(344608)\n",
             "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
         );
         assert_eq!(flagged, "int(2097152)\n");
@@ -2632,7 +2633,9 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 344336 is the compiler's arena's
+    /// 2097152 is php's one 2 MiB chunk. 344624 is the usage of the pin
+    /// above, and the sixteen bytes more the peak the reset leaves stood
+    /// at as the reset ran: the compiler's arena's
     /// first block of 65536, the rooms of the pin above, the object
     /// store's 8192, the VM stack's
     /// first page of 262144, `EG(symbol_table)`'s data of 2560 (an engine with no
@@ -2652,7 +2655,7 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(344336)\nint(2097152)\n",
+            body, "int(344624)\nint(2097152)\n",
             "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
         );
     }
