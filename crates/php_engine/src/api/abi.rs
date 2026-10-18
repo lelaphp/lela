@@ -30,7 +30,7 @@ use crate::supplied::{Keyed, Registered, Supplies};
 mod class;
 mod marshal;
 
-pub use crate::fiber::{Coroutine, CoroutineStatus, HoldsCoroutine};
+pub use crate::fiber::{Coroutine, CoroutineEnd, CoroutineStatus, HoldsCoroutine};
 pub use crate::observer::{
     BeginHandler, EndHandler, ErrorNotice, FiberHandler, FiberStatus, FiberSwitchHandler, Observed,
     ObservedFiber, ObserverHandlers, ObserverInit, OpcodeHandler, Opcodes, OpcodesDeclared,
