@@ -1,7 +1,8 @@
 //! The dispatch of design §4.3 seam 7, generated from `ops.toml` at the
-//! workspace root over `php_unit::Opcode`: one `match` arm per opcode the
-//! engine has a handler for, and one arm naming every other opcode, which
-//! ends the request in the internal-error fatal that names it, so that
+//! workspace root over `php_unit::Handler`, the handler each opline is
+//! resolved to where its unit is published: one `match` arm per handler
+//! the engine serves, and one arm naming every other, which ends the
+//! request in the internal-error fatal that names the opcode, so that
 //! the `match` names every variant and its table needs no range test.
 //!
 //! The spec is `ops.toml` and the bodies are `src/handlers.rs`, and this
@@ -12,10 +13,11 @@
 //!
 //! A handler of an opcode `ops.toml` marks `specialise` may be generic
 //! over the kinds of its operands, one `Operand` parameter for `op1` or
-//! two for `op1` and `op2` after the tier's: the arm is then a `match`
-//! over the opline's kind bytes with one arm per kind the spec lists,
-//! each naming the handler at those kinds (`crate::operand`), as
-//! `zend_vm_gen.php` emits one handler per `SPEC` pair (design §5.8). A
+//! two for `op1` and `op2` after the tier's: each variant of the
+//! opcode's, one per pair of kinds the spec lists, then names the
+//! handler at those kinds (`crate::operand`), as `zend_vm_gen.php` emits
+//! one handler per `SPEC` pair (design §5.8), and the variants that name
+//! one call are one arm. A
 //! handler generic over kinds the spec does not specialise is a build
 //! error. Such a handler is handed the opline's position after the four
 //! every handler takes, since its arm writes nothing to the frame before
@@ -163,7 +165,18 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     let opcodes = opcodes(spec)?;
     let handlers = handlers(bodies)?;
     undispatched(bodies, &opcodes, &handlers)?;
-    let mut arms = String::new();
+    // Each call the dispatch makes, with every `php_unit::Handler` it
+    // serves, in the order first met: one arm per call, so a handler that
+    // serves two variants, a `SEND_VAL` whose handler is generic over
+    // `op1` alone, is one body under both.
+    let mut calls: Vec<(String, Vec<String>)> = Vec::new();
+    let mut serve = |variant: String, call: String| match calls
+        .iter_mut()
+        .find(|(served, _)| *served == call)
+    {
+        Some((_, variants)) => variants.push(variant),
+        None => calls.push((call, vec![variant])),
+    };
     for handler in &handlers {
         let Some(spec) = opcodes.get(&handler.name) else {
             return Err(format!(
@@ -172,39 +185,62 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
                 handler.ident
             ));
         };
-        arms.push_str(&arm(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?);
+        for (variant, call) in
+            arms(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?
+        {
+            serve(variant, call);
+        }
     }
-    // Every opcode the engine has no handler for, named in one arm, so
-    // that the `match` names every variant and its jump table needs no
-    // test of the opcode's range ahead of it.
-    let unserved: Vec<String> = opcodes
+    // Every handler of an opcode the engine serves none of, named in one
+    // arm, so that the `match` names every variant and its jump table
+    // needs no test of the handler's range ahead of it.
+    for spec in opcodes
         .iter()
         .filter(|(name, _)| !handlers.iter().any(|handler| &handler.name == *name))
-        .map(|(_, spec)| format!("Opcode::{}", spec.variant))
-        .collect();
-    if !unserved.is_empty() {
-        write!(
-            arms,
-            "        {} => Err(Fatal::error(format!(\n\
-             \x20           \"InternalError: {{}} has no handler in this engine yet\",\n\
-             \x20           op.opcode.name()\n\
-             \x20       ))),\n",
-            unserved.join("\n        | ")
-        )
-        .ok();
+        .map(|(_, spec)| spec)
+    {
+        for (variant, _) in variants(spec)? {
+            serve(
+                variant,
+                "Err(Fatal::error(format!(\n\
+                 \x20           \"InternalError: {} has no handler in this engine yet\",\n\
+                 \x20           op.opcode.name()\n\
+                 \x20       )))"
+                    .to_owned(),
+            );
+        }
+    }
+    serve(
+        "Unresolved".to_owned(),
+        "Err(Fatal::error(format!(\n\
+         \x20           \"InternalError: {} is served from a unit never published, so no handler is resolved for it\",\n\
+         \x20           op.opcode.name()\n\
+         \x20       )))"
+            .to_owned(),
+    );
+    let mut arms = String::new();
+    for (call, variants) in &calls {
+        let pattern = variants
+            .iter()
+            .map(|variant| format!("Handler::{variant}"))
+            .collect::<Vec<_>>()
+            .join("\n        | ");
+        writeln!(arms, "        {pattern} => {call},").ok();
     }
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
-         /// `ops.toml` and the handlers beside it: the handler at the frame's\n\
-         /// opline `at`, or the fatal for an opcode this engine does not serve\n\
-         /// yet. A handler that leaves a throwable pending says so with\n\
-         /// [`crate::tier::Stepped::Threw`], which is the pending test the\n\
-         /// loop performs. The loop holds `at` in its own hand ([`Next`]): a\n\
-         /// handler generic over its operands' kinds is handed it and writes\n\
-         /// it to the frame before anything it calls out to, and every other\n\
-         /// handler is entered with it written, as php's handler is entered\n\
-         /// past its `SAVE_OPLINE()`.\n\
-         // One arm per opcode served: the length of this function is the\n\
+         /// `ops.toml` and the handlers beside it: the handler the opline at\n\
+         /// the frame's `at` was resolved to where its unit was published\n\
+         /// (`php_unit::Handler`), one jump on one field as php's\n\
+         /// `ZEND_VM_DISPATCH` is, or the fatal for an opcode this engine does\n\
+         /// not serve yet. A handler that leaves a throwable pending says so\n\
+         /// with [`crate::tier::Stepped::Threw`], which is the pending test\n\
+         /// the loop performs. The loop holds `at` in its own hand ([`Next`]):\n\
+         /// a handler generic over its operands' kinds is handed it and\n\
+         /// writes it to the frame before anything it calls out to, and every\n\
+         /// other handler is entered with it written, as php's handler is\n\
+         /// entered past its `SAVE_OPLINE()`.\n\
+         // One arm per handler served: the length of this function is the\n\
          // number of handlers and says nothing about the code, so the line\n\
          // count is no bound on it. Every crate lints under `-D warnings`\n\
          // (harness §4.2), which reaches generated code too.\n\
@@ -219,42 +255,78 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20   op: &Opline,\n\
          \x20   at: u32,\n\
          ) -> Result<Next, Fatal> {{\n\
-         \x20   match op.opcode {{\n\
+         \x20   match op.handler {{\n\
          {arms}\
          \x20   }}\n\
          }}\n"
     ))
 }
 
-/// One opcode's arm: the handler at the tier, or, for a handler generic
-/// over its operands' kinds, a `match` over the opline's kind bytes with
-/// one arm per kind the spec lists, and the internal-error fatal for a
-/// kind it does not, which no unit the compiler wrote has.
-fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
-    let call = |kinds: &[&str]| {
-        let mut params = String::new();
-        for kind in kinds {
-            write!(
-                params,
-                ", crate::operand::{}",
-                kind_type(kind).unwrap_or_default()
-            )
-            .ok();
-        }
-        format!(
-            "crate::handlers::{}::<T{params}>(req, frame, code, op, at)",
-            handler.ident
-        )
+/// One `php_unit::Handler`'s name, and the kinds of `op1` and `op2` it
+/// is served at; `None` for the variant of the kinds a row does not list.
+type Variant = (String, Option<[String; 2]>);
+
+/// Every `php_unit::Handler` of one opcode, as `php_unit`'s `build.rs`
+/// names them from the same row, each with the kinds of `op1` and `op2`
+/// it is served at: the opcode's own for one `ops.toml` does not
+/// specialise, at the one kind each operand's row lists, and for one it
+/// does a variant for every pair of the kinds listed for the operands it
+/// specialises, the others at their one kind, and one, `None`, for the
+/// kinds it does not list.
+fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
+    let lone = |kinds: &[String]| match kinds {
+        [kind] => Some(kind.clone()),
+        _ => None,
     };
-    let variant = &spec.variant;
+    let (spec1, spec2) = (spec.specialise && spec.spec1, spec.specialise && spec.spec2);
+    if !spec1 && !spec2 {
+        let kinds = lone(&spec.op1).zip(lone(&spec.op2)).map(|(a, b)| [a, b]);
+        return Ok(vec![(spec.variant.clone(), kinds)]);
+    }
+    let side = |listed: bool, kinds: &[String]| -> Result<Vec<(String, String)>, String> {
+        if listed {
+            return kinds
+                .iter()
+                .map(|kind| {
+                    kind_type(kind)
+                        .map(|name| (name.to_owned(), kind.clone()))
+                        .ok_or_else(|| {
+                            format!("{}: {kind} is no kind of crate::operand", spec.variant)
+                        })
+                })
+                .collect();
+        }
+        Ok(vec![(String::new(), lone(kinds).unwrap_or_default())])
+    };
+    let mut out = Vec::new();
+    for (a, ka) in side(spec1, &spec.op1)? {
+        for (b, kb) in side(spec2, &spec.op2)? {
+            out.push((format!("{}{a}{b}", spec.variant), Some([ka.clone(), kb])));
+        }
+    }
+    out.push((format!("{}Unlisted", spec.variant), None));
+    Ok(out)
+}
+
+/// One opcode's arms, each a `php_unit::Handler` and the call that
+/// serves it: the handler at the tier for an opcode it serves at any
+/// kinds, and, for a handler generic over its operands' kinds, the
+/// handler at the kinds each variant names, with the internal-error
+/// fatal for the kinds the spec does not list, which no unit the
+/// compiler wrote has.
+fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String> {
     if handler.operands == 0 {
-        return Ok(format!(
-            "        Opcode::{variant} => {{\n\
+        let call = format!(
+            "{{\n\
              \x20           req.vm_mut().stand(frame, at);\n\
              \x20           crate::handlers::{}::<T>(req, frame, code, op)\n\
-             \x20       }}\n",
+             \x20       }}",
             handler.ident
-        ));
+        );
+        return Ok(variants(spec)?
+            .into_iter()
+            .map(|(variant, _)| (variant, call.clone()))
+            .collect());
     }
     if !spec.specialise {
         return Err(format!(
@@ -262,65 +334,40 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
             handler.ident
         ));
     }
-    let mut read = spec
-        .op1
-        .iter()
-        .chain(spec.op2.iter().filter(|_| handler.operands > 1));
-    if let Some(kind) = read.find(|kind| kind_type(kind).is_none()) {
+    if handler.operands > 2 {
         return Err(format!(
-            "`fn {}` is generic over its operands' kinds and ops.toml lists `{kind}` among them, which crate::operand has no type for",
-            handler.ident
+            "`fn {}` is generic over {} operands; an opline has two",
+            handler.ident, handler.operands
         ));
     }
-    let mut out = String::new();
-    match handler.operands {
-        1 => {
-            writeln!(out, "        Opcode::{variant} => match op.op1_type {{").ok();
-            for a in &spec.op1 {
-                writeln!(
-                    out,
-                    "            php_unit::OperandKind::{} => {},",
-                    kind_type(a).unwrap_or_default(),
-                    call(&[a])
-                )
-                .ok();
-            }
+    let unlisted = "Err(Fatal::error(format!(\n\
+                    \x20           \"InternalError: {} over operand kinds ops.toml does not list\",\n\
+                    \x20           op.opcode.name()\n\
+                    \x20       )))";
+    let mut out = Vec::new();
+    for (variant, kinds) in variants(spec)? {
+        let Some(kinds) = kinds else {
+            out.push((variant, unlisted.to_owned()));
+            continue;
+        };
+        let mut params = String::new();
+        for kind in &kinds[..handler.operands] {
+            let Some(ty) = kind_type(kind) else {
+                return Err(format!(
+                    "`fn {}` is generic over its operands' kinds and ops.toml lists `{kind}` among them, which crate::operand has no type for",
+                    handler.ident
+                ));
+            };
+            write!(params, ", crate::operand::{ty}").ok();
         }
-        2 => {
-            writeln!(
-                out,
-                "        Opcode::{variant} => match (op.op1_type, op.op2_type) {{"
-            )
-            .ok();
-            for a in &spec.op1 {
-                for b in &spec.op2 {
-                    writeln!(
-                        out,
-                        "            (php_unit::OperandKind::{}, php_unit::OperandKind::{}) => {},",
-                        kind_type(a).unwrap_or_default(),
-                        kind_type(b).unwrap_or_default(),
-                        call(&[a, b])
-                    )
-                    .ok();
-                }
-            }
-        }
-        n => {
-            return Err(format!(
-                "`fn {}` is generic over {n} operands; an opline has two",
+        out.push((
+            variant,
+            format!(
+                "crate::handlers::{}::<T{params}>(req, frame, code, op, at)",
                 handler.ident
-            ));
-        }
+            ),
+        ));
     }
-    writeln!(
-        out,
-        "            _ => Err(Fatal::error(format!(\n\
-         \x20               \"InternalError: {{}} over operand kinds ops.toml does not list\",\n\
-         \x20               op.opcode.name()\n\
-         \x20           ))),\n\
-         \x20       }},"
-    )
-    .ok();
     Ok(out)
 }
 
@@ -379,6 +426,11 @@ struct Spec {
     specialise: bool,
     op1: Vec<String>,
     op2: Vec<String>,
+    /// Whether each operand's shape carries a zval kind with php's `SPEC`
+    /// bit, which is what `php_unit` specialises a handler over: not for
+    /// `ANY`, nor for a field such as `JMP_ADDR`.
+    spec1: bool,
+    spec2: bool,
 }
 
 /// php's opcode names against what the dispatch reads of their rows.
@@ -407,6 +459,18 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                 })
                 .unwrap_or_default()
         };
+        let specialised = |field: &str| {
+            row.get(field)
+                .and_then(toml::Value::as_str)
+                .unwrap_or("ANY")
+                .split('|')
+                .any(|word| {
+                    matches!(
+                        word,
+                        "CONST" | "TMP" | "VAR" | "CV" | "UNUSED" | "TMPVAR" | "TMPVARCV"
+                    )
+                })
+        };
         out.insert(
             snake(name),
             Spec {
@@ -417,6 +481,8 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                     .unwrap_or(false),
                 op1: kinds("op1"),
                 op2: kinds("op2"),
+                spec1: specialised("op1_raw"),
+                spec2: specialised("op2_raw"),
             },
         );
     }

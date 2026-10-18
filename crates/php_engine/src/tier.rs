@@ -268,10 +268,11 @@ pub(crate) fn settled(req: &mut Request, frame: FrameRef, at: u32, next: Next) -
 }
 
 /// The generated dispatch (design §4.3 seam 7): one `match` arm per
-/// opcode `ops.toml` names, over the handlers beside it.
+/// `php_unit::Handler` an opline is resolved to, over the handlers beside
+/// it.
 mod dispatch {
     use php_heap::{Fatal, FrameRef};
-    use php_unit::{OpArray, Opcode, Opline};
+    use php_unit::{Handler, OpArray, Opline};
 
     use crate::api::request::Request;
     use crate::tier::{Next, Tier};
@@ -589,7 +590,7 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             req.sensed_after(body, op)?;
             match next.way() {
                 // `at` is the index of an opline that stands, so it is
-                // under the length of an op array, which no 24-byte opline
+                // under the length of an op array, which no 28-byte opline
                 // count brings to `u32::MAX`: the add does not wrap.
                 Way::Advance => at = at.wrapping_add(1),
                 Way::Jump(to) => at = to,

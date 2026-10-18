@@ -1017,7 +1017,7 @@ mod tests {
     /// of `for (;;) {}`, safepoint number one, which runs until the
     /// interrupt stops it.
     fn looping() -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::Jmp,
@@ -1029,7 +1029,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     fn description() -> RequestDescription {

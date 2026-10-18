@@ -4,9 +4,9 @@
 
 use php_heap::Zval;
 
-use crate::Opcode;
 use crate::decl::{ConstExpr, Name};
 use crate::opcode;
+use crate::{Handler, Opcode};
 
 /// An index into an op array's oplines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -164,15 +164,18 @@ impl Opcode {
     pub const COUNT: usize = opcode::COUNT;
 }
 
-/// One instruction, php's 24-byte `zend_op` field for field (design
-/// §5.7); `out` is php's `result` and `out_type` its `result_type`,
-/// spelled so because the glossary keeps that word for `Result`. The
-/// four bytes before the fields of four are what php's are: the opcode
-/// and the kind of each operand, `result`'s last. A site opcode's
-/// `out` is its safepoint number and its `out_type` stays `Unused`, as
-/// php leaves it; on every other opcode `out_type` is
-/// `RETURN_VALUE_USED`, what the compiler wrote where `zend_do_free`
-/// found nothing reading the value.
+/// One instruction, php's `zend_op` field for field (design §5.7);
+/// `out` is php's `result` and `out_type` its `result_type`, spelled so
+/// because the glossary keeps that word for `Result`. The four bytes
+/// before the fields of four are what php's are: the opcode and the kind
+/// of each operand, `result`'s last. A site opcode's `out` is its
+/// safepoint number and its `out_type` stays `Unused`, as php leaves it;
+/// on every other opcode `out_type` is `RETURN_VALUE_USED`, what the
+/// compiler wrote where `zend_do_free` found nothing reading the value.
+/// `handler` is php's `zend_op.handler`, the handler the opline is
+/// served by, which the compiler leaves `Unresolved` and publication
+/// resolves from the fields before it ([`Handler`]); php's is a pointer
+/// and this its number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Opline {
@@ -185,6 +188,7 @@ pub struct Opline {
     pub out: u32,
     pub extended_value: u32,
     pub lineno: u32,
+    pub handler: Handler,
 }
 
 impl Default for Opline {
@@ -199,6 +203,7 @@ impl Default for Opline {
             out: 0,
             extended_value: 0,
             lineno: 0,
+            handler: Handler::Unresolved,
         }
     }
 }
@@ -367,6 +372,15 @@ pub struct OpArray {
 }
 
 impl OpArray {
+    /// Every opline's handler resolved from its opcode and the kinds of
+    /// its operands, as php's `pass_two` calls `zend_vm_set_opcode_handler`
+    /// on every opline it finishes ([`crate::Unit::published`]).
+    pub(crate) fn resolve(&mut self) {
+        for op in &mut self.oplines {
+            op.handler = Handler::of(op);
+        }
+    }
+
     /// The tables shrunk to what they hold ([`crate::Unit::compact`]).
     pub(crate) fn compact(&mut self) {
         self.oplines.shrink_to_fit();
@@ -437,8 +451,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_opline_is_twenty_four_bytes_and_the_enum_keeps_php_numbers() {
-        assert_eq!(std::mem::size_of::<Opline>(), 24);
+    fn an_opline_is_twenty_eight_bytes_and_the_enum_keeps_php_numbers() {
+        assert_eq!(
+            std::mem::size_of::<Opline>(),
+            28,
+            "php's twenty-four bytes of fields and the two of the handler"
+        );
+        assert_eq!(std::mem::size_of::<Handler>(), 2);
         assert_eq!(
             std::mem::size_of::<Opcode>(),
             1,

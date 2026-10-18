@@ -23571,7 +23571,7 @@ mod tests {
     /// A unit whose main op array is one `JMP` to `target`, its
     /// safepoint number `number`.
     fn jumping(target: u32, number: u32) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline::default(),
@@ -23585,7 +23585,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §5.7, §5.8: a `JMP` to an earlier opline is a back-edge and
@@ -23650,7 +23651,7 @@ mod tests {
     /// constant at slot zero, aimed at the `NOP`, with safepoint number
     /// one: the shape of `for (;;)` after a body of one opline.
     fn conditional(literal: php_heap::Zval) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline::default(),
@@ -23667,7 +23668,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §5.7, §5.8: a `JMPNZ` taken to an earlier opline is the
@@ -23714,7 +23716,7 @@ mod tests {
     /// that temporary aimed at the `NOP` with safepoint number seven:
     /// `do {} while ($i < 1)` over a constant.
     fn compared_loop(left: i64) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline::default(),
@@ -23742,7 +23744,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §5.8: a comparison with a `JMPNZ` over its temporary after
@@ -23783,7 +23786,7 @@ mod tests {
     /// A unit whose main op array is one `RETURN null`, its safepoint
     /// number `number`, as the compiler writes it into `result`.
     fn returning(number: u32) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::Return,
@@ -23796,7 +23799,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §4.3 seam 8: `RETURN` raises the return safepoint, with the
@@ -23845,7 +23849,7 @@ mod tests {
         let written = text(strings, b"StrLen");
         let lowered = text(strings, b"strlen");
         let argument = text(strings, b"abc");
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -23877,7 +23881,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Interned `bytes` as a constant, `UNDEF` where the table is full.
@@ -24103,7 +24108,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitNsFcallByName,
@@ -24122,7 +24127,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -24156,7 +24162,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitFcallByName,
@@ -24173,7 +24179,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -24196,7 +24203,7 @@ mod tests {
     /// (`ZEND_LAST_CATCH`), naming no variable, its cache slot at byte
     /// zero and its jump to the `NOP` after it.
     fn catching(strings: &mut php_heap::Strings, written: &[u8], lowered: &[u8]) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -24215,7 +24222,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_CATCH` over two passes of one opline, which is what a
@@ -24278,7 +24286,7 @@ mod tests {
             literals.push(interned(strings, written));
             literals.push(interned(strings, lowered));
         }
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitStaticMethodCall,
@@ -24294,7 +24302,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_INIT_STATIC_METHOD_CALL` over two constants, twice, which
@@ -24380,7 +24389,7 @@ mod tests {
     /// `$o` and the pair `GetMessage`, `getmessage`, with the two cache
     /// slots the compiler reserves in `result` at byte zero: `$o->GetMessage()`.
     fn method_call(strings: &mut php_heap::Strings) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitMethodCall,
@@ -24402,7 +24411,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_INIT_METHOD_CALL` over a constant name, twice on an
@@ -24511,7 +24521,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -24560,7 +24570,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let named = req.class_named(Bare::resolved(b"stdclass"));
@@ -24608,7 +24619,7 @@ mod tests {
     /// A unit whose main op array is `JMP_FRAMELESS` over `name`, its
     /// jump to opline 2, its cache slot at byte 0, then two `NOP`s.
     fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -24627,7 +24638,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_JMP_FRAMELESS` over two passes of one opline: the first
@@ -24739,7 +24751,7 @@ mod tests {
             Some(&b"seven"[..])
         );
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::FramelessIcall0,
@@ -24752,7 +24764,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
@@ -24774,7 +24787,7 @@ mod tests {
     fn a_row_the_table_has_not_is_an_internal_error() {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::FramelessIcall0,
@@ -24787,7 +24800,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
@@ -24818,7 +24832,7 @@ mod tests {
         if let Some(init) = oplines.first_mut() {
             init.op2 = 3;
         }
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines,
                 literals: unit
@@ -24831,7 +24845,8 @@ mod tests {
                 ..unit.main.clone()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -24856,7 +24871,7 @@ mod tests {
     /// `ASSIGN` of the constant `1` into the CV, its value unused:
     /// `$a = 1;`.
     fn assigning() -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::Assign,
@@ -24873,7 +24888,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `zend_assign_to_variable`'s first test (`Z/Zend/zend_execute.h:171`):
@@ -25017,7 +25033,7 @@ mod tests {
     fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::QmAssign,
@@ -25034,7 +25050,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let Ok(left) = req.string(b"an owner left behind") else {
             return;
