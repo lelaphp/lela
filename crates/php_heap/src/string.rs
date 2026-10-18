@@ -203,6 +203,42 @@ impl Str {
     /// The bytes one allocation of a string of `len` bytes takes:
     /// php's `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))`, which is what
     /// makes `memory_get_usage()` move by what php's moves by.
+    ///
+    /// A copy of part of a string is `zend_string_init` of that many
+    /// bytes, so `substr` moves `memory_get_usage()` by this rounded up
+    /// to its bin, a `run` of whole pages past 3072 bytes, and by nothing
+    /// for a span of one byte, the interned character, or one that is the
+    /// whole string, which is the argument's own (#2661). A constant
+    /// string is interned and its copy one more name for it, so neither
+    /// moves it; a string a native makes, `strtoupper`'s or an integer's,
+    /// is the request's. The program writes its first line
+    /// before it measures, since the first byte a request writes holds
+    /// the thirty-two of the default mimetype.
+    ///
+    /// ```php
+    /// echo "copied, moved\n"; $big = str_repeat('0123456789', 1000); $s = $t = $u = $v = null;
+    /// foreach ([[0, 1], [0, 7], [0, 10], [5, 100], [0, 3000], [0, 5000], [1, 9999], [0, 10000], [-10, null]] as [$o, $l]) {
+    ///     $m = memory_get_usage(); $s = substr($big, $o, $l); echo $o, ',', $l ?? 'null', ' ', memory_get_usage() - $m, "\n"; $s = null;
+    /// }
+    /// $m = memory_get_usage(); $s = 'interned'; $t = $s; echo 'literal ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $u = strtoupper($s); echo 'strtoupper ', memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $v = (string) 1234567; echo 'integer ', memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect capture
+    /// copied, moved
+    /// 0,1 0
+    /// 0,7 32
+    /// 0,10 40
+    /// 5,100 128
+    /// 0,3000 3072
+    /// 0,5000 8192
+    /// 1,9999 12288
+    /// 0,10000 0
+    /// -10,null 40
+    /// literal 0
+    /// strtoupper 40
+    /// integer 32
+    /// ```
     pub(crate) const fn allocation_size(len: usize) -> usize {
         (HEADER + len + 1).next_multiple_of(8)
     }
