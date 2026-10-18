@@ -6,7 +6,6 @@
 //! file but this one reads.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use php_heap::FrameRef;
 use php_unit::OpArray;
@@ -187,7 +186,7 @@ impl Request {
         };
         let Some((unit, body)) = self
             .user_function(function)
-            .map(|user| (Arc::clone(&user.unit), user.body))
+            .map(|user| (php_unit::PublishedUnit::clone(&user.unit), user.body))
         else {
             return Vec::new();
         };

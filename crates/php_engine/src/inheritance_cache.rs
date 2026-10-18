@@ -32,7 +32,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use php_link::Raised;
-use php_unit::Unit;
+use php_unit::PublishedUnit;
 
 use crate::api::values::ClassId;
 
@@ -70,7 +70,7 @@ impl Entry {
 /// that declares it, which the chain keeps alive so its address names it.
 struct Chain {
     /// Held and never read: what keeps the key's address the unit's.
-    _unit: Arc<Unit>,
+    _unit: PublishedUnit,
     entries: Arc<[Arc<Entry>]>,
 }
 
@@ -95,8 +95,8 @@ impl Default for InheritanceCache {
 
 /// The key of the declaration at `at` of `unit`: the unit's address,
 /// which the chain's share of the unit keeps from being reused.
-fn key(unit: &Arc<Unit>, at: u32) -> (usize, u32) {
-    (Arc::as_ptr(unit).addr(), at)
+fn key(unit: &PublishedUnit, at: u32) -> (usize, u32) {
+    (PublishedUnit::as_ptr(unit).addr(), at)
 }
 
 impl InheritanceCache {
@@ -109,7 +109,7 @@ impl InheritanceCache {
 
     /// The entries published for the declaration at `at` of `unit`,
     /// newest last; none where it was never published.
-    pub(crate) fn find(&self, unit: &Arc<Unit>, at: u32) -> Option<Arc<[Arc<Entry>]>> {
+    pub(crate) fn find(&self, unit: &PublishedUnit, at: u32) -> Option<Arc<[Arc<Entry>]>> {
         let key = key(unit, at);
         let shard = self
             .shard(key)
@@ -121,14 +121,14 @@ impl InheritanceCache {
     /// `entry` added for the declaration at `at` of `unit`, or the entry
     /// another request added for the same link meanwhile, which is the
     /// one to declare.
-    pub(crate) fn add(&self, unit: &Arc<Unit>, at: u32, entry: Entry) -> Arc<Entry> {
+    pub(crate) fn add(&self, unit: &PublishedUnit, at: u32, entry: Entry) -> Arc<Entry> {
         let key = key(unit, at);
         let mut shard = self
             .shard(key)
             .write()
             .unwrap_or_else(PoisonError::into_inner);
         let chain = shard.entry(key).or_insert_with(|| Chain {
-            _unit: Arc::clone(unit),
+            _unit: PublishedUnit::clone(unit),
             entries: Arc::new([]),
         });
         if let Some(found) = chain.entries.iter().find(|found| found.same_link(&entry)) {

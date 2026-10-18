@@ -5,10 +5,8 @@
 //! them, and the chain of frames and calls a backtrace walks. The stack
 //! and the VM stay on the request, since every area reaches them.
 
-use std::sync::Arc;
-
 use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef, ZvalType};
-use php_unit::{CacheSlot, Unit};
+use php_unit::{CacheSlot, PublishedUnit, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -251,7 +249,7 @@ impl Request {
     /// The unit `header`'s frame serves and which of its op arrays: a
     /// function's through the function table, which holds the unit, a
     /// file's through the frame's [`exec::Annex`].
-    pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&Arc<Unit>, exec::Body)> {
+    pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&PublishedUnit, exec::Body)> {
         if let Some(function) = header.function {
             let user = self.user_function(function)?;
             Some((&user.unit, user.body))
@@ -267,7 +265,7 @@ impl Request {
     pub(crate) fn serving(&self, frame: FrameRef) -> Option<exec::Serving> {
         let (unit, body) = self.unit_of(self.vm.at(frame)?)?;
         Some(exec::Serving {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             body,
         })
     }
@@ -522,7 +520,7 @@ impl Request {
     /// here on: its op arrays take runtime caches of the request's own,
     /// as php gives them caches on the heap, and none of the engine's
     /// offsets ([`exec::RuntimeCaches::take`]).
-    pub(crate) fn take_unit(&mut self, unit: Unit) -> Arc<Unit> {
+    pub(crate) fn take_unit(&mut self, unit: Unit) -> PublishedUnit {
         self.map.take(unit)
     }
 
@@ -532,7 +530,7 @@ impl Request {
     /// the fatal php raises there, and nothing is pushed. The frame is
     /// not begun: its observer begin is the caller's, which `execute`
     /// raises as `zend_execute` does.
-    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
+    pub(crate) fn push_frame(&mut self, unit: PublishedUnit) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let mut header = exec::Header::of(None, code);
@@ -596,7 +594,7 @@ impl Request {
     /// memory limit refuses is the fatal and nothing else is touched.
     pub(crate) fn push_code_frame(
         &mut self,
-        unit: Arc<Unit>,
+        unit: PublishedUnit,
         caller: FrameRef,
         returns_to: Option<(FrameRef, u32)>,
     ) -> Result<FrameRef, Fatal> {

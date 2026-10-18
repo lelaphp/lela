@@ -6,8 +6,6 @@
 //! the request holds, and the rest still raise php's `Error` for an
 //! undefined function or class.
 
-use std::sync::Arc;
-
 use php_heap::FrameRef;
 
 use php_unit::decl::{Bare, ConstExpr, HookKind, MethodDecl, Name, ParameterDefault};
@@ -776,7 +774,7 @@ pub(crate) fn handle_undef_args(req: &mut Request, call: FrameRef) -> Result<(),
 fn fill_undef_args(req: &mut Request, call: FrameRef, function: Function) -> Result<(), Thrown> {
     let user = req
         .user_function(function)
-        .map(|user| (Arc::clone(&user.unit), user.body));
+        .map(|user| (php_unit::PublishedUnit::clone(&user.unit), user.body));
     let count = req.vm().at(call).map_or(0, |header| header.num_args);
     for at in 0..count {
         let undef = req.vm().stack.frame(call).is_some_and(|frame| {

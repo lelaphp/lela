@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use php_compile::CompileError;
-use php_unit::Unit;
+use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::{Cache, Validation};
 use crate::api::request::{CacheBudget, CacheStatus, CachedFile, Preloaded, Restart};
@@ -35,7 +35,7 @@ pub(crate) use wire::decode;
 /// What the unit cache answers for one file: the published unit, the
 /// refusal the compiler gave for it, or nothing at all for a file that
 /// could not be read.
-pub(crate) type Cached = Option<Result<Arc<Unit>, CompileError>>;
+pub(crate) type Cached = Option<Result<PublishedUnit, CompileError>>;
 
 /// The classes a held unit's compiler bound early, each published into
 /// the engine's arena as the unit was held (design §5.14, §6.3), by its
@@ -134,7 +134,7 @@ impl Stamp {
 /// never changed; the members are atomics a racing request may write
 /// over, which costs at most one more stat.
 pub(crate) struct Held {
-    pub(crate) unit: Result<Arc<Unit>, CompileError>,
+    pub(crate) unit: Result<PublishedUnit, CompileError>,
     /// Its early-bound classes, published as it was held, which a
     /// request loading the unit declares by their numbers.
     pub(crate) early: EarlyBound,
@@ -163,7 +163,7 @@ pub(crate) struct Held {
 /// unit or the compiler's refusal, its early-bound classes published,
 /// the bytes it was read from and its stamp as observed.
 struct Read {
-    unit: Result<Arc<Unit>, CompileError>,
+    unit: Result<PublishedUnit, CompileError>,
     early: EarlyBound,
     size: u64,
     observed: Option<Stamp>,
@@ -185,7 +185,7 @@ impl Held {
     /// One of the preload's saved scripts, `preload_script_in_shared_memory`'s:
     /// held with no stamp, which nothing validates, and never served
     /// before, `last_used` zero.
-    pub(crate) fn preloaded(unit: Arc<Unit>, path: Vec<u8>, size: u64, order: u64) -> Held {
+    pub(crate) fn preloaded(unit: PublishedUnit, path: Vec<u8>, size: u64, order: u64) -> Held {
         Held {
             unit: Ok(unit),
             early: Arc::new([]),
@@ -411,7 +411,7 @@ pub(crate) struct Asked<'a> {
 /// (`zend_file_cache_unserialize_op_array`'s `script->corrupted` arm), so
 /// `CG(map_ptr_last)` moves only for what is held (GH-8646).
 pub(crate) enum Compiled {
-    Published(Arc<Unit>),
+    Published(PublishedUnit),
     Alone(Box<Unit>),
 }
 
@@ -436,7 +436,7 @@ fn alone(unit: Result<Unit, CompileError>, filed: Filed) -> Answered {
 /// held nowhere made `own`'s.
 pub(crate) fn served(
     answered: Option<Result<Compiled, CompileError>>,
-    own: impl FnOnce(Unit) -> Arc<Unit>,
+    own: impl FnOnce(Unit) -> PublishedUnit,
 ) -> Cached {
     answered.map(|compiled| {
         compiled.map(|compiled| match compiled {
@@ -660,8 +660,8 @@ impl UnitCache {
         asked: Asked<'_>,
         compile: impl FnOnce(&[u8]) -> Result<Unit, CompileError>,
         decode: impl FnOnce(&[u8]) -> Option<Unit>,
-        share: impl FnOnce(Unit) -> Arc<Unit>,
-        publish: impl FnOnce(&Arc<Unit>) -> EarlyBound,
+        share: impl FnOnce(Unit) -> PublishedUnit,
+        publish: impl FnOnce(&PublishedUnit) -> EarlyBound,
     ) -> Answered {
         let Asked {
             path,

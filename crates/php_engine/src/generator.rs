@@ -1514,7 +1514,7 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
     let unit = header
         .function
         .and_then(|function| req.user_function(function))
-        .map(|user| (std::sync::Arc::clone(&user.unit), user.body));
+        .map(|user| (php_unit::PublishedUnit::clone(&user.unit), user.body));
     let code = unit
         .as_ref()
         .and_then(|(unit, body)| exec::body_of(unit, *body));

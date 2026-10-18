@@ -17,11 +17,10 @@
 //! [`free_operand`].
 
 use std::cell::Cell;
-use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Zval};
 use php_unit::decl::{Bare, HookKind};
-use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
+use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, PublishedUnit, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, warning};
@@ -168,7 +167,7 @@ impl TableId {
 /// The unit a frame serves and which of its op arrays, held by a share
 /// of the unit so the oplines can be read while the request is borrowed.
 pub(crate) struct Serving {
-    pub(crate) unit: Arc<Unit>,
+    pub(crate) unit: PublishedUnit,
     pub(crate) body: Body,
 }
 
@@ -895,7 +894,7 @@ pub(crate) struct Annex {
     /// The unit whose main op array a file's frame serves, one share held
     /// for the frame's life: a function's frame has its unit through the
     /// function table, which holds it.
-    pub(crate) unit: Option<Arc<Unit>>,
+    pub(crate) unit: Option<PublishedUnit>,
     /// The file's op array as another process reads it, php's
     /// `EX(func)` of a code frame ([`crate::readable`]): no name, the
     /// unit's file and oplines. The header names it from the push on,
@@ -1140,7 +1139,7 @@ impl<'a> FrameAt<'a> {
     }
 
     /// The unit and which of its op arrays the frame serves.
-    pub(crate) fn unit(self) -> Option<(&'a Arc<Unit>, Body)> {
+    pub(crate) fn unit(self) -> Option<(&'a PublishedUnit, Body)> {
         self.req.unit_of(self.header())
     }
 
@@ -3130,7 +3129,7 @@ mod tests {
     use std::sync::Arc;
 
     use php_heap::FrameRef;
-    use php_unit::{CacheSlot, MapPtrOffset, OpArray, Unit};
+    use php_unit::{CacheSlot, MapPtrOffset, OpArray, PublishedUnit, Unit};
 
     use super::{Body, CacheAt, Cached, RuntimeCaches, code_of, init_runtime_cache};
     use crate::api::call::Function;
@@ -3139,7 +3138,7 @@ mod tests {
 
     /// A unit whose main op array has no oplines and `cache_size` bytes
     /// of runtime cache.
-    fn with_cache(cache_size: u32) -> Arc<Unit> {
+    fn with_cache(cache_size: u32) -> PublishedUnit {
         Unit {
             main: OpArray {
                 cache_size,
@@ -3163,7 +3162,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = with_cache(24);
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         for at in [0, 8, 16, 24] {
             assert_eq!(req.cached(frame, CacheSlot(at)), Cached::Unprimed);
         }
