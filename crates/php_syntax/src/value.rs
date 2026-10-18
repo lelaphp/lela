@@ -376,6 +376,22 @@ pub(crate) struct Number {
 /// T_DNUMBER
 /// ```
 pub(crate) fn number(kind: SyntaxKind, text: &[u8]) -> Number {
+    // The common literal, a decimal of up to eighteen digits with no
+    // `_` and no leading zero, fits a long whatever its digits: read in
+    // one pass.
+    if kind == SyntaxKind::INT
+        && text.len() <= 18
+        && text.first().is_some_and(|b| (b'1'..=b'9').contains(b))
+        && text.iter().all(u8::is_ascii_digit)
+    {
+        let long = text
+            .iter()
+            .fold(0i64, |long, digit| long * 10 + i64::from(digit - b'0'));
+        return Number {
+            value: TokenValue::Int(long),
+            bad_digit: None,
+        };
+    }
     if kind == SyntaxKind::FLOAT {
         let digits: String = text
             .iter()

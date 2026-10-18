@@ -1432,11 +1432,14 @@ pub(crate) fn unit(
     // The scanner stops at `__halt_compiler();` (the byte `halt_end`
     // names), so a halted file's last line is that statement's, and the
     // data after it counts no line.
-    let scanned = walk::halt_offset(parsed)
-        .and_then(|end| usize::try_from(end).ok())
-        .and_then(|end| parsed.source.get(..end))
-        .unwrap_or(parsed.source);
-    let lines = u32::try_from(scanned.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
+    // Read off the parse's line table: the lines up to that byte, or
+    // the whole source's where there is none.
+    let lines = match walk::halt_offset(parsed) {
+        Some(end) => parsed
+            .lines
+            .line_number(u32::try_from(end).unwrap_or(u32::MAX)),
+        None => parsed.lines.line_count(),
+    };
     let mut emit = Emit::new(arena, parsed, options, strings, halt);
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.

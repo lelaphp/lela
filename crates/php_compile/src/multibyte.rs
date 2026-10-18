@@ -520,6 +520,27 @@ pub(crate) fn scan<'p>(
     options: &Options<'p>,
     scanning: Option<Scanning<'p>>,
 ) -> Scanned<'p> {
+    // No `declare` to read and no filter the file was opened through:
+    // the parse stands as it is, and nothing is walked.
+    if scanning.is_none_or(|s| s.filter.is_none()) && parsed.tree.nodes::<DeclareStmt>().is_empty()
+    {
+        return Scanned {
+            parsed: Cow::Borrowed(parsed),
+            refused: None,
+            halt: None,
+        };
+    }
+    scan_declared(arena, parsed, options, scanning)
+}
+
+/// [`scan`] over a parse with a `declare` to read or a filter the file
+/// was opened through.
+fn scan_declared<'p>(
+    arena: &'p Arena,
+    parsed: &'p Parsed<'p>,
+    options: &Options<'p>,
+    scanning: Option<Scanning<'p>>,
+) -> Scanned<'p> {
     let scanning = scanning.unwrap_or(Scanning {
         original: parsed.source,
         filter: None,

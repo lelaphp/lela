@@ -549,34 +549,38 @@ fn compile_scanned<'p>(
         return Err(refused.error(raised));
     }
     let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
-    match emit::unit(arena, parsed, options, strings, halt) {
-        Ok(mut unit) => {
-            raised.append(&mut unit.diagnostics);
-            unit.diagnostics = raised;
+    // The unit is finished where `unit` made it, and handed back as it
+    // stands rather than moved out and into a result again.
+    let mut made = emit::unit(arena, parsed, options, strings, halt);
+    match &mut made {
+        Ok(unit) => {
+            if !raised.is_empty() {
+                raised.append(&mut unit.diagnostics);
+                unit.diagnostics = raised;
+            }
             let interned = match options.kind {
-                SourceKind::File => intern_names(&unit, strings),
-                SourceKind::Eval(_) => intern_declared(&unit, strings),
+                SourceKind::File => intern_names(unit, strings),
+                SourceKind::Eval(_) => intern_declared(unit, strings),
             };
-            match interned {
-                Ok(()) => Ok(unit),
-                // `zend_mm`'s limit, raised as `E_ERROR` where the
-                // compile asked for the memory.
-                Err(fatal) => Err(CompileError {
+            // `zend_mm`'s limit, raised as `E_ERROR` where the compile
+            // asked for the memory.
+            if let Err(fatal) = interned {
+                return Err(CompileError {
                     level: Level::Error,
                     message: fatal_message(fatal),
                     line: unit.main.line_end,
-                    raised: unit.diagnostics,
+                    raised: std::mem::take(&mut unit.diagnostics),
                     thrown: false,
                     stage: Stage::Compiling,
-                }),
+                });
             }
         }
-        Err(mut refused) => {
+        Err(refused) => {
             raised.append(&mut refused.raised);
             refused.raised = raised;
-            Err(refused)
         }
     }
+    made
 }
 
 /// The names a file's op arrays carry interned into `strings`, the home
@@ -632,8 +636,13 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 /// 0
 /// ```
 pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
-    let bodies = std::iter::once(&unit.main)
-        .chain(unit.functions.iter().map(|(_, body)| body))
+    for var in &unit.main.vars {
+        strings.intern(&var.0)?;
+    }
+    let bodies = unit
+        .functions
+        .iter()
+        .map(|(_, body)| body)
         .chain(unit.dynamic.iter().map(|(_, body)| body))
         .chain(unit.methods.iter().map(|method| &method.body))
         .chain(unit.hooks.iter().map(|hook| &hook.body));

@@ -152,6 +152,12 @@ pub(super) struct ClassModifiers {
 /// before it compiles the body and emits `GENERATOR_CREATE` after the
 /// parameters.
 pub(super) fn generators(tree: &tree::Tree) -> Vec<u32> {
+    // A file with no `yield` has no generator, and its shape is not
+    // walked to find none.
+    if tree.nodes::<tree::YieldExpr>().is_empty() && tree.nodes::<tree::YieldFromExpr>().is_empty()
+    {
+        return Vec::new();
+    }
     let mut open: Vec<(usize, Option<u32>)> = Vec::new();
     let mut found = Vec::new();
     for (at, element) in tree.elements().iter().enumerate() {
@@ -1768,6 +1774,9 @@ pub(super) struct Constant {
 /// statements end with `__halt_compiler();`, as `zend_compile_const`
 /// finds that statement at the end of `CG(ast)`; none in any other.
 pub(crate) fn halt_offset(parsed: &Parsed) -> Option<i64> {
+    if parsed.tree.nodes::<tree::HaltCompilerStmt>().is_empty() {
+        return None;
+    }
     let file = parsed.tree.root()?.id::<tree::SourceFile>()?;
     match parsed.tree.list(parsed.tree[file].stmts).last()? {
         Stmt::HaltCompilerStmt(id) => Some(halt_end(parsed, *id)),
