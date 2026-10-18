@@ -248,7 +248,7 @@ pub fn user_constants(req: &mut Request) -> Vec<Variable> {
         .constant_table()
         .into_iter()
         .filter(|(extension, _, _)| extension.is_none())
-        .map(|(_, name, value)| (name, value))
+        .map(|(_, name, value)| (name.to_vec(), value))
         .collect();
     variable_rows(req, read, 0)
 }

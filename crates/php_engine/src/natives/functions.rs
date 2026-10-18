@@ -648,41 +648,62 @@ fn get_defined_constants(
     req: &mut Request,
     #[php(default = false)] categorize: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let rows: Vec<(Option<String>, Vec<u8>, Value)> = req
-        .constant_table()
-        .into_iter()
-        .map(|(module, name, value)| (module.map(str::to_owned), name, value))
-        .collect();
+    // The table read once: every name into one buffer, each row its span
+    // of it and its module's group, found by name in a map, as php finds a
+    // group by its module number; the keys are made after, the request
+    // being free again.
     let mut array = PhpArray::new(req)?;
+    let names: Vec<u8>;
+    let mut spans: Vec<(Option<usize>, usize, usize, Value)> = Vec::new();
+    let mut modules: Vec<String> = Vec::new();
+    {
+        let mut module_at: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        let mut bytes = Vec::new();
+        for (module, name, value) in req.constant_table() {
+            let group = module.map(|module| {
+                *module_at.entry(module).or_insert_with(|| {
+                    modules.push(module.to_owned());
+                    modules.len() - 1
+                })
+            });
+            spans.push((group, bytes.len(), name.len(), value));
+            bytes.extend_from_slice(name);
+        }
+        names = bytes;
+    }
+    let name_of = |start: usize, len: usize| &names[start..start + len];
     if !categorize {
-        for (_, name, value) in rows {
-            let key = PhpString::new(req, &name)?.into_key();
+        for &(_, start, len, value) in &spans {
+            let key = PhpString::new(req, name_of(start, len))?.into_key();
             array.set(req, key, Owner::take(req, value))?;
         }
         return Ok(array);
     }
-    let mut groups: Vec<(String, Vec<Named>)> = Vec::new();
-    for (module, name, value) in rows {
-        let module = module.unwrap_or_else(|| String::from("user"));
-        match groups.iter_mut().find(|(group, _)| *group == module) {
-            Some((_, members)) => members.push((name, value)),
-            None => groups.push((module, vec![(name, value)])),
+    // `modules`' groups in the order each first stands, then `user`'s,
+    // the one php adds last for `PHP_USER_CONSTANT`.
+    let user = modules.len();
+    let mut groups: Vec<Vec<(usize, usize, Value)>> = vec![Vec::new(); user + 1];
+    let mut order: Vec<usize> = Vec::new();
+    for &(group, start, len, value) in &spans {
+        let group = group.unwrap_or(user);
+        if groups[group].is_empty() {
+            order.push(group);
         }
+        groups[group].push((start, len, value));
     }
-    for (module, members) in groups {
+    for group_at in order {
         let mut group = PhpArray::new(req)?;
-        for (name, value) in members {
-            let key = PhpString::new(req, &name)?.into_key();
+        for &(start, len, value) in &groups[group_at] {
+            let key = PhpString::new(req, name_of(start, len))?.into_key();
             group.set(req, key, Owner::take(req, value))?;
         }
+        let module = modules.get(group_at).map_or("user", String::as_str);
         let key = PhpString::new(req, module.as_bytes())?.into_key();
         array.set(req, key, group.into_value())?;
     }
     Ok(array)
 }
-
-/// One constant of a group, its name and its value.
-type Named = (Vec<u8>, Value);
 
 /// `get_extension_funcs(string $extension): array|false`, php's
 /// `ZEND_FUNCTION(get_extension_funcs)` (`Z/Zend/zend_builtin_functions.c:2269`):

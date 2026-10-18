@@ -1941,6 +1941,14 @@ impl Shared {
         self.constant_at(self.constant_names.find(&self.constants, name)?)
     }
 
+    /// The position of the declared constant `name`, where the engine
+    /// published a value for it.
+    pub(crate) fn constant_index(&self, name: &[u8]) -> Option<usize> {
+        let at = self.constant_names.find(&self.constants, name)?;
+        self.constant_values.get(at)?.as_ref()?;
+        Some(at)
+    }
+
     /// The value of the constant at `at` of the declared table, as
     /// [`Shared::constant`] reads it.
     pub(crate) fn constant_at(&self, at: usize) -> Option<Value> {

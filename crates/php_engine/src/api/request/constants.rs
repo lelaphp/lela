@@ -7,6 +7,9 @@
 //! request's rows and `PHP_SAPI` are [`Constants`]'s, whose fields no
 //! file but this one reads.
 
+use std::collections::HashMap;
+
+use php_link::NameHasher;
 use php_unit::decl::Attribute;
 
 use crate::api::raising::Thrown;
@@ -74,6 +77,20 @@ impl ConstantRow {
 
 /// The request's rows of `EG(zend_constants)` and `PHP_SAPI`, whose
 /// fields no file but this one reads.
+/// Where a constant the table holds stands, what a `FETCH_CONSTANT`'s
+/// cache slot keeps once its first pass found it, as php's
+/// `CACHE_PTR(opline->extended_value, c)` keeps the `zend_constant`
+/// (#2438): `PHP_SAPI`, a row of the engine's declared table, or a row this
+/// request added, beside the generation of the request's rows it was
+/// found in, so a slot written before phpdbg's `run <file` replaced
+/// `STDIN` reads as unprimed after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConstantAt {
+    Sapi,
+    Declared(u32),
+    Request { at: u32, generation: u32 },
+}
+
 pub(super) struct Constants {
     /// The rows this request added to `EG(zend_constants)`, in the order
     /// it added them, each under the extension it is registered by:
@@ -81,7 +98,11 @@ pub(super) struct Constants {
     /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
     /// `const` wrote, php's `PHP_USER_CONSTANT`, with the file it was
     /// defined in.
-    constants: Vec<ConstantRow>,
+    rows: Vec<ConstantRow>,
+    /// Each row's position by its name, `EG(zend_constants)`' hash.
+    index: HashMap<Box<[u8]>, u32, NameHasher>,
+    /// How many times rows were taken out, which moves those after them.
+    generation: u32,
     /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
     /// it: the host's, so the request's, the engine's interned string
     /// for the name the description carries.
@@ -91,9 +112,40 @@ pub(super) struct Constants {
 impl Default for Constants {
     fn default() -> Constants {
         Constants {
-            constants: Vec::new(),
+            rows: Vec::new(),
+            index: HashMap::with_hasher(NameHasher),
+            generation: 0,
             sapi_constant: Value::null(),
         }
+    }
+}
+
+impl Constants {
+    /// `row` at the end, under its name.
+    fn push(&mut self, row: ConstantRow) {
+        if let Ok(at) = u32::try_from(self.rows.len()) {
+            self.index.insert(row.name.clone().into_boxed_slice(), at);
+        }
+        self.rows.push(row);
+    }
+
+    /// The row under `name` beside its position.
+    fn find(&self, name: &[u8]) -> Option<(u32, &ConstantRow)> {
+        let at = *self.index.get(name)?;
+        Some((at, self.rows.get(usize::try_from(at).ok()?)?))
+    }
+
+    /// The row under `name` taken out, those after it moved down and the
+    /// index laid again, a new generation of positions.
+    fn remove(&mut self, name: &[u8]) -> Option<ConstantRow> {
+        let (at, _) = self.find(name)?;
+        let row = self.rows.remove(usize::try_from(at).ok()?);
+        self.index.clear();
+        for (at, row) in (0u32..).zip(&self.rows) {
+            self.index.insert(row.name.clone().into_boxed_slice(), at);
+        }
+        self.generation = self.generation.wrapping_add(1);
+        Some(row)
     }
 }
 
@@ -105,10 +157,8 @@ impl Request {
     /// object. A release build leaves them to the heap's mass release.
     #[cfg(debug_assertions)]
     pub(super) fn free_constants(&mut self) {
-        for row in std::mem::take(&mut self.constants.constants)
-            .into_iter()
-            .rev()
-        {
+        self.constants.index.clear();
+        for row in std::mem::take(&mut self.constants.rows).into_iter().rev() {
             self.release(row.value);
         }
     }
@@ -133,33 +183,28 @@ impl Request {
     /// row. What `get_defined_constants(true)` groups and phpdbg's `info
     /// constants` walks for the program's own.
     #[must_use]
-    pub fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
+    pub fn constant_table(&self) -> Vec<(Option<&str>, &[u8], Value)> {
         let decls = self.shared.declared().constants.rows();
         let modules = (self.shared.constant_modules.iter()).map(|&at| self.extension_name(at));
-        let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = (decls.iter().enumerate())
-            .zip(modules)
-            .flat_map(|((at, decl), module)| {
-                // `PHP_SAPI` stands where php registers it, before
-                // `PHP_BINARY`, and is the request's.
-                let sapi = (decl.name.0.as_ref() == b"PHP_BINARY").then(|| {
-                    (
-                        Some("Core"),
-                        b"PHP_SAPI".to_vec(),
-                        self.constants.sapi_constant,
-                    )
-                });
-                let value = self.shared.constant_at(at);
-                sapi.into_iter()
-                    .chain(value.map(|value| (module, decl.name.0.to_vec(), value)))
-            })
-            .collect();
-        rows.extend(self.constants.constants.iter().map(|row| {
+        let mut rows: Vec<(Option<&str>, &[u8], Value)> =
+            Vec::with_capacity(decls.len() + self.constants.rows.len() + 1);
+        for ((at, decl), module) in decls.iter().enumerate().zip(modules) {
+            // `PHP_SAPI` stands where php registers it, before
+            // `PHP_BINARY`, and is the request's.
+            if decl.name.0.as_ref() == b"PHP_BINARY" {
+                rows.push((Some("Core"), b"PHP_SAPI", self.constants.sapi_constant));
+            }
+            if let Some(value) = self.shared.constant_at(at) {
+                rows.push((module, &decl.name.0, value));
+            }
+        }
+        rows.extend(self.constants.rows.iter().map(|row| {
             let module = match &row.owner {
                 ConstantOwner::Core => Some("Core"),
                 ConstantOwner::Extension(extension) => self.extension_name(*extension),
                 ConstantOwner::User(_) => None,
             };
-            (module, row.given.clone(), row.value)
+            (module, row.given.as_slice(), row.value)
         }));
         rows
     }
@@ -177,7 +222,7 @@ impl Request {
         let mut array = self.array()?;
         let constants: Vec<(Vec<u8>, Value)> = self
             .constants
-            .constants
+            .rows
             .iter()
             .filter(|row| matches!(row.owner, ConstantOwner::User(_)))
             .map(|row| (row.given.clone(), row.value))
@@ -262,7 +307,7 @@ impl Request {
             .and_then(crate::exec::FrameAt::code)
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
-        self.constants.constants.push(ConstantRow {
+        self.constants.push(ConstantRow {
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -308,10 +353,8 @@ impl Request {
     #[must_use]
     pub fn constant_file(&self, name: &[u8]) -> Option<&[u8]> {
         self.constants
-            .constants
-            .iter()
-            .find(|row| row.name == name)
-            .and_then(|row| match &row.owner {
+            .find(name)
+            .and_then(|(_, row)| match &row.owner {
                 ConstantOwner::User(file) => file.as_deref(),
                 ConstantOwner::Core | ConstantOwner::Extension(_) => None,
             })
@@ -324,7 +367,7 @@ impl Request {
     /// `Core`'s group and before what the program defines. A sink: the
     /// row takes the value's owner.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
-        self.constants.constants.push(ConstantRow::new(
+        self.constants.push(ConstantRow::new(
             ConstantOwner::Core,
             name.to_vec(),
             value.hand_on(),
@@ -351,12 +394,7 @@ impl Request {
         value: Owner<Value>,
         attributes: Vec<Attribute>,
     ) -> bool {
-        if let Some(row) = self
-            .constants
-            .constants
-            .iter_mut()
-            .find(|row| row.name == name)
-        {
+        if let Some(row) = self.constants.rows.iter_mut().find(|row| row.name == name) {
             let old = std::mem::replace(&mut row.value, value.hand_on());
             self.release(old);
             return true;
@@ -366,7 +404,7 @@ impl Request {
             return false;
         }
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
-        self.constants.constants.push(ConstantRow {
+        self.constants.push(ConstantRow {
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
             given: name.to_vec(),
@@ -457,13 +495,7 @@ impl Request {
         };
         handles.set_stdin(stdin);
         for name in [&b"STDIN"[..], b"STDOUT", b"STDERR"] {
-            if let Some(at) = self
-                .constants
-                .constants
-                .iter()
-                .position(|row| row.name == name)
-            {
-                let row = self.constants.constants.remove(at);
+            if let Some(row) = self.constants.remove(name) {
                 self.release(row.value);
             }
         }
@@ -496,7 +528,7 @@ impl Request {
     /// ```
     #[must_use]
     pub fn constant_attributes(&self, name: &[u8]) -> &[Attribute] {
-        if let Some(row) = self.constants.constants.iter().find(|row| row.name == name) {
+        if let Some((_, row)) = self.constants.find(name) {
             return &row.attributes;
         }
         self.shared
@@ -541,7 +573,7 @@ impl Request {
         if name == b"PHP_SAPI" {
             return Some(ExtensionId::CORE);
         }
-        if let Some(row) = self.constants.constants.iter().find(|row| row.name == name) {
+        if let Some((_, row)) = self.constants.find(name) {
             return match row.owner {
                 ConstantOwner::Core => Some(ExtensionId::CORE),
                 ConstantOwner::Extension(extension) => Some(extension),
@@ -556,7 +588,7 @@ impl Request {
     /// `PHP_USER_CONSTANT`: what a fetch reads before it words a
     /// deprecation. None for a name no table has.
     pub(crate) fn constant_deprecation(&self, name: &[u8]) -> Option<(bool, bool)> {
-        if let Some(row) = self.constants.constants.iter().find(|row| row.name == name) {
+        if let Some((_, row)) = self.constants.find(name) {
             let user = matches!(row.owner, ConstantOwner::User(_));
             return Some((row.deprecated, user));
         }
@@ -582,11 +614,50 @@ impl Request {
             return Some(self.constants.sapi_constant);
         }
         self.constants
-            .constants
-            .iter()
-            .find(|row| row.name == name)
-            .map(|row| row.value)
+            .find(name)
+            .map(|(_, row)| row.value)
             .or_else(|| self.shared.constant(name))
+    }
+
+    /// The constant the table holds under `name` as `FETCH_CONSTANT`
+    /// finds it: where it stands, its value, and whether it is
+    /// `CONST_DEPRECATED`, which php caches no slot for.
+    pub(crate) fn constant_found(&self, name: &[u8]) -> Option<(ConstantAt, Value, bool)> {
+        if name == b"PHP_SAPI" {
+            return Some((ConstantAt::Sapi, self.constants.sapi_constant, false));
+        }
+        if let Some((at, row)) = self.constants.find(name) {
+            let generation = self.constants.generation;
+            return Some((
+                ConstantAt::Request { at, generation },
+                row.value,
+                row.deprecated,
+            ));
+        }
+        let at = self.shared.constant_index(name)?;
+        let value = self.shared.constant_at(at)?;
+        let deprecated = self.shared.constant_deprecated(name).unwrap_or(false);
+        Some((
+            ConstantAt::Declared(u32::try_from(at).ok()?),
+            value,
+            deprecated,
+        ))
+    }
+
+    /// The value of the constant a slot found, none where the request's
+    /// rows moved since.
+    #[inline]
+    pub(crate) fn constant_at(&self, at: ConstantAt) -> Option<Value> {
+        match at {
+            ConstantAt::Sapi => Some(self.constants.sapi_constant),
+            ConstantAt::Declared(at) => self.shared.constant_at(usize::try_from(at).ok()?),
+            ConstantAt::Request { at, generation } => {
+                if generation != self.constants.generation {
+                    return None;
+                }
+                Some(self.constants.rows.get(usize::try_from(at).ok()?)?.value)
+            }
+        }
     }
 
     /// The fd the host handed under one of its standard streams
