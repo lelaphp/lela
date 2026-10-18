@@ -601,8 +601,18 @@ impl Request {
     /// ```
     fn redeclaration(&self, existing: ClassId) -> String {
         match self.class_decl(existing) {
-            Some(earlier) => redeclaration(earlier),
+            Some(earlier) => redeclaration(earlier, &earlier.name.0),
             None => String::from("InternalError: a class redeclared over none"),
+        }
+    }
+
+    /// `zend_class_redeclaration_error_ex` over `alias`, the name
+    /// `class_alias()` could not give `class`: the wordings
+    /// [`Request::redeclaration`] has, over `class`'s declaration.
+    pub(crate) fn alias_redeclaration(&self, class: ClassId, alias: &[u8]) -> String {
+        match self.class_decl(class) {
+            Some(decl) => redeclaration(decl, alias),
+            None => format!("Cannot redeclare class {}", String::from_utf8_lossy(alias)),
         }
     }
 
@@ -1333,7 +1343,7 @@ impl Request {
             .and_then(|existing| self.class_decl(existing))
             .or_else(|| self.unlinked_decl(&decl.name.0));
         if let Some(existing) = existing {
-            let message = redeclaration(existing);
+            let message = redeclaration(existing, &existing.name.0);
             let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
             let line = self.current_line();
             self.end_in_compile_time(Level::CompileError, &message, &file, line);
@@ -2209,12 +2219,13 @@ fn dynamic_traits(unit: &Unit, at: u32) -> (crate::attributes::Flags, FrameShape
         .unwrap_or_default()
 }
 
-/// `zend_class_redeclaration_error`'s two wordings over the earlier
-/// declaration: what it is and its own name, and its site when it was a
-/// user class.
-fn redeclaration(earlier: &ClassDecl) -> String {
+/// `zend_class_redeclaration_error_ex`'s two wordings over the earlier
+/// declaration: what it is, the name redeclared, and the earlier one's
+/// site when it was a user class. `zend_class_redeclaration_error` names
+/// the earlier declaration's own name.
+fn redeclaration(earlier: &ClassDecl, name: &[u8]) -> String {
     let what = php_link::object_type(earlier.kind);
-    let name = String::from_utf8_lossy(&earlier.name.0);
+    let name = String::from_utf8_lossy(name);
     if earlier.file.0.is_empty() {
         return format!("Cannot redeclare {what} {name}");
     }
