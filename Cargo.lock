@@ -1622,6 +1622,7 @@ dependencies = [
  "httpdate",
  "hyper",
  "hyper-util",
+ "libc",
  "php_bundle",
  "php_ext",
  "php_proto",
