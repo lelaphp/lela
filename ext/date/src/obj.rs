@@ -381,7 +381,10 @@ pub(super) fn new_interval(
         payload.from_string = date_string.is_some();
         payload.date_string = date_string;
     }
-    set_diff(req, *object, Some(diff))?;
+    if let Err(thrown) = set_diff(req, *object, Some(diff)) {
+        object.give_up(req);
+        return Err(thrown);
+    }
     Ok(object.into_instance())
 }
 

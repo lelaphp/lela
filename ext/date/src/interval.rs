@@ -312,7 +312,10 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
             return Err(thrown);
         }
         // The `diff` the interval had freed before the clone is made.
-        set_diff(req, object, None)?;
+        if let Err(thrown) = set_diff(req, object, None) {
+            release(req, parsed)?;
+            return Err(thrown);
+        }
         let relative = parsed.time.relative;
         let diff = lent(req, |l| RelTime::of(l, &relative))?;
         let text = Owner::take(req, date_string);
@@ -376,13 +379,13 @@ fn read_fields(req: &mut Request, hash: PhpArray, diff: &mut RelFields) -> Resul
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         diff.special_type = long_field(req, b"special_type", 0)? as u32;
+        diff.special_amount = match find(hash, b"special_amount") {
+            Some(v) if scalar(&v) => a64i(req, &v)?,
+            _ => -1,
+        };
         diff.have_weekday_relative = long_field(req, b"have_weekday_relative", 0)? as u32;
         diff.have_special_relative = long_field(req, b"have_special_relative", 0)? as u32;
     }
-    diff.special_amount = match find(hash, b"special_amount") {
-        Some(v) if scalar(&v) => a64i(req, &v)?,
-        _ => -1,
-    };
     #[allow(clippy::cast_possible_truncation, reason = "php's `int civil_or_wall`")]
     match find(hash, b"civil_or_wall") {
         Some(v) => to_long(req, &v).map(|n| n as i32),
