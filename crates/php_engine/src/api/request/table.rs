@@ -55,19 +55,25 @@ impl Request {
     /// and `\0C\0p` for a private one declared by `C`, or the dynamic
     /// table's key, an integer one an index row.
     fn table_row_of(&self, object: PhpObject, key: &Key) -> Row {
-        let class = object.class();
-        let object_rows = object.heap().declared_rows();
         let name = match key {
             Key::Str(name) => *name,
             Key::Int(n) => return Row::Dynamic(php_heap::Key::Long(*n)),
         };
-        let bytes = name.as_bytes();
-        // A table that holds copies of the declared rows answers every
-        // key itself, as php's plain values do.
-        if object_rows == php_heap::DeclaredRows::Copied {
-            return Row::Dynamic(php_heap::Key::Str(name.heap()));
+        match self.slot_named(object, name.as_bytes()) {
+            Some(at) => Row::Slot(at),
+            None => Row::Dynamic(php_heap::Key::Str(name.heap())),
         }
-        for (at, declaring, property) in self.placed(class) {
+    }
+
+    /// The declared slot of `object` whose mangled name is `bytes`; none
+    /// where no slot is named so, or where the table holds copies of the
+    /// declared rows, which answers every key itself, as php's plain
+    /// values do.
+    fn slot_named(&self, object: PhpObject, bytes: &[u8]) -> Option<u32> {
+        if object.heap().declared_rows() == php_heap::DeclaredRows::Copied {
+            return None;
+        }
+        for (at, declaring, property) in self.placed(object.class()) {
             let prefix = self
                 .property_prefix(declaring, property.visibility)
                 .unwrap_or_default();
@@ -75,10 +81,10 @@ impl Request {
                 && bytes.starts_with(&prefix)
                 && bytes[prefix.len()..] == *property.name.0
             {
-                return Row::Slot(u32::try_from(at).unwrap_or(u32::MAX));
+                return Some(u32::try_from(at).unwrap_or(u32::MAX));
             }
         }
-        Row::Dynamic(php_heap::Key::Str(name.heap()))
+        None
     }
 
     /// [`PhpObject::row`]: `zend_symtable_find_ind`, a view.
@@ -132,6 +138,38 @@ impl Request {
                     Err(thrown)
                 }
             },
+        }
+    }
+
+    /// [`PhpObject::set_str`]: `zend_hash_str_update` over the table, the
+    /// slot these bytes name written as [`Request::table_set_row`] writes
+    /// it, and any other name the dynamic table's, separated first where a
+    /// cast shares it, its key made by `zend_string_init` only where the
+    /// table has none ([`Request::array_str_update`]). `value` is the
+    /// table's from here.
+    pub(crate) fn table_set_str(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let object = match self.table_owner(object) {
+            Ok(object) => object,
+            Err(thrown) => {
+                self.release(value);
+                return Err(thrown);
+            }
+        };
+        let o = object.heap();
+        if let Some(at) = self.slot_named(object, name) {
+            return self.write_declared_slot(o, at, value);
+        }
+        match self.separated_properties(o) {
+            Ok(table) => self.array_str_update(table, name, value),
+            Err(thrown) => {
+                self.release(value);
+                Err(thrown)
+            }
         }
     }
 

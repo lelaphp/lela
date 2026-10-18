@@ -139,3 +139,13 @@ fn periods_request_what_the_oracle_requests() {
     let oracle = include_str!("storage/periods.oracle");
     assert_eq!(seen(&receipt), seen(oracle));
 }
+
+/// An abbreviation zone's abbreviation is the `timelib_strdup` copy php's
+/// `tzi.z.abbr` is, made where `timezone_initialize`, the clone and a
+/// date's `getTimezone()` make it and freed where the zone is (#2885).
+#[test]
+fn abbreviation_zones_request_what_the_oracle_requests() {
+    let receipt = receipt_of(include_str!("storage/abbreviations.php"));
+    let oracle = include_str!("storage/abbreviations.oracle");
+    assert_eq!(seen(&receipt), seen(oracle));
+}
