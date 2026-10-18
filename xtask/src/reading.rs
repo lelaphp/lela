@@ -1202,12 +1202,10 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let written = fs::write(&beside, bytes)
-        .with_context(|| format!("writing {}", beside.display()))
-        .and_then(|()| {
-            fs::rename(&beside, path)
-                .with_context(|| format!("renaming {} to {}", beside.display(), path.display()))
-        });
+    let written = crate::write(&beside, bytes).and_then(|()| {
+        fs::rename(&beside, path)
+            .with_context(|| format!("renaming {} to {}", beside.display(), path.display()))
+    });
     if written.is_err() {
         fs::remove_file(&beside).ok();
     }

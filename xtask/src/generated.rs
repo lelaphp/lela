@@ -65,7 +65,7 @@ pub fn write_all(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+        crate::write(&path, text)?;
         written.push(path);
     }
     Ok(written)

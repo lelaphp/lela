@@ -80,7 +80,7 @@ impl Laid {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
-            fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+            crate::write(&path, text)?;
             written.push(format!("{row}/{rel}"));
         }
         if add_member(root, row)? {
@@ -110,8 +110,7 @@ impl Edit {
         if self.after == self.before {
             return Ok(false);
         }
-        fs::write(&self.path, &self.after)
-            .with_context(|| format!("writing {}", self.path.display()))?;
+        crate::write(&self.path, &self.after)?;
         Ok(true)
     }
 }
@@ -373,7 +372,7 @@ fn add_member(root: &Path, row: &str) -> Result<bool> {
     let (at, insert) = push_array(&text, start, row)?;
     let mut out = text.clone();
     out.insert_str(at, &insert);
-    fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    crate::write(&path, out)?;
     Ok(true)
 }
 

@@ -1284,7 +1284,7 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
         if ends_with_newline {
             out.push('\n');
         }
-        fs::write(&file, out).with_context(|| format!("writing {}", file.display()))?;
+        crate::write(&file, out)?;
     }
     Ok(())
 }
