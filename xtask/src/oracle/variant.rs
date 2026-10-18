@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::{Oracle, Pin};
+use super::{ClosureDigest, Oracle, Pin};
 
 /// One platform an oracle build is pinned for, by the key its table
 /// carries in `oracle.toml`: the maintainer's macOS arm64, and the two
@@ -108,22 +108,41 @@ impl Variant {
 
     /// Hold each platform's table to what the platform's build is: a Linux
     /// build names the base image's manifest digest, which the recipe pins
-    /// and rebuilds from (#1948), and the macOS one, made on no image,
-    /// names none. `name` is the variant's, for the refusal.
-    pub(super) fn held(&self, name: &str) -> Result<()> {
+    /// and rebuilds from (#1948), and no closure; the macOS one, made on no
+    /// image, names none and names `closure`, the digest of the pin's
+    /// `[closure]` it was made against (#2935), so a bump of the record
+    /// refuses the build it left behind until a person re-pins it. `name`
+    /// is the variant's, for the refusal.
+    pub(super) fn held(&self, name: &str, closure: Option<&ClosureDigest>) -> Result<()> {
         for platform in Platform::ALL {
             let Some(build) = self.build(platform) else {
                 continue;
             };
-            match (platform.imaged(), &build.image) {
-                (true, None) => bail!(
-                    "[variant.{name}.{}] names no image; a Linux build is pinned by its base image's manifest digest beside its md5 (#1782, #1948)",
-                    platform.key()
+            let (key, imaged) = (platform.key(), platform.imaged());
+            let at = format!("[variant.{name}.{key}]");
+            let repin = format!(
+                "re-pinning it with `scripts/oracle-build.py build {key} {name}` is a person's act (harness §11)"
+            );
+            match (imaged, &build.image, &build.closure, closure) {
+                (true, None, ..) => bail!(
+                    "{at} names no image; a Linux build is pinned by its base image's manifest digest beside its md5 (#1782, #1948)"
                 ),
-                (false, Some(image)) => bail!(
-                    "[variant.{name}.{}] names the image {image}; the macOS build is made on the maintainer's machine and names none (#1782)",
-                    platform.key()
+                (false, Some(image), ..) => bail!(
+                    "{at} names the image {image}; the macOS build is made on the maintainer's machine and names none (#1782)"
                 ),
+                (true, _, Some(named), _) => bail!(
+                    "{at} names the closure {named}; a Linux build is made in its image, against no Homebrew closure, and names none (#2935); {repin}"
+                ),
+                (false, _, None, _) => bail!(
+                    "{at} names no closure, so its build predates the pin's [closure]: the macOS build names the digest of the [closure] it was made against beside its md5 (#2935); {repin}"
+                ),
+                (false, _, Some(named), recorded) if recorded != Some(named) => {
+                    let recorded =
+                        recorded.map_or("records none".to_owned(), |d| format!("is {d}"));
+                    bail!(
+                        "{at} was made against the closure {named}, and the pin's [closure] {recorded}, so its build predates the closure (#2935); {repin}"
+                    )
+                }
                 _ => {}
             }
         }
@@ -148,7 +167,8 @@ impl Variant {
 /// that platform, the binary's md5, which is its identity as `[oracle]`'s
 /// md5 is the main oracle's, and for a Linux build the base image's
 /// manifest digest, which the recipe pins and rebuilds from, the md5
-/// holding the binary it rebuilt (#1948). The path is where a machine
+/// holding the binary it rebuilt (#1948); for the macOS build, the digest
+/// of the `[closure]` it was made against (#2935). The path is where a machine
 /// finds the binary: on Linux, the install prefix the recipe builds it to;
 /// a relative path is the pin's directory's.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -158,6 +178,8 @@ pub struct Build {
     pub md5: String,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub closure: Option<ClosureDigest>,
 }
 
 /// The oracles one run holds: the main oracle's, and one for each variant
@@ -190,10 +212,9 @@ impl<'a> Oracles<'a> {
         let Some(name) = variant else {
             return Ok(&self.main);
         };
-        match self.variants.get(name) {
-            Some(oracle) => Ok(oracle),
-            None => Err(self.main.pin().unknown(name)),
-        }
+        self.variants
+            .get(name)
+            .ok_or_else(|| self.main.pin().unknown(name))
     }
 
     /// The main oracle's.
@@ -227,31 +248,81 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
-    #[test]
-    fn a_linux_build_names_its_image_and_the_macos_build_names_none() {
-        let md5 = "md5 = \"0\"";
-        let held = variant(&format!(
-            "flags = []\ndarwin-arm64 = {{ path = \"php\", {md5} }}\nlinux-x86_64 = {{ path = \"php\", {md5}, image = \"sha256:1\" }}\n"
-        ));
-        held.held("zend-test").unwrap();
+    /// The digest of a one-keg `[closure]` at `version`.
+    fn digest(version: &str) -> ClosureDigest {
+        let text = format!("zstd = \"{version}\"");
+        toml::from_str::<super::super::Closure>(&text)
+            .unwrap()
+            .digest()
+    }
 
-        let imageless = variant(&format!(
-            "flags = []\nlinux-aarch64 = {{ path = \"php\", {md5} }}\n"
+    #[test]
+    fn a_linux_build_names_its_image_and_the_macos_build_names_its_closure() {
+        let (md5, recorded) = ("md5 = \"0\"", digest("1.5.7_1"));
+        let closure = format!("closure = \"{recorded}\"");
+        let refused = |text: &str, closure: Option<&ClosureDigest>| {
+            variant(&format!("flags = []\n{text}\n"))
+                .held("zend-test", closure)
+                .unwrap_err()
+                .to_string()
+        };
+        let held = variant(&format!(
+            "flags = []\ndarwin-arm64 = {{ path = \"php\", {md5}, {closure} }}\nlinux-x86_64 = {{ path = \"php\", {md5}, image = \"sha256:1\" }}\n"
         ));
-        let err = imageless.held("zend-test").unwrap_err().to_string();
+        held.held("zend-test", Some(&recorded)).unwrap();
+
+        let err = refused(
+            &format!("linux-aarch64 = {{ path = \"php\", {md5} }}"),
+            None,
+        );
         assert!(
             err.contains("[variant.zend-test.linux-aarch64] names no image"),
             "{err}"
         );
-
-        let imaged = variant(&format!(
-            "flags = []\ndarwin-arm64 = {{ path = \"php\", {md5}, image = \"sha256:1\" }}\n"
-        ));
-        let err = imaged.held("zend-test").unwrap_err().to_string();
+        let err = refused(
+            &format!("darwin-arm64 = {{ path = \"php\", {md5}, {closure}, image = \"sha256:1\" }}"),
+            Some(&recorded),
+        );
         assert!(
             err.contains("[variant.zend-test.darwin-arm64] names the image sha256:1"),
             "{err}"
         );
+
+        let repin = "re-pinning it with `scripts/oracle-build.py build darwin-arm64 zend-test` is a person's act (harness §11)";
+        let err = refused(
+            &format!("darwin-arm64 = {{ path = \"php\", {md5} }}"),
+            Some(&recorded),
+        );
+        assert!(
+            err.contains("[variant.zend-test.darwin-arm64] names no closure, so its build predates the pin's [closure]")
+                && err.contains(repin),
+            "{err}"
+        );
+        let err = refused(
+            &format!("linux-x86_64 = {{ path = \"php\", {md5}, image = \"sha256:1\", {closure} }}"),
+            Some(&recorded),
+        );
+        assert!(
+            err.contains(&format!(
+                "[variant.zend-test.linux-x86_64] names the closure {recorded}; a Linux build"
+            )),
+            "{err}"
+        );
+        let moved = digest("1.5.8");
+        let err = refused(
+            &format!("darwin-arm64 = {{ path = \"php\", {md5}, {closure} }}"),
+            Some(&moved),
+        );
+        assert!(
+            err.contains(&format!("was made against the closure {recorded}, and the pin's [closure] is {moved}, so its build predates the closure"))
+                && err.contains(repin),
+            "{err}"
+        );
+        let err = refused(
+            &format!("darwin-arm64 = {{ path = \"php\", {md5}, {closure} }}"),
+            None,
+        );
+        assert!(err.contains("the pin's [closure] records none"), "{err}");
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub(crate) mod profile;
 mod variant;
 
 pub(crate) use closure::Closure;
+pub use closure::ClosureDigest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Variant};
 
@@ -699,8 +700,9 @@ impl Pin {
     /// file says it, blind to this machine; `load` consults the machine.
     pub fn parse(text: &str) -> Result<Pin> {
         let mut pin: Pin = toml::from_str(text)?;
+        let closure = pin.closure.as_ref().map(Closure::digest);
         for (name, variant) in &pin.variant {
-            variant.held(name)?;
+            variant.held(name, closure.as_ref())?;
         }
         pin.digest =
             crate::git::blob_id(toml::from_str::<toml::Table>(text)?.to_string().as_bytes());

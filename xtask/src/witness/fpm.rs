@@ -272,10 +272,7 @@ impl Pool {
 /// The last [`TAIL`] lines of the log at `log`, or what kept it unread.
 fn tail(log: &Path) -> String {
     match fs::read_to_string(log) {
-        Ok(text) => {
-            let lines: Vec<&str> = text.lines().collect();
-            lines[lines.len().saturating_sub(TAIL)..].join("\n")
-        }
+        Ok(text) => crate::batch::tail(&text, TAIL),
         Err(unread) => format!("({} unread: {unread})", log.display()),
     }
 }
