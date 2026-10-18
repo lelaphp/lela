@@ -56,7 +56,7 @@ use std::process::Command;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
@@ -249,15 +249,15 @@ impl Held {
     pub(super) fn judge(
         &self,
         oracle: &Oracle<'_>,
-        engine: Result<&Path>,
+        engine: Result<PathBuf>,
         registry: &Registry,
         line: &Line,
     ) -> Judged {
         let id = format!("{}#{}", self.file.display(), line.name);
-        let ran = self
-            .pinned(oracle)
+        let ran = oracle
+            .pinned_host(self.host)
             .and_then(|pinned| Ok((pinned, engine?)))
-            .and_then(|(pinned, engine)| both(oracle, &pinned, engine, line));
+            .and_then(|(pinned, engine)| both(oracle, &pinned, &engine, line));
         let (judgement, note) = match ran {
             Err(trouble) => (Judgement::Bork, format!("{trouble:#}")),
             Ok((theirs, ours)) => {
@@ -274,23 +274,6 @@ impl Held {
     /// The host these lines run.
     pub(super) fn host(&self) -> EngineHost {
         self.host
-    }
-
-    /// The pinned host of this crate's kind, its digest asserted: the
-    /// failure where the pin names none, none is at its path, or its
-    /// digest is not the pin's.
-    fn pinned(&self, oracle: &Oracle<'_>) -> Result<PathBuf> {
-        let pin = oracle.pin();
-        if self.host == hosts::CLI {
-            oracle.asserted()?;
-            return Ok(pin.oracle.path.clone());
-        }
-        let host = pin
-            .sapi
-            .of(self.host)
-            .ok_or_else(|| anyhow!("the pin's [sapi] names no {}", self.host.binary))?;
-        oracle.host_asserted(host)?;
-        Ok(host.path.clone())
     }
 }
 
@@ -695,7 +678,7 @@ mod tests {
         let held = Held::parse(hosts::CGI, "sapi/cgi/tests/lines.toml".into(), text).unwrap();
         let judged = held.judge(
             &pin.oracle(),
-            Ok(engine),
+            Ok(engine.to_path_buf()),
             &Registry::default(),
             &held.lines[0],
         );

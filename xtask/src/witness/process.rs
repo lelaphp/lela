@@ -38,13 +38,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
 use crate::carried::BUNDLE;
-use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, MAKALA, PHPDBG};
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
 use crate::oracle::profile;
 use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
 use crate::phpt::environment::Environment;
@@ -66,26 +66,19 @@ const TRACE: &str = "PHP_WITNESS_TRACE";
 #[derive(Debug)]
 pub(crate) struct Binary {
     root: PathBuf,
-    cli: OnceLock<Result<PathBuf, String>>,
-    cgi: OnceLock<Result<PathBuf, String>>,
-    fpm: OnceLock<Result<PathBuf, String>>,
-    phpdbg: OnceLock<Result<PathBuf, String>>,
-    makala: OnceLock<Result<PathBuf, String>>,
-    /// `php` built with one feature of the bundle on, by feature.
-    featured: Mutex<BTreeMap<String, Result<PathBuf, String>>>,
+    built: Mutex<BTreeMap<Build, Result<PathBuf, String>>>,
 }
+
+/// A binary a run builds: a host by its crate, and the bundle feature
+/// `php` is built with on, where there is one.
+type Build = (&'static str, Option<String>);
 
 impl Binary {
     /// The binaries of the workspace at `root`, not yet built.
     pub(crate) fn of(root: &Path) -> Binary {
         Binary {
             root: root.to_path_buf(),
-            cli: OnceLock::new(),
-            cgi: OnceLock::new(),
-            fpm: OnceLock::new(),
-            phpdbg: OnceLock::new(),
-            makala: OnceLock::new(),
-            featured: Mutex::default(),
+            built: Mutex::default(),
         }
     }
 
@@ -95,68 +88,48 @@ impl Binary {
     #[cfg(test)]
     pub(crate) fn standing(root: &Path, host: EngineHost, path: PathBuf) -> Binary {
         let binary = Binary::of(root);
-        if let Ok(slot) = binary.slot(host) {
-            slot.set(Ok(path)).ok();
-        }
+        binary.stand(host, None, path);
         binary
     }
 
     /// The same with `path` standing in for `php` built with `feature`.
     #[cfg(test)]
     pub(crate) fn featuring(self, feature: &str, path: PathBuf) -> Binary {
-        let mut featured = self.featured.lock().unwrap_or_else(PoisonError::into_inner);
-        featured.insert(feature.to_owned(), Ok(path));
-        drop(featured);
+        self.stand(CLI, Some(feature), path);
         self
     }
 
-    /// Where the CLI's binary is, built from the tree now if this run has
-    /// not built it yet; what `crosscheck` starts as the built-in server.
-    pub(crate) fn cli(&self) -> Result<&Path> {
-        self.host(CLI)
+    #[cfg(test)]
+    fn stand(&self, host: EngineHost, feature: Option<&str>, path: PathBuf) {
+        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        built.insert((host.krate, feature.map(str::to_owned)), Ok(path));
     }
 
-    /// Where `host`'s binary is, as [`Binary::cli`]: what a fence with a
-    /// request is served by, and what a host's own line runs (#1975).
-    pub(super) fn host(&self, host: EngineHost) -> Result<&Path> {
-        built(self.slot(host)?, &self.root, host)
+    /// Where `host`'s binary is, built from the tree now if this run has
+    /// not built it yet: what a fence with a request is served by, what a
+    /// host's own line runs (#1975), and the CLI's what `crosscheck`
+    /// starts as the built-in server.
+    pub(crate) fn host(&self, host: EngineHost) -> Result<PathBuf> {
+        self.built(host, None)
     }
 
-    /// Where `host`'s binary is kept once built.
-    fn slot(&self, host: EngineHost) -> Result<&OnceLock<Result<PathBuf, String>>> {
-        [
-            (CLI, &self.cli),
-            (CGI, &self.cgi),
-            (FPM, &self.fpm),
-            (PHPDBG, &self.phpdbg),
-            (MAKALA, &self.makala),
-        ]
-        .into_iter()
-        .find_map(|(kind, slot)| (kind == host).then_some(slot))
-        .ok_or_else(|| anyhow!("{} is no host the witness lane builds", host.krate))
-    }
-
-    /// Where `php` built with `feature` of the bundle on is, built now
-    /// into [`profile::featured`] if this run has not built it yet; the
-    /// CLI's binary where there is no feature.
-    fn cli_with(&self, feature: Option<&str>) -> Result<PathBuf> {
-        let Some(feature) = feature else {
-            return self.cli().map(Path::to_path_buf);
-        };
-        let mut featured = self.featured.lock().unwrap_or_else(PoisonError::into_inner);
-        let built = featured.entry(feature.to_owned()).or_insert_with(|| {
-            let on = format!("{BUNDLE}/{feature}");
-            let into = profile::featured(&self.root, feature);
-            profile::build(
-                &self.root,
-                &CLI.package(),
-                CLI.binary,
-                Some(&on),
-                Some(&into),
-            )
-            .map_err(|e| format!("{e:#}"))
+    /// Where `host`'s binary is, `php` built with `feature` of the bundle
+    /// on into [`profile::featured`] where there is one, built now in the
+    /// lanes' profile ([`profile::build`]) if this run has not built it
+    /// yet: every request it serves records the natives it entered where
+    /// `PHP_WITNESS_TRACE` names a file, with no build of its own for the
+    /// lane (#2168).
+    fn built(&self, host: EngineHost, feature: Option<&str>) -> Result<PathBuf> {
+        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        let key = (host.krate, feature.map(str::to_owned));
+        let path = built.entry(key).or_insert_with(|| {
+            let on = feature.map(|feature| format!("{BUNDLE}/{feature}"));
+            let into = feature.map(|feature| profile::featured(&self.root, feature));
+            let (package, binary) = (host.package(), host.binary);
+            profile::build(&self.root, &package, binary, on.as_deref(), into.as_deref())
+                .map_err(|e| format!("{e:#}"))
         });
-        built.clone().map_err(|why| anyhow!("{why}"))
+        path.clone().map_err(|why| anyhow!("{why}"))
     }
 
     /// `snippet` served by the binary, the one built with `feature` where
@@ -171,7 +144,7 @@ impl Binary {
         regime: Option<&str>,
         feature: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.cli_with(feature)?;
+        let binary = self.built(CLI, feature)?;
         traced(|env| {
             oracle.run_under(&Invocation {
                 regimes: regime.as_slice(),
@@ -211,7 +184,7 @@ impl Binary {
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.host(CGI)?;
         let hosts = Tree::new("witness-cgi")?;
-        let host = cgi::linked(binary, hosts.path())?;
+        let host = cgi::linked(&binary, hosts.path())?;
         traced(|env| served_as_cgi(oracle, &host, snippet, request, regime, env))
     }
 
@@ -225,7 +198,7 @@ impl Binary {
         request: &str,
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.host(FPM)?;
-        traced(|env| super::fpm::served_as_fpm(oracle, binary, snippet, request, env))
+        traced(|env| super::fpm::served_as_fpm(oracle, &binary, snippet, request, env))
     }
 
     /// `snippet` handed to `sapi/phpdbg`'s binary with `commands` on its
@@ -238,7 +211,7 @@ impl Binary {
         commands: &str,
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.host(PHPDBG)?;
-        traced(|env| served_as_phpdbg(oracle, binary, snippet, commands, env))
+        traced(|env| served_as_phpdbg(oracle, &binary, snippet, commands, env))
     }
 }
 
@@ -315,24 +288,4 @@ pub(super) fn described(
     env.extend(crate::phpt::env_of(&phpt, &path));
     cgi::request(&phpt, program, &env)
         .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))
-}
-
-/// Where `host`'s binary is, built into `slot` from the tree at `root`
-/// now if this run has not built it yet.
-fn built<'a>(
-    slot: &'a OnceLock<Result<PathBuf, String>>,
-    root: &Path,
-    host: EngineHost,
-) -> Result<&'a Path> {
-    slot.get_or_init(|| build(root, host).map_err(|e| format!("{e:#}")))
-        .as_deref()
-        .map_err(|why| anyhow!("{why}"))
-}
-
-/// The host's own binary, built in the lanes' profile
-/// ([`profile::build`]): every request it serves records the natives it
-/// entered where `PHP_WITNESS_TRACE` names a file, with no build of its
-/// own for the lane (#2168).
-fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
-    profile::build(root, &host.package(), host.binary, None, None)
 }
