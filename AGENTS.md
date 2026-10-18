@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=5d54b7b196ccb6cf4fd6372299a9b38b360863ee39024923e7767a38d0347ac3 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=2d18734664fd866f2f3c3ce14e8551bf7da6cc7cf9f505af6c628e32311e7453 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 412 |  |
 
-<!-- /computed in=7b463356b649eeca430ab4084b88b91922145ffcd912fdf03032b25cdf9276e9 out=4ec24a4942ba33945cb092bf1bafa18c6f1fa4070dc8951294cf0acef34f31da -->
+<!-- /computed in=2a121befc91aa1b92564a8761b8db014358f2af07c6157c112e1af7e5d0d4e08 out=4ec24a4942ba33945cb092bf1bafa18c6f1fa4070dc8951294cf0acef34f31da -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -173,7 +173,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=e2ddad118c41bb24a2653cf36220e68fa1d0614da1021e1625c3131d12ad51a6 out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
+<!-- /computed in=61d87ad8ce7ea436a6ee2fee3fa23a7d371bd7e7059c0cb32dc710cd1d4d7d2f out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

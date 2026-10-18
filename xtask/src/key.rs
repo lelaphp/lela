@@ -93,6 +93,24 @@ static COMMITS: OnceLock<Mutex<Commits>> = OnceLock::new();
 type Commits = BTreeMap<(PathBuf, String), Arc<Snapshot>>;
 
 impl Snapshot {
+    /// A snapshot of the whole content at `root`: `files` and `tracked`
+    /// as the fields say, taken at `commit`, no key asked of it yet.
+    fn new(
+        root: &Path,
+        commit: String,
+        files: Vec<(String, String)>,
+        tracked: Vec<(String, String)>,
+    ) -> Snapshot {
+        Snapshot {
+            root: root.to_path_buf(),
+            commit,
+            files,
+            tracked,
+            covers: None,
+            keys: Mutex::default(),
+        }
+    }
+
     /// The working tree now under `path` and, for a crate, its closure
     /// alone: what one stamp outside an instrument's run reads, a
     /// `permit` call's over the file it touched above all, where asking
@@ -145,13 +163,10 @@ impl Snapshot {
                 files.insert(path.to_owned(), id);
             }
         }
+        let (files, tracked) = (files.into_iter().collect(), tracked.into_iter().collect());
         Ok(Snapshot {
-            root: root.to_path_buf(),
-            commit: git::head_commit(root)?,
-            files: files.into_iter().collect(),
-            tracked: tracked.into_iter().collect(),
             covers: Some(covers),
-            keys: Mutex::default(),
+            ..Snapshot::new(root, git::head_commit(root)?, files, tracked)
         })
     }
 
@@ -236,14 +251,7 @@ impl Snapshot {
             }
         }
         files.sort_unstable();
-        Ok(Snapshot {
-            root: root.to_path_buf(),
-            commit,
-            files,
-            tracked: on_disk,
-            covers: None,
-            keys: Mutex::default(),
-        })
+        Ok(Snapshot::new(root, commit, files, on_disk))
     }
 
     /// What `index` holds, as a commit would take it: the keys the scopes
@@ -251,14 +259,8 @@ impl Snapshot {
     /// untracked file beside it.
     pub(crate) fn index(root: &Path, index: &Index) -> Result<Snapshot> {
         let files = index.entries().to_vec();
-        Ok(Snapshot {
-            root: root.to_path_buf(),
-            commit: git::head_commit(root)?,
-            tracked: files.clone(),
-            files,
-            covers: None,
-            keys: Mutex::default(),
-        })
+        let commit = git::head_commit(root)?;
+        Ok(Snapshot::new(root, commit, files.clone(), files))
     }
 
     /// The tracked files as `commit` holds them, read once per process
@@ -282,14 +284,8 @@ impl Snapshot {
             }
         }
         files.sort_unstable();
-        let snapshot = Arc::new(Snapshot {
-            root: root.to_path_buf(),
-            commit: commit.chars().take(7).collect(),
-            tracked: files.clone(),
-            files,
-            covers: None,
-            keys: Mutex::default(),
-        });
+        let short = commit.chars().take(7).collect();
+        let snapshot = Arc::new(Snapshot::new(root, short, files.clone(), files));
         if let Ok(mut held) = read.lock() {
             held.insert(at, Arc::clone(&snapshot));
         }

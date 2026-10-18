@@ -185,13 +185,13 @@ fn displaced(root: &Path, rev: &str, path: &str) -> String {
 /// parent's, judged at its own commits, so the merge is not asked of it.
 /// A hit neither parent carried as often is the merge's.
 fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
-    let theirs = git::git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], None).ok();
+    let theirs = git::rev_parse(root, &["-q", "--verify", "MERGE_HEAD"]).ok();
     let mut files = Vec::new();
     for change in git::staged(root)?.into_iter().filter(|c| !c.deleted) {
         if let Some(content) = git::staged_content(root, &change.path)? {
             let mut parents = vec![displaced(root, "HEAD", &change.path)];
             if let Some(theirs) = &theirs {
-                let merged = displaced(root, theirs.trim(), &change.path);
+                let merged = displaced(root, theirs, &change.path);
                 if merged == content {
                     continue;
                 }

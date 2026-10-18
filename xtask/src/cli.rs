@@ -311,7 +311,7 @@ pub(crate) enum Command {
     ///
     /// Without an argument, the per-commit corpus of design §6.1: every
     /// file of `Zend/tests`, `tests` and `sapi/cli` of the pinned php-src.
-    CompileIdentity(Identity),
+    CompileIdentity(crate::compile_identity::Ask),
     /// Hold each default extension's `--re` and `--ri` rendering to the
     /// oracle's bytes, kept in the store; one reading per extension per flag.
     ///
@@ -618,30 +618,6 @@ impl PhptEngine {
             (None, false) => crate::phpt::Engine::Built,
         }
     }
-}
-
-/// What one `compile-identity` run is asked for, flattened onto the
-/// command so the dispatch has one line for the instrument as it has for
-/// every other.
-#[derive(Debug, Args)]
-pub(crate) struct Identity {
-    /// One file, on request: its verdict is printed, a difference is the
-    /// exit, and nothing is recorded.
-    #[arg(long, value_name = "PATH", conflicts_with = "corpus")]
-    pub file: Option<PathBuf>,
-    /// A corpus at a directory of its own: the nightly whole, which CI
-    /// runs.
-    #[arg(long, value_name = "DIR")]
-    pub corpus: Option<PathBuf>,
-    /// The binary whose dump is held to the oracle's; without it, the
-    /// engine's own where cargo puts it.
-    #[arg(long, value_name = "PATH")]
-    pub engine: Option<PathBuf>,
-    /// A `[regime.<name>]` of the pin both sides dump under after `dump`:
-    /// `extended-info`, php's `-e`, is the per-commit corpus's second
-    /// (#1822). The reading's scope carries it, `php-src@regime=<name>`.
-    #[arg(long, value_name = "NAME")]
-    pub regime: Option<String>,
 }
 
 /// What is done to a track rather than asked of it.
