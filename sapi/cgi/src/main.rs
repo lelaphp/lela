@@ -1,7 +1,7 @@
 //! `php-cgi`, the binary (design §4.1; ADR-0008): php's CGI host,
 //! [`php_sapi_cgi::main`], built beside `php` as php builds its CGI, where
 //! a test that looks for it looks (`Z/sapi/cgi/tests/include.inc`).
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,

@@ -642,14 +642,21 @@ fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> R
             Ok(shown(&answer))
         }
         (None, Some(params)) => {
-            let stream = UnixStream::connect(listen).map_err(Refused)?;
-            stream.set_read_timeout(wait)?;
             let params: Vec<(&str, String)> =
                 params.iter().map(|(n, v)| (n.as_str(), fill(v))).collect();
             let pairs = params.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes()));
             let body = request.body.as_deref().map(fill);
-            let (stdout, stderr) =
-                super::fpm::round(stream, pairs, body.as_deref().map(str::as_bytes))?;
+            let body = body.as_deref().map(str::as_bytes);
+            // A path is a Unix socket, and anything else `host:port`.
+            let (stdout, stderr) = if listen.starts_with('/') {
+                let stream = UnixStream::connect(listen).map_err(Refused)?;
+                stream.set_read_timeout(wait)?;
+                super::fpm::round(stream, pairs, body)?
+            } else {
+                let stream = TcpStream::connect(listen).map_err(Refused)?;
+                stream.set_read_timeout(wait)?;
+                super::fpm::round(stream, pairs, body)?
+            };
             Ok(format!("{}\n-- stderr\n{}", shown(&stdout), shown(&stderr)))
         }
         (None, None) => bail!("a request is `http` or `params`"),

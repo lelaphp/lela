@@ -210,3 +210,87 @@ env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD =
 files = { "pre.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''', "t.php" = '''<?php echo basename(__FILE__), " ", implode(",", array_map("basename", get_included_files())), "\n";''' }
 [[line.then]]
 args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "{dir}/t.php"]
+
+# php-cgi `-b`, its FastCGI server (`Z/sapi/cgi/cgi_main.c:1931-2140`): the
+# socket bound where the switch names, each request's variables read from its
+# `FCGI_PARAMS` as `init_request_info` reads them, its body from its
+# `FCGI_STDIN`, and a file that does not open answered with php's page; the
+# process serves until it is stopped (#2792).
+[[line]]
+name = "fastcgi-serves-requests-on-its-port"
+args = ["-n", "-b", "127.0.0.1:{port}"]
+files = { "t.php" = "<?php echo php_sapi_name(), ' ', $_GET['q'] ?? '-', ' ', $_SERVER['REQUEST_METHOD'], ' ', json_encode($_POST), ' ', file_get_contents('php://input'), \"\\n\";" }
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "POST"], ["CONTENT_TYPE", "application/x-www-form-urlencoded"], ["CONTENT_LENGTH", "7"]]
+body = "a=1&b=2"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/missing.php"], ["REQUEST_METHOD", "GET"]]
+
+# A FastCGI parameter holding a NUL is read up to it, as php-fpm reads one
+# (#2757): `init_request_info` and the loop read each through a `char *`, and
+# `$_SERVER` registers each through `strlen`.
+[[line]]
+name = "fastcgi-a-parameter-holding-a-nul-is-read-up-to-it"
+args = ["-n", "-b", "127.0.0.1:{port}"]
+files = { "a.txt" = "hello\n", "run.php" = '''
+<?php
+echo "ran\n";
+foreach ($_SERVER as $name => $value) {
+    if (is_string($value) && (str_contains($value, "\0") || str_contains($value, 'run.php') || str_starts_with($name, 'ORIG_') || $name === 'QUERY_STRING')) echo $name, ' ', json_encode($value), "\n";
+}
+var_dump($_GET, getallheaders()['X-A'] ?? null, getenv('QUERY_STRING'));
+''' }
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/run.php\u0000.txt"], ["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/run.php\u0000.txt"], ["QUERY_STRING", "a=1\u0000&b=2"], ["HTTP_X_A", "b\u0000c"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/run.php\u0000"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/a.txt\u0000.php"], ["REQUEST_METHOD", "GET"]]
+
+# `PHP_FCGI_CHILDREN` and `PHP_FCGI_MAX_REQUESTS` are read with `atoi` once
+# the socket is bound, and a negative one is refused with php's line and
+# `FAILURE`.
+[[line]]
+name = "fastcgi-a-negative-children-count-is-refused"
+args = ["-n", "-b", "127.0.0.1:{port}"]
+env = { PHP_FCGI_CHILDREN = "-1" }
+[[line.then]]
+args = ["-n", "-b", "127.0.0.1:{port}"]
+env = { PHP_FCGI_CHILDREN = "", PHP_FCGI_MAX_REQUESTS = "-2" }
+
+# `PHP_FCGI_MAX_REQUESTS=1`: the process serves one request and ends, with
+# the request's exit status.
+[[line]]
+name = "fastcgi-max-requests-ends-the-process"
+args = ["-n", "-b", "127.0.0.1:{port}"]
+env = { PHP_FCGI_MAX_REQUESTS = "1" }
+files = { "t.php" = "<?php echo \"one\\n\"; exit(3);" }
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+
+# `PHP_FCGI_CHILDREN=2`: the parent forks two children in a process group of
+# its own, each serving, and its stop ends the group whole
+# (`fastcgi_cleanup`).
+[[line]]
+name = "fastcgi-children-serve-and-end-with-the-parent"
+args = ["-n", "-b", "127.0.0.1:{port}"]
+env = { PHP_FCGI_CHILDREN = "2" }
+files = { "t.php" = "<?php echo \"served\\n\";" }
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/t.php"], ["REQUEST_METHOD", "GET"]]

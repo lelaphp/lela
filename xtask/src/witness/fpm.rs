@@ -315,7 +315,7 @@ fn exchange(
 /// `FCGI_STDOUT` and `FCGI_STDERR` until `FCGI_END_REQUEST`: a fence's
 /// request and a host line's (`super::host`, #1975).
 pub(super) fn round<'a>(
-    mut stream: UnixStream,
+    mut stream: impl Read + Write,
     pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
     stdin: Option<&[u8]>,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
