@@ -795,11 +795,20 @@ impl Request {
     /// bool(true)
     /// ```
     pub(crate) fn eval_string(&mut self, code: &[u8]) -> Result<Opened, Thrown> {
+        // `zend_make_compiled_string_description`'s `%s(%d) : %s`, laid
+        // in one buffer of its length.
+        const TAIL: &[u8] = b") : eval()'d code";
         if code.is_empty() {
             return Ok(Opened::Failed);
         }
-        let mut name = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        name.extend_from_slice(format!("({}) : eval()'d code", self.current_line()).as_bytes());
+        let line = self.current_line();
+        let file = self.current_file().unwrap_or_default();
+        // The file, `(`, at most ten digits and the tail.
+        let mut name = Vec::with_capacity(file.len() + 11 + TAIL.len());
+        name.extend_from_slice(file);
+        name.push(b'(');
+        std::io::Write::write_fmt(&mut name, format_args!("{line}")).ok();
+        name.extend_from_slice(TAIL);
         Ok(Opened::Unit(self.compile_eval(code, &name)?))
     }
 

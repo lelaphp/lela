@@ -23,12 +23,21 @@ use crate::api::values::{PhpString, Value};
 
 /// The names of the request-only units the request holds: each unit's
 /// strings, one owner apiece, beside the unit they go with, and the
-/// newest string held for each name, where a copy finds it.
+/// newest string held for each name, where a copy finds it. A name no
+/// living unit holds keeps its key with no string, so the next unit of
+/// that name, an `eval` in a loop's, makes no key of its own; and the
+/// vectors a unit's names stood in are kept for the next unit's.
 #[derive(Default)]
 pub(crate) struct UnitNames {
     units: Vec<(Weak<Unit>, Vec<PhpString>)>,
-    by_bytes: HashMap<Box<[u8]>, PhpString, NameHasher>,
+    by_bytes: HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
+    spare: Vec<Vec<PhpString>>,
+    dead: Vec<PhpString>,
 }
+
+/// The most names a unit dedupes by comparing each with the ones it
+/// already holds, past which a set of them is made.
+const SCANNED_NAMES: usize = 16;
 
 impl UnitNames {
     /// The units that are over taken out with their strings: each unit
@@ -38,36 +47,29 @@ impl UnitNames {
     /// returned. Each name one of those strings stood for is pointed at
     /// an equal string a living unit holds, or at none.
     fn take(&mut self, ended: Option<*const Unit>) -> Vec<PhpString> {
-        let mut dead = Vec::new();
+        let mut dead = std::mem::take(&mut self.dead);
+        let spare = &mut self.spare;
         self.units.retain_mut(|(unit, names)| {
             if unit.strong_count() > 0 && ended != Some(unit.as_ptr()) {
                 return true;
             }
             dead.append(names);
+            spare.push(std::mem::take(names));
             false
         });
         for name in &dead {
             let bytes = name.as_bytes();
-            if self
-                .by_bytes
-                .get(bytes)
-                .is_some_and(|held| held.heap().is_same(name.heap()))
-            {
-                let living = self
+            let Some(held) = self.by_bytes.get_mut(bytes) else {
+                continue;
+            };
+            if held.is_some_and(|held| held.heap().is_same(name.heap())) {
+                *held = self
                     .units
                     .iter()
                     .rev()
                     .flat_map(|(_, names)| names)
                     .find(|held| held.as_bytes() == bytes)
                     .copied();
-                match living {
-                    Some(living) => {
-                        self.by_bytes.insert(bytes.into(), living);
-                    }
-                    None => {
-                        self.by_bytes.remove(bytes);
-                    }
-                }
             }
         }
         dead
@@ -89,16 +91,38 @@ impl Request {
             return Ok(());
         }
         let at = self.unit_names.units.len();
-        self.unit_names
-            .units
-            .push((Arc::downgrade(unit), Vec::new()));
+        let names = self.unit_names.spare.pop().unwrap_or_default();
+        self.unit_names.units.push((Arc::downgrade(unit), names));
         let mut seen = HashSet::with_hasher(NameHasher);
         for name in php_compile::op_array_names(unit) {
-            if !seen.insert(name) {
+            let held = self
+                .unit_names
+                .units
+                .get(at)
+                .map_or(0, |(_, names)| names.len());
+            let again = if held < SCANNED_NAMES {
+                self.unit_names
+                    .units
+                    .get(at)
+                    .is_some_and(|(_, names)| names.iter().any(|made| made.as_bytes() == name))
+            } else {
+                if seen.is_empty()
+                    && let Some((_, names)) = self.unit_names.units.get(at)
+                {
+                    seen.extend(names.iter().map(|made| made.as_bytes().to_vec()));
+                }
+                !seen.insert(name.to_vec())
+            };
+            if again {
                 continue;
             }
             let made = self.string(name)?;
-            self.unit_names.by_bytes.insert(name.into(), made);
+            match self.unit_names.by_bytes.get_mut(name) {
+                Some(held) => *held = Some(made),
+                None => {
+                    self.unit_names.by_bytes.insert(name.into(), Some(made));
+                }
+            }
             if let Some((_, names)) = self.unit_names.units.get_mut(at) {
                 names.push(made);
             }
@@ -136,7 +160,7 @@ impl Request {
         if let Some(held) = self.shared.existing_interned(bytes) {
             return Ok(PhpString::of(held));
         }
-        if let Some(held) = self.unit_names.by_bytes.get(bytes).copied() {
+        if let Some(held) = self.unit_names.by_bytes.get(bytes).copied().flatten() {
             self.addref(&Value::string(held));
             return Ok(held);
         }
@@ -157,9 +181,11 @@ impl Request {
                 unit.functions.is_empty() && unit.dynamic.is_empty() && unit.classes.is_empty()
             })
             .map(Arc::as_ptr);
-        for name in self.unit_names.take(ended) {
+        let mut dead = self.unit_names.take(ended);
+        for name in dead.drain(..) {
             self.release(Value::string(name));
         }
+        self.unit_names.dead = dead;
     }
 
     /// Every request-only unit's names given up at the request's end,
