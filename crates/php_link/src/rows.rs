@@ -47,6 +47,9 @@ pub struct LinkedClass<H> {
     /// `ce->destructor`: the position of `__destruct`'s row in
     /// `methods`, set as [`LinkedClass::constructor`] is.
     pub destructor: Option<u32>,
+    /// `ce->num_hooked_props != 0`: whether a row of `properties` has
+    /// hooks, so a property access on a class with none asks no hook.
+    pub hooked: bool,
 }
 
 impl<H> Default for LinkedClass<H> {
@@ -59,6 +62,7 @@ impl<H> Default for LinkedClass<H> {
             interfaces: Box::default(),
             constructor: None,
             destructor: None,
+            hooked: false,
         }
     }
 }
