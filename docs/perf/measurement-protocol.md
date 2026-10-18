@@ -7,9 +7,10 @@ inherited from the second engine, whose own protocol stands at
 here is the part that binds a run, and §10 says what was left behind and why.
 `xtask bench` is the one instrument that runs it.
 
-Version `2`: the ancestor's `1`, and a request-shaped arm under the same
-paired rule (§3, §5; #2351). A change to §3, §4 or §5 bumps it; adding a
-statement or a recorded field does not.
+Version `3`: the ancestor's `1`, a request-shaped arm under the same
+paired rule (§3, §5; #2351), which made `2`, and that arm's concurrent
+form, whose rep is a rate (§3, §4.2; #2660). A change to §3, §4 or §5
+bumps it; adding a statement or a recorded field does not.
 
 ## 1. What it refuses
 
@@ -54,6 +55,8 @@ the verdict and exits 0 (`harness-design.md` §4.2).
 | order within a rep | alternated: even reps run arm A first, odd reps arm B first |
 | processes per rep | one per arm, back to back |
 | requests per rep, a request-shaped arm | one per arm, back to back, to a server started once for the bar |
+| clients per rep, a concurrent request-shaped arm | 8 per arm, the arms back to back, each client asking until 3 s have passed and then finishing the request it has in flight |
+| what a concurrent rep measures | the requests a second its clients were answered at, over the time its last client took to end |
 
 Twelve paired deltas give a stable interpolated inter-quartile range. The
 response to `NOISE-SWAMPED` is more reps, a quieter machine or a larger
@@ -68,6 +71,18 @@ binary pinned as a program is (§6). It is how the production server is
 measured against php-fpm (#2351); the two arms reach their hosts as each is
 reached, so the bar states its clients, and a server's own A/A control
 stands beside it.
+
+Its concurrent form measures throughput where the one request measures
+latency (#2660, `third-engine-design.md` §9.2's "8 threads, one process ≥
+php-fpm with 8 workers"). Each arm's rep is 8 clients at once, each
+sending the request again as soon as it is answered, one connection a
+request as the one-request arm sends it, until 3 seconds have passed;
+each then finishes the request in flight, and the rep is the requests
+answered over the time from the first sent to the last answered. The
+servers are the bar's, started before its first rep: a server of 8
+request threads, and php-fpm with `pm = static` and `pm.max_children =
+8` behind the same `FastCGI` client. The warm-up is the two discarded
+reps, which reach every request thread and child before a rep is kept.
 
 ## 4. The statistics
 
@@ -89,9 +104,14 @@ percentile: a percentile is a per-arm description and is never signed.
 
 ### 4.2 The paired delta
 
-`delta[r] = a_ms[r] - b_ms[r]` for each measured rep. Reported: the median,
-Q1, Q3 and IQR of the delta sample, and `paired_pct = median(delta) /
-median(b) * 100`, which is the number to quote.
+`delta[r] = a[r] - b[r]` for each measured rep, in the bar's unit: the
+milliseconds a run took, or a concurrent rep's requests a second (§3).
+Reported: the median, Q1, Q3 and IQR of the delta sample, and
+`paired_pct = median(delta) / median(b) * 100`, which is the number to
+quote. A rate's loss is a negative delta, so what reads a delta as better
+or worse, the distance to go and §12's rule, reads a rate's turned: more
+is worse of a time, and less of a rate. The reading keeps each figure
+under its unit, `_ms` or `_rps`.
 
 ### 4.3 The verdict
 
@@ -111,7 +131,9 @@ not signalled, and it is not a claim that the two arms are equal.
 Per rep, never once at the end. The two arms' standard streams, or a
 request-shaped arm's response body, its head being what each host is, are
 compared byte for byte inside the rep that produced them, and a
-disagreement stops the run. How the two compared is named in the reading,
+disagreement stops the run. A concurrent rep holds every response its
+clients were answered with to one body, and an answer of another stops
+the run as two arms that disagree do. How the two compared is named in the reading,
 in four values:
 
 | value | meaning |
@@ -224,7 +246,8 @@ A night is one reading of the bar: its paired delta's median, Q1 and Q3
 1. **A night fails on an established regression.** A night is an
    established regression when its paired delta's whole inter-quartile
    range lies worse than the bar's baseline by more than its tolerance,
-   Q1 above the baseline plus the tolerance. A `NOISE-SWAMPED` night (§4.3)
+   Q1 above the baseline plus the tolerance, a rate's night turned so
+   that more is worse (§4.2). A `NOISE-SWAMPED` night (§4.3)
    is never one: §1.2 applied to the bar.
 2. **Two nights in a row fail the bar.** One such night is a warning on its
    reading. A second in a row fails the reading and the nightly lane, and
