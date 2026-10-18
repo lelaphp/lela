@@ -153,15 +153,18 @@ pub struct Unit {
 /// A unit as [`Unit::published`], its one constructor, leaves it: every
 /// opline's handler resolved, its [`UnitCell`] bound, and shared,
 /// read-only, by every request and frame that serves it. It is the one
-/// form of a unit the engine pushes a frame for, and `execute` enters
-/// only a frame, so no opline reaches the dispatch with its handler
-/// `Unresolved` (design §5.7, #2903). A [`Unit`] is compiled, dumped,
+/// form of a unit the engine reads a frame's op array through: a file's
+/// frame is pushed for one and holds it, and a function's frame reads
+/// its op array through the function table, which holds the unit the
+/// function was declared from as one. `execute` enters only a frame, so
+/// no opline reaches the dispatch with its handler `Unresolved` (design
+/// §5.7, #2903). A [`Unit`] is compiled, dumped,
 /// cached and read back, and served only once it is published. Design
 /// §5.14's `Published`, which the unit cache stores, is the engine's
 /// form of a cached unit; an `eval`'s unit is a published unit too.
 ///
-/// A unit is not a published one, so a frame push that takes one is
-/// handed none:
+/// A unit is not a published one, so a file's frame push, which takes
+/// one (`php_engine`'s `Request::push_frame`), is handed none:
 ///
 /// ```compile_fail
 /// fn pushed(_: php_unit::PublishedUnit) {}

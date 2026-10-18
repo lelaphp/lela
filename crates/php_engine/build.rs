@@ -211,8 +211,8 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
         }
     }
     // `Unresolved`, which no opline the dispatch is handed holds: every
-    // frame is pushed for a `php_unit::PublishedUnit`, which only
-    // `Unit::published` makes, and it resolves every opline's handler.
+    // frame's op array is read through a `php_unit::PublishedUnit`, which
+    // only `Unit::published` makes, and it resolves every opline's handler.
     // The arm stays because `Unresolved` stays a variant, what an opline
     // holds before publication, and it is still the fatal, never a panic.
     serve(
@@ -247,8 +247,9 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          /// entered past its `SAVE_OPLINE()`.\n\
          ///\n\
          /// The `Handler::Unresolved` arm is unreachable by construction:\n\
-         /// `code` is the op array of a frame, every frame is pushed for a\n\
-         /// `php_unit::PublishedUnit`, which `Unit::published` alone makes\n\
+         /// `code` is the op array of a frame, read through the\n\
+         /// `php_unit::PublishedUnit` the frame's annex or the function table\n\
+         /// holds (`Request::unit_of`), which `Unit::published` alone makes\n\
          /// and which resolves every opline's handler, and a published unit\n\
          /// is read and never written (#2907). It stays because `Unresolved`\n\
          /// stays a `php_unit::Handler`, the value the compiler writes and\n\
