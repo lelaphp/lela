@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use xtask::manifest::Manifest;
-use xtask::oracle::{PROMISE_VARIABLE, TREE_VARIABLE};
+use xtask::oracle::{PROMISE_VARIABLE, Platform, TREE_VARIABLE};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 
@@ -763,16 +763,22 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     for name in pin.variant.keys() {
         let built = pin.variant(name).unwrap().oracle;
         let laid = &json["variants"][name.as_str()];
-        assert_eq!(
-            laid["md5"].as_str().unwrap_or_default(),
-            built.md5,
-            "{name}"
-        );
-        assert_eq!(
-            laid["path"].as_str().unwrap_or_default(),
-            built.path.to_str().unwrap()
-        );
+        if built.md5.is_empty() {
+            assert!(laid.is_null(), "{name} pins no build here: {laid}");
+            continue;
+        }
+        assert_eq!(laid["md5"], built.md5.as_str(), "{name}");
+        assert_eq!(laid["path"], built.path.to_str().unwrap(), "{name}");
+        assert_eq!(laid["platform"], Platform::this().unwrap().key(), "{name}");
     }
+    let pinned_here = pin
+        .variant
+        .keys()
+        .filter(|n| !pin.variant(n).unwrap().oracle.md5.is_empty());
+    assert_eq!(
+        json["variants"].as_object().unwrap().len(),
+        pinned_here.count()
+    );
     let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
     assert!(ok, "{err}");
     assert!(
