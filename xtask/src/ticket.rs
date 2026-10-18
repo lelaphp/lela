@@ -182,7 +182,7 @@ use serde::Deserialize;
 
 use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
-use crate::reading::{Reading, Status};
+use crate::reading::{Reading, Status, millis};
 use crate::steer::STEERABLE;
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
@@ -1637,11 +1637,6 @@ pub const MERGED: &str = "merged";
 /// A span in seconds to a tenth, for a message.
 fn secs(span: Duration) -> String {
     format!("{:.1} s", span.as_secs_f64())
-}
-
-/// A span in whole milliseconds, for a count.
-fn millis(span: Duration) -> u64 {
-    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// A reading of the instrument over `scope`, stamped over the workspace

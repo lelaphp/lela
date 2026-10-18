@@ -328,7 +328,7 @@ impl Standing {
         }
         let read = |name: &str| {
             let file = dir.join(name);
-            std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))
+            crate::read(&file)
         };
         Ok(Some(Standing::of_proc(
             &read("shm")?,

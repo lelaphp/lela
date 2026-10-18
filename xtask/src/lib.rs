@@ -121,6 +121,18 @@ pub(crate) fn built_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The text of the file at `path`, an error naming it where it cannot be
+/// read: every instrument's read of a file it needs.
+pub(crate) fn read(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// `contents` written to the file at `path`, an error naming it where it
+/// cannot be: every instrument's write of a file it lays down.
+pub(crate) fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
+}
+
 /// `xtask/` as cargo names it for the process running, a test's among
 /// them, else the one in the workspace it runs in: what a test reads its
 /// fixtures under, never a path baked in at compile time (#2719).

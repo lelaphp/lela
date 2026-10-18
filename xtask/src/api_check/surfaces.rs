@@ -201,8 +201,7 @@ pub(crate) fn write(crates: &Crates, inventory: &mut Inventory<'_>) -> Result<()
             )],
             ..Lock::default()
         });
-        fs::write(&path, lock.render(&[Block::of(None, items)]))
-            .with_context(|| format!("writing {}", path.display()))?;
+        crate::write(&path, lock.render(&[Block::of(None, items)]))?;
     }
     Ok(())
 }

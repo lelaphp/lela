@@ -130,9 +130,11 @@ fn verdict(reading: &Reading) -> (Status, String, Vec<(String, String)>) {
         .next()
         .unwrap_or_default()
         .to_owned();
+    // How long a crate's executables ran is the run's, never its verdict.
     let numbers = reading
         .numbers
         .iter()
+        .filter(|(k, _)| *k != "ms")
         .map(|(k, v)| (k.clone(), v.to_string()))
         .collect();
     (reading.status, first, numbers)

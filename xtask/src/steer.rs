@@ -155,8 +155,7 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
         }
         Verdict::Additive(added) => {
             if !dry_run {
-                fs::write(&path, &proposed)
-                    .with_context(|| format!("writing {}", path.display()))?;
+                crate::write(&path, &proposed)?;
                 // The reading is stamped over what steer left, a snapshot
                 // taken after the write, so the sensor beside `permit` can
                 // tell steer's write from one made beside it in the same

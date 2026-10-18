@@ -61,7 +61,6 @@ mod surfaces;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -380,8 +379,7 @@ fn hold_lock<'s>(
 ) -> Result<Vec<String>> {
     if write {
         let lock = committed.unwrap_or_default();
-        fs::write(path, lock.render(blocks))
-            .with_context(|| format!("writing {}", path.display()))?;
+        crate::write(path, lock.render(blocks))?;
         return Ok(Vec::new());
     }
     let Some(committed) = committed else {

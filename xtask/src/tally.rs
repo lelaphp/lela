@@ -200,18 +200,11 @@ impl<J: Judgement> Tally<J> {
         Tally::judge_apart(items, cores(), NonZeroUsize::MIN, &apart, judge)
     }
 
-    /// [`Tally::judge`] on a pool of `threads`, each item held apart from
-    /// the items `apart[n]` says it may not run beside, as [`Queue::take`]
-    /// holds them.
-    /// The items are cut into batches of `batch` neighbours in their
-    /// order, and a batch's items are judged one after another, as one of
-    /// upstream's workers runs the batch it is handed
-    /// (run-tests.php:1742-1744, 1279-1325); the batches run beside each
-    /// other, and a batch of one holds nothing. An item alone is in no
-    /// batch and is not counted in one. The verdicts are printed and kept
-    /// in the items' order all the same, each once every one before it is
-    /// in, so the run reads as the one-at-a-time run does, and a pool of
-    /// one is that run.
+    /// [`Tally::judge`] on [`pool`]'s threads, each item held apart from
+    /// the items `apart[n]` says it may not run beside and in batches of
+    /// `batch`. The verdicts are printed and kept in the items' order all
+    /// the same, so the run reads as the one-at-a-time run does, and a
+    /// pool of one is that run.
     pub fn judge_apart<I: Sync>(
         items: &[I],
         threads: NonZeroUsize,
@@ -222,55 +215,11 @@ impl<J: Judgement> Tally<J> {
     where
         J: Send,
     {
-        let queue = Mutex::new(Queue::new(apart, batch));
-        let freed = Condvar::new();
-        let (sent, received) = mpsc::channel();
-        thread::scope(|scope| {
-            for _ in 0..threads.get().min(items.len()) {
-                let (sent, queue, freed) = (sent.clone(), &queue, &freed);
-                let judge = &judge;
-                scope.spawn(move || {
-                    let lock = || queue.lock().unwrap_or_else(PoisonError::into_inner);
-                    loop {
-                        let mut waiting = lock();
-                        let at = loop {
-                            if let Some(at) = waiting.take(apart) {
-                                break at;
-                            }
-                            if waiting.waiting.is_empty() {
-                                return;
-                            }
-                            waiting = freed.wait(waiting).unwrap_or_else(PoisonError::into_inner);
-                        };
-                        drop(waiting);
-                        // A judge that panics gives its keys back all the
-                        // same, so no thread waits on them for ever.
-                        let judged = panic::catch_unwind(AssertUnwindSafe(|| judge(&items[at])))
-                            .unwrap_or_else(|_| Err(anyhow!("judging item {at} panicked")));
-                        lock().done(at, &apart[at]);
-                        freed.notify_all();
-                        // A send that fails is the receiver gone, a verdict
-                        // before this one having ended the run: nothing
-                        // more starts.
-                        if sent.send((at, judged)).is_err() {
-                            lock().waiting.clear();
-                            freed.notify_all();
-                            return;
-                        }
-                    }
-                });
-            }
-            drop(sent);
-            let mut tally = Tally::found(items.len());
-            let mut early = BTreeMap::new();
-            for (at, judged) in received {
-                early.insert(at, judged);
-                while let Some(judged) = early.remove(&tally.judged.len()) {
-                    tally.record(judged?);
-                }
-            }
-            Ok(tally)
-        })
+        let mut tally = Tally::found(items.len());
+        pool(items, threads, batch, apart, judge, |judged| {
+            tally.record(judged);
+        })?;
+        Ok(tally)
     }
 
     /// One verdict kept, and printed unless it passed.
@@ -417,40 +366,93 @@ pub fn cores() -> NonZeroUsize {
     thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
 }
 
-/// `each` over every item on as many threads as the machine has, each
-/// item once, the answers in the items' order: for a lane whose items
-/// share nothing and spend their wall waiting on processes, as
-/// `crosscheck`'s renderings do (#2166).
-pub(crate) fn each_beside<T: Sync, R: Send>(items: &[T], each: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let answers: Mutex<Vec<Option<R>>> = Mutex::new(items.iter().map(|_| None).collect());
+/// `each` over every item on as many threads as the machine has, the
+/// answers in the items' order: for a lane whose items share nothing and
+/// spend their wall waiting on processes, as `crosscheck`'s renderings do
+/// (#2166).
+pub(crate) fn each_beside<T: Sync, R: Send>(
+    items: &[T],
+    each: impl Fn(&T) -> R + Sync,
+) -> Result<Vec<R>> {
+    let mut answers = Vec::with_capacity(items.len());
+    let apart = vec![Apart::default(); items.len()];
+    let (each, batch) = (|item: &T| Ok(each(item)), NonZeroUsize::MIN);
+    pool(items, cores(), batch, &apart, each, |r| answers.push(r))?;
+    Ok(answers)
+}
+
+/// `each` over every item on a pool of `threads`, each item held apart
+/// from the items `apart[n]` says it may not run beside, as [`Queue::take`]
+/// holds them. The items are cut into batches of `batch` neighbours in
+/// their order, and a batch's items are taken one after another, as one
+/// of upstream's workers runs the batch it is handed
+/// (run-tests.php:1742-1744, 1279-1325); the batches run beside each
+/// other, and a batch of one holds nothing. An item alone is in no batch
+/// and is not counted in one. `on` is handed each answer on the calling
+/// thread in the items' order, each once every one before it is in. An
+/// item whose `each` fails or panics ends the run at its place: its error
+/// is the answer, and nothing more starts.
+pub(crate) fn pool<I: Sync, R: Send>(
+    items: &[I],
+    threads: NonZeroUsize,
+    batch: NonZeroUsize,
+    apart: &[Apart],
+    each: impl Fn(&I) -> Result<R> + Sync,
+    mut on: impl FnMut(R),
+) -> Result<()> {
+    let queue = Mutex::new(Queue::new(apart, batch));
+    let freed = Condvar::new();
+    let (sent, received) = mpsc::channel();
     thread::scope(|scope| {
-        for _ in 0..cores().get().min(items.len()) {
-            scope.spawn(|| {
+        for _ in 0..threads.get().min(items.len()) {
+            let (sent, queue, freed, each) = (sent.clone(), &queue, &freed, &each);
+            scope.spawn(move || {
+                let lock = || queue.lock().unwrap_or_else(PoisonError::into_inner);
                 loop {
-                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(item) = items.get(at) else {
-                        break;
+                    let mut waiting = lock();
+                    let at = loop {
+                        if let Some(at) = waiting.take(apart) {
+                            break at;
+                        }
+                        if waiting.waiting.is_empty() {
+                            return;
+                        }
+                        waiting = freed.wait(waiting).unwrap_or_else(PoisonError::into_inner);
                     };
-                    let answer = each(item);
-                    let mut held = answers.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Some(slot) = held.get_mut(at) {
-                        *slot = Some(answer);
+                    drop(waiting);
+                    // An item that panics gives its keys back all the
+                    // same, so no thread waits on them for ever.
+                    let answer = panic::catch_unwind(AssertUnwindSafe(|| each(&items[at])))
+                        .unwrap_or_else(|_| Err(anyhow!("item {at} panicked")));
+                    lock().done(at, &apart[at]);
+                    freed.notify_all();
+                    // A send that fails is the receiver gone, an answer
+                    // before this one having ended the run: nothing more
+                    // starts.
+                    if sent.send((at, answer)).is_err() {
+                        lock().waiting.clear();
+                        freed.notify_all();
+                        return;
                     }
                 }
             });
         }
-    });
-    answers
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner)
-        .into_iter()
-        .flatten()
-        .collect()
+        drop(sent);
+        let mut next = 0;
+        let mut early = BTreeMap::new();
+        for (at, answer) in received {
+            early.insert(at, answer);
+            while let Some(answer) = early.remove(&next) {
+                on(answer?);
+                next += 1;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// The items not yet started and what the running ones hold: where the
-/// threads of [`Tally::judge_apart`] take their next item from.
+/// threads of [`pool`] take their next item from.
 #[derive(Debug, Default)]
 struct Queue {
     /// The items not yet started, in their order.
