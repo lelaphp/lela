@@ -48,7 +48,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
 
 use constants::{
     PREG_BACKTRACK_LIMIT_ERROR, PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR,
@@ -75,7 +75,15 @@ struct State {
     data: Option<ffi::MatchData>,
     context: Option<ffi::Context>,
     limits: Limits,
+    /// `PCRE_G(gctx_zmm)`'s room: the `pcre2_general_context` `RINIT`
+    /// creates through `php_pcre_emalloc` and `RSHUTDOWN` frees, which
+    /// the engine's match data does not allocate through.
+    general: Option<Emalloc>,
 }
+
+/// `sizeof(pcre2_general_context)`: the allocator's two callbacks and
+/// their data.
+const GENERAL_CONTEXT: usize = 24;
 
 /// `PCRE_G(backtrack_limit)`, `PCRE_G(recursion_limit)` and
 /// `PCRE_G(jit)`: the three ini entries as their `OnUpdate*` left them,
@@ -162,11 +170,10 @@ fn limit(value: i64) -> u32 {
     u32::try_from(value.rem_euclid(1 << 32)).unwrap_or(u32::MAX)
 }
 
-/// The request's `PCRE_G` limits, as the entries in force give them.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the `rinit` slot's shape, which a hook that throws needs"
-)]
+/// `PHP_RINIT_FUNCTION(pcre)`: the request's `PCRE_G` limits, as the
+/// entries in force give them, and `PCRE_G(gctx_zmm)` created on the
+/// request's heap, 24 bytes `memory_get_usage()` counts from the first
+/// line. The `Err` is the memory limit's fatal.
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
     let mut limits = Limits::default();
     for (name, _) in INI {
@@ -175,7 +182,17 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
         }
     }
     req.state::<State>().limits = limits;
+    let general = Emalloc::new(req, GENERAL_CONTEXT)?;
+    req.state::<State>().general = Some(general);
     Ok(())
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(pcre)`: `pcre2_general_context_free` of
+/// `PCRE_G(gctx_zmm)`.
+fn rshutdown(req: &mut Request) {
+    if let Some(general) = req.state::<State>().general.take() {
+        general.free(req);
+    }
 }
 
 /// `OnUpdateBacktrackLimit`, `OnUpdateRecursionLimit` and `OnUpdateJit`
@@ -286,6 +303,7 @@ pub fn extension() -> Extension {
         .on_modify(INI[2].0.as_bytes(), on_update::<2>)
         .request_state::<State>()
         .rinit(rinit)
+        .rshutdown(rshutdown)
         .engine_state(|start| Ok(pattern::engine_state(start)))
         .info(pcre_info)
         .build("pcre")

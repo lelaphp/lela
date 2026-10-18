@@ -355,8 +355,10 @@ impl Receiver {
     }
 }
 
-/// What php's `INCLUDE_OR_EVAL` keeps on the request's heap for the op
-/// array a code frame serves, freed with the frame however it ends
+/// What php's `INCLUDE_OR_EVAL`, and `zend_execute_scripts` for the
+/// primary file and the files `auto_prepend_file` and `auto_append_file`
+/// name, keep on the request's heap for the op array a code frame
+/// serves, freed with the frame however it ends
 /// (`zend_leave_helper`'s `ZEND_CALL_NESTED_CODE` arm, `destroy_op_array`
 /// and `efree_size`): the op array itself, which `zend_accel_load_script`
 /// copies out of the cache and `zend_compile` makes, and the runtime
@@ -1185,9 +1187,20 @@ impl<'a> FrameAt<'a> {
 /// (design §4.3 seam 9), php's `ZEND_OBSERVER_DATA` at the
 /// `zend_observer_fcall_op_array_extension` offset of the same cache,
 /// unresolved when the cache is laid down.
+///
+/// php's bytes for the cache are on the request's heap at php's size,
+/// `cache_size`: carved from the compiler's arena for a function's or a
+/// real closure's shared cache, which nothing gives back before the
+/// request ends ([`lay_runtime_cache`]), and `emalloc`ed for a closure's
+/// own, given back with the closure ([`RuntimeCache::room`]).
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCache {
     slots: Option<Box<[Cached]>>,
+    /// A closure's own cache's `emalloc(cache_size)`
+    /// (`zend_create_closure_ex`, `Z/Zend/zend_closures.c:813`), taken as
+    /// the closure is made and given back with it; none for a cache the
+    /// arena holds.
+    pub(crate) room: Option<php_heap::Block>,
     observer: crate::observer::Slot,
     /// For a closure's op array, the scope its cache was laid down for
     /// by the first closure made over it, which php writes onto the op
@@ -1292,21 +1305,67 @@ pub(crate) fn observer_slot_of(
 /// and a constant resolve the same in every scope; a method's callee
 /// does not, so [`Cached::ClassAndCallee`] carries the scope it was
 /// resolved from and answers no other.
-pub(crate) fn init_runtime_cache(map: &mut RuntimeCaches, code: &OpArray, body: Body) {
+///
+/// The `Err` is the memory limit's fatal, where the arena had not the
+/// room for a function's cache, and nothing is laid down.
+pub(crate) fn init_runtime_cache(
+    map: &mut RuntimeCaches,
+    heap: &mut php_heap::Heap,
+    code: &OpArray,
+    body: Body,
+) -> Result<(), Fatal> {
     let at = CacheAt::of(code.runtime_cache);
     if body == Body::Main {
         map.map(at).lay_down(code.cache_size);
-    } else {
-        lay_runtime_cache(map, at, code.cache_size);
+        return Ok(());
     }
+    lay_runtime_cache(map, heap, at, code.cache_size)
 }
 
 /// `zend_init_func_run_time_cache` over a function's cache pointer and
 /// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
 /// the function's first activation in the request, found laid down by
-/// every one after.
+/// every one after, and its `cache_size` bytes carved from the
+/// compiler's arena as `init_func_run_time_cache_i` carves them
+/// (`Z/Zend/zend_execute.c:4455`). The arena's blocks are 64 KiB, so a
+/// cache moves nothing until the newest block has not the room for it,
+/// and the call whose cache it is takes another block of the same size,
+/// which holds 8189 caches of one slot, its header aside. Where the
+/// first block stands full is the compile's, which carves a function's
+/// op array from the same arena under php, so the witness reads the
+/// second:
+///
+/// ```php
+/// $f = __DIR__ . '/carved.php'; $src = "<?php function g() {}\n";
+/// for ($i = 0; $i < 20000; $i++) { $src .= "function f$i() { g(); }\n"; }
+/// file_put_contents($f, $src); include $f; unlink($f);
+/// $m = memory_get_usage(); $first = $second = $grew = 0;
+/// for ($i = 0; $i < 20000 && !$second; $i++) { ("f$i")(); $now = memory_get_usage(); if ($now !== $m) { if ($first) { $second = $i; $grew = $now - $m; } else { $first = $i; } } $m = $now; }
+/// echo $second - $first, " ", $grew, "\n";
+/// ```
+/// ```expect
+/// 8189 65536
+/// ```
+///
+/// The `Err` is the memory limit's fatal, with nothing laid down.
 #[inline]
-pub(crate) fn lay_runtime_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) {
+pub(crate) fn lay_runtime_cache(
+    map: &mut RuntimeCaches,
+    heap: &mut php_heap::Heap,
+    at: CacheAt,
+    cache_size: u32,
+) -> Result<(), Fatal> {
+    if !map.laid(at) {
+        heap.carve(cache_size as usize)?;
+        map.map(at).lay_down(cache_size);
+    }
+    Ok(())
+}
+
+/// A closure's own cache laid down at its first call: its slots, the
+/// room php's `emalloc` takes having been taken as the closure was made
+/// ([`RuntimeCache::room`]).
+pub(crate) fn lay_own_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u32) {
     if !map.laid(at) {
         map.map(at).lay_down(cache_size);
     }
@@ -3219,9 +3278,10 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = with_cache(8);
         let mut map = RuntimeCaches::default();
+        let mut heap = php_heap::Heap::new();
         let code = code_of(&unit);
         for _ in 0..2 {
-            init_runtime_cache(&mut map, code, Body::Function(0));
+            assert!(init_runtime_cache(&mut map, &mut heap, code, Body::Function(0)).is_ok());
         }
         let ptr = CacheAt::of(code.runtime_cache);
         let laid = map.get(ptr).and_then(|cache| cache.slots.as_ref());
@@ -3231,13 +3291,13 @@ mod tests {
             "one slot of eight bytes"
         );
         map.map(ptr).set(CacheSlot(0), Cached::Miss);
-        init_runtime_cache(&mut map, code, Body::Function(0));
+        assert!(init_runtime_cache(&mut map, &mut heap, code, Body::Function(0)).is_ok());
         assert_eq!(
             map.get(ptr).map(|cache| cache.get(CacheSlot(0))),
             Some(Cached::Miss),
             "the second activation finds the first's slot"
         );
-        init_runtime_cache(&mut map, code, Body::Main);
+        assert!(init_runtime_cache(&mut map, &mut heap, code, Body::Main).is_ok());
         assert_eq!(
             map.get(ptr).map(|cache| cache.get(CacheSlot(0))),
             Some(Cached::Unprimed),
@@ -3297,7 +3357,10 @@ mod tests {
             numbers(&first),
             [MapPtrOffset::Request(0), MapPtrOffset::Request(1)]
         );
-        init_runtime_cache(&mut caches, code_of(&first), Body::Function(0));
+        let mut heap = php_heap::Heap::new();
+        assert!(
+            init_runtime_cache(&mut caches, &mut heap, code_of(&first), Body::Function(0)).is_ok()
+        );
         let at = CacheAt::of(first.main.runtime_cache);
         caches.map(at).set(CacheSlot(0), Cached::Hit);
         let second = caches.take(one_function());

@@ -536,7 +536,7 @@ impl Request {
         let mut header = exec::Header::of(None, code);
         // `zend_execute`'s `ZEND_CALL_TOP_CODE`.
         header.info.set_top_code(true);
-        exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
         self.forget_main_statics(code.runtime_cache);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
@@ -614,7 +614,7 @@ impl Request {
         header.set_returns_to(returns_to.map(|(_, slot)| slot));
         header.set_caller(exec::Caller::Opline(caller));
         let table = self.rebuild_symbol_table(caller);
-        exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
         self.forget_main_statics(code.runtime_cache);
         header.annex = Some(self.annexes.insert(exec::Annex {
             unit: Some(unit),
@@ -1324,7 +1324,9 @@ impl Request {
         });
         // A closure with a cache of its own reads it in place of its
         // function's (`zend_create_closure_ex`).
-        let cache = self.closure_own_cache(closure).unwrap_or(shape.cache);
+        let own_cache = self.closure_own_cache(closure);
+        let cache = own_cache.unwrap_or(shape.cache);
+        let own_cache = own_cache.is_some();
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
         // on is an extra one, where php leaves it past the temporaries
@@ -1353,7 +1355,11 @@ impl Request {
                 }
             }
         }
-        exec::lay_runtime_cache(&mut self.map, cache, shape.cache_size);
+        if own_cache {
+            exec::lay_own_cache(&mut self.map, cache, shape.cache_size);
+        } else {
+            exec::lay_runtime_cache(&mut self.map, &mut self.heap, cache, shape.cache_size)?;
+        }
         crate::observer::call(self, call);
         Ok(exec::Activated {
             frame: call,
@@ -1913,15 +1919,34 @@ impl Request {
         }
     }
 
-    /// A cache of the request's own for a closure, laid down at its
-    /// first call ([`exec::RuntimeCaches::own_cache`]).
-    pub(crate) fn own_cache(&mut self) -> exec::CacheAt {
-        self.map.own_cache()
+    /// A cache of the request's own for a closure, its `cache_size`
+    /// bytes `emalloc`ed as `zend_create_closure_ex` allocates them
+    /// (`Z/Zend/zend_closures.c:813`) and its slots laid down at its
+    /// first call ([`exec::RuntimeCaches::own_cache`]). A closure bound
+    /// to another scope takes sixteen bytes more than one bound to its
+    /// own, the cache of its two calls, and gives them back with it:
+    ///
+    /// ```php
+    /// class A {} function g() {}
+    /// $c = function () { g(); g(); };
+    /// $m = memory_get_usage(); $b = Closure::bind($c, null, A::class); echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); $d = Closure::bind($c, null, null); echo memory_get_usage() - $m, " ";
+    /// $m = memory_get_usage(); unset($b); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 400 384 -400
+    /// ```
+    ///
+    /// The `Err` is the memory limit's fatal.
+    pub(crate) fn own_cache(&mut self, cache_size: u32) -> Result<exec::CacheAt, Thrown> {
+        let room = self.heap.block(cache_size as usize);
+        let room = self.fatal_of(room)?;
+        Ok(self.map.own_cache(Some(room)))
     }
 
-    /// A closure's own cache given back with it.
+    /// A closure's own cache given back with it, its room to the heap.
     pub(crate) fn give_back_cache(&mut self, at: exec::CacheAt) {
-        self.map.give_back(at);
+        self.map.give_back(&mut self.heap, at);
     }
 
     /// Whether the cache at `at` is laid down, `RUN_TIME_CACHE` not
@@ -1943,8 +1968,10 @@ impl Request {
         at: exec::CacheAt,
         cache_size: u32,
         scope: Option<crate::api::values::ClassId>,
-    ) {
-        exec::lay_runtime_cache(&mut self.map, at, cache_size);
+    ) -> Result<(), Thrown> {
+        let laid = exec::lay_runtime_cache(&mut self.map, &mut self.heap, at, cache_size);
+        self.fatal_of(laid)?;
         self.map.map(at).laid_for = scope;
+        Ok(())
     }
 }

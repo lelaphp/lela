@@ -108,8 +108,10 @@ impl Request {
     pub(crate) fn hash_environment(&mut self) -> Result<(), Thrown> {
         if !self.description.argv.is_empty() {
             let mut words = PhpArray::new(self)?;
+            // `ZVAL_STRING`, `zend_string_init`, which makes even a word
+            // of one byte a string of its own.
             for word in self.description.argv.clone() {
-                let word = PhpString::new(self, &word)?;
+                let word = Owner::adopt(self.string_init(&word)?);
                 words.append(self, word.into_value())?;
             }
             let count = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
@@ -606,8 +608,10 @@ impl Request {
         };
         if !self.description.argv.is_empty() {
             if let (Some(count), Some(words)) = (found(self, b"argc"), found(self, b"argv")) {
+                // `ZSTR_KNOWN(ZEND_STR_ARGV)` and `ZEND_STR_ARGC`, the
+                // engine's own strings, which cost the request nothing.
                 for (name, value) in [(b"argv".as_slice(), words), (b"argc", count)] {
-                    let name = PhpString::new(self, name)?;
+                    let name = PhpString::existing_interned(self, name)?;
                     server.set(self, name.into_key(), Owner::take(self, value))?;
                 }
             }

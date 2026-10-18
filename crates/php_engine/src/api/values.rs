@@ -3373,12 +3373,13 @@ mod tests {
             Some(7),
             "the destructor ran once, reading the payload"
         );
-        assert_eq!(req.memory_usage(false) - start, 160 + 32);
+        // The destructor's `define()` took a `zend_constant`'s 40.
+        assert_eq!(req.memory_usage(false) - start, 160 + 32 + 40);
         req.release(v);
         assert_eq!(req.resource(1), None);
         assert_eq!(
             req.memory_usage(false),
-            start + 160,
+            start + 160 + 40,
             "the list's table stays until the request ends"
         );
         let Ok(next) = Resource::new(&mut req, kind, 0u8).map(Owner::hand_on) else {

@@ -161,17 +161,17 @@ impl Request {
         let Some(closure) = object.closure(self).cloned() else {
             return Ok(Value::null());
         };
-        let own_cache = self
+        let cache_size = self
             .user_function(closure.function)
-            .is_some()
-            .then(|| {
-                object
-                    .native::<ClosureObject>(self)
-                    .map(|payload| payload.cache)
+            .map(|user| user.shape.cache_size);
+        let own_cache = match cache_size.filter(|_| {
+            object.native::<ClosureObject>(self).is_some_and(|payload| {
+                closure.scope != Some(scope) || payload.cache != ClosureCache::Function
             })
-            .flatten()
-            .filter(|cache| closure.scope != Some(scope) || *cache != ClosureCache::Function)
-            .map(|_| self.own_cache());
+        }) {
+            Some(size) => Some(self.own_cache(size)?),
+            None => None,
+        };
         let held = object.native_mut::<ClosureObject>(self).map(|payload| {
             let cache = match own_cache {
                 Some(at) => std::mem::replace(&mut payload.cache, ClosureCache::Own(at)),
