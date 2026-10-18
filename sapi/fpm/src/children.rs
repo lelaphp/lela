@@ -15,6 +15,7 @@ use php_sapi::Forked;
 use crate::conf::Pm;
 use crate::master::{Became, Child, Fpm, State, Step};
 use crate::pctl::signal_name;
+use crate::stdio::Pipe;
 use crate::zlog::Level;
 use crate::{zlog, zlog_sys};
 
@@ -311,21 +312,12 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
 
 /// `fpm_child_close` in the loop for the child that ran in the pool at
 /// `pool`: each pipe read to its end as its event would be
-/// (`fpm_event_fire`), then out of the loop and closed, as the pipe that
-/// ended is; one still open, where something the child started holds its
-/// writing end, out of the loop before it closes too.
+/// (`fpm_event_fire`), and closed.
 fn close(fpm: &mut Fpm, pool: usize, child: &mut Child) {
-    for stdout in [true, false] {
-        let Some(fd) = crate::stdio::pipe(child, stdout).take() else {
-            continue;
-        };
-        let mut stream = child.log_stream.take();
-        let open = crate::stdio::pipe_said(fpm, pool, child.pid, &mut stream, fd, stdout);
-        child.log_stream = stream;
-        if let Some(fd) = open {
-            fpm.unwatch(fd.as_fd());
-        }
+    for pipe in [Pipe::Stdout, Pipe::Stderr] {
+        crate::stdio::pipe_said(fpm, pool, child, pipe);
     }
+    crate::stdio::close_pipes(fpm, child);
     if let Some(stream) = &mut child.log_stream {
         stream.finish();
     }

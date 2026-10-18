@@ -375,19 +375,21 @@ params = [["SCRIPT_FILENAME", "{dir}/a.php"], ["REQUEST_METHOD", "GET"], ["DOCUM
 params = [["SCRIPT_FILENAME", "{dir}/b.php"], ["REQUEST_METHOD", "GET"], ["DOCUMENT_ROOT", "{dir}"]]
 
 # A pool that catches its workers' output reads its child's two pipes in the
-# loop: the child ended by `SIGTERM` closes them, the master reads each to its
-# end, takes its event out of the queue while the pipe is still open and only
+# loop, logging each line a request writes to stderr, and the stop waits for
+# the fourth: the child ended by `SIGTERM` closes them, the master reads each
+# to its end, takes its event out of the queue while the pipe is still open and only
 # then closes it (`fpm_stdio_child_said`, `fpm_event_del`), so terminating
 # writes no `kevent: unable to delete event` and no `epoll: unable to remove
 # fd` (#2793).
 [[line]]
 name = "a-pool-catching-its-workers-output-terminates-without-an-event-error"
 args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
-files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\ncatch_workers_output = yes\n", "index.php" = "<?php echo \"ran\\n\";" }
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\ncatch_workers_output = yes\n", "index.php" = "<?php file_put_contents('php://stderr', \"said\\n\"); echo \"ran\\n\";" }
 mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
 [line.serve]
 listen = "{dir}/fpm.sock"
 stop = "SIGTERM"
+settled = ["fpm.log", '(?s)(said into stderr: "said"\n.*){4}']
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
