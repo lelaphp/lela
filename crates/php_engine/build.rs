@@ -210,6 +210,11 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
             );
         }
     }
+    // `Unresolved`, which no opline the dispatch is handed holds: every
+    // frame is pushed for a `php_unit::PublishedUnit`, which only
+    // `Unit::published` makes, and it resolves every opline's handler.
+    // The arm stays because `Unresolved` stays a variant, what an opline
+    // holds before publication, and it is still the fatal, never a panic.
     serve(
         "Unresolved".to_owned(),
         "Err(Fatal::error(format!(\n\
@@ -240,6 +245,16 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          /// writes it to the frame before anything it calls out to, and every\n\
          /// other handler is entered with it written, as php's handler is\n\
          /// entered past its `SAVE_OPLINE()`.\n\
+         ///\n\
+         /// The `Handler::Unresolved` arm is unreachable by construction:\n\
+         /// `code` is the op array of a frame, every frame is pushed for a\n\
+         /// `php_unit::PublishedUnit`, which `Unit::published` alone makes\n\
+         /// and which resolves every opline's handler, and a published unit\n\
+         /// is read and never written (#2907). It stays because `Unresolved`\n\
+         /// stays a `php_unit::Handler`, the value the compiler writes and\n\
+         /// the unit cache's file reads back before publication, so a `match`\n\
+         /// that names every variant names it; it is the fatal it always\n\
+         /// was, never a panic.\n\
          // One arm per handler served: the length of this function is the\n\
          // number of handlers and says nothing about the code, so the line\n\
          // count is no bound on it. Every crate lints under `-D warnings`\n\

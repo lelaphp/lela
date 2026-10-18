@@ -28,7 +28,7 @@ use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
     Type,
 };
-use php_unit::{FramelessEntry, Unit, frameless_table};
+use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
 use crate::api::abi::{
     Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, IniHandler,
@@ -1555,7 +1555,7 @@ impl Shared {
         source: &[u8],
         origin: Origin<'_>,
         stack: StackLimit,
-    ) -> Result<Arc<Unit>, CompileError> {
+    ) -> Result<PublishedUnit, CompileError> {
         self.compile_shared(source, origin, stack)
             .map(|unit| self.publish_compiled(unit))
     }
@@ -1598,7 +1598,7 @@ impl Shared {
     /// for more than one request takes, as only what opcache persists
     /// moves `CG(map_ptr_last)`, and its tables shrunk to what they hold
     /// ([`Unit::compact`]).
-    pub(crate) fn publish_compiled(&self, mut unit: Unit) -> Arc<Unit> {
+    pub(crate) fn publish_compiled(&self, mut unit: Unit) -> PublishedUnit {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
         unit.compact();
         unit.published()
@@ -1633,7 +1633,7 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
-    ) -> Result<Arc<Unit>, CompileError> {
+    ) -> Result<PublishedUnit, CompileError> {
         let ini = CompileIni {
             precision: req.precision(),
             short_open_tag: req.short_open_tag(),
@@ -1781,7 +1781,7 @@ impl Shared {
         stack: StackLimit,
         request_classes: RequestClasses<'_>,
         multibyte: Option<Multibyte<'_>>,
-    ) -> Result<Arc<Unit>, CompileError> {
+    ) -> Result<PublishedUnit, CompileError> {
         self.compile_file(source, path, cwd, stack, request_classes, multibyte)
             .map(|unit| self.publish_compiled(unit))
     }
@@ -4607,7 +4607,7 @@ impl Engine {
     /// constant strings interned into this engine's table, so two units
     /// carrying one constant carry the one `zend_string` (design §5.2).
     #[must_use]
-    pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<Arc<Unit>> {
+    pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<PublishedUnit> {
         let stack = self.shared.stack_limit();
         let cwd = std::env::current_dir().unwrap_or_default();
         let origin = Origin {
@@ -5134,7 +5134,7 @@ impl Engine {
         req: &mut Request,
         source: Option<&[u8]>,
         written: Option<&[u8]>,
-    ) -> Option<Result<Arc<Unit>, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileError>> {
         let laid = req.heap_mut().lay_interned_table();
         if let Err(thrown) = req.fatal_of(laid) {
             req.leave_pending(&thrown);
@@ -5171,7 +5171,7 @@ impl Engine {
         path: &[u8],
         written: &[u8],
         handle: HandlePath,
-    ) -> Option<Result<Arc<Unit>, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileError>> {
         req.compile_file(path, Some(written), handle)
             .unwrap_or_else(|thrown| {
                 req.leave_pending(&thrown);
@@ -5652,7 +5652,7 @@ fn compile(
 /// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
-pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKind) -> bool {
+pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: SourceKind) -> bool {
     // A request-only unit's names, which php's compile made as strings
     // of the request; the memory limit refusing them ends the request.
     if matches!(kind, SourceKind::Eval(_)) && req.hold_unit_names(unit).is_err() {
@@ -5802,12 +5802,12 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
-pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bool {
+pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -> bool {
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
     let standing = req.vm().depth();
-    let frame = match req.push_frame(Arc::clone(unit)) {
+    let frame = match req.push_frame(PublishedUnit::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
             req.end_in(&fatal);
@@ -7370,8 +7370,8 @@ mod tests {
         ) else {
             return;
         };
-        assert!(Arc::ptr_eq(&one, &again), "one published unit");
-        let named = |unit: &Arc<Unit>| {
+        assert!(PublishedUnit::ptr_eq(&one, &again), "one published unit");
+        let named = |unit: &PublishedUnit| {
             unit.main
                 .literals
                 .first()
@@ -7961,8 +7961,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), description(""));
         let unit = engine
             .unit(b"<?php echo 1;", b"witness.php")
-            .unwrap_or_default();
-        let unit = Unit::clone(&unit);
+            .map_or_else(Unit::default, |unit| Unit::clone(&unit));
         let frame = req.pushed(unit.published());
         assert_eq!(
             crate::tier::execute::<Probe, Untold>(&mut req, frame),
@@ -7989,7 +7988,7 @@ mod tests {
                 b"<?php function f($a, $b = 1) { return $a; } f(1); f(2, 3); f();",
                 b"witness.php",
             )
-            .unwrap_or_default();
+            .unwrap_or_else(|| Unit::default().published());
         req.declare_functions(&unit);
         let frame = req.pushed(unit);
         let outcome = crate::tier::execute::<Probe, Untold>(&mut req, frame);

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use php_compile::{CompileError, SourceKind};
 use php_heap::Fatal;
-use php_unit::Unit;
+use php_unit::PublishedUnit;
 
 use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
@@ -127,7 +127,7 @@ impl Request {
         path: &[u8],
         written: Option<&[u8]>,
         handle: HandlePath,
-    ) -> Result<Option<Result<Arc<Unit>, CompileError>>, Thrown> {
+    ) -> Result<Option<Result<PublishedUnit, CompileError>>, Thrown> {
         self.compile_through(FileArgs::new(path, written, handle))
     }
 
@@ -136,7 +136,7 @@ impl Request {
     fn compile_through(
         &mut self,
         args: FileArgs<'_>,
-    ) -> Result<Option<Result<Arc<Unit>, CompileError>>, Thrown> {
+    ) -> Result<Option<Result<PublishedUnit, CompileError>>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
         Ok(top.serve(self)?.map(|compiled| compiled.0))
@@ -827,7 +827,7 @@ impl Request {
         code: &[u8],
         name: &[u8],
         position: php_compile::syntax::Position,
-    ) -> Result<Result<Arc<Unit>, CompileError>, Thrown> {
+    ) -> Result<Result<PublishedUnit, CompileError>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let args = StringArgs::new(code, name, position);
         let top =
@@ -948,13 +948,17 @@ impl Request {
         source: &[u8],
         name: &[u8],
         position: php_compile::syntax::Position,
-    ) -> Result<Arc<Unit>, CompileError> {
+    ) -> Result<PublishedUnit, CompileError> {
         Arc::clone(&self.shared).compile_for(self, source, name, SourceKind::Eval(position))
     }
 
     /// [`Request::compile_string`] with the compiler's refusal raised as
     /// an included file's is, at `name`.
-    pub(crate) fn compile_eval(&mut self, code: &[u8], name: &[u8]) -> Result<Arc<Unit>, Thrown> {
+    pub(crate) fn compile_eval(
+        &mut self,
+        code: &[u8],
+        name: &[u8],
+    ) -> Result<PublishedUnit, Thrown> {
         self.compile_string(code, name, php_compile::syntax::Position::AfterOpenTag)?
             .map_err(|refused| self.refused_include(&refused, name, SourceKind::EVAL))
     }

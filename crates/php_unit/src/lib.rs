@@ -37,4 +37,6 @@ pub use op::{
 };
 pub use opcode::{Handler, Opcode};
 pub use types::{type_to_string, type_to_string_called};
-pub use unit::{AutoGlobal, Diagnostic, HookBody, Level, MethodBody, TopLevel, Unit, UnitCell};
+pub use unit::{
+    AutoGlobal, Diagnostic, HookBody, Level, MethodBody, PublishedUnit, TopLevel, Unit, UnitCell,
+};

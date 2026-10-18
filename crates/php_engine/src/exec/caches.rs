@@ -16,10 +16,10 @@
 //! once nothing holds the unit, so an `eval` in a loop grows neither
 //! the engine's count nor the request's table.
 
-use std::sync::{Arc, Weak};
+use std::sync::Weak;
 
 use php_heap::{MapPtr, MapTable};
-use php_unit::{MapPtrOffset, OpArray, Unit};
+use php_unit::{MapPtrOffset, OpArray, PublishedUnit, Unit};
 
 use super::RuntimeCache;
 
@@ -149,7 +149,7 @@ impl RuntimeCaches {
     /// unit nothing holds any longer first, whose cache was emptied as
     /// the unit was found over, as php frees a heap cache with its op
     /// array.
-    pub(crate) fn take(&mut self, mut unit: Unit) -> Arc<Unit> {
+    pub(crate) fn take(&mut self, mut unit: Unit) -> PublishedUnit {
         let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
         self.held.retain_mut(|(unit, numbers)| {
             if unit.strong_count() > 0 {
@@ -169,7 +169,7 @@ impl RuntimeCaches {
             numbers.push(number);
         }
         let unit = unit.published();
-        self.held.push((Arc::downgrade(&unit), numbers));
+        self.held.push((PublishedUnit::downgrade(&unit), numbers));
         unit
     }
 }

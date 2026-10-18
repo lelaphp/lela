@@ -1379,7 +1379,7 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
 /// ```
 pub(crate) fn const_expr_closure(
     req: &mut Request,
-    unit: &std::sync::Arc<php_unit::Unit>,
+    unit: &php_unit::PublishedUnit,
     at: u32,
     scope: Option<ClassId>,
 ) -> Result<PhpObject, Thrown> {
