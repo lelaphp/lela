@@ -311,7 +311,7 @@ pub struct OpArray {
     pub num_tmps: u32,
     pub try_catch: Vec<TryCatch>,
     pub live_ranges: Vec<LiveRange>,
-    pub safepoints: Vec<OplineIdx>,
+    pub safepoints: Safepoints,
     pub filename: Name,
     pub line_start: u32,
     pub line_end: u32,
@@ -366,6 +366,117 @@ pub struct OpArray {
     pub numeric_dims: Vec<ConstIdx>,
 }
 
+/// An op array's safepoints (design §5.7), numbered by place: the
+/// entry, then each loop header and return as the compiler meets it.
+/// Nearly every op array has a handful, which stand inline, so the table
+/// makes no allocation of its own until it holds more than
+/// [`Safepoints::INLINE`]; it reads as the slice of them either way.
+#[derive(Debug, Clone)]
+pub struct Safepoints(Sites);
+
+/// Where the safepoints stand: inline up to [`Safepoints::INLINE`], on
+/// the heap past it.
+#[derive(Debug, Clone)]
+enum Sites {
+    Inline {
+        len: u8,
+        sites: [OplineIdx; Safepoints::INLINE],
+    },
+    Spilled(Vec<OplineIdx>),
+}
+
+impl Safepoints {
+    /// How many safepoints stand inline: the entry and five more, a
+    /// function's returns and a loop or two.
+    pub const INLINE: usize = 6;
+
+    /// No safepoint.
+    #[must_use]
+    pub const fn new() -> Safepoints {
+        Safepoints(Sites::Inline {
+            len: 0,
+            sites: [OplineIdx(0); Safepoints::INLINE],
+        })
+    }
+
+    /// `at` numbered next.
+    pub fn push(&mut self, at: OplineIdx) {
+        match &mut self.0 {
+            Sites::Inline { len, sites } => {
+                if let Some(slot) = sites.get_mut(usize::from(*len)) {
+                    *slot = at;
+                    *len += 1;
+                } else {
+                    let mut spilled = Vec::with_capacity(2 * Safepoints::INLINE);
+                    spilled.extend_from_slice(sites);
+                    spilled.push(at);
+                    self.0 = Sites::Spilled(spilled);
+                }
+            }
+            Sites::Spilled(spilled) => spilled.push(at),
+        }
+    }
+
+    /// The heap's room shrunk to what is held, inline again where that
+    /// fits.
+    fn shrink_to_fit(&mut self) {
+        if let Sites::Spilled(spilled) = &mut self.0 {
+            if spilled.len() <= Safepoints::INLINE {
+                *self = Safepoints::from(std::mem::take(spilled));
+            } else {
+                spilled.shrink_to_fit();
+            }
+        }
+    }
+}
+
+impl Default for Safepoints {
+    fn default() -> Safepoints {
+        Safepoints::new()
+    }
+}
+
+impl From<Vec<OplineIdx>> for Safepoints {
+    fn from(sites: Vec<OplineIdx>) -> Safepoints {
+        if sites.len() > Safepoints::INLINE {
+            return Safepoints(Sites::Spilled(sites));
+        }
+        let mut inline = Safepoints::new();
+        for at in sites {
+            inline.push(at);
+        }
+        inline
+    }
+}
+
+impl std::ops::Deref for Safepoints {
+    type Target = [OplineIdx];
+
+    fn deref(&self) -> &[OplineIdx] {
+        match &self.0 {
+            Sites::Inline { len, sites } => sites.get(..usize::from(*len)).unwrap_or_default(),
+            Sites::Spilled(spilled) => spilled,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Safepoints {
+    fn deref_mut(&mut self) -> &mut [OplineIdx] {
+        match &mut self.0 {
+            Sites::Inline { len, sites } => sites.get_mut(..usize::from(*len)).unwrap_or_default(),
+            Sites::Spilled(spilled) => spilled,
+        }
+    }
+}
+
+impl PartialEq for Safepoints {
+    fn eq(&self, other: &Safepoints) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for Safepoints {}
+
 impl OpArray {
     /// The tables shrunk to what they hold ([`crate::Unit::compact`]).
     pub(crate) fn compact(&mut self) {
@@ -413,7 +524,7 @@ mod tests {
             OpArray {
                 oplines,
                 literals,
-                safepoints: Vec::with_capacity(8),
+                safepoints: (0..9).map(OplineIdx).collect::<Vec<_>>().into(),
                 ..OpArray::default()
             }
         };
@@ -430,11 +541,33 @@ mod tests {
         for body in [&unit.main, &unit.methods[0].body] {
             assert_eq!(body.oplines.capacity(), 1);
             assert_eq!(body.literals.capacity(), 1);
-            assert_eq!(body.safepoints.capacity(), 0);
+            assert!(matches!(body.safepoints.0, Sites::Spilled(ref s) if s.capacity() == 9));
         }
     }
 
     use super::*;
+
+    /// The table stands inline to [`Safepoints::INLINE`], spills past it
+    /// in order, and comes back inline where a shrink finds room.
+    #[test]
+    fn safepoints_stand_inline_until_they_spill() {
+        let mut sites = Safepoints::new();
+        for at in 0..7 {
+            assert!(matches!(sites.0, Sites::Inline { .. }), "{at} inline");
+            sites.push(OplineIdx(at));
+        }
+        assert!(matches!(sites.0, Sites::Spilled(_)));
+        assert_eq!(&*sites, &(0..7).map(OplineIdx).collect::<Vec<_>>()[..]);
+        if let Some(first) = sites.first_mut() {
+            first.0 = 3;
+        }
+        assert_eq!(sites.first(), Some(&OplineIdx(3)));
+        sites.shrink_to_fit();
+        assert!(matches!(sites.0, Sites::Spilled(ref s) if s.capacity() == 7));
+        let back = Safepoints::from(vec![OplineIdx(1), OplineIdx(2)]);
+        assert!(matches!(back.0, Sites::Inline { len: 2, .. }));
+        assert_eq!(back, Safepoints::from(vec![OplineIdx(1), OplineIdx(2)]));
+    }
 
     #[test]
     fn an_opline_is_twenty_four_bytes_and_the_enum_keeps_php_numbers() {

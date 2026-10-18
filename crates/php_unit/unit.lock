@@ -38,6 +38,10 @@ OperandKind
 Opline
 Opline::jump_target
 OplineIdx
+Safepoints
+Safepoints::INLINE
+Safepoints::new
+Safepoints::push
 TopLevel
 TryCatch
 Unit

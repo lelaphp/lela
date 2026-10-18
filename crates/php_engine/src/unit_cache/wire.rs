@@ -22,8 +22,8 @@ use php_unit::decl::{
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, HookBody, Level, LiveKind, LiveRange, MapPtrOffset,
-    MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, TopLevel, TryCatch, Unit,
-    UnitCell,
+    MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, Safepoints, TopLevel, TryCatch,
+    Unit, UnitCell,
 };
 
 /// The unit's bytes; none where a constant of an op array is of a kind
@@ -172,6 +172,18 @@ impl<T: Wire> Wire for Vec<T> {
     fn take(r: &mut Reader<'_>) -> Option<Self> {
         let n = r.len()?;
         (0..n).map(|_| T::take(r)).collect()
+    }
+}
+
+/// Written as the vector it reads as, so a file the cache wrote before
+/// the table stood inline reads back the same.
+impl Wire for Safepoints {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        put_len(self.len(), out)?;
+        self.iter().try_for_each(|item| item.put(out))
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Vec::<OplineIdx>::take(r).map(Safepoints::from)
     }
 }
 

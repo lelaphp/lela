@@ -110,7 +110,7 @@ use php_unit::decl::{
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
-    OpArray, Opcode, OperandKind, Opline, OplineIdx, TopLevel, TryCatch, Unit,
+    OpArray, Opcode, OperandKind, Opline, OplineIdx, Safepoints, TopLevel, TryCatch, Unit,
 };
 
 use php_syntax::magic_const_name;
@@ -550,7 +550,7 @@ pub(crate) struct Emit<'a> {
     vars: Vec<Name>,
     /// `CG(context).has_assigned_to_http_response_header`.
     http_response_header: ResponseHeader,
-    safepoints: Vec<OplineIdx>,
+    safepoints: Safepoints,
     temporaries: u32,
     cache_slots: u32,
     line: u32,
@@ -1499,7 +1499,7 @@ struct Saved {
     const_exprs: Vec<ConstExpr>,
     vars: Vec<Name>,
     http_response_header: ResponseHeader,
-    safepoints: Vec<OplineIdx>,
+    safepoints: Safepoints,
     temporaries: u32,
     cache_slots: u32,
     loops: Vec<Loop>,
@@ -1522,10 +1522,10 @@ struct Saved {
     active_hook: Option<HookKind>,
 }
 
-/// An op array's safepoints as it begins: the entry, number zero, with
-/// room for its returns, since every op array has one at least.
-fn entry_safepoints() -> Vec<OplineIdx> {
-    let mut safepoints = Vec::with_capacity(4);
+/// An op array's safepoints as it begins: the entry, number zero, inline
+/// with room for its returns ([`Safepoints`]).
+fn entry_safepoints() -> Safepoints {
+    let mut safepoints = Safepoints::new();
     safepoints.push(OplineIdx(0));
     safepoints
 }
@@ -19640,7 +19640,7 @@ mod tests {
             const_exprs: Vec::new(),
             vars: Vec::new(),
             http_response_header: ResponseHeader::Predefined,
-            safepoints: Vec::new(),
+            safepoints: Safepoints::new(),
             temporaries: 0,
             cache_slots: 0,
             line: 1,

@@ -1153,7 +1153,7 @@ mod tests {
     fn the_entry_is_safepoint_zero_and_the_return_carries_its_own_number() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1;");
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1)],
             "the entry at opline zero, then the return"
         );
@@ -2003,7 +2003,7 @@ mod tests {
             "an empty condition is php's constant true"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(4), OplineIdx(5)],
             "the entry, the header the back-edge lands on, which is itself, the return"
         );
@@ -2087,7 +2087,7 @@ mod tests {
             "the comparison's, which the JMPNZ tests"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(2), OplineIdx(6)],
             "the entry, the body's first opline as the header, the return"
         );
@@ -2115,7 +2115,7 @@ mod tests {
             "landing on the body's first opline"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1), OplineIdx(3)],
             "the entry, the header at the ECHO, the return"
         );
@@ -2126,7 +2126,7 @@ mod tests {
 
         let (unit, _strings) = unit_and_strings(b"<?php foreach ($a as $v) { continue; }");
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1), OplineIdx(5)],
             "the entry, the header at the FE_FETCH_R, the return"
         );
@@ -8437,7 +8437,7 @@ class C {
             "the literal is the array php folds"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1), OplineIdx(5)],
             "the entry, the header the back-edge lands on, the return"
         );
@@ -8563,7 +8563,7 @@ class C {
             "two back-edges to one header carry one number, the header's"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[
                 OplineIdx(0),
                 OplineIdx(1),
