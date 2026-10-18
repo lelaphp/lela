@@ -11,9 +11,11 @@ use std::path::Path;
 use std::process::Command;
 
 use xtask::manifest::Manifest;
-use xtask::reading::{Status, Store};
+use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
-use xtask::ticket::{Act, CAP, Gh, Reach, Successors, Verdict, merged, parent, run, stranded};
+use xtask::ticket::{
+    Act, CAP, Gh, MERGED, Reach, Successors, Verdict, merged, parent, run, stranded,
+};
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
@@ -493,7 +495,7 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
             "Merge t7: the bundle (#7, #8, #9, #10, #11)",
         ],
     );
-    let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    let (readings, phases) = tickets_merged(&root, &recorded);
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
         .map(|r| (r.scope.as_str(), r.status))
@@ -515,6 +517,7 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
         "{}",
         readings[3].message
     );
+    phases_named(&phases);
     let calls = recorded.calls();
     for n in [7, 8, 9] {
         assert!(
@@ -557,6 +560,34 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     assert!(stranded(&root, &store, &head).unwrap().is_empty());
 }
 
+/// The run's reading of the merge of #7 to #11 names each phase with its
+/// time (#2813): every close, the tracker by verb, each ticket read once
+/// but #11, which as unready is read again after the closes, and #12 as
+/// #8's successor, and the run whole.
+fn phases_named(phases: &Reading) {
+    for said in [
+        "name 5 ticket(s), 3 closed here",
+        "closed #7 in ",
+        "closed #9 in ",
+        "gh close 3 time(s) in ",
+        "gh edit 1 time(s) in ",
+        "gh view 7 time(s) in ",
+        "the workspace read in ",
+        " s in all",
+    ] {
+        assert!(
+            phases.message.contains(said),
+            "{said:?}: {}",
+            phases.message
+        );
+    }
+    assert_eq!(phases.numbers["closed"], 3.into());
+    assert_eq!(phases.numbers["gh_calls"], 11.into());
+    for key in ["gh_ms", "workspace_ms", "ms"] {
+        assert!(phases.numbers.contains_key(key), "{key}: {phases:#?}");
+    }
+}
+
 /// A merge that lands part of a ticket (#2394): the ticket it names with
 /// no ready record has a box unticked and stands blocked by an open one,
 /// as the build skill leaves a ticket whose last box waits on another, so
@@ -585,7 +616,7 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
     recorded.blocked(13, UNTICKED, &[(14, "OPEN"), (16, "CLOSED")]);
     recorded.blocked(15, UNTICKED, &[(16, "CLOSED")]);
     recorded.blocked(17, TICKED, &[(14, "OPEN")]);
-    let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    let readings = tickets_merged(&root, &recorded).0;
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
         .map(|r| (r.scope.as_str(), r.status))
@@ -631,6 +662,20 @@ fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_nam
     );
 }
 
+/// [`merged`] on `main` over the merge at `HEAD`: the readings of the
+/// tickets, and the run's own, the last, set apart once it is held to be
+/// the run's (#2813).
+fn tickets_merged(root: &Path, recorded: &Recorded) -> (Vec<Reading>, Reading) {
+    let mut readings = merged(root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    let run = readings.pop().expect("the run's own reading");
+    assert_eq!(
+        (run.scope.as_str(), run.status),
+        (MERGED, Status::Pass),
+        "{run:#?}"
+    );
+    (readings, run)
+}
+
 /// A merge of `branch` into `main` under `subject`, each ticket of
 /// `ready` readied on the branch with the successors it names, every
 /// ticket and successor open with its boxes ticked at `recorded`.
@@ -665,9 +710,10 @@ fn merged_with_ready(
 /// that passed #2536 over as no issue at all, its first read failing; in
 /// 86edf384, #2631's read in the close failing after #2754 closed took the
 /// whole run down before one reading was written, so #2631, #2156 and
-/// #2621 stayed open and #2754's close went unrecorded. A read is asked
-/// again, so every ticket the merge names closes, each with its own
-/// successors.
+/// #2621 stayed open and #2754's close went unrecorded. The close reads
+/// no ticket again since #2813, so #2631's one read, after #2754 closed,
+/// is the one that fails here. A read is asked again, so every ticket the
+/// merge names closes, each with its own successors.
 #[test]
 fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_names() {
     for (branch, subject, ready, (flaky, answered)) in [
@@ -680,7 +726,7 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
                 (2156, "2802"),
                 (2621, "nothing"),
             ][..],
-            (2631, 1),
+            (2631, 0),
         ),
         (
             "t2536",
@@ -692,7 +738,7 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
         let (root, recorded) =
             merged_with_ready(&format!("replay-{branch}"), branch, subject, ready);
         recorded.flaky(flaky, answered, 1);
-        let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+        let readings = tickets_merged(&root, &recorded).0;
         let closed: Vec<(&str, Status)> = readings
             .iter()
             .map(|r| (r.scope.as_str(), r.status))
@@ -721,7 +767,7 @@ fn a_merge_whose_tracker_fails_a_read_for_a_moment_still_closes_every_ticket_it_
     }
 }
 
-/// A ticket the tracker will not answer for once its state was read is
+/// A ticket the tracker will not answer for, every read asked again, is
 /// not passed over and does not take the run down (#2804): the tickets
 /// around it close, each close is recorded, and it is a failed reading
 /// saying what to run again, which `done` names until the run, asked
@@ -736,8 +782,8 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
         &[(20, "nothing"), (21, "nothing"), (22, "nothing")],
     );
     recorded.none(23);
-    recorded.flaky(21, 1, 3);
-    let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    recorded.flaky(21, 0, 3);
+    let readings = tickets_merged(&root, &recorded).0;
     let verdicts: Vec<(&str, Status)> = readings
         .iter()
         .map(|r| (r.scope.as_str(), r.status))
@@ -773,7 +819,7 @@ fn a_ticket_the_tracker_cannot_read_is_named_and_the_rest_of_the_merge_closes() 
 
     recorded.issue(20, "CLOSED", TICKED);
     recorded.issue(22, "CLOSED", TICKED);
-    let again = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    let again = tickets_merged(&root, &recorded).0;
     assert_eq!(again.len(), 1, "{again:#?}");
     assert_eq!(
         (again[0].scope.as_str(), again[0].status),

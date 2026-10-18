@@ -171,8 +171,11 @@
 //! rule is judged by `permit`, whose tools are `Edit`, `Write` and `Bash`,
 //! so a GitHub MCP server attached later would close a ticket unjudged.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -1015,10 +1018,21 @@ impl State {
 /// instrument makes are here. The command line runs [`Gh::on_path`]; a
 /// test runs [`Gh::at`] over a shell file that answers `issue view` from
 /// a recorded transcript and writes what `issue close` asked, so the
-/// judgement is held without the network.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// judgement is held without the network. Every call is timed, by its
+/// verb, for the reading of [`merged`] that names what the tracker cost
+/// (#2813).
+#[derive(Debug)]
 pub struct Gh {
     program: PathBuf,
+    spent: Mutex<BTreeMap<String, Spent>>,
+}
+
+/// The calls of one verb `gh` was asked, and the time they took, each
+/// retry of a read among them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Spent {
+    calls: u64,
+    took: Duration,
 }
 
 impl Gh {
@@ -1031,25 +1045,36 @@ impl Gh {
     pub fn at(program: &Path) -> Gh {
         Gh {
             program: program.to_path_buf(),
+            spent: Mutex::default(),
         }
+    }
+
+    /// What every verb asked so far cost, and their sum.
+    fn spent(&self) -> (BTreeMap<String, Spent>, Spent) {
+        let by_verb = self.spent.lock().map(|s| s.clone()).unwrap_or_default();
+        let all = by_verb.values().fold(Spent::default(), |sum, s| Spent {
+            calls: sum.calls + s.calls,
+            took: sum.took + s.took,
+        });
+        (by_verb, all)
     }
 
     /// `gh issue view <n> --json …`, one issue, its labels among them,
     /// since a close holds a successor to the closed ticket's track.
     pub fn view(&self, root: &Path, ticket: Ticket) -> Result<Issue> {
         let number = ticket.number().to_string();
-        let text = read(
-            &self.program,
-            root,
-            &[
-                "issue",
-                "view",
-                &number,
-                "--json",
-                "number,title,body,state,url,labels,blocking,blockedBy,subIssuesSummary",
-            ],
-        )
-        .with_context(|| format!("{ticket} could not be read from the tracker"))?;
+        let text = self
+            .read(
+                root,
+                &[
+                    "issue",
+                    "view",
+                    &number,
+                    "--json",
+                    "number,title,body,state,url,labels,blocking,blockedBy,subIssuesSummary",
+                ],
+            )
+            .with_context(|| format!("{ticket} could not be read from the tracker"))?;
         serde_json::from_str(&text)
             .with_context(|| format!("{ticket}: gh's answer is not an issue"))
     }
@@ -1059,21 +1084,21 @@ impl Gh {
     /// Every open issue, not the labelled ones alone, so the frontier's
     /// filters are judged here, where a test can hold each of them.
     pub fn open(&self, root: &Path) -> Result<Vec<Open>> {
-        let text = read(
-            &self.program,
-            root,
-            &[
-                "issue",
-                "list",
-                "--state",
-                "open",
-                "--limit",
-                "1000",
-                "--json",
-                "number,title,url,labels,blockedBy",
-            ],
-        )
-        .context("the open tickets could not be listed from the tracker")?;
+        let text = self
+            .read(
+                root,
+                &[
+                    "issue",
+                    "list",
+                    "--state",
+                    "open",
+                    "--limit",
+                    "1000",
+                    "--json",
+                    "number,title,url,labels,blockedBy",
+                ],
+            )
+            .context("the open tickets could not be listed from the tracker")?;
         serde_json::from_str(&text).context("gh's answer is not a list of issues")
     }
 
@@ -1090,24 +1115,16 @@ impl Gh {
             .map(|t| t.number().to_string())
             .collect::<Vec<_>>()
             .join(",");
-        gh(
-            &self.program,
-            root,
-            &["issue", "edit", &number, "--add-blocking", &opened],
-        )
-        .with_context(|| format!("{ticket}'s edge to what it opened was not set"))?;
+        self.call(root, &["issue", "edit", &number, "--add-blocking", &opened])
+            .with_context(|| format!("{ticket}'s edge to what it opened was not set"))?;
         Ok(())
     }
 
     /// `gh issue close <n> --comment <text>`: the one act.
     pub fn close(&self, root: &Path, ticket: Ticket, comment: &str) -> Result<()> {
         let number = ticket.number().to_string();
-        gh(
-            &self.program,
-            root,
-            &["issue", "close", &number, "--comment", comment],
-        )
-        .with_context(|| format!("{ticket} was not closed"))?;
+        self.call(root, &["issue", "close", &number, "--comment", comment])
+            .with_context(|| format!("{ticket} was not closed"))?;
         Ok(())
     }
 }
@@ -1127,41 +1144,53 @@ fn no_issue(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains(NO_ISSUE)
 }
 
-/// [`gh`] for a call that only reads, asked up to [`READS`] times with a
-/// longer pause before each retry, but for the answer that there is no
-/// such issue.
-fn read(program: &Path, root: &Path, args: &[&str]) -> Result<String> {
-    let mut asked = 1;
-    loop {
-        match gh(program, root, args) {
-            Err(err) if asked < READS && !no_issue(&err) => {
-                std::thread::sleep(std::time::Duration::from_millis(500) * asked);
-                asked += 1;
+impl Gh {
+    /// [`Gh::call`] for a call that only reads, asked up to [`READS`]
+    /// times with a longer pause before each retry, but for the answer
+    /// that there is no such issue.
+    fn read(&self, root: &Path, args: &[&str]) -> Result<String> {
+        let mut asked = 1;
+        loop {
+            match self.call(root, args) {
+                Err(err) if asked < READS && !no_issue(&err) => {
+                    std::thread::sleep(Duration::from_millis(500) * asked);
+                    asked += 1;
+                }
+                answer => return answer,
             }
-            answer => return answer,
         }
     }
-}
 
-/// Run `program` in `root` and return its stdout; a non-zero exit is an
-/// error carrying its stderr.
-fn gh(program: &Path, root: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(program)
-        .args(args)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("running gh")?;
-    if !out.status.success() {
-        bail!(
-            "gh {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+    /// Run the program in `root` and return its stdout, the call timed
+    /// under its verb, `args[1]`; a non-zero exit is an error carrying its
+    /// stderr.
+    fn call(&self, root: &Path, args: &[&str]) -> Result<String> {
+        let started = Instant::now();
+        let out = Command::new(&self.program)
+            .args(args)
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("running gh");
+        if let Ok(mut spent) = self.spent.lock() {
+            let verb = spent
+                .entry(args.get(1).copied().unwrap_or("").to_owned())
+                .or_default();
+            verb.calls += 1;
+            verb.took += started.elapsed();
+        }
+        let out = out?;
+        if !out.status.success() {
+            bail!(
+                "gh {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        String::from_utf8(out.stdout).context("gh wrote something that is not UTF-8")
     }
-    String::from_utf8(out.stdout).context("gh wrote something that is not UTF-8")
 }
 
 /// Every criterion of `rows` as the reading cites it: the criterion, the
@@ -1258,12 +1287,7 @@ pub fn parent(root: &Path, gh: &Gh, sheet: Ticket, session_id: Option<&str>) -> 
     let issue = gh.view(root, sheet)?;
     let held = issue.sub_issues.total;
     let spare = CAP.saturating_sub(held);
-    let mut reading = Reading::stamped_over(
-        INSTRUMENT,
-        &parent_scope(sheet),
-        &Snapshot::disk(root)?,
-        Path::new(STAMPED_OVER),
-    )?;
+    let mut reading = stamped(&Snapshot::disk(root)?, &parent_scope(sheet))?;
     reading.count("subissues", held)?;
     reading.count("cap", CAP)?;
     reading.count("room", spare)?;
@@ -1327,14 +1351,29 @@ pub fn run(
     ticket: Ticket,
     session_id: Option<&str>,
 ) -> Result<Reading> {
-    let issue = gh.view(root, ticket)?;
+    let (issue, snapshot) = (gh.view(root, ticket)?, Snapshot::disk(root)?);
+    judged(root, manifest, gh, act, &issue, &snapshot, session_id)
+}
+
+/// [`run`] over an issue already read, stamped over `snapshot`: [`merged`]
+/// reads each ticket once and the workspace once for all of them (#2813).
+fn judged(
+    root: &Path,
+    manifest: &Manifest,
+    gh: &Gh,
+    act: Act,
+    issue: &Issue,
+    snapshot: &Snapshot,
+    session_id: Option<&str>,
+) -> Result<Reading> {
+    let ticket = Ticket::new(issue.number);
     let criteria = Criteria::parse(&issue.body);
     let rows = denied(manifest, &issue.labels, &criteria);
     // The rows that say the label is wrong, and the rows an instrument
     // writes, which are a note and not a refusal.
     let (denied, steered): (Vec<&Denied>, Vec<&Denied>) =
         rows.iter().partition(|row| row.mislabelled());
-    let mut reading = stamped(root, ticket)?;
+    let mut reading = stamped(snapshot, &scope(ticket))?;
     counted(&mut reading, &criteria, &denied, steered.len(), &act)?;
     session_id
         .unwrap_or_default()
@@ -1368,7 +1407,7 @@ pub fn run(
                 "Withdrawn by `xtask ticket close` at {}: {reason}; {boxes}",
                 reading.commit
             );
-            match close(gh, root, &issue, &reading, &successors, &comment) {
+            match close(gh, root, issue, &reading, &successors, &comment) {
                 Ok((opened, closed)) => (
                     Status::Pass,
                     format!("{ticket}: {boxes}; withdrawn: {reason}; {opened}; {closed}"),
@@ -1397,7 +1436,7 @@ pub fn run(
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing recorded"),
         ),
-        Act::Ready(successors) => match ready(gh, root, &issue, &reading, &successors) {
+        Act::Ready(successors) => match ready(gh, root, issue, &reading, &successors) {
             Ok(said) => (Status::Pass, format!("{ticket}: {boxes}; {said}")),
             Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
         },
@@ -1416,7 +1455,7 @@ pub fn run(
                 "Closed by `xtask ticket close` at {}: {boxes}",
                 reading.commit
             );
-            match close(gh, root, &issue, &reading, &successors, &comment) {
+            match close(gh, root, issue, &reading, &successors, &comment) {
                 Ok((opened, closed)) => (
                     Status::Pass,
                     format!("{ticket}: {boxes}; {opened}; {closed}"),
@@ -1482,10 +1521,7 @@ impl Closed {
     /// The close `reading` records; none for a reading of a read, a ready
     /// record or a merge that left a ticket open, and for a close refused.
     pub(crate) fn of(reading: &Reading) -> Option<Closed> {
-        let count = |key| match reading.numbers.get(key)? {
-            crate::reading::Number::Int(n) => u64::try_from(*n).ok(),
-            crate::reading::Number::Float(_) => None,
-        };
+        let count = |key| u64::try_from(reading.int(key)?).ok();
         (reading.instrument == INSTRUMENT && reading.status == Status::Pass).then_some(())?;
         Some(Closed {
             withdrawn: count(WITHDRAWN)? > 0,
@@ -1506,7 +1542,13 @@ impl Closed {
 /// run goes on, so one failure of the network neither passes a ticket
 /// over nor loses the closes made before it (#2804). Off `main` nothing is closed: the fast-forward that brings
 /// the merge there calls this again.
+///
+/// On `main` the last reading is the run's own, under [`MERGED`]: what
+/// each phase took, each ticket's close and every `gh` call by its verb,
+/// and the run whole, so a merge's post-commit time is read from the
+/// store and not guessed (#2813).
 pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<Vec<Reading>> {
+    let started = Instant::now();
     if Reach::of(root)? != Reach::Landed {
         return Ok(Vec::new());
     }
@@ -1518,7 +1560,13 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     );
     let mut readings = Vec::new();
     let mut unready = Vec::new();
-    for ticket in named_by_merges(root, &format!("{since}..HEAD"))? {
+    let named = named_by_merges(root, &format!("{since}..HEAD"))?;
+    let read = Instant::now();
+    let snapshot = Snapshot::disk(root)?;
+    let read = read.elapsed();
+    let mut made = Vec::new();
+    for &ticket in &named {
+        let began = Instant::now();
         let closed = gh.view(root, ticket).and_then(|issue| {
             if issue.state == State::Closed {
                 return Ok(None);
@@ -1528,43 +1576,89 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
                 return Ok(None);
             };
             let act = Act::Close(Verdict::Done, successors, Reach::Landed);
-            run(root, manifest, gh, act, ticket, None).map(Some)
+            judged(root, manifest, gh, act, &issue, &snapshot, None).map(Some)
         });
         match closed {
             Ok(Some(reading)) if reading.status != Status::Pass => {
                 readings.push(unclosed(reading, &again)?);
             }
-            Ok(reading) => readings.extend(reading),
+            Ok(Some(reading)) => {
+                made.push(format!("closed {ticket} in {}", secs(began.elapsed())));
+                readings.push(reading);
+            }
+            Ok(None) => {}
             Err(err) if no_issue(&err) => {}
-            Err(err) => readings.push(failed(root, ticket, &err, &again)?),
+            Err(err) => readings.push(failed(&snapshot, ticket, &err, &again)?),
         }
     }
     for ticket in unready {
         match gh.view(root, ticket) {
             Ok(issue) if issue.state == State::Closed => {}
-            Ok(issue) => readings.push(left_open(root, &issue, &again)?),
+            Ok(issue) => readings.push(left_open(&snapshot, &issue, &again)?),
             Err(err) if no_issue(&err) => {}
-            Err(err) => readings.push(failed(root, ticket, &err, &again)?),
+            Err(err) => readings.push(failed(&snapshot, ticket, &err, &again)?),
         }
     }
+    let mut run = stamped(&snapshot, MERGED)?;
+    let (by_verb, all) = gh.spent();
+    let took = started.elapsed();
+    run.status = Status::Pass;
+    run.count("named", named.len() as u64)?;
+    run.count("closed", made.len() as u64)?;
+    run.count("gh_calls", all.calls)?;
+    run.count("gh_ms", millis(all.took))?;
+    run.count("workspace_ms", millis(read))?;
+    run.count("ms", millis(took))?;
+    // Each phase: the closes in the order made, the tracker by verb, and
+    // the read of the workspace every reading is stamped over.
+    let closes = made.len();
+    let mut phases = made;
+    phases.extend(
+        by_verb
+            .iter()
+            .map(|(verb, s)| format!("gh {verb} {} time(s) in {}", s.calls, secs(s.took))),
+    );
+    phases.push(format!("the workspace read in {}", secs(read)));
+    run.message = format!(
+        "the merges since {} name {} ticket(s), {} closed here; {}; {} in all",
+        parent.trim(),
+        named.len(),
+        closes,
+        phases.join("; "),
+        secs(took)
+    );
+    readings.push(run);
     Ok(readings)
 }
 
-/// A reading of `ticket`, stamped over the workspace as every reading of
-/// the instrument is.
-fn stamped(root: &Path, ticket: Ticket) -> Result<Reading> {
-    Reading::stamped_over(
-        INSTRUMENT,
-        &scope(ticket),
-        &Snapshot::disk(root)?,
-        Path::new(STAMPED_OVER),
-    )
+/// The scope of the reading [`merged`] writes of its own run on `main`.
+pub const MERGED: &str = "merged";
+
+/// A span in seconds to a tenth, for a message.
+fn secs(span: Duration) -> String {
+    format!("{:.1} s", span.as_secs_f64())
+}
+
+/// A span in whole milliseconds, for a count.
+fn millis(span: Duration) -> u64 {
+    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A reading of the instrument over `scope`, stamped over the workspace
+/// as every reading of the instrument is.
+fn stamped(snapshot: &Snapshot, scope: &str) -> Result<Reading> {
+    Reading::stamped_over(INSTRUMENT, scope, snapshot, Path::new(STAMPED_OVER))
 }
 
 /// The reading of a ticket [`merged`] could not even read or close for
 /// `err`, as [`unclosed`] says it.
-fn failed(root: &Path, ticket: Ticket, err: &anyhow::Error, again: &str) -> Result<Reading> {
-    let mut reading = stamped(root, ticket)?;
+fn failed(
+    snapshot: &Snapshot,
+    ticket: Ticket,
+    err: &anyhow::Error,
+    again: &str,
+) -> Result<Reading> {
+    let mut reading = stamped(snapshot, &scope(ticket))?;
     reading.message = format!("{err:#}");
     unclosed(reading, again)
 }
@@ -1590,9 +1684,9 @@ fn unclosed(mut reading: Reading, again: &str) -> Result<Reading> {
 /// reading skips the close, saying so and what holds it. Otherwise it is
 /// [`unclosed`], and where the merge lands part of it the message says
 /// how to wire the blocker on first.
-fn left_open(root: &Path, issue: &Issue, again: &str) -> Result<Reading> {
+fn left_open(snapshot: &Snapshot, issue: &Issue, again: &str) -> Result<Reading> {
     let ticket = Ticket::new(issue.number);
-    let mut left = stamped(root, ticket)?;
+    let mut left = stamped(snapshot, &scope(ticket))?;
     let blockers: Vec<String> = issue
         .blocked_by
         .open()
