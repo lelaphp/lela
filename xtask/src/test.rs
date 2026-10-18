@@ -6,8 +6,8 @@
 //! reading per crate that exists; `--crate` narrows it to the ones named,
 //! `--staged` to the crates with a staged change. The numbers are the sums
 //! over every test binary and the doctests of the crate: `passed`,
-//! `failed`, `ignored` and `filtered`; a crate whose tests do not build has
-//! none and fails all the same.
+//! `failed`, `ignored` and `filtered`, with `ms` beside them; a crate whose
+//! tests do not build has none and fails all the same.
 //!
 //! A run is three steps over every crate at once, as `cargo test` would
 //! take them one crate at a time (#2165), and a crate with a binary takes
@@ -28,7 +28,10 @@
 //! `[package.metadata.xtask.test]`: then as many run at once as
 //! [`Beside::pool`] says, an executable that does share something held
 //! apart from the others that name its key ([`Beside`]), what each one
-//! printed kept whole and read in the executables' order (#2869).
+//! printed kept whole and read in the executables' order (#2869). The
+//! reading is stamped once they have ended, `ms` counts how long they
+//! ran, and a group per executable, `test worktree`, how long that one
+//! did.
 //!
 //! **A pinned error code.** A `compile_fail,E0382` block passes the stable
 //! rustdoc when it fails to compile for any reason; only a nightly's
@@ -44,6 +47,7 @@ use std::fs::{self, File};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -51,7 +55,7 @@ use serde::Deserialize;
 use crate::batch::{self, Built, Executable, Package, Run, Targets, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::reading::{Reading, Status, Store, plural};
+use crate::reading::{Number, Reading, Status, Store, millis, plural};
 use crate::sources;
 use crate::tally::{self, Apart};
 
@@ -160,9 +164,9 @@ fn reading(
     run: &Run,
     (doc, missed): (Option<&Ran>, &[String]),
 ) -> Result<Reading> {
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     let name = &krate.name;
     let Some(built) = run.crates.get(name).filter(|b| b.whole) else {
+        let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
         let said = run
             .crates
             .get(name)
@@ -174,15 +178,30 @@ fn reading(
         reading.message = format!("{name}: the tests did not build\n{}", tail(&said, 40));
         return Ok(reading);
     };
+    let started = Instant::now();
     let (jobs, apart) = Beside::of(&built.package)?.pool(name, &built.executables)?;
     let mut all = Ran {
         passed: true,
         ..Ran::default()
     };
-    let each = |executable: &Executable| execute(executable, built, run);
-    let on = |ran: Ran| all.add(&ran);
+    let mut took = BTreeMap::new();
+    let each = |executable: &Executable| {
+        let started = Instant::now();
+        let ran = execute(executable, built, run)?;
+        let named = format!("{} {}", executable.kind, executable.name);
+        Ok((named, millis(started.elapsed()), ran))
+    };
+    let on = |(named, ms, ran): (String, u64, Ran)| {
+        took.insert(named, Number::count(ms));
+        all.add(&ran);
+    };
     let batch = NonZeroUsize::MIN;
     tally::pool(&built.executables, jobs, batch, &apart, each, on)?;
+    // Stamped once the executables have ended, so a span read off the
+    // store's stamps holds their run (#2869).
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
+    reading.count("ms", millis(started.elapsed()))?;
+    reading.groups = took;
     if let Some(doc) = doc {
         all.add(doc);
     }

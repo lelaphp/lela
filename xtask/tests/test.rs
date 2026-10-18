@@ -11,7 +11,7 @@ use std::process::Command;
 use xtask::divergence::Registry;
 use xtask::done;
 use xtask::manifest::Manifest;
-use xtask::reading::{Number, Reading, Status, Store};
+use xtask::reading::{Number, Reading, Status, Store, epoch_seconds};
 use xtask::scratch::Tree;
 use xtask::test;
 
@@ -339,21 +339,37 @@ fn overlap((a_from, a_to): (u128, u128), (b_from, b_to): (u128, u128)) -> bool {
 
 /// A crate's test executables run one at a time unless its `Cargo.toml`
 /// says they share nothing; then they run side by side, but for those
-/// that hold one key apart, which never overlap (#2869).
+/// that hold one key apart, which never overlap. The reading is stamped
+/// once the last has ended, `ms` says how long they ran, and a group per
+/// executable how long each did (#2869).
 #[test]
 fn executables_run_side_by_side_where_declared_and_apart_where_they_share_a_key() {
     let declared = "\n[package.metadata.xtask.test]\nexecutables = \"side-by-side\"\n\
                     apart = { a = [\"shared\"], b = [\"shared\"] }\n";
-    let (_, [a, b, c]) = spans("test-beside", declared);
+    let (reading, [a, b, c]) = spans("test-beside", declared);
     assert!(!overlap(a, b), "a and b hold one key: {a:?} {b:?}");
     assert!(
         overlap(a, c) || overlap(b, c),
         "c runs beside one: {a:?} {b:?} {c:?}"
     );
+    assert!(int(&reading, "ms") >= 1400, "{reading:#?}");
+    for test in ["test a", "test b", "test c"] {
+        let ms = reading.groups.get(test).map(|ms| ms.as_f64());
+        assert!(
+            ms.is_some_and(|ms| ms >= 700.0),
+            "each one's time: {reading:#?}"
+        );
+    }
+    let ended = a.1.max(b.1).max(c.1) / 1000;
+    assert!(
+        epoch_seconds(&reading.at).unwrap() >= i64::try_from(ended).unwrap(),
+        "{reading:#?}"
+    );
 
-    let (_, [a, b, c]) = spans("test-one-at-a-time", "");
+    let (reading, [a, b, c]) = spans("test-one-at-a-time", "");
     assert!(
         !overlap(a, b) && !overlap(a, c) && !overlap(b, c),
         "{a:?} {b:?} {c:?}"
     );
+    assert!(int(&reading, "ms") >= 2100, "{reading:#?}");
 }
