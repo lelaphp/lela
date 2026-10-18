@@ -7686,12 +7686,13 @@ mod tests {
                 "what the request interned is the request's own memory"
             );
         }
-        // The object store's table and the VM stack's first page, and
-        // nothing else, before a line runs (design §5.4, §5.6): 1024
+        // The compiler's arena, the object store's table and the VM
+        // stack's first page, and nothing else, before a line runs
+        // (design §5.4, §5.6, §5.13): `zend_arena_create(64 * 1024)`, 1024
         // buckets of a pointer each, and `ZEND_VM_STACK_PAGE_SIZE`.
         assert_eq!(
             started_at,
-            vec![8192 + 262_144, 8192 + 262_144],
+            vec![65_536 + 8192 + 262_144, 65_536 + 8192 + 262_144],
             "every request starts where the one before it did"
         );
         assert_eq!(

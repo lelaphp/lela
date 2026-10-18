@@ -2566,8 +2566,8 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(315536)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            unflagged, "int(381072)\n",
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
@@ -2630,9 +2630,9 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 315536 is the object store's
-    /// 8192, the VM stack's first page of 262144, `EG(symbol_table)`'s
-    /// data of 2560 (an engine with no
+    /// 2097152 is php's one 2 MiB chunk. 381072 is the compiler's arena's
+    /// first block of 65536, the object store's 8192, the VM stack's
+    /// first page of 262144, `EG(symbol_table)`'s data of 2560 (an engine with no
     /// stream layer opens none of the three standard streams `do_cli`
     /// opens, which cost 1200 under the bundle), the 1632 of the variables
     /// `php_hash_environment` and the CLI lay down, and what this source's
@@ -2651,8 +2651,8 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(315536)\nint(2097152)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            body, "int(381072)\nint(2097152)\n",
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
     }
 }
