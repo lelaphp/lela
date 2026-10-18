@@ -1,4 +1,4 @@
-# A slice of docs/divergence.toml's shape: the merge base's one row.
+# A slice of docs/divergence.toml's shape in a conflicted merge (README.md).
 
 [[divergence]]
 id = "trace:fixture-base"

@@ -45,7 +45,7 @@
 //! append a ruled row to the registry conflict at the second's merge, and
 //! the working file then holds git's markers, which no reader parses. So
 //! while `MERGE_HEAD` stands with the file unmerged, a proposal is judged
-//! against the blobs git keeps for the conflict ([`Ground::Merge`]): it is
+//! against the blobs git keeps for the conflict (`Ground::Merge`): it is
 //! written when it is the union of what each side adds over the merge
 //! base, and the reading names both sides' additions. A change or a drop on
 //! either side, and a row neither side carries, is refused as any change
@@ -93,8 +93,8 @@ pub enum Verdict {
     Additive(Vec<String>),
     /// A merge stands with the file conflicted, and the proposal is the
     /// union of what each side adds over the merge base: `head`, what
-    /// `HEAD` carries beyond it, and `merged`, what `MERGE_HEAD` does,
-    /// which is what the write adds to `HEAD`'s file ([`Ground::Merge`]).
+    /// `HEAD` carries beyond it, and `merged`, what the write adds to
+    /// `HEAD`'s file, each a value `MERGE_HEAD` adds (`Ground::Merge`).
     Union {
         head: Vec<String>,
         merged: Vec<String>,
@@ -126,7 +126,7 @@ pub fn judge(tracked: &str, proposed: &str) -> Result<Verdict> {
 
 /// What a proposal is judged against, read once from the checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ground {
+pub(crate) enum Ground {
     /// The tracked file as it stands.
     File(String),
     /// A merge stands (`MERGE_HEAD`) with the file unmerged in the index,
@@ -143,17 +143,21 @@ pub enum Ground {
 }
 
 impl Ground {
-    /// The ground of `file` in the checkout at `root`, whose working copy
-    /// is `working`.
-    pub fn of(root: &Path, file: &str, working: String) -> Result<Ground> {
-        let unmerged = git::has_ref(root, "MERGE_HEAD")
-            && !git::git(root, &["ls-files", "--unmerged", "--", file], None)?.is_empty();
-        if !unmerged {
-            return Ok(Ground::File(working));
+    /// The ground of `file` in the checkout at `root`, whose text, outside
+    /// a conflicted merge, is `text`: the working copy steer replaces, or
+    /// the one `permit --after` kept from before the call.
+    pub(crate) fn of(root: &Path, file: &str, text: String) -> Result<Ground> {
+        let merging = git::has_ref(root, "MERGE_HEAD");
+        let unmerged = git::git(root, &["ls-files", "--unmerged", "--", file], None)?;
+        if !merging || unmerged.is_empty() {
+            return Ok(Ground::File(text));
         }
+        // Each entry is `<mode> <blob> <stage>\t<path>`; a file both sides
+        // added has no stage 1, and its base carries nothing.
+        let staged = |n: u8| unmerged.lines().any(|e| e.contains(&format!(" {n}\t")));
         let stage = |n: u8| git::git(root, &["show", &format!(":{n}:{file}")], None);
         Ok(Ground::Merge {
-            base: stage(1).unwrap_or_default(),
+            base: if staged(1) { stage(1)? } else { String::new() },
             head: stage(2)?,
             merged: stage(3)?,
         })
@@ -173,7 +177,7 @@ impl Ground {
     /// change or drop nothing either side carries, and what it adds to
     /// `HEAD`'s file is only what `MERGE_HEAD` adds over the base, so a
     /// row neither side carries is refused by its path.
-    pub fn judge(&self, proposed: &str) -> Result<Verdict> {
+    pub(crate) fn judge(&self, proposed: &str) -> Result<Verdict> {
         let Ground::Merge { base, head, merged } = self else {
             return judge(self.tracked(), proposed);
         };
@@ -244,9 +248,9 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
                 changed.join(", ")
             );
         }
-        Verdict::Additive(added) if added.is_empty() => {
+        _ if verdict.additions().is_empty() => {
             reading.status = Status::Skip;
-            reading.message = format!("{file}: the proposal is the tracked file; nothing to write");
+            reading.message = format!("{file}: the proposal adds nothing to it; nothing to write");
         }
         Verdict::Additive(added) | Verdict::Union { merged: added, .. } => {
             if !dry_run {

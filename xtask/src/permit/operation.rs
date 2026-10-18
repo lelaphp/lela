@@ -549,10 +549,9 @@ pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
 /// carries it, so `permit --after` never puts it back (#2597), where a
 /// conflicted path it leaves to the hand that resolves it (#2880). An
 /// index git cannot read is read as staged, the side that puts nothing
-/// back. What the index
-/// cannot say is whose hand staged the entry, so a call's own `git add`
-/// while the operation stands is read as the operation's and rides its
-/// commit; another session's staging there is what a `where =
+/// back. What the index cannot say is whose hand staged the entry, so a
+/// call's own `git add` while the operation stands is read as the
+/// operation's and rides its commit; another session's staging there is what a `where =
 /// "operating"` rule refuses at the call ([`foreign`]).
 pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
     let operation = Operation::in_progress(&git_dir(checkout)?)?;

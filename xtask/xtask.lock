@@ -311,9 +311,6 @@ scratch::xtask
 status::Against
 status::render
 status::session
-steer::Ground
-steer::Ground::judge
-steer::Ground::of
 steer::STEERABLE
 steer::Verdict
 steer::Verdict::additions
