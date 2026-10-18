@@ -263,17 +263,24 @@ pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
 pub(crate) fn elsewhere(root: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
     crate::batch::without_git(&mut command);
-    run(command, root, args, None)
+    utf8(run(command, root, args, None)?)
 }
 
 /// Run git in `root` and return its stdout; a non-zero exit is an error
 /// carrying git's stderr.
 pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
-    run(Command::new("git"), root, args, stdin)
+    utf8(run(Command::new("git"), root, args, stdin)?)
 }
 
-/// `git`, as `command` stands, run in `root` with `stdin` fed to it.
-fn run(mut command: Command, root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
+/// `git`, as `command` stands, run in `root` with `stdin` fed to it: what
+/// it wrote on stdout, or the error that carries what it wrote on stderr
+/// when it exited non-zero.
+pub(crate) fn run(
+    mut command: Command,
+    root: &Path,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> Result<Vec<u8>> {
     let mut child = command
         .arg("-C")
         .arg(root)
@@ -291,19 +298,15 @@ fn run(mut command: Command, root: &Path, args: &[&str], stdin: Option<&str>) ->
         pipe.write_all(text.as_bytes()).context("feeding git")?;
     }
     let out = child.wait_with_output().context("waiting for git")?;
-    String::from_utf8(ran(&args.join(" "), out)?).context("git wrote something that is not UTF-8")
-}
-
-/// What `git <said>` wrote on stdout, or the error that carries what it
-/// wrote on stderr when it exited non-zero.
-pub(crate) fn ran(said: &str, out: std::process::Output) -> Result<Vec<u8>> {
     if !out.status.success() {
-        bail!(
-            "git {said}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git {}: {}", args.join(" "), stderr.trim());
     }
     Ok(out.stdout)
+}
+
+fn utf8(stdout: Vec<u8>) -> Result<String> {
+    String::from_utf8(stdout).context("git wrote something that is not UTF-8")
 }
 
 /// One file the working tree differs in from a base commit.

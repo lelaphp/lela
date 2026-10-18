@@ -71,7 +71,6 @@ pub use crate::batch::without_git;
 /// scratch repository's among them (#1416, #2747).
 pub fn committed(root: &Path, path: &str) -> Result<String> {
     let mut git = Command::new("git");
-    git.args(["show", &format!(":{path}")]).current_dir(root);
     if let Some(index) = std::env::var_os(batch::COMMIT_INDEX) {
         let dir = crate::git::git(root, &["rev-parse", "--absolute-git-dir"], None)
             .ok()
@@ -83,8 +82,7 @@ pub fn committed(root: &Path, path: &str) -> Result<String> {
             git.env("GIT_INDEX_FILE", index);
         }
     }
-    let out = git.output().with_context(|| format!("git show :{path}"))?;
-    let out = crate::git::ran(&format!("show :{path}"), out)?;
+    let out = crate::git::run(git, root, &["show", &format!(":{path}")], None)?;
     String::from_utf8(out).with_context(|| format!("{path} is not UTF-8"))
 }
 
