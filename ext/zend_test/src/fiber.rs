@@ -469,6 +469,35 @@ impl _ZendTestFiber {
     /// a: 8 2
     /// b: 8 0
     /// ```
+    ///
+    /// Inside both, the chain from the inner `Fiber`'s frame goes through
+    /// each `start` into the test fiber's closure, whose bottom frame names
+    /// no resumer's; a suspend that passes through both leaves the chain
+    /// standing as it is, and a debugger's evaluation in the inner fiber's
+    /// frame reads it so (`tests/frames.rs`, #2765):
+    ///
+    /// ```php
+    /// function f() {
+    ///     try { throw new Exception("no"); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+    /// }
+    /// $test = new _ZendTestFiber(function () {
+    ///     $a = new Fiber(function () {
+    ///         $b = new Fiber(function () { f(); });
+    ///         $b->start();
+    ///     });
+    ///     $a->start();
+    /// });
+    /// $test->start();
+    /// ```
+    /// ```expect
+    /// #0 %s(7): f()
+    /// #1 [internal function]: {closure:{closure:{closure:%s:5}:6}:7}()
+    /// #2 %s(8): Fiber->start()
+    /// #3 [internal function]: {closure:{closure:%s:5}:6}()
+    /// #4 %s(10): Fiber->start()
+    /// #5 [internal function]: {closure:%s:5}()
+    /// #6 {main}
+    /// ```
     fn suspend(
         req: &mut Request,
         #[php(default = null)] value: Value,

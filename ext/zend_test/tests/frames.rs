@@ -168,8 +168,9 @@ fn what_an_evaluation_there_throws_traces_on_into_the_test_fibers_frames() {
 
 /// Two `Fiber`s deep, the chain runs from the inner one's frame through
 /// the outer one's into the test fiber's, as the zend-test oracle's trace
-/// of a throw from `f()` while the inner one runs reads it, numbered by
-/// this program's lines:
+/// of a throw from `f()` while the inner one runs reads it (the witness on
+/// `_ZendTestFiber::suspend` pins that trace), numbered by this program's
+/// lines:
 ///
 /// ```text
 /// #0 Standard input code(11): f()
