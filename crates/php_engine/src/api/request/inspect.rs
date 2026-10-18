@@ -5,8 +5,11 @@
 //! an op array or a linked table holds, a tier reads through the native
 //! face (#1911).
 
+use std::sync::Arc;
+
 use php_compile::SourceKind;
 use php_heap::{Fatal, FrameRef};
+use php_unit::Unit;
 
 use super::{Request, Symbol};
 use crate::api::raising::{Level, Thrown};
@@ -128,26 +131,13 @@ impl Request {
 
     /// The code block itself, on a frame of its own over the global table.
     fn code_over(&mut self, name: &[u8], code: &[u8]) -> Result<Evaluated, Fatal> {
-        let unit = match self.host_string(|req| req.compile_eval(code, name)) {
-            Ok(unit) => unit,
-            Err(thrown) => {
-                self.leave_pending(&thrown);
-                return Ok(Evaluated::NotCompiled);
-            }
+        let Some(unit) = self.compiled_eval(code, name) else {
+            return Ok(Evaluated::NotCompiled);
         };
         if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL) || self.bailing_out() {
             return Ok(Evaluated::NotCompiled);
         }
-        let standing = self.vm.depth();
-        let callee = self.push_frame(unit)?;
-        crate::observer::call(self, callee);
-        let reenter = self.shared.loops.reenter;
-        let served = self.serve_host_string(|req| reenter(req, callee));
-        while self.vm.depth() > standing {
-            let top = self.vm.stack.current();
-            self.leave_frame(top);
-        }
-        served?;
+        self.serve_eval(None, unit)?;
         let returned = std::mem::replace(&mut self.returned, Value::null());
         self.release(returned);
         Ok(Evaluated::Rendered)
@@ -216,16 +206,34 @@ impl Request {
         name: &[u8],
     ) -> Result<Evaluation, Fatal> {
         let source = [&b"return "[..], code, b";"].concat();
-        let unit = match self.host_string(|req| req.compile_eval(&source, name)) {
-            Ok(unit) => unit,
-            Err(thrown) => {
-                self.leave_pending(&thrown);
-                return Ok(Evaluation::NotCompiled);
-            }
+        let Some(unit) = self.compiled_eval(&source, name) else {
+            return Ok(Evaluation::NotCompiled);
         };
         if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL) {
             return Ok(Evaluation::Refused);
         }
+        self.serve_eval(scope, unit)?;
+        Ok(Evaluation::Served)
+    }
+
+    /// `source` compiled as an `eval` under `name`, as a host's string
+    /// is ([`Request::host_string`]), or none, what the compiler threw
+    /// left pending.
+    fn compiled_eval(&mut self, source: &[u8], name: &[u8]) -> Option<Arc<Unit>> {
+        match self.host_string(|req| req.compile_eval(source, name)) {
+            Ok(unit) => Some(unit),
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                None
+            }
+        }
+    }
+
+    /// `unit` served by the loop bound to the engine, in `scope`'s frame
+    /// as a nested code frame is, or with none on a frame of its own over
+    /// the global table, and every frame it left above the standing ones
+    /// left.
+    fn serve_eval(&mut self, scope: Option<FrameRef>, unit: Arc<Unit>) -> Result<(), Fatal> {
         let standing = self.vm.depth();
         let callee = if let Some(frame) = scope {
             self.push_code_frame(unit, frame, None)?
@@ -243,8 +251,7 @@ impl Request {
             let top = self.vm.stack.current();
             self.leave_frame(top);
         }
-        served?;
-        Ok(Evaluation::Served)
+        served
     }
 
     /// `f` served with the request executing nothing, as php's
