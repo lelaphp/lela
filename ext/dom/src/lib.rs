@@ -2212,30 +2212,28 @@ enum Declared {
 
 fn declared_type(req: &mut Request, object: PhpObject, name: &[u8]) -> (Vec<u8>, Declared) {
     use php_ext::decl::Type;
-    let mut at = Some(object.class());
-    while let Some(c) = at {
-        let Some(decl) = req.class_decl(c) else {
-            break;
-        };
-        if let Some(p) = decl.properties.iter().find(|p| &*p.name.0 == name) {
-            let declared = match &p.ty {
-                Some(Type::Bool) => Declared::Bool,
-                Some(Type::Named(class)) => Declared::Object {
+    // `zend_hash_find_ptr(&ce->properties_info, name)` and its
+    // `prop_info->ce`.
+    let row = req.property_info_row(object.class(), name);
+    if let Some(row) = row
+        && let Some(p) = req.row_property_info(row)
+    {
+        let declared = match &p.ty {
+            Some(Type::Bool) => Declared::Bool,
+            Some(Type::Named(class)) => Declared::Object {
+                class: class.0.to_vec(),
+                nullable: false,
+            },
+            Some(Type::Nullable(inner)) => match &**inner {
+                Type::Named(class) => Declared::Object {
                     class: class.0.to_vec(),
-                    nullable: false,
+                    nullable: true,
                 },
-                Some(Type::Nullable(inner)) => match &**inner {
-                    Type::Named(class) => Declared::Object {
-                        class: class.0.to_vec(),
-                        nullable: true,
-                    },
-                    _ => Declared::String { nullable: true },
-                },
-                _ => Declared::String { nullable: false },
-            };
-            return (decl.name.0.to_vec(), declared);
-        }
-        at = req.class_parent(c);
+                _ => Declared::String { nullable: true },
+            },
+            _ => Declared::String { nullable: false },
+        };
+        return (class_name(req, row.declaring()).into_bytes(), declared);
     }
     (
         class_name(req, object.class()).into_bytes(),

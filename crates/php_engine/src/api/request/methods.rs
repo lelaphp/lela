@@ -7,7 +7,7 @@
 //! the engine's linked classes and the classes the request declared.
 
 use php_link::{LinkedClass, Row};
-use php_unit::decl::{Bare, ClassKind, MethodDecl, Visibility};
+use php_unit::decl::{Bare, ClassKind, MethodDecl, PropertyDecl, Visibility};
 
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::{Thrown, none_pending};
@@ -47,7 +47,88 @@ impl MethodRow {
     }
 }
 
+/// One row of a linked class's property table, `ce->properties_info`,
+/// named by value as a [`MethodRow`] is: the class whose table it is and
+/// the row the linked record holds there, read by
+/// [`Request::row_property_info`]. What php holds as a `zend_property_info *`
+/// out of the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropertyInfoRow {
+    class: ClassId,
+    row: Row<ClassId>,
+}
+
+impl PropertyInfoRow {
+    /// The class whose property table holds the row.
+    pub fn class(self) -> ClassId {
+        self.class
+    }
+
+    /// `prop_info->ce`: the class that declared the property, the
+    /// table's own class for one it declares.
+    pub fn declaring(self) -> ClassId {
+        self.row.holder_in(self.class)
+    }
+}
+
 impl Request {
+    /// `ZEND_HASH_FOREACH_PTR(&ce->properties_info, prop_info)`: every
+    /// row of `class`'s property table in php's order, the class's own
+    /// declarations, instance and `static`, then each inherited one it
+    /// does not declare again, an internal class's redeclaration at the
+    /// end; each a [`PropertyInfoRow`] [`Request::row_property_info`] reads, read
+    /// off the linked record in place; nothing for a class with no
+    /// linked record.
+    ///
+    /// ```php
+    /// class A { public $a = 1; static $s = 1; protected $p; } class B extends A { public $b; public $a = 2; }
+    /// foreach ((new ReflectionClass('B'))->getProperties() as $p) echo $p->class, '::', $p->name, "\n";
+    /// var_dump(get_class_vars('B'));
+    /// ```
+    /// ```expect
+    /// B::b
+    /// B::a
+    /// A::s
+    /// A::p
+    /// array(3) {
+    ///   ["b"]=>
+    ///   NULL
+    ///   ["a"]=>
+    ///   int(2)
+    ///   ["s"]=>
+    ///   int(1)
+    /// }
+    /// ```
+    pub fn property_info_rows(
+        &self,
+        class: ClassId,
+    ) -> impl ExactSizeIterator<Item = PropertyInfoRow> + '_ {
+        self.linked_class(class)
+            .map_or(&[][..], |record| record.properties.rows())
+            .iter()
+            .map(move |&row| PropertyInfoRow { class, row })
+    }
+
+    /// `zend_hash_find_ptr(&ce->properties_info, name)` as a
+    /// [`PropertyInfoRow`]: the row of `class`'s property table under the
+    /// name, byte for byte; none where the table has no entry of that
+    /// name. One lookup in the class's linked record.
+    pub fn property_info_row(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfoRow> {
+        let record = self.linked_class(class)?;
+        let (_, &row) = record.properties.find_at(name, |row| {
+            self.row_property_info(PropertyInfoRow { class, row: *row })
+                .map_or(&[][..], |property| &property.name.0)
+        })?;
+        Some(PropertyInfoRow { class, row })
+    }
+
+    /// The declaration of the property a row of a property table is,
+    /// which [`PropertyInfoRow::declaring`] declared.
+    pub fn row_property_info(&self, row: PropertyInfoRow) -> Option<&PropertyDecl> {
+        let decl = self.class_decl(row.declaring())?;
+        decl.properties.get(usize::try_from(row.row.at).ok()?)
+    }
+
     /// `obj->handlers->get_method(&obj, name, key)` as a call and
     /// `zend_is_callable_ex` ask it: the class's `get_method`, then its
     /// `__call`, then the same on the object its class hands the call

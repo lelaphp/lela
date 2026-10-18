@@ -2440,25 +2440,13 @@ fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<P
 }
 
 /// Whether a class from `class` up to `SplFileInfo`, that one aside,
-/// declares its own `__construct`.
+/// declares its own `__construct`: `ce->constructor->common.scope !=
+/// spl_ce_SplFileInfo`.
 fn declares_constructor(req: &mut Request, class: ClassId) -> Result<bool, Thrown> {
     let base = linked(req, b"SplFileInfo")?;
-    let mut at = Some(class);
-    for _ in 0..64 {
-        let Some(class) = at.filter(|c| *c != base) else {
-            return Ok(false);
-        };
-        let declares = req.class_decl(class).is_some_and(|decl| {
-            decl.methods
-                .iter()
-                .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__construct"))
-        });
-        if declares {
-            return Ok(true);
-        }
-        at = req.class_parent(class);
-    }
-    Ok(false)
+    Ok(req
+        .method_row(class, b"__construct")
+        .is_some_and(|row| row.scope() != base))
 }
 
 /// The name of the info class an object makes, `SplFileInfo` by default.

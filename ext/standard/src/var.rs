@@ -167,22 +167,9 @@ fn class_name(req: &Request, object: php_ext::values::PhpObject) -> Vec<u8> {
 /// Whether the class, or a class it extends, declares `method`, compared
 /// without case as php's function table is keyed.
 fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8]) -> bool {
-    let mut at = Some(class);
-    for _ in 0..64 {
-        let Some(here) = at else { return false };
-        let Some(decl) = req.class_decl(here) else {
-            return false;
-        };
-        if decl
-            .methods
-            .iter()
-            .any(|m| !m.is_abstract && m.function.name.0.eq_ignore_ascii_case(method))
-        {
-            return true;
-        }
-        at = req.class_parent(here);
-    }
-    false
+    req.method_row(class, method)
+        .and_then(|row| req.row_method(row))
+        .is_some_and(|method| !method.is_abstract)
 }
 
 /// Whether the class is `Serializable`, php's `ce->serialize` and

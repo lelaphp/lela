@@ -566,22 +566,7 @@ fn throw_failed(req: &mut Request, message: &str) -> Thrown {
 /// Whether the class, or a class it extends, has `__toString`, php's
 /// `ce->__tostring`.
 fn has_to_string(req: &mut Request, class: ClassId) -> bool {
-    let mut at = Some(class);
-    for _ in 0..64 {
-        let Some(here) = at else { return false };
-        let Some(decl) = req.class_decl(here) else {
-            return false;
-        };
-        if decl
-            .methods
-            .iter()
-            .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__tostring"))
-        {
-            return true;
-        }
-        at = req.class_parent(here);
-    }
-    false
+    req.method_row(class, b"__tostring").is_some()
 }
 
 // ------------------------------------------------------------ dispatch

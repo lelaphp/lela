@@ -164,6 +164,30 @@ impl<R, C: Case> Rows<R, C> {
         self.push(row, hash)
     }
 
+    /// `zend_hash_del` of the row under `name`, where one stands, then
+    /// `row` at the end: what `zend_declare_typed_property` makes of an
+    /// internal class's redeclaration of a property it inherited. Whether
+    /// it was added.
+    pub(crate) fn replace<'n>(
+        &mut self,
+        row: R,
+        name: &[u8],
+        named: impl Fn(&R) -> &'n [u8],
+    ) -> bool {
+        let hash = hash::<C>(name);
+        if let Some(at) = self.position(hash, |held| same::<C>(named(held), name)) {
+            let mut entries = std::mem::take(&mut self.entries);
+            let mut hashes = std::mem::take(&mut self.hashes);
+            entries.remove(at);
+            hashes.remove(at);
+            self.index = HashTable::new();
+            for (kept, kept_hash) in entries.into_iter().zip(hashes) {
+                self.push(kept, kept_hash);
+            }
+        }
+        self.push(row, hash)
+    }
+
     /// `do_inherit_method`, or `do_inherit_class_constant`, over each
     /// row of `from` in its order: the row `copy` makes of it at the
     /// end, where it makes one, unless one of its name stands already.

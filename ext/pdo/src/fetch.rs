@@ -1350,21 +1350,7 @@ fn class_target(
 
 /// Whether `class` declares or inherits a constructor.
 fn has_constructor(req: &mut Request, class: ClassId) -> bool {
-    let mut at = Some(class);
-    while let Some(class) = at {
-        let Some(decl) = req.class_decl(class) else {
-            return false;
-        };
-        if decl
-            .methods
-            .iter()
-            .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__construct"))
-        {
-            return true;
-        }
-        at = req.class_parent(class);
-    }
-    false
+    req.method_row(class, b"__construct").is_some()
 }
 
 // ---- the methods

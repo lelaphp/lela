@@ -1464,6 +1464,10 @@ trait ClassMember: Sized + 'static {
     /// and `zend_class_implements` the interfaces'; a method is
     /// registered with the class, before either.
     const LAST_WHEN_INTERNAL: bool = false;
+    /// Whether an internal class's own that redeclares an inherited one
+    /// takes its place at the end, `zend_hash_del` then
+    /// `zend_hash_update_ptr`: a property (`zend_declare_typed_property`).
+    const REDECLARED_LAST: bool = false;
 }
 
 impl ClassMember for MethodDecl {
@@ -1498,6 +1502,8 @@ impl ClassMember for ClassConstDecl {
 
 impl ClassMember for PropertyDecl {
     type Case = Exact;
+    const LAST_WHEN_INTERNAL: bool = true;
+    const REDECLARED_LAST: bool = true;
     fn of(class: &ClassDecl) -> &[Self] {
         &class.properties
     }
@@ -2188,10 +2194,11 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// a private constant not); the rest of its own, which for a method
     /// are the traits' abstract ones it took; then each of its
     /// interfaces', in `zend_do_implement_interfaces`' order, that
-    /// nothing above put there. An internal class's constants are the
-    /// parent's and the interfaces' and then its own
-    /// ([`ClassMember::LAST_WHEN_INTERNAL`]). None where the parent or
-    /// an interface is held with no record.
+    /// nothing above put there. An internal class's constants and
+    /// properties are the parent's and the interfaces' and then its own
+    /// ([`ClassMember::LAST_WHEN_INTERNAL`]), a property it redeclares
+    /// moving to the end ([`ClassMember::REDECLARED_LAST`]). None where
+    /// the parent or an interface is held with no record.
     ///
     /// `ce->properties_info` puts the class's own first, so it is not
     /// the slot order, which puts the parent's slots first.
@@ -2223,7 +2230,12 @@ impl<'a, H: Copy> Linker<'a, H> {
         }
         if last {
             for (at, member) in declared {
-                rows.add(Row { holder: None, at }, member.name(), named);
+                let row = Row { holder: None, at };
+                if M::REDECLARED_LAST {
+                    rows.replace(row, member.name(), named);
+                } else {
+                    rows.add(row, member.name(), named);
+                }
             }
         }
         Some(rows)

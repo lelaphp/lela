@@ -6924,42 +6924,9 @@ fn constant_rows(req: &Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)
 /// )
 /// ```
 fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, ClassId)> {
-    linked_properties_at(req, class, 0)
-}
-
-fn linked_properties_at(
-    req: &mut Request,
-    class: ClassId,
-    depth: u32,
-) -> Vec<(PropertyDecl, ClassId)> {
-    let Some(decl) = req.class_decl(class).cloned() else {
-        return Vec::new();
-    };
-    let inherited = match req.class_parent(class) {
-        Some(parent) if depth <= 64 => linked_properties_at(req, parent, depth + 1),
-        _ => Vec::new(),
-    };
-    if decl.file.0.is_empty() {
-        // An internal class inherits before it declares, and a
-        // redeclaration is `zend_hash_del` then `zend_hash_update_ptr`
-        // in `zend_declare_typed_property`, so it moves to the end.
-        let mut table = inherited;
-        for property in decl.properties {
-            if let Some(i) = table.iter().position(|(p, _)| p.name == property.name) {
-                table.remove(i);
-            }
-            table.push((property, class));
-        }
-        return table;
-    }
-    let mut table: Vec<(PropertyDecl, ClassId)> =
-        decl.properties.into_iter().map(|p| (p, class)).collect();
-    for (property, at) in inherited {
-        if !table.iter().any(|(p, _)| p.name == property.name) {
-            table.push((property, at));
-        }
-    }
-    table
+    req.property_info_rows(class)
+        .filter_map(|row| Some((req.row_property_info(row)?.clone(), row.declaring())))
+        .collect()
 }
 
 /// `_function_string` with no scope: `Function [ <internal:ext>

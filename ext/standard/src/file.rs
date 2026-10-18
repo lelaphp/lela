@@ -1784,33 +1784,9 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     {
         return Ok(true);
     }
-    let mut at = Some(object.class());
-    for _ in 0..64 {
-        let Some(class) = at else {
-            break;
-        };
-        let Some(decl) = req.class_decl(class) else {
-            break;
-        };
-        let declares = |methods: &[php_ext::decl::MethodDecl]| {
-            methods
-                .iter()
-                .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__toString"))
-        };
-        if declares(&decl.methods) {
-            return Ok(true);
-        }
-        let traits = decl.traits.clone();
-        for name in traits {
-            if let Some(used) = lookup_class(req, &name.0)?
-                && req.class_decl(used).is_some_and(|t| declares(&t.methods))
-            {
-                return Ok(true);
-            }
-        }
-        at = req.class_parent(class);
-    }
-    Ok(false)
+    // `ce->__tostring`: the function table's row, a trait's method and
+    // an inherited one among them.
+    Ok(req.method_row(object.class(), b"__tostring").is_some())
 }
 
 /// `stream_get_meta_data($stream): array`,

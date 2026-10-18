@@ -1169,27 +1169,13 @@ fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
 /// The public methods of a class's function table: its own, then each
 /// parent's it does not override.
 fn public_methods(req: &mut Request, class: ClassId) -> Vec<Vec<u8>> {
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    let mut seen: Vec<Vec<u8>> = Vec::new();
-    let mut at = Some(class);
-    for _ in 0..64 {
-        let Some(c) = at else { break };
-        let Some(decl) = req.class_decl(c).cloned() else {
-            break;
-        };
-        for m in &decl.methods {
-            let lc = m.function.name.0.to_ascii_lowercase();
-            if seen.contains(&lc) {
-                continue;
-            }
-            seen.push(lc);
-            if m.visibility == php_ext::decl::Visibility::Public {
-                out.push(m.function.name.0.to_vec());
-            }
-        }
-        at = req.class_parent(c);
-    }
-    out
+    // `ZEND_HASH_FOREACH_PTR(&ce->function_table, f)` with
+    // `ZEND_ACC_PUBLIC`, in the table's order.
+    req.method_rows(class)
+        .filter_map(|row| req.row_method(row))
+        .filter(|m| m.visibility == php_ext::decl::Visibility::Public)
+        .map(|m| m.function.name.0.to_vec())
+        .collect()
 }
 
 /// `SoapServer::__construct`'s body.
