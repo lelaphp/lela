@@ -418,7 +418,7 @@ impl Request {
     /// below it while a suspend that passed through leaves each waiting
     /// on the one under it, to the bottom frame of the last, where
     /// `zend_fiber_suspend` cut `prev_execute_data`
-    /// ([`crate::fiber::take_held`]). The request's own stack is kept
+    /// ([`crate::fiber::take_chain`]). The request's own stack is kept
     /// where [`crate::fiber::Fibers::request_stack`] finds it, so
     /// `EG(symbol_table)`'s CVs are read where they stand, and the serve
     /// holds one owner of each coroutine's object on the chain, so nothing
@@ -431,7 +431,7 @@ impl Request {
         coroutine: crate::fiber::Context,
         f: impl FnOnce(&mut Request) -> R,
     ) -> Option<R> {
-        let (mut execution, below) = crate::fiber::take_held(self, coroutine)?;
+        let (mut execution, below) = crate::fiber::take_chain(self, coroutine)?;
         let objects: Vec<Value> = std::iter::once(coroutine)
             .chain(below.iter().map(|held| held.coroutine))
             .map(|held| held.object().as_value())
@@ -444,7 +444,7 @@ impl Request {
         let served = self.with_fiber_switch_blocked(f);
         if let Some((coroutine, mut execution, below)) = self.fibers.take_back() {
             self.switch_stack(&mut execution);
-            let held = std::iter::once(crate::fiber::Held {
+            let held = std::iter::once(crate::fiber::HeldStack {
                 coroutine,
                 execution,
             });

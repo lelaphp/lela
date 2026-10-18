@@ -359,19 +359,19 @@ enum Aside {
     /// running coroutine, the coroutine served, the execution the
     /// request ran on, which no running coroutine's `below` holds, and
     /// the held stacks the chain runs on into below the coroutine's,
-    /// innermost first ([`take_held`]).
+    /// innermost first ([`take_chain`]).
     Suspended {
         running: Vec<Running>,
         coroutine: Context,
         displaced: Box<Execution>,
-        below: Vec<Held>,
+        below: Vec<HeldStack>,
     },
 }
 
 /// A coroutine off the running chain, and the execution it held, which
 /// a serve took out to stand on the chain below the stack it serves on
-/// ([`take_held`]).
-pub(crate) struct Held {
+/// ([`take_chain`]).
+pub(crate) struct HeldStack {
     pub(crate) coroutine: Context,
     pub(crate) execution: Box<Execution>,
 }
@@ -385,7 +385,10 @@ pub(crate) struct Held {
 /// suspended coroutine's bottom, where `zend_fiber_suspend` cut it, and
 /// at one whose bottom names no resumer. None where `top` holds no
 /// execution with a frame in it.
-pub(crate) fn take_held(req: &mut Request, top: Context) -> Option<(Box<Execution>, Vec<Held>)> {
+pub(crate) fn take_chain(
+    req: &mut Request,
+    top: Context,
+) -> Option<(Box<Execution>, Vec<HeldStack>)> {
     let coroutine = top.coroutine(req)?;
     let execution = coroutine.take_held()?;
     let mut next = coroutine.linked_resumer();
@@ -398,7 +401,7 @@ pub(crate) fn take_held(req: &mut Request, top: Context) -> Option<(Box<Executio
             break;
         };
         next = held.linked_resumer();
-        below.push(Held {
+        below.push(HeldStack {
             coroutine: resumer,
             execution,
         });
@@ -565,7 +568,7 @@ impl Fibers {
         &mut self,
         coroutine: Context,
         displaced: Box<Execution>,
-        below: Vec<Held>,
+        below: Vec<HeldStack>,
     ) {
         let running = std::mem::take(&mut self.running);
         self.aside.push(Aside::Suspended {
@@ -579,7 +582,7 @@ impl Fibers {
     /// [`Fibers::set_aside_for`] undone: the coroutines set aside running
     /// again, and the coroutine served, the execution displaced and the
     /// held stacks below handed back.
-    pub(crate) fn take_back(&mut self) -> Option<(Context, Box<Execution>, Vec<Held>)> {
+    pub(crate) fn take_back(&mut self) -> Option<(Context, Box<Execution>, Vec<HeldStack>)> {
         match self
             .aside
             .pop_if(|aside| matches!(aside, Aside::Suspended { .. }))?
@@ -1653,9 +1656,10 @@ fn execute<P: HoldsCoroutine>(
     let thrown = match body(req) {
         Ok(CoroutineEnd::Return(value)) => return Transfer::Value(value.hand_on()),
         Ok(CoroutineEnd::Into(target)) => {
-            if let Ok(coroutine) = coroutine_of::<P>(req, object) {
-                coroutine.into = Some(target);
-            }
+            let Ok(coroutine) = coroutine_of::<P>(req, object) else {
+                return Transfer::Fatal;
+            };
+            coroutine.into = Some(target);
             return Transfer::Value(Value::null());
         }
         Err(thrown) => thrown,
@@ -1788,8 +1792,7 @@ fn switch_into<P: HoldsCoroutine>(
     }
     // The coroutine running now: `object`, then each one a body ended into.
     let mut object = object;
-    let (switched, refused) =
-        run_ending_into::<P>(req, &mut object, &mut stack, own, by, transfer, caller)?;
+    let switched = run_ending_into::<P>(req, &mut object, &mut stack, own, by, transfer, caller)?;
     // The switch back is noticed on the coroutine's side, its frames the
     // ones standing, as php notices it before the jump, and out of the
     // coroutine the suspend was made in.
@@ -1841,14 +1844,6 @@ fn switch_into<P: HoldsCoroutine>(
             Transfer::Fatal
         }
     };
-    if refused {
-        settle(req, Ok(back));
-        return Err(throw_error(
-            req,
-            "Error",
-            "InternalError: a fiber coroutine ended into one not laid down",
-        ));
-    }
     Ok(back)
 }
 
@@ -1856,8 +1851,9 @@ fn switch_into<P: HoldsCoroutine>(
 /// coroutine a body ends into ([`CoroutineEnd::Into`]), resumed by what
 /// resumed the first, `caller`, as `zend_test_fiber_execute` hands a
 /// `pipeTo` target the dead fiber's: `object` and `stack` are left the
-/// last one's, with how it came back, and whether a body ended into one
-/// not laid down, which comes back as that body's return.
+/// last one's, and how it came back is returned. A body that ends into
+/// one not laid down is the engine's fatal, which comes back as the
+/// transfer that body's fatal makes.
 fn run_ending_into<P: HoldsCoroutine>(
     req: &mut Request,
     object: &mut PhpObject,
@@ -1866,20 +1862,24 @@ fn run_ending_into<P: HoldsCoroutine>(
     mut by: Resumer,
     mut transfer: Transfer,
     caller: Caller,
-) -> Result<(Result<Switched<Transfer>, php_heap::Fatal>, bool), Thrown> {
+) -> Result<Result<Switched<Transfer>, php_heap::Fatal>, Thrown> {
     loop {
         let switched = run_on::<P>(req, *object, stack, own, by, transfer)?;
         let back = match switched {
             Ok(Switched::Returned(back)) => back,
-            switched => return Ok((switched, false)),
+            switched => return Ok(switched),
         };
         let Some(target) = coroutine_of::<P>(req, *object)?.into.take() else {
-            return Ok((Ok(Switched::Returned(back)), false));
-        };
-        let Some((next, held, kind)) = laid_down::<P>(req, target) else {
-            return Ok((Ok(Switched::Returned(back)), true));
+            return Ok(Ok(Switched::Returned(back)));
         };
         settle(req, Ok(back));
+        let Some((next, held, kind)) = laid_down::<P>(req, target) else {
+            let _ = crate::api::raising::fatal(
+                req,
+                "InternalError: a fiber coroutine ended into one not laid down",
+            );
+            return Ok(Ok(Switched::Returned(Transfer::Fatal)));
+        };
         ended_into::<P>(req, *object, target, caller)?;
         *object = target;
         *stack = next;
@@ -2407,13 +2407,13 @@ impl Coroutine {
     }
 
     /// [`Coroutine::held`], taken out for the request to serve on
-    /// ([`take_held`]); [`Coroutine::hold`] puts it back.
+    /// ([`take_chain`]); [`Coroutine::hold`] puts it back.
     fn take_held(&mut self) -> Option<Box<Execution>> {
         self.held()?;
         self.execution.take()
     }
 
-    /// What [`take_held`] took, held again.
+    /// What [`Coroutine::take_held`] took, held again.
     pub(crate) fn hold(&mut self, execution: Box<Execution>) {
         self.execution = Some(execution);
     }
