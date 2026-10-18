@@ -28,6 +28,11 @@ use php_engine::tier::{Flow, FrameRef, Request, Site, Tier};
 #[allow(unsafe_code, reason = "seams.toml rule unsafe.homes: php_jit::enter")]
 mod enter;
 
+// The code arena has no caller until a trace is published, so it is built
+// for its tests alone (#2741).
+#[cfg(test)]
+mod table;
+
 /// The bench bar's program (#2742), behind the `bench` feature, so the
 /// crate's own surface stays `Jit`.
 #[cfg(feature = "bench")]
