@@ -194,11 +194,16 @@ fn unforked(req: &mut Request) -> i32 {
 }
 
 /// A platform where no thread can take another user's ids for itself
-/// alone: the preload is served as the process runs.
+/// alone: the engine refuses to start rather than serve a file the
+/// operator declared unprivileged as root, where php would preload as
+/// the user (`trace:preload-user-no-thread-credentials`, as #1258's
+/// ruling of 2026-10-01 accepts it).
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn as_user(_: &mut Request, script: Vec<u8>, _: Account) -> PostStartup {
-    PostStartup::Preload {
-        script,
-        thread: None,
-    }
+fn as_user(req: &mut Request, _: Vec<u8>, _: Account) -> PostStartup {
+    accel_log(
+        req,
+        Log::Fatal,
+        "Preloading as \"opcache.preload_user\" needs a thread that takes the user's ids for itself alone, which this platform has not",
+    );
+    PostStartup::Refuse { status: -2 }
 }
