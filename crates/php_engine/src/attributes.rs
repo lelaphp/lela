@@ -19,7 +19,7 @@ use php_unit::Level;
 
 use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
 use crate::api::call::{Function, attribute_object_made};
-use crate::api::raising::{Thrown, none_pending, raise, throw_error};
+use crate::api::raising::{Thrown, none_pending, raise};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
@@ -639,13 +639,7 @@ impl SensitiveParameterValue {
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
         let value = Owner::take(req, value);
-        initialise(
-            req,
-            this.object(),
-            "SensitiveParameterValue",
-            b"value",
-            value,
-        )
+        initialise(req, this.object(), b"value", value)
     }
 
     /// `SensitiveParameterValue::getValue(): mixed`, the value the
@@ -740,9 +734,9 @@ impl Deprecated {
     ) -> Result<(), Thrown> {
         let this = this.object();
         let message = Owner::take(req, message.map_or_else(Value::null, Value::string));
-        initialise(req, this, "Deprecated", b"message", message)?;
+        initialise(req, this, b"message", message)?;
         let since = Owner::take(req, since.map_or_else(Value::null, Value::string));
-        initialise(req, this, "Deprecated", b"since", since)
+        initialise(req, this, b"since", since)
     }
 }
 
@@ -781,7 +775,7 @@ impl NoDiscard {
         #[php(default = null)] message: Option<PhpString>,
     ) -> Result<(), Thrown> {
         let message = Owner::take(req, message.map_or_else(Value::null, Value::string));
-        initialise(req, this.object(), "NoDiscard", b"message", message)
+        initialise(req, this.object(), b"message", message)
     }
 }
 
@@ -803,20 +797,12 @@ impl DelayedTargetValidation {}
 fn initialise(
     req: &mut Request,
     this: PhpObject,
-    class: &str,
     name: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
     if this.prop(req, name).is_some() {
         value.give_up(req);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!(
-                "Cannot modify readonly property {class}::${}",
-                String::from_utf8_lossy(name)
-            ),
-        ));
+        return Err(req.readonly_modification(this.class(), name, "modify"));
     }
     crate::api::call::write_prop(req, &this, name, value)
 }

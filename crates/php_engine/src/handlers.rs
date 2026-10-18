@@ -12860,11 +12860,10 @@ fn assign_property(
             let reinitable = object.heap().slot_bit(slot, php_heap::PropBit::Reinitable);
             if typed.readonly && !reinitable && !object.heap().slot(slot).is_undef() {
                 req.release(value);
-                let class = req.class_name(typed.declaring);
-                return Ok(Err(crate::api::raising::throw_error(
-                    req,
-                    "Error",
-                    &format!("Cannot modify readonly property {class}::${shown_name}"),
+                return Ok(Err(req.readonly_modification(
+                    typed.declaring,
+                    bytes,
+                    "modify",
                 )));
             }
             let strict = req.frame_strict_types(frame);
@@ -15283,15 +15282,10 @@ fn unwritten_step_slot(
     slot: u32,
     typed: bool,
 ) -> Result<PropertyPtr, Thrown> {
-    let shown = String::from_utf8_lossy(bytes).into_owned();
     if typed {
-        let class = req.class_name(object.class());
-        return Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            &format!("Typed property {class}::${shown} must not be accessed before initialization"),
-        ));
+        return Err(req.uninitialized_property(object.class(), bytes));
     }
+    let shown = String::from_utf8_lossy(bytes).into_owned();
     if req.overloaded_place(object, bytes) {
         return Ok(PropertyPtr::Served(WriteBack::Property));
     }
