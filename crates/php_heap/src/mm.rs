@@ -52,15 +52,18 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::hooks::Fatal;
 use crate::observe::{Allocation, AllocationObserverId, ObserveAllocations, Observers};
 
+mod cache;
 #[cfg(debug_assertions)]
 mod leaks;
 #[cfg(debug_assertions)]
 mod origins;
+
+pub use cache::ChunkCache;
 
 /// `ZEND_MM_CHUNK_SIZE`: 2 MiB, and the alignment of every chunk, so the
 /// chunk an allocation belongs to is its address with the low bits cut.
@@ -274,6 +277,10 @@ pub(crate) struct Mm {
     /// ([`Mm::set_origin`]).
     #[cfg(debug_assertions)]
     origin: crate::sensed::Origin,
+    /// The engine's free chunks this heap takes its chunks from and gives
+    /// them back to ([`ChunkCache`]); none for a heap that maps its own
+    /// and unmaps them at its end.
+    cache: Option<Arc<ChunkCache>>,
     /// A debug build's backtrace of every block it has out, where
     /// allocations are traced ([`Mm::trace_allocations`]).
     #[cfg(debug_assertions)]
@@ -287,6 +294,21 @@ impl Mm {
     /// cannot give the chunk leaves the heap empty and the next
     /// allocation asks again.
     pub(crate) fn new() -> Mm {
+        Mm::over(None)
+    }
+
+    /// A heap whose chunks come from `cache` and go back to it at its
+    /// end, as `zend_mm_shutdown(full=0)` leaves php's main chunk laid
+    /// down again for the next request: what it reads is [`Mm::new`]'s.
+    pub(crate) fn new_in(cache: Arc<ChunkCache>) -> Mm {
+        Mm::over(Some(cache))
+    }
+
+    fn over(cache: Option<Arc<ChunkCache>>) -> Mm {
+        let main = match &cache {
+            Some(cache) => cache.enter(),
+            None => chunk_alloc(CHUNK_SIZE),
+        };
         let mut mm = Mm {
             chunks: Vec::new(),
             cached: Vec::new(),
@@ -310,10 +332,11 @@ impl Mm {
             quarantine: [Quarantine::EMPTY; BINS],
             #[cfg(debug_assertions)]
             origin: crate::sensed::Origin::default(),
+            cache,
             #[cfg(debug_assertions)]
             traces: None,
         };
-        if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
+        if let Some(chunk) = main {
             mm.chunk_init(chunk, 0);
             mm.chunks.push(chunk);
             mm.peak_chunks_count = 1;
@@ -368,7 +391,7 @@ impl Mm {
                 let Some(chunk) = self.cached.pop() else {
                     break;
                 };
-                chunk_free(chunk, CHUNK_SIZE);
+                self.unmap_chunk(chunk);
                 self.real_size -= CHUNK_SIZE;
             }
             return true;
@@ -1090,9 +1113,9 @@ impl Mm {
                     return Err(self.refuse(limit_exhausted(self.limit, asked)));
                 }
             }
-            let mapped = match chunk_alloc(CHUNK_SIZE) {
+            let mapped = match self.map_chunk() {
                 Some(chunk) => Some(chunk),
-                None if self.gc_heap() != 0 => chunk_alloc(CHUNK_SIZE),
+                None if self.gc_heap() != 0 => self.map_chunk(),
                 None => None,
             };
             let Some(chunk) = mapped else {
@@ -1182,9 +1205,9 @@ impl Mm {
             num > cached_num
         });
         if newer {
-            chunk_free(chunk, CHUNK_SIZE);
+            self.unmap_chunk(chunk);
         } else if let Some(cached) = self.cached.pop() {
-            chunk_free(cached, CHUNK_SIZE);
+            self.unmap_chunk(cached);
             self.cached.push(chunk);
         }
     }
@@ -1389,20 +1412,43 @@ impl std::fmt::Debug for Mm {
 }
 
 impl Drop for Mm {
-    /// Mass release at request end (design §5.13): every chunk, cached
-    /// chunk and huge block this request mapped is given back, so nothing
-    /// a request allocated outlives it.
+    /// Mass release at request end (design §5.13): every huge block this
+    /// request mapped is unmapped, and every chunk and cached chunk goes
+    /// back to the engine's cache where the heap has one
+    /// (`zend_mm_shutdown(full=0)`), and is unmapped where it has none, so
+    /// nothing a request allocated outlives it.
     fn drop(&mut self) {
-        for chunk in self.chunks.drain(..) {
-            #[cfg(debug_assertions)]
-            origins::give_back(chunk);
-            chunk_free(chunk, CHUNK_SIZE);
-        }
-        for chunk in self.cached.drain(..) {
-            chunk_free(chunk, CHUNK_SIZE);
-        }
         for block in self.huge.drain(..) {
             huge_unmap(block.at, block.size);
+        }
+        #[cfg(debug_assertions)]
+        for chunk in &self.chunks {
+            origins::give_back(*chunk);
+        }
+        let held = self.chunks.drain(..).chain(self.cached.drain(..));
+        match &self.cache {
+            Some(cache) => cache.leave(held),
+            None => held.for_each(|chunk| chunk_free(chunk, CHUNK_SIZE)),
+        }
+    }
+}
+
+impl Mm {
+    /// One chunk more for this heap: the engine cache's, or a fresh
+    /// mapping (`zend_mm_chunk_alloc`).
+    fn map_chunk(&self) -> Option<NonNull<Chunk>> {
+        match &self.cache {
+            Some(cache) => cache.take(),
+            None => chunk_alloc(CHUNK_SIZE),
+        }
+    }
+
+    /// A chunk this heap gives up while it stands: to the engine's cache,
+    /// or unmapped (`zend_mm_chunk_free`).
+    fn unmap_chunk(&self, chunk: NonNull<Chunk>) {
+        match &self.cache {
+            Some(cache) => cache.give(chunk),
+            None => chunk_free(chunk, CHUNK_SIZE),
         }
     }
 }

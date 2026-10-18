@@ -69,6 +69,7 @@ pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
+pub use mm::ChunkCache;
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
 };
@@ -154,7 +155,34 @@ impl Heap {
     /// the request serves a line, and nothing else.
     #[must_use]
     pub fn new() -> Heap {
-        let mut mm = mm::Mm::new();
+        Heap::over(mm::Mm::new())
+    }
+
+    /// [`Heap::new`], its chunks taken from the engine's `cache` and given
+    /// back to it when the heap drops, as a php-fpm child keeps its heap's
+    /// chunks from one request to the next (`zend_mm_shutdown(full=0)`):
+    /// what the heap reads is a new heap's. A request of a php-fpm child
+    /// starts on the one chunk its heap kept:
+    ///
+    /// ```php
+    /// echo memory_get_usage(true), ' ', memory_get_peak_usage(true), ' ', ini_get('memory_limit'), "\n";
+    /// ```
+    /// ```request fpm
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// X-Powered-By: PHP/8.5.9
+    /// Content-type: text/html; charset=UTF-8
+    ///
+    /// 2097152 2097152 128M
+    /// ```
+    #[must_use]
+    pub fn new_in(cache: std::sync::Arc<ChunkCache>) -> Heap {
+        Heap::over(mm::Mm::new_in(cache))
+    }
+
+    fn over(mut mm: mm::Mm) -> Heap {
         let store = object::Store::new(&mut mm);
         let mut gc = collector::Collector::new();
         gc.enable(true);

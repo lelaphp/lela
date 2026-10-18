@@ -929,6 +929,12 @@ pub(crate) struct Shared {
     /// started by the first deadline a request sets, parked between
     /// requests, and joined before a fork and at the engine's end.
     pub(crate) timer: crate::interrupt::Timer,
+    /// The free chunks every request's heap takes its chunks from and
+    /// gives them back to at its end (design §5.13, §5.14): what php's
+    /// worker keeps from one request to the next by
+    /// `zend_mm_shutdown(full=0)`, kept by the engine because a heap is
+    /// its request's and dropped with it (#2940).
+    pub(crate) chunks: Arc<php_heap::ChunkCache>,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -3585,6 +3591,7 @@ impl EngineBuilder {
                 arena,
                 layer,
                 timer: crate::interrupt::Timer::default(),
+                chunks: Arc::default(),
                 strings: Mutex::new(strings),
                 names,
                 default_strings,

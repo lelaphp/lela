@@ -945,7 +945,7 @@ impl Request {
         // VM stack, out of the heap the object store's table stands in.
         // The main chunk holds it, so nothing refuses it; a heap that
         // did would refuse the first push again, with php's fatal.
-        let mut heap = Heap::new();
+        let mut heap = Heap::new_in(Arc::clone(&shared.chunks));
         #[cfg(debug_assertions)]
         if shared.sense_leaks == crate::engine::LeakSensor::Traced {
             heap.trace_allocations();

@@ -43,6 +43,8 @@ Block::bytes_mut
 Block::is_empty
 Block::len
 CallStack
+ChunkCache
+ChunkCache::new
 DeclaredRows
 Direction
 EntryGuard
@@ -144,6 +146,7 @@ Heap::memory_usage
 Heap::native
 Heap::native_mut
 Heap::new
+Heap::new_in
 Heap::object
 Heap::object_clone
 Heap::object_clone_members_into
