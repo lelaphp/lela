@@ -180,7 +180,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: store-miri
-          path: target/harness
+          # The phpt runs the workspace keeps are the build job's to hand
+          # `done`: this job takes none, and its runner's would be another
+          # machine's or an older job's runs of the same tree.
+          path: |
+            target/harness
+            !target/harness/phpt-runs/
           if-no-files-found: warn
           retention-days: 1 # read by `done`'s job, minutes later
 
@@ -235,7 +240,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: store-oracle
-          path: target/harness
+          # The phpt runs the workspace keeps are the build job's to hand
+          # `done`: this job takes none, and its runner's would be another
+          # machine's or an older job's runs of the same tree.
+          path: |
+            target/harness
+            !target/harness/phpt-runs/
           if-no-files-found: warn
           retention-days: 1 # read by `done`'s job, minutes later
 

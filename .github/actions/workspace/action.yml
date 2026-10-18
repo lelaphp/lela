@@ -3,9 +3,11 @@
 # and runs this before its first cargo step: everything git does not track is
 # removed except target/, which stays as the warm build a hosted runner had
 # to restore from a cache; the reading store under it is emptied, so a run's
-# readings are its own (harness §4.2); and, unless a job builds no Rust, the
-# toolchain rust-toolchain.toml names is installed where rustup has not yet
-# (rustup 1.28 or later, as scripts/ci/runner.sh lays it down).
+# readings are its own (harness §4.2), all but the phpt runs and the
+# targets under the pin kept beside it, which the oracle job holds an
+# engine's reading to from one run to the next; and, unless a job builds no
+# Rust, the toolchain rust-toolchain.toml names is installed where rustup
+# has not yet (rustup 1.28 or later, as scripts/ci/runner.sh lays it down).
 name: workspace
 description: Clean the checkout but target/, empty the store, install the pinned toolchain
 inputs:
@@ -21,5 +23,5 @@ runs:
         TOOLCHAIN: ${{ inputs.toolchain }}
       run: |
         git clean -ffdxq -e /target/
-        rm -rf target/harness
+        [ ! -d target/harness ] || find target/harness -mindepth 1 -maxdepth 1 ! -name phpt-runs -exec rm -rf {} +
         [ "$TOOLCHAIN" != true ] || rustup toolchain install
