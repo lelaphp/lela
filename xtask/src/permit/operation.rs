@@ -545,17 +545,19 @@ pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The operation standing in `checkout` that has staged `path`, its index
-/// entry other than `HEAD`'s: the operation's commit carries it, so
-/// `permit --after` never puts it back (#2597). An index git cannot read
-/// is read as staged, the side that puts nothing back. What the index
+/// entry other than `HEAD`'s and not a conflict's: the operation's commit
+/// carries it, so `permit --after` never puts it back (#2597), where a
+/// conflicted path it leaves to the hand that resolves it (#2880). An
+/// index git cannot read is read as staged, the side that puts nothing
+/// back. What the index
 /// cannot say is whose hand staged the entry, so a call's own `git add`
 /// while the operation stands is read as the operation's and rides its
 /// commit; another session's staging there is what a `where =
 /// "operating"` rule refuses at the call ([`foreign`]).
 pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
     let operation = Operation::in_progress(&git_dir(checkout)?)?;
-    let args = ["diff", "--cached", "--name-only", "-z", "--", path];
-    let differs = git::git(checkout, &args, None).map_or(true, |d| !d.is_empty());
+    let args = ["diff", "--cached", "--quiet", "--diff-filter=u", "--", path];
+    let differs = git::git(checkout, &args, None).is_err();
     differs.then_some(operation)
 }
 
