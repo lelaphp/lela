@@ -488,14 +488,18 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
 
 /// The clone at `root` given a `target/debug` warm for the build the add
 /// makes, where the volume clones: this workspace's copied in as a head
-/// start and then built in the clone, so what the copy lacks the clone
-/// compiles here and the worktree does not. The copy alone was the clone's
-/// build until #2261, and it lacked every dependency whenever a
-/// `cargo sweep --maxsize` had pruned this workspace's `target/` during the
-/// run, the oldest artifacts first: the worktree then compiled them all
-/// and the test failed on a tree it does not own. Whether the volume
-/// clones, which is the branch the add takes; where it does not, the
-/// clone holds no build and the add says it starts cold.
+/// start and then `xtask`'s dependencies built in the clone, so what the
+/// copy lacks the clone compiles here and the worktree does not. The copy
+/// alone was the clone's build until #2261, and it lacked every dependency
+/// whenever a `cargo sweep --maxsize` had pruned this workspace's
+/// `target/` during the run, the oldest artifacts first: the worktree then
+/// compiled them all and the test failed on a tree it does not own. A
+/// dependency's build does not read the sources of the crate that uses it,
+/// so `xtask`'s two roots stand empty for the length of the clone's build
+/// and are checked out again after: the add's build is the one that
+/// compiles `xtask` (#2882). Whether the volume clones, which is the branch
+/// the add takes; where it does not, the clone holds no build and the add
+/// says it starts cold.
 fn warm_clone(root: &Path) -> bool {
     let target = root.join("target");
     fs::create_dir_all(&target).unwrap();
@@ -520,6 +524,13 @@ fn warm_clone(root: &Path) -> bool {
         .arg(target.join("debug"))
         .output()
         .unwrap();
+    let roots = [
+        ("xtask/src/lib.rs", "//! empty\n"),
+        ("xtask/src/main.rs", "//! empty\nfn main() {}\n"),
+    ];
+    for (file, empty) in roots {
+        write(root, file, empty);
+    }
     let built = Command::new("cargo")
         .args(["build", "-p", "xtask"])
         .current_dir(root)
@@ -527,6 +538,7 @@ fn warm_clone(root: &Path) -> bool {
         .env_remove("CARGO_MANIFEST_DIR")
         .output()
         .unwrap();
+    sh(root, &["git", "checkout", "--", roots[0].0, roots[1].0]);
     assert!(
         built.status.success(),
         "the clone's build: {}",
