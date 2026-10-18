@@ -27,9 +27,10 @@ use crate::held::{Held, Shape};
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
 
-/// `PHP_DATE_CIVIL` and `PHP_DATE_WALL`.
-pub(super) const CIVIL: i64 = 1;
-pub(super) const WALL: i64 = 2;
+/// `PHP_DATE_CIVIL` and `PHP_DATE_WALL`, the values of
+/// `php_interval_obj`'s `int civil_or_wall`.
+pub(super) const CIVIL: i32 = 1;
+pub(super) const WALL: i32 = 2;
 
 /// `php_date_obj`: the time, none until a constructor set it. timelib
 /// made it on the request's heap ([`crate::lent`]), so its
@@ -115,20 +116,24 @@ const _: () = assert!(size_of::<TzState>() <= 32);
 
 /// `php_interval_obj`: the relative time, none until a constructor set
 /// it. timelib made it on the request's heap ([`crate::lent`]), where
-/// php's `diff` points.
+/// php's `diff` points. Three words, so a `DateInterval`'s state lies
+/// inside the 24 bytes php's `php_interval_obj` holds past its
+/// `zend_object` and its `new` asks the system allocator for nothing.
 #[derive(Default)]
 pub(crate) struct IntervalState {
     pub diff: Option<RelTime>,
-    pub civil_or_wall: i64,
+    pub civil_or_wall: i32,
     pub from_string: bool,
     /// The string a relative time was parsed from, the one the caller
     /// passed, shared as php's `zend_string_copy` shares it.
     pub date_string: Option<Owner<PhpString>>,
 }
 
-/// The payload: `php_interval_obj` keeps its state behind pointers, and so the
-/// payload is one, inside the `sizeof` php allocates (design §5.13).
-pub(crate) type IntervalObj = Box<IntervalState>;
+/// The payload, inside the `sizeof` php allocates (design §5.13): the
+/// state itself, which fits it.
+pub(crate) type IntervalObj = IntervalState;
+
+const _: () = assert!(size_of::<IntervalState>() <= 24);
 
 /// `php_period_obj`: its three times and its relative time are
 /// timelib's, made on the request's heap ([`crate::lent`]) where php's
@@ -357,7 +362,7 @@ pub(super) fn tz_from_time(t: &Time) -> Option<TzKind> {
 /// before the relative time.
 pub(super) fn new_interval(
     req: &mut Request,
-    civil_or_wall: i64,
+    civil_or_wall: i32,
     date_string: Option<PhpString>,
     diff: impl FnOnce(&mut Request) -> Result<RelTime, Thrown>,
 ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
@@ -398,7 +403,7 @@ pub(super) fn set_diff(
 pub(super) fn interval_of(
     req: &mut Request,
     object: PhpObject,
-) -> Result<(RelFields, i64), Thrown> {
+) -> Result<(RelFields, i32), Thrown> {
     let diff = object
         .native::<IntervalObj>(req)
         .and_then(|i| i.diff.as_deref().map(|d| (*d, i.civil_or_wall)));

@@ -130,12 +130,6 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
     for (name, size, alignment, room) in [
         ("date", size_of::<DateState>(), align_of::<DateState>(), 8),
         (
-            "interval",
-            size_of::<IntervalState>(),
-            align_of::<IntervalState>(),
-            24,
-        ),
-        (
             "period",
             size_of::<PeriodState>(),
             align_of::<PeriodState>(),
@@ -149,8 +143,10 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
         assert!(size > room);
         assert!(alignment <= 8);
     }
-    // A `DateTimeZone`'s state lies inside its object since #2630.
+    // A `DateTimeZone`'s state lies inside its object since #2630, a
+    // `DateInterval`'s since #2855.
     assert!(size_of::<TzState>() <= 32 && align_of::<TzState>() <= 8);
+    assert!(size_of::<IntervalState>() <= 24 && align_of::<IntervalState>() <= 8);
     println!(
         "time={} relative={} zone={} diagnostic={} message={} block={} optional-block={}",
         size_of::<TimeFields>(),

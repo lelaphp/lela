@@ -341,8 +341,8 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
 
 /// The fields of `php_date_interval_initialize_from_hash`, read into
 /// `diff` in php's order with php's defaults; the `civil_or_wall` it
-/// reads last.
-fn read_fields(req: &mut Request, hash: PhpArray, diff: &mut RelFields) -> Result<i64, Thrown> {
+/// reads last, a long cut to php's `int`.
+fn read_fields(req: &mut Request, hash: PhpArray, diff: &mut RelFields) -> Result<i32, Thrown> {
     let long_field = |req: &mut Request, name: &[u8], default: i64| -> Result<i64, Thrown> {
         match find(hash, name) {
             Some(v) if scalar(&v) => to_long(req, &v),
@@ -383,8 +383,9 @@ fn read_fields(req: &mut Request, hash: PhpArray, diff: &mut RelFields) -> Resul
         Some(v) if scalar(&v) => a64i(req, &v)?,
         _ => -1,
     };
+    #[allow(clippy::cast_possible_truncation, reason = "php's `int civil_or_wall`")]
     match find(hash, b"civil_or_wall") {
-        Some(v) => to_long(req, &v),
+        Some(v) => to_long(req, &v).map(|n| n as i32),
         None => Ok(CIVIL),
     }
 }
