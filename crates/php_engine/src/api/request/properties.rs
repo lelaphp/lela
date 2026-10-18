@@ -1469,7 +1469,7 @@ impl Request {
     /// Cannot modify readonly property T::$i
     /// int(5)
     /// ```
-    fn readonly_modification(
+    pub(crate) fn readonly_modification(
         &mut self,
         declaring: ClassId,
         name: &[u8],
@@ -1487,7 +1487,7 @@ impl Request {
     /// php's `Error` for a typed property read before anything wrote it
     /// (`zend_throw_error` under `uninit_error`), naming the class that
     /// declared it, `prop_info->ce`.
-    fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
+    pub(crate) fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
         let class = self.class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
@@ -3526,13 +3526,8 @@ impl Request {
                     ))));
                 };
                 if readonly {
-                    let class = self.class_name(declaring);
-                    let shown = String::from_utf8_lossy(&name).into_owned();
-                    return Err(crate::api::raising::throw_error(
-                        self,
-                        "Error",
-                        &format!("Cannot acquire reference to readonly property {class}::${shown}"),
-                    ));
+                    let operation = "acquire reference to";
+                    return Err(self.readonly_modification(declaring, &name, operation));
                 }
                 let cell = self.reference(held)?;
                 if let Some(place) = o.slot_ref(slot) {
@@ -4151,13 +4146,7 @@ impl Request {
                         && !empty
                         && !o.slot_bit(placed.slot, php_heap::PropBit::Reinitable)
                     {
-                        let declaring = self.class_name(placed.declaring);
-                        let shown = String::from_utf8_lossy(name).into_owned();
-                        return Err(crate::api::raising::throw_error(
-                            self,
-                            "Error",
-                            &format!("Cannot unset readonly property {declaring}::${shown}"),
-                        ));
+                        return Err(self.readonly_modification(placed.declaring, name, "unset"));
                     }
                     if let Some(set) = placed.set_visibility
                         && !self.has_set_access(placed.declaring, placed.root, set)

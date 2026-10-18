@@ -570,17 +570,11 @@ impl Request {
         if read == PropertyRead::Silent {
             return Ok(Value::null());
         }
+        if placed.typed {
+            return Err(self.uninitialized_property(object.class(), name));
+        }
         let class = self.class_name(object.class());
         let shown = String::from_utf8_lossy(name).into_owned();
-        if placed.typed {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!(
-                    "Typed property {class}::${shown} must not be accessed before initialization"
-                ),
-            ));
-        }
         crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         Ok(Value::null())
     }

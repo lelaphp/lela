@@ -791,18 +791,6 @@ impl Request {
         }
     }
 
-    /// `get_active_function_arg_name`: the declared name of the active
-    /// native's parameter at `position`, one-based, and none past the
-    /// declared count, where php's variadic slot sits
-    /// (`Z/Zend/zend_execute_API.c:643-654`).
-    fn active_native_arg_name(&self, position: u32) -> Option<String> {
-        let decl = self.function_decl(self.active_native_function()?)?;
-        let parameter = decl
-            .parameters
-            .get(usize::try_from(position.checked_sub(1)?).ok()?)?;
-        (!parameter.variadic).then(|| String::from_utf8_lossy(&parameter.name.0).into_owned())
-    }
-
     /// `arg_info->type` of the active native's parameter at `position`,
     /// what `zend_null_arg_deprecated` names the type by and what
     /// [`crate::api::coerce::argument`] holds the argument to: the
@@ -852,9 +840,7 @@ impl Request {
     /// `zend_param_must_be_nullable` write after `#N`, with its leading
     /// space, and nothing where the parameter has no name.
     fn argument_name_suffix(&self, position: u32) -> String {
-        self.active_native_arg_name(position)
-            .map(|name| format!(" (${name})"))
-            .unwrap_or_default()
+        crate::api::raising::arg_name_suffix(self, self.active_native_function(), position)
     }
 
     /// `zend_argument_error_variadic`'s message:

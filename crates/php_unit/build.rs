@@ -342,7 +342,8 @@ type Dimension = (&'static str, Vec<(String, String)>);
 /// says `SMART_BRANCH`, each of those three times over, unfused and fused
 /// to the `JMPZ` or the `JMPNZ` after it, as php's `_JMPZ` and `_JMPNZ`
 /// handlers are. `Unresolved`, the default, is what an opline holds
-/// until its unit is published.
+/// until its unit is published, and what no opline of a
+/// `PublishedUnit` holds.
 fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
     let mut variants = vec!["Unresolved".to_owned()];
     let mut arms = String::new();
@@ -409,7 +410,8 @@ fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
          /// whose `op2` is a jump address, and `AddUnlisted` for the kinds it\n\
          /// does not list, php's `ZEND_NULL_HANDLER`. Resolved once, where the\n\
          /// unit is published ([`crate::Unit::published`]), so the dispatch\n\
-         /// reads one field and jumps once; `Unresolved` until then.\n\
+         /// reads one field and jumps once; `Unresolved` until then, which no\n\
+         /// opline of a [`crate::PublishedUnit`] holds.\n\
          #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]\n\
          #[repr(u16)]\n\
          pub enum Handler {{\n\

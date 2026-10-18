@@ -93,34 +93,16 @@ pub(crate) fn serve(
     regime: Option<&Regime>,
     snippet: &str,
 ) -> Result<Observation> {
-    serve_by(None, recipe, regime, snippet)
+    serve_by(None, recipe, regime, snippet).map(|(observed, _)| observed)
 }
 
 /// [`serve`] by `server`, a binary standing for `php-linked` that a test
 /// hands a lane to serve through one that misbehaves (#1069), or the one
-/// built from the workspace where none is named.
+/// built from the workspace where none is named; with the natives the
+/// request entered beside what it observed, in the order it entered them,
+/// one per line as the trace file holds them: what witness coverage counts
+/// (harness §4.5 condition 2, revision 58).
 pub(crate) fn serve_by(
-    server: Option<&Path>,
-    recipe: &Recipe,
-    regime: Option<&Regime>,
-    snippet: &str,
-) -> Result<Observation> {
-    run(server, recipe, regime, snippet).map(|(observed, _)| observed)
-}
-
-/// [`serve`] with the natives the request entered beside what it
-/// observed, in the order it entered them, one per line as the trace file
-/// holds them: what witness coverage counts (harness §4.5 condition 2,
-/// revision 58).
-pub(crate) fn serve_traced(
-    recipe: &Recipe,
-    regime: Option<&Regime>,
-    snippet: &str,
-) -> Result<(Observation, String)> {
-    run(None, recipe, regime, snippet)
-}
-
-fn run(
     server: Option<&Path>,
     recipe: &Recipe,
     regime: Option<&Regime>,

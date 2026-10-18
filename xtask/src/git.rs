@@ -31,9 +31,7 @@ pub struct Stamp {
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
-        None => Ok(git(root, &["rev-parse", "--short=7", "HEAD"], None)?
-            .trim()
-            .to_owned()),
+        None => rev_parse(root, &["--short=7", "HEAD"]),
     }
 }
 
@@ -113,12 +111,8 @@ pub(crate) fn files_under(root: &Path, scopes: &[impl AsRef<Path>]) -> Result<Ve
                 .context("the scope path is not UTF-8")?,
         );
     }
-    let listing = git(root, &args, None)?;
-    let mut paths: Vec<String> = listing
-        .split('\0')
-        .filter(|p| !p.is_empty() && root.join(p).is_file())
-        .map(str::to_owned)
-        .collect();
+    let mut paths = listed(root, &args)?;
+    paths.retain(|path| root.join(path).is_file());
     paths.sort_unstable();
     paths.dedup();
     Ok(paths)
@@ -157,23 +151,9 @@ pub struct Index(Vec<(String, String)>);
 
 impl Index {
     pub fn read(root: &Path) -> Result<Index> {
-        let mut entries = Vec::new();
-        for entry in git(root, &["ls-files", "--stage", "-z"], None)?
-            .split('\0')
-            .filter(|e| !e.is_empty())
-        {
-            let (head, path) = entry
-                .split_once('\t')
-                .with_context(|| format!("git ls-files wrote {entry:?}"))?;
-            // `<mode> <id> <stage>`: a submodule is no file of a scope's,
-            // and a conflicted path has no stage 0, so no scope holding
-            // one matches what is on disk.
-            if let [mode, id, "0"] = head.split(' ').collect::<Vec<_>>()[..]
-                && mode != "160000"
-            {
-                entries.push((path.to_owned(), id.to_owned()));
-            }
-        }
+        let mut entries: Vec<_> = (stage(root)?.into_iter())
+            .filter_map(|(path, id)| Some((path, id?)))
+            .collect();
         entries.sort_unstable();
         Ok(Index(entries))
     }
@@ -183,6 +163,57 @@ impl Index {
     pub(crate) fn entries(&self) -> &[(String, String)] {
         &self.0
     }
+}
+
+/// Each path the index tracks and its blob id at stage 0, from
+/// `ls-files --stage`: none for a submodule, which is no file of a
+/// scope's, or a conflicted path, which has no stage 0, so no scope
+/// holding one matches what is on disk.
+pub(crate) fn stage(root: &Path) -> Result<Vec<(String, Option<String>)>> {
+    let staged = entries(root, &["ls-files", "--stage", "-z"])?.into_iter();
+    // Each head is `<mode> <id> <stage>`.
+    let id = |head: &str| match head.split(' ').collect::<Vec<_>>()[..] {
+        [mode, id, "0"] if mode != "160000" => Some(id.to_owned()),
+        _ => None,
+    };
+    Ok(staged.map(|(head, path)| (path, id(&head))).collect())
+}
+
+/// Each file `commit` holds under `paths`, the whole tree for none, and
+/// its blob id, from `ls-tree`.
+pub(crate) fn blobs(root: &Path, commit: &str, paths: &[&str]) -> Result<Vec<(String, String)>> {
+    let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit, "--"];
+    args.extend(paths);
+    let blob = |head: &str| match head.split(' ').collect::<Vec<_>>()[..] {
+        [_, "blob", id] => Some(id.to_owned()),
+        _ => None,
+    };
+    let listed = entries(root, &args)?.into_iter();
+    Ok(listed
+        .filter_map(|(head, path)| Some((path, blob(&head)?)))
+        .collect())
+}
+
+/// What `git <args>` lists with `-z`, entry by entry.
+pub(crate) fn listed(root: &Path, args: &[&str]) -> Result<Vec<String>> {
+    let said = git(root, args, None)?;
+    Ok(said
+        .split('\0')
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// What `git <args>` lists with `-z`, each entry's head and path parted
+/// at its tab.
+pub(crate) fn entries(root: &Path, args: &[&str]) -> Result<Vec<(String, String)>> {
+    (listed(root, args)?.into_iter())
+        .map(|entry| {
+            let (head, path) = (entry.split_once('\t'))
+                .with_context(|| format!("git {} wrote {entry:?}", args[0]))?;
+            Ok((head.to_owned(), path.to_owned()))
+        })
+        .collect()
 }
 
 /// The blob id of the sorted `<id> <path>` listing of `(path, id)` pairs:
@@ -212,28 +243,13 @@ pub(crate) fn listing_id(listing: &[(String, String)]) -> String {
 pub(crate) fn tracked_hash(root: &Path, paths: &[&str], at: Option<&str>) -> Result<String> {
     let mut listing = Vec::new();
     if let Some(commit) = at {
-        let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit, "--"];
-        args.extend(paths);
-        for entry in git(root, &args, None)?
-            .split('\0')
-            .filter(|e| !e.is_empty())
-        {
-            let (head, path) = entry
-                .split_once('\t')
-                .with_context(|| format!("git ls-tree wrote {entry:?}"))?;
-            if let [_, "blob", id] = head.split(' ').collect::<Vec<_>>()[..] {
-                listing.push((path.to_owned(), id.to_owned()));
-            }
-        }
+        listing = blobs(root, commit, paths)?;
     } else {
         let mut args = vec!["ls-files", "-z", "--cached", "--"];
         args.extend(paths);
-        for path in git(root, &args, None)?
-            .split('\0')
-            .filter(|p| !p.is_empty())
-        {
-            let id = fs::read(root.join(path)).map_or_else(|_| "gone".to_owned(), |b| blob_id(&b));
-            listing.push((path.to_owned(), id));
+        for path in listed(root, &args)? {
+            let id = fs::read(root.join(&path)).map_or_else(|_| "gone".to_owned(), |b| blob_id(&b));
+            listing.push((path, id));
         }
     }
     listing.sort_unstable();
@@ -251,7 +267,21 @@ pub fn blob_id(content: &[u8]) -> String {
 
 /// Whether `root` has the ref `name` (`refs/heads/x`, `refs/remotes/origin/x`).
 pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
-    git(root, &["rev-parse", "--verify", "--quiet", name], None).is_ok()
+    rev_parse(root, &["--verify", "--quiet", name]).is_ok()
+}
+
+/// `git rev-parse` with `args` in `root`: what it printed, trimmed.
+pub(crate) fn rev_parse(root: &Path, args: &[&str]) -> Result<String> {
+    let out = git(root, &[&["rev-parse"], args].concat(), None)?;
+    Ok(out.trim().to_owned())
+}
+
+/// The checkout's own git dir, a linked worktree's under the main one's
+/// `worktrees/`, with its links resolved so `/tmp` and `/private/tmp` name
+/// one; `None` outside a repository.
+pub(crate) fn git_dir(checkout: &Path) -> Option<PathBuf> {
+    let dir = PathBuf::from(rev_parse(checkout, &["--absolute-git-dir"]).ok()?);
+    Some(std::fs::canonicalize(&dir).unwrap_or(dir))
 }
 
 /// `git` in a repository that is not the workspace's, such as the pinned
@@ -328,20 +358,11 @@ pub fn changed_since(root: &Path, base: &str) -> Result<Vec<Change>> {
         None,
     )?;
     let mut out = changes(&listing);
-    let untracked = git(
-        root,
-        &["ls-files", "-z", "--others", "--exclude-standard"],
-        None,
-    )?;
-    out.extend(
-        untracked
-            .split('\0')
-            .filter(|p| !p.is_empty())
-            .map(|p| Change {
-                path: p.to_owned(),
-                deleted: false,
-            }),
-    );
+    let untracked = listed(root, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    out.extend(untracked.into_iter().map(|path| Change {
+        path,
+        deleted: false,
+    }));
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.dedup();
     Ok(out)

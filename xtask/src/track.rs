@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use crate::git::git;
+use crate::git::{self, git};
 
 /// The branch every ticket's branch is cut from, and the track of a
 /// ticket that carries no `track:` label (ADR-0009).
@@ -239,10 +239,7 @@ fn ref_of(root: &Path, name: &str) -> Option<String> {
     let remote = format!("origin/{name}");
     let candidates = [("refs/heads/", name), ("refs/remotes/", remote.as_str())];
     candidates.into_iter().find_map(|(namespace, candidate)| {
-        let full = format!("{namespace}{candidate}");
-        git(root, &["rev-parse", "--verify", "--quiet", &full], None)
-            .ok()
-            .map(|_| candidate.to_owned())
+        git::has_ref(root, &format!("{namespace}{candidate}")).then(|| candidate.to_owned())
     })
 }
 
@@ -293,16 +290,9 @@ pub(crate) fn worktrees(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
 
 /// The full id of `name`.
 pub(crate) fn rev(root: &Path, name: &str) -> Result<String> {
-    git(
+    git::rev_parse(
         root,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{name}^{{commit}}"),
-        ],
-        None,
+        &["--verify", "--quiet", &format!("{name}^{{commit}}")],
     )
-    .map(|id| id.trim().to_owned())
     .with_context(|| format!("{name} names no commit"))
 }

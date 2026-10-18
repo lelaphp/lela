@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::reading::{self, Number, Reading};
+use crate::reading::{self, Reading};
 
 /// The registry's path, relative to the workspace root.
 pub const FILE: &str = "docs/divergence.toml";
@@ -723,20 +723,16 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
         Reading::for_scope(INSTRUMENT, "workspace", manifest, &Snapshot::disk(root)?)?;
     if let Some(rule) = rule {
         reading.rule.clone_from(&rule.id);
-        reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
+        reading.adr = rule.adr.adr_field();
     }
     let rows = registry.rows().len();
     let counts = registry.counts();
     let refused = registry.refused();
-    reading.numbers.insert("rows".into(), Number::count(rows));
-    reading
-        .numbers
-        .insert("ids".into(), Number::count(counts.ids));
+    reading.count("rows", u64::try_from(rows)?)?;
+    reading.count("ids", counts.ids)?;
     for status in Status::ALL {
         let n = counts.by_status.get(&status).copied().unwrap_or(0);
-        reading
-            .numbers
-            .insert(status.as_str().into(), Number::count(n));
+        reading.count(status.as_str(), n)?;
     }
     let mut failures = Vec::new();
     for lack in Lack::ALL {
@@ -748,14 +744,12 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
                 n => format!("{} (covering {n} ids)", r.id),
             })
             .collect();
-        reading
-            .numbers
-            .insert(lack.number().into(), Number::count(named.len()));
+        reading.count(lack.number(), u64::try_from(named.len())?)?;
         if !named.is_empty() {
             failures.push(format!(
                 "{} accepted row{} {}: {}",
                 named.len(),
-                if named.len() == 1 { "" } else { "s" },
+                reading::plural(named.len()),
                 lack.says(),
                 named.join(", ")
             ));

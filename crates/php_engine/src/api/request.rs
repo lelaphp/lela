@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Obj, Ref, Res, ResourceType, Zval, ZvalRef};
 use php_link::LinkedClass;
-use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
+use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::GcTable;
 use crate::api::call::Function;
@@ -486,12 +486,12 @@ pub struct Request {
     /// held or keeps in its file cache, compiled with
     /// `ZEND_COMPILE_DELAYED_BINDING` ([`Request::class_load`]), and
     /// whether this request's miss compiled it.
-    accel_loaded: Option<(Arc<Unit>, AccelServed)>,
+    accel_loaded: Option<(PublishedUnit, AccelServed)>,
     /// The unit the cache last served from what it holds, beside its
     /// early-bound classes as they were published with it (design §6.3),
     /// which its load declares by one insert each
     /// ([`Request::declare_classes`]).
-    early_bound: Option<(Arc<Unit>, crate::unit_cache::EarlyBound)>,
+    early_bound: Option<(PublishedUnit, crate::unit_cache::EarlyBound)>,
     /// The request in flight, which no fork but its own happens beside
     /// (#1807, [`Request::fork`]): entered before its deadlines are laid
     /// on the engine's timer and left after they are taken out, so no
@@ -553,7 +553,7 @@ pub(crate) struct SymbolTable {
 pub(crate) enum Opened {
     Already,
     Failed,
-    Unit(Arc<Unit>),
+    Unit(PublishedUnit),
 }
 
 /// What `zend_get_property_offset` places a declared instance property
@@ -588,7 +588,7 @@ struct DeclaredSlot {
 /// shares the trait's opcodes (`zend_add_trait_method`), so the row is
 /// the class's and the op array the trait's unit's.
 pub(crate) struct UserFunction {
-    pub(crate) unit: Arc<Unit>,
+    pub(crate) unit: PublishedUnit,
     pub(crate) body: exec::Body,
     pub(crate) member: Option<Member>,
     /// `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, which
@@ -804,7 +804,7 @@ pub(crate) enum MemberAt {
 /// Where it stands in `EG(class_table)` is the table's ([`Named`]), not
 /// the row's.
 pub(crate) struct Declared {
-    unit: Arc<Unit>,
+    unit: PublishedUnit,
     at: u32,
     composed: Option<Box<php_link::Composed>>,
     bound: Bound,
@@ -1459,7 +1459,7 @@ impl HeapHooks for Hooks<'_> {
 impl Request {
     /// [`Request::push_frame`] in a test, whose request no memory limit
     /// holds, so the push is never refused.
-    pub(crate) fn pushed(&mut self, unit: Arc<Unit>) -> FrameRef {
+    pub(crate) fn pushed(&mut self, unit: PublishedUnit) -> FrameRef {
         let pushed = self.push_frame(unit);
         assert_eq!(pushed.as_ref().err(), None, "a test's frame is pushed");
         pushed.unwrap_or(FrameRef(0))

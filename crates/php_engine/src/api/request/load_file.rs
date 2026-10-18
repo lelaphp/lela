@@ -2,8 +2,6 @@
 //! then `zend_execute`: what `spl_autoload`, SPL's default autoloader,
 //! does with the class file it finds (`Z/ext/spl/php_spl.c:220`).
 
-use std::sync::Arc;
-
 use super::Request;
 use crate::api::raising::Thrown;
 use crate::api::values::Value;
@@ -70,7 +68,7 @@ impl Request {
     /// user frame's symbol table, entered on the engine's loop once more
     /// and popped with everything above where the stack stood; what the
     /// file left pending is the `Err`, and what it returned is given up.
-    fn serve_top_code(&mut self, unit: Arc<php_unit::Unit>) -> Result<(), Thrown> {
+    fn serve_top_code(&mut self, unit: php_unit::PublishedUnit) -> Result<(), Thrown> {
         let standing = self.vm.depth();
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);

@@ -38,9 +38,8 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -49,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use super::{Ask, INSTRUMENT, coverage_rule, fence::Witness, under_rule};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
+use crate::oracle::Ended;
 use crate::reading::{Reading, Status, Store};
 use crate::sysv;
 
@@ -172,25 +172,6 @@ impl Kept {
     }
 }
 
-/// How the served process ended, as the watching one reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ended {
-    Exited(i32),
-    Signalled(Signal),
-}
-
-impl Ended {
-    fn of(status: ExitStatus) -> Ended {
-        match (status.code(), status.signal()) {
-            (Some(code), _) => Ended::Exited(code),
-            (None, Some(number)) => Ended::Signalled(Signal(number)),
-            // Neither is a stopped or continued process, which `wait`
-            // does not answer for a child it was not asked to trace.
-            (None, None) => Ended::Exited(-1),
-        }
-    }
-}
-
 /// A signal by its number, and by its name where the platform's is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Signal(pub i32);
@@ -285,7 +266,8 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     let kept = Kept::read(&journal)?;
     let mut readings = kept.readings.clone();
     let ended = Ended::of(status);
-    if let Ended::Signalled(signal) = ended {
+    if let Ended::Signal(number) = ended {
+        let signal = Signal(number);
         readings.extend(died(&snapshot, manifest, &crates, &kept, signal)?);
         eprintln!(
             "witness: the served run died on {signal}; {}",
@@ -301,7 +283,7 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     }
     ask.scope.record(store, &readings)?;
     match ended {
-        Ended::Exited(code) if code != 0 => {
+        Ended::Status(code) if code != 0 => {
             bail!("witness: the served run ended with exit {code}; the line above it says why")
         }
         _ => Ok(()),
