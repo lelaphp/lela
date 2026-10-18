@@ -26,6 +26,7 @@
 //! for writing or for reading by it; `SEND_FUNC_ARG` then sends what
 //! was fetched the same way.
 
+use php_syntax::Arena;
 use php_syntax::tree::{self, Node, NodeId};
 use php_unit::decl::Parameter;
 use php_unit::{AutoGlobal, Opcode, OperandKind, Opline};
@@ -39,10 +40,10 @@ use crate::CompileError;
 /// [`Source`]: the expression written, or a value the compiler holds,
 /// which is the value a pipe sends and the description
 /// `zend_compile_assert` adds to the list.
-#[derive(Clone)]
-pub(super) enum Arg {
+#[derive(Clone, Copy)]
+pub(super) enum Arg<'a> {
     Positional(Source),
-    Named(Box<[u8]>, Source),
+    Named(&'a [u8], Source),
     Unpack(tree::Expr),
 }
 
@@ -53,25 +54,28 @@ pub(super) enum Arg {
 /// `...` of a first-class callable, `ZEND_AST_CALLABLE_CONVERT`, which
 /// sends nothing and makes a closure of the call its `INIT_*` began
 /// (`zend_compile_call_common`).
-pub(super) enum Args {
-    Written { list: Vec<Arg>, line: u32 },
+/// The list is in the compile's arena, as every temporary of the
+/// compiler's that dies with it.
+pub(super) enum Args<'a> {
+    Written { list: &'a [Arg<'a>], line: u32 },
     CallableConvert,
 }
 
-impl Args {
+impl<'a> Args<'a> {
     /// A list the compiler makes itself, of plain expressions at `line`.
-    pub(super) fn of(list: &[tree::Expr], line: u32) -> Args {
+    pub(super) fn of(arena: &'a Arena, list: &[tree::Expr], line: u32) -> Args<'a> {
+        let mut made = arena.vec(list.len());
+        for expr in list {
+            made.push(Arg::Positional(Source::Expr(*expr)));
+        }
         Args::Written {
-            list: list
-                .iter()
-                .map(|expr| Arg::Positional(Source::Expr(*expr)))
-                .collect(),
+            list: made.into_slice(),
             line,
         }
     }
 
     /// The arguments as written; none for a first-class callable's.
-    pub(super) fn list(&self) -> &[Arg] {
+    pub(super) fn list(&self) -> &'a [Arg<'a>] {
         match self {
             Args::Written { list, .. } => list,
             Args::CallableConvert => &[],
@@ -171,10 +175,10 @@ impl Callee {
 /// Where a `SEND_*` or a `CHECK_FUNC_ARG` puts its argument, php's
 /// `op2`: its number, or its name, an `IS_CONST` the engine places by
 /// `zend_handle_named_arg`.
-#[derive(Clone)]
-enum ArgAt {
+#[derive(Clone, Copy)]
+enum ArgAt<'a> {
     Number(u32),
-    Name(Box<[u8]>),
+    Name(&'a [u8]),
 }
 
 /// One argument as [`Plan`] placed it: where it goes, and the number of
@@ -184,10 +188,11 @@ enum ArgAt {
 /// before it (`SEND_UNPACK`); or php's compile error for an argument
 /// the list may not have where it stands, raised where the compiler
 /// reaches it.
-enum Placed {
+#[derive(Clone, Copy)]
+enum Placed<'a> {
     Send {
         value: Source,
-        at: ArgAt,
+        at: ArgAt<'a>,
         number: Option<u32>,
     },
     Unpack {
@@ -199,8 +204,8 @@ enum Placed {
 
 /// `zend_compile_args`' placement of a whole list, which reads the
 /// names and the callee alone.
-pub(super) struct Plan {
-    placed: Vec<Placed>,
+pub(super) struct Plan<'a> {
+    placed: &'a [Placed<'a>],
     /// The number of arguments placed at their number, the
     /// `extended_value` of the `INIT_*` and what `used_stack` counts.
     pub(super) count: u32,
@@ -213,10 +218,12 @@ pub(super) struct Plan {
     pub(super) extra_named: bool,
 }
 
-impl Plan {
-    pub(super) fn of(arguments: &Args, callee: Option<&Callee>) -> Plan {
+impl<'a> Plan<'a> {
+    /// The plan of `arguments`, laid in `arena`.
+    pub(super) fn of(arena: &'a Arena, arguments: &Args<'a>, callee: Option<&Callee>) -> Plan<'a> {
+        let mut placed_all = arena.vec(arguments.len());
         let mut plan = Plan {
-            placed: Vec::with_capacity(arguments.len()),
+            placed: &[],
             count: 0,
             may_have_undef: false,
             extra_named: false,
@@ -244,7 +251,7 @@ impl Plan {
                             count: plan.count,
                         }
                     };
-                    plan.placed.push(placed);
+                    placed_all.push(placed);
                     continue;
                 }
                 Arg::Positional(value) => (None, *value),
@@ -284,19 +291,20 @@ impl Plan {
                         }
                         Placed::Send {
                             value,
-                            at: ArgAt::Name(name.clone()),
+                            at: ArgAt::Name(name),
                             number,
                         }
                     }
                 }
             };
-            plan.placed.push(placed);
+            placed_all.push(placed);
         }
+        plan.placed = placed_all.into_slice();
         plan
     }
 }
 
-impl Emit<'_> {
+impl<'a> Emit<'a> {
     /// The arguments of a call as written, or the `...` of a first-class
     /// callable, which the parser lets stand only as the whole list. An
     /// unpacked argument after a named one is php's compile error, and
@@ -314,9 +322,9 @@ impl Emit<'_> {
         &self,
         id: NodeId<tree::ArgList>,
         line: u32,
-    ) -> Result<Args, CompileError> {
+    ) -> Result<Args<'a>, CompileError> {
         let node = &self.parsed.tree[id];
-        let mut list = Vec::with_capacity(node.args.len());
+        let mut list = self.arena.vec(node.args.len());
         for arg in self.list(node.args) {
             match arg {
                 tree::Arg::Expr(expr) => list.push(Arg::Positional(Source::Expr(*expr))),
@@ -325,10 +333,7 @@ impl Emit<'_> {
                     let Some(value) = named.value else {
                         return Err(walk::unread(line, "a named argument"));
                     };
-                    list.push(Arg::Named(
-                        self.text(named.name).into(),
-                        Source::Expr(value),
-                    ));
+                    list.push(Arg::Named(self.text(named.name), Source::Expr(value)));
                 }
                 tree::Arg::SpreadArg(spread) => {
                     let Some(value) = self.parsed.tree[*spread].value else {
@@ -340,7 +345,7 @@ impl Emit<'_> {
             }
         }
         Ok(Args::Written {
-            list,
+            list: list.into_slice(),
             line: node.line(),
         })
     }
@@ -397,10 +402,10 @@ impl Emit<'_> {
         else {
             return Ok(());
         };
-        for placed in &plan.placed {
+        for placed in plan.placed {
             match placed {
                 Placed::Send { value, at, number } => {
-                    self.send_arg(*value, at, callee, *number, list_line)?;
+                    self.send_arg(*value, *at, callee, *number, list_line)?;
                 }
                 Placed::Unpack { value, count } => self.send_unpack(*value, *count)?,
                 Placed::Refused(message) => return Err(self.compile_error(*message)),
@@ -448,7 +453,7 @@ impl Emit<'_> {
     fn send_arg(
         &mut self,
         value: Source,
-        at: &ArgAt,
+        at: ArgAt<'_>,
         callee: Option<&Callee>,
         number: Option<u32>,
         list_line: u32,
@@ -459,7 +464,7 @@ impl Emit<'_> {
         // holds is sent as any other expression's is.
         let value = match value {
             Source::Expr(value) => self.peel(value),
-            Source::Node(held) => return self.send_value(held, at, known),
+            Source::Node(held) => return self.send_value(held, &at, known),
         };
         // "Treat passing of $GLOBALS the same as passing a call": its
         // `FETCH_GLOBALS` temporary is `SEND_VAL_EX` where the parameter
@@ -482,13 +487,13 @@ impl Emit<'_> {
                 (_, Some(SendMode::Value)) => Opcode::SendVar,
                 (_, None) => Opcode::SendVarNoRefEx,
             };
-            return self.send(opcode, operand, at);
+            return self.send(opcode, operand, &at);
         }
         if let Some(variable) = self.variable_of(value)? {
-            return self.send_variable(value, variable, at, known, list_line);
+            return self.send_variable(value, variable, &at, known, list_line);
         }
         let computed = self.expr(value)?;
-        self.send_value(computed, at, known)
+        self.send_value(computed, &at, known)
     }
 
     /// `zend_compile_args`' last arm, an argument that is no call and no
@@ -671,7 +676,7 @@ impl Emit<'_> {
         }
         Ok(match value {
             tree::Expr::SimpleVarExpr(id) => Some(match self.simple_var_of(id, self.line)? {
-                SimpleVar::Cv(name) => Variable::Cv(self.lookup_cv(&name)),
+                SimpleVar::Cv(name) => Variable::Cv(self.lookup_cv(name)),
                 SimpleVar::This => Variable::This,
                 // `zend_try_compile_cv` refuses an auto-global, so it is
                 // fetched by its name from `EG(symbol_table)`.

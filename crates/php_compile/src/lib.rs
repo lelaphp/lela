@@ -463,7 +463,7 @@ fn export_in(
             stage: Stage::Compiling,
         });
     }
-    emit::export(&parsed, options, strings)
+    emit::export(arena, &parsed, options, strings)
 }
 
 /// What the lexer is told of a source the compiler is handed: the
@@ -549,7 +549,7 @@ fn compile_scanned<'p>(
         return Err(refused.error(raised));
     }
     let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
-    match emit::unit(parsed, options, strings, halt) {
+    match emit::unit(arena, parsed, options, strings, halt) {
         Ok(mut unit) => {
             raised.append(&mut unit.diagnostics);
             unit.diagnostics = raised;

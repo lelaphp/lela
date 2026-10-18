@@ -502,7 +502,7 @@ impl Emit<'_> {
         // `zval_get_string` reads.
         let property = match inner.member {
             Some(ScopedSelector::SimpleVarExpr(var)) => match self.parsed.tree[var].var {
-                Some(var) => self.variable_name(var),
+                Some(var) => self.variable_name(var).to_vec(),
                 None => return Ok(None),
             },
             Some(ScopedSelector::DynamicVarExpr(var)) => {
@@ -556,7 +556,7 @@ impl Emit<'_> {
         let arguments = self.arguments(args, line)?;
         let name = self.string(&property)?;
         let op1 = self.literal(name);
-        let plan = super::args::Plan::of(&arguments, None);
+        let plan = super::args::Plan::of(self.arena, &arguments, None);
         self.push(Opline {
             opcode: Opcode::InitParentPropertyHookCall,
             op1_type: OperandKind::Const,

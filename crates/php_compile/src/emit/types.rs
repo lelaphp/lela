@@ -479,10 +479,7 @@ impl Emit<'_> {
         };
         if fetch == FETCH_CLASS_DEFAULT {
             let resolved = self.class_name(&written);
-            let resolved = match resolved.strip_prefix(b"\\") {
-                Some(rest) => rest.to_vec(),
-                None => resolved,
-            };
+            let resolved = resolved.strip_prefix(b"\\").unwrap_or(resolved).to_vec();
             let unqualified = resolved.rsplit(|b| *b == b'\\').next().unwrap_or(&resolved);
             if is_reserved_class_name(unqualified) {
                 return Err(self.compile_error(format!(

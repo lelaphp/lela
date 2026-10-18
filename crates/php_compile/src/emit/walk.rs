@@ -685,7 +685,7 @@ impl Emit<'_> {
             let attributes = self.walk_attributes(self.list(param.attrs))?;
             let modifiers =
                 self.walk_modifiers(self.list(param.modifiers), line, Target::Parameter)?;
-            let name = self.variable_name(param.var);
+            let name = self.variable_name(param.var).to_vec();
             let hooks = match param.hooks {
                 Some(list) => Some(self.walk_hooks(list, &name)?),
                 None => None,
@@ -1309,7 +1309,7 @@ impl Emit<'_> {
         for declarator in self.list(node.property_declarators) {
             let declarator = self.parsed.tree[*declarator];
             let attributes = self.walk_attributes(self.list(node.attrs))?;
-            let name = self.variable_name(declarator.var);
+            let name = self.variable_name(declarator.var).to_vec();
             let hooks = match node.hooks {
                 Some(list) => Some(self.walk_hooks(list, &name)?),
                 None => None,

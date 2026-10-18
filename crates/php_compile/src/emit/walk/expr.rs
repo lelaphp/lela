@@ -49,7 +49,7 @@ impl Emit<'_> {
             for id in self.list(self.parsed.tree[clause].closure_use_vars) {
                 let used = &self.parsed.tree[*id];
                 lexical.push(Use {
-                    name: self.variable_name(used.var),
+                    name: self.variable_name(used.var).to_vec(),
                     by_ref: used.byref.is_some(),
                     line: used.line(),
                 });

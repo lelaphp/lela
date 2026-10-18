@@ -109,8 +109,27 @@ impl Arena {
     }
 
     /// A copy of `items` in the arena.
-    pub(crate) fn copy<T: Copy>(&self, items: &[T]) -> &[T] {
+    #[must_use]
+    pub fn copy<T: Copy>(&self, items: &[T]) -> &[T] {
         self.bump.alloc_slice_copy(items)
+    }
+
+    /// `bytes` with ASCII letters lowercased, as `zend_str_tolower`
+    /// folds a name, in the arena.
+    #[must_use]
+    pub fn lowercase(&self, bytes: &[u8]) -> &[u8] {
+        let folded = self.bump.alloc_slice_copy(bytes);
+        folded.make_ascii_lowercase();
+        folded
+    }
+
+    /// An empty vector in the arena with room for `capacity` items. What
+    /// it holds is `Copy`, so nothing in the arena is ever owed a drop.
+    #[must_use]
+    pub fn vec<T: Copy>(&self, capacity: usize) -> ArenaVec<'_, T> {
+        ArenaVec(bumpalo::collections::Vec::with_capacity_in(
+            capacity, &self.bump,
+        ))
     }
 
     /// `parts` one after another, in the arena.
@@ -125,6 +144,36 @@ impl Arena {
     }
 }
 
+/// A vector of [`Arena::vec`], grown in the arena and frozen to a slice
+/// of it: a compiler's temporary list, given up with the arena.
+pub struct ArenaVec<'a, T: Copy>(bumpalo::collections::Vec<'a, T>);
+
+impl<'a, T: Copy> ArenaVec<'a, T> {
+    /// `item` at the end.
+    pub fn push(&mut self, item: T) {
+        self.0.push(item);
+    }
+
+    /// `items` at the end.
+    pub fn extend_from_slice(&mut self, items: &[T]) {
+        self.0.extend_from_slice(items);
+    }
+
+    /// What it holds, as a slice of the arena.
+    #[must_use]
+    pub fn into_slice(self) -> &'a [T] {
+        self.0.into_bump_slice()
+    }
+}
+
+impl<T: Copy> std::ops::Deref for ArenaVec<'_, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Arena;
@@ -134,6 +183,10 @@ mod tests {
         let mut arena = Arena::new();
         assert_eq!(arena.copy(b"abc"), b"abc");
         assert_eq!(arena.concat(&[b"a\\", b"b"]), b"a\\b");
+        let mut grown = arena.vec(1);
+        grown.push(1);
+        grown.extend_from_slice(&[2, 3]);
+        assert_eq!(grown.into_slice(), &[1, 2, 3]);
         let room = arena.bump.allocated_bytes();
         assert!(room > 0);
         arena.reset();

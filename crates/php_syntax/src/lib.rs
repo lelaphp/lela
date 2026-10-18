@@ -57,7 +57,7 @@ mod source;
 pub mod tree;
 mod value;
 
-pub use arena::Arena;
+pub use arena::{Arena, ArenaVec};
 pub use highlight::{Colours, highlight, html_puts, strip};
 pub use kind::SyntaxKind;
 pub use lexer::{LexOptions, Lexed, Position, Token, lex};
