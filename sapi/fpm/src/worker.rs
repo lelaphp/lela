@@ -10,13 +10,14 @@
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpStream};
-use std::os::fd::{AsFd, IntoRawFd};
+use std::os::fd::IntoRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::cgi::{C_NUMBER, Disk, ini_text};
+use php_sapi::fcgi::{Conn, allowed, client_ip};
 use php_sapi::{
     Aborted, Body, Chdir, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
     OutputSink, ProgramFile, RequestDescription, ResponseHead, WebRequest,
@@ -32,58 +33,6 @@ use crate::{zlog, zlog_sys};
 
 /// `sapi_module.name`: what `php_sapi_name()` answers.
 pub(crate) const NAME: &str = "fpm-fcgi";
-
-/// One connection.
-enum Conn {
-    Tcp(TcpStream),
-    Unix(UnixStream),
-}
-
-impl Read for Conn {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Conn::Tcp(s) => s.read(buf),
-            Conn::Unix(s) => s.read(buf),
-        }
-    }
-}
-
-impl Write for Conn {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Conn::Tcp(s) => s.write(buf),
-            Conn::Unix(s) => s.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Conn {
-    fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        match self {
-            Conn::Tcp(s) => s.as_fd(),
-            Conn::Unix(s) => s.as_fd(),
-        }
-    }
-
-    /// `fcgi_close(req, force, …)`: the connection shut and drained where
-    /// not forced.
-    fn close(self, force: bool) {
-        if !force {
-            match &self {
-                Conn::Tcp(s) => s.shutdown(std::net::Shutdown::Write),
-                Conn::Unix(s) => s.shutdown(std::net::Shutdown::Write),
-            }
-            .ok();
-            let mut this = self;
-            let mut buf = [0u8; 8];
-            while matches!(this.read(&mut buf), Ok(n) if n > 0) {}
-        }
-    }
-}
 
 /// What a request writes through: the connection, the request's output
 /// buffer, and what the access log reads of the response afterwards.
@@ -285,51 +234,20 @@ fn log_fastcgi(_level: Level, message: &[u8]) {
     let _ = wire.write(Kind::Stderr, message);
 }
 
-/// `fcgi_set_allowed_clients`: the addresses `listen.allowed_clients`
-/// names, each wrong one logged; `None` lets every address in.
+/// `fcgi_set_allowed_clients` over `listen.allowed_clients`, each wrong
+/// address logged as the child logs it; `None` lets every address in.
 fn allowed_clients(list: Option<&[u8]>) -> Option<Vec<IpAddr>> {
-    let list = list?;
-    let mut allowed = Vec::new();
-    for word in list.split(|b| *b == b',') {
-        match std::str::from_utf8(word)
-            .ok()
-            .and_then(|w| w.parse::<IpAddr>().ok())
-        {
-            Some(ip) => allowed.push(ip),
-            None => zlog!(
-                Error @ (crate::zlog::Site::FCGI),
-                "Wrong IP address '{}' in listen.allowed_clients",
-                String::from_utf8_lossy(word)
-            ),
-        }
-    }
+    let allowed = php_sapi::fcgi::allowed_clients(list?, |word| {
+        zlog!(
+            Error @ (crate::zlog::Site::FCGI),
+            "Wrong IP address '{}' in listen.allowed_clients",
+            String::from_utf8_lossy(word)
+        );
+    });
     if allowed.is_empty() {
         zlog!(Error @ (crate::zlog::Site::FCGI), "There are no allowed addresses");
     }
     Some(allowed)
-}
-
-/// `fcgi_is_allowed`, and `fcgi_get_last_client_ip`'s text of the peer.
-fn allowed(allowed: Option<&[IpAddr]>, peer: Option<IpAddr>) -> bool {
-    let (Some(list), Some(peer)) = (allowed, peer) else {
-        return true;
-    };
-    list.iter().any(|ip| match (ip, peer) {
-        (IpAddr::V4(a), IpAddr::V4(p)) => *a == p,
-        (IpAddr::V6(a), IpAddr::V6(p)) => a.octets()[..12] == p.octets()[..12],
-        (IpAddr::V4(a), IpAddr::V6(p)) => p.to_ipv4_mapped() == Some(*a),
-        (IpAddr::V6(_), IpAddr::V4(_)) => false,
-    })
-}
-
-/// `fcgi_get_last_client_ip`: the peer, a mapped IPv4 as IPv4.
-fn client_ip(peer: Option<IpAddr>) -> Option<String> {
-    peer.map(|ip| match ip {
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map_or_else(|| v6.to_string(), |v4| v4.to_string()),
-        IpAddr::V4(v4) => v4.to_string(),
-    })
 }
 
 /// A `.user.ini` cache entry, `user_config_cache_entry`.

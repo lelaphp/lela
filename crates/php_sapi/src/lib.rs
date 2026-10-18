@@ -9,7 +9,8 @@
 //! `main/`: [`getopt`], `php_getopt`, which the CLI and CGI read their
 //! command lines with; [`cgi`], the CGI environment made a request
 //! description and the response's head written, which php's CGI and its
-//! `FastCGI` process manager both do; [`ini`], the line's `-d` entries as
+//! `FastCGI` process manager both do; [`fcgi`], the connection both serve
+//! `FastCGI` over; [`ini`], the line's `-d` entries as
 //! `php_ini_builder` reads them, and `php_init_config`'s search for the
 //! php.ini files; and [`start`], `php_module_startup` over them, with what a
 //! host prints before it serves anything. [`tier`] is
@@ -26,6 +27,7 @@
 )]
 
 pub mod cgi;
+pub mod fcgi;
 pub mod getopt;
 pub mod ini;
 

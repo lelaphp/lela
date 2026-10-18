@@ -1,6 +1,6 @@
 //! php's CGI, `php-src/sapi/cgi`, as one crate under `sapi/` (ADR-0008):
 //! the binary `php-cgi`, reaching the engine through `php_sapi` alone. The
-//! host is `sapi/cgi/cgi_main.c` without its `FastCGI` half: the command
+//! host is `sapi/cgi/cgi_main.c`: the command
 //! line read as `main` reads it through `php_getopt`, the request of the
 //! web the server describes in the environment read as `init_request_info`
 //! reads it ([`php_sapi::cgi`]), one request description built from both,
@@ -18,12 +18,13 @@
 //! words after the file its `$argv` and, joined by `arg_separator.input`,
 //! its query string, and `-q` or `-f` writing no head.
 //!
-//! What php-cgi takes that this host refuses, its usage and exit 1: `-b`,
-//! the `FastCGI` server, which is the `FastCGI` worker's to serve. `-T`
+//! Under `-b` it is a `FastCGI` server instead ([`fastcgi`]): the socket
+//! bound, the children `PHP_FCGI_CHILDREN` asks forked, and each request
+//! read from its `FCGI_PARAMS` and served through `FCGI_STDOUT`. `-T`
 //! is taken and times nothing; `-c` and `-e` are taken and change nothing,
 //! as the CLI host's are; `-i` serves `phpinfo()`.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -34,6 +35,9 @@
     clippy::unimplemented
 )]
 
+mod fastcgi;
+#[allow(unsafe_code)]
+mod ffi;
 mod natives;
 
 use std::ffi::{OsStr, OsString};
@@ -103,6 +107,9 @@ pub enum Ask {
     Extensions,
     /// A request.
     Serve(Invocation),
+    /// `-b`: the `FastCGI` server bound where the switch names
+    /// ([`fastcgi`]).
+    FastCgi(Vec<u8>),
 }
 
 /// What started php-cgi, which the environment says.
@@ -200,23 +207,21 @@ impl Options {
                 ask: Ask::Serve(invocation),
             };
         }
-        let mut refused = false;
+        let mut bindpath = None;
         for (code, value) in switches(&argv) {
             match code {
                 b'd' => ini.push(define(&value)),
                 b'c' => ini_search.path = Some(value),
                 b'n' => ini_search.ignore = true,
-                b'b' => refused = true,
+                b'b' => bindpath = Some(value),
                 b's' => invocation.behavior = Behavior::Highlight,
                 _ => {}
             }
         }
         let ask = match usage_pass(&argv) {
             Some(usage) => usage,
-            None if refused => Ask::Usage {
-                stderr: String::new(),
-                exit_code: 1,
-            },
+            // Bound, php-cgi is `FastCGI` and reads its line no further.
+            None if let Some(path) = bindpath => Ask::FastCgi(path),
             None if server => Ask::Serve(invocation),
             None => shell_pass(&argv, invocation),
         };
@@ -846,6 +851,9 @@ pub fn main() -> ExitCode {
             invocation,
             env,
         ),
+        Ask::FastCgi(path) => {
+            fastcgi::serve(&engine(&options.ini, Origin::Server, false), path, &env)
+        }
     };
     php_sapi::exit_code(status)
 }

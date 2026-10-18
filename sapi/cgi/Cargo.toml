@@ -33,3 +33,9 @@ php_sapi = { path = "../../crates/php_sapi" }
 # The face `cgi_module_entry`'s natives are declared with, as an extension
 # declares its own (ADR-0008, #1348).
 php_ext = { path = "../../crates/php_ext" }
+# `-b`'s `FastCGI` server: its socket, the children it forks and waits
+# for, and the stop signals its parent ends them on, safe where `nix` wraps
+# them and in `src/ffi/` where it does not (`fastcgi_cleanup`'s
+# `sigaction`).
+nix = { workspace = true, features = ["socket", "net", "process", "signal"] }
+libc = { workspace = true }
