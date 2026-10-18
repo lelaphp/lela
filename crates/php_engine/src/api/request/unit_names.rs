@@ -12,10 +12,9 @@
 //! held to the request's end.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Weak;
 
 use php_link::NameHasher;
-use php_unit::{PublishedUnit, Unit};
+use php_unit::{PublishedUnit, Unit, WeakUnit};
 
 use super::Request;
 use crate::api::raising::Thrown;
@@ -29,7 +28,7 @@ use crate::api::values::{PhpString, Value};
 /// vectors a unit's names stood in are kept for the next unit's.
 #[derive(Default)]
 pub(crate) struct UnitNames {
-    units: Vec<(Weak<Unit>, Vec<PhpString>)>,
+    units: Vec<(WeakUnit, Vec<PhpString>)>,
     by_bytes: HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
     spare: Vec<Vec<PhpString>>,
     dead: Vec<PhpString>,

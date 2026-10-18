@@ -227,11 +227,42 @@ impl PublishedUnit {
     }
 
     /// A share that keeps the unit's identity and not the unit, as
-    /// [`Arc::downgrade`] makes: what a holder that outlives no frame
-    /// keeps to learn when the last share is gone.
+    /// [`Arc::downgrade`] makes: what a holder keeps that must not keep
+    /// the unit alive, to learn when the last share is gone.
     #[must_use]
-    pub fn downgrade(this: &PublishedUnit) -> Weak<Unit> {
-        Arc::downgrade(&this.0)
+    pub fn downgrade(this: &PublishedUnit) -> WeakUnit {
+        WeakUnit(Arc::downgrade(&this.0))
+    }
+}
+
+/// A published unit's identity without the unit
+/// ([`PublishedUnit::downgrade`]): how many shares of it stand, and where
+/// it stands. It never gives the unit back, so no `Arc<Unit>` of a
+/// published unit is held outside this crate, and none can be made the
+/// only share and written through:
+///
+/// ```compile_fail
+/// let published = php_unit::Unit::default().published();
+/// let weak = php_unit::PublishedUnit::downgrade(&published);
+/// drop(published);
+/// let shared = weak.upgrade();
+/// ```
+#[derive(Debug, Clone)]
+pub struct WeakUnit(Weak<Unit>);
+
+impl WeakUnit {
+    /// How many shares of the published unit stand, none once it is gone,
+    /// as [`Weak::strong_count`] answers.
+    #[must_use]
+    pub fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
+
+    /// Where the published unit stands, what [`PublishedUnit::as_ptr`]
+    /// answers for a share of it, as [`Weak::as_ptr`] answers.
+    #[must_use]
+    pub fn as_ptr(&self) -> *const Unit {
+        self.0.as_ptr()
     }
 }
 

@@ -16,10 +16,8 @@
 //! once nothing holds the unit, so an `eval` in a loop grows neither
 //! the engine's count nor the request's table.
 
-use std::sync::Weak;
-
 use php_heap::{MapPtr, MapTable};
-use php_unit::{MapPtrOffset, OpArray, PublishedUnit, Unit};
+use php_unit::{MapPtrOffset, OpArray, PublishedUnit, Unit, WeakUnit};
 
 use super::RuntimeCache;
 
@@ -79,7 +77,7 @@ pub(crate) struct RuntimeCaches {
     free: Vec<u32>,
     /// Each request-only unit the request took, and the numbers its op
     /// arrays hold.
-    held: Vec<(Weak<Unit>, Vec<u32>)>,
+    held: Vec<(WeakUnit, Vec<u32>)>,
     /// The vectors of numbers units nothing holds any longer stood in,
     /// emptied, for the next units to take.
     spare: Vec<Vec<u32>>,

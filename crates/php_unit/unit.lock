@@ -57,6 +57,9 @@ Unit::published
 UnitCell
 UnitCell::share
 UnitCell::unit
+WeakUnit
+WeakUnit::as_ptr
+WeakUnit::strong_count
 decl::AliasModifier
 decl::Attribute
 decl::AttributeArgument
