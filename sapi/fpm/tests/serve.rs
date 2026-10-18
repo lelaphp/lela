@@ -614,13 +614,26 @@ fn readable_php_fpm(dir: &Path) -> Command {
     command
 }
 
-/// The frame lines of the slow log entry of one request past
-/// `request_slowlog_timeout`, served by a pool of `name` whose
+/// The program [`slow_frames`] serves where a test names none: it sleeps
+/// two calls under a method of a class an included file declares.
+const SLOW: &[(&str, &str)] = &[
+    (
+        "slow.php",
+        "<?php\nfunction f($n) { usleep(3000000); }\nfunction g() { f(1); }\ninclude __DIR__ . '/inc.php';\necho 'done';\n",
+    ),
+    (
+        "inc.php",
+        "<?php\nclass K { function m() { g(); } }\n(new K)->m();\n",
+    ),
+];
+
+/// The frame lines of the slow log entry of one request for `slow.php`
+/// past `request_slowlog_timeout`, served by a pool of `name` whose
 /// configuration ends in `more`, each past its sixteen-digit room
-/// address, and the test directory as the engine resolved it. The
-/// request sleeps two calls under a method of a class an included file
-/// declares; the entry's head is held here.
-fn slow_frames(name: &str, more: &str) -> (Vec<String>, PathBuf) {
+/// address, and the test directory as the engine resolved it. `files`
+/// are laid in the directory first, `slow.php` among them, which ends
+/// by writing `done`; the entry's head is held here.
+fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, PathBuf) {
     let dir = tree(name);
     let socket = socket(&dir);
     let path = dir.join("php-fpm.conf");
@@ -636,17 +649,10 @@ fn slow_frames(name: &str, more: &str) -> (Vec<String>, PathBuf) {
         ),
     )
     .unwrap();
+    for (file, text) in files {
+        std::fs::write(dir.join(file), text).unwrap();
+    }
     let script = dir.join("slow.php");
-    std::fs::write(
-        &script,
-        "<?php\nfunction f($n) { usleep(3000000); }\nfunction g() { f(1); }\ninclude __DIR__ . '/inc.php';\necho 'done';\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("inc.php"),
-        "<?php\nclass K { function m() { g(); } }\n(new K)->m();\n",
-    )
-    .unwrap();
     let mut master = readable_php_fpm(&dir)
         .args(["-n", "-F", "-y"])
         .arg(&path)
@@ -712,7 +718,7 @@ fn slow_frames(name: &str, more: &str) -> (Vec<String>, PathBuf) {
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
-    let (frames, real) = slow_frames("slowlog", "");
+    let (frames, real) = slow_frames("slowlog", "", SLOW);
     let file = real.join("slow.php").display().to_string();
     let inc = real.join("inc.php").display().to_string();
     assert_eq!(
@@ -727,12 +733,40 @@ fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
     );
 }
 
+/// A request slow inside a generator resumed through a `yield from`:
+/// php links the running generator's frame to the placeholder the
+/// generator the loop resumed holds, `execute_fake`, whose `func` is
+/// `NULL` (`Z/Zend/zend_generators.c:807`), and the placeholder to the
+/// frame that resumed it, so `fpm_php_trace_dump` writes `???()` for the
+/// placeholder, with the line of the loop below it, and the running
+/// frame's line is `unknown:0`, its walk below stopping at the
+/// placeholder (#2897).
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_in_a_delegated_generator_writes_php_s_placeholder_line() {
+    let program = [(
+        "slow.php",
+        "<?php\nfunction inner() { usleep(3000000); yield 1; }\nfunction outer() { yield from inner(); }\n\
+         foreach (outer() as $v) {}\necho 'done';\n",
+    )];
+    let (frames, real) = slow_frames("slowlog-fake", "", &program);
+    let file = real.join("slow.php").display().to_string();
+    assert_eq!(
+        frames,
+        [
+            format!("usleep() {file}:2"),
+            "inner() unknown:0".to_string(),
+            format!("???() {file}:4"),
+        ]
+    );
+}
+
 /// `request_slowlog_trace_depth` cuts the walk at that many frames, the
 /// innermost first, as php's `--callers_limit` does.
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_slow_request_s_frames_stop_at_the_trace_depth() {
-    let (frames, real) = slow_frames("slowlog-depth", "request_slowlog_trace_depth = 2\n");
+    let (frames, real) = slow_frames("slowlog-depth", "request_slowlog_trace_depth = 2\n", SLOW);
     let file = real.join("slow.php").display().to_string();
     assert_eq!(
         frames,

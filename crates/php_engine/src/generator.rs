@@ -125,6 +125,14 @@ pub(crate) struct ZendGenerator {
     /// delegation to this one a backtrace expands between this frame
     /// and the resumer's ([`placeholder_frames`]); no owner.
     resumed_through: Option<PhpObject>,
+    /// `execute_fake` as another process reads it: the room a resumption
+    /// of this generator that runs another links the running frame to,
+    /// serving nothing ([`resume`]). php holds it in the object; the
+    /// payload has no room to spare under php's `sizeof(zend_generator)`,
+    /// so it is boxed, the first time a resumption runs through it, from
+    /// an allocator the request's memory does not count, and never on
+    /// the VM stack's pages.
+    execute_fake: Option<Box<crate::exec::FakeRoom>>,
 }
 
 impl ZendGenerator {
@@ -161,6 +169,7 @@ impl Default for ZendGenerator {
             in_fiber: None,
             destroying: false,
             resumed_through: None,
+            execute_fake: None,
         }
     }
 }
@@ -1145,7 +1154,15 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         // `zend_generator_check_placeholder_frame` expands.
         let through = (!same(generator, orig)).then_some(orig);
         let standing = req.vm().depth();
+        // On the chain another process reads, the running frame links
+        // to that placeholder and the placeholder to the resumer's
+        // innermost, `orig_generator->execute_fake.prev_execute_data =
+        // original_execute_data` (`Z/Zend/zend_generators.c:807`).
+        if let Some(orig) = through {
+            req.link_room(orig, fake_room);
+        }
         let Some(frame) = push(req, generator) else {
+            unlink_fake_room(req, through);
             return Ok(());
         };
         with(req, generator, |g| g.resumed_through = through);
@@ -1159,7 +1176,9 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             drop_values(req, generator);
         } else if delegating && next_delegated(req, generator) {
             with(req, generator, |g| g.resumed_through = None);
-            suspend(req, generator)?;
+            let suspended = suspend(req, generator);
+            unlink_fake_room(req, through);
+            suspended?;
             with(req, orig, |g| {
                 g.do_init = false;
                 g.in_fiber = None;
@@ -1187,6 +1206,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             g.in_fiber = None;
             g.resumed_through = None;
         });
+        unlink_fake_room(req, through);
         served?;
         if req.is_pending() {
             if same(generator, orig) {
@@ -1209,6 +1229,23 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             g.in_fiber = None;
         });
         return Ok(());
+    }
+}
+
+/// `orig_generator->execute_fake`, laid down the first time a resumption
+/// runs another generator through it.
+fn fake_room(generator: &mut ZendGenerator) -> &mut crate::exec::FakeRoom {
+    generator
+        .execute_fake
+        .get_or_insert_with(|| Box::new(crate::exec::FakeRoom::new(crate::exec::Header::fake())))
+}
+
+/// The resumer's innermost room the innermost again, where `through`
+/// linked its placeholder, as php moves `EG(current_execute_data)` back
+/// once the frame above it has left.
+fn unlink_fake_room(req: &mut Request, through: Option<PhpObject>) {
+    if let Some(orig) = through {
+        req.unlink_room(orig, |g: &ZendGenerator| g.execute_fake.as_deref());
     }
 }
 
