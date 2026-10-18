@@ -1,0 +1,28 @@
+# The oracle variants on the oracle runner (#2298): each build the pin
+# names for this machine's platform, laid at its path and held to its md5
+# by scripts/oracle-build.py's recipe, as the pinned-php action pours the
+# keg. A crate whose row names a variant, `ext/zend_test` under zend-test,
+# runs its witnesses, crosscheck and phpt subset under it, and reads skip
+# wherever the binary is not there. The path and md5 are read off `status
+# --section oracle`'s `variants`, so this file spells none of them, and the
+# section is rendered after the corpus action, so its `found.path` is the
+# checkout the build is made from. The runner keeps the binary between
+# jobs: one already at the pin's md5 is checked and left, so a build runs
+# once per pin, and one that does not reproduce the md5 stops the job
+# before any lane.
+name: oracle variants
+description: Lay each oracle variant the pin names for this machine, held to its md5
+inputs:
+  xtask:
+    description: The command the job runs the harness by
+    default: cargo xtask
+runs:
+  using: composite
+  steps:
+    - name: the oracle variants, by md5
+      shell: bash
+      env:
+        XTASK: ${{ inputs.xtask }}
+      run: |
+        $XTASK status --section oracle --format json > "$RUNNER_TEMP/variants.json"
+        "$GITHUB_WORKSPACE/scripts/ci/oracle-variants.sh" "$RUNNER_TEMP/variants.json"

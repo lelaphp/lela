@@ -13,10 +13,14 @@
 #       systemd service.
 #   runner.sh mac --url <repository URL> --token <registration token> --pin <oracle.json> [--name <name>]
 #       On the Mac mini, as the admin user the runner runs as; sudo asks for
-#       the password once, for Homebrew. Homebrew, pkgconf and jq, rustup,
-#       the pinned php by md5 (<oracle.json> is `xtask status --section
-#       oracle --format json`, rendered where the repository is checked out),
-#       and the runner, labelled `dax-oracle`, as a launchd agent, which runs
+#       the password, for Homebrew and the variants' directories. Homebrew,
+#       pkgconf and jq, the tools an oracle variant's build needs (bison,
+#       re2c, Python for scripts/oracle-build.py), rustup, the pinned php by
+#       md5 (<oracle.json> is `xtask status --section oracle --format json`,
+#       rendered where the repository is checked out), the directory of each
+#       variant's path made the user's, so the oracle jobs lay the variant
+#       there by md5 with no root (scripts/ci/oracle-variants.sh, #2298), and
+#       the runner, labelled `dax-oracle`, as a launchd agent, which runs
 #       while the user is logged in: the Mac logs in on boot.
 #
 # The toolchain's channel is rust-toolchain.toml's: rustup is laid down with
@@ -113,12 +117,17 @@ mac() {
     fi
     eval "$(/opt/homebrew/bin/brew shellenv)"
     export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-    say "the tools the jobs need beyond the keg's libraries"
-    brew install pkgconf jq
+    say "the tools the jobs need beyond the keg's libraries, an oracle variant's build among them"
+    brew install pkgconf jq bison re2c python
     say "rustup, with no toolchain until a job names one"
     [ -x "$HOME/.cargo/bin/rustup" ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --default-toolchain none --profile minimal
     say "the pinned php, by md5"
     "$here/pinned-php.sh" "$pin"
+    say "each oracle variant's directory, the runner's to lay its build in"
+    jq -r '.variants // {} | .[].path' "$pin" | while read -r path; do
+        dir=$(dirname "$path")
+        [ -w "$dir" ] || sudo install -d -o "$(id -un)" "$dir"
+    done
     register osx arm64 "$HOME/actions-runner" "$(id -un)" dax-oracle \
         "$HOME/.cargo/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     say "the runner is a launchd agent: it runs while $(id -un) is logged in, so the Mac logs in on boot (the wizard says where)"

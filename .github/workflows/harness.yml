@@ -208,6 +208,9 @@ jobs:
       - uses: ./.github/actions/corpus
         with:
           promise: tree oracle
+      # The oracle variants a crate's row names, built from that tree once
+      # per pin and checked by md5 after (#2298).
+      - uses: ./.github/actions/oracle-variants
       # The witness reading `done`'s condition 1 asks every touched crate
       # for (§4.5, §7: witnesses run per commit over all crates), under the
       # pinned php. A kernel or native without a witness fails here and

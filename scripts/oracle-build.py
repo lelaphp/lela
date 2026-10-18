@@ -7,7 +7,9 @@ flags `[variant.<name>]` names, so it differs from the oracle only where
 intended (#1782, #1889). `main` names the main oracle itself, no flags
 added: CI's Linux platform oracle (#1891).
 
-Usage (`--pin FILE` before the command reads another pin than oracle.toml):
+Usage (`--pin FILE` before the command reads another pin than oracle.toml,
+and `--tree DIR` builds from another checkout of the pinned tag than
+`[source]`'s path, as the oracle runner's corpus checkout, #2298):
   scripts/oracle-build.py configure-line
       Print ci/oracle/configure.toml afresh from the pinned oracle's
       `php -n -i` "Configure Command" row, after asserting its md5.
@@ -139,7 +141,8 @@ def run(argv, **kwargs) -> subprocess.CompletedProcess:
 class Pin:
     """What the recipe reads of a pin: the oracle, the tree and a variant."""
 
-    def __init__(self, path: Path, variant: str):
+    def __init__(self, path: Path, variant: str, tree: Path | None = None):
+        self.checkout = tree
         try:
             pin = tomllib.loads(path.read_text())
         except (OSError, tomllib.TOMLDecodeError) as e:
@@ -162,7 +165,7 @@ class Pin:
         self.variant = variant
 
     def tree(self) -> Path:
-        return Path(self.source["path"])
+        return self.checkout or Path(self.source["path"])
 
     def commit(self) -> str:
         """The pinned commit in full, held to the tag."""
@@ -371,6 +374,7 @@ def test(pin: Pin, plat: str, phpts: list[str]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--pin", type=Path, default=ROOT / "oracle.toml")
+    parser.add_argument("--tree", type=Path, help="a checkout of the pinned tag, in place of [source]'s path")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("configure-line")
     build_command = sub.add_parser("build")
@@ -383,7 +387,7 @@ def main() -> None:
     test_command.add_argument("variant")
     test_command.add_argument("phpt", nargs="+")
     opts = parser.parse_args()
-    pin = Pin(opts.pin, getattr(opts, "variant", "main"))
+    pin = Pin(opts.pin, getattr(opts, "variant", "main"), opts.tree)
     if opts.command == "configure-line":
         configure_line(pin)
     elif opts.command == "build":
