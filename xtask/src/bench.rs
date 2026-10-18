@@ -263,11 +263,47 @@ impl Correctness {
     }
 }
 
-/// One run of one arm: how long it took, and what it wrote, the bytes the
-/// two arms' runs of one rep are held equal by (§5).
+/// One run of one arm: what it measured in its arm's [`Unit`], and what it
+/// wrote, the bytes the two arms' runs of one rep are held equal by (§5).
 pub(crate) struct Sample {
-    pub(crate) ms: f64,
+    pub(crate) value: f64,
     pub(crate) wrote: Vec<u8>,
+}
+
+/// What a rep of an arm measures (§3): the milliseconds one run took, a
+/// cost, or the requests a second its clients were answered at, a rate
+/// (#2660). The paired delta is taken in it, `a - b`, so a rate's loss is
+/// a negative delta; [`Unit::worse`] turns either into a cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Unit {
+    #[default]
+    Ms,
+    Rps,
+}
+
+impl Unit {
+    /// The suffix of the reading's keys and of each figure printed.
+    pub(crate) fn suffix(self) -> &'static str {
+        match self {
+            Unit::Ms => "ms",
+            Unit::Rps => "rps",
+        }
+    }
+
+    /// The sign that makes a delta in the unit a cost: more is worse of
+    /// a time, and less of a rate.
+    pub(crate) fn worse(self) -> f64 {
+        match self {
+            Unit::Ms => 1.0,
+            Unit::Rps => -1.0,
+        }
+    }
+
+    /// The unit a reading's numbers were recorded in.
+    pub(crate) fn of(reading: &Reading) -> Unit {
+        let rate = reading.numbers.contains_key("b_median_rps");
+        if rate { Unit::Rps } else { Unit::Ms }
+    }
 }
 
 /// What an arm's run wrote that the rep holds equal (§5): what a process
@@ -294,6 +330,10 @@ pub(crate) trait Side {
     /// What [`Sample::wrote`] holds of the run.
     fn stream(&self) -> Stream {
         Stream::Stdout
+    }
+    /// What [`Sample::value`] measures.
+    fn unit(&self) -> Unit {
+        Unit::Ms
     }
 }
 
@@ -355,9 +395,11 @@ impl Side for Spawned {
     }
 }
 
-/// What one bar measured: the two arms, their paired delta, the delta as a
-/// percentage of the candidate arm's median, and how the bytes compared.
+/// What one bar measured, in its unit: the two arms, their paired delta,
+/// the delta as a percentage of the candidate arm's median, and how the
+/// bytes compared.
 struct Measured {
+    unit: Unit,
     a: Stats,
     b: Stats,
     delta: Stats,
@@ -449,7 +491,7 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
     let done = child
         .wait_with_output()
         .with_context(|| format!("waiting for the arm {}", arm.name))?;
-    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let value = start.elapsed().as_secs_f64() * 1000.0;
     if !done.status.success() {
         bail!(
             "the arm {} exited {}: {}",
@@ -459,7 +501,7 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
         );
     }
     Ok(Sample {
-        ms,
+        value,
         wrote: done.stdout,
     })
 }
@@ -473,7 +515,7 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
 fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Measured> {
     let programs = [a.program().to_path_buf(), b.program().to_path_buf()];
     let before = [Pin::take(&programs[0])?, Pin::take(&programs[1])?];
-    let (mut a_ms, mut b_ms, mut delta) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut a_of, mut b_of, mut delta) = (Vec::new(), Vec::new(), Vec::new());
     let mut vacuous = false;
     for r in 1..=(WARMUP + reps) {
         let (sa, sb) = if r % 2 == 0 {
@@ -491,15 +533,16 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
         }
         vacuous |= sa.wrote.is_empty();
         if r > WARMUP {
-            delta.push(sa.ms - sb.ms);
-            a_ms.push(sa.ms);
-            b_ms.push(sb.ms);
+            delta.push(sa.value - sb.value);
+            a_of.push(sa.value);
+            b_of.push(sb.value);
         }
     }
     holds(&programs, &before)?;
-    let stream = a.stream();
-    let (a, b, delta) = (stats(&a_ms), stats(&b_ms), stats(&delta));
+    let (stream, unit) = (a.stream(), a.unit());
+    let (a, b, delta) = (stats(&a_of), stats(&b_of), stats(&delta));
     Ok(Measured {
+        unit,
         a,
         b,
         delta,
@@ -792,14 +835,15 @@ fn rendered(
     label: Label,
     load: Option<[f64; 3]>,
 ) -> String {
+    let unit = measured.unit.suffix();
     let stat = |name: &str, s: &Stats| {
         format!(
-            "  {name}: median {:.3} ms, IQR {:.3} (q1 {:.3}, q3 {:.3}, min {:.3}, max {:.3}, n {})\n",
+            "  {name}: median {:.3} {unit}, IQR {:.3} (q1 {:.3}, q3 {:.3}, min {:.3}, max {:.3}, n {})\n",
             s.median, s.iqr, s.q1, s.q3, s.min, s.max, s.n
         )
     };
     format!(
-        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}{}  paired delta: median {:.3} ms ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}\n  correctness {}; {}\n",
+        "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}{}  paired delta: median {:.3} {unit} ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}\n  correctness {}; {}\n",
         bar.id,
         label.as_str(),
         load_text(load),
@@ -833,12 +877,12 @@ fn held_by(bar: &Shown<'_>, measured: &Measured) -> String {
 
 /// How far the first arm's median stands behind the second's, as a
 /// percentage of the second's: the paired delta where its sign is
-/// established and it is the first arm's loss, nothing where the first arm
-/// is ahead, and none where the sign is not established (§1.2) or the
-/// second arm took no time.
+/// established and it is the first arm's loss, a time more or a rate
+/// less, nothing where the first arm is ahead, and none where the sign is
+/// not established (§1.2) or the second arm measured nothing.
 fn to_go(measured: &Measured) -> Option<f64> {
     (sign_of(&measured.delta) == RESOLVED && measured.paired_pct.is_finite())
-        .then(|| measured.paired_pct.max(0.0))
+        .then(|| (measured.paired_pct * measured.unit.worse()).max(0.0))
 }
 
 /// A measured number as the store keeps it: to the microsecond, which is
@@ -881,22 +925,21 @@ fn recorded(
     }
     reading.count("reps", u64::try_from(measured.delta.n)?)?;
     reading.count("warmup_discarded", u64::try_from(WARMUP)?)?;
+    let unit = measured.unit.suffix();
     let numbers = [
-        ("a_median_ms", measured.a.median),
-        ("a_iqr_ms", measured.a.iqr),
-        ("b_median_ms", measured.b.median),
-        ("b_iqr_ms", measured.b.iqr),
-        ("delta_median_ms", measured.delta.median),
-        ("delta_q1_ms", measured.delta.q1),
-        ("delta_q3_ms", measured.delta.q3),
-        ("delta_iqr_ms", measured.delta.iqr),
-        ("paired_pct", measured.paired_pct),
+        ("a_median", measured.a.median),
+        ("a_iqr", measured.a.iqr),
+        ("b_median", measured.b.median),
+        ("b_iqr", measured.b.iqr),
+        ("delta_median", measured.delta.median),
+        ("delta_q1", measured.delta.q1),
+        ("delta_q3", measured.delta.q3),
+        ("delta_iqr", measured.delta.iqr),
     ];
-    for (key, value) in numbers {
+    let numbers = (numbers.into_iter()).map(|(key, value)| (format!("{key}_{unit}"), value));
+    for (key, value) in numbers.chain([("paired_pct".to_owned(), measured.paired_pct)]) {
         if value.is_finite() {
-            reading
-                .numbers
-                .insert((*key).to_owned(), rounded(value).into());
+            reading.numbers.insert(key, rounded(value).into());
         }
     }
     if let Some(l) = load {
@@ -910,7 +953,7 @@ fn recorded(
         format!(" ({})", note.trim())
     };
     reading.message = format!(
-        "{}: paired delta {:.3} ms ({:+.2}%) over {reps} reps, {verdict}; correctness {}; {}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
+        "{}: paired delta {:.3} {unit} ({:+.2}%) over {reps} reps, {verdict}; correctness {}; {}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
         bar.about,
         measured.delta.median,
         measured.paired_pct,
@@ -969,6 +1012,7 @@ mod tests {
         assert_eq!(Held::Control.status(SWAMPED), Status::Pass);
         assert_eq!(Held::Series.status(RESOLVED), Status::Pass);
         let measured = |deltas: &[f64], paired_pct| Measured {
+            unit: super::Unit::Ms,
             a: Stats::default(),
             b: Stats::default(),
             delta: stats(deltas),
@@ -982,7 +1026,52 @@ mod tests {
         let straddles = [-1.0, -1.0, 1.0, 1.0];
         assert_eq!(to_go(&measured(&straddles, 3.0)), None, "swamped");
         assert_eq!(to_go(&measured(&behind, f64::NAN)), None);
+        let rate = |deltas: &[f64], paired_pct| Measured {
+            unit: super::Unit::Rps,
+            ..measured(deltas, paired_pct)
+        };
+        assert!(
+            close(to_go(&rate(&ahead, -50.0)).unwrap(), 50.0),
+            "fewer requests a second is behind"
+        );
+        assert!(close(to_go(&rate(&behind, 12.5)).unwrap(), 0.0));
         assert_eq!(Correctness::Bytes(Stream::Body).as_str(), "body-bytes");
+    }
+
+    /// A rate arm's reps are paired as a time's are, the delta in requests
+    /// a second, `a - b`: 50 against 100 is a delta of -50 and 50% to go.
+    #[test]
+    fn a_rate_bar_pairs_its_requests_a_second_per_rep() {
+        struct Rate(f64, std::path::PathBuf);
+        impl super::Side for Rate {
+            fn name(&self) -> &'static str {
+                "rate"
+            }
+            fn program(&self) -> &std::path::Path {
+                &self.1
+            }
+            fn unit(&self) -> super::Unit {
+                super::Unit::Rps
+            }
+            fn once(&mut self) -> anyhow::Result<super::Sample> {
+                self.0 += 0.001;
+                Ok(super::Sample {
+                    value: self.0,
+                    wrote: b"x".to_vec(),
+                })
+            }
+        }
+        let exe = std::env::current_exe().unwrap();
+        let mut sides: [Box<dyn super::Side>; 2] = [
+            Box::new(Rate(50.0, exe.clone())),
+            Box::new(Rate(100.0, exe)),
+        ];
+        let measured = super::measure("c8", &mut sides, 12).unwrap();
+        assert_eq!(measured.unit, super::Unit::Rps);
+        assert!((measured.a.median - 50.0).abs() < 0.1 && (measured.b.median - 100.0).abs() < 0.1);
+        assert!(close(measured.delta.median, -50.0) && close(measured.paired_pct.round(), -50.0));
+        assert!(close(to_go(&measured).unwrap().round(), 50.0));
+        assert_eq!(measured.correctness, Correctness::Bytes(Stream::Stdout));
     }
 
     /// A GitHub-hosted runner is refused, and a machine of ours or one

@@ -28,6 +28,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -382,7 +383,7 @@ pub(crate) fn by_fpm(
     ini: &[String],
     ports: Ports,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut fpm = Fpm::start(oracle, host, program, http, (ini, ports))?;
+    let mut fpm = Fpm::start(oracle, host, program, http, (ini, ports), 1)?;
     let answered = fpm.ask()?;
     fpm.settle()?;
     Ok(answered)
@@ -390,10 +391,12 @@ pub(crate) fn by_fpm(
 
 /// A pool of its own of the php-fpm at `host`, kept to hand one request,
 /// `http` to `program` under the pin's `[fastcgi]` mapping, as
-/// many times as it is asked: what [`by_fpm`] asks once and a bench arm
-/// asks each rep (#2351). Ended when dropped.
+/// many times as it is asked, by as many clients at once as there are: what
+/// [`by_fpm`] asks once and a bench arm asks each rep (#2351, #2660).
+/// Ended when dropped.
 pub(crate) struct Fpm {
-    pool: Pool,
+    /// Held only while a client connects, so the master's end is read.
+    pool: Mutex<Pool>,
     params: Vec<(String, Vec<u8>)>,
     body: Vec<u8>,
     timeout: Duration,
@@ -402,14 +405,15 @@ pub(crate) struct Fpm {
 }
 
 impl Fpm {
-    /// The pool started, under the recipe's ini and `ini` after it, with
-    /// `ports` as each connection's.
+    /// The pool of `children` started, under the recipe's ini and `ini`
+    /// after it, with `ports` as each connection's.
     pub(crate) fn start(
         oracle: &Oracle<'_>,
         host: &Path,
         program: &Path,
         http: &Http,
         (ini, ports): (&[String], Ports),
+        children: usize,
     ) -> Result<Fpm> {
         let pin = oracle.pin();
         let recipe = &pin.recipe;
@@ -421,7 +425,14 @@ impl Fpm {
         // environment, as makala's holds nothing.
         let sockets = Tree::new("mkf")?;
         Ok(Fpm {
-            pool: Pool::start(oracle, host, &sockets, &[], ini, true)?,
+            pool: Mutex::new(Pool::start(
+                oracle,
+                host,
+                &sockets,
+                &[],
+                ini,
+                (true, children),
+            )?),
             params: mapped(pin.fastcgi()?, http, &root, script, ports),
             body: http.body.clone(),
             timeout: Duration::from_secs(recipe.limits.timeout_s),
@@ -431,8 +442,8 @@ impl Fpm {
 
     /// The request handed once more: what it wrote on `FCGI_STDOUT` and
     /// `FCGI_STDERR`.
-    pub(crate) fn ask(&mut self) -> Result<(Vec<u8>, Vec<u8>)> {
-        let stream = self.pool.connect()?;
+    pub(crate) fn ask(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let stream = (self.pool.lock().unwrap_or_else(PoisonError::into_inner)).connect()?;
         stream.set_read_timeout(Some(self.timeout))?;
         let pairs = (self.params.iter()).map(|(n, v)| (n.as_bytes(), v.as_slice()));
         round(stream, pairs, Some(&self.body))
@@ -441,7 +452,8 @@ impl Fpm {
     /// Once the request last asked has ended in the pool's child, as well
     /// as its response (`Pool::settle`).
     fn settle(&mut self) -> Result<()> {
-        self.pool.settle(self.timeout)
+        let pool = self.pool.get_mut().unwrap_or_else(PoisonError::into_inner);
+        pool.settle(self.timeout)
     }
 }
 

@@ -69,8 +69,9 @@ const PING: &str = "/witness-ping";
 /// named with.
 const TAIL: usize = 10;
 
-/// A php-fpm master over a pool of one child listening on the socket at
-/// `socket`, its log at `log`; ended with `SIGTERM` when dropped.
+/// A php-fpm master over a pool of static children, one for a fence,
+/// listening on the socket at `socket`, its log at `log`; ended with
+/// `SIGTERM` when dropped.
 pub(super) struct Pool {
     master: Child,
     socket: PathBuf,
@@ -187,7 +188,7 @@ pub(crate) fn served_as_fpm(
             None => given.push((name, value)),
         }
     }
-    let mut pool = Pool::start(oracle, host, &own, env, &[], false)?;
+    let mut pool = Pool::start(oracle, host, &own, env, &[], (false, 1))?;
     let started = Instant::now();
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let stream = pool.connect()?;
@@ -206,17 +207,17 @@ pub(crate) fn served_as_fpm(
 
 impl Pool {
     /// The php-fpm at `host`, its master in the foreground over a pool of
-    /// one child on a Unix socket in `own`, under the recipe's ini and
-    /// `ini` after it as `-d`, with `env` in the master's environment, which
-    /// its child keeps, or none of it where `clear_env` says, php-fpm's
-    /// default.
+    /// `children` children, `pm = static`, on a Unix socket in `own`, under
+    /// the recipe's ini and `ini` after it as `-d`, with `env` in the
+    /// master's environment, which its children keep, or none of it where
+    /// `clear_env` says, php-fpm's default.
     pub(super) fn start(
         oracle: &Oracle<'_>,
         host: &Path,
         own: &Tree,
         env: &[(String, OsString)],
         ini: &[String],
-        clear_env: bool,
+        (clear_env, children): (bool, usize),
     ) -> Result<Pool> {
         let recipe = &oracle.pin().recipe;
         // The address is a path in the fence's own tree, so no other process
@@ -235,7 +236,7 @@ impl Pool {
         let conf = own.write(
             "php-fpm.conf",
             format!(
-                "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = {}\nping.path = {PING}\n",
+                "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = {children}\nclear_env = {}\nping.path = {PING}\n",
                 log.display(),
                 socket.display(),
                 if clear_env { "yes" } else { "no" }

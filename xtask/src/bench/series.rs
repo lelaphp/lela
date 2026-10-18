@@ -19,12 +19,13 @@
 
 use std::fmt::Write as _;
 
-use super::{SWAMPED, rounded, sign, stats};
+use super::{SWAMPED, Unit, rounded, sign, stats};
 use crate::manifest::Tolerance;
 use crate::reading::{Reading, Status};
 use crate::status::every::count;
 
-/// One night of a bar, in percent of the second arm's median.
+/// One night of a bar, in percent of the second arm's median, a cost: a
+/// rate's night is turned so that more is worse (`Unit::worse`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Night {
     median: f64,
@@ -37,14 +38,18 @@ impl Night {
     /// The night a bar's reading measured; none for one that measured
     /// nothing, or whose second arm took no time.
     fn of(reading: &Reading) -> Option<Night> {
-        let n = |key: &str| reading.numbers.get(key).map(|n| n.as_f64());
-        let share = 100.0 / n("b_median_ms").filter(|b| *b > 0.0)?;
-        let (q1, q3) = (n("delta_q1_ms")?, n("delta_q3_ms")?);
+        let unit = Unit::of(reading);
+        let n = |key: &str| {
+            (reading.numbers.get(&format!("{key}_{}", unit.suffix()))).map(|n| n.as_f64())
+        };
+        let share = 100.0 * unit.worse() / n("b_median").filter(|b| *b > 0.0)?;
+        let (q1, q3) = (n("delta_q1")?, n("delta_q3")?);
         let reps = usize::try_from(count(reading, "reps")?).ok()?;
+        let (low, high) = (q1 * share, q3 * share);
         Some(Night {
-            median: n("delta_median_ms")? * share,
-            q1: q1 * share,
-            q3: q3 * share,
+            median: n("delta_median")? * share,
+            q1: low.min(high),
+            q3: low.max(high),
             swamped: sign(reps, q1, q3) == SWAMPED,
         })
     }
@@ -273,6 +278,33 @@ mod tests {
         reading.numbers.insert("reps".to_owned(), Number::Int(12));
         commit.clone_into(&mut reading.commit);
         reading
+    }
+
+    /// A rate's night is a cost: 30 requests a second short of a second
+    /// arm's 100 is 30% worse, its quartiles turned with it.
+    #[test]
+    fn a_rate_s_night_reads_as_a_cost() {
+        let mut reading = Reading::new(super::super::INSTRUMENT, "b");
+        for (key, value) in [
+            ("b_median_rps", 100.0),
+            ("delta_median_rps", -30.0),
+            ("delta_q1_rps", -35.0),
+            ("delta_q3_rps", -25.0),
+        ] {
+            reading.numbers.insert(key.to_owned(), Number::Float(value));
+        }
+        reading.numbers.insert("reps".to_owned(), Number::Int(12));
+        let night = Night::of(&reading).unwrap();
+        assert_eq!(
+            night,
+            super::Night {
+                median: 30.0,
+                q1: 25.0,
+                q3: 35.0,
+                swamped: false
+            }
+        );
+        assert_eq!(night.beside(10.0, 2.0), Beside::Worse);
     }
 
     /// The first baseline is the median over the tolerance's dates and is
