@@ -172,7 +172,7 @@ impl std::ops::Deref for Repository {
 fn repository(name: &str) -> Repository {
     let tree = Tree::new(&format!("worktree-{name}")).unwrap();
     let root = tree.join("repo");
-    scratch::repository(workspace(), &root).unwrap();
+    scratch::repository(workspace(), &root, &["."]).unwrap();
     Repository { _tree: tree, root }
 }
 

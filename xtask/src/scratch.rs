@@ -428,9 +428,10 @@ pub fn xtask(bin: &'static str) -> &'static Path {
     .map_or(Path::new(bin), Binary::path)
 }
 
-/// A scratch repository at `to` holding `workspace`'s files, tracked or
-/// not yet but not ignored and standing in the working tree
-/// ([`crate::git::files`]), as the one commit on `main`, with the hooks
+/// A scratch repository at `to` holding `workspace`'s files under
+/// `scopes`, `.` for every one, tracked or not yet but not ignored and
+/// standing in the working tree ([`crate::git::files`]), as the one commit
+/// on `main`, with the hooks
 /// path the clone's own is set to and that commit made unsigned and
 /// unhooked: a person's `commit.gpgsign` is not the scratch repository's,
 /// and the real pre-commit measuring the scratch's files is not what a
@@ -449,9 +450,9 @@ pub fn xtask(bin: &'static str) -> &'static Path {
 /// which `gc` keeps for two weeks from then; a scratch lives for one test,
 /// so only a `git gc --prune=now` in the workspace during it can take a
 /// borrowed object away.
-pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
+pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
-    for file in crate::git::files(workspace, Path::new("."))? {
+    for file in crate::git::files_under(workspace, scopes)? {
         let target = to.join(&file);
         if let Some(dir) = target.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

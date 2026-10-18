@@ -92,11 +92,11 @@ fn read_head(root: &Path) -> Option<String> {
 /// tracked or not, as paths relative to `root`, sorted. What an instrument
 /// means by "the sources" of a scope; `tree_hash` is one hash over them.
 pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
-    files_under(root, &[scope.to_path_buf()])
+    files_under(root, &[scope])
 }
 
 /// [`files`] under each of `scopes` at once, one listing of their union.
-fn files_under(root: &Path, scopes: &[PathBuf]) -> Result<Vec<String>> {
+pub(crate) fn files_under(root: &Path, scopes: &[impl AsRef<Path>]) -> Result<Vec<String>> {
     let mut args = vec![
         "ls-files",
         "-z",
@@ -106,7 +106,12 @@ fn files_under(root: &Path, scopes: &[PathBuf]) -> Result<Vec<String>> {
         "--",
     ];
     for scope in scopes {
-        args.push(scope.to_str().context("the scope path is not UTF-8")?);
+        args.push(
+            scope
+                .as_ref()
+                .to_str()
+                .context("the scope path is not UTF-8")?,
+        );
     }
     let listing = git(root, &args, None)?;
     let mut paths: Vec<String> = listing

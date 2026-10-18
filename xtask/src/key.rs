@@ -598,7 +598,7 @@ struct Dependency {
 pub(crate) fn fixture(name: &str) -> crate::scratch::Tree {
     let tree = crate::scratch::Tree::new(&format!("closure-{name}")).unwrap();
     let fixture = crate::built_root().join("xtask/fixtures/closure");
-    crate::scratch::repository(&fixture, &tree).unwrap();
+    crate::scratch::repository(&fixture, &tree, &["."]).unwrap();
     tree
 }
 
