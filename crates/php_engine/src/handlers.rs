@@ -12673,14 +12673,8 @@ fn inline_assign_obj(
     Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
-/// The `OP_DATA` value an assignment's inline path takes, as
-/// `zend_assign_to_variable` takes it: a constant that counts no owner
-/// copied, a temporary moved out of its slot and a CV copied with one
-/// more owner, and, under `RETURN_VALUE_USED`, one more owner for the
-/// temporary, which takes it too. None, with nothing touched, for a
-/// value nothing wrote, whose warning is the kernel's, a reference,
-/// whose value is what is assigned, a refcounted constant, and a
-/// temporary holding an owner.
+/// The `OP_DATA` value the inline path of `ASSIGN_OBJ` or `ASSIGN_DIM`
+/// takes, by [`taken_value`]'s rule.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn data_value(
@@ -12692,9 +12686,42 @@ fn data_value(
 ) -> Option<Zval> {
     let data =
         exec::opline_at(code, at.saturating_add(1)).filter(|data| data.opcode == Opcode::OpData)?;
-    let value = ByKind(data.op1_type);
+    taken_value(req, frame, code, op, ByKind(data.op1_type), data.op1)
+}
+
+/// The value an assignment's inline path takes, one rule for `ASSIGN`'s
+/// `op2` and the `OP_DATA` of `ASSIGN_OBJ` and `ASSIGN_DIM`, as
+/// `zend_assign_to_variable` takes it: a constant that counts no owner
+/// copied, a temporary moved out of its slot and a CV copied with one
+/// more owner, and, under `RETURN_VALUE_USED`, one more owner for the
+/// temporary, which takes it too. None, with nothing touched, for a
+/// value nothing wrote, whose warning is the kernel's, a reference,
+/// whose value is what is assigned, a refcounted constant, and a
+/// temporary holding an owner.
+///
+/// ```php
+/// $a = str_repeat('a', 3); $o = new stdClass; $d = [];
+/// $x = $a; $o->p = $a; $d[0] = $a; $y = $a . 'b'; $o->q = $a . 'c'; $d[1] = $a . 'd';
+/// debug_zval_dump($a, $y, $o->q, $d[1]);
+/// ```
+/// ```expect
+/// string(3) "aaa" refcount(5)
+/// string(4) "aaab" refcount(2)
+/// string(4) "aaac" refcount(2)
+/// string(4) "aaad" refcount(2)
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn taken_value(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    value: impl Operand,
+    field: u32,
+) -> Option<Zval> {
     let slots = req.slots_mut(frame);
-    let z = value.read(slots, code, data.op1);
+    let z = value.read(slots, code, field);
     let used = op.out_type != OperandKind::Unused;
     let out = exec::temporary_slot(code, op.out) as usize;
     if !crate::operand::movable(z)
@@ -12704,7 +12731,7 @@ fn data_value(
         return None;
     }
     if matches!(value.kind(), OperandKind::Tmp | OperandKind::Var) {
-        *slots.get_mut(value.slot(code, data.op1)?)? = Zval::UNDEF;
+        *slots.get_mut(value.slot(code, field)?)? = Zval::UNDEF;
     } else {
         req.heap_mut().addref(z);
     }
@@ -22093,13 +22120,24 @@ fn inline_incdec(
 }
 
 /// The inline path of `ZEND_ASSIGN` to a CV (`ZEND_ASSIGN_SPEC_CV_*`,
-/// `zend_assign_to_variable`'s first arm): a value that owns nothing,
-/// a number, a bool, `null`, an interned string or an immutable array,
-/// copied bitwise over a variable that owns nothing either, so no owner
-/// is taken, none is given up and no destructor is served; and the same
-/// copy into the temporary under `RETURN_VALUE_USED`. `None` for a
-/// `VAR`, a value or a variable that owns something, a reference among
-/// them, which is where `zend_assign_to_variable` does more than copy.
+/// `zend_assign_to_variable`): the value taken by [`taken_value`]'s rule
+/// and written over a variable that holds nothing that counts owners or
+/// a string, which is given up after the write, as
+/// `zend_assign_to_variable`'s `GC_DELREF` of the garbage gives it up; a
+/// string serves no destructor and is offered to no collector. `None`
+/// for a `VAR`, a variable holding a reference or any other owner, and
+/// a value the rule leaves to the kernel.
+///
+/// ```php
+/// $s = str_repeat('x', 3); $t = str_repeat('y', 3);
+/// $s = $t . 'z'; $s = $t; $u = $s = $t . 'w';
+/// debug_zval_dump($s, $t, $u);
+/// ```
+/// ```expect
+/// string(4) "yyyw" refcount(4)
+/// string(3) "yyy" refcount(2)
+/// string(4) "yyyw" refcount(4)
+/// ```
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
 fn inline_assign(
@@ -22113,15 +22151,16 @@ fn inline_assign(
         return None;
     }
     let at = a.slot(code, op.op1)?;
-    let slots = req.slots_mut(frame);
-    let value = b.read(slots, code, op.op2);
-    if !crate::operand::owns_nothing(value) || slots.get(at)?.is_refcounted() {
+    let held = *req.slots_mut(frame).get(at)?;
+    let garbage = held.is_refcounted().then(|| held.as_str()).flatten();
+    if held.is_refcounted() && garbage.is_none() {
         return None;
     }
-    if op.out_type != OperandKind::Unused {
-        write_owning_nothing(slots, code, op, value)?;
+    let value = taken_value(req, frame, code, op, b, op.op2)?;
+    *req.slots_mut(frame).get_mut(at)? = value;
+    if let Some(garbage) = garbage {
+        req.heap_mut().release_string(garbage);
     }
-    *slots.get_mut(at)? = value;
     Some(Ok(advanced()))
 }
 
