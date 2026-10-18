@@ -31,6 +31,7 @@ pub(crate) mod profile;
 mod variant;
 
 pub(crate) use closure::Closure;
+pub use closure::ClosureDigest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Variant};
 
@@ -231,6 +232,12 @@ impl Sapi {
         .into_iter()
         .find_map(|(each, pinned)| (each == kind).then_some(pinned.as_ref()))
         .flatten()
+    }
+
+    /// [`Sapi::of`], and the failure where the pin names none.
+    pub(crate) fn named(&self, kind: hosts::EngineHost) -> Result<&Host> {
+        self.of(kind)
+            .ok_or_else(|| anyhow::anyhow!("oracle.toml's [sapi] names no {}", kind.binary))
     }
 }
 
@@ -693,8 +700,9 @@ impl Pin {
     /// file says it, blind to this machine; `load` consults the machine.
     pub fn parse(text: &str) -> Result<Pin> {
         let mut pin: Pin = toml::from_str(text)?;
+        let closure = pin.closure.as_ref().map(Closure::digest);
         for (name, variant) in &pin.variant {
-            variant.held(name)?;
+            variant.held(name, closure.as_ref())?;
         }
         pin.digest =
             crate::git::blob_id(toml::from_str::<toml::Table>(text)?.to_string().as_bytes());
@@ -1704,6 +1712,19 @@ impl<'a> Oracle<'a> {
     pub(crate) fn host_asserted(&self, host: &Host) -> Result<()> {
         self.asserted()?;
         host.assert_digest()
+    }
+
+    /// The pinned host of `kind`'s kind, its digest asserted, `[oracle]`
+    /// itself for the CLI: the failure where the pin names none, none is
+    /// at its path, or its digest is not the pin's.
+    pub(crate) fn pinned_host(&self, kind: hosts::EngineHost) -> Result<PathBuf> {
+        if kind == hosts::CLI {
+            self.asserted()?;
+            return Ok(self.pin.oracle.path.clone());
+        }
+        let host = self.pin.sapi.named(kind)?;
+        self.host_asserted(host)?;
+        Ok(host.path.clone())
     }
 
     /// Assert the digest now rather than at the first program: what a

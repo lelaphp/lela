@@ -31,7 +31,7 @@ pub const FILE: &str = "seams.toml";
 pub const SCRIPTS: &str = "scripts";
 
 /// `seams.toml` at its current value, with the oracle pin loaded through it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Manifest {
@@ -185,7 +185,7 @@ pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
 }
 
 /// `[oracle]`: the only place the manifest says where the pin is.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct PinRow {
@@ -193,7 +193,7 @@ pub struct PinRow {
 }
 
 /// `[budget]`: the workspace-wide ceilings (design §4.1, §10).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Budget {
@@ -274,7 +274,7 @@ impl Scripts {
 
 /// `[[crate]]`: one crate, its ceiling and the subsets of the pinned
 /// corpus it is measured by; nothing about `unsafe`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Crate {
@@ -321,13 +321,7 @@ impl Crate {
         Crate {
             name: name.to_owned(),
             budget: 1,
-            lock: OneOrMany::None,
-            lock_from: BTreeMap::new(),
-            feature: None,
-            targets: Vec::new(),
-            phpt: Vec::new(),
-            porting: false,
-            oracle: None,
+            ..Crate::default()
         }
     }
 
@@ -413,7 +407,7 @@ pub(crate) fn derived_subset(name: &str) -> PathBuf {
 }
 
 /// `[[seam]]`: one locked seam (design §4.5).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Seam {
@@ -475,20 +469,14 @@ impl Seam {
         Seam {
             name: name.to_owned(),
             producer: producer.to_owned(),
-            facade: None,
-            consumers: Vec::new(),
             lock: format!("{name}.lock"),
-            adr: OneOrMany::None,
-            generated: false,
-            allowlist: false,
-            sections: Vec::new(),
-            module: None,
+            ..Seam::default()
         }
     }
 }
 
 /// `[[edge]]`: one permitted (or denied) dependency edge (design §4.2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Edge {
@@ -513,13 +501,7 @@ impl Edge {
         Edge {
             from: from.to_owned(),
             to: OneOrMany::One(to.to_owned()),
-            adr: OneOrMany::None,
-            reexports_only: false,
-            only: false,
-            order: None,
-            allowlist: None,
-            lock: None,
-            deny: false,
+            ..Edge::default()
         }
     }
 }
@@ -537,7 +519,7 @@ impl Edge {
 /// does not judge the call (#341), which only a rule `permit` judges over
 /// a command may carry. `where` is the same idea for the checkout a call
 /// runs in ([`Where`]), and the same rules alone may carry it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Rule {
@@ -783,16 +765,12 @@ impl Rule {
         Rule {
             id: id.to_owned(),
             scope: OneOrMany::One(scope.to_owned()),
-            tool: OneOrMany::None,
-            exempt: Vec::new(),
-            exempt_label: Vec::new(),
-            within: Where::Anywhere,
-            adr: OneOrMany::None,
             text: id.to_owned(),
             predicate: Predicates {
                 deny: Some(true),
                 ..Predicates::default()
             },
+            ..Rule::default()
         }
     }
 
@@ -954,18 +932,8 @@ impl Manifest {
                 pin: "oracle.toml".to_owned(),
             },
             budget: Budget::flat(1),
-            telemetry: None,
             crates: crates.into_iter().collect(),
-            seams: Vec::new(),
-            edges: Vec::new(),
-            rules: Vec::new(),
-            weeks: Vec::new(),
-            lock_homes: BTreeMap::new(),
-            parity: Parity::default(),
-            divergence: None,
-            tolerances: Vec::new(),
-            pin: Pin::default(),
-            root: PathBuf::new(),
+            ..Manifest::default()
         }
     }
 

@@ -31,7 +31,7 @@ use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString};
 
 /// `MBFL_OUTPUTFILTER_ILLEGAL_MODE_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +235,11 @@ pub(crate) struct State {
     pub(crate) outconv: Option<u32>,
     /// `all_encodings_list`, one owner held until `rshutdown`.
     pub(crate) all_encodings: Option<Owner<PhpArray>>,
+    /// `current_detect_order_list`'s room: one `mbfl_encoding` pointer
+    /// to each encoding of the detect order, `safe_emalloc`ed by `RINIT`
+    /// and again by each `mb_detect_order()` that sets it, which the
+    /// engine keeps as [`Settings::detect_order`].
+    pub(crate) detect_order_room: Option<Emalloc>,
     pub(crate) regex: crate::regex::State,
 }
 
@@ -260,6 +265,31 @@ impl Settings {
 }
 
 /// The request's settings, built from the ini on first touch.
+/// `php_mb_populate_current_detect_order_list`, and the swap
+/// `mb_detect_order()` makes: the room for `entries` pointers of the
+/// detect order, `safe_emalloc(entries, sizeof(mbfl_encoding *), 0)`,
+/// laid down and the one before it given back after it. `RINIT`'s holds
+/// the list's encodings; `mb_detect_order()`'s is what its parse
+/// `ecalloc`s, a name or element for each and the language's default
+/// list beside them for an `auto`, whatever the names turn out to be:
+///
+/// ```php
+/// $m = memory_get_usage(); mb_detect_order('ASCII, UTF-8, SJIS, EUC-JP'); echo memory_get_usage() - $m, " ";
+/// $m = memory_get_usage(); mb_detect_order(['ASCII', 'UTF-8']); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32 -16
+/// ```
+///
+/// The `Err` is the memory limit's fatal.
+pub(crate) fn lay_detect_order_room(req: &mut Request, entries: usize) -> Result<(), Thrown> {
+    let room = Emalloc::new(req, entries * std::mem::size_of::<usize>())?;
+    if let Some(old) = req.state::<State>().detect_order_room.replace(room) {
+        old.free(req);
+    }
+    Ok(())
+}
+
 pub(crate) fn settings(req: &mut Request) -> &mut Settings {
     if req.state::<State>().settings.is_none() {
         let built = Settings::from_ini(req);

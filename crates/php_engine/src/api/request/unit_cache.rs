@@ -199,14 +199,18 @@ impl Request {
     /// is filed under beside its full path, the path itself where it is
     /// absolute and, where it is relative, with the working directory,
     /// the `include_path` and the including file's directory that resolve
-    /// it; none for an empty path or one a stream wrapper opens.
-    fn written_key(&self, written: &[u8]) -> Option<UnitKey> {
+    /// it; none for an empty path or one a stream wrapper opens. A
+    /// relative path's key asks for the working directory, which lays
+    /// `ZCG(cwd)` down the first time ([`Request::accel_cwd`]).
+    fn written_key(&mut self, written: &[u8]) -> Option<UnitKey> {
         if written.is_empty() || super::paths::scheme_length(written).is_some() {
             return None;
         }
         if written.starts_with(b"/") {
             return Some(UnitKey::full(written));
         }
+        // The memory limit's fatal is recorded and ends the request.
+        self.accel_cwd().ok();
         Some(UnitKey::relative(
             written,
             self.cwd.as_os_str().as_encoded_bytes(),
@@ -507,32 +511,30 @@ impl Request {
         let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
         let (arena, cwd) = (Arc::clone(&self.arena), &self.cwd);
+        let scanned = std::cell::Cell::new(None);
         let (compiled, filed, early) = shared.units.file(
             &arena.files,
             asked,
-            |source| shared.compile_file(source, path, cwd, stack, request_classes, multibyte),
+            |source| {
+                scanned.set(Some(source.len()));
+                shared.compile_file(source, path, cwd, stack, request_classes, multibyte)
+            },
             |body| shared.decode_kept(body),
             |unit| shared.publish_compiled(unit),
             |unit| self.publish_unit(unit),
         );
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
+        // The primary file compiled through the host's handle, which
+        // `zend_stream_fixup` reads it into and `CG(open_files)` lists.
+        if handle == HandlePath::Host
+            && let Some(len) = scanned.get()
+        {
+            self.fill_primary_handle(len).ok();
+        }
         if matches!(cached, Some(Ok(_))) {
             self.tell_compiled(&full, validation, filed);
         }
-        let served = AccelServed::of(validation, filed);
-        self.accel_loaded = (cached.clone().and_then(Result::ok)).zip(served);
-        // The classes its compiler bound early, published as it was held,
-        // which its load declares by their numbers.
-        self.early_bound = cached
-            .clone()
-            .and_then(Result::ok)
-            .zip(early)
-            .filter(|(_, early)| early.iter().any(Option::is_some));
-        // php keeps a link in its inheritance cache only under opcache,
-        // whose loaded classes are immutable (`ZEND_ACC_IMMUTABLE`).
-        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, Some(_)) = (&cached, filed, served) {
-            self.note_held(unit);
-        }
+        self.note_load(&cached, validation, filed, early);
         // The file opened as a stream where php compiles it or resolves
         // it to look it up by its full path, and not for a hit whose key
         // the cache files: one by the full path, or read back from the
@@ -541,6 +543,31 @@ impl Request {
             self.open_include_stream(&full, handle);
         }
         cached
+    }
+
+    /// What `zend_accel_load_script` is told of a file the cache answered
+    /// as `filed`: how opcache served it, the classes its compiler bound
+    /// early, published as it was held, which its load declares by their
+    /// numbers, and, for a unit opcache loaded, the note that its classes
+    /// are immutable, since php keeps a link in its inheritance cache only
+    /// under opcache (`ZEND_ACC_IMMUTABLE`).
+    fn note_load(
+        &mut self,
+        cached: &Cached,
+        validation: Validation,
+        filed: Filed,
+        early: Option<crate::unit_cache::EarlyBound>,
+    ) {
+        let served = AccelServed::of(validation, filed);
+        self.accel_loaded = (cached.clone().and_then(Result::ok)).zip(served);
+        self.early_bound = cached
+            .clone()
+            .and_then(Result::ok)
+            .zip(early)
+            .filter(|(_, early)| early.iter().any(Option::is_some));
+        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, Some(_)) = (cached, filed, served) {
+            self.note_held(unit);
+        }
     }
 
     /// A file the answer keeps out of the cache, `blacklist_misses`

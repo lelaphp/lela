@@ -28,16 +28,14 @@ pub(crate) use every::PerReading;
 
 use crate::api_check::{self, lock::Lock};
 use crate::cli::{Format, Section};
-use crate::crosscheck;
 use crate::divergence::{Counts, Registry, Retires, Status};
 use crate::git::git;
 use crate::layout;
 use crate::manifest::{LockCeiling, Manifest, Measure, SCRIPTS, Seam, Week};
 use crate::oracle::hosts::{EngineHost, HOSTS};
-use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, TREE_VARIABLE};
+use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
 use crate::permit;
 use crate::phpt;
-use crate::port_map;
 use crate::reading::{self, Log, Reading, Store};
 use crate::sources::NOT_YET_CREATED;
 use crate::track_work;
@@ -188,21 +186,15 @@ pub fn render(
                 Table::Json => (rows, INSTRUMENT),
             }
         }
-        Section::Witness => (
-            fold_uncreated(instrument(&readings, "witness"), "scope")?,
+        // A section named as its instrument is: the readings of that
+        // instrument, a crate's not yet created folded where it has one.
+        s @ (Section::Witness | Section::Test | Section::Mutants) => (
+            fold_uncreated(instrument(&readings, &every::name(s)), "scope")?,
             INSTRUMENT,
         ),
-        Section::Test => (
-            fold_uncreated(instrument(&readings, crate::test::INSTRUMENT), "scope")?,
-            INSTRUMENT,
-        ),
-        Section::Mutants => (
-            fold_uncreated(instrument(&readings, "mutants"), "scope")?,
-            INSTRUMENT,
-        ),
-        Section::Bench => (instrument(&readings, crate::bench::INSTRUMENT), INSTRUMENT),
-        Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
-        Section::Crosscheck => (instrument(&readings, crosscheck::INSTRUMENT), INSTRUMENT),
+        s @ (Section::Bench | Section::PortMap | Section::Crosscheck) => {
+            (instrument(&readings, &every::name(s)), INSTRUMENT)
+        }
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Tickets => return tickets::render(against.checkout()?, root, format),
         Section::Track => (
@@ -553,13 +545,15 @@ impl Row {
         }
     }
 
+    /// What `cell` makes of the reading, empty where there is none.
+    fn of(&self, cell: impl Fn(&Reading) -> String) -> String {
+        self.reading.as_ref().map(cell).unwrap_or_default()
+    }
+
     /// The reading's message as a cell of at most [`MESSAGE_WIDTH`]
     /// characters, the last an ellipsis where it was cut.
     fn message(&self) -> String {
-        self.reading
-            .as_ref()
-            .map(|x| clipped(&x.message))
-            .unwrap_or_default()
+        self.of(|x| clipped(&x.message))
     }
 
     /// Every number of the reading but those at zero, as `key=value`,
@@ -572,17 +566,14 @@ impl Row {
     /// which a section renders in columns of their own, as `key=value`,
     /// space-separated.
     fn numbers_but(&self, shown: &[&str]) -> String {
-        self.reading
-            .as_ref()
-            .map(|x| {
-                x.numbers
-                    .iter()
-                    .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default()
+        self.of(|x| {
+            x.numbers
+                .iter()
+                .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
     }
 
     /// The `sessions` fact as `id=count` pairs, newest first, the session
@@ -957,8 +948,8 @@ fn outermost(rows: Vec<Row>) -> Vec<Row> {
 
 /// The counts that size a run rather than judge it; the subset's row
 /// carries them, so a comparison's cell leaves them out.
-const SIZE: [&str; 7] = [
-    "passed", "percent", "run", "skipped", "tests", "unread", "xfailed",
+const SIZE: [&str; 8] = [
+    "passed", "percent", "run", "skipped", "tests", "unread", "warned", "xfailed",
 ];
 
 /// The phpt rows as Markdown: one per subset, each comparison folded into
@@ -1589,14 +1580,21 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// variable's or the pin's, or the absence it named; and the pinned php,
 /// its version, keg path and md5. An eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
-/// records them (#2657). CI reads the two names
-/// off the JSON, `tree.variable` and `promise.variable`, and sets them
-/// under those names, so the workflow spells neither; the oracle runner
-/// pours the keg `binary` names and holds it to that md5 (#2253), and
-/// pours and pins each keg `closure` names at its version.
+/// records them (#2657), with the record's digest, and a `variant` row
+/// per `[variant.<name>]` that pins a build for this machine's platform,
+/// its path and md5 (#2298), and the macOS build's closure digest (#2935).
+/// CI reads the two names off the JSON, `tree.variable` and
+/// `promise.variable`, and sets them under those names, so the workflow
+/// spells neither; the oracle runner pours the keg `binary` names and
+/// holds it to that md5 (#2253), pours and pins each keg `closure` names
+/// at its version, and lays each of `variants` at its path by its md5.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let php = &pin.oracle;
+    let platform = Platform::this();
+    let builds: Vec<_> = (pin.variant.iter())
+        .filter_map(|(name, variant)| Some((name, variant.build(platform?)?)))
+        .collect();
     let named = source.named();
     let promise = std::env::var_os(PROMISE_VARIABLE).map(|v| v.to_string_lossy().into_owned());
     let pinned = source.path();
@@ -1637,41 +1635,35 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "md5": php.md5,
             },
             "closure": pin.closure.as_ref().map(Closure::kegs),
+            "closure_digest": pin.closure.as_ref().map(|c| c.digest().to_string()),
+            "variants": builds.iter().map(|(name, build)| ((*name).clone(), json!({
+                "platform": platform.map(Platform::key),
+                "path": build.path.display().to_string(),
+                "md5": build.md5,
+                "closure": build.closure.as_ref().map(ToString::to_string),
+            }))).collect::<serde_json::Map<_, _>>(),
         }))?,
         Table::Md => {
-            let mut out = String::new();
-            writeln!(
-                out,
-                "| fact | variable | value | state |\n|---|---|---|---|"
-            )
-            .ok();
-            writeln!(
-                out,
-                "| tree | {TREE_VARIABLE} | {} | {} |",
-                cell(&display(named).unwrap_or_default()),
-                set(named.is_some())
-            )
-            .ok();
-            writeln!(
-                out,
-                "| promise | {PROMISE_VARIABLE} | {} | {} |",
-                cell(promise.as_deref().unwrap_or_default()),
-                set(promise.is_some())
-            )
-            .ok();
-            writeln!(
-                out,
-                "| pin |  | {} | {} |",
-                cell(&pinned.display().to_string()),
-                if pinned.is_dir() {
-                    "a directory"
-                } else {
-                    "not a directory"
-                }
-            )
-            .ok();
-            writeln!(out, "| tag |  | {} | the pin's |", cell(&source.tag)).ok();
-            writeln!(out, "| commit |  | {} | the pin's |", cell(&source.commit)).ok();
+            let mut out = "| fact | variable | value | state |\n|---|---|---|---|\n".to_owned();
+            let (o, row) = (&mut out, oracle_row);
+            let tree = display(named).unwrap_or_default();
+            row(o, "tree", TREE_VARIABLE, &tree, set(named.is_some()));
+            let promised = promise.as_deref().unwrap_or_default();
+            row(
+                o,
+                "promise",
+                PROMISE_VARIABLE,
+                promised,
+                set(promise.is_some()),
+            );
+            let dir = if pinned.is_dir() {
+                "a directory"
+            } else {
+                "not a directory"
+            };
+            row(o, "pin", "", &pinned.display().to_string(), dir);
+            row(o, "tag", "", &source.tag, "the pin's");
+            row(o, "commit", "", &source.commit, "the pin's");
             let (path, state) = match &found {
                 Ok(tree) => (
                     tree.display().to_string(),
@@ -1682,23 +1674,23 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 ),
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
-            writeln!(out, "| found |  | {} | {} |", cell(&path), cell(&state)).ok();
-            writeln!(
-                out,
-                "| binary |  | {} | php {}, md5 {} |",
-                cell(&php.path.display().to_string()),
-                php.version,
-                php.md5
-            )
-            .ok();
-            closure_row(&mut out, pin.closure.as_ref());
+            row(o, "found", "", &path, &state);
+            let binary = format!("php {}, md5 {}", php.version, php.md5);
+            row(o, "binary", "", &php.path.display().to_string(), &binary);
+            closure_row(o, pin.closure.as_ref());
+            for (name, build) in &builds {
+                let fact = format!("variant {name}");
+                let closure = build.closure.as_ref().map(|c| format!(", closure {c}"));
+                let md5 = format!("md5 {}{}", build.md5, closure.unwrap_or_default());
+                row(o, &fact, "", &build.path.display().to_string(), &md5);
+            }
             out
         }
     })
 }
 
 /// The oracle section's `closure` row: each keg `[closure]` records and its
-/// version, none where the pin records no closure.
+/// version, and the record's digest, none where the pin records no closure.
 fn closure_row(out: &mut String, closure: Option<&Closure>) {
     let Some(closure) = closure else { return };
     let kegs: Vec<String> = closure
@@ -1706,8 +1698,15 @@ fn closure_row(out: &mut String, closure: Option<&Closure>) {
         .iter()
         .map(|(k, v)| format!("{k} {v}"))
         .collect();
-    let (count, kegs) = (kegs.len(), cell(&kegs.join(", ")));
-    writeln!(out, "| closure |  | {kegs} | {count} kegs, the pin's |").ok();
+    let (count, digest) = (kegs.len(), closure.digest());
+    let count = format!("{count} kegs, the pin's, digest {digest}");
+    oracle_row(out, "closure", "", &kegs.join(", "), &count);
+}
+
+/// One row of the oracle section's table, its value and state as cells.
+fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: &str) {
+    let (value, state) = (cell(value), cell(state));
+    writeln!(out, "| {fact} | {variable} | {value} | {state} |").ok();
 }
 
 /// The `corpus` section: what CI checks out of the pinned php-src (#1713),
@@ -1717,8 +1716,10 @@ fn closure_row(out: &mut String, closure: Option<&Closure>) {
 /// roots, and the cache key, the commit and a digest of the patterns, so a
 /// change to the roots never restores a checkout made by the old ones.
 /// Beside the checkout, `targets`: where a workspace keeps the targets
-/// under the pin, relative to its root, which CI keeps between runs so an
-/// engine's reading is held to its subset's target (#1733); and `hosts`,
+/// under the pin, the main oracle's and each variant's this machine pins,
+/// relative to its root, which CI keeps between runs so an engine's
+/// reading is held to its subset's target (#1733) and a bound on
+/// `target/` keeps alone (#2299); and `hosts`,
 /// each host the lane hands a test to by its crate, package and binary
 /// ([`HOSTS`]), which CI builds (#1908).
 fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
@@ -1728,7 +1729,11 @@ fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
     digest.update(patterns.join("\n").as_bytes());
     let digest = digest.digest().to_string();
     let key = format!("php-src-{}-{}", source.commit, &digest[..12]);
-    let targets = phpt::target::kept_under(pin).display().to_string();
+    let variants = pin.variant.keys().filter_map(|name| pin.variant(name).ok());
+    let pins = std::iter::once(pin.clone()).chain(variants.filter(|v| !v.oracle.md5.is_empty()));
+    let targets: Vec<String> = pins
+        .map(|p| phpt::target::kept_under(&p).display().to_string())
+        .collect();
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&json!({
             "tag": source.tag,
@@ -1744,15 +1749,13 @@ fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
             })),
         }))?,
         Table::Md => {
-            let mut out = String::new();
-            writeln!(out, "| fact | value |").ok();
-            writeln!(out, "|---|---|").ok();
+            let mut out = "| fact | value |\n|---|---|\n".to_owned();
             writeln!(out, "| tag | {} |", cell(&source.tag)).ok();
             writeln!(out, "| commit | {} |", cell(&source.commit)).ok();
             writeln!(out, "| phpt_files | {} |", source.phpt_files).ok();
             writeln!(out, "| patterns | {} |", cell(&patterns.join(" "))).ok();
             writeln!(out, "| key | {key} |").ok();
-            writeln!(out, "| targets | {} |", cell(&targets)).ok();
+            writeln!(out, "| targets | {} |", cell(&targets.join(" "))).ok();
             let packages: Vec<String> = HOSTS.map(EngineHost::package).into();
             writeln!(out, "| hosts | {} |", cell(&packages.join(" "))).ok();
             out
@@ -1871,14 +1874,8 @@ const TICKET: Columns = (
             r.fact("scope"),
             r.status(),
             r.numbers(),
-            r.reading
-                .as_ref()
-                .map(|x| x.commit.clone())
-                .unwrap_or_default(),
-            r.reading
-                .as_ref()
-                .map(|x| short(&x.session).to_owned())
-                .unwrap_or_default(),
+            r.of(|x| x.commit.clone()),
+            r.of(|x| short(&x.session).to_owned()),
             r.message(),
         ]
     },
@@ -1904,10 +1901,7 @@ const TRACK: Columns = (
             r.number("tokens"),
             r.number("turn"),
             r.numbers_but(&SPENT),
-            r.reading
-                .as_ref()
-                .map(|x| x.commit.clone())
-                .unwrap_or_default(),
+            r.of(|x| x.commit.clone()),
             r.message(),
         ]
     },
@@ -1921,17 +1915,11 @@ const USAGE: Columns = (
     |r| {
         vec![
             r.fact("scope"),
-            r.reading
-                .as_ref()
-                .map(|x| short(&x.session).to_owned())
-                .unwrap_or_default(),
+            r.of(|x| short(&x.session).to_owned()),
             r.number("turn"),
             r.number("tokens"),
             r.number("usd"),
-            r.reading
-                .as_ref()
-                .map(|x| x.at.to_string())
-                .unwrap_or_default(),
+            r.of(|x| x.at.to_string()),
             r.message(),
         ]
     },
@@ -1959,10 +1947,7 @@ fn permit_cells(r: &Row, keep: Option<usize>) -> Vec<String> {
         r.fact("rule"),
         r.fact("adr"),
         r.status(),
-        r.reading
-            .as_ref()
-            .map(|x| x.at.to_string())
-            .unwrap_or_default(),
+        r.of(|x| x.at.to_string()),
         r.fact("denials"),
         r.fact("handed_on"),
         r.fact("this_session"),
@@ -2023,6 +2008,23 @@ mod tests {
     fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
         text.lines()
             .find(|l| l.starts_with("<!-- computed ") && l.contains(&format!(" name={name}")))
+    }
+
+    /// The sections `render` reads by their own name read the instrument
+    /// of that name, so the two spellings are held to each other here.
+    #[test]
+    fn a_section_read_by_its_name_is_named_as_its_instrument_is() {
+        use crate::cli::Section;
+        for (section, instrument) in [
+            (Section::Witness, crate::witness::INSTRUMENT),
+            (Section::Test, crate::test::INSTRUMENT),
+            (Section::Mutants, "mutants"),
+            (Section::Bench, crate::bench::INSTRUMENT),
+            (Section::PortMap, crate::port_map::INSTRUMENT),
+            (Section::Crosscheck, crate::crosscheck::INSTRUMENT),
+        ] {
+            assert_eq!(super::every::name(section), instrument);
+        }
     }
 
     #[test]

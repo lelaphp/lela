@@ -331,21 +331,26 @@ pub(crate) fn reading(
     Ok(reading)
 }
 
-/// What one `xtask compile-identity` run was asked for.
-#[derive(Debug, Clone, Default)]
+/// What one `xtask compile-identity` run was asked for, flattened onto the
+/// command line as it is.
+#[derive(Debug, Clone, Default, clap::Args)]
 pub struct Ask {
-    /// One file, on request (harness §7): its verdict is printed and
-    /// nothing is recorded, since one file is no measurement of a corpus,
-    /// and a difference is the exit.
+    /// One file, on request: its verdict is printed, a difference is the
+    /// exit, and nothing is recorded.
+    #[arg(long, value_name = "PATH", conflicts_with = "corpus")]
     pub file: Option<PathBuf>,
-    /// A corpus at a directory of its own: the nightly whole, denied at
-    /// the call.
+    /// A corpus at a directory of its own: the nightly whole, which CI
+    /// runs.
+    #[arg(long, value_name = "DIR")]
     pub corpus: Option<PathBuf>,
     /// The binary whose dump is held to the oracle's; without it, the
     /// engine's own where cargo puts it.
+    #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
-    /// A `[regime.<name>]` of the pin both sides dump under after `dump`
-    /// (#1822); none for the plain run.
+    /// A `[regime.<name>]` of the pin both sides dump under after `dump`:
+    /// `extended-info`, php's `-e`, is the per-commit corpus's second
+    /// (#1822). The reading's scope carries it, `php-src@regime=<name>`.
+    #[arg(long, value_name = "NAME")]
     pub regime: Option<String>,
 }
 
@@ -453,22 +458,11 @@ pub(crate) fn judge(
     corpus: &Corpus,
 ) -> Result<Tally> {
     let files = corpus.files()?;
-    let (Some(compiler), None) = (compiler(runner), oracle_absent) else {
+    let (Some(compiler), None) = (runner.binary(), oracle_absent) else {
         return Ok(Tally::found(files.len()));
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;
     Tally::judge(&files, |file| dumps.judge(corpus, file))
-}
-
-/// The binary that takes the engine's side of the dump, and none where
-/// the runner found nothing to measure. A regime's arguments go to it on
-/// its command line as they go to php's, so every regime is one it can
-/// dump under.
-fn compiler(runner: &Runner) -> Option<&Path> {
-    match runner {
-        Runner::Engine(binary) | Runner::Control(binary) => Some(binary),
-        Runner::Linked | Runner::Stale(_) | Runner::Absent(_) => None,
-    }
 }
 
 /// The corpus one file on request is named inside: the pinned tree's,
@@ -503,7 +497,7 @@ fn one(
     if let Some(why) = oracle_absent {
         bail!("{INSTRUMENT}: {why}");
     }
-    let Some(compiler) = compiler(runner) else {
+    let Some(compiler) = runner.binary() else {
         bail!("{INSTRUMENT}: there is nothing to dump the file with; build the engine's binary");
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;

@@ -708,9 +708,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
     let (absolute, said) = run(root.path());
     assert_eq!(
         absolute.as_deref(),
-        Some(
-            "pass phpt ext/ctype: ext/ctype: 1 passed, 0 skipped, 0 unread by the compiler of 1 tests"
-        ),
+        Some("pass phpt ext/ctype: ext/ctype: 1 passed of 1 tests"),
         "{said}"
     );
     let (relative, said) = run(Path::new("."));
@@ -1222,6 +1220,17 @@ fn printed(at: &Path) -> String {
 /// own and take it in their sweeps, the kernel keeping no maker for it.
 static PRIVATE_QUEUES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// What names the claims directory a run's System V claims are laid
+/// apart in ([`OneTree::claims`]), so the claims a test reads are its
+/// runs' alone; such a run still holds back from what a claim held in the
+/// machine's covers, as a run beside another run does (#2902), and says
+/// it left what it did.
+const CLAIMS: &str = "XTASK_SYSV_CLAIMS";
+
+/// What a sweep says of a new object that names no process and that it
+/// leaves, as it does where another run's claim covers its second.
+const STOOD: &str = "no process and stand";
+
 /// [`PRIVATE_QUEUES`] held, whatever test panicked holding it before.
 fn alone() -> std::sync::MutexGuard<'static, ()> {
     PRIVATE_QUEUES
@@ -1248,10 +1257,12 @@ fn started_at(pid: &str) -> String {
 /// then sleeps past the recipe's limit. The run is killed outright, which
 /// leaves the test's php running, and the next run kills it before it
 /// sweeps (#2522); the same php still running then is killed by this
-/// test, which fails. The runs take their temporary directory
-/// apart, so the claims directory is theirs alone and no other run's
-/// reclaim takes the claim first; another run's sweep on the machine may
-/// still take the queue itself, which this test then cannot name.
+/// test, which fails. The runs lay their claims apart ([`CLAIMS`]), so
+/// the claims directory is theirs alone and no other run's reclaim takes
+/// the claim first; another run's sweep on the machine may still take the
+/// queue itself, which this test then cannot name, and a claim another
+/// run holds on the machine keeps the next run from it and the killed
+/// run's claim standing, which the test says and returns on.
 #[test]
 fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
     if oracle().is_none() {
@@ -1272,14 +1283,9 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
         leaves_a_private_queue(&started, "sleep(120);\n--EXPECT--\n"),
     )
     .unwrap();
-    let tmp = Tree::new("phpt-sysv-killed-tmp").unwrap();
-    let claims = tmp.join("xtask-sysv-claims");
+    let claims = tree.claims();
     let checkout = OneTree::checkout("sysv-killed");
-    let run = || {
-        let mut command = tree.command(&checkout, "ext/sysvmsg");
-        command.env("TMPDIR", tmp.path());
-        command
-    };
+    let run = || tree.command(&checkout, "ext/sysvmsg");
     let mut killed = run().spawn().unwrap();
     let printed = printed(&started);
     killed.kill().unwrap();
@@ -1323,15 +1329,19 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
         .read("phpt", "ext/sysvmsg")
         .unwrap()
         .expect("the second run's reading");
-    assert!(
-        fs::read_dir(&claims).unwrap().next().is_none(),
-        "the next run took the claim"
-    );
     let standing = ipcs();
     let [queue] = appeared.as_slice() else {
         eprintln!("the queue is not told apart: {appeared:?}");
         return;
     };
+    if fs::read_dir(&claims).unwrap().next().is_some() {
+        Command::new("ipcrm").args(["-q", queue]).status().ok();
+        eprintln!(
+            "skipped: a claim held on the machine kept the killed run's: {}",
+            reading.message
+        );
+        return;
+    }
     assert!(
         !standing.iter().any(|o| o.kind == "q" && o.id == *queue),
         "the queue {queue} the killed run's test left stands"
@@ -1356,12 +1366,13 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
 /// with a claim held there from before the queue was made, as a run going
 /// beside it holds one (#2563), it leaves the queue standing and its own
 /// claim for a later reclaim, and this test removes the queue. The runs
-/// take a temporary directory of their own, so the claims they read are
-/// this test's alone; a private queue another session's run makes in the
-/// same second as the test's program may still be taken with it, as by
-/// any System V subset's sweep. On Linux, where `unshare` puts the subset
-/// in a private IPC namespace, the queue goes with its program, and the
-/// test says so and returns.
+/// lay their claims apart ([`CLAIMS`]), so the claims they read are this
+/// test's alone but for those held on the machine, which keep the first
+/// run from the queue too, and the test says so and returns; a private
+/// queue another session's run makes in the same second as the test's
+/// program may still be taken with it, as by any System V subset's sweep.
+/// On Linux, where `unshare` puts the subset in a private IPC namespace,
+/// the queue goes with its program, and the test says so and returns.
 #[test]
 fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a_claim_is_held() {
     if oracle().is_none() {
@@ -1383,13 +1394,11 @@ fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a
         leaves_a_private_queue(&started, then),
     )
     .unwrap();
-    let tmp = Tree::new("phpt-sysv-own-tmp").unwrap();
-    let claims = tmp.join("xtask-sysv-claims");
+    let claims = tree.claims();
     let checkout = OneTree::checkout("sysv-own");
     let run = || {
         fs::remove_file(&started).ok();
-        let mut command = tree.command(&checkout, "ext/sysvmsg");
-        let out = command.env("TMPDIR", tmp.path()).output().unwrap();
+        let out = tree.command(&checkout, "ext/sysvmsg").output().unwrap();
         assert!(out.status.success(), "{out:?}");
         let reading = xtask::reading::Store::of_workspace(checkout.path())
             .read("phpt", "ext/sysvmsg")
@@ -1427,11 +1436,12 @@ fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a
         eprintln!("the queue is not told apart: {}", reading.message);
         return;
     };
-    let left = stands(&queue);
-    if left {
+    if stands(&queue) {
         Command::new("ipcrm").args(["-q", &queue]).status().ok();
+        assert!(said.contains(STOOD), "the run left {queue}: {said}");
+        eprintln!("skipped: a claim held on the machine kept the run from {queue}: {said}");
+        return;
     }
-    assert!(!left, "the run left its test's queue {queue}: {said}");
     if took(&reading, &queue) {
         assert!(count(&reading, "sysv_removed") >= 1, "{reading:#?}");
     } else {
@@ -1458,7 +1468,7 @@ fn a_system_v_subsets_own_sweep_takes_the_private_queue_its_test_leaves_unless_a
         "the run took its test's queue {queue} while a claim was held: {reading:#?}"
     );
     if left {
-        assert!(said.contains("no process and stand"), "{said}");
+        assert!(said.contains(STOOD), "{said}");
     } else {
         eprintln!("another run's sweep took the queue {queue}: {said}");
     }
@@ -1501,13 +1511,8 @@ fn the_private_queues_the_zend_arginfo_test_leaves_are_removed_after_its_run() {
         ),
     )
     .unwrap();
-    let tmp = Tree::new("phpt-sysv-arginfo-tmp").unwrap();
     let checkout = OneTree::checkout("sysv-arginfo");
-    let out = tree
-        .command(&checkout, "Zend/tests")
-        .env("TMPDIR", tmp.path())
-        .output()
-        .unwrap();
+    let out = tree.command(&checkout, "Zend/tests").output().unwrap();
     assert!(out.status.success(), "{out:?}");
     let said = String::from_utf8_lossy(&out.stdout);
     let queues: Vec<String> = fs::read_to_string(&made)
@@ -1526,6 +1531,10 @@ fn the_private_queues_the_zend_arginfo_test_leaves_are_removed_after_its_run() {
         .collect();
     for queue in &standing {
         Command::new("ipcrm").args(["-q", queue]).status().ok();
+    }
+    if !standing.is_empty() && said.contains(STOOD) {
+        eprintln!("skipped: a claim held on the machine kept the run from {standing:?}: {said}");
+        return;
     }
     assert!(
         standing.is_empty(),
@@ -1912,7 +1921,7 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 struct OneTree {
     corpus: Tree,
     engine: PathBuf,
-    _bin: Tree,
+    bin: Tree,
 }
 
 impl OneTree {
@@ -1936,8 +1945,14 @@ impl OneTree {
         OneTree {
             corpus,
             engine,
-            _bin: bin,
+            bin,
         }
+    }
+
+    /// Where the runs over the tree lay their System V claims apart
+    /// ([`CLAIMS`]), so a test of what a sweep takes never waits on them.
+    fn claims(&self) -> PathBuf {
+        self.bin.join("xtask-sysv-claims")
     }
 
     /// A checkout of its own, committed, as a builder's worktree is.
@@ -1964,6 +1979,7 @@ impl OneTree {
             .args(["phpt", "--subset", subset, "--jobs", "2", "--engine"])
             .arg(&self.engine)
             .env(xtask::oracle::TREE_VARIABLE, self.corpus.path())
+            .env(CLAIMS, self.claims())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         command

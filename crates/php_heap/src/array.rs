@@ -269,24 +269,6 @@ pub(crate) fn free_table_data(mm: &mut Mm, a: Arr) {
     }
 }
 
-/// `zend_hash_add_new(ht, str, &val)` under `zend_add_interned_string`
-/// (`Z/Zend/zend_string.c:173-185`): `s`, interned already, as its own
-/// key and as the value, out of `mm` for the data the first add lays
-/// down and for each doubling. The caller has looked the bytes up and
-/// found nothing, so the add is an add.
-pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
-    append_str(mm, a, s, Zval::string(s))
-}
-
-/// The data [`add_interned`]'s first add lays down, laid down ahead of
-/// it (`zend_hash_real_init_mixed`); nothing where it stands already.
-pub(crate) fn lay_interned(mm: &mut Mm, a: Arr) -> Result<(), Fatal> {
-    if a.is_uninitialized() {
-        a.real_init_mixed(mm)?;
-    }
-    Ok(())
-}
-
 /// `zend_hash_index_add_new(ht, index, &zv)` over a request's `mm` for a
 /// key the caller knows is not there, which is what `zend_list_insert`
 /// (`Z/Zend/zend_list.c:32-44`) knows of the id `nNextFreeElement` gave
@@ -996,17 +978,6 @@ impl Arr {
         None
     }
 
-    /// `zend_interned_string_ht_lookup_ex` (`Z/Zend/zend_string.c:132-169`):
-    /// the string key whose hash is `h` and whose bytes are `bytes`, for
-    /// a table of interned strings asked about bytes that are not yet a
-    /// string. The walk is [`Arr::find_str`]'s over the chain `h` names,
-    /// comparing the bytes, since the caller holds no string to be the
-    /// same as.
-    pub(crate) fn find_bytes(self, h: u64, bytes: &[u8]) -> Option<Str> {
-        let idx = self.find_bucket_bytes(h, bytes)?;
-        self.read_bucket(idx).key
-    }
-
     /// `zend_hash_str_find_bucket`: the bucket of the string key whose
     /// hash is `h` and whose bytes are `bytes`, none in a packed or an
     /// uninitialised table, whose two hash slots name no bucket.
@@ -1331,6 +1302,34 @@ impl Arr {
     /// table whose data is a `run` of pages grows where it stands when
     /// the pages after it are free and `memory_get_peak_usage()` never
     /// holds the two sizes at once (#278).
+    ///
+    /// A list appended to from empty moves `memory_get_usage()` at its
+    /// first element and at each doubling past eight, by php's numbers
+    /// (#2661): the 56-byte header and data of eight slots of sixteen
+    /// bytes and two of hash, each size rounded up to its bin to 3072
+    /// bytes, past that to a `run` of whole pages, and past the 2 MB chunk
+    /// to a huge block. The program writes its first line before it
+    /// measures, since the first byte a request writes holds the
+    /// thirty-two of the default mimetype.
+    ///
+    /// ```php
+    /// echo "appended, moved\n"; $a = []; $d = $p = 0; $m = memory_get_usage();
+    /// for ($i = 1; $i <= 1100; $i++) { $a[] = $i; $d = memory_get_usage() - $m; if ($d !== $p) echo $i, ' ', $d, "\n"; $p = $d; }
+    /// $m = memory_get_usage(); $b = []; for ($i = 0; $i < 100000; $i++) $b[] = $i; echo 100000, ' ', memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect capture
+    /// appended, moved
+    /// 1 216
+    /// 9 376
+    /// 17 696
+    /// 33 1336
+    /// 65 2616
+    /// 129 8248
+    /// 257 12344
+    /// 513 20536
+    /// 1025 36920
+    /// 100000 2113616
+    /// ```
     fn packed_grow(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let size = self.table_size();
         if size >= MAX_SIZE {
@@ -1353,6 +1352,44 @@ impl Arr {
     /// `zend_hash_do_resize`: compact when a thirty-second of the table
     /// is tombstones, else double it, the used buckets copied and
     /// relinked.
+    ///
+    /// A hash appended to from empty moves `memory_get_usage()` at its
+    /// first element and at each doubling past eight (#2661): the header
+    /// and data of `HT_SIZE_EX`, forty bytes a bucket and four of hash
+    /// for each of twice as many slots, rounded up as a list's data is
+    /// ([`Arr::packed_grow`]). Under negative integer keys nothing else is
+    /// allocated; under string keys each key's string is counted beside
+    /// its bucket.
+    ///
+    /// ```php
+    /// echo "inserted, moved\n"; $h = []; $d = $p = 0; $m = memory_get_usage();
+    /// for ($i = 1; $i <= 1100; $i++) { $h[-$i] = $i; $d = memory_get_usage() - $m; if ($d !== $p) echo $i, ' ', $d, "\n"; $p = $d; }
+    /// foreach ([1, 8, 9, 16, 17, 64, 65, 1000, 100000] as $n) {
+    ///     $m = memory_get_usage(); $k = []; for ($i = 0; $i < $n; $i++) $k["k$i"] = $i;
+    ///     echo "k$n ", memory_get_usage() - $m, "\n"; unset($k);
+    /// }
+    /// ```
+    /// ```expect capture
+    /// inserted, moved
+    /// 1 376
+    /// 9 696
+    /// 17 1336
+    /// 33 2616
+    /// 65 8248
+    /// 129 12344
+    /// 257 20536
+    /// 513 41016
+    /// 1025 81976
+    /// k1 408
+    /// k8 632
+    /// k9 984
+    /// k16 1208
+    /// k17 1880
+    /// k64 4664
+    /// k65 10328
+    /// k1000 73016
+    /// k100000 8442960
+    /// ```
     fn do_resize(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let used = self.num_used();
         let elements = self.header().num_elements.get();

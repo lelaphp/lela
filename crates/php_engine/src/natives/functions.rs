@@ -166,11 +166,23 @@ fn func_get_args(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         "func_get_args",
         "cannot be called from the global scope",
     )?;
-    if arguments.is_empty() {
+    copied_arguments(req, arguments, 0)
+}
+
+/// What `func_get_args()` and `ZEND_FUNC_GET_ARGS` copy: the arguments
+/// past the first `skip`, as their slots hold them now, a reference
+/// followed and a slot nothing holds `null`; `zend_empty_array` where
+/// none is left, which costs nothing.
+pub(crate) fn copied_arguments(
+    req: &mut Request,
+    arguments: Vec<Value>,
+    skip: usize,
+) -> Result<Owner<PhpArray>, Thrown> {
+    if arguments.len() <= skip {
         return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut array = PhpArray::new(req)?;
-    for argument in arguments {
+    for argument in arguments.into_iter().skip(skip) {
         let value = argument.deref();
         let value = if value.tag() == TypeTag::Undef {
             Value::null()

@@ -12,7 +12,10 @@ use php_unit::decl::{Bare, ConstExpr, HookKind, MethodDecl, Name, ParameterDefau
 use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
-use crate::api::raising::{Thrown, argument_error, throw_error};
+use crate::api::raising::{
+    Thrown, argument_error, class_not_found, non_static_method_call, throw_error,
+    undefined_function, undefined_method,
+};
 use crate::api::request::{Request, Strategy};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted, adopted_some,
@@ -1025,15 +1028,7 @@ pub(crate) fn call_method_made(
 ) -> Result<Value, Thrown> {
     let class = object.class();
     let Some(function) = req.method_named(class, method) else {
-        let class = req.class_name(class);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!(
-                "Call to undefined method {class}::{}()",
-                String::from_utf8_lossy(method)
-            ),
-        ));
+        return Err(undefined_method(req, class, method));
     };
     let served = req.serve_method_made(function, Some(*object), class, arguments, &[]);
     without_frame(req, served)
@@ -2133,13 +2128,7 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
             )
         });
     }
-    autoload(req, name)?.ok_or_else(|| {
-        throw_error(
-            req,
-            "Error",
-            &format!("Class \"{}\" not found", String::from_utf8_lossy(name)),
-        )
-    })
+    autoload(req, name)?.ok_or_else(|| class_not_found(req, name))
 }
 
 /// `zend_update_class_constants` (`Z/Zend/zend_API.c:1535`): the
@@ -3083,14 +3072,7 @@ fn function_callable(
         req.function_named(Bare::resolved(name.0.get(at + 1..)?))
     });
     let Some(function) = found else {
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!(
-                "Call to undefined function {}()",
-                String::from_utf8_lossy(&name.0)
-            ),
-        ));
+        return Err(undefined_function(req, &name.0));
     };
     req.keep_callable(unit, at, function);
     let frame = crate::classes::CallFrame::Callee {
@@ -3150,27 +3132,14 @@ fn method_callable(
         return Err(magic_refused(req));
     }
     let Some(function) = found else {
-        let shown = req.class_name(ce);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!(
-                "Call to undefined method {shown}::{}()",
-                String::from_utf8_lossy(&method.0)
-            ),
-        ));
+        return Err(undefined_method(req, ce, &method.0));
     };
     req.check_method_access_from(function, &method.0, scope)?;
     if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
     {
-        let shown = req.qualified_name_of(function);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Non-static method {shown}() cannot be called statically"),
-        ));
+        return Err(non_static_method_call(req, function));
     }
     req.static_method_found(function)?;
     let frame = crate::classes::CallFrame::Callee {

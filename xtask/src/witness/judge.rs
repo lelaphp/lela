@@ -42,6 +42,7 @@ use super::process::{self, Binary};
 use super::{Accept, Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
+use crate::oracle::hosts::{CGI, FPM, PHPDBG};
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
 use crate::scratch::Full;
 use anyhow::{Context, Result};
@@ -351,40 +352,29 @@ fn ended(ran: &Observation) -> String {
 /// fence's regime, or, for a `request` fence, the request served by the
 /// host the pin's `[sapi]` names.
 fn ran_by_oracle(oracle: &Oracle<'_>, witness: &Witness) -> Result<Observation> {
-    match &witness.request {
-        Some(commands) if witness.served == Served::Phpdbg => oracle.asserted().and_then(|()| {
-            let Some(phpdbg) = &oracle.pin().sapi.phpdbg else {
-                anyhow::bail!("oracle.toml's [sapi] names no phpdbg to serve the program");
-            };
-            process::served_as_phpdbg(oracle, &phpdbg.path, &witness.snippet, commands, &[])
-        }),
-        Some(request) if matches!(witness.served, Served::Fpm | Served::Makala) => {
-            oracle.asserted().and_then(|()| {
-                let Some(fpm) = &oracle.pin().sapi.fpm else {
-                    anyhow::bail!("oracle.toml's [sapi] names no php-fpm to serve the request");
-                };
-                if witness.served == Served::Makala {
-                    return makala::served_by_mapping(oracle, &fpm.path, &witness.snippet, request);
-                }
-                super::fpm::served_as_fpm(oracle, &fpm.path, &witness.snippet, request, &[])
-            })
+    let sapi = &oracle.pin().sapi;
+    let (snippet, regime) = (&witness.snippet, witness.regime.as_deref());
+    let Some(request) = &witness.request else {
+        return oracle.run(Program::Snippet(snippet), regime);
+    };
+    oracle.asserted()?;
+    match witness.served {
+        Served::Phpdbg => {
+            process::served_as_phpdbg(oracle, &sapi.named(PHPDBG)?.path, snippet, request, &[])
         }
-        Some(request) => oracle.asserted().and_then(|()| {
-            let Some(cgi) = &oracle.pin().sapi.cgi else {
-                anyhow::bail!("oracle.toml's [sapi] names no php-cgi to serve the request");
-            };
-            process::served_as_cgi(
-                oracle,
-                &cgi.path,
-                &witness.snippet,
-                request,
-                witness.regime.as_deref(),
-                &[],
-            )
-        }),
-        None => oracle.run(
-            Program::Snippet(&witness.snippet),
-            witness.regime.as_deref(),
+        Served::Makala => {
+            makala::served_by_mapping(oracle, &sapi.named(FPM)?.path, snippet, request)
+        }
+        Served::Fpm => {
+            super::fpm::served_as_fpm(oracle, &sapi.named(FPM)?.path, snippet, request, &[])
+        }
+        _ => process::served_as_cgi(
+            oracle,
+            &sapi.named(CGI)?.path,
+            snippet,
+            request,
+            regime,
+            &[],
         ),
     }
 }
@@ -504,7 +494,7 @@ pub(super) fn serve(
     regime: Option<&Regime>,
 ) -> Result<(Observation, Vec<Entry>)> {
     match witness.served {
-        Served::Linked => linked::serve_traced(&oracle.pin().recipe, regime, &witness.snippet)
+        Served::Linked => linked::serve_by(None, &oracle.pin().recipe, regime, &witness.snippet)
             .map(|(out, entered)| (out, entered.lines().filter_map(Entry::parse).collect()))
             .context("the linked engine did not serve it"),
         Served::Binary => binary
@@ -533,7 +523,7 @@ pub(super) fn serve(
         Served::Makala => (binary.host(crate::oracle::hosts::MAKALA))
             .and_then(|host| {
                 let request = witness.request.as_deref().unwrap_or_default();
-                process::traced(|env| makala::served(oracle, host, &witness.snippet, request, env))
+                process::traced(|env| makala::served(oracle, &host, &witness.snippet, request, env))
             })
             .context("the makala binary did not serve it"),
         Served::Phpdbg => binary

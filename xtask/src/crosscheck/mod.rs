@@ -529,6 +529,7 @@ fn rendering(
                 None,
                 &program,
             )
+            .map(|(observed, _)| observed)
             .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
         } else {
             engines

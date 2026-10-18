@@ -746,7 +746,7 @@ mod tests {
     use super::*;
     use php_link::Names;
     use php_unit::decl::{ConstExpr, ConstantName, Name, NameKind, Parameter, Type, Visibility};
-    use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
+    use php_unit::{AutoGlobal, OpArray, Opcode, OperandKind, OplineIdx, frameless_table};
 
     /// A dump read as text by the tests below, which hold it to php's
     /// words; a byte that is no character reads as U+FFFD here alone.
@@ -7125,6 +7125,80 @@ class C {
             ],
             "a promoted parameter is a declared property of the class"
         );
+    }
+
+    /// `ZEND_TYPE_PURE_MASK(arg_info[-1].type)` on every op array: the
+    /// declared return type's mask wherever one is declared, the
+    /// `string` `zend_compile_params` falls back to for `__toString` and
+    /// the `void` a `set` hook is given among them, and 0 where none is
+    /// declared, the main op array's included.
+    #[test]
+    fn an_op_array_s_return_mask_is_its_declared_return_type_s_mask() {
+        let (unit, _strings) = unit_and_strings(
+            b"<?php
+function a(): int { return 1; }
+function b(): ?int { return null; }
+function c(): int|string|null { return 1; }
+function d(): Countable { return new ArrayObject; }
+function e() { return 1; }
+class K {
+    public int $p { get => 1; set { } }
+    public function s(): static { return $this; }
+    public function m(): self|false { return $this; }
+    public function __toString() { return \"\"; }
+}
+$f = fn (): float => 1.5;
+",
+        );
+        let mask = |decl: &FunctionDecl| decl.return_type.as_ref().map_or(0, Type::mask);
+        let mut held: Vec<(String, u32, u32)> = Vec::new();
+        let mut take = |decl: &FunctionDecl, code: &OpArray| {
+            let name = String::from_utf8_lossy(&decl.name.0).into_owned();
+            held.push((name, mask(decl), code.return_mask));
+        };
+        for (decl, code) in unit.functions.iter().chain(&unit.dynamic) {
+            take(decl, code);
+        }
+        for body in &unit.methods {
+            let class = &unit.classes[body.class as usize];
+            take(&class.methods[body.method as usize].function, &body.body);
+        }
+        for body in &unit.hooks {
+            let property = &unit.classes[body.class as usize].properties[body.property as usize];
+            let hook = property
+                .hooks
+                .as_ref()
+                .and_then(|hooks| hooks.of(body.kind));
+            assert!(hook.is_some(), "a hook's body has its declaration");
+            if let Some(hook) = hook {
+                take(&hook.function, &body.body);
+            }
+        }
+        for (name, declared, carried) in &held {
+            assert_eq!(declared, carried, "{name}");
+        }
+        let carried = |name: &str| {
+            let found = held.iter().find(|(held, ..)| held == name);
+            found.map(|(.., carried)| *carried)
+        };
+        assert_eq!(unit.main.return_mask, 0, "the main op array declares none");
+        assert_eq!(carried("a"), Some(1 << 4));
+        assert_eq!(carried("b"), Some((1 << 4) | (1 << 1)));
+        assert_eq!(carried("c"), Some((1 << 4) | (1 << 6) | (1 << 1)));
+        assert_eq!(carried("d"), Some(0), "a class name contributes no bit");
+        assert_eq!(carried("e"), Some(0), "no return type is declared");
+        assert_eq!(carried("s"), Some(1 << 15), "`static` is a bit of its own");
+        assert_eq!(carried("m"), Some(1 << 2), "`self` contributes no bit");
+        assert_eq!(carried("__toString"), Some(1 << 6), "the fallback `string`");
+        assert_eq!(carried("$p::get"), Some(1 << 4), "the property's type");
+        assert_eq!(
+            carried("$p::set"),
+            Some(1 << 14),
+            "the `void` of a `set` hook"
+        );
+        let closure = held.iter().find(|(name, ..)| name.starts_with("{closure:"));
+        assert_eq!(closure.map(|(.., carried)| *carried), Some(1 << 5));
+        assert_eq!(held.len(), 11, "every function, method, hook and closure");
     }
 
     /// The two `INIT_*_METHOD_CALL`s, read as

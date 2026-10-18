@@ -144,7 +144,7 @@ pub(crate) fn whole(n: Number) -> u64 {
 }
 
 /// A section as the command line spells it.
-fn name(section: Section) -> String {
+pub(super) fn name(section: Section) -> String {
     section
         .to_possible_value()
         .map_or_else(|| format!("{section:?}"), |v| v.get_name().to_owned())

@@ -145,11 +145,18 @@ fn sapi_filter(
         .state::<State>()
         .slot(input)
         .and_then(|slot| slot.as_deref().copied());
+    // `ZVAL_STRINGL`, `zend_string_init`, which makes even an empty or
+    // a one-byte value a string of its own, for the raw copy, and for the
+    // value handed on where it has a byte, `ZVAL_EMPTY_STRING` where not.
     if let Some(array) = kept {
-        let raw = string_value(req, value)?;
+        let raw = string_init(req, value)?;
         req.register_variable(array, name, raw)?;
     }
-    let raw = string_value(req, value)?;
+    let raw = if value.is_empty() {
+        string_value(req, value)?
+    } else {
+        string_init(req, value)?
+    };
     let default = req
         .ini_get(b"filter.default")
         .and_then(|named| {
@@ -534,6 +541,12 @@ fn find(options: Option<&Value>, name: &[u8]) -> Option<Value> {
 /// A new string of the request's as a value.
 fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     Ok(PhpString::new(req, bytes)?.into_value())
+}
+
+/// `ZVAL_STRINGL`: a string of the bytes out of the request's heap,
+/// `zend_string_init`, whatever their length.
+fn string_init(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::filled(req, bytes.len(), |into| into.copy_from_slice(bytes))?.into_value())
 }
 
 /// The bytes as C's `%s` prints them, up to the first NUL.

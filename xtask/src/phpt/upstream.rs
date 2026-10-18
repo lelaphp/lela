@@ -83,7 +83,7 @@ pub(crate) fn compare(
         let ours = ours.judged.iter().find(|judged| judged.id == id);
         let ours = ours.map(|judged| judged.judgement);
         let theirs = verdict(&said, test);
-        let alike = ours.and_then(word).is_some_and(|ours| Some(ours) == theirs);
+        let alike = alike(ours, theirs);
         apart += usize::from(!alike);
         println!(
             "phpt: --upstream: {}: xtask phpt {}, run-tests.php {}; {}",
@@ -139,7 +139,7 @@ pub(super) fn named(source: &Path, subset: &Subset, files: &[PathBuf]) -> Result
 
 /// `run-tests.php` of the copy `tree` over `tests`, under the oracle of
 /// `pin` and the recipe's environment, what it wrote printed and returned.
-fn upstream(pin: &Pin, tree: &Path, tests: &[PathBuf]) -> Result<String> {
+pub(super) fn upstream(pin: &Pin, tree: &Path, tests: &[PathBuf]) -> Result<String> {
     let php = pin.oracle.file()?;
     let mut runner = Command::new(php);
     pin.recipe
@@ -194,6 +194,17 @@ pub(super) fn verdict<'a>(said: &'a str, test: &Path) -> Option<&'a str> {
     words.last()
 }
 
+/// Whether this runner's verdict `ours` and upstream's `theirs` are one:
+/// upstream's word without the `WARN&` it reports a `warn` SKIPIF's test
+/// under (run-tests.php:2677), which this runner keeps in the failure's
+/// note and not as a verdict of its own. A lone `WARN` is a verdict of
+/// both runners', [`Judgement::Warn`].
+pub(super) fn alike(ours: Option<Judgement>, theirs: Option<&str>) -> bool {
+    let unwarned = theirs.map(|theirs| theirs.strip_prefix("WARN&").unwrap_or(theirs));
+    ours.and_then(word)
+        .is_some_and(|ours| Some(ours) == unwarned)
+}
+
 /// What `run-tests.php` calls a verdict of this runner's: a difference a
 /// registry row accepts is still its `FAIL`, and a test the compiler did
 /// not read has none, since only the engine's compiler refuses one, nor
@@ -205,6 +216,7 @@ fn word(judgement: Judgement) -> Option<&'static str> {
         Judgement::Skip => Some("SKIP"),
         Judgement::Bork => Some("BORK"),
         Judgement::XFail => Some("XFAIL"),
+        Judgement::Warn => Some("WARN"),
         Judgement::Unread | Judgement::Unsent => None,
     }
 }
@@ -289,5 +301,9 @@ mod tests {
         let another = "PASS y [ext/a/tests/y.phpt] \nwhat came after\n[ext/a/tests/x.phpt]";
         assert_eq!(verdict(another, test), None);
         assert_eq!(word(Judgement::Diverged), Some("FAIL"));
+        assert!(alike(Some(Judgement::Fail), Some("WARN&FAIL")));
+        assert!(alike(Some(Judgement::Warn), Some("WARN")));
+        assert!(!alike(Some(Judgement::Pass), Some("WARN")));
+        assert!(!alike(Some(Judgement::Unread), None));
     }
 }

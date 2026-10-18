@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::Column;
+use crate::oracle::hosts::{CGI, CLI, FPM};
 use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
 use crate::scratch::Tree;
 
@@ -109,21 +110,14 @@ pub(crate) fn oracle_side(
     column: Column,
 ) -> Result<Observation> {
     let program = column.program(module);
-    let sapi = &oracle.pin().sapi;
-    let pinned = |pinned: Option<&oracle::Host>, name: &str| {
-        let pinned = pinned
-            .ok_or_else(|| anyhow!("oracle.toml's [sapi] names no {name} to serve the module"))?;
-        oracle.host_asserted(pinned)?;
-        Ok::<_, anyhow::Error>(pinned.path.clone())
-    };
     let served = match host {
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
         Host::Cgi => {
-            let path = pinned(sapi.cgi.as_ref(), "php-cgi")?;
+            let path = oracle.pinned_host(CGI)?;
             crate::witness::served_as_cgi(oracle, &path, &program, REQUEST, None, &[])?
         }
         Host::Fpm => {
-            let path = pinned(sapi.fpm.as_ref(), "php-fpm")?;
+            let path = oracle.pinned_host(FPM)?;
             crate::witness::served_as_fpm(oracle, &path, &program, REQUEST, &[])?
         }
         Host::Server => served_by_server(oracle, &oracle.pin().oracle.path, &program)?,
@@ -145,7 +139,7 @@ pub(crate) fn engine_side(
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
         Host::Cgi => binary.serve_cgi(oracle, &program, REQUEST, None)?.0,
         Host::Fpm => binary.serve_fpm(oracle, &program, REQUEST)?.0,
-        Host::Server => served_by_server(oracle, binary.cli()?, &program)?,
+        Host::Server => served_by_server(oracle, &binary.host(CLI)?, &program)?,
     };
     Ok(body(oracle, served))
 }

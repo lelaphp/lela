@@ -121,14 +121,10 @@ pub fn reading(root: &Path, usage: &SessionUsage, session: &str, turn: u64) -> R
         reading.count(TOKENS, tokens)?;
     }
     if let Some(percent) = usage.context.percent {
-        reading
-            .numbers
-            .insert(PERCENT.to_owned(), Number::Float(percent));
+        reading.set(PERCENT, percent);
     }
     if let Some(cost) = &usage.cost {
-        reading
-            .numbers
-            .insert(USD.to_owned(), Number::Float(dollars(cost.usd)));
+        reading.set(USD, dollars(cost.usd));
     }
     reading.message = match (usage.context.tokens, usage.context.percent) {
         (Some(tokens), Some(percent)) => format!(
@@ -152,13 +148,7 @@ pub fn record(root: &Path, store: &Store, session: &str, turn: u64) -> Result<()
         .context("reading the SessionUsage object from stdin")?;
     let usage = SessionUsage::parse(&text)?;
     let reading = reading(root, &usage, session, turn)?;
-    println!(
-        "{} {} {}: {}",
-        reading.status.as_str(),
-        reading.instrument,
-        reading.scope,
-        reading.message
-    );
+    println!("{reading}");
     store.record_measurement(std::slice::from_ref(&reading))
 }
 
@@ -237,7 +227,7 @@ impl Total {
     /// The total as the run's `usd`, where any step had one.
     pub fn carry(self, reading: &mut Reading) {
         if let Some(usd) = self.usd {
-            reading.numbers.insert(USD.to_owned(), Number::Float(usd));
+            reading.set(USD, usd);
         }
     }
 }

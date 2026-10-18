@@ -1587,6 +1587,7 @@ version = "0.0.0"
 name = "php_sapi"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "php_engine",
  "php_proto",
 ]
@@ -2279,6 +2280,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
+ "sha2",
  "syn",
  "toml",
 ]

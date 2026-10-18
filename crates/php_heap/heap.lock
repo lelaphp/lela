@@ -48,6 +48,8 @@ Direction
 EntryGuard
 Exponent
 Exponent::as_char
+FakeRoom
+FakeRoom::new
 Fatal
 Fatal::error
 Fatal::into_reason
@@ -102,6 +104,7 @@ Heap::array_update
 Heap::block
 Heap::block_resize
 Heap::call_destructors
+Heap::carve
 Heap::close_resources
 Heap::dup_value
 Heap::fatal_leaving
@@ -132,7 +135,6 @@ Heap::iterators_advance
 Heap::iterators_carry
 Heap::iterators_lower_pos
 Heap::iterators_update
-Heap::lay_interned_table
 Heap::lend
 Heap::mark_destructed
 Heap::memory_limit
@@ -343,6 +345,7 @@ VmStack::innermost
 VmStack::is_empty
 VmStack::len
 VmStack::link_below
+VmStack::link_room
 VmStack::link_word
 VmStack::move_to_heap
 VmStack::new
@@ -358,6 +361,7 @@ VmStack::resume_frame
 VmStack::set_aside
 VmStack::top
 VmStack::top_mut
+VmStack::unlink_room
 Zval
 Zval::UNDEF
 Zval::array

@@ -1017,37 +1017,92 @@ pub(crate) struct Scopes {
 /// k(): Argument #1 ($c) must be of type ?callable, string given
 /// ```
 pub(crate) fn holds(req: &mut Request, value: &Value, ty: &Type, scopes: Scopes) -> bool {
+    holding(req, value, ty, scopes).resolve(req, value, scopes)
+}
+
+/// What a declared type says of a value with the request only read:
+/// [`holds`] up to its `callable`, the one test that can serve PHP code
+/// or raise a deprecation (`zend_is_callable`, which may autoload a class
+/// a string names) and so takes the request whole. A caller that holds
+/// the type borrowed from the request reads this, lets the borrow go and
+/// then resolves it ([`Holding::resolve`]), so it copies no type.
+///
+/// `callable` is tried after every other member of a union, where php
+/// tries the classes, then `callable`, then `static`
+/// (`zend_check_type_slow`): a value `static` holds is an object, which
+/// `zend_is_callable` resolves with nothing raised or served, so the order
+/// of the two is not observable.
+pub(crate) fn holding(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -> Holding {
     let value = value.deref();
     let object = value.as_object().map(PhpObject::class);
     let is = |class: Option<ClassId>| {
-        object
-            .zip(class)
-            .is_some_and(|(object, class)| req.instance_of(object, class))
+        Holding::of(
+            object
+                .zip(class)
+                .is_some_and(|(object, class)| req.instance_of(object, class)),
+        )
     };
     match ty {
-        Type::Mixed => true,
-        Type::Nullable(inner) => {
-            matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef)
-                || holds(req, &value, inner, scopes)
+        Type::Mixed => Holding::Yes,
+        Type::Nullable(_) if matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef) => {
+            Holding::Yes
         }
-        Type::Union(members) => members
-            .iter()
-            .any(|member| holds(req, &value, member, scopes)),
-        Type::Intersection(members) => members
-            .iter()
-            .all(|member| holds(req, &value, member, scopes)),
+        Type::Nullable(inner) => holding(req, &value, inner, scopes),
+        Type::Union(members) => {
+            let mut verdict = Holding::No;
+            for member in members {
+                match holding(req, &value, member, scopes) {
+                    Holding::Yes => return Holding::Yes,
+                    Holding::IfCallable => verdict = Holding::IfCallable,
+                    Holding::No => {}
+                }
+            }
+            verdict
+        }
+        // Names alone, so never `callable`.
+        Type::Intersection(members) => Holding::of(
+            members
+                .iter()
+                .all(|member| holding(req, &value, member, scopes) == Holding::Yes),
+        ),
         Type::Named(name) => is(req.class_named(name.into())),
-        Type::Iterable => {
-            value.as_array().is_some() || is(req.class_named(Bare::resolved(b"Traversable")))
-        }
-        Type::Callable => req.is_callable_value(&value, scopes.callables),
+        Type::Iterable if value.as_array().is_some() => Holding::Yes,
+        Type::Iterable => is(req.class_named(Bare::resolved(b"Traversable"))),
+        Type::Callable => Holding::IfCallable,
         Type::SelfClass => is(scopes.own),
         Type::CalledClass => is(scopes.called),
         Type::ParentClass => is(scopes
             .own
-            .and_then(|class| req.class_decl(class)?.parent.clone())
-            .and_then(|parent| req.class_named((&parent).into()))),
-        _ => ty.contains_code(value.type_code()),
+            .and_then(|class| req.class_decl(class)?.parent.as_ref())
+            .and_then(|parent| req.class_named(parent.into()))),
+        _ => Holding::of(ty.contains_code(value.type_code())),
+    }
+}
+
+/// [`holding`]'s answer: the type holds the value, it does not, or it does
+/// where the value is callable, which [`Holding::resolve`] asks of the
+/// request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Holding {
+    Yes,
+    No,
+    IfCallable,
+}
+
+impl Holding {
+    fn of(holds: bool) -> Holding {
+        if holds { Holding::Yes } else { Holding::No }
+    }
+
+    /// The answer whole: `zend_is_callable` over the value where only
+    /// a `callable` could hold it, with the deprecations `scopes` asks
+    /// for.
+    pub(crate) fn resolve(self, req: &mut Request, value: &Value, scopes: Scopes) -> bool {
+        match self {
+            Holding::Yes => true,
+            Holding::No => false,
+            Holding::IfCallable => req.is_callable_value(&value.deref(), scopes.callables),
+        }
     }
 }
 

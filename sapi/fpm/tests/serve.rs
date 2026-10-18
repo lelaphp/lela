@@ -732,6 +732,34 @@ fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
     );
 }
 
+/// A request slow inside a generator resumed through a `yield from`:
+/// php links the running generator's frame to the placeholder the
+/// generator the loop resumed holds, `execute_fake`, whose `func` is
+/// `NULL` (`Z/Zend/zend_generators.c:807`), and the placeholder to the
+/// frame that resumed it, so `fpm_php_trace_dump` writes `???()` for the
+/// placeholder, with the line of the loop below it, and the running
+/// frame's line is `unknown:0`, its walk below stopping at the
+/// placeholder (#2897).
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_in_a_delegated_generator_writes_php_s_placeholder_line() {
+    let program = [(
+        "slow.php",
+        "<?php\nfunction inner() { usleep(3000000); yield 1; }\nfunction outer() { yield from inner(); }\n\
+         foreach (outer() as $v) {}\necho 'done';\n",
+    )];
+    let (frames, real) = slow_frames("slowlog-fake", "", &program);
+    let file = real.join("slow.php").display().to_string();
+    assert_eq!(
+        frames,
+        [
+            format!("usleep() {file}:2"),
+            "inner() unknown:0".to_string(),
+            format!("???() {file}:4"),
+        ]
+    );
+}
+
 /// `request_slowlog_trace_depth` cuts the walk at that many frames, the
 /// innermost first, as php's `--callers_limit` does.
 #[test]

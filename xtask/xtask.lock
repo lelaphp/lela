@@ -149,6 +149,7 @@ oracle::Binary::absent
 oracle::Binary::file
 oracle::Binary::variant
 oracle::Build
+oracle::ClosureDigest
 oracle::ENGINE
 oracle::Ended
 oracle::Host

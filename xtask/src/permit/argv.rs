@@ -643,11 +643,8 @@ fn past_options(words: &[String], mut at: usize) -> usize {
         .get(at)
         .filter(|w| w.starts_with(['-', '+']) && *w != "--")
     {
-        at += if CARGO_VALUED.contains(&word.as_str()) {
-            2
-        } else {
-            1
-        };
+        // The option, and its value where it takes one.
+        at += 1 + usize::from(CARGO_VALUED.contains(&word.as_str()));
     }
     at.min(words.len())
 }
@@ -741,11 +738,7 @@ impl Argv {
             };
             at += 1;
             while let Some(option) = words.get(at).filter(|w| w.starts_with('-')) {
-                at += if valued.contains(&option.as_str()) {
-                    2
-                } else {
-                    1
-                };
+                at += 1 + usize::from(valued.contains(&option.as_str()));
             }
             at += operands;
         }

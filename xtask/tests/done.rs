@@ -1483,9 +1483,10 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         assert!(at > last, "{step} is out of order: {text}");
         last = at;
     }
-    // Every upload is a store and nothing else, and one of them is the
-    // run's, `harness`; a ticket is closed by the session that worked it,
-    // so no job closes one on a push (#290).
+    // Every upload is a store and nothing else, less what a job excludes
+    // of it (the phpt runs a job that takes none would carry, #2299), and
+    // one of them is the run's, `harness`; a ticket is closed by the
+    // session that worked it, so no job closes one on a push (#290).
     let uploads = text.match_indices("upload-artifact").collect::<Vec<_>>();
     assert_eq!(
         uploads.len(),
@@ -1496,8 +1497,16 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     for (upload, _) in uploads {
         let step = &text[upload..];
         let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+        let excluding = step.split_once("path: |\n").is_some_and(|(_, paths)| {
+            let mut paths = paths
+                .lines()
+                .map(str::trim)
+                .take_while(|l| !l.contains(':'));
+            paths.next() == Some("target/harness")
+                && paths.all(|l| l.starts_with("!target/harness/") || l.is_empty())
+        });
         assert!(
-            step.contains("path: target/harness"),
+            step.contains("path: target/harness") || excluding,
             "the upload is the store: {step}"
         );
         kept += usize::from(step.contains("name: harness\n"));

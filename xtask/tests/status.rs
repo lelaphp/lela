@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use xtask::manifest::Manifest;
-use xtask::oracle::{PROMISE_VARIABLE, TREE_VARIABLE};
+use xtask::oracle::{PROMISE_VARIABLE, Platform, TREE_VARIABLE};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 
@@ -747,17 +747,52 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
 }
 
 /// The pinned php a runner pours (#2253): its version, keg path and md5
-/// as the pin states them, so the oracle job reads the pin off this
-/// section and never parses `oracle.toml` a second time.
+/// as the pin states them, and each variant's build for this machine a
+/// runner lays (#2298), so the oracle job reads the pin off this section
+/// and never parses `oracle.toml` a second time.
 #[test]
 fn oracle_states_the_pinned_php_a_runner_pours() {
     let root = scratch("oracle-binary");
-    let oracle = Manifest::load(workspace()).unwrap().pin.oracle;
+    let pin = Manifest::load(workspace()).unwrap().pin;
+    let oracle = pin.oracle.clone();
     let path = oracle.path.display().to_string();
     let json = oracle_json(&root, None, None);
     assert_eq!(json["binary"]["version"], oracle.version.as_str());
     assert_eq!(json["binary"]["path"], path.as_str());
     assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
+    for name in pin.variant.keys() {
+        let built = pin.variant(name).unwrap().oracle;
+        let laid = &json["variants"][name.as_str()];
+        if built.md5.is_empty() {
+            assert!(laid.is_null(), "{name} pins no build here: {laid}");
+            continue;
+        }
+        assert_eq!(laid["md5"], built.md5.as_str(), "{name}");
+        assert_eq!(laid["path"], built.path.to_str().unwrap(), "{name}");
+        assert_eq!(laid["platform"], Platform::this().unwrap().key(), "{name}");
+        let pinned = pin.variant[name].build(Platform::this().unwrap()).unwrap();
+        let closure = pinned.closure.as_ref().map(ToString::to_string);
+        assert_eq!(laid["closure"], serde_json::json!(closure), "{name}");
+    }
+    // The record's digest, SHA-256 over each `name=version\n` in name
+    // order (#2935), computed here from the kegs the section names.
+    if let Some(kegs) = json["closure"].as_object() {
+        use sha2::Digest as _;
+        let mut sha = sha2::Sha256::new();
+        for (keg, version) in kegs {
+            sha.update(format!("{keg}={}\n", version.as_str().unwrap()));
+        }
+        let hex: Vec<String> = sha.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(json["closure_digest"], format!("sha256:{}", hex.concat()));
+    }
+    let pinned_here = pin
+        .variant
+        .keys()
+        .filter(|n| !pin.variant(n).unwrap().oracle.md5.is_empty());
+    assert_eq!(
+        json["variants"].as_object().unwrap().len(),
+        pinned_here.count()
+    );
     let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
     assert!(ok, "{err}");
     assert!(
@@ -767,6 +802,17 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         )),
         "{md}"
     );
+    for (name, laid) in json["variants"].as_object().unwrap() {
+        let row = md
+            .lines()
+            .find(|l| l.starts_with(&format!("| variant {name} |")));
+        let md5 = format!("md5 {}", laid["md5"].as_str().unwrap());
+        let state = match laid["closure"].as_str() {
+            Some(closure) => format!("{md5}, closure {closure} |"),
+            None => format!("{md5} |"),
+        };
+        assert!(row.is_some_and(|row| row.ends_with(&state)), "{md}");
+    }
 }
 
 /// The pin's tag and commit as `[source]` states them (#66), beside its
@@ -825,13 +871,18 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
         "{key}"
     );
     let pin = Manifest::load(workspace()).unwrap().pin;
+    let variants = pin
+        .variant
+        .keys()
+        .map(|name| pin.variant(name).unwrap().oracle.md5);
+    let kept: Vec<String> = std::iter::once(pin.oracle.md5.clone())
+        .chain(variants.filter(|md5| !md5.is_empty()))
+        .map(|md5| format!("target/harness/phpt-runs/pin-{}-{md5}", pin.source.tag))
+        .collect();
     assert_eq!(
         corpus["targets"],
-        format!(
-            "target/harness/phpt-runs/pin-{}-{}",
-            pin.source.tag, pin.oracle.md5
-        ),
-        "the targets are kept under the pin's tag and the oracle's digest"
+        serde_json::json!(kept),
+        "the targets are kept under the pin's tag and each oracle's digest"
     );
     // The hosts the lane hands a test to (#1908), the binary under test
     // first: each `sapi/*` crate of the workspace, by the package and the

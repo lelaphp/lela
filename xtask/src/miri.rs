@@ -24,12 +24,12 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::batch::{self, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Reading, Status};
 use crate::sources;
 
 /// The instrument name the reading carries.
@@ -53,18 +53,16 @@ pub const CRATES: [&str; 1] = ["php_heap"];
 /// A crate whose sources do not exist yet writes none; a machine without
 /// the toolchain writes a skip naming the command that installs it.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
-    let names: Vec<&str> = if only.is_empty() {
-        CRATES.to_vec()
+    let named: Vec<String> = if only.is_empty() {
+        CRATES.map(str::to_owned).into()
     } else {
-        only.iter().map(String::as_str).collect()
+        only.to_vec()
     };
     let snapshot = Snapshot::disk(root)?;
     let installed = installed(root);
     let mut readings = Vec::new();
-    for name in names {
-        let Some(krate) = manifest.crate_named(name) else {
-            bail!("the manifest has no crate named {name:?}");
-        };
+    for krate in manifest.crates_named(&named)? {
+        let name = &krate.name;
         if !sources::exists(root, krate) {
             continue;
         }
@@ -82,18 +80,6 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
         readings.push(reading);
     }
     Ok(readings)
-}
-
-/// The command line's entry: the crates named, or [`CRATES`], and every
-/// reading written.
-pub(crate) fn command(
-    root: &Path,
-    manifest: &Manifest,
-    store: &Store,
-    crates: &[String],
-) -> Result<()> {
-    let readings = run(root, manifest, crates)?;
-    crate::record(store, &readings)
 }
 
 /// Whether `cargo miri` answers on [`TOOLCHAIN`]; what it said where not.
