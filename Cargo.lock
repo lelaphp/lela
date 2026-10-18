@@ -888,6 +888,7 @@ dependencies = [
  "php_ext_zend_test",
  "php_ext_zip",
  "php_ext_zlib",
+ "php_jit",
 ]
 
 [[package]]
@@ -1541,6 +1542,13 @@ version = "0.0.0"
 dependencies = [
  "corosensei",
  "libc",
+]
+
+[[package]]
+name = "php_jit"
+version = "0.0.0"
+dependencies = [
+ "php_engine",
 ]
 
 [[package]]

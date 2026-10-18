@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 411 |  |
 
-<!-- /computed in=e123270e9dfef92db6dcc4453a835e3f28957146e69b9f21a71b3514364ea980 out=6167ee5f123228b3af05f954cb0a5d7ecdf9e2724cb7cde590953fdd0a9e7e73 -->
+<!-- /computed in=8e91333feae97c7e600f793b20f2794e157a264691a16c2df77f63432065a4ef out=6167ee5f123228b3af05f954cb0a5d7ecdf9e2724cb7cde590953fdd0a9e7e73 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -183,6 +183,7 @@ Options:
 ├── php_engine
 ├── php_ext
 ├── php_heap
+├── php_jit
 ├── php_link
 ├── php_macros
 ├── php_process
@@ -193,7 +194,7 @@ Options:
 ├── php_unit
 └── timelib_sys
 ```
-<!-- /computed in=116a29f2690535535ce478cb1937672cf8a93a8cbbbc2d2ae9137c2e8a3ebf08 out=08232d13ccb389a8e7ddf2fe175d9cd15829207c42a1da48168957adbdc5f201 -->
+<!-- /computed in=70b3b7eca9690068316f014f00bdd615bc6f89449cdfd3567d5ee9f795b18194 out=b73614d2eac7f713540dbdf7f6b1b890c6288f77445621d7a7118414d6885560 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

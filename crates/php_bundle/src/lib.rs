@@ -358,8 +358,23 @@ pub fn configure_for(serving: Serving) -> &'static [&'static str] {
     })
 }
 
-/// The tier, named once (design §4.3 seam 8): the interpreter alone until
-/// the `jit` feature binds the compiled tier. Never in [`enabled()`].
+/// The tier, named once (design §4.3 seam 8; `jit-design.md` §6): the
+/// compiled tier where the `jit` feature is on and the target is one of
+/// the four it is built for. Never in [`enabled()`].
+#[cfg(all(
+    feature = "jit",
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub type Tier = php_jit::Jit;
+/// The tier, named once (design §4.3 seam 8; `jit-design.md` §6): the
+/// interpreter alone, without the `jit` feature or off the four targets
+/// the compiled tier is built for. Never in [`enabled()`].
+#[cfg(not(all(
+    feature = "jit",
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 pub type Tier = php_ext::Nop;
 
 /// The in-process host (design §4.3 seam 4, §8; `CONTEXT.md`, Host): a fresh
@@ -415,5 +430,21 @@ mod tests {
         let on_threads = configure_for(Serving::Threads);
         assert!(!on_threads.contains(&"--enable-pcntl"));
         assert!(on_threads.contains(&"--disable-posix"));
+    }
+
+    /// The `jit` feature binds the compiled tier on the four targets, and
+    /// every other build the interpreter alone (`jit-design.md` §6).
+    #[test]
+    fn the_tier_is_the_compiled_one_where_the_feature_and_the_target_are() {
+        use std::any::TypeId;
+        let compiled = cfg!(all(
+            feature = "jit",
+            any(target_os = "linux", target_os = "macos"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ));
+        assert_eq!(
+            TypeId::of::<Tier>() == TypeId::of::<php_ext::Nop>(),
+            !compiled
+        );
     }
 }

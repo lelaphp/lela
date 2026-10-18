@@ -204,8 +204,8 @@ pub(crate) enum Targets {
     /// because no two in the workspace conflict and the lanes already
     /// build each but one: the `php` binary turns on the bundle's
     /// extensions, and `php-linked` its `linked` and `test`. The one is
-    /// `php_bundle`'s `jit`, in the set on purpose: it enables nothing
-    /// until `php_jit` exists, and then the tier is linted with the rest.
+    /// `php_bundle`'s `jit`, in the set on purpose: it links `php_jit` on
+    /// the four targets, so the tier is linted with the rest.
     /// A selected crate's features no longer depend on what else the run
     /// selects, so its reading out of the one run is the one a run over
     /// it alone gives.
