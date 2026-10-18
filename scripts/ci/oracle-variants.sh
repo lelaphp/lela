@@ -16,8 +16,10 @@
 # once and every job after it checks. A build whose md5 is not the pin's is
 # laid nowhere and exits 1: this machine's libraries or tools are not the
 # ones the pin was built with, and which side is right is a person's to
-# settle. The path's directory is the runner user's, laid by `runner.sh
-# mac`, so nothing here runs as root.
+# settle. The refusal is kept beside the path, `.refused-<pin md5>`, so the
+# jobs after it say it again without building again until the pin moves or
+# a person removes the file. The path's directory is the runner user's,
+# laid by `runner.sh mac`, so nothing here runs as root.
 #
 # DRY_RUN=1 says what it would build and builds nothing. ORACLE_BUILD names
 # the recipe, `python3 scripts/oracle-build.py` where unset (Python 3.11 or
@@ -27,7 +29,7 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 pin=${1:?usage: oracle-variants.sh <oracle.json from xtask status --section oracle --format json>}
 recipe=(python3 "$here/../oracle-build.py")
-[ -z "${ORACLE_BUILD:-}" ] || recipe=("$ORACLE_BUILD")
+[ -z "${ORACLE_BUILD:-}" ] || read -ra recipe <<<"$ORACLE_BUILD"
 dry=${DRY_RUN:-}
 builds=$(jq -r '.variants // {} | to_entries[] | "\(.key) \(.value.platform) \(.value.md5) \(.value.path)"' "$pin")
 [ -n "$builds" ] || { echo "no oracle variant pins a build for this machine"; exit 0; }
@@ -46,8 +48,15 @@ while read -r name platform md5 path; do
     tree=$(jq -er .found.path "$pin") ||
         { echo "::error::no pinned php-src to build $name from: $(jq -r .found.error "$pin")"; exit 1; }
     dir=$(dirname "$path")
-    { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; } ||
-        { echo "::error::$dir is not $(id -un)'s to write; scripts/ci/runner.sh mac lays it"; exit 1; }
+    { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; } || {
+        echo "::error::$dir is not $(id -un)'s to write; scripts/ci/runner.sh mac lays it, as \`sudo install -d -o $(id -un) $dir\` does"
+        exit 1
+    }
+    refused=$dir/.refused-$md5
+    if [ -f "$refused" ]; then
+        echo "::error::$name: $(cat "$refused"); not built again until the pin moves or $refused is removed (#2298)"
+        exit 1
+    fi
     now=absent
     [ ! -f "$path" ] || now="md5 $(digest "$path"), not the pin's $md5"
     echo "$name: $path is $now; building it for $platform from $tree"
@@ -58,6 +67,7 @@ while read -r name platform md5 path; do
     [ -n "$built" ] || { echo "::error::${recipe[*]} named no binary it built for $name"; exit 1; }
     got=$(digest "$built")
     [ "$got" = "$md5" ] || {
+        echo "a build here on $(date -u +%Y-%m-%d) has md5 $got and the pin is $md5" >"$refused"
         echo "::error::$name: the build at $built has md5 $got and the pin is $md5, so this machine does not reproduce the pinned build; it is laid nowhere, and the difference is a person's to settle (#2298)"
         exit 1
     }

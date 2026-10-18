@@ -214,8 +214,10 @@ jobs:
         with:
           promise: tree oracle
       # The oracle variants a crate's row names, built from that tree once
-      # per pin and checked by md5 after (#2298).
+      # per pin and checked by md5 after (#2298); a build that is not the
+      # pin's fails the step and not the lanes, whose variant crates say so.
       - uses: ./.github/actions/oracle-variants
+        continue-on-error: true
       # The witness reading `done`'s condition 1 asks every touched crate
       # for (§4.5, §7: witnesses run per commit over all crates), under the
       # pinned php. A kernel or native without a witness fails here and

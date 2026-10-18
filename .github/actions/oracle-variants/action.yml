@@ -8,8 +8,11 @@
 # section is rendered after the corpus action, so its `found.path` is the
 # checkout the build is made from. The runner keeps the binary between
 # jobs: one already at the pin's md5 is checked and left, so a build runs
-# once per pin, and one that does not reproduce the md5 stops the job
-# before any lane.
+# once per pin. One that does not reproduce the md5 is laid nowhere, kept
+# as a refusal that later jobs repeat without building again, and fails
+# the step; each job runs it with `continue-on-error`, so the lanes go on,
+# and every lane under the variant says in its own reading that the binary
+# is absent or not the pin's, while the other crates' readings stand.
 name: oracle variants
 description: Lay each oracle variant the pin names for this machine, held to its md5
 inputs:
