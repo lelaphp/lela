@@ -191,6 +191,7 @@ pub(super) fn served(
             binary: host.to_path_buf(),
             script: program.to_path_buf(),
             limit_s,
+            stopped: Vec::new(),
         }
         .into()),
         Err(e) => Err(e),

@@ -947,6 +947,9 @@ pub(crate) struct PastLimit {
     pub(crate) script: PathBuf,
     /// The recipe's limit, in seconds.
     pub(crate) limit_s: u64,
+    /// What it left standing outside its group, stopped with it
+    /// ([`crate::scratch::stop_naming`]).
+    pub(crate) stopped: Vec<u32>,
 }
 
 impl fmt::Display for PastLimit {
@@ -957,7 +960,16 @@ impl fmt::Display for PastLimit {
             self.binary.display(),
             self.limit_s,
             self.script.display()
-        )
+        )?;
+        let stopped: Vec<String> = self.stopped.iter().map(u32::to_string).collect();
+        match stopped.as_slice() {
+            [] => Ok(()),
+            pids => write!(
+                f,
+                ", with what it left outside its group: {}",
+                pids.join(", ")
+            ),
+        }
     }
 }
 
@@ -1582,6 +1594,7 @@ impl<'a> Oracle<'a> {
                 binary: call.binary.to_path_buf(),
                 script: scratch.script.clone(),
                 limit_s: recipe.limits.timeout_s,
+                stopped: crate::scratch::stop_naming(&scratch.script),
             }
             .into());
         };

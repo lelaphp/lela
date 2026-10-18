@@ -1849,6 +1849,39 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
     }
 }
 
+/// A process a program started that left its group by `setsid()` and
+/// names the program's files, as php-fpm's master names the configuration
+/// `FPM\Tester` wrote beside the test: once the program passes the limit
+/// it goes with it, and the test's note names it, rather than standing
+/// on the test's port until the subset ends (#2777).
+#[test]
+fn what_a_program_past_the_limit_left_outside_its_group_goes_with_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let leaves = r#"--TEST--
+leaves a session
+--FILE--
+<?php
+$conf = __DIR__ . '/' . basename(__FILE__, 'php') . 'conf';
+$pid = __DIR__ . '/left.pid';
+shell_exec("perl -MPOSIX -e 'POSIX::setsid(); open my \$f, q(>), \$ARGV[1]; print \$f \$\$; close \$f; sleep 120' $conf $pid > /dev/null 2>&1 &");
+sleep(60);
+--EXPECT--
+nothing
+"#;
+    let (root, subset) = rooted("left-session", leaves);
+    let (went, note) = only(&run_on(&subset, 1, 10));
+    assert_eq!(went, Judgement::Fail, "{note}");
+    let pid = fs::read_to_string(root.join("ext/fixture/tests/left.pid")).unwrap();
+    let pid: i32 = pid.trim().parse().unwrap();
+    assert!(
+        note.ends_with(&format!("outside its group: {pid}")),
+        "{note}"
+    );
+    assert!(!stands(pid), "the session {pid} outlived its run");
+}
+
 /// A child that shares its program's stdout and writes there after the
 /// program exits is read, as upstream reads a test's stdout to its end
 /// (#1491): gh20582.phpt's `proc_open`ed `php -r` lost its `var_dump` to
