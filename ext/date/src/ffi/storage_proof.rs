@@ -161,7 +161,7 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
         size_of::<Emalloc>(),
         size_of::<Option<Emalloc>>()
     );
-    assert_eq!(size_of::<RelFields>(), crate::held::REL_TIME);
+    assert_eq!(size_of::<RelFields>(), 104);
     assert!(size_of::<Option<Emalloc>>() > 8);
     println!(
         "direct owned-zone shape={} native-zone={}: rejected",
