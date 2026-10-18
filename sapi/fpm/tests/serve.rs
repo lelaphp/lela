@@ -152,6 +152,28 @@ fn exchange(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> (
     }
 }
 
+/// The inodes of what this test's process leaves open past its stdio,
+/// as a process it execs inherits them: listed by a child shell, since
+/// stat-ing `/dev/fd` in this process while another test thread spawns
+/// races the kernel's fd table, and macOS 15.6 panicked on it.
+fn inherited() -> Vec<u64> {
+    Command::new("/bin/sh")
+        .args([
+            "-c",
+            "for f in $(/usr/bin/seq 3 63); do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// A connection to the pool listening at `socket`, tried for ten seconds
 /// from `started`.
 fn connect(socket: &Path, started: Instant) -> Option<UnixStream> {
@@ -489,10 +511,7 @@ echo listed();
     .unwrap();
     let stderr = dir.join("stderr");
     let inode = |path: &Path| std::fs::metadata(path).map_or(0, |m| m.ino());
-    let ours: Vec<u64> = (3..64)
-        .filter_map(|fd| std::fs::metadata(format!("/dev/fd/{fd}")).ok())
-        .map(|m| m.ino())
-        .collect();
+    let ours = inherited();
     let mut master = php_fpm()
         .args(["-n", "-d", "opcache.file_update_protection=0", "-F", "-y"])
         .arg(&path)
