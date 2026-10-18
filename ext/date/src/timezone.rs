@@ -273,7 +273,7 @@ fn transition(
     let mut row = PhpArray::new(req)?;
     set_str(req, &mut row, b"ts", Owner::int(ts))?;
     let time = format_timestamp(req, b"x-m-d\\TH:i:sP", ts, false)?;
-    set_string(req, &mut row, b"time", &time)?;
+    set_str(req, &mut row, b"time", time.into_value())?;
     set_str(req, &mut row, b"offset", Owner::int(offset))?;
     set_str(req, &mut row, b"isdst", Owner::bool(is_dst))?;
     set_string(req, &mut row, b"abbr", abbr)?;

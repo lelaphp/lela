@@ -10,7 +10,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString, SmartStr};
 
 use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::lent::{Lent, kept, lent};
@@ -145,15 +145,49 @@ fn blank_offset() -> Offset {
 }
 
 /// `date_format(format, len, t, localtime)`: the format read byte by
-/// byte, each letter replaced by what `php_date.c` prints for it.
-#[allow(clippy::too_many_lines)]
-pub(super) fn date_format(lent: &Lent<'_>, format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
-    let mut out = Vec::new();
+/// byte, each letter replaced by what `php_date.c` prints for it, built
+/// in a `smart_str` on the request's heap and handed over as php's
+/// `return string.s` does, untrimmed, so the string stands in the
+/// buffer's first block, 256 bytes, or the page it grew to; the empty
+/// format is `ZSTR_EMPTY_ALLOC()`, which allocates nothing. The `Err` is
+/// the memory limit's fatal.
+pub(super) fn date_format(
+    req: &mut Request,
+    format: &[u8],
+    t: &Time,
+    localtime: bool,
+) -> Result<Owner<PhpString>, Thrown> {
     if format.is_empty() {
-        return out;
+        return PhpString::new(req, b"");
     }
-    let offset = localtime.then(|| local_offset(lent, t));
-    let off = offset.as_ref().map_or(0, |o| o.offset);
+    let offset = if localtime {
+        Some(lent(req, |l| local_offset(l, t))?)
+    } else {
+        None
+    };
+    let mut out = SmartStr::default();
+    match format_into(req, &mut out, format, t, offset.as_ref()) {
+        Ok(()) => out.finish(req),
+        Err(thrown) => {
+            out.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// [`date_format`]'s loop: each letter's piece appended to `out` as
+/// `smart_str_appendl` appends it, `offset` the local time's where the
+/// format is local.
+#[allow(clippy::too_many_lines)]
+fn format_into(
+    req: &mut Request,
+    out: &mut SmartStr,
+    format: &[u8],
+    t: &Time,
+    offset: Option<&Offset>,
+) -> Result<(), Thrown> {
+    let localtime = offset.is_some();
+    let off = offset.map_or(0, |o| o.offset);
     let sign = if localtime && off < 0 { '-' } else { '+' };
     let oh = (off / 3600).abs();
     let om = ((off % 3600) / 60).abs();
@@ -217,9 +251,9 @@ pub(super) fn date_format(lent: &Lent<'_>, format: &[u8], t: &Time, localtime: b
             b's' => format!("{:02}", c_int(t.s)),
             b'u' => format!("{:06}", c_int(t.us)),
             b'v' => format!("{:03}", c_int(t.us / 1000)),
-            b'I' => i32::from(offset.as_ref().is_some_and(|o| o.is_dst)).to_string(),
+            b'I' => i32::from(offset.is_some_and(|o| o.is_dst)).to_string(),
             b'p' | b'P' | b'O' => {
-                let abbr = offset.as_ref().map_or(&[][..], |o| &o.abbr);
+                let abbr = offset.map_or(&[][..], |o| &o.abbr);
                 if c == b'p' && (!localtime || matches!(abbr, b"UTC" | b"Z" | b"GMT+0000")) {
                     "Z".to_owned()
                 } else {
@@ -227,7 +261,7 @@ pub(super) fn date_format(lent: &Lent<'_>, format: &[u8], t: &Time, localtime: b
                     format!("{sign}{oh:02}{colon}{om:02}")
                 }
             }
-            b'T' => match &offset {
+            b'T' => match offset {
                 Some(o) => String::from_utf8_lossy(&o.abbr).into_owned(),
                 None => "GMT".to_owned(),
             },
@@ -239,7 +273,6 @@ pub(super) fn date_format(lent: &Lent<'_>, format: &[u8], t: &Time, localtime: b
                             .map(|z| String::from_utf8_lossy(z.name()).into_owned())
                             .unwrap_or_default(),
                         ZONETYPE_ABBR => offset
-                            .as_ref()
                             .map(|o| String::from_utf8_lossy(&o.abbr).into_owned())
                             .unwrap_or_default(),
                         ZONETYPE_OFFSET => {
@@ -285,20 +318,20 @@ pub(super) fn date_format(lent: &Lent<'_>, format: &[u8], t: &Time, localtime: b
                 i += 1;
                 // php reads the byte after the backslash, and past the
                 // last byte the string's terminating NUL.
-                out.push(format.get(i).copied().unwrap_or(0));
+                out.append(req, &[format.get(i).copied().unwrap_or(0)])?;
                 i += 1;
                 continue;
             }
             other => {
-                out.push(other);
+                out.append(req, &[other])?;
                 i += 1;
                 continue;
             }
         };
-        out.extend_from_slice(piece.as_bytes());
+        out.append(req, piece.as_bytes())?;
         i += 1;
     }
-    out
+    Ok(())
 }
 
 /// `(t->h % 12) ? (int) t->h % 12 : 12`.
@@ -316,19 +349,22 @@ fn swatch(sse: i64) -> i32 {
     (beat / 864) % 1000
 }
 
-/// `php_format_date(format, len, ts, localtime)`.
+/// `php_format_date(format, len, ts, localtime)`: the time `ts` in
+/// `format`, in the default zone where `localtime`, as [`date_format`]
+/// hands it over. The `Err` is the memory limit's fatal or the default
+/// zone's error.
 pub(super) fn format_timestamp(
     req: &mut Request,
     format: &[u8],
     ts: i64,
     localtime: bool,
-) -> Result<Vec<u8>, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let zone = if localtime {
         Some(default_zone(req)?)
     } else {
         None
     };
-    lent(req, |l| {
+    let t = lent(req, |l| {
         let mut t = Time::new(l);
         match zone {
             Some(zone) => {
@@ -337,8 +373,24 @@ pub(super) fn format_timestamp(
             }
             None => t.unixtime2gmt(l, ts),
         }
-        date_format(l, format, &t, localtime)
-    })
+        t
+    })?;
+    kept(req, t, |req, t| date_format(req, format, t, localtime))
+}
+
+/// [`format_timestamp`] as the bytes main's and ext/standard's callers of
+/// `php_format_date` read before they free the string
+/// ([`php_ext::request::FormatDate`]).
+pub(super) fn format_date(
+    req: &mut Request,
+    format: &[u8],
+    ts: i64,
+    localtime: bool,
+) -> Result<Vec<u8>, Thrown> {
+    let text = format_timestamp(req, format, ts, localtime)?;
+    let bytes = text.as_bytes().to_vec();
+    text.give_up(req);
+    Ok(bytes)
 }
 
 /// `php_date(INTERNAL_FUNCTION_PARAM_PASSTHRU, localtime)`.
@@ -349,8 +401,7 @@ fn php_date(
     localtime: bool,
 ) -> Result<Owner<PhpString>, Thrown> {
     let ts = timestamp.unwrap_or_else(now);
-    let text = format_timestamp(req, format.as_bytes(), ts, localtime)?;
-    PhpString::new(req, &text)
+    format_timestamp(req, format.as_bytes(), ts, localtime)
 }
 
 /// `date(string $format, ?int $timestamp = null): string`, in the
@@ -373,6 +424,21 @@ fn php_date(
 /// string(0) ""
 /// string(2) "00"
 /// string(6) "706d00"
+/// ```
+///
+/// The string is `date_format`'s `smart_str`, untrimmed, and the empty
+/// format's is the interned empty string:
+///
+/// ```php
+/// date('Y', 0);
+/// $m = memory_get_usage(); $b = date('Y-m-d', 0); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $c = date(''); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $l = date('D, d M Y H:i:s T e', 0); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 256
+/// 0
+/// 256
 /// ```
 #[php_function]
 fn date(

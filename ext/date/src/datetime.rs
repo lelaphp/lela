@@ -416,13 +416,16 @@ fn last_errors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     crate::parse::errors_value(req, &errors).map(OrFalse::Value)
 }
 
-/// `php_format_date_obj`: the object's time formatted, none where no
-/// constructor set it.
-pub(crate) fn format_obj(req: &mut Request, format: &[u8], object: PhpObject) -> Option<Vec<u8>> {
+/// `php_format_date_obj`: the object's time formatted, as
+/// `date_format` hands it over, none where no constructor set it.
+pub(crate) fn format_obj(
+    req: &mut Request,
+    format: &[u8],
+    object: PhpObject,
+) -> Option<Result<Owner<PhpString>, Thrown>> {
     with_time(req, object, |req, t| {
-        lent(req, |l| format_time(l, format, t, t.is_localtime != 0))
-    })?
-    .ok()
+        format_time(req, format, t, t.is_localtime != 0)
+    })
 }
 
 /// `date_format` and `format` of both classes.
@@ -431,10 +434,10 @@ fn format_of(
     object: PhpObject,
     format: PhpString,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let Some(text) = format_obj(req, format.as_bytes(), object) else {
-        return Err(crate::obj::uninitialized(req, object.class()));
-    };
-    PhpString::new(req, &text)
+    match format_obj(req, format.as_bytes(), object) {
+        Some(text) => text,
+        None => Err(crate::obj::uninitialized(req, object.class())),
+    }
 }
 
 /// `php_date_modify(object, modify, len)`: the parse's fields written
@@ -1142,6 +1145,29 @@ fn date_get_last_errors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, T
 /// string(89) "2010-01-02 03:04:05.678901 678 America/Sao_Paulo -02 -02:00 -02:00 -0200 -7200 1262408645"
 /// string(22) "+05:30 GMT+0530 +05:30"
 /// string(23) "CEST CEST +02:00 1 7200"
+/// ```
+///
+/// The string is `date_format`'s `smart_str`, untrimmed: its first
+/// block, or the page it grew to, and the date a cast or a dump reads is
+/// the same:
+///
+/// ```php
+/// $d = new DateTime('2020-01-04 UTC');
+/// $m = memory_get_usage(); $a = $d->format('c'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = date_format($d, ''); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $c = $d->format(str_repeat('Y', 100)); echo memory_get_usage() - $m, "\n";
+/// $z = new DateTime('2000-01-01 EST');
+/// $m = memory_get_usage(); $e = $z->format('T e c'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $f = (array) $d; echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $g = (new DateTimeZone('UTC'))->getTransitions(0, 0); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 256
+/// 0
+/// 4096
+/// 256
+/// 832
+/// 1040
 /// ```
 #[php_function]
 fn date_format(

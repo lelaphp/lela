@@ -8,7 +8,7 @@ use php_ext::call::new_object;
 use php_ext::coerce::{to_double, to_long, with_string};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef};
 
 use crate::datetime::restore_properties;
 use crate::ffi::{self, ErrorContainer, Parsed, RelFields, RelTime, Time, UNSET};
@@ -149,9 +149,36 @@ fn date_interval_create_from_date_string(
 }
 
 /// `date_interval_format(format, len, t)`: `%` and a letter each
-/// replaced by its field.
-fn interval_format(format: &[u8], t: &RelFields) -> Vec<u8> {
-    let mut out = Vec::new();
+/// replaced by its field, built in a `smart_str` on the request's heap
+/// and handed over untrimmed, as php's `return string.s` does; the empty
+/// format, and one that appended nothing (a lone `%`), is
+/// `ZSTR_EMPTY_ALLOC()`. The `Err` is the memory limit's fatal.
+fn interval_format(
+    req: &mut Request,
+    format: &[u8],
+    t: &RelFields,
+) -> Result<Owner<PhpString>, Thrown> {
+    if format.is_empty() {
+        return PhpString::new(req, b"");
+    }
+    let mut out = SmartStr::default();
+    match interval_into(req, &mut out, format, t) {
+        Ok(()) => out.finish(req),
+        Err(thrown) => {
+            out.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// [`interval_format`]'s loop: a letter's piece appended as
+/// `smart_str_appendl` appends it, any other byte as `smart_str_appendc`.
+fn interval_into(
+    req: &mut Request,
+    out: &mut SmartStr,
+    format: &[u8],
+    t: &RelFields,
+) -> Result<(), Thrown> {
     let mut spec = false;
     #[allow(clippy::cast_possible_truncation)]
     let c_int = |n: i64| i64::from(n as i32);
@@ -160,7 +187,7 @@ fn interval_format(format: &[u8], t: &RelFields) -> Vec<u8> {
             if c == b'%' {
                 spec = true;
             } else {
-                out.push(c);
+                out.append(req, &[c])?;
             }
             continue;
         }
@@ -191,14 +218,13 @@ fn interval_format(format: &[u8], t: &RelFields) -> Vec<u8> {
             b'R' => (if t.invert != 0 { "-" } else { "+" }).to_owned(),
             b'%' => "%".to_owned(),
             other => {
-                out.push(b'%');
-                out.push(other);
+                out.append(req, &[b'%', other])?;
                 continue;
             }
         };
-        out.extend_from_slice(piece.as_bytes());
+        out.append(req, piece.as_bytes())?;
     }
-    out
+    Ok(())
 }
 
 /// `date_interval_format` and `DateInterval::format`.
@@ -208,7 +234,7 @@ fn format_of(
     format: PhpString,
 ) -> Result<Owner<PhpString>, Thrown> {
     let (diff, _) = interval_of(req, object)?;
-    PhpString::new(req, &interval_format(format.as_bytes(), &diff))
+    interval_format(req, format.as_bytes(), &diff)
 }
 
 /// `date_interval_format(DateInterval $object, string $format): string`,
@@ -225,6 +251,23 @@ fn format_of(
 /// string(0) ""
 /// string(23) "-6 days 11 hours 750000"
 /// string(2) "-6"
+/// ```
+///
+/// The string is `date_interval_format`'s `smart_str`, untrimmed, and an
+/// empty format, or one that appended nothing, the interned empty string:
+///
+/// ```php
+/// $i = new DateInterval('P1D');
+/// $m = memory_get_usage(); $a = $i->format('%d days'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $b = $i->format(''); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $c = date_interval_format($i, '%'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $e = $i->format(str_repeat('%d', 300)); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 256
+/// 0
+/// 0
+/// 4736 4096
 /// ```
 #[php_function]
 fn date_interval_format(

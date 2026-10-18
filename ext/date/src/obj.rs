@@ -565,8 +565,8 @@ fn has_debug_info(req: &mut Request, object: PhpObject) -> bool {
 /// `date_object_to_hash`: `date`, and where the time is local its
 /// `timezone_type` and `timezone`.
 pub(super) fn date_fields(req: &mut Request, t: &Time) -> Result<Fields, Thrown> {
-    let text = lent(req, |l| date_format(l, b"x-m-d H:i:s.u", t, true))?;
-    let mut fields = vec![(&b"date"[..], PhpString::new(req, &text)?.into_value())];
+    let text = date_format(req, b"x-m-d H:i:s.u", t, true)?;
+    let mut fields = vec![(&b"date"[..], text.into_value())];
     if t.is_localtime != 0 {
         let zone_type = Owner::int(i64::from(t.zone_type));
         fields.push((b"timezone_type", zone_type));

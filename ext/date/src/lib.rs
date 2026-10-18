@@ -108,7 +108,10 @@ pub fn get_timezone_info(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
 /// none where no constructor set it. `ext/soap`'s `to_xml_datetime_ex`
 /// writes a date with it, past a subclass's `format()`.
 pub fn php_format_date_obj(req: &mut Request, format: &[u8], object: PhpObject) -> Option<Vec<u8>> {
-    datetime::format_obj(req, format, object)
+    let text = datetime::format_obj(req, format, object)?.ok()?;
+    let bytes = text.as_bytes().to_vec();
+    text.give_up(req);
+    Some(bytes)
 }
 
 /// What ext/intl reads of a `DateTimeInterface`'s `php_date_obj`
@@ -183,7 +186,7 @@ pub fn extension() -> Extension {
         .ini(ini())
         // `php_format_date`, what php's `main` and ext/standard call
         // into ext/date for (`php_date.h`).
-        .register(php_ext::request::FormatDate(format::format_timestamp))
+        .register(php_ext::request::FormatDate(format::format_date))
         .constants(constants::declared())
         .functions(vec![
             parse::strtotime::declared(),
