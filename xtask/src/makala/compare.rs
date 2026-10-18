@@ -134,7 +134,8 @@ fn narrowed(entries: &mut Vec<Entry>, left: &mut Vec<String>, only: &[String]) {
 }
 
 /// Why the pinned php's run of the entry's `--SKIPIF--` says to skip it,
-/// its words read by the phpt lane's rule (`adapter::Said`); none
+/// or what it wrote where upstream borks the test and runs nothing, its
+/// words read by the phpt lane's rule (`adapter::Said`); none
 /// for an entry with no section or one the section does not skip. The
 /// section is written to a directory of its own, so the pinned tree at
 /// `tree` is never written to, and runs in the test's directory there, so
@@ -154,10 +155,11 @@ fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<Str
         cwd: beside.parent(),
         ..Invocation::new(php, Program::Beside(&program))
     })?;
-    match Said::of(&String::from_utf8_lossy(&ran.stdout)) {
-        Said::Skip(why) => Ok(Some(why)),
-        _ => Ok(None),
-    }
+    Ok(match Said::of(&String::from_utf8_lossy(&ran.stdout)) {
+        Said::Skip(why) => Some(why),
+        Said::Bork(said) => Some(format!("invalid output from SKIPIF: {said}")),
+        Said::XFail(_) | Said::Run => None,
+    })
 }
 
 /// One entry served by both and held: the same, a difference, unstable.
