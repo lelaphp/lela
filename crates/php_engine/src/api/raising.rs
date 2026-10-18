@@ -1093,7 +1093,7 @@ pub(crate) fn new_throwable_made(
     // one byte as for any), so it stands across the trace; its `%s` reads
     // the bytes as they are, to the first NUL.
     let message = message.as_ref();
-    let message = message.split(|b| *b == 0).next().unwrap_or_default();
+    let message = crate::c_number::c_str(message);
     let message = Owner::adopt(req.string_init(message)?);
     let object = match req.new_object_of(class) {
         Ok(object) => object,

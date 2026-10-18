@@ -12,6 +12,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::coerce::c_str;
 use php_ext::coerce::{atoi, is_space, strtol, truthy};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
@@ -88,12 +89,6 @@ impl Reply {
     }
 }
 
-/// The part of a byte string php's `%s` prints: what comes before its
-/// first NUL.
-fn cstr(s: &[u8]) -> &[u8] {
-    s.split(|b| *b == 0).next().unwrap_or_default()
-}
-
 /// `get_ftp_result` (`Z/ext/standard/ftp_fopen_wrapper.c:79`) over a
 /// 512-byte buffer: lines read until one opens `ddd `, the last read kept
 /// where a read gives none.
@@ -108,7 +103,7 @@ fn get_result(req: &mut Request, stream: Stream) -> Result<Reply, Thrown> {
     }
     Ok(Reply {
         // `get_ftp_result` answers its `strtol` as an `int`: C's `atoi`.
-        code: i64::from(atoi(cstr(&line))),
+        code: i64::from(atoi(c_str(&line))),
         line,
     })
 }
@@ -119,7 +114,7 @@ fn command(req: &mut Request, stream: Stream, verb: &[u8], argument: Option<&[u8
     let mut line = verb.to_vec();
     if let Some(argument) = argument {
         line.push(b' ');
-        line.extend_from_slice(cstr(argument));
+        line.extend_from_slice(c_str(argument));
     }
     line.extend_from_slice(b"\r\n");
     stream.write(req, &line);
@@ -195,7 +190,7 @@ fn connect(
         );
         return Err(throw_error(req, "ValueError", &text));
     };
-    let Some(mut resource) = parser.parse(req, cstr(path))? else {
+    let Some(mut resource) = parser.parse(req, c_str(path))? else {
         return Ok(None);
     };
     if resource.path.is_none() {
@@ -205,7 +200,7 @@ fn connect(
         resource.port = Some(21);
     }
     let mut transport = b"tcp://".to_vec();
-    transport.extend_from_slice(resource.host.as_deref().map(cstr).unwrap_or_default());
+    transport.extend_from_slice(resource.host.as_deref().map(c_str).unwrap_or_default());
     transport.extend_from_slice(format!(":{}", resource.port.unwrap_or(21)).as_bytes());
     let timeout = timeval(default_timeout(req).trunc());
     let xport = Xport::Client {
@@ -310,7 +305,7 @@ fn login(
         && user.iter().any(u8::is_ascii_control)
     {
         let mut message = b"Invalid login ".to_vec();
-        message.extend_from_slice(cstr(user));
+        message.extend_from_slice(c_str(user));
         log(req, report, &message);
         return Ok(false);
     }
@@ -328,7 +323,7 @@ fn login(
                 let password = php_raw_url_decode(password);
                 if password.iter().any(u8::is_ascii_control) {
                     let mut message = b"Invalid password ".to_vec();
-                    message.extend_from_slice(cstr(&password));
+                    message.extend_from_slice(c_str(&password));
                     log(req, report, &message);
                     return Ok(false);
                 }
@@ -427,7 +422,7 @@ fn passive(req: &mut Request, control: Stream) -> Result<Option<Passive>, Thrown
     command(req, control, b"EPSV", None);
     let reply = get_result(req, control)?;
     if reply.code == 229 {
-        let line = cstr(&reply.line);
+        let line = c_str(&reply.line);
         let mut pipes = 0;
         let mut at = 4.min(line.len());
         while at < line.len() {
@@ -450,7 +445,7 @@ fn passive(req: &mut Request, control: Stream) -> Result<Option<Passive>, Thrown
     if reply.code != 227 {
         return Ok(None);
     }
-    let line = cstr(&reply.line);
+    let line = c_str(&reply.line);
     let Some(start) = line
         .get(4..)
         .and_then(|rest| rest.iter().position(u8::is_ascii_digit))
@@ -554,7 +549,7 @@ impl Closer for Control {
                     let text = format!(
                         "FTP server error {}:{}",
                         reply.code,
-                        String::from_utf8_lossy(cstr(&reply.line))
+                        String::from_utf8_lossy(c_str(&reply.line))
                     );
                     docref(req, Level::Warning, &text);
                 }
@@ -596,7 +591,7 @@ fn prepare(
                 return Ok(Prepared::Refused(last));
             }
             let mut file_size = 0;
-            if let Some(space) = cstr(&last.line).iter().position(|b| *b == b' ') {
+            if let Some(space) = c_str(&last.line).iter().position(|b| *b == b' ') {
                 // `size_t file_size = atoi(...)`: a negative `int` is the
                 // size it wraps to.
                 file_size =
@@ -607,7 +602,7 @@ fn prepare(
                     ctx,
                     Notification::FileSize {
                         size: file_size,
-                        message: cstr(&last.line),
+                        message: c_str(&last.line),
                         message_code: last.code,
                     },
                 )?;
@@ -743,9 +738,9 @@ fn refused(
     let notified = notify_error(req, ctx, NotifyCode::Failure, Some(&reply.line), reply.code);
     control.free(req);
     notified?;
-    if !cstr(&reply.line).is_empty() {
+    if !c_str(&reply.line).is_empty() {
         let mut message = b"FTP server reports ".to_vec();
-        message.extend_from_slice(cstr(&reply.line));
+        message.extend_from_slice(c_str(&reply.line));
         req.wrapper_log_error(&String::from_utf8_lossy(&message));
     }
     if let Some(text) = data_error {
@@ -789,7 +784,7 @@ fn start(
     command(req, control, transfer.verb(), Some(&file));
     let host = passive
         .host
-        .unwrap_or_else(|| cstr(resource.host.as_deref().unwrap_or_default()).to_vec());
+        .unwrap_or_else(|| c_str(resource.host.as_deref().unwrap_or_default()).to_vec());
     let mut transport = b"tcp://".to_vec();
     transport.extend_from_slice(&host);
     transport.extend_from_slice(format!(":{}", passive.port).as_bytes());
@@ -900,7 +895,7 @@ fn listing(
     };
     let host = passive
         .host
-        .unwrap_or_else(|| cstr(resource.host.as_deref().unwrap_or_default()).to_vec());
+        .unwrap_or_else(|| c_str(resource.host.as_deref().unwrap_or_default()).to_vec());
     let mut transport = host;
     transport.extend_from_slice(format!(":{}", passive.port).as_bytes());
     let timeout = timeval(default_timeout(req).trunc());
@@ -958,7 +953,7 @@ fn listing(
 fn entry_name(line: &[u8]) -> Vec<u8> {
     let base = crate::string::path::php_basename(line, b"");
     let kept = base.len().min(MAXPATHLEN).saturating_sub(2);
-    cstr(&base[..kept]).to_vec()
+    c_str(&base[..kept]).to_vec()
 }
 
 /// The thirteen fields of a stat as the array the engine reads an
@@ -1101,7 +1096,7 @@ fn unlink(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
     else {
         let text = format!(
             "Unable to connect to {}",
-            String::from_utf8_lossy(cstr(url))
+            String::from_utf8_lossy(c_str(url))
         );
         docref(req, Level::Warning, &text);
         return Ok(false);
@@ -1114,7 +1109,7 @@ fn unlink(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
     if reply.class() != Class::Completion {
         let text = format!(
             "Error Deleting file: {}",
-            String::from_utf8_lossy(cstr(&reply.line))
+            String::from_utf8_lossy(c_str(&reply.line))
         );
         docref(req, Level::Warning, &text);
         return Ok(false);
@@ -1142,10 +1137,10 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
         );
         return Err(throw_error(req, "ValueError", &text));
     };
-    let Some(source) = parser.parse(req, cstr(from))? else {
+    let Some(source) = parser.parse(req, c_str(from))? else {
         return Ok(false);
     };
-    let Some(target) = parser.parse(req, cstr(to))? else {
+    let Some(target) = parser.parse(req, c_str(to))? else {
         return Ok(false);
     };
     let (from_port, to_port) = (source.port.unwrap_or(0), target.port.unwrap_or(0));
@@ -1160,7 +1155,7 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
         return Ok(false);
     }
     let Some(Session { control, .. }) = connect(req, from, ctx, Report::Quiet)? else {
-        let host = source.host.as_deref().map(cstr).unwrap_or_default();
+        let host = source.host.as_deref().map(c_str).unwrap_or_default();
         let text = format!("Unable to connect to {}", String::from_utf8_lossy(host));
         docref(req, Level::Warning, &text);
         return Ok(false);
@@ -1179,7 +1174,7 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
         Err(reply) => {
             let text = format!(
                 "Error Renaming file: {}",
-                String::from_utf8_lossy(cstr(&reply.line))
+                String::from_utf8_lossy(c_str(&reply.line))
             );
             docref(req, Level::Warning, &text);
             return Ok(false);
@@ -1188,7 +1183,7 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
     if reply.class() != Class::Completion {
         let text = format!(
             "Error Renaming file: {}",
-            String::from_utf8_lossy(cstr(&reply.line))
+            String::from_utf8_lossy(c_str(&reply.line))
         );
         docref(req, Level::Warning, &text);
         return Ok(false);
@@ -1220,12 +1215,12 @@ fn mkdir(req: &mut Request, url: &[u8], _mode: i64, recursive: bool) -> Result<b
     else {
         let text = format!(
             "Unable to connect to {}",
-            String::from_utf8_lossy(cstr(url))
+            String::from_utf8_lossy(c_str(url))
         );
         docref(req, Level::Warning, &text);
         return Ok(false);
     };
-    let path = cstr(resource.path.as_deref().unwrap_or_default()).to_vec();
+    let path = c_str(resource.path.as_deref().unwrap_or_default()).to_vec();
     let reply = closing(req, control, |req, control| {
         if recursive {
             make_parents(req, control, &path)
@@ -1247,7 +1242,7 @@ fn make_parents(req: &mut Request, control: Stream, path: &[u8]) -> Result<Reply
     let e = buf.len();
     buf.push(0);
     let shown = |buf: &[u8]| {
-        let upto = cstr(buf);
+        let upto = c_str(buf);
         if upto.is_empty() {
             b"/".to_vec()
         } else {
@@ -1255,7 +1250,7 @@ fn make_parents(req: &mut Request, control: Stream, path: &[u8]) -> Result<Reply
         }
     };
     let mut found = None;
-    while let Some(p) = cstr(&buf).iter().rposition(|b| *b == b'/') {
+    while let Some(p) = c_str(&buf).iter().rposition(|b| *b == b'/') {
         buf[p] = 0;
         command(req, control, b"CWD", Some(&shown(&buf)));
         if get_result(req, control)?.class() == Class::Completion {
@@ -1271,10 +1266,10 @@ fn make_parents(req: &mut Request, control: Stream, path: &[u8]) -> Result<Reply
         while p != e {
             if buf[p] == 0 && buf[p + 1] != 0 {
                 buf[p] = b'/';
-                command(req, control, b"MKD", Some(cstr(&buf)));
+                command(req, control, b"MKD", Some(c_str(&buf)));
                 reply = get_result(req, control)?;
                 if reply.class() != Class::Completion {
-                    let text = String::from_utf8_lossy(cstr(&reply.line)).into_owned();
+                    let text = String::from_utf8_lossy(c_str(&reply.line)).into_owned();
                     docref(req, Level::Warning, &text);
                     break;
                 }
@@ -1305,7 +1300,7 @@ fn rmdir(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
     else {
         let text = format!(
             "Unable to connect to {}",
-            String::from_utf8_lossy(cstr(url))
+            String::from_utf8_lossy(c_str(url))
         );
         docref(req, Level::Warning, &text);
         return Ok(false);
@@ -1316,7 +1311,7 @@ fn rmdir(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
         get_result(req, control)
     })?;
     if reply.class() != Class::Completion {
-        let text = String::from_utf8_lossy(cstr(&reply.line)).into_owned();
+        let text = String::from_utf8_lossy(c_str(&reply.line)).into_owned();
         docref(req, Level::Warning, &text);
         return Ok(false);
     }

@@ -1143,8 +1143,7 @@ pub(super) fn decode(encoded: &[u8], variant: Variant) -> Option<Decoded> {
 
 /// The bytes before the first NUL, as `strlen` sees a `char *`.
 fn c_string(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    bytes.get(..end).unwrap_or(bytes)
+    php_ext::coerce::c_str(bytes)
 }
 
 /// `argon2_compare`: equality of two tags of one length without an early exit.

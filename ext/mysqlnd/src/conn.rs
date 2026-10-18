@@ -1411,7 +1411,7 @@ impl ConnData {
         let user = user.unwrap_or_default();
         let password = password.unwrap_or_default();
         let db = db.unwrap_or_default();
-        let db = &db[..db.iter().position(|b| *b == 0).unwrap_or(db.len())];
+        let db = php_ext::coerce::c_str(db);
         let data = self
             .auth_plugin_data
             .as_ref()

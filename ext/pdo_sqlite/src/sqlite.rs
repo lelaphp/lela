@@ -288,8 +288,7 @@ pub(super) fn open_basedir(req: &Request) -> bool {
 /// ```
 pub(super) fn safe_filename(req: &mut Request, name: Option<&[u8]>) -> Option<Vec<u8>> {
     let name = name?;
-    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-    let name = &name[..end];
+    let name = php_ext::coerce::c_str(name);
     if name.len() >= 5 && name[..5].eq_ignore_ascii_case(b"file:") {
         return (!open_basedir(req)).then(|| name.to_vec());
     }

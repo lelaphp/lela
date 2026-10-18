@@ -323,10 +323,7 @@ impl Request {
     /// value given up, `zval_ptr_dtor_nogc`, so a destructor it serves
     /// runs after the warning.
     fn refuse_constant(&mut self, name: &[u8], value: Owner<Value>) {
-        let shown = name
-            .iter()
-            .position(|b| *b == 0)
-            .map_or(name, |nul| &name[..nul]);
+        let shown = crate::c_number::c_str(name);
         crate::api::raising::warning(
             self,
             &format!(

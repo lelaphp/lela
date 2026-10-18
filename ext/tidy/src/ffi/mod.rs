@@ -139,8 +139,7 @@ fn text(at: *const c_char) -> Option<Vec<u8>> {
 
 /// `bytes` as C reads `ZSTR_VAL`, ending at its first NUL.
 fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// `tidyLibraryVersion()`: `5.8.0` on the oracle's machine.

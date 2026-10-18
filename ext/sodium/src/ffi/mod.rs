@@ -612,9 +612,9 @@ pub(crate) fn bin2hex(hex: &mut [u8], bin: &[u8]) -> Result<(), Failed> {
 /// `ignore` as the C string the decoders read: its bytes up to the
 /// first NUL, as `strchr` sees a `char *`, with the NUL after them.
 fn c_ignore(ignore: &[u8]) -> Vec<u8> {
-    let end = ignore.iter().position(|&b| b == 0).unwrap_or(ignore.len());
-    let mut owned = Vec::with_capacity(end + 1);
-    owned.extend_from_slice(&ignore[..end]);
+    let ignore = php_ext::coerce::c_str(ignore);
+    let mut owned = Vec::with_capacity(ignore.len() + 1);
+    owned.extend_from_slice(ignore);
     owned.push(0);
     owned
 }

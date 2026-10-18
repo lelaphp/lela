@@ -1,6 +1,7 @@
 //! `class ZipArchive` (`php_zip.c`): the object over one open archive,
 //! its six properties read through `zip_prop_handlers`, and its methods.
 
+use php_ext::coerce::c_str;
 use std::path::PathBuf;
 
 use php_ext::abi::{
@@ -540,12 +541,6 @@ macro_rules! archive {
     }};
 }
 
-/// The bytes a C string carries: up to the first NUL, as libzip's
-/// `strlen` reads php's buffer.
-fn cstr(bytes: &[u8]) -> &[u8] {
-    bytes.split(|b| *b == 0).next().unwrap_or_default()
-}
-
 /// A `zend_long` index as libzip's `zip_uint64_t`: a negative one past
 /// every entry.
 fn index(i: i64) -> usize {
@@ -647,7 +642,7 @@ fn add_file(
     };
     let Some(idx) = replace else {
         return Ok(added(req, object, |za| {
-            za.file_replace(None, Some(cstr(entry)), source, flags)
+            za.file_replace(None, Some(c_str(entry)), source, flags)
         }));
     };
     if index(idx) >= za.num_entries() {
@@ -704,7 +699,7 @@ macro_rules! named {
             return Err(arg_value_error($req, 1, "not be empty"));
         }
         let za = archive!($req, $this);
-        match za.name_locate(cstr($name.as_bytes()), 0) {
+        match za.name_locate(c_str($name.as_bytes()), 0) {
             Ok(idx) => (za, idx),
             Err(_) => return Ok($none),
         }
@@ -1034,7 +1029,7 @@ impl ZipArchive {
     #[php(tentative)]
     fn setPassword(req: &mut Rq, this: Z, #[php(sensitive)] password: PhpString) -> R<bool> {
         let za = archive!(req, this);
-        let password = cstr(password.as_bytes());
+        let password = c_str(password.as_bytes());
         if password.is_empty() {
             return Ok(false);
         }
@@ -1219,7 +1214,7 @@ impl ZipArchive {
         if dirname.is_empty() {
             return Ok(false);
         }
-        let name = cstr(dirname.as_bytes()).to_vec();
+        let name = c_str(dirname.as_bytes()).to_vec();
         Ok(added(req, this.object(), |za| {
             za.dir_add(&name, c::u32(flags))
         }))
@@ -1260,7 +1255,7 @@ impl ZipArchive {
         #[php(default = ZipArchive::FL_OVERWRITE)] flags: i64,
     ) -> R<bool> {
         archive!(req, this);
-        let (name, data) = (cstr(name.as_bytes()).to_vec(), content.as_bytes().to_vec());
+        let (name, data) = (c_str(name.as_bytes()).to_vec(), content.as_bytes().to_vec());
         let source = Source::buffer(data);
         Ok(added(req, this.object(), |za| {
             za.file_replace(None, Some(&name), source, c::u32(flags))
@@ -1503,7 +1498,7 @@ impl ZipArchive {
         }
         let za = archive!(req, this);
         Ok(za
-            .rename(self::index(index), cstr(new_name.as_bytes()))
+            .rename(self::index(index), c_str(new_name.as_bytes()))
             .is_ok())
     }
 
@@ -1530,7 +1525,7 @@ impl ZipArchive {
             return Err(arg_value_error(req, 2, "not be empty"));
         }
         let (za, idx) = named!(req, this, name, false);
-        Ok(za.rename(idx, cstr(new_name.as_bytes())).is_ok())
+        Ok(za.rename(idx, c_str(new_name.as_bytes())).is_ok())
     }
 
     /// `ZipArchive::setArchiveComment()`: a comment not UTF-8 nor ASCII
@@ -1829,7 +1824,7 @@ impl ZipArchive {
         if name.is_empty() {
             return Ok(false);
         }
-        let Ok(idx) = za.name_locate(cstr(name.as_bytes()), 0) else {
+        let Ok(idx) = za.name_locate(c_str(name.as_bytes()), 0) else {
             return Ok(false);
         };
         Ok(za.stat_index(idx, 0).is_ok() && za.delete(idx).is_ok())
@@ -1959,7 +1954,7 @@ impl ZipArchive {
     fn getNameIndex(req: &mut Rq, this: Z, index: i64, #[php(default = 0)] flags: i64) -> Str {
         let za = archive!(req, this);
         match za.get_name(self::index(i64::from(c::i32(index))), c::u32(flags)) {
-            Ok(name) => Ok(OrFalse::Value(PhpString::new(req, cstr(&name))?)),
+            Ok(name) => Ok(OrFalse::Value(PhpString::new(req, c_str(&name))?)),
             Err(_) => Ok(OrFalse::False),
         }
     }
@@ -2049,7 +2044,7 @@ impl ZipArchive {
         if name.is_empty() {
             return Ok(false);
         }
-        let Ok(idx) = za.name_locate(cstr(name.as_bytes()), 0) else {
+        let Ok(idx) = za.name_locate(c_str(name.as_bytes()), 0) else {
             return Ok(false);
         };
         Ok(za.stat_index(idx, 0).is_ok() && za.unchange_one(idx, false).is_ok())
@@ -2639,7 +2634,7 @@ fn set_encryption(
     method: i64,
     password: Option<PhpString>,
 ) -> bool {
-    let password = password.map(|p| cstr(p.as_bytes()).to_vec());
+    let password = password.map(|p| c_str(p.as_bytes()).to_vec());
     let Some(za) = this
         .object()
         .native_mut::<Intern>(req)

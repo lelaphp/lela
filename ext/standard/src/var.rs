@@ -227,8 +227,7 @@ fn not_serializable(req: &mut Request, class: php_ext::values::ClassId) -> Optio
         return None;
     }
     let name = &req.class_decl(class)?.name.0;
-    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-    Some(String::from_utf8_lossy(&name[..end]).into_owned())
+    Some(String::from_utf8_lossy(php_ext::coerce::c_str(name)).into_owned())
 }
 
 /// Whether the object is an enum case.
@@ -850,7 +849,7 @@ pub(super) fn render(
         let name = object.handlers(req).get_class_name(req, *object);
         // `smart_str_appends(buf, ZSTR_VAL(class_name))`: up to the NUL
         // of an anonymous class's name.
-        out.extend_from_slice(name.split(|b| *b == 0).next().unwrap_or_default());
+        out.extend_from_slice(php_ext::coerce::c_str(&name));
         // `ZEND_ACC_ENUM`: a case is `Suit Enum:string` and its `name`
         // and `value` under it, where an object is `C Object`.
         if matches!(kind, ClassKind::Enum) {
@@ -1009,7 +1008,7 @@ fn unmangled(out: &mut Vec<u8>, key: &[u8]) {
         Some(b"*") => out.extend_from_slice(b":protected"),
         Some(class) => {
             out.push(b':');
-            out.extend_from_slice(class.split(|b| *b == 0).next().unwrap_or_default());
+            out.extend_from_slice(php_ext::coerce::c_str(class));
             out.extend_from_slice(b":private");
         }
     }

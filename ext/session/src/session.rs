@@ -5,6 +5,7 @@
 //! and the request hooks. Each save handler operation is dispatched by
 //! the save handler standing in `PS(mod)`.
 
+use php_ext::coerce::c_str;
 use std::io::Read;
 
 use php_ext::coerce::strtol;
@@ -117,7 +118,7 @@ pub(super) fn validate_sid(req: &mut Request, module: Module, id: &[u8]) -> Resu
 /// `php_session_valid_key`: `[a-zA-Z0-9,-]`, one to 256 of them, read
 /// up to the first NUL.
 pub(super) fn valid_key(key: &[u8]) -> bool {
-    let key = crate::c_str(key);
+    let key = c_str(key);
     !key.is_empty()
         && key.len() <= MAX_SID_LENGTH
         && key
@@ -458,11 +459,11 @@ pub(super) fn start(req: &mut Request) -> Result<bool, Thrown> {
     if req.state::<State>().id.is_none() {
         find_id(req);
     }
-    let dangerous = req.state::<State>().id.as_deref().is_some_and(|id| {
-        crate::c_str(id)
-            .iter()
-            .any(|c| b"\r\n\t <>'\"\\".contains(c))
-    });
+    let dangerous = req
+        .state::<State>()
+        .id
+        .as_deref()
+        .is_some_and(|id| c_str(id).iter().any(|c| b"\r\n\t <>'\"\\".contains(c)));
     if dangerous {
         req.state::<State>().id = None;
     }
@@ -547,7 +548,7 @@ pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
     }
     let id = req.state::<State>().id.clone();
     match id {
-        Some(id) if !crate::c_str(&id).is_empty() => {
+        Some(id) if !c_str(&id).is_empty() => {
             if ini_bool(req, b"session.use_strict_mode") {
                 let valid = validate_sid(req, module, &id);
                 if !absorb(req, valid)?.unwrap_or(false) {
@@ -1039,7 +1040,7 @@ fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
         return Ok(-2);
     }
     let expire = req.ini_long(b"session.cache_expire").saturating_mul(60);
-    let limiter = crate::c_str(&limiter).to_ascii_lowercase();
+    let limiter = c_str(&limiter).to_ascii_lowercase();
     let past = "Expires: Thu, 19 Nov 1981 08:52:00 GMT".to_owned();
     let private = format!("Cache-Control: private, max-age={expire}");
     let headers: Vec<String> = match limiter.as_slice() {

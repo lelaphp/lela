@@ -86,8 +86,7 @@ const PHP_NS: &[u8] = b"http://php.net/xsl\0";
 
 /// A copy of `bytes` up to its first NUL with the NUL after.
 fn cstr(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    let mut out = bytes[..end].to_vec();
+    let mut out = php_ext::coerce::c_str(bytes).to_vec();
     out.push(0);
     out
 }

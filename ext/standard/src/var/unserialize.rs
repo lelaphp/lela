@@ -1206,8 +1206,7 @@ fn allowed_names(
             // php prints the name as a C string, up to its first NUL
             // byte.
             let bytes = name.as_bytes();
-            let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-            let shown = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let shown = String::from_utf8_lossy(php_ext::coerce::c_str(bytes)).into_owned();
             let thrown = throw_error(
                 req,
                 "ValueError",

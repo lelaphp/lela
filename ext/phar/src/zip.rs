@@ -545,7 +545,7 @@ pub(crate) fn parse(
     if let Some(mut actual) = actual_alias {
         actual.truncate(alias_len);
         if !path::valid_alias(&actual) {
-            let shown = lossy(actual.split(|b| *b == 0).next().unwrap_or_default()).into_owned();
+            let shown = lossy(php_ext::coerce::c_str(&actual)).into_owned();
             return refuse(
                 req,
                 format!("phar error: invalid alias \"{shown}\" in zip-based phar \"{name}\""),

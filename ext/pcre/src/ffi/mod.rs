@@ -246,8 +246,7 @@ impl Code {
             .map(|entry| {
                 let group = usize::from(entry[0]) << 8 | usize::from(entry[1]);
                 let name = &entry[2..];
-                let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-                (group, name[..end].to_vec())
+                (group, php_ext::coerce::c_str(name).to_vec())
             })
             .collect()
     }

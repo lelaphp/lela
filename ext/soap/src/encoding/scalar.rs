@@ -350,9 +350,8 @@ pub(super) fn bad_utf8(s: &[u8]) -> Vec<u8> {
             break;
         }
     }
-    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
     if c == 0 {
-        return s[..end].to_vec();
+        return php_ext::coerce::c_str(s).to_vec();
     }
     let hex = |d: u8| if d > 9 { b'a' + d - 10 } else { b'0' + d };
     let mut out = s[..(i - 1).min(s.len())].to_vec();
@@ -609,8 +608,7 @@ fn list_items(
             Some(s) => s.to_vec(),
             None => serialization_bytes(req, &data)?,
         };
-        let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
-        let collapsed = white_space_collapse(&s[..end]);
+        let collapsed = white_space_collapse(php_ext::coerce::c_str(&s));
         if !collapsed.is_empty() {
             for item in collapsed.split(|&c| c == b' ') {
                 let v = string(req, item)?;
@@ -644,8 +642,7 @@ pub(super) fn to_zval_any(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Own
         }
     }
     let dumped = Save::bare(data).unwrap_or_default();
-    let end = dumped.iter().position(|&b| b == 0).unwrap_or(dumped.len());
-    string(req, &dumped[..end])
+    string(req, php_ext::coerce::c_str(&dumped))
 }
 
 /// `to_xml_any`.
@@ -758,11 +755,10 @@ pub(super) fn to_zval_user(req: &mut Request, e: &Enc, node: Node) -> Res<Owner<
         }
         None => Vec::new(),
     };
-    let end = dumped.iter().position(|&b| b == 0).unwrap_or(dumped.len());
     let Ok(callable) = callable_checked(req, &f) else {
         return Err(soap_error("Encoding: Error calling from_xml callback"));
     };
-    let arg = string(req, &dumped[..end])?;
+    let arg = string(req, php_ext::coerce::c_str(&dumped))?;
     let out = call(req, &callable, &[*arg]);
     arg.give_up(req);
     Ok(out?)

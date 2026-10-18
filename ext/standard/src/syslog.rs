@@ -125,7 +125,7 @@ fn php_openlog(req: &mut Request, ident: CString, option: i32, facility: i32) {
 #[php_function]
 fn openlog(req: &mut Request, prefix: PhpString, flags: i64, facility: i64) -> True {
     let bytes = prefix.as_bytes();
-    let ident = CString::new(bytes.split(|c| *c == 0).next().unwrap_or(&[])).unwrap_or_default();
+    let ident = CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default();
     php_openlog(req, ident, int(flags), int(facility));
     True
 }
@@ -260,7 +260,7 @@ fn syslog_str(req: &Request, priority: i32, message: &[u8]) {
 /// `%.*s` a `smart_string`'s otherwise; both end at a NUL, which only
 /// `raw` and `all` let through.
 fn send(priority: i32, line: &[u8]) {
-    let line = line.split(|&c| c == 0).next().unwrap_or_default();
+    let line = php_ext::coerce::c_str(line);
     let line = CString::new(line).unwrap_or_default();
     crate::ffi::syslog(priority, &line);
 }

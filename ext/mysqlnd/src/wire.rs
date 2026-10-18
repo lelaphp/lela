@@ -363,8 +363,7 @@ fn greet(body: &[u8]) -> Result<Greet, Short> {
     if g.server_capabilities & crate::consts::client::PLUGIN_AUTH != 0 {
         p.check()?;
         let rest = p.rest();
-        let len = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
-        g.auth_protocol = Some(rest[..len].to_vec());
+        g.auth_protocol = Some(php_ext::coerce::c_str(rest).to_vec());
     }
     Ok(g)
 }

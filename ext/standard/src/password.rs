@@ -66,7 +66,7 @@ fn extract_ident(hash: &[u8]) -> Option<&[u8]> {
         return None;
     }
     let rest = hash.get(1..)?;
-    let rest = rest.split(|c| *c == 0).next().unwrap_or(rest);
+    let rest = php_ext::coerce::c_str(rest);
     let end = rest.iter().position(|c| *c == b'$')?;
     rest.get(..end)
 }

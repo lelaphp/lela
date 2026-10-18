@@ -227,7 +227,7 @@ struct Glob {
 /// int(0)
 /// ```
 pub fn php_glob(pattern: &[u8], flags: i32) -> Result<Vec<Vec<u8>>, i32> {
-    let pattern = pattern.split(|&b| b == 0).next().unwrap_or_default();
+    let pattern = php_ext::coerce::c_str(pattern);
     let mut g = Glob {
         flags,
         pathv: Vec::new(),

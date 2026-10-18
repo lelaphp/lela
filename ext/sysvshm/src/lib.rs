@@ -328,7 +328,7 @@ fn shm_attach(
         }
     };
     let magic = segment.read(0, MAGIC.len());
-    if magic.as_deref().and_then(|m| m.split(|&b| b == 0).next()) != Some(&b"PHP_SM"[..]) {
+    if magic.as_deref().map(php_ext::coerce::c_str) != Some(&b"PHP_SM"[..]) {
         segment.write(0, MAGIC);
         segment.set_word(8, word(HEAD));
         segment.set_word(16, word(HEAD));

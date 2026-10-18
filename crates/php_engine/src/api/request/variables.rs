@@ -622,7 +622,7 @@ impl Request {
                 .web()
                 .and_then(|web| web.query.clone())
                 .unwrap_or_default();
-            let query = query.split(|b| *b == 0).next().unwrap_or_default();
+            let query = crate::c_number::c_str(&query);
             let mut words = PhpArray::new(self)?;
             let mut count = 0;
             if !query.is_empty() {
@@ -793,7 +793,7 @@ impl Request {
         if self.treated(input, source, into)? {
             return Ok(());
         }
-        let source = source.split(|b| *b == 0).next().unwrap_or_default();
+        let source = crate::c_number::c_str(source);
         let separators = match input {
             Input::Cookie => b";".to_vec(),
             _ => self
@@ -962,7 +962,7 @@ impl Request {
         cookie: bool,
     ) -> Result<(), Thrown> {
         // The name is a C string: it ends at its first NUL.
-        let var_name = var_name.split(|c| *c == 0).next().unwrap_or(&[]);
+        let var_name = crate::c_number::c_str(var_name);
         let skip = var_name.iter().take_while(|c| **c == b' ').count();
         let original = &var_name[skip..];
         let mut var = original.to_vec();

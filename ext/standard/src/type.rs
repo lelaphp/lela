@@ -195,10 +195,7 @@ fn get_debug_type(req: &mut Request, value: Value) -> Result<Owner<PhpString>, T
                 .class_decl(object.class())
                 .map(|decl| decl.name.0.to_vec())
                 .unwrap_or_default();
-            match name.iter().position(|b| *b == 0) {
-                Some(end) => name[..end].to_vec(),
-                None => name,
-            }
+            php_ext::coerce::c_str(&name).to_vec()
         }
         ValueRef::Resource(resource) => match resource.type_name(req) {
             Some(kind) => {

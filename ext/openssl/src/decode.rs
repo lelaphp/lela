@@ -130,8 +130,7 @@ impl<T: View> Answer for Owner<T> {
 
 /// A byte string as C reads it: up to its first NUL.
 pub(crate) fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// `php_openssl_check_path_ex`: the path made absolute, `file://` taken

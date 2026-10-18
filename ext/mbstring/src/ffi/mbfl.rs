@@ -184,8 +184,7 @@ impl Encoding {
     /// `mbfl_name2encoding`: the name read as a C string, to its first
     /// NUL, as php passes `ZSTR_VAL`.
     pub(crate) fn named(name: &[u8]) -> Option<Encoding> {
-        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-        Encoding::named_ex(&name[..end])
+        Encoding::named_ex(php_ext::coerce::c_str(name))
     }
 
     /// `mbfl_no2encoding`.
@@ -429,8 +428,7 @@ impl Language {
     /// `mbfl_name2language`: the name, short name or an alias, ignoring
     /// case, the name read to its first NUL.
     pub(crate) fn named(name: &[u8]) -> Option<Language> {
-        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-        let name = CString::new(&name[..end]).ok()?;
+        let name = CString::new(php_ext::coerce::c_str(name)).ok()?;
         // SAFETY: `name` is NUL-terminated and outlives the call.
         Language::of(unsafe { mbfl_name2language(name.as_ptr()) })
     }

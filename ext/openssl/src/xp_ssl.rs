@@ -632,8 +632,7 @@ fn strerror(errno: i32) -> String {
 
 /// Bytes as C's `%s` prints them: up to the first NUL.
 fn c_str(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    String::from_utf8_lossy(php_ext::coerce::c_str(bytes)).into_owned()
 }
 
 /// A warning in `php_error_docref`'s words.

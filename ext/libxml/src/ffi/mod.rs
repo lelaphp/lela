@@ -2296,8 +2296,7 @@ unsafe extern "C" fn write_into(context: *mut c_void, buffer: *const c_char, len
 }
 
 fn c_string(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    let mut out = bytes[..end].to_vec();
+    let mut out = php_ext::coerce::c_str(bytes).to_vec();
     out.push(0);
     out
 }

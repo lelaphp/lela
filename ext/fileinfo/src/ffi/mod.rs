@@ -201,10 +201,7 @@ pub(crate) fn take_warning() -> Option<(Option<Vec<u8>>, String)> {
             message.len(),
         )
     };
-    let cut = |bytes: &[u8]| {
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        bytes[..end].to_vec()
-    };
+    let cut = |bytes: &[u8]| php_ext::coerce::c_str(bytes).to_vec();
     let text = String::from_utf8_lossy(&cut(&message)).into_owned();
     match kind {
         0 => Some((None, text)),

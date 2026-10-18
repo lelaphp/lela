@@ -254,13 +254,13 @@ fn open(
     {
         match password.as_str_bytes() {
             Some(p) => {
-                let p = p.split(|b| *b == 0).next().unwrap_or_default();
+                let p = php_ext::coerce::c_str(p);
                 archive.default_password = (!p.is_empty()).then(|| p.to_vec());
             }
             None => docref(req, Level::Warning, "Can't set zip password"),
         }
     }
-    let fragment = fragment.split(|b| *b == 0).next().unwrap_or_default();
+    let fragment = php_ext::coerce::c_str(fragment);
     let Ok(idx) = archive.name_locate(fragment, 0) else {
         return Ok(None);
     };

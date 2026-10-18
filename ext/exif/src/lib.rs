@@ -31,6 +31,7 @@ use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, OrFalse, Path, Ref, Untyped,
 };
 use php_ext::attr::{php_const, php_function};
+use php_ext::coerce::c_str;
 use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
@@ -187,7 +188,7 @@ fn parses(req: &mut Request, value: &[u8]) -> bool {
     if decode::parses(req, value) {
         return true;
     }
-    let value = String::from_utf8_lossy(image::cstr(value)).into_owned();
+    let value = String::from_utf8_lossy(c_str(value)).into_owned();
     docref(
         req,
         Level::Warning,

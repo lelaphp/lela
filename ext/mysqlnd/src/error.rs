@@ -192,8 +192,8 @@ fn state_of(sqlstate: &[u8]) -> [u8; 5] {
 /// The text as `strlcpy` into `MYSQLND_ERRMSG_SIZE` keeps it: up to the
 /// first NUL, at most 511 bytes.
 fn cut(error: &[u8]) -> Vec<u8> {
-    let end = error.iter().position(|b| *b == 0).unwrap_or(error.len());
-    error[..end.min(ERRMSG_SIZE - 1)].to_vec()
+    let error = php_ext::coerce::c_str(error);
+    error[..error.len().min(ERRMSG_SIZE - 1)].to_vec()
 }
 
 /// `MYSQLND_UPSERT_STATUS`.

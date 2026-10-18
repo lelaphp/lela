@@ -87,7 +87,7 @@ fn build_elem(
             out.extend_from_slice(key);
             out.extend_from_slice(b": ");
             let text = text.as_bytes();
-            out.extend_from_slice(text.split(|c| *c == 0).next().unwrap_or(text));
+            out.extend_from_slice(php_ext::coerce::c_str(text));
             out.extend_from_slice(b"\r\n");
             Ok(())
         }
@@ -191,7 +191,7 @@ pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Th
 /// control byte a space but a folded `\r\n` and the spaces after it,
 /// read as the C string the value is.
 fn clean(field: &[u8]) -> Vec<u8> {
-    let field = field.split(|c| *c == 0).next().unwrap_or(field);
+    let field = php_ext::coerce::c_str(field);
     let end = field
         .iter()
         .rposition(|c| !is_space(*c))
@@ -393,7 +393,7 @@ pub fn php_mail(
         body.extend_from_slice(line_sep);
     }
     body.extend_from_slice(line_sep);
-    let message = message.split(|c| *c == 0).next().unwrap_or(message);
+    let message = php_ext::coerce::c_str(message);
     if mode.as_deref() == Some(b"lf") {
         let mut i = 0;
         while i < message.len() {

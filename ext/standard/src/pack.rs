@@ -619,10 +619,7 @@ fn unpack(
                             }
                             &span[..usize::try_from(len).unwrap_or(0)]
                         }
-                        _ => {
-                            let end = span.iter().position(|c| *c == 0).unwrap_or(span.len());
-                            &span[..end]
-                        }
+                        _ => php_ext::coerce::c_str(span),
                     };
                     Some(PhpString::new(req, kept)?.into_value())
                 }

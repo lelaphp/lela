@@ -586,7 +586,7 @@ fn call_user_notifier(
     };
     let message = match notice.message {
         Some(text) => {
-            let text = text.split(|b| *b == 0).next().unwrap_or_default();
+            let text = crate::api::coerce::c_str(text);
             PhpString::new(req, text)?.into_value()
         }
         None => Owner::null(),
@@ -614,7 +614,7 @@ fn put_option(
     option: &[u8],
     value: &Value,
 ) -> Result<(), Thrown> {
-    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
+    let c_string = |bytes: &[u8]| crate::api::coerce::c_str(bytes).to_vec();
     options.separate(req)?;
     let wrapper = c_string(wrapper);
     let existing = options.find(&wrapper).map(|v| v.deref());

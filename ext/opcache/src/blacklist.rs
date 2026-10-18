@@ -101,8 +101,7 @@ fn fgets(text: &[u8]) -> impl Iterator<Item = &[u8]> {
             .map_or(most, |at| at + 1);
         let (piece, tail) = rest.split_at(take);
         rest = tail;
-        let end = piece.iter().position(|b| *b == 0).unwrap_or(piece.len());
-        Some(&piece[..end])
+        Some(php_ext::coerce::c_str(piece))
     })
 }
 

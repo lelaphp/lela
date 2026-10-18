@@ -95,7 +95,7 @@ pub(crate) fn encoding_handler(
     from_list: &[Encoding],
     report_errors: bool,
 ) -> (Variables, Option<Encoding>) {
-    let text = text.split(|&b| b == 0).next().unwrap_or_default();
+    let text = php_ext::coerce::c_str(text);
     if text.is_empty() {
         return (Vec::new(), None);
     }

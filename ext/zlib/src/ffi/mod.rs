@@ -500,8 +500,7 @@ impl GzFile {
     /// `gzdopen(dup(fd), mode)`, the `mode` read up to its first NUL as the
     /// C string php hands on; `None` where zlib refused it.
     pub(crate) fn dopen(fd: RawFd, mode: &[u8]) -> Option<GzFile> {
-        let end = mode.iter().position(|b| *b == 0).unwrap_or(mode.len());
-        let mut mode = mode[..end].to_vec();
+        let mut mode = php_ext::coerce::c_str(mode).to_vec();
         mode.push(0);
         // SAFETY: the descriptor belongs to the open stream the caller
         // holds, which outlives this call.

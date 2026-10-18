@@ -764,8 +764,7 @@ fn convert(
             }
             NodeKind::Comment => {
                 let data = node.data();
-                let end = data.iter().position(|b| *b == 0).unwrap_or(data.len());
-                let comment = Node::new_comment(Some(doc), data.get(..end).unwrap_or_default())?;
+                let comment = Node::new_comment(Some(doc), php_ext::coerce::c_str(data))?;
                 item.parent.add_child(comment);
                 comment.set_line(node.line());
             }

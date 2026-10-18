@@ -118,8 +118,7 @@ unsafe extern "C" {
 /// A PHP string as the C string `ZSTR_VAL` hands libintl: its bytes up
 /// to the first NUL, where C stops reading.
 pub(crate) fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// The bytes of the string libintl answered, none for a null pointer.

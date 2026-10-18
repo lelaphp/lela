@@ -69,8 +69,7 @@ fn checksum(buf: &[u8]) -> u32 {
 
 /// A byte field read to its first NUL, at most its length.
 fn strn(field: &[u8]) -> &[u8] {
-    let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
-    &field[..end]
+    php_ext::coerce::c_str(field)
 }
 
 /// `phar_is_tar`: the first block's checksum holds, or the name says

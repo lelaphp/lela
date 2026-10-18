@@ -228,8 +228,7 @@ impl Num {
     /// the fraction's length as written, or `None` for a string that is
     /// no number.
     pub(crate) fn parse(text: &[u8], scale: usize, auto_scale: bool) -> Option<(Num, usize)> {
-        let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
-        let s = &text[..end];
+        let s = php_ext::coerce::c_str(text);
         let digit_run =
             |from: usize| from + s[from..].iter().take_while(|b| b.is_ascii_digit()).count();
         let mut at = usize::from(matches!(s.first(), Some(b'+' | b'-')));

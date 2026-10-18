@@ -171,7 +171,7 @@ fn replace_data(
         Vec::new()
     };
     let count = i64::from(count).min(length - offset);
-    let data = &data[..data.iter().position(|b| *b == 0).unwrap_or(data.len())];
+    let data = php_ext::coerce::c_str(data);
     out.extend_from_slice(data);
     if offset < length {
         out.extend(Utf8::sub(&cur, offset + count, length - offset).unwrap_or_default());

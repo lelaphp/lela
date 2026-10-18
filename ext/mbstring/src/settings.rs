@@ -533,8 +533,7 @@ pub(crate) fn encoding_list(
         Ok(list) => Ok(Some(list)),
         Err(Invalid(name)) => {
             // `%.*s`, which stops at a NUL.
-            let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-            let name = String::from_utf8_lossy(&name[..end]);
+            let name = String::from_utf8_lossy(php_ext::coerce::c_str(&name));
             if let Some(arg) = arg {
                 Err(value_error(
                     req,
@@ -579,8 +578,7 @@ pub(crate) fn encoding_array(
                 list.push(encoding);
                 None
             } else {
-                let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-                Some(String::from_utf8_lossy(&name[..end]).into_owned())
+                Some(String::from_utf8_lossy(php_ext::coerce::c_str(name)).into_owned())
             }
         })?;
         if let Some(name) = invalid {
@@ -627,8 +625,7 @@ pub(crate) fn encoding(
         return Ok(*encoding);
     }
     let Some(encoding) = Encoding::named(name) else {
-        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-        let name = String::from_utf8_lossy(&name[..end]);
+        let name = String::from_utf8_lossy(php_ext::coerce::c_str(name));
         return Err(value_error(
             req,
             arg,
@@ -849,8 +846,7 @@ fn on_internal_encoding(req: &mut Request, value: Option<&[u8]>) -> Result<bool,
 /// UTF-8, after a warning; the regex encoding follows it.
 fn set_internal(req: &mut Request, value: &[u8]) {
     let encoding = Encoding::named(value).unwrap_or_else(|| {
-        let end = value.iter().position(|&b| b == 0).unwrap_or(value.len());
-        let name = String::from_utf8_lossy(&value[..end]);
+        let name = String::from_utf8_lossy(php_ext::coerce::c_str(value));
         docref(
             req,
             Level::Warning,

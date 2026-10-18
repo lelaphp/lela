@@ -78,8 +78,7 @@ fn bytes_of<'a>(p: *const c_char) -> &'a [u8] {
 /// The bytes as a C string: timelib reads up to the first NUL, as php's
 /// `ZSTR_VAL` hands it the same bytes.
 fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// `call` handed [`c_string`]'s string of `bytes`, laid on this stack
@@ -87,7 +86,8 @@ fn c_string(bytes: &[u8]) -> CString {
 /// call allocates nothing to terminate it.
 fn with_c_string<R>(bytes: &[u8], call: impl FnOnce(&CStr) -> R) -> R {
     const ROOM: usize = 64;
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    let bytes = php_ext::coerce::c_str(bytes);
+    let end = bytes.len();
     let mut room = [0u8; ROOM];
     if let Some(slot) = room.get_mut(..end)
         && end < ROOM

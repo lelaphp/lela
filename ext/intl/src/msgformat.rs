@@ -495,7 +495,7 @@ fn set_timezone(req: &mut Request, site: &mut Site) -> Result<(), Thrown> {
 
 /// A key or value php prints with `%s`: up to its first NUL.
 fn shown(bytes: &[u8]) -> &[u8] {
-    &bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())]
+    php_ext::coerce::c_str(bytes)
 }
 
 /// `'<shown>'` within a message.

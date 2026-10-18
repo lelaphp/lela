@@ -188,8 +188,7 @@ impl Mpz {
     /// `mpz_set_str` over the text up to its first NUL, as php hands
     /// libgmp a `zend_string`'s bytes; `false` is libgmp's `-1`.
     pub(crate) fn set_str(&mut self, text: &[u8], base: i32) -> bool {
-        let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
-        let mut owned = text.get(..end).unwrap_or_default().to_vec();
+        let mut owned = php_ext::coerce::c_str(text).to_vec();
         owned.push(0);
         // SAFETY: `owned` is NUL-terminated and outlives the call.
         let done = unsafe { sys::set_str(self.ptr(), owned.as_ptr().cast(), base) };

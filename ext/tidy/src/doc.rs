@@ -135,8 +135,7 @@ fn on_doc<R: Default>(
 
 /// A C string's text in a message: the bytes to the first NUL.
 pub(crate) fn shown(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    String::from_utf8_lossy(php_ext::coerce::c_str(bytes)).into_owned()
 }
 
 fn new_string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {

@@ -4,11 +4,12 @@
 //! a directory gives is checked against a [`Window`] before a byte of
 //! it is read, as php's `exif_offset_info` guards check it.
 
+use php_ext::coerce::c_str;
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::{Request, Stream, Whence};
 
 use crate::image::{
-    FileType, Format, Found, Image, Order, Section, TAG_COMPUTED, TAG_NONE, c_hex, c_int, cstr,
+    FileType, Format, Found, Image, Order, Section, TAG_COMPUTED, TAG_NONE, c_hex, c_int,
 };
 use crate::tags::{self, MAKER_NOTES, NoteLayout, NoteOffsets, NoteOrder, Table};
 
@@ -378,7 +379,7 @@ impl<'r> Reader<'r> {
     /// `exif_process_APP12`: Olympus's company and info strings.
     fn app12(&mut self, data: &[u8]) {
         let body = data.get(2..).unwrap_or_default();
-        let company = cstr(body);
+        let company = c_str(body);
         if company.is_empty() {
             return;
         }
@@ -392,7 +393,7 @@ impl<'r> Reader<'r> {
             company,
         );
         if let Some(rest) = body.get(l1 + 1..).filter(|rest| !rest.is_empty()) {
-            let info = cstr(rest);
+            let info = c_str(rest);
             self.add_tag(
                 Section::App12,
                 b"Info".to_vec(),
@@ -740,7 +741,7 @@ impl<'r> Reader<'r> {
                     }
                 }
                 tag::SUB_IFD if format == Format::Ifd => self.error(Level::Notice, "Skip SUB IFD"),
-                tag::MAKE => self.img.make = Some(cstr(bytes).to_vec()),
+                tag::MAKE => self.img.make = Some(c_str(bytes).to_vec()),
                 tag::MAKER_NOTE if !self.maker_note(bytes, info, displacement) => return false,
                 tag::EXIF_IFD_POINTER | tag::GPS_IFD_POINTER | tag::INTEROP_IFD_POINTER
                     if read_next =>
@@ -791,13 +792,13 @@ impl<'r> Reader<'r> {
 
     /// `TAG_COPYRIGHT`: "photographer NUL editor NUL", or one string.
     fn copyright(&mut self, bytes: &[u8]) {
-        let photographer = cstr(bytes);
+        let photographer = c_str(bytes);
         let length = photographer.len();
         if bytes.len() <= 1 || length == 0 {
             return;
         }
         if length < bytes.len() - 1 {
-            let editor = cstr(&bytes[length + 1..]).to_vec();
+            let editor = c_str(&bytes[length + 1..]).to_vec();
             let mut both = photographer.to_vec();
             both.extend_from_slice(b", ");
             both.extend_from_slice(&editor);
@@ -823,7 +824,7 @@ impl<'r> Reader<'r> {
                 _ => None,
             };
             let named: Option<&[u8]> = match &head {
-                b"ASCII\0\0\0" | b"UNICODE\0" | b"JIS\0\0\0\0\0" => Some(cstr(&head)),
+                b"ASCII\0\0\0" | b"UNICODE\0" | b"JIS\0\0\0\0\0" => Some(c_str(&head)),
                 b"\0\0\0\0\0\0\0\0" => Some(b"UNDEFINED"),
                 _ => None,
             };
@@ -851,7 +852,7 @@ impl<'r> Reader<'r> {
                 a -= 1;
             }
         }
-        (Some(cstr(rest).to_vec()), encoding)
+        (Some(c_str(rest).to_vec()), encoding)
     }
 
     /// `bytes` decoded from the file order's encoding of `codec`.
@@ -1513,7 +1514,7 @@ fn parse_meta(data: &[u8]) -> (u32, u32) {
 /// The found sections a list of names asks for, as `exif_read_data`
 /// reads `$required_sections`: the names split at commas and spaces.
 pub(crate) fn needed(names: &[u8]) -> Found {
-    let names = cstr(names);
+    let names = c_str(names);
     let mut needed = Found::default();
     for section in Section::ALL {
         let name = section.name().as_bytes();
