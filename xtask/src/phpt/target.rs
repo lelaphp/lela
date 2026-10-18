@@ -188,12 +188,12 @@ impl Target {
         crate::reading::replace(&path(root, pin, scope), text.as_bytes())
     }
 
-    /// Whether the test is in the target: the oracle met it, or failed it
-    /// as its `--XFAIL--` asks.
+    /// Whether the test is in the target: the oracle passed it, warned or
+    /// not, or failed it as its `--XFAIL--` asks.
     pub(crate) fn holds(&self, id: &str) -> bool {
         matches!(
             self.0.verdicts.get(id),
-            Some(Judgement::Pass | Judgement::Warn | Judgement::XFail)
+            Some(oracle) if oracle.passed() || *oracle == Judgement::XFail
         )
     }
 
@@ -258,7 +258,8 @@ impl Target {
         match self.0.verdicts.get(id) {
             Some(&oracle) if self.holds(id) => {
                 let accepted = engine == Judgement::Diverged || registry.accepted(id).is_some();
-                // A target kept before #2922 calls a warned test a pass.
+                // A pass and a warned pass met the same expectation, told
+                // apart by the test's `--XFAIL--` alone.
                 if engine == oracle || (engine.passed() && oracle.passed()) || accepted {
                     Standing::Met
                 } else {
@@ -541,6 +542,17 @@ mod tests {
         let measure = measured();
         assert_eq!(measure.outside.len(), 3, "{measure:#?}");
         assert_eq!(measure.target, 4, "{measure:#?}");
+    }
+
+    /// An engine's warned pass meets the oracle's pass, as a target kept
+    /// before #2922 holds every warned test, and misses its expected
+    /// failure.
+    #[test]
+    fn a_warned_pass_meets_a_pass_and_misses_an_expected_failure() {
+        let target = Target::of(fixture("control.json"));
+        let standing = |test| target.standing(&registry(), &id(test), Judgement::Warn);
+        assert_eq!(standing("kept.phpt"), Standing::Met);
+        assert_eq!(standing("xfail.phpt"), Standing::Missed);
     }
 
     /// A test the engine came to `Diverged` on is met, though no `phpt:`
