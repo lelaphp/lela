@@ -457,7 +457,7 @@ fn tend<'a>(
                 }
             };
             match standing {
-                _ if stale => remove(&file)?,
+                _ if stale => crate::remove(&file)?,
                 Some(operation) if starter.identity.is_none() && !starter.contested => {
                     let identity = operation.identity(&git_dir);
                     write(
@@ -523,15 +523,6 @@ fn hold<'a>(files: impl Iterator<Item = &'a Path>) -> Result<Vec<fs::File>> {
 fn write(file: &Path, starter: &Starter) -> Result<()> {
     let text = serde_json::to_string(starter).context("rendering the operation's starter")?;
     reading::replace(file, format!("{text}\n").as_bytes())
-}
-
-fn remove(file: &Path) -> Result<()> {
-    match fs::remove_file(file) {
-        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("removing {}", file.display()))
-        }
-        _ => Ok(()),
-    }
 }
 
 /// The checkout a call runs in: where it acts ([`acts_in`]), its

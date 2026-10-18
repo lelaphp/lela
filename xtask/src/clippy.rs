@@ -428,8 +428,8 @@ impl Files {
     /// A file's attributes; none for a file not there.
     fn module(&mut self, root: &Path, file: &Path) -> Result<&Module> {
         if !self.0.contains_key(file) {
-            let module = match fs::read_to_string(root.join(file)) {
-                Ok(text) => {
+            let module = match crate::read_if(&root.join(file))? {
+                Some(text) => {
                     let parsed = syn::parse_file(&text)
                         .with_context(|| format!("parsing {}", file.display()))?;
                     let mut module = Module {
@@ -446,8 +446,7 @@ impl Files {
                     }
                     module
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Module::default(),
-                Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+                None => Module::default(),
             };
             self.0.insert(file.to_path_buf(), module);
         }
