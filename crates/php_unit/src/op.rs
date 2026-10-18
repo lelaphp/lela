@@ -401,6 +401,13 @@ pub struct OpArray {
     /// caller's decides an argument's coercion and the frame's own a
     /// return's and a typed property's.
     pub strict_types: bool,
+    /// `ZEND_TYPE_PURE_MASK` of `arg_info[-1]`, the declared return
+    /// type's [`crate::decl::Type::mask`] as `zend_compile_typename`
+    /// computes it, and 0 where none is declared: the one test a
+    /// `VERIFY_RETURN_TYPE` makes before it reads the declaration. A
+    /// class name adds no bit and `static`'s matches no value, so the
+    /// link changes nothing of it.
+    pub return_mask: u32,
     /// `zend_handle_numeric_dim`'s pairs (`Z/Zend/zend_compile.c:2788`):
     /// for every constant dimension whose written string was a canonical
     /// decimal integer, the slot of `literals` holding the integer php

@@ -404,7 +404,7 @@ record! {
     OpArray {
         oplines, literals, const_exprs, vars, num_cvs, num_tmps, try_catch, live_ranges,
         safepoints, filename, line_start, line_end, cache_size, runtime_cache,
-        dynamic_func_defs, bound_vars, no_receiver, strict_types, numeric_dims,
+        dynamic_func_defs, bound_vars, no_receiver, strict_types, return_mask, numeric_dims,
     }
     AttributeArgument { name, value }
     Attribute { name, arguments, line, strict }
