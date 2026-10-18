@@ -83,7 +83,9 @@ pub(crate) fn compare(
         let ours = ours.judged.iter().find(|judged| judged.id == id);
         let ours = ours.map(|judged| judged.judgement);
         let theirs = verdict(&said, test);
-        let alike = ours.and_then(word).is_some_and(|ours| Some(ours) == theirs);
+        let alike = ours
+            .and_then(word)
+            .is_some_and(|ours| Some(ours) == theirs.map(unwarned));
         apart += usize::from(!alike);
         println!(
             "phpt: --upstream: {}: xtask phpt {}, run-tests.php {}; {}",
@@ -194,6 +196,13 @@ pub(super) fn verdict<'a>(said: &'a str, test: &Path) -> Option<&'a str> {
     words.last()
 }
 
+/// Upstream's verdict without the `WARN` it reports a `warn` SKIPIF's
+/// test under (run-tests.php:2677): a word over the verdict, which this
+/// runner keeps in the failure's note and not as a verdict of its own.
+fn unwarned(theirs: &str) -> &str {
+    theirs.strip_prefix("WARN&").unwrap_or(theirs)
+}
+
 /// What `run-tests.php` calls a verdict of this runner's: a difference a
 /// registry row accepts is still its `FAIL`, and a test the compiler did
 /// not read has none, since only the engine's compiler refuses one, nor
@@ -289,5 +298,7 @@ mod tests {
         let another = "PASS y [ext/a/tests/y.phpt] \nwhat came after\n[ext/a/tests/x.phpt]";
         assert_eq!(verdict(another, test), None);
         assert_eq!(word(Judgement::Diverged), Some("FAIL"));
+        assert_eq!(unwarned("WARN&FAIL"), "FAIL");
+        assert_eq!(unwarned("WARN"), "WARN");
     }
 }

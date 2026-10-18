@@ -522,7 +522,7 @@ fn a_refusal_of_the_compiler_is_read_as_unread() {
 const FIXTURE: &str = "fixtures/phpt/UnreadConstruct.phpt";
 
 #[test]
-fn a_skipif_that_says_skip_skips_with_its_reason_and_one_that_warns_first_borks() {
+fn a_skipif_is_judged_by_what_it_says_as_upstream_judges_it() {
     if oracle().is_none() {
         return;
     }
@@ -539,9 +539,22 @@ fn a_skipif_that_says_skip_skips_with_its_reason_and_one_that_warns_first_borks(
             Judgement::Bork,
             "invalid output from SKIPIF: Warning: w in ",
         ),
+        // A SKIPIF a signal ended having written nothing: upstream's
+        // `Termsig=` line is what it wrote (#2908).
+        (
+            "posix_kill(getmypid(), 9);",
+            Judgement::Bork,
+            "invalid output from SKIPIF: Termsig=0",
+        ),
+        // A `warn` with a reason runs the test, whose failure says it.
+        (
+            "echo 'warn slow here';",
+            Judgement::Fail,
+            "warn: slow here\n",
+        ),
     ] {
         let test = format!(
-            "--TEST--\nSkipped\n--SKIPIF--\n<?php {skipif}\n--FILE--\n<?php echo \"never\";\n--EXPECT--\nnever\n"
+            "--TEST--\nSkipped\n--SKIPIF--\n<?php {skipif}\n--FILE--\n<?php echo \"ran\";\n--EXPECT--\nnever\n"
         );
         let (_tree, subset) = subset("skipif", &[("skipped.phpt", &test)]);
         let tally = run(&subset, &registry(""));
