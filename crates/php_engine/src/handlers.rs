@@ -21329,16 +21329,9 @@ pub(crate) fn switch_long<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
-    let table = exec::constant(code, ConstIdx(op.op2));
-    let Some(table) = table.as_array() else {
-        return Err(no_table("SWITCH_LONG"));
-    };
-    Ok(switched(
-        req,
-        frame,
-        crate::ops::switch_long(&subject, *table),
-        op,
-    ))
+    let table = jump_table(code, op, "SWITCH_LONG")?;
+    let target = crate::ops::switch_long(&subject, table);
+    Ok(switched(req, frame, target, op))
 }
 
 /// `ZEND_SWITCH_STRING`: [`crate::ops::switch_string`], the same way.
@@ -21349,16 +21342,9 @@ pub(crate) fn switch_string<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
-    let table = exec::constant(code, ConstIdx(op.op2));
-    let Some(table) = table.as_array() else {
-        return Err(no_table("SWITCH_STRING"));
-    };
-    Ok(switched(
-        req,
-        frame,
-        crate::ops::switch_string(&subject, *table),
-        op,
-    ))
+    let table = jump_table(code, op, "SWITCH_STRING")?;
+    let target = crate::ops::switch_string(&subject, table);
+    Ok(switched(req, frame, target, op))
 }
 
 /// `ZEND_MATCH`: [`crate::ops::match_target`] over the subject and the
@@ -21374,16 +21360,9 @@ pub(crate) fn r#match<T: Tier>(
     if subject.tag() == TypeTag::Undef {
         subject = exec::operand(req, frame, code, op.op1_type, op.op1);
     }
-    let table = exec::constant(code, ConstIdx(op.op2));
-    let Some(table) = table.as_array() else {
-        return Err(no_table("MATCH"));
-    };
-    Ok(switched(
-        req,
-        frame,
-        crate::ops::match_target(&subject, *table),
-        op,
-    ))
+    let table = jump_table(code, op, "MATCH")?;
+    let target = crate::ops::match_target(&subject, table);
+    Ok(switched(req, frame, target, op))
 }
 
 /// `ZEND_IN_ARRAY`: [`crate::ops::in_array`] over the needle, the table
@@ -22384,6 +22363,13 @@ fn switched(req: &Request, frame: FrameRef, switched: Switched, op: &Opline) -> 
         Switched::Default => Next::jump(op.extended_value),
         Switched::Chain => advance(req, frame),
     }
+}
+
+/// The jump table a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` carries
+/// as the constant `op2` names, or [`no_table`]'s fatal.
+fn jump_table(code: &OpArray, op: &Opline, opcode: &str) -> Result<PhpArray, Fatal> {
+    let table = exec::constant(code, ConstIdx(op.op2)).as_array().copied();
+    table.ok_or_else(|| no_table(opcode))
 }
 
 /// The fatal for an opcode over a constant table, a jump table or
