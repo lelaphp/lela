@@ -315,6 +315,11 @@ unsafe extern "C" {
     /// on the request's heap beside timelib's, `DATEG(tzcache)`'s table.
     #[link_name = "emalloc"]
     pub fn timelib_malloc(size: usize) -> *mut c_void;
+    /// `timelib_strdup`, which `include/timelib_config.h` points at
+    /// `estrdup`, as php's does: the copy php's code makes of an
+    /// abbreviation, `offset->abbr = timelib_strdup(t->tz_abbr)`.
+    #[link_name = "estrdup"]
+    pub fn timelib_strdup(s: *const c_char) -> *mut c_char;
     pub fn timelib_unixtime2local(tm: *mut TimeFields, ts: i64);
     pub fn timelib_update_from_sse(tm: *mut TimeFields);
     pub fn timelib_set_timezone_from_offset(t: *mut TimeFields, utc_offset: i64);
@@ -349,6 +354,7 @@ unsafe extern "C" {
     pub fn timelib_time_dtor(t: *mut TimeFields);
     pub fn timelib_time_clone(orig: *mut TimeFields) -> *mut TimeFields;
     pub fn timelib_time_compare(t1: *mut TimeFields, t2: *mut TimeFields) -> c_int;
+    pub fn timelib_time_offset_ctor() -> *mut TimeOffset;
     pub fn timelib_time_offset_dtor(t: *mut TimeOffset);
     pub fn timelib_error_container_dtor(errors: *mut ErrorContainer);
     pub fn timelib_date_to_int(d: *mut TimeFields, error: *mut c_int) -> i64;

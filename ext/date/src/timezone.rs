@@ -13,7 +13,7 @@ use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
 use crate::ffi::{self, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::format_timestamp;
-use crate::lent::{Lent, lent};
+use crate::lent::{Lent, kept, lent};
 use crate::obj::{
     AbbrZone, TIMEZONE, TzKind, TzObj, class_id, lent_time, rows_array, set_str, set_string,
     set_tz, std_rows, tz_fields, tz_of,
@@ -228,7 +228,7 @@ fn timezone_name_get(
 fn offset_of(req: &mut Request, object: PhpObject, date: PhpObject) -> Result<i64, Thrown> {
     let kind = tz_of(req, object)?;
     let offset = lent_time(req, date, |l, time| match &kind {
-        TzKind::Id(zone) => i64::from(zone.offset_in(l, time.sse).offset),
+        TzKind::Id(zone) => i64::from(zone.offset_in(l, time.sse).offset()),
         TzKind::Offset(offset) => *offset,
         TzKind::Abbr(zone) => zone.utc_offset + i64::from(zone.dst) * 3600,
     });
@@ -346,15 +346,13 @@ fn transitions_of(
     } else if trans.is_empty() {
         nominal(req, &mut out, begin_ts)?;
     } else if posix {
-        let o = zone.offset_at(req, begin_ts)?;
-        transition(
-            req,
-            &mut out,
-            begin_ts,
-            i64::from(o.offset),
-            o.is_dst,
-            &o.abbr,
-        )?;
+        // `add_from_tto(tto, timestamp_begin)` reads timelib's offset,
+        // which php frees after the row is added.
+        let o = lent(req, |l| zone.offset_in(l, begin_ts))?;
+        kept(req, o, |req, o| {
+            let (offset, is_dst) = (i64::from(o.offset()), o.is_dst());
+            transition(req, &mut out, begin_ts, offset, is_dst, o.abbr())
+        })?;
     } else if let Some(t) = trans.last().and_then(|(_, i)| ty(*i)) {
         transition(
             req,
@@ -455,6 +453,20 @@ fn transitions_of(
 ///   }
 /// }
 /// bool(false)
+/// ```
+///
+/// Each row's `time` is `php_format_date`'s string, untrimmed, and a row
+/// read off a zone's POSIX rule is made while timelib's offset stands:
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// $u = new DateTimeZone('UTC'); $p = new DateTimeZone('EST5EDT');
+/// pk(fn () => $u->getTransitions(0, 0));
+/// pk(fn () => $p->getTransitions(2000000000, 2000000000));
+/// ```
+/// ```expect
+/// 1040 1072
+/// 1088 1040
 /// ```
 #[php_function]
 fn timezone_transitions_get(

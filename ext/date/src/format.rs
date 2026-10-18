@@ -12,7 +12,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, SmartStr};
 
-use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
+use crate::ffi::{self, Time, TimeOffset, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::lent::{Lent, kept, lent};
 use crate::obj::{set_str, set_string};
 use crate::zone::default_zone;
@@ -105,42 +105,19 @@ pub(super) fn c_int(n: i64) -> i64 {
     i64::from(n as i32)
 }
 
-/// The offset `date_format` reads for a local time: the abbreviation's,
-/// the fixed offset's under `GMT±hhmm`, or the zone's at the time.
-fn local_offset(lent: &Lent<'_>, t: &Time) -> Offset {
+/// The offset `date_format` makes for a local time, timelib's own and
+/// held until the string is made: the abbreviation's, the fixed
+/// offset's under `GMT±hhmm`, or the zone's at the time.
+fn local_offset(lent: &Lent<'_>, t: &Time) -> TimeOffset {
     match t.zone_type {
-        ZONETYPE_ABBR => Offset {
-            offset: t.z + t.dst * 3600,
-            is_dst: t.dst != 0,
-            abbr: t.tz_abbr().to_vec(),
-        },
-        ZONETYPE_OFFSET => {
-            let o = t.z;
-            Offset {
-                offset: o,
-                is_dst: false,
-                abbr: format!(
-                    "GMT{}{:02}{:02}",
-                    if o < 0 { '-' } else { '+' },
-                    (o / 3600).abs(),
-                    ((o % 3600) / 60).abs()
-                )
-                .into_bytes(),
-            }
-        }
+        ZONETYPE_ABBR => TimeOffset::of_abbr(lent, t.z + t.dst * 3600, t.dst != 0, t.tz_abbr()),
+        ZONETYPE_OFFSET => TimeOffset::of_fixed(lent, t.z),
         ZONETYPE_ID => match t.zone() {
             Some(zone) => zone.offset_in(lent, t.sse),
-            None => blank_offset(),
+            None => TimeOffset::new(lent),
         },
-        _ => blank_offset(),
-    }
-}
-
-fn blank_offset() -> Offset {
-    Offset {
-        offset: 0,
-        is_dst: false,
-        abbr: Vec::new(),
+        // "Shouldn't happen, but code defensively."
+        _ => TimeOffset::new(lent),
     }
 }
 
@@ -160,13 +137,27 @@ pub(super) fn date_format(
     if format.is_empty() {
         return PhpString::new(req, b"");
     }
-    let offset = if localtime {
-        Some(lent(req, |l| local_offset(l, t))?)
-    } else {
-        None
-    };
+    if !localtime {
+        return format_built(req, format, t, None);
+    }
+    // php frees the offset after `smart_str_0`, so it stands beside the
+    // buffer while the buffer grows.
+    let offset = lent(req, |l| local_offset(l, t))?;
+    kept(req, offset, |req, offset| {
+        format_built(req, format, t, Some(offset))
+    })
+}
+
+/// [`date_format`]'s `smart_str`, built and handed over, or freed where
+/// the memory limit stopped it.
+fn format_built(
+    req: &mut Request,
+    format: &[u8],
+    t: &Time,
+    offset: Option<&TimeOffset>,
+) -> Result<Owner<PhpString>, Thrown> {
     let mut out = SmartStr::default();
-    match format_into(req, &mut out, format, t, offset.as_ref()) {
+    match format_into(req, &mut out, format, t, offset) {
         Ok(()) => out.finish(req),
         Err(thrown) => {
             out.free(req);
@@ -184,10 +175,10 @@ fn format_into(
     out: &mut SmartStr,
     format: &[u8],
     t: &Time,
-    offset: Option<&Offset>,
+    offset: Option<&TimeOffset>,
 ) -> Result<(), Thrown> {
     let localtime = offset.is_some();
-    let off = offset.map_or(0, |o| o.offset);
+    let off = offset.map_or(0, TimeOffset::offset);
     let sign = if localtime && off < 0 { '-' } else { '+' };
     let oh = (off / 3600).abs();
     let om = ((off % 3600) / 60).abs();
@@ -251,9 +242,9 @@ fn format_into(
             b's' => format!("{:02}", c_int(t.s)),
             b'u' => format!("{:06}", c_int(t.us)),
             b'v' => format!("{:03}", c_int(t.us / 1000)),
-            b'I' => i32::from(offset.is_some_and(|o| o.is_dst)).to_string(),
+            b'I' => i32::from(offset.is_some_and(TimeOffset::is_dst)).to_string(),
             b'p' | b'P' | b'O' => {
-                let abbr = offset.map_or(&[][..], |o| &o.abbr);
+                let abbr = offset.map_or(&[][..], TimeOffset::abbr);
                 if c == b'p' && (!localtime || matches!(abbr, b"UTC" | b"Z" | b"GMT+0000")) {
                     "Z".to_owned()
                 } else {
@@ -262,7 +253,7 @@ fn format_into(
                 }
             }
             b'T' => match offset {
-                Some(o) => String::from_utf8_lossy(&o.abbr).into_owned(),
+                Some(o) => String::from_utf8_lossy(o.abbr()).into_owned(),
                 None => "GMT".to_owned(),
             },
             b'e' => {
@@ -273,7 +264,7 @@ fn format_into(
                             .map(|z| String::from_utf8_lossy(z.name()).into_owned())
                             .unwrap_or_default(),
                         ZONETYPE_ABBR => offset
-                            .map(|o| String::from_utf8_lossy(&o.abbr).into_owned())
+                            .map(|o| String::from_utf8_lossy(o.abbr()).into_owned())
                             .unwrap_or_default(),
                         ZONETYPE_OFFSET => {
                             let secs = off % 60;
@@ -426,19 +417,22 @@ fn php_date(
 /// string(6) "706d00"
 /// ```
 ///
-/// The string is `date_format`'s `smart_str`, untrimmed, and the empty
-/// format's is the interned empty string:
+/// The string is `date_format`'s `smart_str`, untrimmed, built while
+/// timelib's offset for the local time stands, and the empty format's
+/// is the interned empty string:
 ///
 /// ```php
 /// date('Y', 0);
 /// $m = memory_get_usage(); $b = date('Y-m-d', 0); echo memory_get_usage() - $m, "\n";
 /// $m = memory_get_usage(); $c = date(''); echo memory_get_usage() - $m, "\n";
-/// $m = memory_get_usage(); $l = date('D, d M Y H:i:s T e', 0); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $l = date('D, d M Y H:i:s T e', 0); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $n = idate('Z', 0); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect
 /// 256
 /// 0
-/// 256
+/// 576 256
+/// 320 0
 /// ```
 #[php_function]
 fn date(
@@ -504,8 +498,8 @@ fn idate_field(lent: &Lent<'_>, format: u8, t: &Time) -> i64 {
         b'H' | b'G' => c_int(t.h),
         b'i' => c_int(t.i),
         b's' => c_int(t.s),
-        b'I' => i64::from(offset.is_dst),
-        b'Z' => i64::from(offset.offset),
+        b'I' => i64::from(offset.is_dst()),
+        b'Z' => i64::from(offset.offset()),
         b'U' => c_int(t.sse),
         _ => -1,
     }
@@ -869,19 +863,15 @@ fn php_strftime(
         let offset = match zone {
             None => {
                 t.unixtime2gmt(l, ts);
-                Offset {
-                    offset: 0,
-                    is_dst: false,
-                    abbr: b"GMT".to_vec(),
-                }
+                None
             }
             Some(zone) => {
                 t.set_zone_id(zone.clone());
                 t.unixtime2local(l, ts);
-                zone.offset_in(l, ts)
+                Some(zone.offset_in(l, ts))
             }
         };
-        strftime_of(format, &t, &offset)
+        strftime_of(format, &t, offset.as_ref())
     })?;
     match text {
         Some(text) => PhpString::new(req, &text).map(OrFalse::Value),
@@ -890,8 +880,8 @@ fn php_strftime(
 }
 
 /// `strftime(3)` over the `struct tm` `php_strftime` fills from `t` and
-/// its offset.
-fn strftime_of(format: &[u8], t: &Time, offset: &Offset) -> Option<Vec<u8>> {
+/// its offset, `GMT` with none where the time is UTC.
+fn strftime_of(format: &[u8], t: &Time, offset: Option<&TimeOffset>) -> Option<Vec<u8>> {
     let tm = ffi::BrokenDown {
         sec: t.s,
         min: t.i,
@@ -901,9 +891,9 @@ fn strftime_of(format: &[u8], t: &Time, offset: &Offset) -> Option<Vec<u8>> {
         year: t.y - 1900,
         wday: ffi::day_of_week(t.y, t.m, t.d),
         yday: ffi::day_of_year(t.y, t.m, t.d),
-        isdst: offset.is_dst,
-        gmtoff: i64::from(offset.offset),
-        zone: &offset.abbr,
+        isdst: offset.is_some_and(TimeOffset::is_dst),
+        gmtoff: i64::from(offset.map_or(0, TimeOffset::offset)),
+        zone: offset.map_or(b"GMT", TimeOffset::abbr),
     };
     ffi::strftime(format, &tm)
 }

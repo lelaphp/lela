@@ -620,7 +620,7 @@ fn offset_of(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
         match time.zone_type {
             ZONETYPE_ID => time
                 .zone()
-                .map_or(0, |zone| i64::from(zone.offset_in(l, time.sse).offset)),
+                .map_or(0, |zone| i64::from(zone.offset_in(l, time.sse).offset())),
             ZONETYPE_OFFSET => i64::from(time.z),
             ZONETYPE_ABBR => i64::from(time.z + 3600 * time.dst),
             _ => 0,
@@ -1148,24 +1148,24 @@ fn date_get_last_errors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, T
 /// ```
 ///
 /// The string is `date_format`'s `smart_str`, untrimmed: its first
-/// block, or the page it grew to, and the date a cast or a dump reads is
-/// the same:
+/// block, or the page it grew to, built while timelib's offset for the
+/// local time stands; the date a cast or a dump reads is the same:
 ///
 /// ```php
 /// $d = new DateTime('2020-01-04 UTC');
 /// $m = memory_get_usage(); $a = $d->format('c'); echo memory_get_usage() - $m, "\n";
 /// $m = memory_get_usage(); $b = date_format($d, ''); echo memory_get_usage() - $m, "\n";
-/// $m = memory_get_usage(); $c = $d->format(str_repeat('Y', 100)); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $c = $d->format(str_repeat('Y', 100)); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
 /// $z = new DateTime('2000-01-01 EST');
-/// $m = memory_get_usage(); $e = $z->format('T e c'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); memory_reset_peak_usage(); $e = $z->format('T e c'); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
 /// $m = memory_get_usage(); $f = (array) $d; echo memory_get_usage() - $m, "\n";
 /// $m = memory_get_usage(); $g = (new DateTimeZone('UTC'))->getTransitions(0, 0); echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect
 /// 256
 /// 0
-/// 4096
-/// 256
+/// 4304 4096
+/// 304 256
 /// 832
 /// 1040
 /// ```
