@@ -569,7 +569,47 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     };
     let mut bars = vec![permit.declared()];
     bars.extend(crate::makala::bench::declared(root)?);
+    bars.extend(
+        [
+            ("jit-wrapper", ("direct", "direct"), Held::Series),
+            ("jit-wrapper-aa", ("wrapper-b", "wrapper"), Held::Control),
+        ]
+        .map(|(id, b, held)| wrapper(root, id, b, held)),
+    );
     Ok(bars)
+}
+
+/// `php_jit`'s bars (#2742): `CALLS` calls of its test kernel through the
+/// kernel's `extern "C"` wrapper, `catch_unwind` and its `Status`, against
+/// the same calls made to the kernel directly, each through a function
+/// pointer, a series; and the wrapper against itself, its A/A control.
+fn wrapper(root: &Path, id: &str, (b, way): (&'static str, &'static str), held: Held) -> Declared {
+    const CALLS: &str = "200000000";
+    let root = root.to_path_buf();
+    Declared {
+        id: id.to_owned(),
+        about: format!("{CALLS} calls of php_jit's test kernel through its wrapper, against {b}"),
+        held,
+        start: Box::new(move || {
+            let program =
+                crate::oracle::profile::released(&root, "php_jit", "php_jit_bench", Some("bench"))?;
+            let arm = |name: &str, way: &str| -> Box<dyn Side> {
+                let args = vec![way.to_owned(), CALLS.to_owned()];
+                let (name, stdin) = (name.to_owned(), String::new());
+                let arm = Arm {
+                    name,
+                    program: program.clone(),
+                    args,
+                    stdin,
+                };
+                Box::new(Spawned {
+                    arm,
+                    program: program.clone(),
+                })
+            };
+            Ok(Ok([arm("wrapper", "wrapper"), arm(b, way)]))
+        }),
+    }
 }
 
 /// The variable GitHub sets on every runner: `github-hosted` on its own

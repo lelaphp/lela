@@ -84,8 +84,13 @@ pub(crate) fn build(
 
 /// The same in `release`, the bench lane's profile: what a bar's arm of
 /// the engine's own runs, never a correctness lane's build (#2351).
-pub(crate) fn released(root: &Path, package: &str, binary: &str) -> Result<PathBuf> {
-    built(root, Profile::Release, (package, binary), None, None)
+pub(crate) fn released(
+    root: &Path,
+    package: &str,
+    binary: &str,
+    features: Option<&str>,
+) -> Result<PathBuf> {
+    built(root, Profile::Release, (package, binary), features, None)
 }
 
 /// `binary` of `package` built in `profile`: the cargo line [`build`] and
