@@ -219,7 +219,7 @@ extern "C" fn release(opaque: *mut c_void, address: *mut c_void) {
 // zlib retains the stream's address, including when this function returns.
 #[allow(clippy::unnecessary_box_returns)]
 fn stream(storage: &mut Storage) -> Box<z::z_stream> {
-    let mut stream = super::fresh();
+    let mut stream = super::fresh(false);
     stream.zalloc = allocate;
     stream.zfree = release;
     stream.opaque = std::ptr::from_mut(storage).cast();

@@ -194,10 +194,12 @@ fn handle(
     coding: Coding,
 ) -> Result<Result<Handed, ()>, Thrown> {
     let init = |req: &mut Request| -> Result<Result<Deflate, ()>, Thrown> {
-        Ok(
-            Deflate::new(req, level, coding.bits(), MAX_MEM_LEVEL, DEFAULT_STRATEGY)?
-                .map_err(|_| ()),
-        )
+        Ok(Deflate::new(
+            req,
+            (level, coding.bits(), MAX_MEM_LEVEL, DEFAULT_STRATEGY),
+            false,
+        )?
+        .map_err(|_| ()))
     };
     if op.start {
         ctx.end(req);

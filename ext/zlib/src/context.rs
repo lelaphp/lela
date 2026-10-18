@@ -335,7 +335,11 @@ fn deflate_init(
         ));
     }
     let dictionary = options.dictionary(req)?;
-    let Ok(mut stream) = Deflate::new(req, level, windowed(encoding, window), memory, strategy)?
+    let Ok(mut stream) = Deflate::new(
+        req,
+        (level, windowed(encoding, window), memory, strategy),
+        false,
+    )?
     else {
         docref(
             req,
@@ -519,7 +523,7 @@ fn inflate_init(
     }
     let mut dictionary = options.dictionary(req)?;
     let bits = windowed(encoding, window);
-    let Ok(mut stream) = Inflate::new(req, bits)? else {
+    let Ok(mut stream) = Inflate::new(req, bits, false)? else {
         docref(
             req,
             Level::Warning,
