@@ -31,9 +31,9 @@ use crate::format::date_format as format_time;
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent};
 use crate::obj::{
-    AbbrZone, CIVIL, DATE, DateObj, TzKind, WALL, again, check_time, class_id, clone_date,
-    date_fields, interval_of, lent_time, new_interval, new_timezone, rows_array, set_time,
-    std_rows, time_of, tz_from_time, tz_of, uninitialized, with_time,
+    CIVIL, DATE, DateObj, TzKind, WALL, again, check_time, class_id, clone_date, date_fields,
+    interval_of, lent_time, new_interval, new_timezone, rows_array, set_time, set_tz, std_rows,
+    time_of, tz_from_time, tz_of, uninitialized, with_time,
 };
 use crate::parse::keep_errors;
 use crate::timezone::DateTimeZone;
@@ -168,39 +168,53 @@ fn now_in(
     parsed: &Time,
     default: &[u8],
 ) -> Option<(Time, Option<Arc<Zone>>)> {
-    let mut now = Time::new(l);
+    // The zone is read, an abbreviation copied and the default looked up,
+    // before `now = timelib_time_ctor()`, as php's order is.
     let zone = match given {
-        Some(TzKind::Id(zone)) => Some(zone),
-        Some(TzKind::Offset(offset)) => {
+        Some(TzKind::Id(zone)) => NowZone::Id(zone),
+        Some(TzKind::Offset(offset)) => NowZone::Offset(offset),
+        Some(TzKind::Abbr(zone)) => {
+            NowZone::Abbr(zone.utc_offset, zone.dst, ffi::Abbr::dup(l, zone.abbr()))
+        }
+        None => match parsed.zone() {
+            Some(zone) => NowZone::Id(zone.clone()),
+            None => NowZone::Id(l.zone(default)?),
+        },
+    };
+    let mut now = Time::new(l);
+    let zone = match zone {
+        NowZone::Id(zone) => Some(zone),
+        NowZone::Offset(offset) => {
             now.zone_type = ZONETYPE_OFFSET;
             #[allow(clippy::cast_possible_truncation)]
             let z = offset as i32;
             now.z = z;
             None
         }
-        Some(TzKind::Abbr(zone)) => {
-            let AbbrZone {
-                utc_offset,
-                abbr,
-                dst,
-            } = *zone;
+        NowZone::Abbr(utc_offset, dst, abbr) => {
             #[allow(clippy::cast_possible_truncation)]
             let z = utc_offset as i32;
             now.z = z;
             now.dst = dst;
             now.zone_type = ZONETYPE_ABBR;
-            now.set_abbr(l, &abbr);
+            now.take_abbr(l, abbr);
             None
         }
-        None => match parsed.zone() {
-            Some(zone) => Some(zone.clone()),
-            None => Some(l.zone(default)?),
-        },
     };
     if let Some(zone) = &zone {
         now.set_zone_id(zone.clone());
     }
     Some((now, zone))
+}
+
+/// The zone `php_date_initialize` gives `now`, read before `now` is
+/// made: the database's, an offset, or an abbreviation's offset, whether
+/// it is daylight time, and the `timelib_strdup` copy `now->tz_abbr`
+/// takes.
+enum NowZone {
+    Id(Arc<Zone>),
+    Offset(i64),
+    Abbr(i64, i32, ffi::Abbr),
 }
 
 /// What `php_date_initialize`'s timelib work came to: the time to set,
@@ -577,19 +591,44 @@ fn sub(
 }
 
 /// `date_timezone_get` and `getTimezone` of both classes: `false` for a
-/// time with no zone.
+/// time with no zone; else `php_date_instantiate(date_ce_timezone)` and
+/// then `set_timezone_from_timelib_time`, so the object is made before
+/// an abbreviation's copy, as php makes it.
+///
+/// ```php
+/// $d = new DateTime('2024-03-30 12:00 CEST');
+/// $m = memory_get_usage(); $z = $d->getTimezone(); echo memory_get_usage() - $m, ' ', $z->getName(), "\n";
+/// $m = memory_get_usage(); unset($z); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 96 CEST
+/// -96
+/// ```
 fn timezone_of(
     req: &mut Request,
     object: PhpObject,
 ) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
-    let kind = lent_time(req, object, |_, time| {
-        (time.is_localtime != 0)
-            .then(|| tz_from_time(time))
-            .flatten()
+    let local = lent_time(req, object, |_, time| {
+        time.is_localtime != 0
+            && match time.zone_type {
+                ZONETYPE_ID => time.zone().is_some(),
+                ZONETYPE_OFFSET | ZONETYPE_ABBR => true,
+                _ => false,
+            }
     })?;
-    match kind {
-        Some(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
-        None => Ok(OrFalse::False),
+    if !local {
+        return Ok(OrFalse::False);
+    }
+    let class = class_id(req, "DateTimeZone")?;
+    let zone = new_object(req, class)?;
+    let set = lent_time(req, object, |l, time| tz_from_time(l, time))
+        .and_then(|kind| set_tz(req, *zone, kind));
+    match set {
+        Ok(()) => Ok(OrFalse::Value(zone.into_instance())),
+        Err(thrown) => {
+            zone.give_up(req);
+            Err(thrown)
+        }
     }
 }
 
@@ -601,7 +640,7 @@ fn timezone_set(req: &mut Request, object: PhpObject, timezone: PhpObject) -> Re
         match &kind {
             TzKind::Offset(offset) => time.set_timezone_from_offset(l, *offset),
             TzKind::Abbr(zone) => {
-                time.set_timezone_from_abbr(l, zone.utc_offset, &zone.abbr, zone.dst);
+                time.set_timezone_from_abbr(l, zone.utc_offset, zone.abbr(), zone.dst);
             }
             TzKind::Id(zone) => time.set_timezone(l, zone),
         }

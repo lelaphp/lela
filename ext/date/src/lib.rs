@@ -34,7 +34,6 @@ mod classes;
 mod datetime;
 mod ffi;
 mod format;
-mod held;
 mod interval;
 mod lent;
 mod obj;
@@ -120,7 +119,18 @@ pub fn php_format_date_obj(req: &mut Request, format: &[u8], object: PhpObject) 
 /// (`!time->is_localtime`).
 pub struct DateParts {
     pub us: i64,
-    pub zone: Option<TzKind>,
+    pub zone: Option<ZoneParts>,
+}
+
+/// A zone as ext/intl's `timezone_convert_datetimezone` reads it, off a
+/// time (`datetime->time`) or a `DateTimeZone` (`tzobj->tzi`): its zone
+/// of the database, its offset from UTC in seconds, or its abbreviation,
+/// `time->tz_abbr` or `tzi.z.abbr`, read where ext/date keeps it and
+/// copied out for the reader, as an offset is.
+pub enum ZoneParts {
+    Id(Arc<Zone>),
+    Offset(i64),
+    Abbr(Vec<u8>),
 }
 
 /// `php_date_obj_from_obj(obj)->time`, as ext/intl's
@@ -132,7 +142,12 @@ pub fn date_obj(req: &Request, object: PhpObject) -> Option<DateParts> {
     let zone = if time.is_localtime == 0 {
         None
     } else {
-        obj::tz_from_time(time)
+        match time.zone_type {
+            ffi::ZONETYPE_ID => time.zone().map(|zone| ZoneParts::Id(Arc::clone(zone))),
+            ffi::ZONETYPE_OFFSET => Some(ZoneParts::Offset(i64::from(time.z))),
+            ffi::ZONETYPE_ABBR => Some(ZoneParts::Abbr(time.tz_abbr().to_vec())),
+            _ => None,
+        }
     };
     Some(DateParts { us: time.us, zone })
 }
@@ -141,8 +156,12 @@ pub fn date_obj(req: &Request, object: PhpObject) -> Option<DateParts> {
 /// `timezone_convert_datetimezone` reads them; none where the object is
 /// not `initialized` (design §4.10).
 #[must_use]
-pub fn timezone_obj(req: &Request, object: PhpObject) -> Option<TzKind> {
-    object.native::<obj::TzObj>(req)?.tz.clone()
+pub fn timezone_obj(req: &Request, object: PhpObject) -> Option<ZoneParts> {
+    Some(match object.native::<obj::TzObj>(req)?.tz.as_ref()? {
+        TzKind::Id(zone) => ZoneParts::Id(Arc::clone(zone)),
+        TzKind::Offset(offset) => ZoneParts::Offset(*offset),
+        TzKind::Abbr(zone) => ZoneParts::Abbr(zone.abbr().to_vec()),
+    })
 }
 
 /// `object_init_ex(php_date_get_timezone_ce())` with its `type` and `tzi`

@@ -2,6 +2,8 @@
 //! over `timelib_parse_zone`, the name, offset, transitions and location
 //! of a zone, and its serialised form.
 
+use std::sync::Arc;
+
 use php_ext::abi::{Instance, OrFalse, Path, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
@@ -90,11 +92,14 @@ fn parse(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, Refusal> {
     match read.zone_type {
         ZONETYPE_ID => read.zone.map(TzKind::Id).ok_or(Refusal::Unknown),
         ZONETYPE_OFFSET => Ok(TzKind::Offset(z)),
-        ZONETYPE_ABBR => Ok(TzKind::Abbr(Box::new(AbbrZone {
-            utc_offset: z,
-            abbr: read.abbr,
-            dst: read.dst,
-        }))),
+        // `set_timezone_from_timelib_time` copies the parse's abbreviation
+        // before `timelib_free(dummy_t.tz_abbr)` frees it with `read`.
+        ZONETYPE_ABBR => {
+            let abbr = read.abbr.as_ref().map_or(&[][..], ffi::Abbr::bytes);
+            Ok(TzKind::Abbr(Arc::new(AbbrZone::new(
+                lent, z, read.dst, abbr,
+            ))))
+        }
         _ => Err(Refusal::Unknown),
     }
 }

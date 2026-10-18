@@ -48,8 +48,8 @@ pub struct RelFields {
 
 /// `timelib_time`. The two pointers are timelib's to manage, so they are
 /// private: [`TimeFields::tz_abbr`] and [`TimeFields::tz_info`] read them,
-/// and [`TimeFields::set_tz_info`], an `unsafe fn`, is the one door that
-/// writes one. Every other field is a number any code may read and write.
+/// and [`TimeFields::set_tz_info`] and [`TimeFields::set_tz_abbr`], each
+/// an `unsafe fn`, are the doors that write them. Every other field is a number any code may read and write.
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeFields {
@@ -99,6 +99,18 @@ impl TimeFields {
     /// reads it and never frees it.
     pub unsafe fn set_tz_info(&mut self, tz: *mut TzInfo) {
         self.tz_info = tz;
+    }
+
+    /// `t->tz_abbr = abbr`, as php's `php_date_initialize` hands `now` the
+    /// copy it made, `now->tz_abbr = new_abbr`.
+    ///
+    /// # Safety
+    ///
+    /// `abbr` is null or a NUL-terminated block of timelib's allocator
+    /// that the time owns from here, its `timelib_time_dtor` the one that
+    /// frees it, and the block the time held is freed or null.
+    pub unsafe fn set_tz_abbr(&mut self, abbr: *mut c_char) {
+        self.tz_abbr = abbr;
     }
 }
 

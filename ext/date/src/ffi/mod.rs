@@ -278,6 +278,52 @@ pub struct Offset {
     pub abbr: Vec<u8>,
 }
 
+/// An owned abbreviation: a NUL-terminated copy timelib's allocator made
+/// on the request's heap, `timelib_strdup`'s, as php's `tzi.z.abbr` and
+/// a parse's `dummy_t.tz_abbr` are, freed by its drop (`timelib_free`)
+/// under a lend where php frees it.
+pub struct Abbr(NonNull<c_char>);
+
+// SAFETY: the copy is owned here alone and never written after it was
+// made, so a shared read of it from any thread reads settled bytes.
+unsafe impl Send for Abbr {}
+// SAFETY: as above; nothing writes through a shared `Abbr`.
+unsafe impl Sync for Abbr {}
+
+impl Drop for Abbr {
+    fn drop(&mut self) {
+        // SAFETY: the copy timelib's allocator made, and this its one owner.
+        unsafe { sys::timelib_free(self.0.as_ptr().cast()) };
+    }
+}
+
+impl Abbr {
+    /// A copy timelib's allocator made, owned from here; none for null.
+    fn adopt(raw: *mut c_char) -> Option<Abbr> {
+        NonNull::new(raw).map(Abbr)
+    }
+
+    /// `timelib_strdup(abbr)`, the bytes cut at a NUL as C reads them; an
+    /// allocation failing is one the process does not outlive.
+    pub(crate) fn dup(_: &Lent<'_>, bytes: &[u8]) -> Abbr {
+        let text = c_string(bytes);
+        // SAFETY: a NUL-terminated string live for the call, copied by
+        // timelib's allocator under the lend.
+        let copy = unsafe { sys::timelib_strdup(text.as_ptr()) };
+        Abbr::adopt(copy).unwrap_or_else(|| std::process::abort())
+    }
+
+    /// The abbreviation's bytes, without the terminator.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        bytes_of(self.0.as_ptr())
+    }
+
+    /// The copy handed to a struct of timelib's whose dtor frees it.
+    fn into_raw(self) -> *mut c_char {
+        std::mem::ManuallyDrop::new(self).0.as_ptr()
+    }
+}
+
 /// An owned `timelib_time_offset`, made by timelib's allocator on the
 /// request's heap where php's `date_format` makes the local time's
 /// offset and `timelib_get_time_zone_info` answers a zone's, and freed by
@@ -310,10 +356,7 @@ impl TimeOffset {
     /// abbreviation, cut at a NUL as C reads it.
     pub(crate) fn of_abbr(lent: &Lent<'_>, offset: i32, is_dst: bool, abbr: &[u8]) -> TimeOffset {
         let mut made = TimeOffset::new(lent);
-        let abbr = c_string(abbr);
-        // SAFETY: a NUL-terminated string live for the call, copied by
-        // timelib's allocator under the lend.
-        let copy = unsafe { sys::timelib_strdup(abbr.as_ptr()) };
+        let copy = Abbr::dup(lent, abbr).into_raw();
         made.write(offset, is_dst, copy);
         made
     }
@@ -995,22 +1038,19 @@ impl Time {
         self.sync([]);
     }
 
-    /// `t->tz_abbr = timelib_strdup(abbr)` through the only door timelib
-    /// has for it that keeps the zone: set from the abbreviation and the
-    /// fields restored.
-    pub(crate) fn set_abbr(&mut self, lent: &Lent<'_>, abbr: &[u8]) {
-        let (z, dst, zone_type, have_zone) = (self.z, self.dst, self.zone_type, self.have_zone);
-        let zone = self.zone.clone();
-        let info = self.tz_info();
-        self.set_timezone_from_abbr(lent, i64::from(z), abbr, dst);
-        self.z = z;
-        self.dst = dst;
-        self.zone_type = zone_type;
-        self.have_zone = have_zone;
-        // SAFETY: the pointer the time held before the call, and the `Arc`
-        // restored beside it keeps that zone alive.
-        unsafe { self.set_tz_info(info) };
-        self.zone = zone;
+    /// `t->tz_abbr = abbr`, php's `now->tz_abbr = new_abbr`: the copy
+    /// the time owns from here, its dtor's to free, the one it held freed
+    /// first.
+    pub(crate) fn take_abbr(&mut self, _: &Lent<'_>, abbr: Abbr) {
+        let held = TimeFields::tz_abbr(self).cast_mut();
+        if !held.is_null() {
+            // SAFETY: the time's own copy, made by timelib's allocator,
+            // which nothing reads once it is replaced below.
+            unsafe { sys::timelib_free(held.cast()) };
+        }
+        // SAFETY: a copy of timelib's allocator the time owns from here,
+        // the one it held freed above.
+        unsafe { self.set_tz_abbr(abbr.into_raw()) };
     }
 
     /// `timelib_update_ts(t, tzi)`: under `zone`, or the time's own when
@@ -1203,14 +1243,16 @@ pub(crate) struct ZoneRead {
     pub not_found: bool,
     pub read: usize,
     pub zone_type: u32,
-    /// The abbreviation an abbreviation zone keeps; empty for another.
-    pub abbr: Vec<u8>,
+    /// The parse's own copy of what it read as an abbreviation,
+    /// `dummy_t.tz_abbr`, which php frees after the zone has copied it.
+    pub abbr: Option<Abbr>,
     pub zone: Option<Arc<Zone>>,
 }
 
 /// `timelib_parse_zone(&ptr, &dst, &dummy_t, &not_found, ...)` over
 /// `s`, into a `timelib_time` on the stack as php's `dummy_t = {0}` is,
-/// whose `tz_abbr` copy is freed after, `timelib_free(dummy_t.tz_abbr)`.
+/// whose `tz_abbr` copy the read owns and frees when it is dropped,
+/// `timelib_free(dummy_t.tz_abbr)`.
 pub(crate) fn parse_zone(lent: &mut Lent<'_>, s: &[u8]) -> ZoneRead {
     with_c_string(s, |text| parse_zone_in(lent, text))
 }
@@ -1247,19 +1289,9 @@ fn parse_zone_in(lent: &mut Lent<'_>, text: &CStr) -> ZoneRead {
         .iter()
         .find(|zone| !tz_info.is_null() && zone.ptr() == tz_info)
         .cloned();
-    // Only an abbreviation zone keeps its abbreviation; an identifier's
-    // copy is the transient php frees unread.
-    let abbr = if dummy.zone_type == ZONETYPE_ABBR {
-        bytes_of(dummy.tz_abbr()).to_vec()
-    } else {
-        Vec::new()
-    };
-    let abbr_copy = dummy.tz_abbr();
-    if !abbr_copy.is_null() {
-        // SAFETY: the copy `timelib_parse_zone` made with `timelib_strdup`
-        // and the dummy's alone, which is dropped with this frame.
-        unsafe { sys::timelib_free(abbr_copy.cast_mut().cast()) };
-    }
+    // The copy `timelib_parse_zone` made with `timelib_strdup`, the
+    // dummy's alone, which is dropped with this frame: the read owns it.
+    let abbr = Abbr::adopt(dummy.tz_abbr().cast_mut());
     ZoneRead {
         offset,
         dst,
