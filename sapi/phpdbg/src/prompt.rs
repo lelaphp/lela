@@ -168,6 +168,20 @@ pub enum Outcome {
     LeftLog,
 }
 
+impl Outcome {
+    /// How the host's log a prompt inside it stood in ends, the session
+    /// `stopped` or not: bailed out, past what `php_error_cb` writes
+    /// after it, where the prompt stopped the session or a refusal at it
+    /// bailed out; else returned, for `php_error_cb` to go on.
+    pub fn after_log(self, stopped: bool) -> AfterLog {
+        match self {
+            Outcome::Stopped | Outcome::LeftLog => AfterLog::BailedOut,
+            Outcome::Resume | Outcome::NotRunning if stopped => AfterLog::BailedOut,
+            Outcome::Resume | Outcome::NotRunning => AfterLog::Returned,
+        }
+    }
+}
+
 /// What one command asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ret {
@@ -1485,10 +1499,10 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// prompt>
 /// ```
 pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
-    s.status = Some(255);
     // Inside the log, `php_log_err`'s guard logs nothing, and so lists
     // nothing, while `php_error_cb` displays each diagnostic all the same.
     if out::logging() {
+        s.status = Some(255);
         s.left_log = out::in_log_prompt();
         out::stick_log();
         out::replay(&s.refused.clone(), || AfterLog::Returned);
@@ -1496,19 +1510,19 @@ pub fn refused_again(s: &mut Session, here: Option<&mut Here<'_>>) {
     }
     // What a fatal's log is followed by, `php_sapi_phpdbg_log_message`'s
     // listing and prompt, where the compiler's fatal was logged, before
-    // `php_error_cb` displays it.
+    // `php_error_cb` displays it and writes the status 255, which a prompt
+    // that bailed out of the log leaves as it was.
     let refused = s.refused.clone();
-    out::replay(&refused, || {
+    let after = out::replay(&refused, || {
         crate::list::code(s, NO_ACTIVE_FILE, 0);
         let Some(here) = here.filter(|_| s.started) else {
             return AfterLog::Returned;
         };
-        match out::in_log(|| interactive(s, here)) {
-            Outcome::Stopped | Outcome::LeftLog => AfterLog::BailedOut,
-            _ if s.stopped.is_some() => AfterLog::BailedOut,
-            Outcome::Resume | Outcome::NotRunning => AfterLog::Returned,
-        }
+        out::in_log(|| interactive(s, here)).after_log(s.stopped.is_some())
     });
+    if after == AfterLog::Returned {
+        s.status = Some(255);
+    }
 }
 
 /// `phpdbg_compile`'s notice where the init files compile the context,

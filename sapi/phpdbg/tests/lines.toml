@@ -363,6 +363,27 @@ files = { "t.php" = "<?php\n$a = 1;\nbreak 2;\n" }
 stdin = "print exec\nprint exec\nc\nprint exec\nq\n"
 streams = "merged"
 
+# The auto compile under `-r` comes after the init files whatever they left:
+# where their code bailed out, its displays come before the startup run asks
+# to restart (`n`, the session at the prompt); php is fully started after it,
+# so after a restart (`y`) the next cycle's auto compile stands at an
+# invisible prompt inside its log, where `q` bails out of the log before the
+# fatal is displayed and the status written, and the session ends with 0.
+[[line]]
+name = "under-r-the-auto-compile-displays-after-init-files-that-bailed-out"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "n\nq\n"
+streams = "merged"
+
+# The same, restarted.
+[[line]]
+name = "under-r-a-restart-s-auto-compile-quit-inside-its-log-leaves-the-status"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "y\nq\n"
+streams = "merged"
+
 # `run` with arguments in the init file rebuilds `argv` in the request the
 # file runs in and runs the program there, as php's `run` does with
 # `php_build_argv`, every cycle: the first cycles.

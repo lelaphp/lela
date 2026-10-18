@@ -390,8 +390,9 @@ impl OutputSink for Kept {
 /// before `php_error_cb` displays the fatal
 /// (`Z/sapi/phpdbg/phpdbg.c:731-770`, `Z/main/main.c:1411-1495`). A log
 /// that bailed out leaves the display unwritten; nothing logged serves
-/// no `fatal`.
-pub fn replay(written: &[Written], fatal: impl FnOnce() -> AfterLog) {
+/// no `fatal`. Which of the two it was is the answer, `Returned` where
+/// nothing was logged.
+pub fn replay(written: &[Written], fatal: impl FnOnce() -> AfterLog) -> AfterLog {
     let logged = written
         .iter()
         .rposition(|each| matches!(each, Written::Log(_)))
@@ -407,7 +408,8 @@ pub fn replay(written: &[Written], fatal: impl FnOnce() -> AfterLog) {
     };
     through_fatal.iter().for_each(&mut write);
     if logged > 0 && fatal() == AfterLog::BailedOut {
-        return;
+        return AfterLog::BailedOut;
     }
     displayed.iter().for_each(write);
+    AfterLog::Returned
 }
