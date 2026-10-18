@@ -277,9 +277,10 @@ ini = ["cgi.fix_pathinfo=0"]
 [variant.zend-test]
 # The pinned tag with the main oracle's configure line plus --enable-zend-test (#1782),
 # built by scripts/oracle-build.py (#1889) to the fixed prefix; image is the base
-# image's manifest digest the Linux build reproduces from (#1948)
+# image's manifest digest the Linux build reproduces from (#1948); closure is the
+# digest of the [closure] the macOS build was made against (#2935)
 flags = ["--enable-zend-test"]
-darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "ba849d79fcf55a9e33cdf4d380dd13fe" }
+darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "ba849d79fcf55a9e33cdf4d380dd13fe", closure = "sha256:df85e2cfe3f4a0b78bd4843813f79f2cd996df4a7c8c89e09cadfd98293670ec" }
 linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "a4d2632ad5a39206e905b7df1ba31b1a", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
 linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "36a4972453e44183222752661fad198b", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
 
