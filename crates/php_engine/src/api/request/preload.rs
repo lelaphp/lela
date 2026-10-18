@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_link::{Folded, Linked, NameMap, Obligation};
 use php_unit::decl::{Bare, ClassDecl, Name, shown};
-use php_unit::{AutoGlobal, Level, Unit};
+use php_unit::{AutoGlobal, Level, PublishedUnit};
 
 use super::{PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
@@ -169,7 +169,7 @@ pub(crate) struct Buckets {
 
 /// The bucket a load took for the class at `at` of `unit`.
 struct Reserved {
-    unit: Arc<Unit>,
+    unit: PublishedUnit,
     at: u32,
     bucket: Bucket,
 }
@@ -190,15 +190,16 @@ impl Buckets {
     }
 
     /// The next bucket, held for the class at `at` of `unit`.
-    pub(crate) fn reserve(&mut self, unit: &Arc<Unit>, at: u32) {
+    pub(crate) fn reserve(&mut self, unit: &PublishedUnit, at: u32) {
         let bucket = self.take();
-        let unit = Arc::clone(unit);
+        let unit = PublishedUnit::clone(unit);
         self.reserved.push(Reserved { unit, at, bucket });
     }
 
     /// The bucket held for the class at `at` of `unit`, or the next.
-    pub(crate) fn claim(&mut self, unit: &Arc<Unit>, at: u32) -> Bucket {
-        let held = (self.reserved.iter()).position(|r| Arc::ptr_eq(&r.unit, unit) && r.at == at);
+    pub(crate) fn claim(&mut self, unit: &PublishedUnit, at: u32) -> Bucket {
+        let held =
+            (self.reserved.iter()).position(|r| PublishedUnit::ptr_eq(&r.unit, unit) && r.at == at);
         match held {
             Some(i) => self.reserved.swap_remove(i).bucket,
             None => self.take(),
@@ -244,14 +245,14 @@ struct UnitDeclarations {
 
 impl Preloaded {
     /// Whether the class at `at` of `unit` is one the preload holds.
-    pub(crate) fn holds_class(&self, unit: &Arc<Unit>, at: u32) -> bool {
+    pub(crate) fn holds_class(&self, unit: &PublishedUnit, at: u32) -> bool {
         self.declared
             .get(&address(unit))
             .is_some_and(|held| held.classes.contains(&at))
     }
 
     /// Whether the function `body` of `unit` is one the preload holds.
-    pub(crate) fn holds_function(&self, unit: &Arc<Unit>, body: Body) -> bool {
+    pub(crate) fn holds_function(&self, unit: &PublishedUnit, body: Body) -> bool {
         self.declared
             .get(&address(unit))
             .is_some_and(|held| held.functions.contains(&body))
@@ -264,15 +265,15 @@ impl Preloaded {
 }
 
 /// A unit's identity for as long as the preload keeps it.
-fn address(unit: &Arc<Unit>) -> usize {
-    Arc::as_ptr(unit) as usize
+fn address(unit: &PublishedUnit) -> usize {
+    PublishedUnit::as_ptr(unit) as usize
 }
 
 /// The preload's request: the files it compiled, in order, and how
 /// many aliases the extensions' `RINIT`s had added before its program
 /// began, which are theirs and every request's, not the preload's.
 pub(crate) struct Preloading {
-    scripts: Vec<(Vec<u8>, Arc<Unit>, u64)>,
+    scripts: Vec<(Vec<u8>, PublishedUnit, u64)>,
     aliases_before: usize,
     /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Request::preloading_in_child`]).
     in_child: bool,
@@ -281,7 +282,7 @@ pub(crate) struct Preloading {
 /// One class `preload_link` asks about: a top-level or an anonymous
 /// class of a preloaded file that nothing bound.
 struct Candidate {
-    unit: Arc<Unit>,
+    unit: PublishedUnit,
     at: u32,
     decl: ClassDecl,
     linked: bool,
@@ -344,10 +345,11 @@ impl Request {
             return false;
         };
         body != Body::Main
-            && preloaded
-                .scripts
-                .iter()
-                .any(|held| held.unit.as_ref().is_ok_and(|held| Arc::ptr_eq(held, unit)))
+            && preloaded.scripts.iter().any(|held| {
+                held.unit
+                    .as_ref()
+                    .is_ok_and(|held| PublishedUnit::ptr_eq(held, unit))
+            })
     }
 
     /// The request, started, is the preload's from here: every file it
@@ -375,7 +377,7 @@ impl Request {
             .iter()
             .find(|(held, _, _)| *held == full)
         {
-            return Some(Ok(Arc::clone(unit)));
+            return Some(Ok(PublishedUnit::clone(unit)));
         }
         let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
         let shared = Arc::clone(&self.shared);
@@ -392,14 +394,16 @@ impl Request {
         );
         if let (Ok(unit), Some(preloading)) = (&unit, &mut self.preloading) {
             let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
-            preloading.scripts.push((full, Arc::clone(unit), size));
+            preloading
+                .scripts
+                .push((full, PublishedUnit::clone(unit), size));
         }
         Some(unit)
     }
 
     /// Whether the class at `at` of `unit` is one the preload holds,
     /// which a load and a `DECLARE_CLASS` pass over.
-    pub(crate) fn preloaded_class(&self, unit: &Arc<Unit>, at: usize) -> bool {
+    pub(crate) fn preloaded_class(&self, unit: &PublishedUnit, at: usize) -> bool {
         let Ok(at) = u32::try_from(at) else {
             return false;
         };
@@ -411,7 +415,7 @@ impl Request {
 
     /// Whether the function `body` of `unit` is one the preload holds,
     /// which a load and a `DECLARE_FUNCTION` pass over.
-    pub(crate) fn preloaded_function(&self, unit: &Arc<Unit>, body: Body) -> bool {
+    pub(crate) fn preloaded_function(&self, unit: &PublishedUnit, body: Body) -> bool {
         self.shared
             .units
             .preloaded()
@@ -480,15 +484,14 @@ impl Request {
                 let Ok(at) = u32::try_from(at) else {
                     continue;
                 };
-                let bound = self
-                    .own_classes
-                    .iter()
-                    .any(|declared| Arc::ptr_eq(&declared.unit, unit) && declared.at == at);
+                let bound = self.own_classes.iter().any(|declared| {
+                    PublishedUnit::ptr_eq(&declared.unit, unit) && declared.at == at
+                });
                 if bound || !(decl.flags.is_top_level || decl.flags.is_anonymous) {
                     continue;
                 }
                 candidates.push(Candidate {
-                    unit: Arc::clone(unit),
+                    unit: PublishedUnit::clone(unit),
                     at,
                     decl: decl.clone(),
                     linked: false,
@@ -799,8 +802,14 @@ impl Request {
             .and_then(|decl| self.class_named(decl.parent.as_ref()?.into()))
             .and_then(shared);
         let composed = row.composed.as_deref().cloned();
-        self.publish(&Arc::clone(&row.unit), row.at, composed, record, parent)
-            .ok_or_else(|| ARENA_FULL.to_string())
+        self.publish(
+            &PublishedUnit::clone(&row.unit),
+            row.at,
+            composed,
+            record,
+            parent,
+        )
+        .ok_or_else(|| ARENA_FULL.to_string())
     }
 
     /// `preload_sort_classes`, php's own swap sort and not a stable one:

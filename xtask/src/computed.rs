@@ -31,7 +31,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::git::git;
+use crate::git;
 
 /// What `computed run` did, interpreted once.
 #[derive(Debug, PartialEq, Eq)]
@@ -218,13 +218,7 @@ fn unstaged_reads(root: &Path, files: &[String]) -> Result<Vec<String>> {
             "--directory",
         ],
     ] {
-        let listed = git(root, args, None)?;
-        unstaged.extend(
-            listed
-                .split('\0')
-                .filter(|p| !p.is_empty())
-                .map(str::to_owned),
-        );
+        unstaged.extend(git::listed(root, args)?);
     }
     if unstaged.is_empty() {
         return Ok(Vec::new());
@@ -242,8 +236,8 @@ fn unstaged_reads(root: &Path, files: &[String]) -> Result<Vec<String>> {
         .collect();
     // A file the commit stages carries its regions as they stand, a render
     // made earlier from the working tree among them.
-    let staged = git(root, &["diff", "--cached", "--name-only", "-z"], None)?;
-    let staged: BTreeSet<&str> = staged.split('\0').collect();
+    let staged = ["diff", "--cached", "--name-only", "-z"];
+    let staged = BTreeSet::from_iter(git::listed(root, &staged)?);
     let carried = |paths: &[String]| -> Result<Vec<Region>> {
         let affected: Affected = asked(root, "affected", paths)?;
         Ok(affected

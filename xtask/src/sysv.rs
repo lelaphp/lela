@@ -710,18 +710,14 @@ impl fmt::Display for Swept {
 /// `before`, read again now, and say what was done: how a subset that
 /// holds no claim sweeps, by its own processes alone (#2563).
 pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
-    let mut swept = Swept::default();
-    remove(
-        left(before, &Standing::now()?, &spawned.pids, alive),
-        &mut swept,
-    )?;
-    Ok(swept)
+    removed(left(before, &Standing::now()?, &spawned.pids, alive))
 }
 
-/// Each of `objects` removed by an `ipcrm` of its own and counted into
-/// `swept`, so one that another run's sweep took in the moment between is
-/// passed over and not the whole sweep refused (#1582).
-fn remove(objects: Vec<&Object>, swept: &mut Swept) -> Result<()> {
+/// Each of `objects` removed by an `ipcrm` of its own and counted, so one
+/// that another run's sweep took in the moment between is passed over and
+/// not the whole sweep refused (#1582).
+fn removed(objects: Vec<&Object>) -> Result<Swept> {
+    let mut swept = Swept::default();
     let mut refused = Vec::new();
     for object in objects {
         let removed = Command::new("ipcrm")
@@ -741,7 +737,7 @@ fn remove(objects: Vec<&Object>, swept: &mut Swept) -> Result<()> {
         }
     }
     if refused.is_empty() {
-        return Ok(());
+        return Ok(swept);
     }
     // An object `ipcrm` refused that is no longer standing was removed in
     // the moment between: by another run's sweep on the machine, which the
@@ -764,7 +760,7 @@ fn remove(objects: Vec<&Object>, swept: &mut Swept) -> Result<()> {
             );
         }
     }
-    Ok(())
+    Ok(swept)
 }
 
 /// Where a run's claims stand: the machine's ([`machine`]), or the
@@ -1146,9 +1142,7 @@ impl Claim {
             let windows = [window(from, None, &clock)];
             let mut gone = claimed(&standing, &windows, (&Runner::now(), &clock), alive);
             gone.retain(|o| !held.covers(o, &clock));
-            let mut swept = Swept::default();
-            remove(gone, &mut swept)?;
-            Ok(swept)
+            removed(gone)
         })
     }
 
@@ -1168,13 +1162,12 @@ impl Claim {
             let runs = (&Runner::now(), &clock);
             let mut unnamed = unnamed_left(before, &after, &spawned.runs, runs);
             unnamed.retain(|o| !held.covers(o, &clock));
-            let mut swept = Swept {
-                unnamed: after.since(before).filter(|o| o.named.is_empty()).count() - unnamed.len(),
-                ..Swept::default()
-            };
+            let stood = after.since(before).filter(|o| o.named.is_empty()).count() - unnamed.len();
             gone.extend(unnamed);
-            remove(gone, &mut swept)?;
-            Ok(swept)
+            Ok(Swept {
+                unnamed: stood,
+                ..removed(gone)?
+            })
         })
     }
 
@@ -1251,11 +1244,7 @@ pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
     claims.stop();
     let clock = Clock::now()?;
     let standing = Standing::now()?;
-    let mut swept = Swept::default();
-    remove(
-        claims.taken(&standing, grace, (&Runner::now(), &clock), alive),
-        &mut swept,
-    )?;
+    let swept = removed(claims.taken(&standing, grace, (&Runner::now(), &clock), alive))?;
     claims.settle(grace, &clock);
     Ok(swept)
 }

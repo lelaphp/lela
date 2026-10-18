@@ -8,6 +8,7 @@
 //! itself whether its configuration lets it answer, as opcache's
 //! `accelerator_enabled` does.
 
+use php_unit::PublishedUnit;
 use php_unit::decl::Bare;
 use std::sync::Arc;
 
@@ -273,8 +274,8 @@ impl Request {
         }
         self.arena.files.hit(&held, validation, now);
         self.accel_loaded = (held.unit.as_ref().ok().cloned()).map(|unit| (unit, AccelServed::Hit));
-        self.early_bound =
-            (held.unit.as_ref().ok()).map(|unit| (Arc::clone(unit), Arc::clone(&held.early)));
+        self.early_bound = (held.unit.as_ref().ok())
+            .map(|unit| (PublishedUnit::clone(unit), Arc::clone(&held.early)));
         if let Ok(unit) = &held.unit {
             self.note_held(unit);
         }

@@ -203,10 +203,10 @@ impl Request {
     /// The unit and the body of the op array `frame` serves, one more
     /// share of the unit so the frame's names are read while the
     /// request is written.
-    fn frame_unit(&self, frame: FrameRef) -> Option<(std::sync::Arc<php_unit::Unit>, exec::Body)> {
+    fn frame_unit(&self, frame: FrameRef) -> Option<(php_unit::PublishedUnit, exec::Body)> {
         self.frame_at(frame)
             .and_then(exec::FrameAt::unit)
-            .map(|(unit, body)| (std::sync::Arc::clone(unit), body))
+            .map(|(unit, body)| (php_unit::PublishedUnit::clone(unit), body))
     }
 
     pub(super) fn table_mut(&mut self, table: TableId) -> Option<&mut Vec<(PhpString, Symbol)>> {

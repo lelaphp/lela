@@ -1,6 +1,7 @@
 //! A unit (design §4.7): one compiled file, immutable once published, its
 //! declarations beside their op arrays.
 
+use std::ops::Deref;
 use std::sync::{Arc, OnceLock, Weak};
 
 use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Name};
@@ -22,8 +23,12 @@ impl UnitCell {
     /// The unit the cell was bound to, while it is shared; none before
     /// [`Unit::published`] and after the last share is gone.
     #[must_use]
-    pub fn unit(&self) -> Option<Arc<Unit>> {
-        self.0.as_ref()?.get().and_then(Weak::upgrade)
+    pub fn unit(&self) -> Option<PublishedUnit> {
+        self.0
+            .as_ref()?
+            .get()
+            .and_then(Weak::upgrade)
+            .map(PublishedUnit)
     }
 
     /// A share of the cell for a closure of the unit, the cell laid down
@@ -145,6 +150,125 @@ pub struct Unit {
     pub cell: UnitCell,
 }
 
+/// A unit as [`Unit::published`], its one constructor, leaves it: every
+/// opline's handler resolved, its [`UnitCell`] bound, and shared,
+/// read-only, by every request and frame that serves it. It is the one
+/// form of a unit the engine reads a frame's op array through: a file's
+/// frame is pushed for one and holds it, and a function's frame reads
+/// its op array through the function table, which holds the unit the
+/// function was declared from as one. `execute` enters only a frame, so
+/// no opline reaches the dispatch with its handler `Unresolved` (design
+/// §5.7, #2903). A [`Unit`] is compiled, dumped,
+/// cached and read back, and served only once it is published. Design
+/// §5.14's `Published`, which the unit cache stores, is the engine's
+/// form of a cached unit; an `eval`'s unit is a published unit too.
+///
+/// A unit is not a published one, so a file's frame push, which takes
+/// one (`php_engine`'s `Request::push_frame`), is handed none:
+///
+/// ```compile_fail
+/// fn pushed(_: php_unit::PublishedUnit) {}
+/// pushed(php_unit::Unit::default());
+/// ```
+///
+/// No share of a unit becomes a published one but the one
+/// [`Unit::published`] makes:
+///
+/// ```compile_fail
+/// let shared = std::sync::Arc::new(php_unit::Unit::default());
+/// let published = php_unit::PublishedUnit(shared);
+/// ```
+///
+/// ```compile_fail
+/// let shared = std::sync::Arc::new(php_unit::Unit::default());
+/// let published = php_unit::PublishedUnit::from(shared);
+/// ```
+///
+/// And a published unit's oplines are read and never written, so none is
+/// put back to `Unresolved`:
+///
+/// ```compile_fail
+/// let mut published = php_unit::Unit::default().published();
+/// published.main.oplines[0].handler = php_unit::Handler::Unresolved;
+/// ```
+///
+/// What each of those is refused for, done the one way:
+///
+/// ```
+/// use php_unit::{Handler, OpArray, Opline, Unit};
+/// let unit = Unit {
+///     main: OpArray { oplines: vec![Opline::default()], ..OpArray::default() },
+///     ..Unit::default()
+/// };
+/// assert_eq!(unit.main.oplines[0].handler, Handler::Unresolved);
+/// let published = unit.published();
+/// assert_eq!(published.main.oplines[0].handler, Handler::Nop);
+/// ```
+#[derive(Debug, Clone)]
+pub struct PublishedUnit(Arc<Unit>);
+
+impl Deref for PublishedUnit {
+    type Target = Unit;
+
+    fn deref(&self) -> &Unit {
+        &self.0
+    }
+}
+
+impl PublishedUnit {
+    /// Whether the two are one publication, as [`Arc::ptr_eq`] answers.
+    #[must_use]
+    pub fn ptr_eq(this: &PublishedUnit, other: &PublishedUnit) -> bool {
+        Arc::ptr_eq(&this.0, &other.0)
+    }
+
+    /// Where the published unit stands, its identity while any share of
+    /// it is held, as [`Arc::as_ptr`] answers.
+    #[must_use]
+    pub fn as_ptr(this: &PublishedUnit) -> *const Unit {
+        Arc::as_ptr(&this.0)
+    }
+
+    /// A share that keeps the unit's identity and not the unit, as
+    /// [`Arc::downgrade`] makes: what a holder keeps that must not keep
+    /// the unit alive, to learn when the last share is gone.
+    #[must_use]
+    pub fn downgrade(this: &PublishedUnit) -> WeakUnit {
+        WeakUnit(Arc::downgrade(&this.0))
+    }
+}
+
+/// A published unit's identity without the unit
+/// ([`PublishedUnit::downgrade`]): how many shares of it stand, and where
+/// it stands. It never gives the unit back, so no `Arc<Unit>` of a
+/// published unit is held outside this crate, and none can be made the
+/// only share and written through:
+///
+/// ```compile_fail
+/// let published = php_unit::Unit::default().published();
+/// let weak = php_unit::PublishedUnit::downgrade(&published);
+/// drop(published);
+/// let shared = weak.upgrade();
+/// ```
+#[derive(Debug, Clone)]
+pub struct WeakUnit(Weak<Unit>);
+
+impl WeakUnit {
+    /// How many shares of the published unit stand, none once it is gone,
+    /// as [`Weak::strong_count`] answers.
+    #[must_use]
+    pub fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
+
+    /// Where the published unit stands, what [`PublishedUnit::as_ptr`]
+    /// answers for a share of it, as [`Weak::as_ptr`] answers.
+    #[must_use]
+    pub fn as_ptr(&self) -> *const Unit {
+        self.0.as_ptr()
+    }
+}
+
 /// One of [`Unit::top_level`]: a function of [`Unit::functions`] or a
 /// class of [`Unit::classes`], by its index there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,9 +281,10 @@ impl Unit {
     /// The unit shared, as the engine publishes every unit it compiles,
     /// with every opline's handler resolved ([`crate::Handler`]) and its
     /// [`UnitCell`] bound to the shared copy, so a closure its constant
-    /// expressions hold can be made where they are evaluated.
+    /// expressions hold can be made where they are evaluated: the one
+    /// constructor of a [`PublishedUnit`].
     #[must_use]
-    pub fn published(mut self) -> Arc<Unit> {
+    pub fn published(mut self) -> PublishedUnit {
         for code in self.op_arrays_mut() {
             code.resolve();
         }
@@ -169,7 +294,7 @@ impl Unit {
         if let Some(cell) = &shared.cell.0 {
             cell.set(Arc::downgrade(&shared)).ok();
         }
-        shared
+        PublishedUnit(shared)
     }
 
     /// Every op array's tables shrunk to what they hold, as opcache

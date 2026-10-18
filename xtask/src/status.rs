@@ -28,7 +28,6 @@ pub(crate) use every::PerReading;
 
 use crate::api_check::{self, lock::Lock};
 use crate::cli::{Format, Section};
-use crate::crosscheck;
 use crate::divergence::{Counts, Registry, Retires, Status};
 use crate::git::git;
 use crate::layout;
@@ -37,7 +36,6 @@ use crate::oracle::hosts::{EngineHost, HOSTS};
 use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
 use crate::permit;
 use crate::phpt;
-use crate::port_map;
 use crate::reading::{self, Log, Reading, Store};
 use crate::sources::NOT_YET_CREATED;
 use crate::track_work;
@@ -188,21 +186,15 @@ pub fn render(
                 Table::Json => (rows, INSTRUMENT),
             }
         }
-        Section::Witness => (
-            fold_uncreated(instrument(&readings, "witness"), "scope")?,
+        // A section named as its instrument is: the readings of that
+        // instrument, a crate's not yet created folded where it has one.
+        s @ (Section::Witness | Section::Test | Section::Mutants) => (
+            fold_uncreated(instrument(&readings, &every::name(s)), "scope")?,
             INSTRUMENT,
         ),
-        Section::Test => (
-            fold_uncreated(instrument(&readings, crate::test::INSTRUMENT), "scope")?,
-            INSTRUMENT,
-        ),
-        Section::Mutants => (
-            fold_uncreated(instrument(&readings, "mutants"), "scope")?,
-            INSTRUMENT,
-        ),
-        Section::Bench => (instrument(&readings, crate::bench::INSTRUMENT), INSTRUMENT),
-        Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
-        Section::Crosscheck => (instrument(&readings, crosscheck::INSTRUMENT), INSTRUMENT),
+        s @ (Section::Bench | Section::PortMap | Section::Crosscheck) => {
+            (instrument(&readings, &every::name(s)), INSTRUMENT)
+        }
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Tickets => return tickets::render(against.checkout()?, root, format),
         Section::Track => (
@@ -553,13 +545,15 @@ impl Row {
         }
     }
 
+    /// What `cell` makes of the reading, empty where there is none.
+    fn of(&self, cell: impl Fn(&Reading) -> String) -> String {
+        self.reading.as_ref().map(cell).unwrap_or_default()
+    }
+
     /// The reading's message as a cell of at most [`MESSAGE_WIDTH`]
     /// characters, the last an ellipsis where it was cut.
     fn message(&self) -> String {
-        self.reading
-            .as_ref()
-            .map(|x| clipped(&x.message))
-            .unwrap_or_default()
+        self.of(|x| clipped(&x.message))
     }
 
     /// Every number of the reading but those at zero, as `key=value`,
@@ -572,17 +566,14 @@ impl Row {
     /// which a section renders in columns of their own, as `key=value`,
     /// space-separated.
     fn numbers_but(&self, shown: &[&str]) -> String {
-        self.reading
-            .as_ref()
-            .map(|x| {
-                x.numbers
-                    .iter()
-                    .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default()
+        self.of(|x| {
+            x.numbers
+                .iter()
+                .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
     }
 
     /// The `sessions` fact as `id=count` pairs, newest first, the session
@@ -957,8 +948,8 @@ fn outermost(rows: Vec<Row>) -> Vec<Row> {
 
 /// The counts that size a run rather than judge it; the subset's row
 /// carries them, so a comparison's cell leaves them out.
-const SIZE: [&str; 7] = [
-    "passed", "percent", "run", "skipped", "tests", "unread", "xfailed",
+const SIZE: [&str; 8] = [
+    "passed", "percent", "run", "skipped", "tests", "unread", "warned", "xfailed",
 ];
 
 /// The phpt rows as Markdown: one per subset, each comparison folded into
@@ -1877,14 +1868,8 @@ const TICKET: Columns = (
             r.fact("scope"),
             r.status(),
             r.numbers(),
-            r.reading
-                .as_ref()
-                .map(|x| x.commit.clone())
-                .unwrap_or_default(),
-            r.reading
-                .as_ref()
-                .map(|x| short(&x.session).to_owned())
-                .unwrap_or_default(),
+            r.of(|x| x.commit.clone()),
+            r.of(|x| short(&x.session).to_owned()),
             r.message(),
         ]
     },
@@ -1910,10 +1895,7 @@ const TRACK: Columns = (
             r.number("tokens"),
             r.number("turn"),
             r.numbers_but(&SPENT),
-            r.reading
-                .as_ref()
-                .map(|x| x.commit.clone())
-                .unwrap_or_default(),
+            r.of(|x| x.commit.clone()),
             r.message(),
         ]
     },
@@ -1927,17 +1909,11 @@ const USAGE: Columns = (
     |r| {
         vec![
             r.fact("scope"),
-            r.reading
-                .as_ref()
-                .map(|x| short(&x.session).to_owned())
-                .unwrap_or_default(),
+            r.of(|x| short(&x.session).to_owned()),
             r.number("turn"),
             r.number("tokens"),
             r.number("usd"),
-            r.reading
-                .as_ref()
-                .map(|x| x.at.to_string())
-                .unwrap_or_default(),
+            r.of(|x| x.at.to_string()),
             r.message(),
         ]
     },
@@ -1965,10 +1941,7 @@ fn permit_cells(r: &Row, keep: Option<usize>) -> Vec<String> {
         r.fact("rule"),
         r.fact("adr"),
         r.status(),
-        r.reading
-            .as_ref()
-            .map(|x| x.at.to_string())
-            .unwrap_or_default(),
+        r.of(|x| x.at.to_string()),
         r.fact("denials"),
         r.fact("handed_on"),
         r.fact("this_session"),
@@ -2029,6 +2002,23 @@ mod tests {
     fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
         text.lines()
             .find(|l| l.starts_with("<!-- computed ") && l.contains(&format!(" name={name}")))
+    }
+
+    /// The sections `render` reads by their own name read the instrument
+    /// of that name, so the two spellings are held to each other here.
+    #[test]
+    fn a_section_read_by_its_name_is_named_as_its_instrument_is() {
+        use crate::cli::Section;
+        for (section, instrument) in [
+            (Section::Witness, crate::witness::INSTRUMENT),
+            (Section::Test, crate::test::INSTRUMENT),
+            (Section::Mutants, "mutants"),
+            (Section::Bench, crate::bench::INSTRUMENT),
+            (Section::PortMap, crate::port_map::INSTRUMENT),
+            (Section::Crosscheck, crate::crosscheck::INSTRUMENT),
+        ] {
+            assert_eq!(super::every::name(section), instrument);
+        }
     }
 
     #[test]

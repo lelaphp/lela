@@ -67,7 +67,7 @@ use anyhow::{Context, Result};
 
 use crate::key::Snapshot;
 use crate::manifest::{Edge, LockCeiling, Manifest, Seam, Section};
-use crate::reading::{Number, Reading, Status, Store};
+use crate::reading::{Reading, Status, Store};
 use crate::sources::Standing;
 
 use inventory::{Inventory, Leaf, uses};
@@ -255,7 +255,7 @@ fn seam_reading(
     // the stamp is then over.
     let stamped = |snapshot: &Snapshot| -> Result<Reading> {
         let mut reading = Reading::for_scope(INSTRUMENT, &seam.name, manifest, snapshot)?;
-        reading.adr = adrs(&seam.adr);
+        reading.adr = seam.adr.adr_field();
         // The manifest's `on = "pub"` rule over the lock's home, the note at
         // the tool call that a new public item needs its line: the reading
         // carries its id, so the note and the failing diff read as one rule.
@@ -308,9 +308,7 @@ fn seam_reading(
         sections(manifest, crates, seam, &shown, committed.as_ref())?
     };
     let generated: BTreeSet<String> = blocks.iter().flat_map(|b| b.lines.clone()).collect();
-    reading
-        .numbers
-        .insert(numbers::ITEMS.to_owned(), count(generated.len()));
+    reading.count(numbers::ITEMS, u64::try_from(generated.len())?)?;
     let subject = kind.subject(&home, seam);
 
     problems.extend(hold_lock(
@@ -610,9 +608,7 @@ fn crate_reading(
     let mut adr: Vec<&str> = rows.iter().flat_map(|e| e.adr.iter()).collect();
     adr.dedup();
     reading.adr = adr.join(", ");
-    reading
-        .numbers
-        .insert(numbers::EDGES.to_owned(), count(krate.deps.len()));
+    reading.count(numbers::EDGES, u64::try_from(krate.deps.len())?)?;
 
     let mut problems = Vec::new();
     let mut notes = Vec::new();
@@ -668,9 +664,7 @@ fn crate_reading(
     if let Some(order) = rows.iter().find_map(|e| e.order.as_deref()) {
         if order == bundle::REGISTRATION {
             let read = bundle::Bundle::read(krate)?;
-            reading
-                .numbers
-                .insert(numbers::EXTENSIONS.to_owned(), count(read.names().len()));
+            reading.count(numbers::EXTENSIONS, u64::try_from(read.names().len())?)?;
             problems.extend(bundle::unswitched(crates, &read));
         } else {
             problems.push(format!(
@@ -874,15 +868,6 @@ fn lines_counted_by_module(
         reading.group(module, n)?;
     }
     Ok(modules.into_keys().collect())
-}
-
-/// A count as a reading's number.
-fn count(n: usize) -> Number {
-    Number::Int(i64::try_from(n).unwrap_or(i64::MAX))
-}
-
-fn adrs(adr: &crate::manifest::OneOrMany) -> String {
-    adr.iter().collect::<Vec<_>>().join(", ")
 }
 
 /// ` (ADR-0004: <title>)` for the row's ADRs, the title read from the

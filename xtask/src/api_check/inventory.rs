@@ -203,8 +203,8 @@ impl<'a> Inventory<'a> {
                     Item::Use(_) => {}
                     Item::Mod(m) => todo.push(id.child(&m.ident.to_string())),
                     other => {
-                        if let Some((name, _)) = plain_item(other) {
-                            out.push(format!("{} {name}", item_kind(other)));
+                        if let Some((kind, name, _)) = plain_item(other) {
+                            out.push(format!("{kind} {name}"));
                         } else if let Item::Impl(_) = other {
                             out.push("an impl block".to_owned());
                         }
@@ -245,7 +245,7 @@ impl<'a> Inventory<'a> {
                     }
                 }
                 other => {
-                    if let Some((name, vis)) = plain_item(other)
+                    if let Some((_, name, vis)) = plain_item(other)
                         && is_pub(vis)
                     {
                         self.collect_item(id, &name, &join(prefix, &name), out)?;
@@ -546,7 +546,7 @@ impl<'a> Inventory<'a> {
         let defined = module
             .items
             .iter()
-            .any(|item| plain_item(item).is_some_and(|(n, _)| n == name));
+            .any(|item| plain_item(item).is_some_and(|(_, n, _)| n == name));
         match (child, defined) {
             (Some(_), false) => return Ok(Target::Module(id.child(name))),
             (None, false) => {}
@@ -687,37 +687,22 @@ fn join(prefix: &str, name: &str) -> String {
     }
 }
 
-/// The name and visibility of an item that is one lock line: not a
-/// module, a `use`, an impl, a macro or an extern block.
-fn plain_item(item: &Item) -> Option<(String, &Visibility)> {
-    let (ident, vis) = match item {
-        Item::Const(i) => (&i.ident, &i.vis),
-        Item::Enum(i) => (&i.ident, &i.vis),
-        Item::Fn(i) => (&i.sig.ident, &i.vis),
-        Item::Static(i) => (&i.ident, &i.vis),
-        Item::Struct(i) => (&i.ident, &i.vis),
-        Item::Trait(i) => (&i.ident, &i.vis),
-        Item::TraitAlias(i) => (&i.ident, &i.vis),
-        Item::Type(i) => (&i.ident, &i.vis),
-        Item::Union(i) => (&i.ident, &i.vis),
+/// The kind, name and visibility of an item that is one lock line: not
+/// a module, a `use`, an impl, a macro or an extern block.
+fn plain_item(item: &Item) -> Option<(&'static str, String, &Visibility)> {
+    let (kind, ident, vis) = match item {
+        Item::Const(i) => ("const", &i.ident, &i.vis),
+        Item::Enum(i) => ("enum", &i.ident, &i.vis),
+        Item::Fn(i) => ("fn", &i.sig.ident, &i.vis),
+        Item::Static(i) => ("static", &i.ident, &i.vis),
+        Item::Struct(i) => ("struct", &i.ident, &i.vis),
+        Item::Trait(i) => ("trait", &i.ident, &i.vis),
+        Item::TraitAlias(i) => ("trait alias", &i.ident, &i.vis),
+        Item::Type(i) => ("type", &i.ident, &i.vis),
+        Item::Union(i) => ("union", &i.ident, &i.vis),
         _ => return None,
     };
-    Some((ident.to_string(), vis))
-}
-
-fn item_kind(item: &Item) -> &'static str {
-    match item {
-        Item::Const(_) => "const",
-        Item::Enum(_) => "enum",
-        Item::Fn(_) => "fn",
-        Item::Static(_) => "static",
-        Item::Struct(_) => "struct",
-        Item::Trait(_) => "trait",
-        Item::TraitAlias(_) => "trait alias",
-        Item::Type(_) => "type",
-        Item::Union(_) => "union",
-        _ => "item",
-    }
+    Some((kind, ident.to_string(), vis))
 }
 
 /// The segments of an inherent impl's self type: `[Cache]` for

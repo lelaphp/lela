@@ -605,6 +605,12 @@ pub(crate) enum Judgement {
     Bork,
     /// A `--XFAIL--` test that failed, which is what that section asks for.
     XFail,
+    /// A `--XFAIL--` test that passed: upstream's lone `WARN`, `warn: XFAIL
+    /// section but test passes`, counted as warned and neither passed nor
+    /// failed (run-tests.php:2641-2643, 3006-3020, 3069). Upstream's other
+    /// lone `WARN`, a pass on a retry (2648-2650), is never this runner's,
+    /// which retries nothing.
+    Warn,
     /// The compiler refused the test's program with its own parse error,
     /// the `cannot read yet` refusal `php_compile` raises for a construct
     /// it does not read, before any test code ran: a skip of the
@@ -619,16 +625,24 @@ pub(crate) enum Judgement {
 
 impl Judgement {
     /// Every verdict, in the order the reading counts them.
-    pub(crate) const ALL: [Judgement; 8] = [
+    pub(crate) const ALL: [Judgement; 9] = [
         Judgement::Pass,
         Judgement::Fail,
         Judgement::Skip,
         Judgement::Bork,
         Judgement::XFail,
+        Judgement::Warn,
         Judgement::Diverged,
         Judgement::Unread,
         Judgement::Unsent,
     ];
+
+    /// Whether the test met its expectation with no registry row: a pass,
+    /// or one its `--XFAIL--` warns of, which differ by the test's section
+    /// and not by what ran.
+    pub(crate) fn passed(self) -> bool {
+        matches!(self, Judgement::Pass | Judgement::Warn)
+    }
 
     /// Whether the test missed and keeps why: it fails the reading, or the
     /// compiler refused it. Each such verdict carries a [`miss::Miss`].
@@ -647,6 +661,7 @@ impl Judgement {
             Judgement::Skip => "skipped",
             Judgement::Bork => "borked",
             Judgement::XFail => "xfailed",
+            Judgement::Warn => "warned",
             Judgement::Unread => "unread",
             Judgement::Unsent => "unsent",
         }
@@ -667,6 +682,7 @@ impl tally::Judgement for Judgement {
             Judgement::Skip => "skip",
             Judgement::Bork => "bork",
             Judgement::XFail => "xfail",
+            Judgement::Warn => "warn",
             Judgement::Unread => "unread",
             Judgement::Unsent => "unsent",
         }
@@ -678,7 +694,7 @@ impl tally::Judgement for Judgement {
     }
 
     fn met(self) -> bool {
-        matches!(self, Judgement::Pass | Judgement::Diverged)
+        self.passed() || self == Judgement::Diverged
     }
 }
 

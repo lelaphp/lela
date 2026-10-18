@@ -21,7 +21,6 @@
 //! marks as code (`glossary`): `Registry` is `registry`, `Result` is not
 //! `result`.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -188,22 +187,11 @@ fn rule_over<'a>(
 fn reading_of(scan: &Scan, snapshot: &Snapshot, rule: &Rule, krate: &Crate) -> Result<Reading> {
     let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     reading.rule.clone_from(&rule.id);
-    reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
-    reading.numbers = BTreeMap::from([
-        ("items".to_owned(), scan.items.into()),
-        ("prose".to_owned(), scan.prose.into()),
-        (
-            "hits".to_owned(),
-            i64::try_from(scan.findings.len())
-                .unwrap_or(i64::MAX)
-                .into(),
-        ),
-    ]);
-    reading.status = if scan.findings.is_empty() {
-        Status::Pass
-    } else {
-        Status::Fail
-    };
+    reading.adr = rule.adr.adr_field();
+    reading.set("items", scan.items);
+    reading.set("prose", scan.prose);
+    reading.count("hits", u64::try_from(scan.findings.len())?)?;
+    reading.status = Status::of(scan.findings.is_empty());
     reading.message = if scan.findings.is_empty() {
         format!("{}: no avoided word", krate.name)
     } else {

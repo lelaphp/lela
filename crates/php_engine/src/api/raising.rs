@@ -896,6 +896,95 @@ pub fn illegal_container_offset(
     throw_error(req, "TypeError", &message)
 }
 
+/// `zend_cannot_add_element`: php's `Error` for `$a[] = v` where
+/// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, one text for every
+/// append that refuses (`ZEND_ASSIGN_DIM`, `ZEND_ADD_ARRAY_ELEMENT`,
+/// `ZEND_ADD_ARRAY_UNPACK`, `add_next_index_*`'s callers).
+pub(crate) fn cannot_add_element(req: &mut Request) -> Thrown {
+    throw_error(
+        req,
+        "Error",
+        "Cannot add element to the array as the next element is already occupied",
+    )
+}
+
+/// `zend_undefined_function`: php's `Error` naming the function as the
+/// call wrote it.
+pub(crate) fn undefined_function(req: &mut Request, name: &[u8]) -> Thrown {
+    let message = format!(
+        "Call to undefined function {}()",
+        String::from_utf8_lossy(name)
+    );
+    throw_error(req, "Error", &message)
+}
+
+/// `zend_undefined_method`: php's `Error` naming the class as declared
+/// and the method as written.
+pub(crate) fn undefined_method(
+    req: &mut Request,
+    class: crate::api::values::ClassId,
+    method: &[u8],
+) -> Thrown {
+    let class = req.class_name(class);
+    let message = format!(
+        "Call to undefined method {class}::{}()",
+        String::from_utf8_lossy(method)
+    );
+    throw_error(req, "Error", &message)
+}
+
+/// `zend_non_static_method_call`: php's `Error` naming the method's
+/// class and name as declared.
+pub(crate) fn non_static_method_call(
+    req: &mut Request,
+    function: crate::api::call::Function,
+) -> Thrown {
+    let name = req.qualified_name_of(function);
+    let message = format!("Non-static method {name}() cannot be called statically");
+    throw_error(req, "Error", &message)
+}
+
+/// `zend_fetch_class`'s refusal where no class answers the name, php's
+/// `Error` naming it as written.
+pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
+    let message = format!("Class \"{}\" not found", String::from_utf8_lossy(name));
+    throw_error(req, "Error", &message)
+}
+
+/// `get_function_arg_name` as php's argument errors print it after
+/// `#N`: ` ($name)`, with its leading space, for a parameter up to
+/// `num_args`, which excludes the variadic, and nothing past it, at
+/// `number` 0 or where there is no function.
+pub(crate) fn arg_name_suffix(
+    req: &Request,
+    function: Option<crate::api::call::Function>,
+    number: u32,
+) -> String {
+    let named = || {
+        let at = usize::try_from(number.checked_sub(1)?).ok()?;
+        let parameter = req.function_decl(function?)?.parameters.get(at)?;
+        let name = String::from_utf8_lossy(&parameter.name.0);
+        (!parameter.variadic).then(|| format!(" (${name})"))
+    };
+    named().unwrap_or_default()
+}
+
+/// `zend_throw_non_object_error`: php's `Error` for a property `verb`
+/// ("assign", "modify", "increment/decrement") on a container that is
+/// no object, the property named as written and the container by
+/// `zend_zval_value_name`, an undefined one as `null`.
+pub(crate) fn non_object_error(
+    req: &mut Request,
+    verb: &str,
+    name: &[u8],
+    container: &Value,
+) -> Thrown {
+    let shown = crate::ops::value_name(req, &container.undef_as_null());
+    let name = String::from_utf8_lossy(name);
+    let message = format!("Attempt to {verb} property \"{name}\" on {shown}");
+    throw_error(req, "Error", &message)
+}
+
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of
 /// `class` with `message`, the one `previous` holds chained as its
 /// `previous` (`zend_throw_exception_internal`), as

@@ -72,9 +72,7 @@ pub use crate::batch::without_git;
 pub fn committed(root: &Path, path: &str) -> Result<String> {
     let mut git = Command::new("git");
     if let Some(index) = std::env::var_os(batch::COMMIT_INDEX) {
-        let dir = crate::git::git(root, &["rev-parse", "--absolute-git-dir"], None)
-            .ok()
-            .and_then(|dir| fs::canonicalize(dir.trim()).ok());
+        let dir = crate::git::git_dir(root);
         let lies = Path::new(&index)
             .parent()
             .and_then(|p| fs::canonicalize(p).ok());
