@@ -13,7 +13,9 @@
 //! `FastCGI` over; [`ini`], the line's `-d` entries as
 //! `php_ini_builder` reads them, and `php_init_config`'s search for the
 //! php.ini files; and [`start`], `php_module_startup` over them, with what a
-//! host prints before it serves anything. [`tier`] is
+//! host prints before it serves anything; and [`strerror`], an I/O
+//! error's sentence as a host's `%s` of `strerror(errno)` prints it.
+//! [`tier`] is
 //! the tier face beside the host face, for the debugging host (#1308).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
