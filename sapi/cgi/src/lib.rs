@@ -644,26 +644,15 @@ impl Primary {
 }
 
 /// `php_fopen_primary_script` failing over `path`, as `main` answers it
-/// once the request has started (`Z/sapi/cgi/cgi_main.c:2478-2487`):
-/// `Access denied.` under a 403 where the open met `EACCES`, and `No
-/// input file specified.` under a 404 otherwise, a request with no path
+/// once the request has started (`Z/sapi/cgi/cgi_main.c:2478-2487`),
+/// php-fpm's page ([`php_sapi::cgi::unopened`]), a request with no path
 /// among them; `None` where the file opens.
 fn refusal(path: Option<&[u8]>) -> Option<HostPage> {
-    let denied = match path.map(|path| std::fs::File::open(path_of(path))) {
-        Some(Ok(_)) => return None,
-        Some(Err(error)) => error.kind() == std::io::ErrorKind::PermissionDenied,
-        None => false,
-    };
-    let (code, body): (i64, &[u8]) = if denied {
-        (403, b"Access denied.\n")
-    } else {
-        (404, b"No input file specified.\n")
-    };
-    Some(HostPage {
-        code,
-        headers: Vec::new(),
-        body: body.to_vec(),
-    })
+    match path.map(|path| std::fs::File::open(path_of(path))) {
+        Some(Ok(_)) => None,
+        Some(Err(error)) => Some(php_sapi::cgi::unopened(Some(&error))),
+        None => Some(php_sapi::cgi::unopened(None)),
+    }
 }
 
 /// The process's environment, `environ`.

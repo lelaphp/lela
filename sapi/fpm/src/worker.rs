@@ -806,19 +806,7 @@ impl Worker {
                 }
                 HostServes::Program
             }
-            Err(e) => {
-                zlog!(
-                    Error @ main:1881,
-                    "Unable to open primary script: {} ({})",
-                    String::from_utf8_lossy(path),
-                    crate::conf::errno(&e).desc()
-                );
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    refused(403, b"Access denied.\n")
-                } else {
-                    refused(404, b"No input file specified.\n")
-                }
-            }
+            Err(e) => HostServes::Page(unopened(path, &e)),
         }
     }
 
@@ -1097,4 +1085,43 @@ fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
     }
     body.truncate(read);
     Body::from(body)
+}
+
+/// A program that did not open with `error`
+/// (`Z/sapi/fpm/fpm/fpm_main.c:1879-1888`): the line php-fpm logs for it,
+/// then its page, `Access denied.` for `EACCES` alone
+/// ([`php_sapi::cgi::unopened`]).
+fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
+    zlog!(
+        Error @ main:1881,
+        "Unable to open primary script: {} ({})",
+        String::from_utf8_lossy(path),
+        crate::conf::errno(error).desc()
+    );
+    php_sapi::cgi::unopened(Some(error))
+}
+
+#[cfg(test)]
+mod tests {
+    /// php-fpm denies a script whose open met `EACCES` and answers every
+    /// other errno as no input file, `EPERM` among them, which macOS
+    /// answers for a file under a directory the process may not read
+    /// (#2876); `EACCES` itself is held against the pinned php-fpm by
+    /// tests/lines.toml's script of mode 0.
+    #[test]
+    fn a_script_that_does_not_open_with_eperm_is_no_input_file() {
+        let page = |errno: i32| {
+            let page = super::unopened(b"/x.php", &std::io::Error::from_raw_os_error(errno));
+            (page.code, page.body)
+        };
+        assert_eq!(
+            page(libc::EPERM),
+            (404, b"No input file specified.\n".to_vec())
+        );
+        assert_eq!(
+            page(libc::ENOENT),
+            (404, b"No input file specified.\n".to_vec())
+        );
+        assert_eq!(page(libc::EACCES), (403, b"Access denied.\n".to_vec()));
+    }
 }
