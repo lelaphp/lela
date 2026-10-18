@@ -245,6 +245,15 @@ impl Reading {
         self
     }
 
+    /// The count under `key`: none where the reading has no number there,
+    /// or a measurement.
+    pub(crate) fn int(&self, key: &str) -> Option<i64> {
+        match self.numbers.get(key) {
+            Some(Number::Int(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
     /// Record one count under `key`.
     pub fn count(&mut self, key: &str, n: u64) -> Result<()> {
         let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;

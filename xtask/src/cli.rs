@@ -772,7 +772,10 @@ pub(crate) enum TicketCommand {
     /// Close each open ticket the merge commits since `--since` name as
     /// `#n`, with the successors its ready record names; one with no ready
     /// record fails, named, and `done` names it. What the hooks on a merge into `main`
-    /// run (#2311); off `main` it closes nothing.
+    /// run (#2311); off `main` it closes nothing. On `main` it writes one
+    /// reading more, `ticket merged`, naming each phase with its time: each
+    /// close, the `gh` calls by verb, the read of the workspace and the run
+    /// whole (#2813).
     Merged {
         /// The commit `main` stood at before the merge.
         #[arg(long, value_name = "REV")]

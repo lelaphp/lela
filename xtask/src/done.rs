@@ -596,10 +596,7 @@ fn boxes(
     // instrument settled the ticket, so the reading is held to its status
     // alone, met when the close went through and held when it was
     // refused.
-    let count = |key: &str| match reading.numbers.get(key) {
-        Some(Number::Int(n)) => Some(*n),
-        _ => None,
-    };
+    let count = |key: &str| reading.int(key);
     let held = match (count("withdrawn"), count("criteria"), count("unticked")) {
         (Some(withdrawn), ..) if withdrawn > 0 => reading.status != Status::Pass,
         (_, Some(criteria), Some(unticked)) => criteria == 0 || unticked > 0,
@@ -632,15 +629,11 @@ fn boxes(
 /// harness-design.md §4.5 condition 1 is where that decision is written
 /// down, with the two ways it was taken over.
 fn no_binary_yet(reading: &Reading) -> bool {
-    let count = |key: &str| match reading.numbers.get(key) {
-        Some(Number::Int(n)) => Some(*n),
-        _ => None,
-    };
     reading.status == Status::Skip
-        && count("engine_absent") == Some(1)
-        && count("failed") == Some(0)
-        && count("diverged") == Some(0)
-        && count("borked") == Some(0)
+        && reading.int("engine_absent") == Some(1)
+        && reading.int("failed") == Some(0)
+        && reading.int("diverged") == Some(0)
+        && reading.int("borked") == Some(0)
 }
 
 /// Whether a reading that is not a pass is met all the same because the
@@ -768,10 +761,7 @@ fn miri_unsupported(instrument: &str, reading: &Reading) -> bool {
     if instrument != "miri" || reading.status != Status::Fail {
         return false;
     }
-    let count = |key: &str| match reading.numbers.get(key) {
-        Some(Number::Int(n)) => Some(*n),
-        _ => None,
-    };
+    let count = |key: &str| reading.int(key);
     let failed = count("failed");
     failed.is_some_and(|n| n > 0) && failed == count("unsupported") && count("undefined") == Some(0)
 }

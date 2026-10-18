@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use syn::punctuated::Punctuated;
 
 use crate::batch::{Run, Targets, tail};
@@ -53,20 +53,11 @@ pub(crate) const INSTRUMENT: &str = "clippy";
 /// Run clippy over every crate that exists, or over `only`; one reading
 /// each, and a second, in release, for each crate that [`splits`].
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
-    for name in only {
-        if manifest.crate_named(name).is_none() {
-            bail!("the manifest has no crate named {name:?}");
-        }
-    }
+    let mut crates = manifest.crates_named(only)?;
+    crates.retain(|k| sources::exists(root, k));
     // The key each reading carries is the tree's before cargo built it,
     // so a file written while the crates are measured stales the reading.
     let snapshot = Snapshot::disk(root)?;
-    let crates: Vec<&Crate> = manifest
-        .crates
-        .iter()
-        .filter(|k| only.is_empty() || only.iter().any(|n| n == &k.name))
-        .filter(|k| sources::exists(root, k))
-        .collect();
     let mut release = Vec::new();
     for krate in &crates {
         if splits(root, krate)? {
@@ -194,23 +185,6 @@ pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec
         return Ok(Vec::new());
     }
     run(root, manifest, &measured)
-}
-
-/// The command line's entry: the crates named, or with `--staged` the
-/// ones with a staged change, and every reading written.
-pub(crate) fn command(
-    root: &Path,
-    manifest: &Manifest,
-    store: &Store,
-    crates: &[String],
-    staged: bool,
-) -> Result<()> {
-    let readings = if staged {
-        run_staged(root, manifest, store)?
-    } else {
-        run(root, manifest, crates)?
-    };
-    crate::record(store, &readings)
 }
 
 /// One crate's reading: pass when every target was checked and clippy

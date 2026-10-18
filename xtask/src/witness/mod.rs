@@ -625,11 +625,7 @@ pub fn run(
 /// `--staged` the crates a staged change touches; none where `--staged`
 /// finds no such change, which is said and runs nothing.
 fn asked(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Option<Vec<String>>> {
-    for name in &ask.crates {
-        if manifest.crate_named(name).is_none() {
-            bail!("the manifest has no crate named {name:?}");
-        }
-    }
+    manifest.crates_named(&ask.crates)?;
     if !ask.staged {
         return Ok(Some(ask.crates.clone()));
     }

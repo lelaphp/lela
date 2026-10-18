@@ -182,10 +182,7 @@ impl Spent {
     /// The three numbers of one usage reading.
     pub fn of(reading: &Reading) -> Spent {
         let float = |key: &str| reading.numbers.get(key).map(|n| n.as_f64());
-        let int = |key: &str| match reading.numbers.get(key) {
-            Some(Number::Int(n)) => Some(*n),
-            _ => None,
-        };
+        let int = |key: &str| reading.int(key);
         Spent {
             usd: float(USD),
             tokens: int(TOKENS),

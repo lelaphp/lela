@@ -20,7 +20,7 @@ use crate::layout;
 use crate::lines;
 use crate::lock::CargoLock;
 use crate::manifest::{self, Budget, Crate, Generated, Manifest};
-use crate::reading::{Number, Reading, Status, Store};
+use crate::reading::{Reading, Status, Store};
 use crate::sources::{self, Standing};
 
 /// The instrument whose readings this module writes.
@@ -87,10 +87,7 @@ fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Rea
     let mut total = Count::default();
     for krate in &manifest.crates {
         if let Some(stood) = standing.get(&krate.name) {
-            let number = |key: &str| match stood.numbers.get(key) {
-                Some(Number::Int(n)) => u64::try_from(*n).unwrap_or(0),
-                _ => 0,
-            };
+            let number = |key: &str| stood.int(key).map_or(0, |n| u64::try_from(n).unwrap_or(0));
             total.lines += number(numbers::LINES);
             total.bindings += number(numbers::BINDINGS);
             continue;

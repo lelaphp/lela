@@ -244,11 +244,7 @@ fn planned(
     store: &Store,
     ask: &Ask,
 ) -> Result<Option<Vec<String>>> {
-    for name in &ask.crates {
-        if manifest.crate_named(name).is_none() {
-            bail!("the manifest has no crate named {name:?}");
-        }
-    }
+    manifest.crates_named(&ask.crates)?;
     if ask.staged {
         if !ask.crates.is_empty() {
             bail!("witness: --staged names its own crates; drop --crate");

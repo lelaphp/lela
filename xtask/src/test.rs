@@ -83,20 +83,11 @@ pub fn committed(root: &Path, path: &str) -> Result<String> {
 /// Run the tests of every crate that exists, or of `only`; one reading
 /// each.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
-    for name in only {
-        if manifest.crate_named(name).is_none() {
-            bail!("the manifest has no crate named {name:?}");
-        }
-    }
+    let mut crates = manifest.crates_named(only)?;
+    crates.retain(|k| sources::exists(root, k));
     // The key each reading carries is the tree's before cargo built it,
     // so a file written while the crates are measured stales the reading.
     let snapshot = Snapshot::disk(root)?;
-    let crates: Vec<&Crate> = manifest
-        .crates
-        .iter()
-        .filter(|k| only.is_empty() || only.iter().any(|n| n == &k.name))
-        .filter(|k| sources::exists(root, k))
-        .collect();
     if crates.is_empty() {
         return Ok(Vec::new());
     }
@@ -127,23 +118,6 @@ pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec
         return Ok(Vec::new());
     }
     run(root, manifest, &measured)
-}
-
-/// The command line's entry: the crates named, or with `--staged` the
-/// ones with a staged change, and every reading written.
-pub(crate) fn command(
-    root: &Path,
-    manifest: &Manifest,
-    store: &Store,
-    crates: &[String],
-    staged: bool,
-) -> Result<()> {
-    let readings = if staged {
-        run_staged(root, manifest, store)?
-    } else {
-        run(root, manifest, crates)?
-    };
-    crate::record(store, &readings)
 }
 
 /// What one test executable, or one crate's doctests, did: the counts its

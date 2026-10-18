@@ -137,17 +137,10 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
     if rules.is_empty() {
         bail!("the manifest has no rule with `avoid_from`; nothing for vocab to read");
     }
-    for name in only {
-        if manifest.crate_named(name).is_none() {
-            bail!("the manifest has no crate named {name:?}");
-        }
-    }
+    let crates = manifest.crates_named(only)?;
     let snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
-    for krate in &manifest.crates {
-        if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
-            continue;
-        }
+    for krate in crates {
         let Some((rule, glossary)) = rule_over(&rules, krate)? else {
             continue;
         };

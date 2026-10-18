@@ -338,6 +338,7 @@ ticket::Gh::open
 ticket::Gh::view
 ticket::Issue
 ticket::Label
+ticket::MERGED
 ticket::Open
 ticket::Open::label_names
 ticket::Reach
