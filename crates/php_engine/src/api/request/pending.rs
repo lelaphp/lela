@@ -10,6 +10,7 @@
 use crate::api::call::{Function, write_prop};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
+use crate::engine::Known;
 use php_unit::decl::Bare;
 
 use super::Request;
@@ -553,16 +554,16 @@ impl Request {
                 return Err(thrown);
             }
         };
-        if let Err(thrown) = self.write_known(throwable, b"file", file.into_value()) {
+        if let Err(thrown) = self.write_known(throwable, Known::File, file.into_value()) {
             trace.give_up(self);
             return Err(thrown);
         }
         let line = Owner::int(i64::from(self.current_line()));
-        if let Err(thrown) = self.write_known(throwable, b"line", line) {
+        if let Err(thrown) = self.write_known(throwable, Known::Line, line) {
             trace.give_up(self);
             return Err(thrown);
         }
-        self.write_known(throwable, b"trace", trace.into_value())
+        self.write_known(throwable, Known::Trace, trace.into_value())
     }
 
     /// `zend_update_property_ex(base_ce, object, ZSTR_KNOWN(..), value)`:
@@ -571,10 +572,10 @@ impl Request {
     fn write_known(
         &mut self,
         throwable: PhpObject,
-        name: &'static [u8],
+        name: Known,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        let name = match PhpString::interned(self, name) {
+        let name = match self.known(name) {
             Ok(name) => Owner::take(self, name),
             Err(thrown) => {
                 value.give_up(self);

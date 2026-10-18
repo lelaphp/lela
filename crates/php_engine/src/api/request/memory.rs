@@ -743,6 +743,15 @@ impl Request {
         self.fatal_of(interned).map(PhpString::of)
     }
 
+    /// `ZSTR_KNOWN(known)`: [`Request::interned`] of a known name, read
+    /// off the engine's table by its position.
+    pub(crate) fn known(&mut self, known: crate::engine::Known) -> Result<PhpString, Thrown> {
+        match self.shared.known(known) {
+            Some(held) => Ok(PhpString::of(held)),
+            None => self.interned(known.bytes()),
+        }
+    }
+
     /// The heap's memory limit in bytes, `PG(memory_limit)` as
     /// `zend_set_memory_limit` set it.
     pub(crate) fn heap_memory_limit(&self) -> usize {

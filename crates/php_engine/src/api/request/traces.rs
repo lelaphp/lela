@@ -19,6 +19,7 @@ use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted,
 };
+use crate::engine::Known;
 use crate::exec::{self, IncludeKind};
 
 use super::{
@@ -55,8 +56,70 @@ pub(super) type TraceRow = (
     Option<ClassId>,
     Vec<Value>,
     Vec<(PhpString, Value)>,
-    Option<(Vec<u8>, i64)>,
+    Option<(FileAt, i64)>,
 );
+
+/// Where a row's file stands in its [`Rows::files`]: the bytes of the
+/// op array's file name, copied once so the rows hold no borrow of the
+/// frames they were read off.
+pub(super) type FileAt = std::ops::Range<usize>;
+
+/// A backtrace's rows before they are arrays, beside the bytes of the
+/// files they name ([`FileAt`]).
+#[derive(Default)]
+pub(super) struct Rows {
+    laid: Vec<TraceRow>,
+    files: Vec<u8>,
+    /// The file laid last, which a row of the same file names again.
+    last: FileAt,
+}
+
+impl Rows {
+    /// `file` laid at the end of [`Rows::files`], or where it was laid
+    /// last where the last file laid is the same one, so the rows of one
+    /// file name one place and the rendering copies one string for them.
+    fn lay_file(&mut self, file: &[u8]) -> FileAt {
+        if self.files.get(self.last.clone()) == Some(file) {
+            return self.last.clone();
+        }
+        let start = self.files.len();
+        self.files.extend_from_slice(file);
+        self.last = start..self.files.len();
+        self.last.clone()
+    }
+
+    fn clear(&mut self) {
+        self.laid.clear();
+        self.files.clear();
+        self.last = 0..0;
+    }
+}
+
+/// The buffers [`Request::fetch_debug_backtrace`] lays its links and
+/// rows in, empty between walks and kept with their capacity, so a
+/// throwable's backtrace allocates nothing beside the arrays it makes,
+/// as `zend_fetch_debug_backtrace` allocates nothing beside its
+/// `zend_new_array`s. The links are held at `'static` only while empty
+/// ([`relifetimed`]).
+#[derive(Default)]
+pub(super) struct Scratch {
+    links: Vec<Link<'static>>,
+    rows: Rows,
+}
+
+/// An empty vector of links at another lifetime, its allocation kept:
+/// a `collect` of no items back into the vector it came from, which
+/// std makes in place for an element of the same layout. Where it is
+/// not made in place, the vector is a new empty one and the walk
+/// allocates as it would without the buffer.
+#[allow(
+    clippy::unnecessary_filter_map,
+    reason = "the map is what changes the element's lifetime, which a filter keeps"
+)]
+fn relifetimed<'b>(spare: Vec<Link<'_>>) -> Vec<Link<'b>> {
+    debug_assert!(spare.is_empty());
+    spare.into_iter().filter_map(|_| None).collect()
+}
 
 /// What a trace row names: the function a link serves, or the construct
 /// `zend_fetch_debug_backtrace` names a code frame by, `include` and its
@@ -75,7 +138,7 @@ pub(super) enum Traced {
     Frameless(Function),
     Include {
         kind: IncludeKind,
-        file: Option<Vec<u8>>,
+        file: Option<FileAt>,
     },
     /// A code frame no `INCLUDE_OR_EVAL` pushed that stands over user
     /// code, which php names `unknown` (`ZEND_STR_UNKNOWN`): what a
@@ -223,25 +286,35 @@ impl Request {
         options: i64,
         limit: i64,
     ) -> Result<PhpArray, Thrown> {
-        let chain: Vec<Link> = self.chain().collect();
-        // php steps past the native's own link before the walk, so no row
-        // of it is one a later row reads back.
-        let skipped = usize::from(skip_last).min(chain.len());
-        let mut links = self.trace_rows(&chain[skipped..]);
+        let Scratch { links, mut rows } = std::mem::take(&mut self.traces);
+        let links = {
+            let mut chain = relifetimed(links);
+            chain.extend(self.chain());
+            // php steps past the native's own link before the walk, so no
+            // row of it is one a later row reads back.
+            let skipped = usize::from(skip_last).min(chain.len());
+            self.push_trace_rows(&chain[skipped..], &mut rows);
+            chain.clear();
+            relifetimed(chain)
+        };
         // `frameno < limit`: the walk stops once `limit` rows are in,
         // before it lays down the next, and a dropped row is no row.
         if let Ok(limit) = usize::try_from(limit)
             && limit > 0
-            && let Some(cut) = links
+            && let Some(cut) = rows
+                .laid
                 .iter()
                 .enumerate()
                 .filter(|(_, row)| !matches!(row.0, Traced::Dropped))
                 .nth(limit - 1)
                 .map(|(at, _)| at + 1)
         {
-            links.truncate(cut);
+            rows.laid.truncate(cut);
         }
-        self.render_trace(links, options)
+        let trace = self.render_trace(&mut rows, options);
+        rows.clear();
+        self.traces = Scratch { links, rows };
+        trace
     }
 
     /// The rows of a trace as `zend_fetch_debug_backtrace` builds each
@@ -359,21 +432,29 @@ impl Request {
     /// ```
     pub(super) fn render_trace(
         &mut self,
-        links: Vec<TraceRow>,
+        rows: &mut Rows,
         options: i64,
     ) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
         let mut trace = self.array()?;
         self.constant_expression_row(&mut trace)?;
-        for (traced, this, scope, arguments, named, site) in links {
+        let files = std::mem::take(&mut rows.files);
+        let bytes_at = |at: &FileAt| files.get(at.clone()).unwrap_or_default();
+        // The file string of the row before, which a row of the same file
+        // copies: `ZVAL_STR_COPY` of one `op_array->filename`.
+        let mut last: Option<(FileAt, PhpString)> = None;
+        for (traced, this, scope, arguments, named, site) in rows.laid.drain(..) {
+            let site = match site {
+                Some((at, line)) => Some((self.row_file(&at, bytes_at(&at), &mut last)?, line)),
+                None => None,
+            };
             // `zend_new_array(8)` and `zend_hash_real_init_mixed`: every
             // row is a hash laid down before its first key.
             let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
             if let Traced::Frameless(function) = traced {
-                let name = self.declared_name(function);
-                let name = Value::string(self.op_array_string(name.as_bytes())?);
-                self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
+                let name = Value::string(self.function_name_string(function)?);
+                self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
                 self.set_site(&mut row, site)?;
                 if !ignore_arguments {
                     let mut args =
@@ -382,7 +463,7 @@ impl Request {
                         let argument = Owner::take(self, argument.deref());
                         args.append(self, argument)?;
                     }
-                    self.set_string_key(&mut row, b"args", Owner::adopt(Value::array(args)))?;
+                    self.set_string_key(&mut row, Known::Args, Owner::adopt(Value::array(args)))?;
                 }
                 trace.append(self, Owner::adopt(Value::array(row)))?;
                 continue;
@@ -390,31 +471,41 @@ impl Request {
             self.set_site(&mut row, site)?;
             match traced {
                 Traced::Function(function) => {
-                    let name = self.declared_name(function);
-                    let name = Value::string(self.op_array_string(name.as_bytes())?);
-                    self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
+                    let name = Value::string(self.function_name_string(function)?);
+                    self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
                     // `ce->name` whole: an anonymous class's with its NUL
                     // and site; a receiver's class name for a function of
                     // no scope it is passed to, `zend_ffi_get_func`'s.
                     let class = match (self.method_class(function).or(scope), this) {
-                        (Some(class), _) => Some(self.class_name_bytes(class)),
-                        (None, Some(this)) => Some(this.handlers(self).get_class_name(self, this)),
+                        (Some(class), _) => Some(self.class_name_string(class)?),
+                        (None, Some(this)) => {
+                            let name = this.handlers(self).get_class_name(self, this);
+                            Some(self.op_array_string(&name)?)
+                        }
                         (None, None) => None,
                     };
                     if let Some(class) = class {
-                        let class = Value::string(self.op_array_string(&class)?);
-                        self.set_string_key(&mut row, b"class", Owner::adopt(class))?;
+                        let class = Value::string(class);
+                        self.set_string_key(&mut row, Known::Class, Owner::adopt(class))?;
                         if provide_object && let Some(this) = this {
                             let this = Owner::take(self, this.as_value());
-                            self.set_string_key(&mut row, b"object", this)?;
+                            self.set_string_key(&mut row, Known::Object, this)?;
                         }
-                        let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
-                        let join = Value::string(self.interned(join)?);
-                        self.set_string_key(&mut row, b"type", Owner::adopt(join))?;
+                        let join = if this.is_some() {
+                            Known::ObjectOperator
+                        } else {
+                            Known::PaamayimNekudotayim
+                        };
+                        let join = Value::string(self.known(join)?);
+                        self.set_string_key(&mut row, Known::Type, Owner::adopt(join))?;
                     }
                     if !ignore_arguments {
                         let args = self.trace_row_arguments(function, arguments, named)?;
-                        self.set_string_key(&mut row, b"args", Owner::adopt(Value::array(args)))?;
+                        self.set_string_key(
+                            &mut row,
+                            Known::Args,
+                            Owner::adopt(Value::array(args)),
+                        )?;
                     }
                 }
                 Traced::Include { kind, file } => {
@@ -422,18 +513,22 @@ impl Request {
                     // row's one argument, ahead of `function` and under
                     // `DEBUG_BACKTRACE_IGNORE_ARGS` as without it, made
                     // here with the row as its one owner.
-                    if let Some(file) = file {
-                        let file = PhpString::new(self, &file)?;
+                    if let Some(at) = file {
+                        let file = PhpString::new(self, bytes_at(&at))?;
                         let mut args = self.array()?;
                         args.append(self, file.into_value())?;
-                        self.set_string_key(&mut row, b"args", Owner::adopt(Value::array(args)))?;
+                        self.set_string_key(
+                            &mut row,
+                            Known::Args,
+                            Owner::adopt(Value::array(args)),
+                        )?;
                     }
-                    let name = Value::string(self.interned(kind.name().as_bytes())?);
-                    self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
+                    let name = Value::string(self.known(kind.known())?);
+                    self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
                 }
                 Traced::Unknown => {
                     let name = Value::string(self.string(b"unknown")?);
-                    self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
+                    self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
                 }
                 Traced::Dropped => {
                     // `zend_array_destroy(stack_frame)`.
@@ -444,16 +539,72 @@ impl Request {
             }
             trace.append(self, Owner::adopt(Value::array(row)))?;
         }
+        rows.files = files;
         Ok(trace)
+    }
+
+    /// `func->common.function_name` as a row copies it: the engine's
+    /// string for the declared name, read off the declaration with no
+    /// copy of its bytes where the engine holds one, and `native` for a
+    /// function with no declaration.
+    fn function_name_string(&mut self, function: Function) -> Result<PhpString, Thrown> {
+        let held = self
+            .function_decl(function)
+            .map(|decl| self.shared.existing_interned(&decl.name.0));
+        match held {
+            Some(Some(held)) => Ok(PhpString::of(held)),
+            Some(None) => {
+                let name = self.declared_name(function);
+                self.op_array_string(name.as_bytes())
+            }
+            None => self.op_array_string(b"native"),
+        }
+    }
+
+    /// `ce->name` as a row copies it, read as
+    /// [`Request::function_name_string`] reads a function's.
+    fn class_name_string(&mut self, class: ClassId) -> Result<PhpString, Thrown> {
+        let held = self
+            .class_decl(class)
+            .and_then(|decl| self.shared.existing_interned(&decl.name.0));
+        if let Some(held) = held {
+            return Ok(PhpString::of(held));
+        }
+        let name = self.class_name_bytes(class);
+        self.op_array_string(&name)
+    }
+
+    /// The string of a row's file: the one the row before copied where
+    /// it names the same file (`last`), with one more owner, and the
+    /// engine's string for `bytes` otherwise, which `last` keeps.
+    fn row_file(
+        &mut self,
+        at: &FileAt,
+        bytes: &[u8],
+        last: &mut Option<(FileAt, PhpString)>,
+    ) -> Result<PhpString, Thrown> {
+        if let Some((was, file)) = last
+            && was == at
+        {
+            self.addref(&Value::string(*file));
+            return Ok(*file);
+        }
+        let file = self.op_array_string(bytes)?;
+        *last = Some((at.clone(), file));
+        Ok(file)
     }
 
     /// A row's `file` and `line` where it has a site: `ZVAL_STR_COPY` of
     /// the op array's file name, one more owner of its string.
-    fn set_site(&mut self, row: &mut PhpArray, site: Option<(Vec<u8>, i64)>) -> Result<(), Thrown> {
+    fn set_site(
+        &mut self,
+        row: &mut PhpArray,
+        site: Option<(PhpString, i64)>,
+    ) -> Result<(), Thrown> {
         if let Some((file, line)) = site {
-            let file = Value::string(self.op_array_string(&file)?);
-            self.set_string_key(row, b"file", Owner::adopt(file))?;
-            self.set_string_key(row, b"line", Owner::adopt(Value::int(line)))?;
+            let file = Value::string(file);
+            self.set_string_key(row, Known::File, Owner::adopt(file))?;
+            self.set_string_key(row, Known::Line, Owner::adopt(Value::int(line)))?;
         }
         Ok(())
     }
@@ -527,10 +678,14 @@ impl Request {
         }
         let mut row = self.array()?;
         let file = Value::string(self.string(&executing)?);
-        self.set_string_key(&mut row, b"file", Owner::adopt(file))?;
-        self.set_string_key(&mut row, b"line", Owner::adopt(Value::int(i64::from(at))))?;
+        self.set_string_key(&mut row, Known::File, Owner::adopt(file))?;
+        self.set_string_key(
+            &mut row,
+            Known::Line,
+            Owner::adopt(Value::int(i64::from(at))),
+        )?;
         let name = Value::string(self.string(b"[constant expression]")?);
-        self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
+        self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
         trace.append(self, Owner::adopt(Value::array(row)))
     }
 
@@ -737,7 +892,14 @@ impl Request {
     /// #1 %s(9): middle()
     /// #2 %s(11): outer()
     /// ```
-    pub(super) fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
+    pub(super) fn trace_rows(&self, chain: &[Link<'_>]) -> Rows {
+        let mut rows = Rows::default();
+        self.push_trace_rows(chain, &mut rows);
+        rows
+    }
+
+    /// [`Request::trace_rows`] pushed onto `rows`, which holds none.
+    fn push_trace_rows(&self, chain: &[Link<'_>], rows: &mut Rows) {
         // The include the link below `at` stands at, where it is a user
         // frame at an `INCLUDE_OR_EVAL`.
         let including = |at: usize| {
@@ -751,9 +913,10 @@ impl Request {
                 .filter(|op| op.opcode == Opcode::IncludeOrEval)
                 .and_then(|op| IncludeKind::of(op.extended_value))
         };
-        let mut rows = Vec::new();
         for (at, link) in chain.iter().enumerate() {
-            let site = self.row_site(chain, at.saturating_add(1));
+            let site = self
+                .row_site(chain, at.saturating_add(1))
+                .map(|(file, line)| (rows.lay_file(file), line));
             match link {
                 Link::Frame(_, state) => {
                     let Some(function) = state.function() else {
@@ -772,15 +935,16 @@ impl Request {
                             } else {
                                 Traced::Dropped
                             };
-                            rows.push((traced, None, None, Vec::new(), Vec::new(), site));
+                            rows.laid
+                                .push((traced, None, None, Vec::new(), Vec::new(), site));
                             continue;
                         };
                         // `build_filename_arg`: an `eval` names no file.
                         let file = (at > 0 && kind != IncludeKind::Eval)
                             .then(|| state.code())
                             .flatten()
-                            .map(|code| code.filename.0.to_vec());
-                        rows.push((
+                            .map(|code| rows.lay_file(&code.filename.0));
+                        rows.laid.push((
                             Traced::Include { kind, file },
                             None,
                             None,
@@ -791,7 +955,7 @@ impl Request {
                         continue;
                     };
                     let arguments = self.traced_arguments(*state, function);
-                    rows.push((
+                    rows.laid.push((
                         Traced::Function(function),
                         state.this(),
                         self.closure_scope(state.closure()),
@@ -809,12 +973,12 @@ impl Request {
                         && let Some(kind) = including(at)
                     {
                         let file = (kind != IncludeKind::Eval)
-                            .then(|| rows.iter().rev().nth(1))
+                            .then(|| rows.laid.iter().rev().nth(1))
                             .flatten()
                             .and_then(|row: &TraceRow| {
                                 row.5.as_ref().map(|(file, _)| file.clone())
                             });
-                        rows.push((
+                        rows.laid.push((
                             Traced::Include { kind, file },
                             None,
                             None,
@@ -834,7 +998,7 @@ impl Request {
                     } else {
                         Traced::Function(call.callee())
                     };
-                    rows.push((
+                    rows.laid.push((
                         traced,
                         call.this(),
                         self.closure_scope(call.closure()),
@@ -845,7 +1009,6 @@ impl Request {
                 }
             }
         }
-        rows
     }
 
     /// The site a row reads off the link at `below` in `chain`: a user
@@ -856,13 +1019,13 @@ impl Request {
     /// generators the fake stands for to its `prev_execute_data`, the
     /// resumer, as `zend_fetch_debug_backtrace`'s walk from a `prev`
     /// that is no user code goes on.
-    fn row_site(&self, chain: &[Link<'_>], mut below: usize) -> Option<(Vec<u8>, i64)> {
+    fn row_site<'c>(&self, chain: &[Link<'c>], mut below: usize) -> Option<(&'c [u8], i64)> {
         loop {
             break match chain.get(below) {
-                Some(Link::Frame(_, below)) => below
-                    .file()
-                    .map(|file| (file.to_vec(), i64::from(below.line()))),
-                Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
+                Some(Link::Frame(_, below)) => {
+                    below.file().map(|file| (file, i64::from(below.line())))
+                }
+                Some(Link::Site(below)) => Some((&below.file[..], i64::from(below.line))),
                 Some(Link::Call(call)) if self.via_trampoline(call.callee()) => {
                     below = below.saturating_add(1);
                     continue;
@@ -1245,11 +1408,11 @@ impl Request {
     fn set_string_key(
         &mut self,
         row: &mut PhpArray,
-        name: &[u8],
+        name: Known,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         // `ZSTR_KNOWN(ZEND_STR_FILE)` and its kin.
-        let key = match self.interned(name) {
+        let key = match self.known(name) {
             Ok(name) => Owner::take(self, Key::Str(name)),
             Err(thrown) => {
                 value.give_up(self);
