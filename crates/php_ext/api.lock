@@ -666,6 +666,9 @@ request::Persisted
 request::Pid
 request::Pid::as_raw
 request::PreloadStatistics
+request::PropertyInfoRow
+request::PropertyInfoRow::class
+request::PropertyInfoRow::declaring
 request::Raised
 request::Readiness
 request::RealpathEntry
@@ -836,6 +839,8 @@ request::Request::periods_elapsed
 request::Request::phpinfo_as_text
 request::Request::precision
 request::Request::preloading
+request::Request::property_info_row
+request::Request::property_info_rows
 request::Request::put_back_http_status
 request::Request::raised
 request::Request::realpath
@@ -862,6 +867,7 @@ request::Request::response_headers
 request::Request::return_value_used
 request::Request::row_function
 request::Request::row_method
+request::Request::row_property_info
 request::Request::row_prototype
 request::Request::running_handler_flags
 request::Request::sapi_name

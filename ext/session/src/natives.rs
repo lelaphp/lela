@@ -1288,22 +1288,7 @@ fn user_ini(req: &mut Request) -> Result<(), Thrown> {
 /// Whether the object's class declares or inherits `method`, and whether
 /// it is an instance of the interface named.
 fn class_has(req: &mut Request, object: php_ext::values::PhpObject, method: &[u8]) -> bool {
-    let mut at = Some(object.class());
-    for _ in 0..64 {
-        let Some(here) = at else { return false };
-        let Some(decl) = req.class_decl(here) else {
-            return false;
-        };
-        if decl
-            .methods
-            .iter()
-            .any(|m| m.function.name.0.eq_ignore_ascii_case(method))
-        {
-            return true;
-        }
-        at = req.class_parent(here);
-    }
-    false
+    req.method_row(object.class(), method).is_some()
 }
 
 fn implements(

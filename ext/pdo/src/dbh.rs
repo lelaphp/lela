@@ -1182,19 +1182,8 @@ fn public_constructor(req: &mut Request, class: ClassId) -> bool {
 
 /// The visibility of the constructor `class` declares or inherits.
 fn constructor_visibility(req: &mut Request, class: ClassId) -> Option<php_ext::decl::Visibility> {
-    let mut at = Some(class);
-    while let Some(class) = at {
-        let decl = req.class_decl(class)?;
-        if let Some(method) = decl
-            .methods
-            .iter()
-            .find(|m| m.function.name.0.eq_ignore_ascii_case(b"__construct"))
-        {
-            return Some(method.visibility);
-        }
-        at = req.class_parent(class);
-    }
-    None
+    let row = req.method_row(class, b"__construct")?;
+    req.row_method(row).map(|method| method.visibility)
 }
 
 // ---- statements

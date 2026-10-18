@@ -406,21 +406,9 @@ fn declares_nothing(req: &mut Request, class: ClassId) -> bool {
     if known_method(req, class, &setter, None).is_some() {
         return false;
     }
-    let mut at = Some(class);
-    while let Some(class) = at {
-        let Some(decl) = req.class_decl(class) else {
-            return true;
-        };
-        if decl
-            .properties
-            .iter()
-            .any(|p| p.is_instance && !p.is_virtual)
-        {
-            return false;
-        }
-        at = req.class_parent(class);
-    }
-    true
+    !req.property_info_rows(class)
+        .filter_map(|row| req.row_property_info(row))
+        .any(|p| p.is_instance && !p.is_virtual)
 }
 
 /// `mysqli_fetch_all`.
