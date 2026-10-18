@@ -87,20 +87,25 @@ impl Emit<'_> {
         list: NodeId<tree::PropertyHookList>,
         property: &[u8],
     ) -> Result<Vec<Hook>, CompileError> {
-        let hooks = self.parsed.tree[list].property_hooks.clone();
+        let hooks = self.list(self.parsed.tree[list].property_hooks);
         let mut out = Vec::with_capacity(hooks.len());
-        for id in &hooks {
-            let node = self.parsed.tree[*id].clone();
+        for id in hooks {
+            let node = self.parsed.tree[*id];
             let line = self.token_line(node.name).unwrap_or_else(|| node.line());
-            let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Hook)?;
-            let attributes = self.walk_attributes(&node.attrs)?;
+            let modifiers = self.walk_modifiers(self.list(node.modifiers), line, Target::Hook)?;
+            let attributes = self.walk_attributes(self.list(node.attrs))?;
             let name = self.text(node.name).to_vec();
             let parameters = match node.params {
                 Some(params) => Some(self.walk_parameters(params)?),
                 None => None,
             };
             let body = match (node.body, node.arrow) {
-                (Some(block), _) => HookBody::Block(self.parsed.tree[block].stmts.to_vec()),
+                (Some(block), _) => HookBody::Block(
+                    self.parsed
+                        .tree
+                        .list(self.parsed.tree[block].stmts)
+                        .to_vec(),
+                ),
                 (None, Some(arrow)) => match self.parsed.tree[arrow].value {
                     Some(value) => HookBody::Short(value),
                     None => return Err(unread(line, "a property hook's short body")),

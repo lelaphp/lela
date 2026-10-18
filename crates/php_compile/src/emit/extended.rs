@@ -120,7 +120,13 @@ mod tests {
             extended_info,
             ..Options::default()
         };
-        let unit = crate::compile_source(source, &options, &mut strings).unwrap_or_default();
+        let unit = crate::compile_source(
+            &mut php_syntax::Arena::new(),
+            source,
+            &options,
+            &mut strings,
+        )
+        .unwrap_or_default();
         let function = unit
             .functions
             .first()

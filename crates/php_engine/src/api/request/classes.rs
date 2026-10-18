@@ -1876,11 +1876,15 @@ impl Request {
     /// The request's strings, which the units it compiles for itself
     /// intern into ([`super::memory::RequestStrings`]), beside its
     /// classes as the compiler asks after one
-    /// ([`php_compile::RequestClasses`]), borrowed apart so both are
-    /// handed to one compile.
+    /// ([`php_compile::RequestClasses`]), and the arena its compiles
+    /// parse into, borrowed apart so all three are handed to one compile.
     pub(crate) fn compiling<R>(
         &mut self,
-        compile: impl FnOnce(&mut dyn Intern, php_compile::RequestClasses<'_>) -> R,
+        compile: impl FnOnce(
+            &mut dyn Intern,
+            php_compile::RequestClasses<'_>,
+            &mut php_compile::syntax::Arena,
+        ) -> R,
     ) -> R {
         let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
@@ -1888,7 +1892,11 @@ impl Request {
             shared,
             heap: &mut self.heap,
         };
-        compile(&mut strings, php_compile::RequestClasses::new(&holds))
+        compile(
+            &mut strings,
+            php_compile::RequestClasses::new(&holds),
+            &mut self.compile_arena,
+        )
     }
 
     /// `zend_get_callable_name_ex` (`Z/Zend/zend_API.c:4075`): a string

@@ -902,7 +902,7 @@ impl Request {
             ..php_compile::Options::default()
         };
         let mut strings = php_heap::Strings::new();
-        php_compile::export_source(source, &options, &mut strings)
+        php_compile::export_source(&mut self.compile_arena, source, &options, &mut strings)
             .map_err(|refused| self.refused_include(&refused, b"", SourceKind::EVAL))
     }
 

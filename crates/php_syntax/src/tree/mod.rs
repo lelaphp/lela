@@ -6,20 +6,29 @@
 //! or token stands there, and a token as its [`TokenId`], an index into the
 //! lossless token stream. A child the schema marks `!` is a plain field;
 //! every other child is `Option`, since under error recovery any child can
-//! be absent (convention A2), and a repetition is a boxed slice. No node
-//! knows its parent: the compiler passes scope downward.
+//! be absent (convention A2), and a repetition is a [`List`], a stretch of one
+//! of the tree's pools. No node knows its parent: the compiler passes
+//! scope downward.
 //!
-//! **How a node is addressed.** [`Tree`] owns [`Nodes`], the arena: one
-//! vector per node kind, so a `NodeId<ClassDecl>` is a position among the
-//! class declarations and `tree[id]` reads the kind's slot, then
-//! indexes that kind's vector. A kind's vector is made with its first
-//! node, so a tree pays for the kinds it holds and not for every kind
-//! the schema names, in its making, its moves and its drop. Beside
-//! the arena the tree keeps its shape, every node and every significant
-//! token as one [`Element`] in source order with the size of each node's
-//! subtree, which is what a walk that has no field to follow reads, the
-//! dump first among them; an `ERROR` node, which no schema rule names,
-//! lives in the shape alone.
+//! **Where it lives.** In the [`crate::Arena`] the parse was handed, and
+//! nowhere else (#2810): a node is plain data, `Copy` and with nothing to
+//! drop, so the tree is given up with the arena, whole, and a [`Tree`] is
+//! three references into it.
+//!
+//! **How a node is addressed.** [`Tree`] reads [`Nodes`], the arena of
+//! nodes: one slice per node kind, so a `NodeId<ClassDecl>` is a position
+//! among the class declarations and `tree[id]` reads the kind's slot,
+//! then indexes that kind's slice. A kind's slice is made with its first
+//! node, at the count of the kind's nodes the event stream holds, so a
+//! tree pays for the kinds it holds and not for every kind the schema
+//! names, and no kind's slice grows. A list is addressed the same way:
+//! [`Lists`] keeps one pool per element type, a node's `List<Stmt>` is
+//! where its stretch of the statements' pool starts and how long it is, and
+//! `tree[list]` is the slice. Beside the arena the tree keeps its shape,
+//! every node and every significant token as one [`Element`] in source
+//! order with the size of each node's subtree, which is what a walk that
+//! has no field to follow reads, the dump first among them; an `ERROR`
+//! node, which no schema rule names, lives in the shape alone.
 //!
 //! **What every node carries.** Its kind, its range and its line: `range`
 //! is where the node is in the source, and `line` is php's
@@ -42,6 +51,9 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ops::Index;
+
+use bumpalo::Bump;
+use bumpalo::collections::Vec as BumpVec;
 
 use crate::SyntaxKind;
 use crate::source::TextRange;
@@ -132,7 +144,90 @@ pub trait Node: Sized {
 
     /// Every node of this kind in the arena, in the order the builder
     /// finished them; a `NodeId<Self>` indexes this slice.
-    fn all(nodes: &Nodes) -> &[Self];
+    fn all<'t>(nodes: &Nodes<'t>) -> &'t [Self];
+}
+
+/// One repetition of a node (convention A2), a stretch of the pool its
+/// element type has in the tree's [`Lists`]: where the stretch starts and how
+/// long it is, typed by what it lists, so a `List<Stmt>` answers
+/// statements and nothing else. Eight bytes and `Copy`; `tree[list]`
+/// reads the slice. A list is a position in the tree that built it and
+/// reads nothing in another.
+pub struct List<T> {
+    start: u32,
+    len: u32,
+    item: PhantomData<fn() -> T>,
+}
+
+impl<T> List<T> {
+    /// The list of `len` items from `start` in its pool.
+    #[must_use]
+    pub fn new(start: u32, len: u32) -> Self {
+        List {
+            start,
+            len,
+            item: PhantomData,
+        }
+    }
+
+    /// How many items the list holds.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the list holds none.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<T> Default for List<T> {
+    /// The empty list.
+    fn default() -> Self {
+        List::new(0, 0)
+    }
+}
+
+impl<T> Clone for List<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for List<T> {}
+
+impl<T> PartialEq for List<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (self.start, self.len) == (other.start, other.len)
+    }
+}
+
+impl<T> Eq for List<T> {}
+
+impl<T> Hash for List<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.start, self.len).hash(state);
+    }
+}
+
+impl<T> fmt::Debug for List<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "List({}..+{})", self.start, self.len)
+    }
+}
+
+/// What a list may hold: an element type with a pool in [`Lists`].
+pub trait Listed: Sized {
+    /// The pool of this element type.
+    fn pool<'a>(lists: &Lists<'a>) -> &'a [Self];
+}
+
+/// The builder's side of [`Listed`]: the pool being filled.
+pub(crate) trait Pooled: Listed + 'static {
+    /// The pool of this element type while the builder fills it.
+    fn pool_mut<'a, 'p>(pools: &'p mut Pools<'a>) -> &'p mut BumpVec<'a, Self>;
 }
 
 /// One element of the tree's shape: a node, or a significant token by the
@@ -191,21 +286,41 @@ impl Element {
 }
 
 /// The tree of one source file: the arena and the shape, as the docs
-/// above say. An empty tree has no root.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Tree {
+/// above say, every part of it in the parse's [`crate::Arena`]. An empty
+/// tree has no root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tree<'a> {
     /// The shape: every node and significant token in source order, a
     /// node before its subtree.
-    elements: Box<[Element]>,
-    /// The arena.
-    nodes: Nodes,
+    elements: &'a [Element],
+    /// The arena of nodes.
+    nodes: &'a Nodes<'a>,
+    /// The lists' pools.
+    lists: &'a Lists<'a>,
 }
 
-impl Tree {
+/// The arena of a tree with no node.
+const NO_NODES: Nodes<'static> = Nodes {
+    slots: [None; SLOTS],
+    stores: &[],
+};
+
+impl Default for Tree<'_> {
+    /// The empty tree.
+    fn default() -> Self {
+        Tree {
+            elements: &[],
+            nodes: &NO_NODES,
+            lists: &NO_LISTS,
+        }
+    }
+}
+
+impl<'a> Tree<'a> {
     /// The shape, in source order: a node, then the elements inside it.
     #[must_use]
-    pub fn elements(&self) -> &[Element] {
-        &self.elements
+    pub fn elements(&self) -> &'a [Element] {
+        self.elements
     }
 
     /// The outermost node, or `None` for an empty tree.
@@ -217,16 +332,35 @@ impl Tree {
     /// Every node of one kind, in the order the builder finished them:
     /// children before their parent, so the root is last.
     #[must_use]
-    pub fn nodes<T: Node>(&self) -> &[T] {
-        T::all(&self.nodes)
+    pub fn nodes<T: Node>(&self) -> &'a [T] {
+        T::all(self.nodes)
+    }
+
+    /// The items of `list`, as long as the arena lives: a read that
+    /// borrows nothing of its reader, so a walk over a list may change
+    /// what it holds beside the tree.
+    #[must_use]
+    pub fn list<T: Listed>(&self, list: List<T>) -> &'a [T] {
+        let start = list.start as usize;
+        T::pool(self.lists)
+            .get(start..start + list.len as usize)
+            .unwrap_or_default()
     }
 }
 
-impl<T: Node> Index<NodeId<T>> for Tree {
+impl<T: Node> Index<NodeId<T>> for Tree<'_> {
     type Output = T;
 
     fn index(&self, id: NodeId<T>) -> &T {
-        &T::all(&self.nodes)[id.index as usize]
+        &T::all(self.nodes)[id.index as usize]
+    }
+}
+
+impl<T: Listed> Index<List<T>> for Tree<'_> {
+    type Output = [T];
+
+    fn index(&self, list: List<T>) -> &[T] {
+        self.list(list)
     }
 }
 
@@ -245,11 +379,11 @@ pub(crate) enum Resolved {
     Untyped,
 }
 
-/// Where a kind's vector stands in `Nodes::stores`. Held one up in a
+/// Where a kind's slice stands in `Nodes::stores`. Held one up in a
 /// `NonZeroU8`, so an absent slot, `None`, costs no byte of its own and
-/// the slots stay one byte a kind: the arena is moved by value from the
-/// builder into the parse, and a wider slot measured 300 instructions
-/// more a parse of `return 1;`.
+/// the slots stay one byte a kind: the slots are copied once, from the
+/// builder into the arena, and a wider slot measured 300 instructions
+/// more a parse of `return 1;` when they were moved by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StoreAt(std::num::NonZeroU8);
 
@@ -266,33 +400,80 @@ impl StoreAt {
     }
 }
 
-impl Nodes {
-    /// The vector of the struct kind at `slot`, none while no node of
-    /// the kind is built.
-    fn store(&self, slot: usize) -> Option<&Store> {
+impl<'a> Nodes<'a> {
+    /// The slice of the struct kind at `slot`, none while no node of the
+    /// kind is built.
+    fn store(&self, slot: usize) -> Option<&'a Store<'a>> {
         let at = (*self.slots.get(slot)?)?;
         self.stores.get(at.index())
     }
+}
 
-    /// The vector of the struct kind at `slot`, made empty by `empty`
-    /// with the kind's first node. `None` only where the slot is not a
-    /// kind's, or more kinds stand than a slot counts; the caller's
-    /// match on the kind's variant is what reads the vector.
-    fn open<T>(&mut self, slot: usize, empty: fn(Vec<T>) -> Store) -> Option<&mut Store> {
+/// The arena of nodes while the builder fills it: each kind's vector,
+/// made with the kind's first node at the count of its `Start` events,
+/// so no vector grows.
+pub(crate) struct Building<'a> {
+    bump: &'a Bump,
+    slots: [Option<StoreAt>; SLOTS],
+    stores: BumpVec<'a, Growing<'a>>,
+    counts: [u32; SLOTS],
+}
+
+impl<'a> Building<'a> {
+    /// An empty arena in `bump`, to hold as many nodes of each kind as
+    /// `kinds` names.
+    pub(crate) fn new(bump: &'a Bump, kinds: impl Iterator<Item = SyntaxKind>) -> Building<'a> {
+        let mut counts = [0u32; SLOTS];
+        for kind in kinds {
+            if let Some(count) = slot_of(kind).and_then(|slot| counts.get_mut(slot)) {
+                *count = count.saturating_add(1);
+            }
+        }
+        let held = counts.iter().filter(|count| **count > 0).count();
+        Building {
+            bump,
+            slots: [None; SLOTS],
+            stores: BumpVec::with_capacity_in(held, bump),
+            counts,
+        }
+    }
+
+    /// The vector of the struct kind at `slot`, made by `empty` with the
+    /// kind's first node. `None` only where the slot is not a kind's, or
+    /// more kinds stand than a slot counts; the caller's match on the
+    /// kind's variant is what reads the vector.
+    fn open<T>(
+        &mut self,
+        slot: usize,
+        empty: fn(BumpVec<'a, T>) -> Growing<'a>,
+    ) -> Option<&mut Growing<'a>> {
         let at = if let Some(at) = *self.slots.get(slot)? {
             at
         } else {
             let at = StoreAt::new(self.stores.len())?;
-            self.stores.push(empty(Vec::new()));
+            let room = self.counts.get(slot).copied().unwrap_or(0) as usize;
+            self.stores
+                .push(empty(BumpVec::with_capacity_in(room, self.bump)));
             *self.slots.get_mut(slot)? = Some(at);
             at
         };
         self.stores.get_mut(at.index())
     }
+
+    /// The arena as the tree reads it, each vector frozen to its slice.
+    pub(crate) fn freeze(self) -> Nodes<'a> {
+        let stores = self
+            .bump
+            .alloc_slice_fill_iter(self.stores.into_iter().map(Growing::freeze));
+        Nodes {
+            slots: self.slots,
+            stores,
+        }
+    }
 }
 
 /// One node into its kind's vector, and where it went.
-fn push<T>(nodes: &mut Vec<T>, node: Result<T, &'static str>) -> Resolved {
+fn push<T>(nodes: &mut BumpVec<'_, T>, node: Result<T, &'static str>) -> Resolved {
     match node {
         Ok(node) => {
             // A file the lexer accepts is under `u32::MAX` bytes and a
@@ -353,23 +534,23 @@ fn first_after<T: Child>(
     None
 }
 
-/// Every child the field admits, in order. Counted first, so the slice
-/// is one allocation of its own length and none where the list is empty.
-fn all<T: Child>(children: &[Element]) -> Box<[T]> {
-    exact(children.iter().filter_map(T::of))
+/// Every child the field admits, in order, as a stretch of its pool:
+/// counted first, so the pool grows once at most.
+fn all<T: Child + Pooled>(pools: &mut Pools<'_>, children: &[Element]) -> List<T> {
+    listed(pools, children.iter().filter_map(T::of))
 }
 
-/// What `items` yields, in one allocation of exactly its length: walked
-/// once to count and once to fill, where collecting grew a vector and
-/// then reallocated it down to a slice.
-fn exact<T>(items: impl Iterator<Item = T> + Clone) -> Box<[T]> {
+/// What `items` yields, appended to its pool as one stretch.
+fn listed<T: Pooled>(pools: &mut Pools<'_>, items: impl Iterator<Item = T> + Clone) -> List<T> {
     let count = items.clone().count();
     if count == 0 {
-        return Box::default();
+        return List::default();
     }
-    let mut out = Vec::with_capacity(count);
-    out.extend(items);
-    out.into_boxed_slice()
+    let pool = T::pool_mut(pools);
+    let start = u32::try_from(pool.len()).unwrap_or(u32::MAX);
+    pool.reserve(count);
+    pool.extend(items);
+    List::new(start, u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// The first token whose kind is in `kinds`, after a token in `anchors`
@@ -389,11 +570,14 @@ fn token(children: &[Element], anchors: &[SyntaxKind], kinds: &[SyntaxKind]) -> 
 }
 
 /// Every token whose kind is in `kinds`, in order.
-fn tokens(children: &[Element], kinds: &[SyntaxKind]) -> Box<[TokenId]> {
-    exact(children.iter().filter_map(|element| match element {
-        Element::Token { kind, id } if kinds.contains(kind) => Some(*id),
-        _ => None,
-    }))
+fn tokens(pools: &mut Pools<'_>, children: &[Element], kinds: &[SyntaxKind]) -> List<TokenId> {
+    listed(
+        pools,
+        children.iter().filter_map(|element| match element {
+            Element::Token { kind, id } if kinds.contains(kind) => Some(*id),
+            _ => None,
+        }),
+    )
 }
 
 /// Is this token a member name: an `IDENT`, or, since the parser remaps a
@@ -422,7 +606,7 @@ fn member(children: &[Element], anchors: &[SyntaxKind]) -> Option<TokenId> {
 /// Where a token child stands in the source, for an alternation's `range`:
 /// from its first byte to its last, and empty at the end of the source for
 /// a token the stream lacks.
-fn token_range(parsed: &crate::Parsed, id: TokenId) -> TextRange {
+fn token_range(parsed: &crate::Parsed<'_>, id: TokenId) -> TextRange {
     match parsed.tokens.get(id.0 as usize) {
         Some(token) => TextRange::new(token.offset, token.offset.saturating_add(token.len)),
         None => TextRange::new(parsed.lines.len(), parsed.lines.len()),
@@ -431,7 +615,7 @@ fn token_range(parsed: &crate::Parsed, id: TokenId) -> TextRange {
 
 /// The line a token child starts on, for an alternation's `line`: what the
 /// builder gives a token child of a node ([`line`]).
-fn token_line(parsed: &crate::Parsed, id: TokenId) -> u32 {
+fn token_line(parsed: &crate::Parsed<'_>, id: TokenId) -> u32 {
     parsed.lines.line_number(token_range(parsed, id).start)
 }
 

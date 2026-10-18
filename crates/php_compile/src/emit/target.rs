@@ -17,17 +17,20 @@ use crate::CompileError;
 
 /// A place a write lands, decoded once from the tree: php's
 /// `var_ast->kind` after `zend_ensure_writable_variable`.
-pub(super) enum Target {
+pub(super) enum Target<'a> {
     /// `$name`, the CV `zend_try_compile_cv` gives it.
-    Cv(Vec<u8>),
+    Cv(&'a [u8]),
     /// `$a[k]`, `ZEND_AST_DIM`: the whole chain, as the node written.
     Dim(tree::Expr),
     /// `$o->name` or `$o->$name`, `ZEND_AST_PROP`.
     Prop { object: tree::Expr, name: Member },
     /// `C::$name`, `ZEND_AST_STATIC_PROP`.
-    StaticProp { class: ClassSpec, name: ScopedName },
+    StaticProp {
+        class: ClassSpec,
+        name: ScopedName<'a>,
+    },
     /// `list(…)` or `[…]`, `ZEND_AST_ARRAY` as a target.
-    List(List),
+    List(List<'a>),
     /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`,
     /// or an auto-global, which no CV holds: the variable, fetched by its
     /// name.
@@ -36,8 +39,8 @@ pub(super) enum Target {
 
 /// A `list()` or a `[…]` written as a target: its elements, and which of
 /// the three spellings it is, php's `attr` on the `ZEND_AST_ARRAY`.
-pub(super) struct List {
-    pub(super) elements: Box<[NodeId<tree::ArrayElement>]>,
+pub(super) struct List<'a> {
+    pub(super) elements: &'a [NodeId<tree::ArrayElement>],
     pub(super) style: ListStyle,
 }
 
@@ -51,13 +54,13 @@ pub(super) enum ListStyle {
     Long,
 }
 
-impl Emit<'_> {
+impl<'a> Emit<'a> {
     /// `expr` as a target, with the checks `zend_compile_assign` and
     /// `zend_compile_assign_ref` make before they compile anything:
     /// `$this` is `Cannot re-assign $this`, and then
     /// `zend_ensure_writable_variable`'s refusals
     /// ([`Self::ensure_writable`]).
-    pub(super) fn target(&mut self, expr: tree::Expr) -> Result<Target, CompileError> {
+    pub(super) fn target(&mut self, expr: tree::Expr) -> Result<Target<'a>, CompileError> {
         if self.is_this(expr) {
             return Err(self.compile_error("Cannot re-assign $this"));
         }
@@ -70,7 +73,7 @@ impl Emit<'_> {
     /// checks and its own `$this` refusal before it
     /// (`zend_compile_unset`), and what [`Self::target`] decodes after
     /// an assignment's.
-    pub(super) fn place(&mut self, expr: tree::Expr) -> Result<Target, CompileError> {
+    pub(super) fn place(&mut self, expr: tree::Expr) -> Result<Target<'a>, CompileError> {
         let line = self.line_of(expr);
         let expr = self.peel(expr);
         let parsed = self.parsed;
@@ -101,11 +104,11 @@ impl Emit<'_> {
                 }
             },
             tree::Expr::ListExpr(id) => Target::List(List {
-                elements: tree[id].array_elements.clone(),
+                elements: tree.list(tree[id].array_elements),
                 style: ListStyle::List,
             }),
             tree::Expr::ArrayExpr(id) => Target::List(List {
-                elements: tree[id].array_elements.clone(),
+                elements: tree.list(tree[id].array_elements),
                 style: if tree[id].long.is_some() {
                     ListStyle::Long
                 } else {
@@ -230,7 +233,7 @@ impl Emit<'_> {
         value: Source,
     ) -> Result<Where, CompileError> {
         match self.target(target)? {
-            Target::Cv(name) => self.assign(&name, value),
+            Target::Cv(name) => self.assign(name, value),
             Target::Dim(dim) => self.assign_dim(dim, value),
             Target::Prop { object, name } => self.assign_prop(object, name, value),
             Target::StaticProp { class, name } => self.assign_static_prop(class, &name, value),

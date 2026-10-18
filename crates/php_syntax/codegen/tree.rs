@@ -704,11 +704,11 @@ fn slot_base_type(model: &Model<'_>, def: &Def, slot: &Slot) -> Result<String, E
     }
 }
 
-/// The field's type with its arity (A2): a boxed slice when repeated, the
-/// bare type when required, `Option` otherwise.
+/// The field's type with its arity (A2): a list in the tree's pools when
+/// repeated, the bare type when required, `Option` otherwise.
 fn field_type(base: &str, slot: &Slot) -> String {
     if slot.repeated {
-        format!("Box<[{base}]>")
+        format!("List<{base}>")
     } else if slot.required {
         base.to_owned()
     } else {
@@ -742,6 +742,9 @@ struct Field {
     /// The trait the field comes from, when a mixin injected it.
     mixin: Option<String>,
     repeated: bool,
+    /// What one child is, the element of the field's list where it
+    /// repeats.
+    base: String,
     /// The enum a labeled alternation of nodes needs, by name and variants.
     adhoc: Option<(String, Vec<String>)>,
     /// The slot the field resolves from: its kind set, its anchors and its
@@ -763,6 +766,7 @@ impl Field {
             doc: slot_doc(slot),
             mixin: mixin.map(str::to_owned),
             repeated: slot.repeated,
+            base,
             adhoc,
             slot: Some(slot.clone()),
         })
@@ -801,6 +805,7 @@ fn fields_of(model: &Model<'_>, def: &Def, errors: &mut Vec<Error>) -> Vec<Field
                         .to_owned(),
                     mixin: Some(trait_name.clone()),
                     repeated: false,
+                    base: "TokenId".to_owned(),
                     adhoc: None,
                     slot: None,
                 },
@@ -824,29 +829,14 @@ fn fields_of(model: &Model<'_>, def: &Def, errors: &mut Vec<Error>) -> Vec<Field
     fields
 }
 
-/// The return type of the trait method that reads `field`: a borrowed
-/// slice for a list, the value itself otherwise (every base type is
-/// `Copy`).
+/// The return type of the trait method that reads `field`: the field's
+/// own, since every field, a list's index among them, is `Copy`.
 fn method_type(field: &Field) -> String {
-    if field.repeated {
-        let inner = field
-            .ty
-            .strip_prefix("Box<[")
-            .and_then(|t| t.strip_suffix("]>"))
-            .unwrap_or(&field.ty);
-        format!("&[{inner}]")
-    } else {
-        field.ty.clone()
-    }
+    field.ty.clone()
 }
 
 fn method_body(field: &Field) -> String {
-    let name = rust_label(&field.name);
-    if field.repeated {
-        format!("&self.{name}")
-    } else {
-        format!("self.{name}")
-    }
+    format!("self.{}", rust_label(&field.name))
 }
 
 fn emit_header(buf: &mut String) {
@@ -917,7 +907,7 @@ fn emit_struct(
         buf,
         "/// `{name}` (php.ungram): one node of kind `{kind}`, its children the fields the\n\
          /// builder resolved, no scan behind any of them.\n\
-         #[derive(Clone, Debug, PartialEq, Eq)]\n\
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
          pub struct {name} {{\n    \
              /// Where the node is in the source: from its first significant token to its last.\n    \
              pub range: TextRange,\n    \
@@ -947,7 +937,7 @@ fn emit_struct(
              const KIND: SyntaxKind = SyntaxKind::{kind};\n    \
              fn range(&self) -> TextRange {{\n        self.range\n    }}\n    \
              fn line(&self) -> u32 {{\n        self.line\n    }}\n    \
-             fn all(nodes: &Nodes) -> &[Self] {{\n        \
+             fn all<'t>(nodes: &Nodes<'t>) -> &'t [Self] {{\n        \
                  match nodes.store({slot}) {{\n            \
                      Some(Store::{name}(nodes)) => nodes,\n            \
                      _ => &[],\n        \
@@ -999,14 +989,14 @@ fn field_read(model: &Model<'_>, def: &Def, slot: &Slot) -> Result<String, Error
     let stops = kinds_expr(&slot.stops);
     let token_read = |set: &str| {
         if slot.repeated {
-            format!("tokens(children, {set})")
+            format!("tokens(pools, children, {set})")
         } else {
             format!("token(children, {anchors}, {set})")
         }
     };
     let node_read = |ty: &str| {
         if slot.repeated {
-            format!("all::<{ty}>(children)")
+            format!("all::<{ty}>(pools, children)")
         } else if slot.anchors.is_empty() {
             format!("first::<{ty}>(children)")
         } else {
@@ -1057,6 +1047,11 @@ fn emit_resolver(
     } else {
         "_children"
     };
+    let pools_param = if fields.iter().any(|f| f.repeated) {
+        "pools"
+    } else {
+        "_pools"
+    };
     // A node with a required child can fail to resolve and says which
     // child; one without cannot, and returns itself.
     let fallible = has_required(fields);
@@ -1077,7 +1072,8 @@ fn emit_resolver(
                  range: TextRange,\n        \
                  line: u32,\n        \
                  {children_param}: &[Element],\n        \
-                 {doc_param}: Option<TokenId>,\n    \
+                 {doc_param}: Option<TokenId>,\n        \
+                 {pools_param}: &mut Pools<'_>,\n    \
              ) -> {ret} {{\n"
     )
     .ok();
@@ -1123,48 +1119,162 @@ fn has_required(fields: &[Field]) -> bool {
         .any(|f| f.slot.as_ref().is_some_and(|s| s.required && !s.repeated))
 }
 
-/// `Nodes`, the arena: one vector per struct node kind, so a
+/// `Nodes`, the arena: one slice per struct node kind, so a
 /// `NodeId<ClassDecl>` indexes the class declarations and nothing else,
 /// and no node pays for the width of another kind's struct. A kind's
-/// vector is made when its first node is, so a tree pays for the kinds
+/// slice is made when its first node is, so a tree pays for the kinds
 /// it holds and not for every kind the schema names: `Store` is one
-/// kind's vector, and a slot per kind says where in `stores` it stands.
+/// kind's slice, and a slot per kind says where in `stores` it stands.
+/// `Growing` is a kind's vector while the builder fills it, laid down
+/// at the count of the kind's `Start` events, and `slot_of` is the
+/// slot of a kind.
 fn emit_nodes(buf: &mut String, model: &Model<'_>) {
     buf.push_str(
-        "/// One kind's vector in the arena, by the kind's struct.\n\
-         #[derive(Clone, Debug, PartialEq, Eq)]\n\
-         enum Store {\n",
+        "/// One kind's nodes in the arena, by the kind's struct.\n\
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         enum Store<'a> {\n",
     );
     for info in model.structs() {
         let name = &info.def.name;
-        writeln!(buf, "    {name}(Vec<{name}>),").ok();
+        writeln!(buf, "    {name}(&'a [{name}]),").ok();
     }
-    buf.push_str("}\n\n");
+    buf.push_str(
+        "}\n\n\
+         /// One kind's nodes while the builder fills them.\n\
+         enum Growing<'a> {\n",
+    );
+    for info in model.structs() {
+        let name = &info.def.name;
+        writeln!(buf, "    {name}(BumpVec<'a, {name}>),").ok();
+    }
+    buf.push_str(
+        "}\n\n\
+         impl<'a> Growing<'a> {\n    \
+             /// The kind's nodes as the tree keeps them.\n    \
+             #[allow(clippy::too_many_lines)]\n    \
+             fn freeze(self) -> Store<'a> {\n        \
+                 match self {\n",
+    );
+    for info in model.structs() {
+        let name = &info.def.name;
+        writeln!(
+            buf,
+            "            Growing::{name}(nodes) => Store::{name}(nodes.into_bump_slice()),"
+        )
+        .ok();
+    }
+    buf.push_str("        }\n    }\n}\n\n");
     write!(
         buf,
-        "/// The arena (design §4.9, ADR-0003): every node of the tree, one vector per kind,\n\
+        "/// How many struct node kinds there are, each with a slot in `Nodes`.\n\
+         const SLOTS: usize = {count};\n\n\
+         /// The arena (design §4.9, ADR-0003): every node of the tree, one slice per kind,\n\
          /// each addressed by its `NodeId`. Filled by the builder, read through `Tree`. A\n\
-         /// kind's vector is made with its first node, so an arena holds the kinds its\n\
+         /// kind's slice is made with its first node, so an arena holds the kinds its\n\
          /// tree has and nothing for the rest.\n\
-         #[derive(Clone, Debug, PartialEq, Eq)]\n\
-         pub struct Nodes {{\n    \
-             /// Where each struct kind's vector stands in `stores`, by the kind's slot,\n    \
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         pub struct Nodes<'a> {{\n    \
+             /// Where each struct kind's slice stands in `stores`, by the kind's slot,\n    \
              /// and none while no node of the kind is built.\n    \
-             slots: [Option<StoreAt>; {count}],\n    \
-             /// The vectors, in the order their kinds' first nodes were built.\n    \
-             stores: Vec<Store>,\n\
+             slots: [Option<StoreAt>; SLOTS],\n    \
+             /// The slices, in the order their kinds' first nodes were built.\n    \
+             stores: &'a [Store<'a>],\n\
          }}\n\n\
-         impl Default for Nodes {{\n    \
-             fn default() -> Self {{\n        \
-                 Nodes {{\n            \
-                     slots: [None; {count}],\n            \
-                     stores: Vec::new(),\n        \
-                 }}\n    \
-             }}\n\
-         }}\n\n",
+         /// The slot of a struct node kind in `Nodes`, none for a kind with no struct.\n\
+         #[allow(clippy::too_many_lines)]\n\
+         fn slot_of(kind: SyntaxKind) -> Option<usize> {{\n    \
+             match kind {{\n",
         count = model.structs().count()
     )
     .ok();
+    for (slot, info) in model.structs().enumerate() {
+        writeln!(
+            buf,
+            "        SyntaxKind::{} => Some({slot}),",
+            screaming_snake(&info.def.name)
+        )
+        .ok();
+    }
+    buf.push_str("        _ => None,\n    }\n}\n\n");
+}
+
+/// The tree's lists (A2's repetitions): one pool per element type, a
+/// node's list a stretch of its pool that `List` addresses, so a list is a
+/// field of eight bytes and no allocation of its own. `Pools` is the
+/// builder's, one vector per pool, and `Lists` the tree's, each frozen
+/// to a slice of the arena.
+fn emit_lists(buf: &mut String, bases: &BTreeSet<String>) {
+    let field = |base: &str| {
+        let inner = base
+            .strip_prefix("NodeId<")
+            .and_then(|b| b.strip_suffix('>'))
+            .map(|b| format!("{}_ids", snake_case(b)));
+        inner.unwrap_or_else(|| snake_case(base))
+    };
+    buf.push_str(
+        "/// Every list of the tree, one pool per element type, each run of a pool one\n\
+         /// node's list (`List`).\n\
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         pub struct Lists<'a> {\n",
+    );
+    for base in bases {
+        writeln!(buf, "    {}: &'a [{base}],", field(base)).ok();
+    }
+    buf.push_str(
+        "}\n\n\
+         /// The lists of a tree with none.\n\
+         const NO_LISTS: Lists<'static> = Lists {\n",
+    );
+    for base in bases {
+        writeln!(buf, "    {}: &[],", field(base)).ok();
+    }
+    buf.push_str(
+        "};\n\n\
+         /// The pools while the builder fills them.\n\
+         pub(crate) struct Pools<'a> {\n",
+    );
+    for base in bases {
+        writeln!(buf, "    {}: BumpVec<'a, {base}>,", field(base)).ok();
+    }
+    buf.push_str(
+        "}\n\n\
+         impl<'a> Pools<'a> {\n    \
+             /// Every pool empty, in `bump`.\n    \
+             pub(crate) fn new(bump: &'a bumpalo::Bump) -> Pools<'a> {\n        \
+                 Pools {\n",
+    );
+    for base in bases {
+        writeln!(buf, "            {}: BumpVec::new_in(bump),", field(base)).ok();
+    }
+    buf.push_str(
+        "        }\n    }\n\n    \
+             /// The pools as the tree keeps them.\n    \
+             pub(crate) fn freeze(self) -> Lists<'a> {\n        \
+                 Lists {\n",
+    );
+    for base in bases {
+        let name = field(base);
+        writeln!(buf, "            {name}: self.{name}.into_bump_slice(),").ok();
+    }
+    buf.push_str("        }\n    }\n}\n\n");
+    for base in bases {
+        let name = field(base);
+        write!(
+            buf,
+            "impl Listed for {base} {{\n    \
+                 fn pool<'a>(lists: &Lists<'a>) -> &'a [Self] {{\n        \
+                     lists.{name}\n    \
+                 }}\n\
+             }}\n\
+             impl Pooled for {base} {{\n    \
+                 fn pool_mut<'a, 'p>(pools: &'p mut Pools<'a>) -> &'p mut BumpVec<'a, Self> {{\n        \
+                     &mut pools.{name}\n    \
+                 }}\n\
+             }}\n"
+        )
+        .ok();
+    }
+    buf.push('\n');
 }
 
 /// `resolve`, the builder's one call per finished node: the struct of
@@ -1178,7 +1288,8 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
          /// kind with no struct, which `ERROR` is.\n\
          #[allow(clippy::too_many_lines)]\n\
          pub(crate) fn resolve(\n    \
-             nodes: &mut Nodes,\n    \
+             nodes: &mut Building<'_>,\n    \
+             pools: &mut Pools<'_>,\n    \
              kind: SyntaxKind,\n    \
              range: TextRange,\n    \
              line: u32,\n    \
@@ -1195,8 +1306,8 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
         let (open, close) = if fallible { ("", "") } else { ("Ok(", ")") };
         writeln!(
             buf,
-            "        SyntaxKind::{} => match nodes.open({slot}, Store::{name}) {{\n            \
-                 Some(Store::{name}(nodes)) => push(nodes, {open}{name}::resolve(range, line, children, doc_comment){close}),\n            \
+            "        SyntaxKind::{} => match nodes.open({slot}, Growing::{name}) {{\n            \
+                 Some(Growing::{name}(nodes)) => push(nodes, {open}{name}::resolve(range, line, children, doc_comment, pools){close}),\n            \
                  _ => Resolved::Missing(\"Nodes.{}\"),\n        \
              }},",
             screaming_snake(name),
@@ -1381,13 +1492,13 @@ fn emit_enum_place(
         "impl {name} {{\n    \
              /// Where the child is in the source: the node's range, or the token's.\n    \
              #[must_use]\n    \
-             pub fn range(self, parsed: &crate::Parsed) -> TextRange {{\n        \
+             pub fn range(self, parsed: &crate::Parsed<'_>) -> TextRange {{\n        \
                  match self {{\n{range_arms}        }}\n    \
              }}\n\n    \
              /// php's line for the child: the node's `zend_ast.lineno`, or the line a\n    \
              /// token starts on (design §4.9).\n    \
              #[must_use]\n    \
-             pub fn line(self, parsed: &crate::Parsed) -> u32 {{\n        \
+             pub fn line(self, parsed: &crate::Parsed<'_>) -> u32 {{\n        \
                  match self {{\n{line_arms}        }}\n    \
              }}\n\
          }}\n"
@@ -1453,6 +1564,7 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
 
     // --- struct nodes ----------------------------------------------------
     let mut adhoc_enums: Vec<(String, Vec<String>)> = Vec::new();
+    let mut list_bases: BTreeSet<String> = BTreeSet::new();
     for info in &model.defs {
         if info.class != DefClass::StructNode {
             continue;
@@ -1460,6 +1572,7 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
         let def = info.def;
         let fields = fields_of(&model, def, &mut errors);
         adhoc_enums.extend(fields.iter().filter_map(|f| f.adhoc.clone()));
+        list_bases.extend(fields.iter().filter(|f| f.repeated).map(|f| f.base.clone()));
         emit_struct(&mut buf, &model, def, &fields, &mut errors);
     }
 
@@ -1522,6 +1635,7 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
         ));
     }
     emit_nodes(&mut buf, &model);
+    emit_lists(&mut buf, &list_bases);
     emit_resolve(&mut buf, &model);
 
     if errors.is_empty() {
@@ -1645,12 +1759,12 @@ mod tests {
             "pub range: TextRange,",
             "pub line: u32,",
             "fn line(&self) -> u32 {\n        self.line\n    }",
-            "pub items: Box<[Item]>,",
+            "pub items: List<Item>,",
             "pub name: TokenId,",
             "pub params: NodeId<ParamList>,",
             "pub ret: Option<NodeId<RetType>>,",
             "pub item: Option<Item>,",
-            "pub variable: Box<[TokenId]>,",
+            "pub variable: List<TokenId>,",
             "pub name: Option<TokenId>,",
             "impl Node for Decl {",
             "const KIND: SyntaxKind = SyntaxKind::DECL;",
@@ -1660,10 +1774,10 @@ mod tests {
             "pub const NAME_REF_TOKENS: &[SyntaxKind] = &[SyntaxKind::IDENT, SyntaxKind::NAME_QUALIFIED];",
             "pub fn is_name_ref(self) -> bool",
             "impl Item {",
-            "pub fn range(self, parsed: &crate::Parsed) -> TextRange {",
+            "pub fn range(self, parsed: &crate::Parsed<'_>) -> TextRange {",
             "            Self::Decl(id) => parsed.tree[id].range(),",
             "            Self::Ident(id) => token_range(parsed, id),",
-            "pub fn line(self, parsed: &crate::Parsed) -> u32 {",
+            "pub fn line(self, parsed: &crate::Parsed<'_>) -> u32 {",
             "            Self::Decl(id) => parsed.tree[id].line(),",
             "            Self::Ident(id) => token_line(parsed, id),",
         ] {
@@ -1694,13 +1808,13 @@ mod tests {
         );
         for needle in [
             "pub trait HasAttrs {",
-            "    fn attrs(&self) -> &[NodeId<Attr>];",
+            "    fn attrs(&self) -> List<NodeId<Attr>>;",
             "pub trait HasDocComment {",
             "    fn doc_comment(&self) -> Option<TokenId>;",
-            "pub attrs: Box<[NodeId<Attr>]>,",
+            "pub attrs: List<NodeId<Attr>>,",
             "pub doc_comment: Option<TokenId>,",
             "impl HasAttrs for Decl {",
-            "    fn attrs(&self) -> &[NodeId<Attr>] {\n        &self.attrs\n    }",
+            "    fn attrs(&self) -> List<NodeId<Attr>> {\n        self.attrs\n    }",
             "impl HasDocComment for Decl {",
             "    fn doc_comment(&self) -> Option<TokenId> {\n        self.doc_comment\n    }",
         ] {
@@ -1773,10 +1887,10 @@ mod tests {
              Name = <ident> | <name_qualified>\n",
         );
         for needle in [
-            "pub types: Box<[NodeId<Ty>]>,",
-            "let types = all::<NodeId<Ty>>(children);",
-            "pub types: Box<[TokenId]>,",
-            "let types = tokens(children, NAME_TOKENS);",
+            "pub types: List<NodeId<Ty>>,",
+            "let types = all::<NodeId<Ty>>(pools, children);",
+            "pub types: List<TokenId>,",
+            "let types = tokens(pools, children, NAME_TOKENS);",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
@@ -1828,16 +1942,21 @@ mod tests {
              Member = '->' name:<member_ident>\n",
         );
         for needle in [
-            "enum Store {\n    Root(Vec<Root>),\n    Decl(Vec<Decl>),",
-            "    slots: [Option<StoreAt>; 6],",
-            "fn all(nodes: &Nodes) -> &[Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes,\n            _ => &[],\n        }\n    }",
+            "enum Store<'a> {\n    Root(&'a [Root]),\n    Decl(&'a [Decl]),",
+            "enum Growing<'a> {\n    Root(BumpVec<'a, Root>),",
+            "const SLOTS: usize = 6;",
+            "        SyntaxKind::DECL => Some(1),",
+            "pub struct Lists<'a> {\n    item: &'a [Item],\n}",
+            "impl Listed for Item {",
+            "    slots: [Option<StoreAt>; SLOTS],",
+            "fn all<'t>(nodes: &Nodes<'t>) -> &'t [Self] {\n        match nodes.store(1) {\n            Some(Store::Decl(nodes)) => nodes,\n            _ => &[],\n        }\n    }",
             "impl Decl {",
             "    ) -> Result<Self, &'static str> {",
             "        let Some(name) = token(children, &[], &[SyntaxKind::IDENT]) else {\n            \
                  return Err(\"Decl.name\");\n        };",
             "        let body = first::<NodeId<Block>>(children);",
             "        Ok(Self {\n            range,\n            line,\n            doc_comment,\n            name,\n            body,\n        })",
-            "        let items = all::<Item>(children);",
+            "        let items = all::<Item>(pools, children);",
             "    ) -> Self {",
             "        let then = first_after::<Item>(children, &[SyntaxKind::QUESTION], &[SyntaxKind::COLON]);",
             "        let else_branch = first_after::<Item>(children, &[SyntaxKind::COLON], &[]);",
@@ -1849,8 +1968,8 @@ mod tests {
             "        if let Element::Token { kind: SyntaxKind::IDENT, id } = *element {\n            \
                  return Some(Self::Ident(id));",
             "pub(crate) fn resolve(",
-            "        SyntaxKind::DECL => match nodes.open(1, Store::Decl) {\n            Some(Store::Decl(nodes)) => push(nodes, Decl::resolve(range, line, children, doc_comment)),\n            _ => Resolved::Missing(\"Nodes.decl\"),\n        },",
-            "        SyntaxKind::ROOT => match nodes.open(0, Store::Root) {\n            Some(Store::Root(nodes)) => push(nodes, Ok(Root::resolve(range, line, children, doc_comment))),\n            _ => Resolved::Missing(\"Nodes.root\"),\n        },",
+            "        SyntaxKind::DECL => match nodes.open(1, Growing::Decl) {\n            Some(Growing::Decl(nodes)) => push(nodes, Decl::resolve(range, line, children, doc_comment, pools)),\n            _ => Resolved::Missing(\"Nodes.decl\"),\n        },",
+            "        SyntaxKind::ROOT => match nodes.open(0, Growing::Root) {\n            Some(Growing::Root(nodes)) => push(nodes, Ok(Root::resolve(range, line, children, doc_comment, pools))),\n            _ => Resolved::Missing(\"Nodes.root\"),\n        },",
             "        _ => Resolved::Untyped,",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");

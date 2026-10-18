@@ -76,7 +76,7 @@ impl Emit<'_> {
         let inner = match self.peel(expr) {
             tree::Expr::SimpleVarExpr(id) => {
                 return Ok(Some(match self.simple_var_of(id, line)? {
-                    SimpleVar::Cv(name) => Named::Cv(name),
+                    SimpleVar::Cv(name) => Named::Cv(name.to_vec()),
                     SimpleVar::This => Named::This,
                     SimpleVar::Globals => Named::Globals,
                     SimpleVar::Auto(global) => self.auto_global(global)?,
@@ -99,7 +99,7 @@ impl Emit<'_> {
             tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => true,
             tree::Expr::SimpleVarExpr(id) => self.parsed.tree[id]
                 .var
-                .is_some_and(|var| AutoGlobal::of(&self.variable_name(var)).is_some()),
+                .is_some_and(|var| AutoGlobal::of(self.variable_name(var)).is_some()),
             expr => self.global_var_fetch(expr).is_some(),
         }
     }

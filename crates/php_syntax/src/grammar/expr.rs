@@ -801,12 +801,13 @@ fn variable_only(p: &mut Parser<'_>) -> Option<K> {
 fn variable_or_pattern(p: &mut Parser<'_>, patterns: bool) -> Option<K> {
     // php errors at the token that starts what is no variable at all
     // (`unset(1)` and `foreach ($a as 1` are `unexpected integer "1"`,
-    // probed 8.5.9); the diagnostic is built here, before the primary is
-    // consumed, and raised only then.
+    // probed 8.5.9); where the diagnostic stands is taken here, before
+    // the primary is consumed, and it is built only where it is raised.
     let lead = p.current();
-    let at_lead = p.unexpected_here();
+    let at_lead = p.lead();
     let Some(mut lhs) = prefix(p) else {
-        p.error(at_lead);
+        let d = p.unexpected_at(at_lead);
+        p.error(d);
         return None;
     };
     while let Some(trailer) = at_trailer(p, &lhs) {
@@ -821,7 +822,8 @@ fn variable_or_pattern(p: &mut Parser<'_>, patterns: bool) -> Option<K> {
             let d = p.unexpected_here_expecting(AFTER_VARIABLE);
             p.error(d);
         } else {
-            p.error(at_lead);
+            let d = p.unexpected_at(at_lead);
+            p.error(d);
         }
     }
     let kind = lhs.kind();

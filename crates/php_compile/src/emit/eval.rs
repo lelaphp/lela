@@ -37,22 +37,23 @@ pub(super) enum Rewrite {
     Node(tree::Expr),
 }
 
-/// The nodes `zend_eval_const_expr` has replaced, by the node.
+/// The nodes `zend_eval_const_expr` has replaced, by the node; the
+/// table is made with the first, so a compile that folds no `??` or
+/// conditional makes none.
 #[derive(Default)]
-pub(super) struct Rewrites(HashMap<tree::Expr, Rewrite>);
+pub(super) struct Rewrites(Option<HashMap<tree::Expr, Rewrite>>);
 
 impl Rewrites {
     /// What the node was replaced with, if anything.
     pub(super) fn get(&self, expr: tree::Expr) -> Option<Rewrite> {
-        if self.0.is_empty() {
-            return None;
-        }
-        self.0.get(&expr).copied()
+        self.0.as_ref()?.get(&expr).copied()
     }
 
     /// The node replaced with `rewrite`.
     fn record(&mut self, expr: tree::Expr, rewrite: Rewrite) {
-        self.0.insert(expr, rewrite);
+        self.0
+            .get_or_insert_with(HashMap::new)
+            .insert(expr, rewrite);
     }
 }
 
@@ -296,7 +297,7 @@ impl Emit<'_> {
                 self.evaluate(ctor)?;
             }
             if let Some(args) = args {
-                for arg in self.parsed.tree[args].args.clone().iter().copied() {
+                for arg in self.list(self.parsed.tree[args].args).iter().copied() {
                     match arg {
                         tree::Arg::Expr(value) => self.evaluate(value)?,
                         tree::Arg::NamedArg(named) => {
