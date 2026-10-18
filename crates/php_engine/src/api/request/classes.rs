@@ -1647,20 +1647,8 @@ impl Request {
         if self.preloaded_function(unit, exec::Body::Dynamic(at)) {
             return Ok(());
         }
-        let name = String::from_utf8_lossy(&decl.name.0).into_owned();
         if let Some(earlier) = self.function_named(Bare::resolved(lowered)) {
-            let site = self
-                .user_function(earlier)
-                .and_then(user_function_decl)
-                .map(|decl| {
-                    format!(
-                        " (previously declared in {}:{})",
-                        String::from_utf8_lossy(&decl.file.0),
-                        decl.line
-                    )
-                })
-                .unwrap_or_default();
-            let message = format!("Cannot redeclare function {name}(){site}");
+            let message = self.function_redeclaration(earlier, &decl.name.0);
             return Err(crate::api::raising::fatal(self, &message));
         }
         let declared = Function::local(self.user_functions.len());
@@ -1836,6 +1824,24 @@ impl Request {
         (0..unit.functions.len()).all(|at| self.declare_function(unit, at).is_some())
     }
 
+    /// `do_bind_function`'s and `zend_begin_func_decl`'s redeclaration
+    /// text: the function `name` redeclared over `earlier`, and the
+    /// earlier one's site where it is a user function.
+    fn function_redeclaration(&self, earlier: Function, name: &[u8]) -> String {
+        let site = self
+            .user_function(earlier)
+            .and_then(user_function_decl)
+            .map(|decl| {
+                let file = String::from_utf8_lossy(&decl.file.0);
+                format!(" (previously declared in {file}:{})", decl.line)
+            })
+            .unwrap_or_default();
+        format!(
+            "Cannot redeclare function {}(){site}",
+            String::from_utf8_lossy(name)
+        )
+    }
+
     /// `zend_hash_add_ptr(CG(function_table), …)` for the function at
     /// `at` of those the unit declares at its top level, before its
     /// main op array runs: php binds one at compile time and the
@@ -1857,21 +1863,7 @@ impl Request {
             return Some(false);
         }
         if let Some(earlier) = self.function_named((&decl.name).into()) {
-            let site = self
-                .user_function(earlier)
-                .and_then(user_function_decl)
-                .map(|decl| {
-                    format!(
-                        " (previously declared in {}:{})",
-                        String::from_utf8_lossy(&decl.file.0),
-                        decl.line
-                    )
-                })
-                .unwrap_or_default();
-            let message = format!(
-                "Cannot redeclare function {}(){site}",
-                String::from_utf8_lossy(&decl.name.0)
-            );
+            let message = self.function_redeclaration(earlier, &decl.name.0);
             let file = decl.file.0.to_vec();
             self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
             return None;
