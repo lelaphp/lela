@@ -57,6 +57,7 @@ mod sort;
 mod stack;
 mod string;
 mod table_copy;
+mod zend_arena;
 mod zval;
 
 pub use array::DeclaredRows;
@@ -110,6 +111,10 @@ pub struct Heap {
     /// Declared before `mm` for the same reason the store is.
     resources: resource::RegularList,
     mm: mm::Mm,
+    /// php's `CG(arena)`, the compiler's arena: 64 KiB laid down before
+    /// anything else of the request's ([`Heap::new`]), carved and never
+    /// freed a piece at a time ([`Heap::carve`]).
+    arena: zend_arena::ZendArena,
     /// php's `CG(interned_strings)`: the strings this request interned,
     /// live until the request ends (`Z/Zend/zend_string.c:346-353`).
     /// The strings are the request's own memory and are counted as such,
@@ -147,12 +152,15 @@ impl Default for Heap {
 }
 
 impl Heap {
-    /// A heap with php's main chunk mapped and the object store's table
-    /// laid down in it, which is what `init_executor` allocates before
-    /// the request serves a line, and nothing else.
+    /// A heap with php's main chunk mapped and laid down in it, in
+    /// `zend_activate`'s order, the compiler's arena `init_compiler`
+    /// creates and the object store's table `init_executor` allocates,
+    /// and nothing else: what a request's heap holds of the engine's own
+    /// before the host and the extensions start it.
     #[must_use]
     pub fn new() -> Heap {
         let mut mm = mm::Mm::new();
+        let arena = zend_arena::ZendArena::new(&mut mm);
         let store = object::Store::new(&mut mm);
         let mut gc = collector::Collector::new();
         gc.enable(true);
@@ -160,6 +168,7 @@ impl Heap {
             store,
             resources: resource::RegularList::new(),
             mm,
+            arena,
             interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
             gc,
@@ -186,6 +195,17 @@ impl Heap {
     /// ```
     pub fn lay_interned_table(&mut self) -> Result<(), Fatal> {
         self.interned.lay_down(&mut self.mm)
+    }
+
+    /// `zend_arena_alloc(&CG(arena), size)`: `size` bytes, rounded up to
+    /// eight, carved from the compiler's arena, which takes a block of
+    /// the request's heap only where the newest has not the room, and
+    /// gives nothing back before the request ends. What php keeps in the
+    /// bytes, a runtime cache's slots among them, the engine keeps
+    /// typed and elsewhere, so the carve is the room php's takes and
+    /// hands out no memory. The `Err` is the memory limit's fatal.
+    pub fn carve(&mut self, size: usize) -> Result<(), Fatal> {
+        self.arena.carve(&mut self.mm, size)
     }
 
     /// Bytes in use: the bin accounting for `real == false`, the bytes
@@ -492,9 +512,9 @@ impl Heap {
     /// itself keeps for the request's lifetime freed by name, the
     /// constant arrays of the units this request alone served, the
     /// resource list (`zend_destroy_rsrc_list`), the object store's
-    /// buckets (`zend_objects_store_destroy`) and the strings the request
-    /// interned with their table (`zend_interned_strings_deactivate`),
-    /// then every block still held named, `zend_mm_check_leaks`. What it
+    /// buckets (`zend_objects_store_destroy`), the strings the request
+    /// interned with their table (`zend_interned_strings_deactivate`)
+    /// and the compiler's arena (`shutdown_compiler`), then every block still held named, `zend_mm_check_leaks`. What it
     /// finds is recorded as the sensors record and raised by
     /// [`Heap::take_sensed`]: the blocks never freed, their bytes and the
     /// first of them, with what `name` calls the [`Origin`] that block was
@@ -514,6 +534,7 @@ impl Heap {
         self.resources.destroy(&mut self.mm);
         self.store.destroy(&mut self.mm);
         self.interned.destroy(&mut self.mm);
+        self.arena.destroy(&mut self.mm);
         self.mm.sense_leaks(name);
     }
 
@@ -892,6 +913,11 @@ impl Intern for Heap {
     }
 }
 
+/// What a fresh heap holds: the compiler's arena and the object
+/// store's table ([`Heap::new`]).
+#[cfg(test)]
+pub(crate) const STARTED: usize = zend_arena::FIRST_BLOCK + object::INIT_BYTES;
+
 // The mappings the allocator's tests count are the process's, and the
 // test runner `runs` its tests beside each other, in every file at once,
 // so a test that maps a chunk takes this first: one guard for the crate,
@@ -926,8 +952,9 @@ mod tests {
         let mut heap = Heap::new();
         let start = heap.memory_usage(false);
         let real = heap.memory_usage(true);
-        // The object store's table, and nothing else, before a line runs.
-        assert_eq!(start, object::INIT_BYTES);
+        // The compiler's arena and the object store's table, and nothing
+        // else, before a line runs.
+        assert_eq!(start, STARTED);
         assert_eq!(real, mm::CHUNK_SIZE);
         let mut strings = Vec::new();
         for len in [0usize, 1, 7, 8, 100, 3000, 5000, 3_000_000] {
@@ -974,8 +1001,8 @@ mod tests {
         let mut started_at = Vec::new();
         for _ in 0..2 {
             let mut heap = Heap::new();
-            started_at.push(heap.memory_usage(false) - object::INIT_BYTES);
-            let heap_start = object::INIT_BYTES;
+            started_at.push(heap.memory_usage(false) - STARTED);
+            let heap_start = STARTED;
             // The frozen table answers first and allocates nothing.
             let frozen = heap.intern(b"");
             assert!(matches!(frozen, Ok(s) if s.is_empty()));
@@ -1234,9 +1261,9 @@ mod tests {
                 Err(f) => break f,
             }
         };
-        // 511 free pages to a chunk, two of them the object store's
-        // table, two to an allocation.
-        assert_eq!(held.len(), 254);
+        // 511 free pages to a chunk, sixteen of them the compiler's
+        // arena and two the object store's table, two to an allocation.
+        assert_eq!(held.len(), 246);
         assert_eq!(
             fatal,
             Fatal::error(
@@ -1257,9 +1284,9 @@ mod tests {
         let mut heap = Heap::new();
         heap.set_memory_limit(2 * mm::CHUNK_SIZE);
         // A string of 3000 bytes is the 3072-byte bin, four slots to a
-        // `run` of three pages, so two chunks, less the two pages of the
-        // object store's table, hold 339 `runs` and the next one meets
-        // the limit.
+        // `run` of three pages, so two chunks, less the sixteen pages of
+        // the compiler's arena and the two of the object store's table,
+        // hold 334 `runs` and the next one meets the limit.
         let mut held = Vec::new();
         let fatal = loop {
             match heap.string(&[b'x'; 3000]) {
@@ -1267,7 +1294,7 @@ mod tests {
                 Err(f) => break f,
             }
         };
-        assert_eq!(held.len(), 339 * 4);
+        assert_eq!(held.len(), 334 * 4);
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         assert_eq!(
             fatal,
@@ -1296,14 +1323,14 @@ mod tests {
         for s in held.drain(..) {
             heap.release_string(s);
         }
-        assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
+        assert_eq!(heap.memory_usage(false), STARTED);
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         let swept = heap.string(&[b'x'; 1760]);
         assert!(swept.is_ok(), "the sweep did not give the free runs back");
-        // The 1017 pages of the 339 `runs`, and the chunk the sweep
+        // The 1002 pages of the 334 `runs`, and the chunk the sweep
         // emptied kept against the next growth, as php keeps one.
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
-        assert_eq!(heap.memory_usage(false), object::INIT_BYTES + 1792);
+        assert_eq!(heap.memory_usage(false), STARTED + 1792);
         if let Ok(s) = swept {
             heap.release_string(s);
         }
@@ -1390,7 +1417,7 @@ mod tests {
             for s in held {
                 heap.release_string(s);
             }
-            assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
+            assert_eq!(heap.memory_usage(false), STARTED);
         }
         assert_eq!(mm::MAPPINGS.load(Relaxed), before);
     }

@@ -1289,7 +1289,7 @@ mod tests {
         let _alone = alone();
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
-        assert_eq!(start, INIT_BYTES);
+        assert_eq!(start, crate::STARTED);
         assert_eq!(std::mem::size_of::<ObjHeader>(), 40);
         let plain = r.heap.object(7, 0, 0);
         assert!(plain.is_ok(), "the heap would not allocate an object");
@@ -1468,7 +1468,7 @@ mod tests {
         assert_eq!(r.heap.objects(), 0);
         assert_eq!(
             r.heap.memory_usage(false),
-            INIT_BYTES,
+            crate::STARTED,
             "the slot's string went with it"
         );
     }
@@ -1545,7 +1545,7 @@ mod tests {
             ]
         );
         assert_eq!(r.heap.objects(), 0);
-        assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
+        assert_eq!(r.heap.memory_usage(false), crate::STARTED);
     }
 
     /// A native payload sits after the slots in the same allocation, is
@@ -1651,7 +1651,7 @@ mod tests {
         Heap::release(&mut r, Zval::object(o));
         assert_eq!(s.refcount(), 1);
         Heap::release(&mut r, Zval::object(new));
-        assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
+        assert_eq!(r.heap.memory_usage(false), crate::STARTED);
     }
 
     /// A clone with a payload is the class's: the members copied as a
@@ -1690,7 +1690,7 @@ mod tests {
         assert_eq!(s.refcount(), 1);
         Heap::release(&mut r, Zval::object(new));
         assert_eq!(dropped.load(Relaxed), 2);
-        assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
+        assert_eq!(r.heap.memory_usage(false), crate::STARTED);
     }
 
     /// The shutdown walks: destructors in id order for what is still
@@ -1804,6 +1804,6 @@ mod tests {
             r.heap.release_string(key);
         }
         Heap::release(&mut r, Zval::object(o));
-        assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
+        assert_eq!(r.heap.memory_usage(false), crate::STARTED);
     }
 }
