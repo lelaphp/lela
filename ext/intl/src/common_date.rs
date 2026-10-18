@@ -13,7 +13,7 @@ use php_ext::decl::Type;
 use php_ext::raising::{Thrown, fatal, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
-use php_ext_date::TzKind;
+use php_ext_date::{TzKind, ZoneParts};
 
 use crate::calendar::CalendarObject;
 use crate::error::Outside;
@@ -41,13 +41,13 @@ pub(crate) type ZoneArg =
 /// knows no such zone, with the error set on `outside`.
 pub(crate) fn convert_datetimezone(
     req: &mut Request,
-    kind: Option<&TzKind>,
+    kind: Option<&ZoneParts>,
     outside: &mut Outside,
 ) -> Result<Option<Zone>, Thrown> {
     let id = match kind {
-        Some(TzKind::Id(zone)) => zone.name().to_vec(),
-        Some(TzKind::Abbr(zone)) => zone.abbr.clone(),
-        Some(TzKind::Offset(seconds)) => {
+        Some(ZoneParts::Id(zone)) => zone.name().to_vec(),
+        Some(ZoneParts::Abbr(abbr)) => abbr.clone(),
+        Some(ZoneParts::Offset(seconds)) => {
             #[allow(clippy::cast_possible_truncation, reason = "php's (int) cast")]
             let mins = (*seconds as i32) / 60;
             let hours = mins / 60;

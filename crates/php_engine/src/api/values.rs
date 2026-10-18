@@ -1829,6 +1829,37 @@ impl PhpObject {
         req.table_set_row(*self, key, value.hand_on())
     }
 
+    /// One row of the property table written under the string key these
+    /// bytes spell, `zend_hash_str_update` over what
+    /// `zend_std_get_properties` answers, as a `get_properties` handler
+    /// writes its fields (`date_interval_object_to_hash`): a declared
+    /// slot under its mangled name written raw, as [`PhpObject::set_row`]
+    /// writes it, and any other name a dynamic row, a key it holds kept
+    /// with its string and one it does not made only after the table has
+    /// room, by `zend_string_init`, so a key of one byte is allocated as
+    /// php's is and not the interned character. `value` is the table's
+    /// from here, and what the row held is released after the write.
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $o = new stdClass; foreach (['y','m','d','h','i','s','f','invert','days','from_string'] as $k) $o->$k = 1; echo memory_get_usage() - $m, "\n";
+    /// $i = new DateInterval('P1D');
+    /// $m = memory_get_usage(); $a = get_object_vars($i); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $b = get_object_vars($i); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 736
+    /// 1720
+    /// 696
+    /// ```
+    pub fn set_str(
+        &self,
+        req: &mut Request,
+        name: &[u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        req.table_set_str(*self, name, value.hand_on())
+    }
+
     /// One row appended to the property table under its next integer
     /// key, `zend_hash_next_index_insert`: what `$ao[] = $v` writes
     /// through an `ArrayObject` over the object, with no `__set` served
