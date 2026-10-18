@@ -367,6 +367,9 @@ pub struct Request {
     /// one of php's two exits ([`Raised`]), which the loop reads at the
     /// `Threw` edge.
     raised: Option<Raised>,
+    /// The throwable [`Request::while_pending`]'s step stands in
+    /// `raised` for, which the slot names and the step's caller owns.
+    stepping_past: Option<PhpObject>,
     /// php's `zend_bailout` under way: a fatal was rendered where it was
     /// raised and the request is leaving for the `zend_try` that catches
     /// it, the outermost serving's end or the step of
@@ -877,6 +880,7 @@ impl Request {
             cwd,
             fibers: crate::fiber::Fibers::default(),
             raised: None,
+            stepping_past: None,
             bailout: false,
             observing: observing::Observing::default(),
             frame_ids: frame_reads::FrameIds::default(),

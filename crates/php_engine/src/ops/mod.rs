@@ -1632,9 +1632,13 @@ fn property_type_error(
     name: &[u8],
 ) -> Thrown {
     // `if (EG(exception)) return;`: nothing is raised over a pending
-    // throwable, the write is refused and that one leaves, one more owner.
+    // throwable, the write is refused and that one leaves: one more owner
+    // of the slot's, and none past a `while_pending` step's, whose slot
+    // owns none.
     if let Some(standing) = req.pending() {
-        req.addref(&standing.as_value());
+        if !req.stepping_past(standing) {
+            req.addref(&standing.as_value());
+        }
         return Thrown::of(Some(standing));
     }
     let class = req.class_name(declaring);
