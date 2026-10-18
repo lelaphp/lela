@@ -7,7 +7,7 @@
 
 use std::ffi::{CStr, CString};
 use std::io::Write as _;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::sync::OnceLock;
 
@@ -280,61 +280,89 @@ pub(crate) fn flush_child() {
     std::io::stderr().write_all(CMD_FLUSH).ok();
 }
 
-/// `fpm_stdio_child_said`: what child `pid` wrote to one of its pipes,
-/// read to the end of what stands and logged a line at a time.
-pub(crate) fn child_said(fpm: &mut Fpm, pid: i32, stdout: bool) {
-    let Some((p, c)) = fpm.child(pid) else {
-        return;
-    };
-    let fd = {
-        let child = &mut fpm.pools[p].children[c];
-        let fd = if stdout {
-            child.stdout.as_ref()
-        } else {
-            child.stderr.as_ref()
-        };
-        fd.and_then(|fd| fd.try_clone().ok())
-    };
-    let Some(fd) = fd else {
-        return;
-    };
-    let mut child = fpm.pools[p].children[c].log_stream.take();
-    let closed = said(fpm, p, pid, &mut child, &fd, stdout);
-    fpm.pools[p].children[c].log_stream = child;
-    if closed {
-        fpm.unwatch(fd.as_fd());
-        let target = &mut fpm.pools[p].children[c];
-        if stdout {
-            target.stdout = None;
-        } else {
-            target.stderr = None;
+/// One of the two pipes a child's output comes up, where the pool catches
+/// its workers' output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pipe {
+    Stdout,
+    Stderr,
+}
+
+impl Pipe {
+    /// php's word for it in `child N said into stdout`.
+    fn name(self) -> &'static str {
+        match self {
+            Pipe::Stdout => "stdout",
+            Pipe::Stderr => "stderr",
+        }
+    }
+
+    /// The read end of this pipe of `child`, where it stands.
+    pub(crate) fn of(self, child: &Child) -> Option<&OwnedFd> {
+        match self {
+            Pipe::Stdout => child.stdout.as_ref(),
+            Pipe::Stderr => child.stderr.as_ref(),
+        }
+    }
+
+    fn of_mut(self, child: &mut Child) -> &mut Option<OwnedFd> {
+        match self {
+            Pipe::Stdout => &mut child.stdout,
+            Pipe::Stderr => &mut child.stderr,
         }
     }
 }
 
-/// What a dying child's pipe still holds, read and logged.
-pub(crate) fn drain(fpm: &mut Fpm, child: &mut Child, fd: &OwnedFd, stdout: bool) {
-    let pool = fpm
-        .pools
-        .iter()
-        .position(|pool| pool.children.iter().all(|c| c.pid != child.pid))
-        .unwrap_or(0);
-    let mut stream = child.log_stream.take();
-    let _ = said(fpm, pool, child.pid, &mut stream, fd, stdout);
-    child.log_stream = stream;
+/// `fpm_stdio_child_said` on `pipe` of child `pid`, ready in the loop.
+pub(crate) fn child_said(fpm: &mut Fpm, pid: i32, pipe: Pipe) {
+    let Some((p, c)) = fpm.child(pid) else {
+        return;
+    };
+    let mut child = fpm.pools[p].children.remove(c);
+    pipe_said(fpm, p, &mut child, pipe);
+    fpm.pools[p].children.insert(c, child);
 }
 
-/// The reading behind [`child_said`]: whether the pipe closed.
+/// `fpm_stdio_child_said` on `pipe` of `child`, who ran in the pool at
+/// `pool` and stands outside the pools while it is read: what it wrote
+/// read to the end of what stands and logged a line at a time, and the
+/// pipe, where it ended, taken out of the loop while the descriptor is
+/// still open and closed after, as php's `fpm_event_del` comes before its
+/// `close` (#2793).
+pub(crate) fn pipe_said(fpm: &mut Fpm, pool: usize, child: &mut Child, pipe: Pipe) {
+    let Some(fd) = pipe.of_mut(child).take() else {
+        return;
+    };
+    if said(fpm, pool, child.pid, &mut child.log_stream, &fd, pipe) {
+        fpm.unwatch(fd.as_fd());
+    } else {
+        *pipe.of_mut(child) = Some(fd);
+    }
+}
+
+/// What `fpm_child_close` does once the events fired: each pipe still
+/// open, where something the child started holds its writing end, taken
+/// out of the loop and closed.
+pub(crate) fn close_pipes(fpm: &mut Fpm, child: &mut Child) {
+    for pipe in [Pipe::Stdout, Pipe::Stderr] {
+        if let Some(fd) = pipe.of_mut(child).take() {
+            fpm.unwatch(fd.as_fd());
+        }
+    }
+}
+
+/// The reading behind [`pipe_said`]: whether the pipe closed.
 fn said(
     fpm: &Fpm,
     pool: usize,
     pid: i32,
     stream: &mut Option<Stream>,
     fd: &OwnedFd,
-    stdout: bool,
+    pipe: Pipe,
 ) -> bool {
+    let stdout = pipe == Pipe::Stdout;
     let config = &fpm.pools[pool].config;
-    let what = if stdout { "stdout" } else { "stderr" };
+    let what = pipe.name();
     let prefix = format!(
         "[pool {}] child {pid} said into {what}: ",
         String::from_utf8_lossy(&config.name)
@@ -430,7 +458,6 @@ fn said(
             "unable to read what child {pid} said into {what}"
         );
     }
-    let _ = fd.as_raw_fd();
     true
 }
 

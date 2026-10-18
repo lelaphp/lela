@@ -362,6 +362,7 @@ fn a_dump_past_the_limit_or_ended_by_a_signal_is_the_files_fail_naming_it() {
         binary: PathBuf::from("target/lanes/php"),
         script: PathBuf::from("/s/identity.php"),
         limit_s: 1,
+        stopped: Vec::new(),
     };
     let (judgement, why) = engine_side(Err(past.into())).unwrap_err();
     assert_eq!(judgement, Judgement::Fail);

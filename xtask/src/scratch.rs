@@ -812,8 +812,49 @@ fn cwds(pids: &[u32]) -> BTreeMap<u32, PathBuf> {
 }
 
 /// The strays standing in trees made as `name` that `ours` takes, each
-/// stopped, and their pids in order: none where `ps` does not answer.
+/// stopped, and their pids in order.
 fn stop_strays_in(name: &str, ours: impl Fn(&Path) -> bool) -> Vec<u32> {
+    stop_orphans(|orphans| {
+        let strays = Stray::of(orphans, name, cwds).into_iter();
+        strays
+            .filter(|stray| stray.trees.iter().any(|tree| ours(tree)))
+            .collect()
+    })
+}
+
+/// The orphans whose command line names the files of the program run as
+/// `script`, its path up to its extension's dot, as `FPM\Tester` names
+/// the php-fpm it starts by its configuration `<that>ini`: what a program
+/// killed past its limit started outside its group, stopped with their
+/// groups, and their pids, so a php-fpm master that left by `setsid()`
+/// holds no port past the test that started it (#2777). None for a
+/// program run by a relative name, a snippet's, which names no test, nor
+/// for one whose name has no extension.
+pub(crate) fn stop_naming(script: &Path) -> Vec<u32> {
+    let (Some(path), Some(extension)) = (script.to_str(), script.extension()) else {
+        return Vec::new();
+    };
+    if !script.is_absolute() {
+        return Vec::new();
+    }
+    let stem = &path[..path.len() - extension.len()];
+    stop_orphans(|orphans| {
+        let named = orphans
+            .iter()
+            .filter(|orphan| orphan.command.contains(stem));
+        named
+            .map(|orphan| Stray {
+                pid: orphan.pid,
+                group: orphan.group,
+                trees: Vec::new(),
+            })
+            .collect()
+    })
+}
+
+/// The strays `pick` names among this user's orphans as `ps` lists them,
+/// each stopped, and their pids in order: none where `ps` does not answer.
+fn stop_orphans(pick: impl FnOnce(&[Orphan]) -> Vec<Stray>) -> Vec<u32> {
     let Ok(ps) = std::process::Command::new("ps")
         .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,uid=,command="])
         .output()
@@ -822,12 +863,7 @@ fn stop_strays_in(name: &str, ours: impl Fn(&Path) -> bool) -> Vec<u32> {
     };
     let listed = String::from_utf8_lossy(&ps.stdout);
     let uid = nix::unistd::geteuid().as_raw();
-    let orphans = Orphan::of(&listed, adopters(), uid);
-    let strays = Stray::of(&orphans, name, cwds);
-    let ours: Vec<Stray> = strays
-        .into_iter()
-        .filter(|stray| stray.trees.iter().any(|tree| ours(tree)))
-        .collect();
+    let ours = pick(&Orphan::of(&listed, adopters(), uid));
     ours.iter().for_each(Stray::stop);
     let mut pids: Vec<u32> = ours.iter().map(|stray| stray.pid).collect();
     pids.sort_unstable();

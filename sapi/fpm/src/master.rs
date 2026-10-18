@@ -129,7 +129,7 @@ struct Queued {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Watched {
     Signals,
-    Output { pid: i32, stdout: bool },
+    Output { pid: i32, pipe: crate::stdio::Pipe },
     Ondemand(usize),
 }
 
@@ -820,18 +820,12 @@ impl Fpm {
     fn borrow(&self, fd: RawFd, what: Watched) -> Option<std::os::fd::BorrowedFd<'_>> {
         match what {
             Watched::Signals => self.signal_read.as_ref().map(AsFd::as_fd),
-            Watched::Output { pid, stdout } => self
+            Watched::Output { pid, pipe } => self
                 .pools
                 .iter()
                 .flat_map(|p| p.children.iter())
                 .find(|c| c.pid == pid)
-                .and_then(|c| {
-                    if stdout {
-                        c.stdout.as_ref()
-                    } else {
-                        c.stderr.as_ref()
-                    }
-                })
+                .and_then(|c| pipe.of(c))
                 .map(AsFd::as_fd),
             Watched::Ondemand(_) => self.sockets.by_fd(fd).map(AsFd::as_fd),
         }
@@ -848,11 +842,11 @@ impl Fpm {
 
     /// Watch a child's two pipes, `fpm_stdio_parent_use_pipes`.
     pub(crate) fn watch_output(&mut self, pid: i32, stdout: Option<RawFd>, stderr: Option<RawFd>) {
-        if let Some(fd) = stdout {
-            self.watch(fd, Watched::Output { pid, stdout: true }, false);
-        }
-        if let Some(fd) = stderr {
-            self.watch(fd, Watched::Output { pid, stdout: false }, false);
+        use crate::stdio::Pipe;
+        for (fd, pipe) in [(stdout, Pipe::Stdout), (stderr, Pipe::Stderr)] {
+            if let Some(fd) = fd {
+                self.watch(fd, Watched::Output { pid, pipe }, false);
+            }
         }
     }
 
@@ -934,7 +928,7 @@ impl Fpm {
                 };
                 match what {
                     Watched::Signals => self.got_signal()?,
-                    Watched::Output { pid, stdout } => crate::stdio::child_said(self, pid, stdout),
+                    Watched::Output { pid, pipe } => crate::stdio::child_said(self, pid, pipe),
                     Watched::Ondemand(pool) => crate::pctl::on_socket_accept(self, pool)?,
                 }
             }
