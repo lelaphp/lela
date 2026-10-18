@@ -20,7 +20,6 @@ use anyhow::{Context, Result};
 
 use super::environment::Environment;
 use super::file::Phpt;
-use super::miss::Miss;
 use super::{Judged, Judgement};
 use crate::oracle::{self, Normalise};
 
@@ -168,10 +167,7 @@ impl Refused {
     pub(super) fn judged(self, id: &str, name: &str, why: String) -> Judged {
         match self {
             Refused::Skip => Judged::new(id, name, Judgement::Skip, why),
-            Refused::Bork => {
-                let miss = Miss::bork(&why);
-                Judged::new(id, name, Judgement::Bork, why).keeping(miss)
-            }
+            Refused::Bork => super::borked(id, name, why),
         }
     }
 }

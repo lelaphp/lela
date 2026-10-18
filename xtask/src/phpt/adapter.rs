@@ -30,7 +30,7 @@ use super::file::{self, Phpt};
 use super::miss::Miss;
 use super::phpdbg;
 use super::redirect::{Item, Redirect, Test};
-use super::{Judged, Judgement, Lane, Subset};
+use super::{Judged, Judgement, Lane, Subset, borked};
 use super::{cgi, http};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
@@ -143,12 +143,7 @@ impl<'a> Adapter<'a> {
                         })
                     }));
                 }
-                Err(why) => {
-                    let miss = Miss::bork(&why);
-                    items.push(Item::Reached(
-                        Judged::new(&id, &name, Judgement::Bork, why).keeping(miss),
-                    ));
-                }
+                Err(why) => items.push(Item::Reached(borked(&id, &name, why))),
             }
         }
         Ok(items)
@@ -164,10 +159,7 @@ impl<'a> Adapter<'a> {
         let name = test.name(subset);
         let phpt = match Phpt::load(&test.file) {
             Ok(phpt) => phpt,
-            Err(borked) => {
-                let miss = Miss::bork(&borked.0);
-                return Ok(Judged::new(&id, &name, Judgement::Bork, borked.0).keeping(miss));
-            }
+            Err(why) => return Ok(borked(&id, &name, why.0)),
         };
         // A test of a set that redirects again, which upstream's
         // `TestFile` refuses (run-tests.php:3830-3833); and a redirecting
@@ -178,7 +170,7 @@ impl<'a> Adapter<'a> {
             } else {
                 "a --REDIRECTTEST-- runs as the set it names, and this one was judged as a test"
             };
-            return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(Miss::bork(why)));
+            return Ok(borked(&id, &name, why));
         }
         let Admitted {
             ini,
@@ -200,8 +192,7 @@ impl<'a> Adapter<'a> {
                 );
             }
             Err(Stopped::Occupied(why) | Stopped::Unserved(why)) => {
-                let miss = Miss::bork(&why);
-                return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(miss));
+                return Ok(borked(&id, &name, why));
             }
         };
         // A CGI run's headers stand before its body, parted before the
@@ -216,7 +207,7 @@ impl<'a> Adapter<'a> {
         }
         let Some(expectation) = expectation_of(self.oracle.pin(), &phpt) else {
             let why = "missing section --EXPECT--, --EXPECTF-- or --EXPECTREGEX--";
-            return Ok(Judged::new(&id, &name, Judgement::Bork, why).keeping(Miss::bork(why)));
+            return Ok(borked(&id, &name, why));
         };
         let (met, trouble) = match expectation.met_under(self.oracle, &actual) {
             Ok(met) => (met, String::new()),
@@ -295,11 +286,11 @@ impl<'a> Adapter<'a> {
             match Said::of(&String::from_utf8_lossy(&out.stdout)) {
                 Said::Skip(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
                 Said::Bork(said) => {
-                    let why = format!("invalid output from SKIPIF: {said}");
-                    let miss = Miss::bork(&why);
-                    return Ok(Err(
-                        Judged::new(id, name, Judgement::Bork, why).keeping(miss)
-                    ));
+                    return Ok(Err(borked(
+                        id,
+                        name,
+                        format!("invalid output from SKIPIF: {said}"),
+                    )));
                 }
                 Said::XFail(why) => expected_to_fail = Some(why),
                 Said::Run => {}
