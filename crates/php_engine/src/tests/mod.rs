@@ -49,4 +49,5 @@ pub(crate) mod test_ext;
 mod time_limit;
 #[cfg(debug_assertions)]
 mod walks;
+#[cfg(debug_assertions)]
 mod while_pending;
