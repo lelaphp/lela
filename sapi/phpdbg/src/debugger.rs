@@ -142,6 +142,15 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             crate::init::run(&mut session, &mut Here::Idle { req });
             let quits = session.after_run == AfterRun::Quit;
             let runs = std::mem::take(&mut session.init_runs);
+            if runs && session.stopped.is_none() && session.execution != Execution::BailedOut {
+                // Before the run's compile, php's own after the init files,
+                // under `PHPDBG_DISCARD_OUTPUT` where a run is due
+                // (`Z/sapi/phpdbg/phpdbg.c:1540-1553`): its log written
+                // nowhere, each diagnostic displayed.
+                out::discarded(|| {
+                    prompt::refused_again(&mut session, Some(&mut Here::Idle { req }));
+                });
+            }
             if session.stopped.is_some() {
             } else if runs && session.execution == Execution::BailedOut {
                 // The run they come before finds `in_execution` set, and
@@ -154,7 +163,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             } else if quits {
                 // `-rr`'s run compiles it under `PHPDBG_PREVENT_INTERACTIVE`:
                 // what the compiler says alone, and the session ends.
-                let _ = out::replay(&session.refused);
+                out::replay(&session.refused, || AfterLog::Returned);
                 session.status = Some(255);
                 session.stopped = Some(session::Stop::Quit);
             } else if runs {
@@ -548,7 +557,7 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     let outcome = out::in_log(|| prompt::interactive(&mut session, &mut here));
     let stopped = session.stopped.is_some();
     session::put(session);
-    if stopped || outcome == Outcome::Stopped {
+    if stopped || matches!(outcome, Outcome::Stopped | Outcome::LeftLog) {
         return AfterLog::BailedOut;
     }
     let _ = crate::watch::changed(req);
