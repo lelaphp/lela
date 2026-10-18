@@ -581,13 +581,7 @@ impl Scope {
             return crate::record(store, readings);
         }
         for reading in readings {
-            println!(
-                "{} {} {}: {}",
-                reading.status.as_str(),
-                reading.instrument,
-                reading.scope,
-                reading.message
-            );
+            println!("{reading}");
         }
         println!("witness: a run narrowed to the fences {self} writes no reading");
         crate::reading::Outcome::of(readings).exit()

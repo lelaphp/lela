@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Claim, Claims, Clock, Ctime, ENDED, Held, Journal, Kind, Namespace, Object, Runner, STARTED,
-    Standing, Swept, abandoned, alive, claimed, left, offset, second_of_day, unnamed_left, window,
+    Claim, Claims, Clock, Covers, Ctime, ENDED, Held, Journal, Kind, Namespace, Object, Runner,
+    STARTED, Standing, Swept, abandoned, alive, claimed, left, machine, offset, second_of_day,
+    unnamed_left, window,
 };
 use crate::oracle::{Process, Ran};
 use crate::scratch::Tree;
@@ -535,8 +536,8 @@ fn queues(taken: &[&Object], ids: &[u64]) -> Vec<u64> {
 #[test]
 fn what_is_made_while_another_run_holds_its_claim_is_left_until_both_end() {
     let dir = Tree::new("sysv-held").unwrap();
-    let ours = Claim::within(&dir, "ours").unwrap();
-    let theirs = Claim::within(&dir, "theirs").unwrap();
+    let ours = Claim::laid(&dir, "ours", Covers::Window).unwrap();
+    let theirs = Claim::laid(&dir, "theirs", Covers::Window).unwrap();
     let mut ids =
         perl("print msgget(IPC_PRIVATE, 0) // die $!, ' ', msgget(IPC_PRIVATE, 0) // die $!");
     ids.sort_unstable();
@@ -577,8 +578,11 @@ fn what_is_made_while_another_run_holds_its_claim_is_left_until_both_end() {
 #[test]
 fn an_ended_claim_another_run_held_beside_stands_until_it_ends() {
     let dir = Tree::new("sysv-beside").unwrap();
-    let theirs = Claim::within(&dir, "theirs").unwrap();
-    let path = Claim::within(&dir, "ours").unwrap().path().to_path_buf();
+    let theirs = Claim::laid(&dir, "theirs", Covers::Window).unwrap();
+    let path = Claim::laid(&dir, "ours", Covers::Window)
+        .unwrap()
+        .path()
+        .to_path_buf();
     let clock = Clock::now().unwrap();
     Claims::read(&dir, None).settle(Duration::from_secs(1), &clock);
     assert!(path.exists(), "taken while another run held its claim");
@@ -655,9 +659,9 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
         command.spawn().unwrap()
     };
     let dir = Tree::new("sysv-standing").unwrap();
-    let claim = Claim::within(&dir, "sysv-test").unwrap();
+    let claim = Claim::laid(&dir, "sysv-test", Covers::Window).unwrap();
     let path = claim.path().to_path_buf();
-    let theirs = Claim::within(&dir, "theirs").unwrap();
+    let theirs = Claim::laid(&dir, "theirs", Covers::Window).unwrap();
     let mut program = sleep(true);
     let mut others = [sleep(true), sleep(false), sleep(true)];
     let pids = [program.id(), others[0].id(), others[1].id()];
@@ -709,7 +713,7 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
 #[test]
 fn a_claim_left_unsettled_takes_what_its_journaled_programs_left() {
     let dir = Tree::new("sysv-journaled").unwrap();
-    let claim = Claim::within(&dir, "sysv-test").unwrap();
+    let claim = Claim::laid(&dir, "sysv-test", Covers::Window).unwrap();
     let path = claim.path().to_path_buf();
     let queue = || {
         perl(
@@ -755,7 +759,7 @@ fn what_a_held_claims_processes_are_named_on_is_no_other_runs_to_take() {
     use std::io::Write as _;
 
     let dir = Tree::new("sysv-own").unwrap();
-    let own = Claim::laid(&dir, "phpt", false).unwrap();
+    let own = Claim::laid(&dir, "phpt", Covers::Processes).unwrap();
     writeln!(own.journal().unwrap(), "{STARTED} 0 4242").unwrap();
     let standing = Standing(vec![
         made(Kind::Memory, 1, &[4242], 0, "mitchell", "23:30:00"),
@@ -788,4 +792,23 @@ fn what_a_held_claims_processes_are_named_on_is_no_other_runs_to_take() {
         !path.exists(),
         "a claim of its processes alone goes once let go"
     );
+}
+
+/// A run whose claims a test lays apart reads the claims held in the
+/// machine's directory too (#2902): a phpt subset's claim of its processes
+/// alone, held there, keeps a run laid apart from the segment its test's
+/// process left, which such a run's reclaim took as [`abandoned`] between
+/// the test ending and the subset's own sweep. Only this test's claim and
+/// pid are read; other runs' claims on the machine may stand beside it.
+#[test]
+fn a_run_laid_apart_holds_back_from_what_the_machines_held_claims_name() {
+    use std::io::Write as _;
+
+    let apart = Tree::new("sysv-apart").unwrap();
+    let own = Claim::own("phpt").unwrap();
+    assert_eq!(own.path().parent(), Some(machine().as_path()));
+    writeln!(own.journal().unwrap(), "{STARTED} 0 4294967295").unwrap();
+    assert!(!Claims::read(&apart, None).held.started.contains(&u32::MAX));
+    assert!(Claims::seen(&apart, None).held.started.contains(&u32::MAX));
+    std::fs::remove_file(own.path()).ok();
 }

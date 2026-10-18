@@ -345,6 +345,33 @@ fn chr(req: &mut Request, codepoint: i64) -> Result<Owner<PhpString>, Thrown> {
 /// int(40)
 /// ```
 ///
+/// Across the allocator's classes, a small bin, a `run` of pages and a
+/// huge block, the step is php's (#2661): the product and the 32-byte
+/// header of an empty string, so a string of seven bytes takes the
+/// 40-byte bin where its own allocation would take the 32-byte one.
+///
+/// ```php
+/// echo "repeated, moved\n"; $s = null;
+/// foreach ([1, 7, 8, 24, 100, 1000, 3000, 3072, 4096, 10000, 100000, 3000000] as $n) {
+///     $m = memory_get_usage(); $s = str_repeat('x', $n); echo $n, ' ', memory_get_usage() - $m, "\n"; $s = null;
+/// }
+/// ```
+/// ```expect capture
+/// repeated, moved
+/// 1 40
+/// 7 40
+/// 8 40
+/// 24 56
+/// 100 160
+/// 1000 1280
+/// 3000 3072
+/// 3072 4096
+/// 4096 8192
+/// 10000 12288
+/// 100000 102400
+/// 3000000 3014680
+/// ```
+///
 /// ```php
 /// $s = str_repeat("x", 200000000);
 /// ```

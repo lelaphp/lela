@@ -155,10 +155,10 @@ fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<Str
         cwd: beside.parent(),
         ..Invocation::new(php, Program::Beside(&program))
     })?;
-    Ok(match Said::of(&String::from_utf8_lossy(&ran.stdout)) {
+    Ok(match Said::of(&Said::written(&ran)) {
         Said::Skip(why) => Some(why),
         Said::Bork(said) => Some(format!("invalid output from SKIPIF: {said}")),
-        Said::XFail(_) | Said::Run => None,
+        Said::XFail(_) | Said::Warn(_) | Said::Run => None,
     })
 }
 

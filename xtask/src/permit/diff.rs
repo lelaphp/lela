@@ -11,6 +11,7 @@
 //! reading that denies rather than excuses.
 
 use std::collections::btree_map::{BTreeMap, Entry};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -67,20 +68,14 @@ impl Judged {
 
     /// The lines pre-commit prints: one per finding, the rule id in each.
     pub fn render(&self) -> String {
+        let denials = self.denials().map(|found| ("deny", found));
+        let notes = self
+            .a_persons()
+            .chain(self.notes())
+            .map(|found| ("note", found));
         let mut out = String::new();
-        for (path, finding) in self.denials() {
-            out.push_str("deny ");
-            out.push_str(path);
-            out.push_str(": ");
-            out.push_str(&finding.reason());
-            out.push('\n');
-        }
-        for (path, finding) in self.a_persons().chain(self.notes()) {
-            out.push_str("note ");
-            out.push_str(path);
-            out.push_str(": ");
-            out.push_str(&finding.reason());
-            out.push('\n');
+        for (word, (path, finding)) in denials.chain(notes) {
+            writeln!(out, "{word} {path}: {}", finding.reason()).ok();
         }
         out
     }
