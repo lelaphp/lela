@@ -374,10 +374,7 @@ impl Request {
             let z = o.slot(i);
             return (!z.is_undef()).then(|| Value::of_zval(z));
         }
-        o.properties()?
-            .iter()
-            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-            .map(|(_, z)| Value::of_zval(z))
+        Self::dynamic_prop(o, name)
     }
 
     /// `zend_get_property_offset` over the placed instance properties:
@@ -1239,11 +1236,7 @@ impl Request {
                     && !o.slot_uninit(placed.slot)
                     && !self.lazy_slot(o, placed.slot)
             }
-            None => !o.properties().is_some_and(|table| {
-                table
-                    .iter()
-                    .any(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-            }),
+            None => Self::dynamic_prop(o, name).is_none(),
         }
     }
 
@@ -1920,16 +1913,8 @@ impl Request {
                 return Err(self.unplaced_error(class, name, miss));
             }
             wrong = true;
-        } else {
-            let dynamic = o
-                .properties()
-                .into_iter()
-                .flat_map(|table| table.iter().collect::<Vec<_>>())
-                .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-                .map(|(_, z)| Value::of_zval(z));
-            if let Some(value) = dynamic {
-                return Ok(Owner::take(self, value.deref()));
-            }
+        } else if let Some(value) = Self::dynamic_prop(o, name) {
+            return Ok(Owner::take(self, value.deref()));
         }
         let getter = self.magic_accessor(class, b"__get");
         let issetter = silent
