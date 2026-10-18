@@ -457,7 +457,11 @@ pub struct Request {
     /// served declared, each the unit that holds it and which of its op
     /// arrays is the body: a `Function` of the request's own counts into
     /// this list (design §5.6, §5.14).
-    user_functions: Vec<UserFunction>,
+    user_functions: PinnedRows<UserFunction>,
+    /// The callees of the functions no table holds one for, a
+    /// class's native and a trampoline, each made the first time a
+    /// frame serves it ([`Request::described`]).
+    callees: std::collections::HashMap<Function, Box<crate::readable::Named>>,
     /// The names the request-only units it compiled carry, held while
     /// each unit lives ([`unit_names::UnitNames`]).
     unit_names: unit_names::UnitNames,
@@ -589,6 +593,124 @@ pub(crate) struct UserFunction {
     /// What every call's frame push and activation read of the
     /// function, read once where it is declared ([`FrameShape`]).
     pub(crate) shape: FrameShape,
+    /// The function as another process reads it ([`crate::readable`]):
+    /// its name, its file and its oplines, held where the row stands,
+    /// which never moves ([`PinnedRows`], the arena's column), so a
+    /// frame's header names it by its place.
+    pub(crate) record: crate::readable::Record,
+}
+
+impl UserFunction {
+    /// The record of `body` of `unit` under `name`; none for a body
+    /// the unit has not.
+    pub(crate) fn record(unit: &Unit, body: exec::Body, name: &[u8]) -> crate::readable::Record {
+        exec::body_of(unit, body).map_or_else(crate::readable::Record::default, |code| {
+            crate::readable::Record::user(name, code)
+        })
+    }
+
+    /// Where the function's record stands, what a frame serving it
+    /// names.
+    #[inline]
+    pub(crate) fn callee_at(&self) -> crate::readable::CalleeAt {
+        self.record.at()
+    }
+}
+
+/// Rows that never move once pushed: a first segment, then segments of
+/// doubling size, each filled no further than the size it was made with,
+/// so a row stands where it was pushed for as long as the rows do. What
+/// a frame's header names a function's record in
+/// ([`UserFunction::described`]). A row of the first segment, nearly
+/// every request's every row, is read as a vector's is, one bound and
+/// one index, since every call to a function of the request's reads its
+/// row.
+pub(crate) struct PinnedRows<T> {
+    first: Vec<T>,
+    later: Vec<Vec<T>>,
+    len: usize,
+}
+
+impl<T> Default for PinnedRows<T> {
+    fn default() -> PinnedRows<T> {
+        PinnedRows {
+            first: Vec::new(),
+            later: Vec::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T> PinnedRows<T> {
+    /// The rows the first segment holds; later segment `k` holds this
+    /// many `<< (k + 1)`, from `FIRST * ((2 << k) - 1)` on.
+    const FIRST: usize = 128;
+
+    /// The later segment and the place in it of row `at`, past the
+    /// first segment.
+    fn locate(at: usize) -> (usize, usize) {
+        let biased = at + Self::FIRST;
+        let top = (usize::BITS - 1 - biased.leading_zeros()) as usize;
+        let segment = top - Self::FIRST.trailing_zeros() as usize;
+        (segment - 1, biased - (Self::FIRST << segment))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, at: usize) -> Option<&T> {
+        if let Some(row) = self.first.get(at) {
+            return Some(row);
+        }
+        self.get_later(at)
+    }
+
+    #[cold]
+    fn get_later(&self, at: usize) -> Option<&T> {
+        if at >= self.len || at < Self::FIRST {
+            return None;
+        }
+        let (segment, offset) = Self::locate(at);
+        self.later.get(segment)?.get(offset)
+    }
+
+    pub(crate) fn push(&mut self, row: T) {
+        if self.len < Self::FIRST {
+            if self.first.capacity() == 0 {
+                self.first.reserve_exact(Self::FIRST);
+            }
+            self.first.push(row);
+            self.len += 1;
+            return;
+        }
+        let (segment, _) = Self::locate(self.len);
+        if segment == self.later.len() {
+            self.later
+                .push(Vec::with_capacity(Self::FIRST << (segment + 1)));
+        }
+        if let Some(rows) = self.later.get_mut(segment) {
+            rows.push(row);
+            self.len += 1;
+        }
+    }
+
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.first.iter().chain(self.later.iter().flatten())
+    }
+}
+
+impl<T> IntoIterator for PinnedRows<T> {
+    type Item = T;
+    type IntoIter =
+        std::iter::Chain<std::vec::IntoIter<T>, std::iter::Flatten<std::vec::IntoIter<Vec<T>>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.first
+            .into_iter()
+            .chain(self.later.into_iter().flatten())
+    }
 }
 
 /// What `zend_vm_stack_push_call_frame` and `i_init_func_execute_data`
@@ -899,7 +1021,8 @@ impl Request {
             script_encodings: None,
             buckets,
             aliases: tables.aliases,
-            user_functions: Vec::new(),
+            user_functions: PinnedRows::default(),
+            callees: std::collections::HashMap::new(),
             unit_names: unit_names::UnitNames::default(),
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
@@ -1489,5 +1612,31 @@ mod tests {
             String::from_utf8_lossy(&request.take_body()),
             "\nFatal error: Attempt to destruct pending exception in Unknown on line 0\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod pinned_rows {
+    use super::PinnedRows;
+
+    /// Every row stands where it was pushed while the rows grow past the
+    /// first segment and three later ones, and reads back by its place.
+    #[test]
+    fn a_row_stands_where_it_was_pushed() {
+        let mut rows = PinnedRows::default();
+        let mut places = Vec::new();
+        for at in 0..2000usize {
+            rows.push(at);
+            places.push(std::ptr::from_ref(rows.get(at).unwrap_or(&usize::MAX)).addr());
+        }
+        assert_eq!(rows.len(), 2000);
+        for (at, place) in places.iter().enumerate() {
+            let row = rows.get(at);
+            assert_eq!(row, Some(&at));
+            assert_eq!(row.map(|row| std::ptr::from_ref(row).addr()), Some(*place));
+        }
+        assert_eq!(rows.get(2000), None);
+        assert!(rows.iter().copied().eq(0..2000));
+        assert!(rows.into_iter().eq(0..2000));
     }
 }

@@ -1761,6 +1761,14 @@ fn run_on<P: HoldsCoroutine>(
 ) -> Result<Result<Switched<Transfer>, php_heap::Fatal>, Thrown> {
     loop {
         req.switch_execution(&mut own);
+        // `fiber->stack_bottom->prev_execute_data`: the resumer's innermost
+        // frame under `zend_fiber_resume`, nothing otherwise, on the chain
+        // another process reads as on the one a backtrace walks.
+        let below = match by {
+            Resumer::Native => own.vm.stack.innermost(),
+            Resumer::Unlinked => 0,
+        };
+        req.vm_mut().stack.link_below(below);
         req.fibers_mut().running.push(Running {
             fiber: Context::of::<P>(object),
             below: own,

@@ -110,7 +110,7 @@ pub fn serve(engine: &Engine) -> i32 {
         let description = describe(&s, plan);
         session::put(s);
         let (observed, mut sink) =
-            engine.serve(description, Box::new(Sink), || HostServes::Program);
+            engine.serve(description, Box::new(Sink), |_| HostServes::Program);
         if observed.start_failed {
             return start_failed(sink.as_mut());
         }
@@ -615,7 +615,7 @@ mod tests {
         let s = session::take().unwrap_or_default();
         let sink = Box::new(Capture::default());
         let (observed, mut sink) =
-            engine.serve(describe(&s, Plan::Idle), sink, || HostServes::Program);
+            engine.serve(describe(&s, Plan::Idle), sink, |_| HostServes::Program);
         assert!(observed.start_failed);
         assert_eq!(start_failed(sink.as_mut()), 1);
         let sink: Box<dyn std::any::Any> = sink;

@@ -713,6 +713,11 @@ pub(crate) struct Shared {
     /// declarations alone, which the compiler reads as they stand on
     /// every compile ([`Declared`]).
     pub(crate) functions: Vec<FunctionDecl>,
+    /// Each native and then each native method as another process reads
+    /// it ([`crate::readable`]), one row per number a `Function` below
+    /// the arena's takes: the name its declaration holds, which stands
+    /// as long as the engine does.
+    pub(crate) callees: Box<[crate::readable::Record]>,
     /// `functions` by name, any case, `CG(function_table)`'s keys.
     function_names: Names<Folded>,
     /// Each native's entry, one row per row of `functions`, the
@@ -989,6 +994,38 @@ pub(crate) struct NativeMethod {
     /// Its `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, decoded from
     /// the declaration's attributes where the method is linked.
     pub(crate) flags: crate::attributes::Flags,
+}
+
+/// The callees of the natives and then of the native methods, in the
+/// numbers their `Function`s take ([`Shared::callees`]): each under
+/// the name its declaration holds, php's `common.function_name`, which
+/// for a method is the method's alone.
+fn native_callees(
+    functions: &[FunctionDecl],
+    methods: &[NativeMethod],
+    classes: &[ClassDecl],
+    trampolines: &[MethodDecl],
+) -> Box<[crate::readable::Record]> {
+    let method_name = |method: &NativeMethod| -> &[u8] {
+        let decl = match method.at {
+            MethodAt::Declared { class, at } => classes
+                .get(class.0 as usize)
+                .and_then(|class| class.methods.get(at as usize)),
+            MethodAt::Trampoline { at, .. }
+            | MethodAt::ParentHook { at, .. }
+            | MethodAt::Unlisted { at } => trampolines.get(at as usize),
+        };
+        decl.map_or(&[][..], |decl| &decl.function.name.0)
+    };
+    functions
+        .iter()
+        .map(|decl| crate::readable::Record::native(&decl.name.0))
+        .chain(
+            methods
+                .iter()
+                .map(|method| crate::readable::Record::native(method_name(method))),
+        )
+        .collect()
 }
 
 /// Where a native method's declaration stands: among its class's own,
@@ -3443,6 +3480,7 @@ impl EngineBuilder {
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
+        let callees = native_callees(&functions, &methods, &classes, &trampolines);
         let parents: Vec<Option<ClassId>> = classes
             .iter()
             .map(|decl| class_at(&decl.parent.as_ref()?.0))
@@ -3477,6 +3515,7 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                callees,
                 function_names,
                 entries,
                 replaced,
@@ -4745,7 +4784,7 @@ impl Engine {
         &self,
         description: RequestDescription,
         sink: Box<dyn OutputSink + Send>,
-        look: impl FnOnce() -> HostServes,
+        look: impl FnOnce(crate::readable::Innermost) -> HostServes,
     ) -> (Observables, Box<dyn OutputSink + Send>) {
         let (observed, _, sink) = self.serve_looked(description, sink, look, false);
         (observed, sink)
@@ -4757,7 +4796,7 @@ impl Engine {
         &self,
         description: RequestDescription,
         sink: Lent,
-        look: impl FnOnce() -> HostServes,
+        look: impl FnOnce(crate::readable::Innermost) -> HostServes,
         traced: bool,
     ) -> (Observables, Trace, Lent) {
         let source = description.source.clone();
@@ -4765,7 +4804,10 @@ impl Engine {
             Ok(req) => req,
             Err((refused, sink)) => return (refused, Trace::default(), sink),
         };
-        self.serve_in(&mut req, source.as_deref(), look());
+        // The request stands here until its shutdown, and so does the
+        // word its frames' chain starts at.
+        let innermost = req.innermost();
+        self.serve_in(&mut req, source.as_deref(), look(innermost));
         self.shutdown(&mut req)
     }
 
@@ -5451,7 +5493,7 @@ impl Engine {
         description: RequestDescription,
         sink: Lent,
     ) -> (Observables, Trace, Lent) {
-        self.serve_looked(description, sink, || HostServes::Program, true)
+        self.serve_looked(description, sink, |_| HostServes::Program, true)
     }
 }
 

@@ -763,7 +763,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     // is an object, else `Z_CE(EX(This))`, the frame's called scope.
     let called_scope = receiver
         .map(|object| object.class())
-        .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+        .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
     let closure = ClosureInfo {
         function,
         this,
@@ -1707,8 +1707,10 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
     let Cached::Function(function) = req.cached(frame, CacheSlot(op.out)) else {
         return None;
     };
-    let room = req.user_function(function)?.shape.room(op.extended_value);
-    let header = exec::Header::call(function, op.extended_value);
+    let user = req.user_function(function)?;
+    let room = user.shape.room(op.extended_value);
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.callee = user.callee_at();
     Some(match req.push_room(room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
@@ -2678,7 +2680,7 @@ fn push_dynamic(
     };
     let mut header = exec::Header::call(target.function, op.extended_value);
     header.set_receiver(target.this.map(exec::Receiver::Owned));
-    header.called_scope = target.called_scope;
+    header.set_called_scope(target.called_scope);
     header.closure = target.closure;
     header.info.set_dynamic(true);
     if let Some(name) = target.name {
@@ -4719,7 +4721,7 @@ fn arg_type_error(
 /// where this is nothing. A frame a native pushed from an attribute's
 /// site ([`exec::Site`]) names the site.
 fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
-    let Some(caller) = req.vm().at(frame)?.caller.frame() else {
+    let Some(caller) = req.vm().at(frame)?.caller().frame() else {
         // A call a native served from an attribute's site, which is
         // user code (`zend_get_attribute_object`'s dummy frame).
         return req
@@ -5018,7 +5020,7 @@ pub(crate) fn new<T: Tier>(
     });
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this.map(exec::Receiver::Owned));
-    header.called_scope = constructor.map(|_| class);
+    header.set_called_scope(constructor.map(|_| class));
     pushed(req, frame, header)
 }
 
@@ -5401,14 +5403,14 @@ fn static_call_frame(
     {
         let forwarded = receiver
             .map(|this| this.class())
-            .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+            .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
         (None, forwarded.unwrap_or(class))
     } else {
         (None, class)
     };
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this);
-    header.called_scope = Some(called);
+    header.set_called_scope(Some(called));
     pushed(req, frame, header)
 }
 
@@ -5512,10 +5514,10 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     };
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(receiver);
-    header.called_scope = Some(match this {
+    header.set_called_scope(Some(match this {
         Some(this) if !trampoline => this.class(),
         _ => declaring,
-    });
+    }));
     let call = req.push_call(header)?;
     // The trampoline reads the property off the name it was built
     // under, php's `internal_function.reserved[0]`; a hook's own body
@@ -5755,9 +5757,10 @@ fn inline_init_method_call(
     if !instance {
         return None;
     }
-    let room = req.call_room(function, op.extended_value);
+    let (room, callee) = req.call_room(function, op.extended_value);
     let mut header = exec::Header::call(function, op.extended_value);
-    header.called_scope = Some(class);
+    header.callee = callee;
+    header.set_called_scope(Some(class));
     header.set_receiver(Some(match at {
         None => exec::Receiver::lent(object),
         Some(_) => exec::Receiver::Owned(object),
@@ -5860,7 +5863,7 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     };
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this);
-    header.called_scope = Some(called);
+    header.set_called_scope(Some(called));
     pushed(req, frame, header)
 }
 
@@ -11080,7 +11083,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
                 .vm()
                 .this(frame)
                 .map(|this| this.class())
-                .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope))
+                .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope))
                 .unwrap_or(scope),
         }
     } else {
@@ -20865,7 +20868,7 @@ pub(crate) fn get_called_class<T: Tier>(
         .vm()
         .this(frame)
         .map(|this| this.class())
-        .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+        .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
     let Some(class) = called else {
         let thrown = crate::api::raising::throw_error(
             req,

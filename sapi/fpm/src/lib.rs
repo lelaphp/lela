@@ -295,7 +295,7 @@ pub fn main() -> ExitCode {
             // A request whose start fails is `FPM_EXIT_SOFTWARE`
             // (`Z/sapi/fpm/fpm/fpm_main.c:1727-1734`).
             let (served, _) =
-                engine(&ini).serve(description, Box::new(Stdout), || HostServes::Program);
+                engine(&ini).serve(description, Box::new(Stdout), |_| HostServes::Program);
             if served.start_failed {
                 crate::master::EXIT_SOFTWARE
             } else {

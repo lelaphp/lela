@@ -76,14 +76,19 @@ impl Request {
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let caller = self.innermost_user_frame();
         let mut header = exec::Header::of(None, code);
+        // `zend_execute`'s `ZEND_CALL_TOP_CODE`.
+        header.info.set_top_code(true);
+        let record = Box::new(exec::code_record(&unit));
+        header.callee = record.at();
         let pushed = self.vm.push(&mut self.heap, slots, 0, header.clone());
         let frame = self.fatal_of(pushed)?;
         let table = caller.map(|caller| self.rebuild_symbol_table(caller));
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
-        header.caller = caller.map_or(exec::Caller::Outside, exec::Caller::Opline);
+        header.set_caller(caller.map_or(exec::Caller::Outside, exec::Caller::Opline));
         header.annex = Some(self.annexes_mut().insert(exec::Annex {
             unit: Some(unit),
+            record: Some(record),
             symbol_table: table,
             ..exec::Annex::default()
         }));

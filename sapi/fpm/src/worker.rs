@@ -716,9 +716,9 @@ impl Worker {
             board: Some(self.board()),
         });
         let query = env.get(b"QUERY_STRING");
-        let (served, _) = self
-            .engine
-            .serve(description, response, || self.look(&info, head_only, query));
+        let (served, _) = self.engine.serve(description, response, |_| {
+            self.look(&info, head_only, query)
+        });
         if served.start_failed {
             return Served::StartFailed;
         }

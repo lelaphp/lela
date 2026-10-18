@@ -110,10 +110,12 @@ impl ClassId {
         self.0 & ClassId::LOCAL == 0
     }
 
-    /// The request's own class at `at` among its rows.
+    /// The request's own class at `at` among its rows. No class is
+    /// numbered `u32::MAX`, which a frame's header leaves to its called
+    /// scope's `None`.
     pub(crate) fn local(at: usize) -> Option<ClassId> {
         let at = u32::try_from(at).ok()?;
-        (at & ClassId::LOCAL == 0).then_some(ClassId(at | ClassId::LOCAL))
+        (at & ClassId::LOCAL == 0 && at != !ClassId::LOCAL).then_some(ClassId(at | ClassId::LOCAL))
     }
 
     /// Where the class stands among the request's own rows, if it is one.
