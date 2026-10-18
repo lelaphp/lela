@@ -435,7 +435,7 @@ impl Refusal {
     pub(crate) fn error(&self, raised: Vec<php_unit::Diagnostic>) -> CompileError {
         CompileError {
             level: self.level,
-            message: self.message.clone(),
+            message: self.message.clone().into(),
             line: self.line,
             raised,
             thrown: self.thrown,
@@ -1022,7 +1022,7 @@ mod tests {
         assert_eq!(
             refused
                 .err()
-                .map(|e| (e.message, e.line, e.thrown, e.raised.len())),
+                .map(|e| (e.message.into_owned(), e.line, e.thrown, e.raised.len())),
             Some(("Encoding must be a literal".to_owned(), 2, true, 1))
         );
     }

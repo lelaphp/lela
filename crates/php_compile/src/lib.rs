@@ -45,6 +45,8 @@ pub mod syntax {
     };
 }
 
+use std::borrow::Cow;
+
 use php_heap::{Fatal, FatalReason, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::{Arena, Parsed};
@@ -306,7 +308,10 @@ impl SourceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
     pub level: Level,
-    pub message: String,
+    /// php's text, a constant one borrowed where it is one, so a
+    /// refusal the compiler makes and drops, a fold that finds no
+    /// constant among them, allocates nothing.
+    pub message: Cow<'static, str>,
     pub line: u32,
     pub raised: Vec<Diagnostic>,
     /// Whether php throws the refusal as a `CompileError`,
@@ -414,7 +419,7 @@ fn compile_in(
     let opened =
         multibyte::open(multibyte.encodings, source, from).map_err(|refused| CompileError {
             level: Level::CompileError,
-            message: refused.message(),
+            message: refused.message().into(),
             line: 0,
             raised: Vec::new(),
             thrown: false,
@@ -456,7 +461,7 @@ fn export_in(
     if let Some(fatal) = parsed.diagnostics.iter().find(|d| d.level.is_fatal()) {
         return Err(CompileError {
             level: level_of(fatal.level),
-            message: fatal.message.clone(),
+            message: fatal.message.clone().into(),
             line: fatal.line,
             raised: Vec::new(),
             thrown: false,
@@ -528,7 +533,7 @@ fn compile_scanned<'p>(
         if diagnostic.level.is_fatal() {
             return Err(CompileError {
                 level,
-                message: diagnostic.message.clone(),
+                message: diagnostic.message.clone().into(),
                 line: diagnostic.line,
                 raised,
                 thrown: false,
@@ -567,7 +572,7 @@ fn compile_scanned<'p>(
             if let Err(fatal) = interned {
                 return Err(CompileError {
                     level: Level::Error,
-                    message: fatal_message(fatal),
+                    message: fatal_message(fatal).into(),
                     line: unit.main.line_end,
                     raised: std::mem::take(&mut unit.diagnostics),
                     thrown: false,
@@ -4376,7 +4381,7 @@ mod tests {
 
     /// The message one source refuses with, or nothing.
     fn refused_message(source: &[u8]) -> Option<String> {
-        refused(source).map(|e| e.message)
+        refused(source).map(|e| e.message.into_owned())
     }
 
     /// The compile error one source refuses with, or nothing.
@@ -4506,7 +4511,7 @@ mod tests {
                 }
                 (None, None) => {}
                 (found, wanted) => assert_eq!(
-                    found.map(|error| error.message),
+                    found.map(|error| error.message.into_owned()),
                     wanted.map(str::to_owned),
                     "{:?}",
                     String::from_utf8_lossy(source)
@@ -4524,7 +4529,7 @@ mod tests {
     fn an_unread_expression_inside_parentheses_names_the_expression() {
         let compiled = || CompileError {
             level: Level::Parse,
-            message: String::from("compiled"),
+            message: String::from("compiled").into(),
             line: 0,
             raised: Vec::new(),
             thrown: false,
@@ -5091,7 +5096,7 @@ mod tests {
         ] {
             let error = refused(source).unwrap_or_else(|| CompileError {
                 level: Level::Parse,
-                message: String::from("compiled"),
+                message: String::from("compiled").into(),
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
@@ -5205,7 +5210,7 @@ mod tests {
             &mut strings,
         )
         .err()
-        .map(|e| (e.level, e.message, e.line));
+        .map(|e| (e.level, e.message.into_owned(), e.line));
         assert_eq!(
             refused,
             Some((
@@ -5373,7 +5378,7 @@ mod tests {
             let mut strings = php_heap::Strings::new();
             compile_parsed(source, &bundled(), &mut strings)
                 .err()
-                .map(|e| e.message)
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(
             refused(b"<?php const true = 1;").as_deref(),
@@ -5435,7 +5440,7 @@ mod tests {
             let mut strings = php_heap::Strings::new();
             compile_parsed(source, &bundled(), &mut strings)
                 .err()
-                .map(|e| e.message)
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(
             refused(b"<?php echo 1; declare(strict_types=1);").as_deref(),
@@ -5935,7 +5940,7 @@ mod tests {
             let mut strings = php_heap::Strings::new();
             compile_parsed(source, &bundled(), &mut strings)
                 .err()
-                .map(|e| e.message)
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(
             refused(b"<?php $this += 1;").as_deref(),
@@ -6141,7 +6146,7 @@ mod tests {
             let mut strings = php_heap::Strings::new();
             compile_parsed(source, &bundled(), &mut strings)
                 .err()
-                .map(|e| (e.level, e.message, e.line))
+                .map(|e| (e.level, e.message.into_owned(), e.line))
         };
         let compile_error =
             |message: &str, line| Some((Level::CompileError, message.to_string(), line));
@@ -6241,7 +6246,7 @@ mod tests {
             let mut strings = php_heap::Strings::new();
             compile_parsed(source, &bundled(), &mut strings)
                 .err()
-                .map(|e| (e.level, e.message, e.line))
+                .map(|e| (e.level, e.message.into_owned(), e.line))
         };
         let compile_error =
             |message: &str, line| Some((Level::CompileError, message.to_string(), line));
@@ -8336,7 +8341,7 @@ class C {
             let mut strings = php_heap::Strings::new();
             compile_parsed(source, &bundled(), &mut strings)
                 .err()
-                .map(|e| e.message)
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(refused(b"<?php echo E::class;").as_deref(), None);
         assert_eq!(refused(b"<?php f($o->p, name: $o->q);").as_deref(), None);
@@ -8385,7 +8390,7 @@ class C {
              \x20    4: 0004 - 0005 (new)\n\
              \x20    15: 0022 - 0023 (new)\n"
         );
-        let refused_message = |source: &[u8]| refused(source).map(|e| e.message);
+        let refused_message = |source: &[u8]| refused(source).map(|e| e.message.into_owned());
         assert_eq!(
             refused_message(b"<?php function f() { return self::X; }").as_deref(),
             Some("Cannot use \"self\" when no class scope is active")
@@ -8645,7 +8650,7 @@ class C {
         ] {
             let error = refused(source).unwrap_or_else(|| CompileError {
                 level: Level::Parse,
-                message: String::from("compiled"),
+                message: String::from("compiled").into(),
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
@@ -9070,7 +9075,7 @@ class C {
     fn a_jump_out_of_a_finally_block_is_phps_compile_error() {
         let out = refused(b"<?php\nforeach ([1] as $v) { try { echo 1; } finally {\nbreak; } }\n");
         assert_eq!(
-            out.map(|e| (e.message, e.line)),
+            out.map(|e| (e.message.into_owned(), e.line)),
             Some((String::from("jump out of a finally block is disallowed"), 3))
         );
         let inside = refused(
@@ -9121,12 +9126,12 @@ class C {
     fn a_goto_php_refuses_is_phps_compile_error() {
         let undefined = refused(b"<?php\ngoto missing;\n");
         assert_eq!(
-            undefined.map(|e| (e.message, e.line)),
+            undefined.map(|e| (e.message.into_owned(), e.line)),
             Some((String::from("'goto' to undefined label 'missing'"), 2))
         );
         let into = refused(b"<?php\ngoto inside;\nwhile (true) { inside: break; }\n");
         assert_eq!(
-            into.map(|e| (e.message, e.line)),
+            into.map(|e| (e.message.into_owned(), e.line)),
             Some((
                 String::from("'goto' into loop or switch statement is disallowed"),
                 2
@@ -9134,17 +9139,17 @@ class C {
         );
         let twice = refused(b"<?php\na:\na:\n");
         assert_eq!(
-            twice.map(|e| (e.message, e.line)),
+            twice.map(|e| (e.message.into_owned(), e.line)),
             Some((String::from("Label 'a' already defined"), 3))
         );
         let out = refused(b"<?php\ntry { echo 1; } finally { goto out; }\nout: echo 2;\n");
         assert_eq!(
-            out.map(|e| e.message),
+            out.map(|e| e.message.into_owned()),
             Some(String::from("jump out of a finally block is disallowed"))
         );
         let inside = refused(b"<?php\ngoto inside;\ntry { echo 1; } finally { inside: echo 2; }\n");
         assert_eq!(
-            inside.map(|e| e.message),
+            inside.map(|e| e.message.into_owned()),
             Some(String::from("jump into a finally block is disallowed"))
         );
     }
@@ -9188,7 +9193,7 @@ class C {
     fn a_try_with_neither_a_catch_nor_a_finally_is_phps_compile_error() {
         let refused = refused(b"<?php\ntry { echo 1; }\n");
         assert_eq!(
-            refused.map(|e| e.message),
+            refused.map(|e| e.message.into_owned()),
             Some(String::from("Cannot use try without catch or finally"))
         );
     }
@@ -9343,7 +9348,7 @@ class C {
         ];
         for (source, message) in cases {
             assert_eq!(
-                refused(source).map(|e| e.message),
+                refused(source).map(|e| e.message.into_owned()),
                 Some(String::from(*message)),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -9433,7 +9438,7 @@ class C {
         ];
         for (source, message) in cases {
             assert_eq!(
-                refused(source).map(|e| e.message),
+                refused(source).map(|e| e.message.into_owned()),
                 Some(String::from(*message)),
                 "{}",
                 String::from_utf8_lossy(source)

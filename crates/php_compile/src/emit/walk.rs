@@ -26,6 +26,7 @@ use php_syntax::tree::{
 use php_syntax::{Parsed, SyntaxKind, TextRange, tree};
 use php_unit::Level;
 use php_unit::decl::{ClassKind, Visibility};
+use std::borrow::Cow;
 
 mod expr;
 mod hooks;
@@ -341,7 +342,7 @@ impl Emit<'_> {
     fn internal(&self, what: impl AsRef<str>) -> CompileError {
         CompileError {
             level: Level::Error,
-            message: format!("InternalError: {}", what.as_ref()),
+            message: format!("InternalError: {}", what.as_ref()).into(),
             line: self.line,
             raised: Vec::new(),
             thrown: false,
@@ -1305,7 +1306,8 @@ impl Emit<'_> {
                 level: Level::Parse,
                 message: String::from(
                     "syntax error, unexpected token \"{\", expecting \",\" or \";\"",
-                ),
+                )
+                .into(),
                 line: at,
                 raised: Vec::new(),
                 thrown: false,
@@ -1389,7 +1391,7 @@ impl Emit<'_> {
 pub(super) fn unread(line: u32, what: &str) -> CompileError {
     CompileError {
         level: Level::Parse,
-        message: format!("{what} this compiler cannot read yet"),
+        message: format!("{what} this compiler cannot read yet").into(),
         line,
         raised: Vec::new(),
         thrown: false,
@@ -1409,7 +1411,7 @@ fn class_name_kind(kind: ClassKind) -> &'static str {
 }
 
 /// php's compile error at the node's own line.
-pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
+pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> CompileError {
     CompileError {
         level: Level::CompileError,
         message: message.into(),
@@ -1441,7 +1443,7 @@ pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
 /// CompileError: __HALT_COMPILER() can only be used from the outermost scope
 /// CompileError: Encoding must be a literal
 /// ```
-pub(super) fn thrown(line: u32, message: impl Into<String>) -> CompileError {
+pub(super) fn thrown(line: u32, message: impl Into<Cow<'static, str>>) -> CompileError {
     CompileError {
         thrown: true,
         ..refused(line, message)

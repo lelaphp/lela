@@ -91,6 +91,7 @@
 //! `INIT_ARRAY` over the first element and `ADD_ARRAY_ELEMENT` over each
 //! after it, as `zend_compile_array` emits them.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::num::NonZeroI64;
 
@@ -1461,7 +1462,8 @@ pub(crate) fn unit(
                 level: Level::Error,
                 message: String::from(
                     "InternalError: a dynamic function definition whose body never landed",
-                ),
+                )
+                .into(),
                 line,
                 raised: emit.diagnostics,
                 thrown: false,
@@ -1596,7 +1598,8 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
                 "InternalError: {} at opline {at} jumps back to {:04} {what}",
                 op.opcode.name().trim_start_matches("ZEND_"),
                 target.0
-            ),
+            )
+            .into(),
             line: op.lineno,
             raised: Vec::new(),
             thrown: false,
@@ -1744,7 +1747,7 @@ impl<'a> Emit<'a> {
     /// The compile-time fatal for what stands on the statement's line:
     /// this compiler's sentence for what it cannot read yet, which the
     /// engine renders as the parse error #163 framed it as.
-    fn fatal(&self, message: impl Into<String>) -> CompileError {
+    fn fatal(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         CompileError {
             level: Level::Parse,
             message: message.into(),
@@ -6503,7 +6506,7 @@ impl<'a> Emit<'a> {
         let on_target = targets & target != 0;
         let refused = |message: String| CompileError {
             level: Level::Error,
-            message,
+            message: message.into(),
             line,
             raised: Vec::new(),
             thrown: false,
@@ -7271,7 +7274,7 @@ impl<'a> Emit<'a> {
             php_link::Linked::Linked => Ok(true),
             php_link::Linked::Refused(refused) => Err(CompileError {
                 level: refused.refusal.level(),
-                message: refused.refusal.to_string(),
+                message: refused.refusal.to_string().into(),
                 line: refused.site.line,
                 raised: Vec::new(),
                 thrown: false,
@@ -9896,7 +9899,7 @@ impl<'a> Emit<'a> {
             .map_or(self.line, |op| op.lineno);
         let refused = |message: String| CompileError {
             level: Level::CompileError,
-            message,
+            message: message.into(),
             line,
             raised: Vec::new(),
             thrown: false,
@@ -10008,7 +10011,7 @@ impl<'a> Emit<'a> {
                 .map_or(self.line, |op| op.lineno);
             return Err(CompileError {
                 level: Level::CompileError,
-                message: String::from(refused),
+                message: String::from(refused).into(),
                 line,
                 raised: Vec::new(),
                 thrown: false,
@@ -10622,7 +10625,7 @@ impl<'a> Emit<'a> {
     /// compiler stands on: php's own sentence for what its compiler
     /// refuses after the parse, which ends the request as its
     /// `E_COMPILE_ERROR` does.
-    fn compile_error(&self, message: impl Into<String>) -> CompileError {
+    fn compile_error(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         CompileError {
             level: Level::CompileError,
             message: message.into(),
@@ -15304,7 +15307,7 @@ impl<'a> Emit<'a> {
     }
 
     /// A node [`Self::constant_expr`] folds to nothing, refused as `why`.
-    fn no_constant(&self, why: &str) -> Result<Zval, CompileError> {
+    fn no_constant(&self, why: &'static str) -> Result<Zval, CompileError> {
         Err(self.fatal(why))
     }
 
@@ -19776,7 +19779,7 @@ mod tests {
         let refused = |oplines: &[Opline]| {
             headers_numbered(oplines, &entry)
                 .err()
-                .map(|refused| (refused.level, refused.message))
+                .map(|refused| (refused.level, refused.message.into_owned()))
         };
         assert_eq!(
             refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::Jmp, 0, 2)]),
