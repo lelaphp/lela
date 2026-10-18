@@ -222,20 +222,17 @@ fn ctype_alnum(req: &mut Request, text: Value) -> bool {
 /// bool(false)
 /// ```
 ///
-/// Past 0x7F the class is the request's `LC_CTYPE`'s: the host's
-/// `C.UTF-8`, where a request starts, and `fr_FR.ISO8859-1` read
-/// `\xE9` as a letter, and `C` reads nothing there:
+/// Past 0x7F the class is the request's `LC_CTYPE`'s: `fr_FR.ISO8859-1`
+/// reads `\xE9` as a letter, and `C` reads nothing there. Under the
+/// `C.UTF-8` a request starts in, it is the C library's: macOS's classes
+/// those bytes and glibc's none, which this crate's `utf8_locale` test
+/// holds for macOS, so no fence pins it.
 ///
 /// ```php
-/// var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"), ctype_upper("\xC9"), ctype_space("\xA0"));
 /// setlocale(LC_CTYPE, "fr_FR.ISO8859-1"); var_dump(ctype_alpha("\xE9"), ctype_lower("\xE9"), ctype_upper("\xC9"), ctype_digit("\xB2"));
 /// setlocale(LC_CTYPE, "C"); var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"));
 /// ```
 /// ```expect locale=fr_FR.ISO8859-1
-/// bool(true)
-/// bool(true)
-/// bool(true)
-/// bool(true)
 /// bool(true)
 /// bool(true)
 /// bool(true)
