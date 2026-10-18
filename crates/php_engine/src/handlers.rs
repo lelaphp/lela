@@ -20624,25 +20624,9 @@ pub(crate) fn func_get_args<T: Tier>(
         0
     };
     let arguments = req.frame_arguments(frame);
-    let copied = (|| -> Result<PhpArray, Thrown> {
-        if arguments.len() <= skip {
-            return Ok(PhpArray::empty());
-        }
-        let mut array = req.array()?;
-        for argument in arguments.into_iter().skip(skip) {
-            let value = argument.deref();
-            let value = if value.tag() == TypeTag::Undef {
-                Value::null()
-            } else {
-                value
-            };
-            array.append(req, Owner::take(req, value))?;
-        }
-        Ok(array)
-    })();
-    match copied {
+    match crate::natives::copied_arguments(req, arguments, skip) {
         Ok(array) => {
-            set_out(req, frame, code, op, Value::array(array));
+            set_out(req, frame, code, op, Value::array(array.hand_on()));
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),

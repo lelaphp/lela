@@ -50,7 +50,7 @@ mod classes;
 mod errors;
 mod functions;
 
-pub(crate) use functions::ZEND_VERSION;
+pub(crate) use functions::{ZEND_VERSION, copied_arguments};
 
 /// Where one of [`standard`]'s natives stands among `ext/standard`'s
 /// own in `basic_functions.stub.php`, which is the order
