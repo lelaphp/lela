@@ -11,7 +11,7 @@ description = "The opcache extension, php-src/ext/opcache"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, the one workspace dependency. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 # `opcache.preload_user`'s account through `nix` (the user database and,
