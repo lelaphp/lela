@@ -27,7 +27,7 @@ pub(crate) struct Row {
     #[serde(flatten)]
     head: Head,
     /// `ms`, a run's time, or `rps`, its clients' requests a second.
-    unit: &'static str,
+    unit: Unit,
     /// The median of the paired per-rep deltas, in the unit.
     delta_median: Option<f64>,
     /// Their interquartile range, in the unit.
@@ -51,9 +51,9 @@ impl PerReading for Row {
     const INSTRUMENT: &'static str = INSTRUMENT;
 
     fn of(reading: &Reading) -> Row {
-        let unit = Unit::of(reading).suffix();
+        let unit = Unit::of(reading);
         let n = |key: &str| reading.numbers.get(key).map(|n| n.as_f64());
-        let of = |key: &str| n(&format!("{key}_{unit}"));
+        let of = |key: &str| n(&unit.key(key));
         let reps = count(reading, "reps");
         let quartiles = of("delta_q1").zip(of("delta_q3"));
         Row {

@@ -26,6 +26,7 @@
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, PoisonError};
@@ -395,8 +396,11 @@ pub(crate) fn by_fpm(
 /// [`by_fpm`] asks once and a bench arm asks each rep (#2351, #2660).
 /// Ended when dropped.
 pub(crate) struct Fpm {
-    /// Held only while a client connects, so the master's end is read.
+    /// Held only where a client cannot reach `address` at once,
+    /// while [`Pool::connect`] waits for the master to listen.
     pool: Mutex<Pool>,
+    /// Where the pool listens.
+    address: SocketAddr,
     params: Vec<(String, Vec<u8>)>,
     body: Vec<u8>,
     timeout: Duration,
@@ -424,15 +428,10 @@ impl Fpm {
         // `clear_env`, so `$_SERVER` holds nothing of the process's
         // environment, as makala's holds nothing.
         let sockets = Tree::new("mkf")?;
+        let pool = Pool::start(oracle, host, &sockets, &[], ini, (true, children))?;
         Ok(Fpm {
-            pool: Mutex::new(Pool::start(
-                oracle,
-                host,
-                &sockets,
-                &[],
-                ini,
-                (true, children),
-            )?),
+            address: pool.address(),
+            pool: Mutex::new(pool),
             params: mapped(pin.fastcgi()?, http, &root, script, ports),
             body: http.body.clone(),
             timeout: Duration::from_secs(recipe.limits.timeout_s),
@@ -443,7 +442,13 @@ impl Fpm {
     /// The request handed once more: what it wrote on `FCGI_STDOUT` and
     /// `FCGI_STDERR`.
     pub(crate) fn ask(&self) -> Result<(Vec<u8>, Vec<u8>)> {
-        let stream = (self.pool.lock().unwrap_or_else(PoisonError::into_inner)).connect()?;
+        // Once the pool listens its clients reach it at once, without the
+        // lock; before, or where it refuses, through `Pool::connect`, which
+        // waits for it and says why a master ended.
+        let stream = match UnixStream::connect_addr(&self.address) {
+            Ok(stream) => stream,
+            Err(_) => (self.pool.lock().unwrap_or_else(PoisonError::into_inner)).connect()?,
+        };
         stream.set_read_timeout(Some(self.timeout))?;
         let pairs = (self.params.iter()).map(|(n, v)| (n.as_bytes(), v.as_slice()));
         round(stream, pairs, Some(&self.body))

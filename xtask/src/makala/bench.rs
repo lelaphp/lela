@@ -26,7 +26,7 @@
 //! default request threads and a pool of one child. `makala-fpm-c8/<workload>`
 //! is §9.2's worker-throughput bar, "8 threads, one process ≥ php-fpm
 //! with 8 workers" (#2336's ruling, #2660): [`CLIENTS`] clients a rep, each
-//! asking until [`SECONDS`] have passed and finishing the request it has
+//! asking until [`ASKING`] have passed and finishing the request it has
 //! in flight, against a makala of [`CLIENTS`] request threads and a pool of
 //! `pm = static`, `pm.max_children` [`CLIENTS`], behind the same clients as
 //! the latency series, one connection a request. Each arm's rep is the
@@ -72,18 +72,45 @@ fn ini() -> Vec<String> {
 enum Load {
     /// One request, its milliseconds as its client pays for them.
     One,
-    /// [`CLIENTS`] clients for [`SECONDS`], the requests a second they
+    /// [`CLIENTS`] clients for [`ASKING`], the requests a second they
     /// were answered at.
     Clients,
 }
 
 /// The clients of a [`Load::Clients`] rep, and the request threads and
 /// php-fpm children each host has for them (§9.2, #2660).
-pub(crate) const CLIENTS: usize = 8;
+const CLIENTS: usize = 8;
 
 /// How long the clients of a rep ask, each then finishing the request it
 /// has in flight.
-pub(crate) const SECONDS: Duration = Duration::from_secs(3);
+const ASKING: Duration = Duration::from_secs(3);
+
+impl Load {
+    /// What a rep measures under the load.
+    fn unit(self) -> Unit {
+        match self {
+            Load::One => Unit::Ms,
+            Load::Clients => Unit::Rps,
+        }
+    }
+
+    /// The hosts the load is asked of: makala's request threads, its
+    /// default where none, and php-fpm's children.
+    fn hosts(self) -> (Option<usize>, usize) {
+        match self {
+            Load::One => (None, 1),
+            Load::Clients => (Some(CLIENTS), CLIENTS),
+        }
+    }
+
+    /// What a bar's `about` says of its clients.
+    fn clients(self) -> String {
+        match self {
+            Load::One => String::new(),
+            Load::Clients => format!(", {CLIENTS} clients for {}s a rep", ASKING.as_secs()),
+        }
+    }
+}
 
 /// Each workload's bars: the name before the workload's, how it is held
 /// and the load each rep asks under.
@@ -109,14 +136,14 @@ pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
                 Held::Series => "php-fpm behind a FastCGI client",
                 Held::Control => "itself",
             };
-            let clients = match load {
-                Load::One => String::new(),
-                Load::Clients => format!(", {CLIENTS} clients for {}s a rep", SECONDS.as_secs()),
-            };
             let (root, entry) = (root.to_path_buf(), entry.clone());
             bars.push(Declared {
                 id: format!("{bar}/{name}"),
-                about: format!("makala against {against} over {}{clients}", entry.id),
+                about: format!(
+                    "makala against {against} over {}{}",
+                    entry.id,
+                    load.clients()
+                ),
                 held,
                 start: Box::new(move || sides(&root, &entry, held, load)),
             });
@@ -135,7 +162,7 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
     };
     let oracle = manifest.pin.oracle();
     oracle.host_asserted(fpm)?;
-    let threads = (load == Load::Clients).then_some(CLIENTS);
+    let (threads, children) = load.hosts();
     let served = Arc::new(Served::start(root, &manifest, entry, threads)?);
     let makala = |name| -> Box<dyn Side> {
         let (served, program) = (Arc::clone(&served), served.binary.clone());
@@ -151,7 +178,6 @@ fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
         return Ok(Ok([makala("makala-a"), makala("makala-b")]));
     }
     let (program, http) = (fpm.path.clone(), &entry.http);
-    let children = threads.unwrap_or(1);
     let pool = Fpm::start(
         &oracle,
         &program,
@@ -265,10 +291,7 @@ impl Side for ByRequest {
     }
 
     fn unit(&self) -> Unit {
-        match self.load {
-            Load::One => Unit::Ms,
-            Load::Clients => Unit::Rps,
-        }
+        self.load.unit()
     }
 
     fn once(&mut self) -> Result<Sample> {
@@ -278,26 +301,26 @@ impl Side for ByRequest {
                 value: start.elapsed().as_secs_f64() * 1000.0,
                 wrote,
             }),
-            Load::Clients => clients(&*self.ask, CLIENTS, SECONDS),
+            Load::Clients => clients(&*self.ask, CLIENTS, ASKING),
         };
         sample.with_context(|| format!("the arm {}", self.name))
     }
 }
 
-/// `clients` clients asking `ask` until `time` has passed since they
+/// `count` clients asking `ask` until `time` has passed since they
 /// began, each finishing the request it has in flight: the requests a
 /// second the rep was answered at, over the time its last client took to
 /// end, and the body every answer carried, an answer that carried another
 /// refusing the rep (§5).
 fn clients(
     ask: &(dyn Fn() -> Result<Vec<u8>> + Sync),
-    clients: usize,
+    count: usize,
     time: Duration,
 ) -> Result<Sample> {
     let start = Instant::now();
     let until = start + time;
     let each: Vec<(u32, Vec<u8>)> = std::thread::scope(|scope| {
-        let asking: Vec<_> = (0..clients)
+        let asking: Vec<_> = (0..count)
             .map(|_| {
                 scope.spawn(|| -> Result<(u32, Vec<u8>)> {
                     let (mut answered, body) = (1, ask()?);
@@ -372,8 +395,8 @@ mod tests {
     }
 
     /// An arm of the latency series is a time and one of the throughput
-    /// series a rate, and the clients of a rep are 8 against 8 request
-    /// threads and 8 children.
+    /// series a rate, asked of a makala of 8 request threads and a pool of
+    /// 8 children, where the latency series asks makala's default and one.
     #[test]
     fn a_throughput_arm_is_8_clients_reading_requests_a_second() {
         let arm = |load| ByRequest {
@@ -386,7 +409,10 @@ mod tests {
             (arm(Load::One).unit(), arm(Load::Clients).unit()),
             (Unit::Ms, Unit::Rps)
         );
-        assert_eq!(CLIENTS, 8);
+        assert_eq!(
+            (Load::One.hosts(), Load::Clients.hosts()),
+            ((None, 1), (Some(8), 8))
+        );
     }
 
     /// The clients' requests a second are those answered over the time the

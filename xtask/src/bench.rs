@@ -274,9 +274,9 @@ pub(crate) struct Sample {
 /// cost, or the requests a second its clients were answered at, a rate
 /// (#2660). The paired delta is taken in it, `a - b`, so a rate's loss is
 /// a negative delta; [`Unit::worse`] turns either into a cost.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Unit {
-    #[default]
     Ms,
     Rps,
 }
@@ -290,6 +290,12 @@ impl Unit {
         }
     }
 
+    /// The reading's key for the figure `name` in the unit: the one
+    /// spelling the run writes and a reading is read back by.
+    pub(crate) fn key(self, name: &str) -> String {
+        format!("{name}_{}", self.suffix())
+    }
+
     /// The sign that makes a delta in the unit a cost: more is worse of
     /// a time, and less of a rate.
     pub(crate) fn worse(self) -> f64 {
@@ -299,9 +305,10 @@ impl Unit {
         }
     }
 
-    /// The unit a reading's numbers were recorded in.
+    /// The unit a reading's numbers were recorded in: a rate where any
+    /// figure is kept under the rate's suffix.
     pub(crate) fn of(reading: &Reading) -> Unit {
-        let rate = reading.numbers.contains_key("b_median_rps");
+        let rate = reading.numbers.keys().any(|key| key.ends_with("_rps"));
         if rate { Unit::Rps } else { Unit::Ms }
     }
 }
@@ -515,7 +522,7 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
 fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Measured> {
     let programs = [a.program().to_path_buf(), b.program().to_path_buf()];
     let before = [Pin::take(&programs[0])?, Pin::take(&programs[1])?];
-    let (mut a_of, mut b_of, mut delta) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut a_values, mut b_values, mut delta) = (Vec::new(), Vec::new(), Vec::new());
     let mut vacuous = false;
     for r in 1..=(WARMUP + reps) {
         let (sa, sb) = if r % 2 == 0 {
@@ -534,13 +541,13 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
         vacuous |= sa.wrote.is_empty();
         if r > WARMUP {
             delta.push(sa.value - sb.value);
-            a_of.push(sa.value);
-            b_of.push(sb.value);
+            a_values.push(sa.value);
+            b_values.push(sb.value);
         }
     }
     holds(&programs, &before)?;
     let (stream, unit) = (a.stream(), a.unit());
-    let (a, b, delta) = (stats(&a_of), stats(&b_of), stats(&delta));
+    let (a, b, delta) = (stats(&a_values), stats(&b_values), stats(&delta));
     Ok(Measured {
         unit,
         a,
@@ -936,7 +943,7 @@ fn recorded(
         ("delta_q3", measured.delta.q3),
         ("delta_iqr", measured.delta.iqr),
     ];
-    let numbers = (numbers.into_iter()).map(|(key, value)| (format!("{key}_{unit}"), value));
+    let numbers = (numbers.into_iter()).map(|(key, value)| (measured.unit.key(key), value));
     for (key, value) in numbers.chain([("paired_pct".to_owned(), measured.paired_pct)]) {
         if value.is_finite() {
             reading.numbers.insert(key, rounded(value).into());

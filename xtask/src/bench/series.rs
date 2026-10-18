@@ -39,9 +39,7 @@ impl Night {
     /// nothing, or whose second arm took no time.
     fn of(reading: &Reading) -> Option<Night> {
         let unit = Unit::of(reading);
-        let n = |key: &str| {
-            (reading.numbers.get(&format!("{key}_{}", unit.suffix()))).map(|n| n.as_f64())
-        };
+        let n = |key: &str| (reading.numbers.get(&unit.key(key))).map(|n| n.as_f64());
         let share = 100.0 * unit.worse() / n("b_median").filter(|b| *b > 0.0)?;
         let (q1, q3) = (n("delta_q1")?, n("delta_q3")?);
         let reps = usize::try_from(count(reading, "reps")?).ok()?;
