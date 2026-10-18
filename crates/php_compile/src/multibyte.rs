@@ -854,7 +854,13 @@ mod tests {
             ..Options::default()
         };
         let mut strings = php_heap::Strings::new();
-        crate::compile_source(script, &options, &mut strings).map(|unit| (unit, strings))
+        crate::compile_source(
+            &mut php_syntax::Arena::new(),
+            script,
+            &options,
+            &mut strings,
+        )
+        .map(|unit| (unit, strings))
     }
 
     /// The dump, read while the unit's strings stand.

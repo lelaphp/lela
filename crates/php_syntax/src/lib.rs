@@ -133,15 +133,13 @@ impl Parsed<'_> {
 ///
 /// The stacks that die with the parse, the lexer's stream before it is
 /// laid in the arena, the significant-token table, the event stream and
-/// the builder's frames, are the thread's [`Scratch`], lent and taken
-/// back empty, so a thread that parses again reuses their room and a
-/// parse of a statement allocates none of them; with an arena that has
-/// room, as [`Arena::lend`]'s has after the first compile, it allocates
-/// nothing at all.
+/// the builder's frames, are the arena's too, lent and taken back empty,
+/// so an arena that has parsed before, reset since, hands a parse of a
+/// statement all the room it needs and the parse allocates nothing.
 #[must_use]
 pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parsed<'a> {
     let file = options.file;
-    let mut scratch = SCRATCH.take();
+    let mut scratch = arena.take_scratch();
     let lines = LineIndex::new(arena, source);
     let lexed = lexer::lex_with_lines(
         file,
@@ -164,9 +162,7 @@ pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parse
     let tokens = arena.copy(&lexed.tokens);
     let diagnostics = in_php_order(tokens, lexed.diagnostics, built.diagnostics);
     scratch.tokens = lexed.tokens;
-    if scratch.within(Scratch::KEPT) {
-        SCRATCH.set(scratch);
-    }
+    arena.put_back(scratch);
     Parsed {
         source,
         tokens,
@@ -176,32 +172,6 @@ pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parse
         missing: built.missing,
         filtered: Filtered::default(),
     }
-}
-
-/// The room [`parse`] lends its stages and takes back empty: one per
-/// thread, taken for a parse and put back after it, so a parse nested in
-/// another finds none and makes its own.
-#[derive(Default)]
-struct Scratch {
-    tokens: Vec<Token>,
-    significant: Vec<u32>,
-    stacks: tree::Stacks,
-}
-
-impl Scratch {
-    /// The most room of one stack a thread keeps between parses: a parse
-    /// of a large file pays for its own and gives it up.
-    const KEPT: usize = 64 * 1024;
-
-    fn within(&self, bytes: usize) -> bool {
-        self.tokens.capacity() * size_of::<Token>() <= bytes
-            && self.significant.capacity() * size_of::<u32>() <= bytes
-            && self.stacks.within(bytes)
-    }
-}
-
-thread_local! {
-    static SCRATCH: std::cell::Cell<Scratch> = std::cell::Cell::new(Scratch::default());
 }
 
 /// The scanner's and the parser's diagnostics as one list in the order

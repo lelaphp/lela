@@ -811,7 +811,12 @@ __halt_compiler(); data"#;
             filename: b"/srv/n.php",
             ..php_compile::Options::default()
         };
-        let unit = php_compile::compile_source(source, &options, &mut strings);
+        let unit = php_compile::compile_source(
+            &mut php_compile::syntax::Arena::new(),
+            source,
+            &options,
+            &mut strings,
+        );
         assert!(unit.is_ok(), "the source compiles: {unit:?}");
         let Ok(unit) = unit else { return };
         let bytes = encode(&unit);

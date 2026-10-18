@@ -423,9 +423,14 @@ mod tests {
                 let mut strings = php_heap::Strings::new();
                 sums.iter()
                     .map(|source| {
-                        crate::compile_source(source.as_bytes(), &options, &mut strings)
-                            .err()
-                            .map(|refused| refused.message)
+                        crate::compile_source(
+                            &mut php_syntax::Arena::new(),
+                            source.as_bytes(),
+                            &options,
+                            &mut strings,
+                        )
+                        .err()
+                        .map(|refused| refused.message)
                     })
                     .collect::<Vec<_>>()
             })

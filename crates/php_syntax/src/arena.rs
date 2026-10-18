@@ -6,39 +6,66 @@
 //! so nothing is dropped a node at a time; the unit a compile publishes
 //! is an owned value and never lives here.
 //!
-//! The arena is the caller's: [`crate::parse`] borrows one and the
-//! [`crate::Parsed`] it hands back borrows it in turn, so a parse cannot
-//! outlive the memory it is in, and a node is still read by its index
-//! in safe code. [`Arena::lend`] is the per-compile one, the thread's,
-//! reset after each use, so a thread that compiles again bumps into the
-//! room the last compile left and a small compile makes no allocation
-//! for its tree at all.
+//! The arena is the caller's, and nothing of it is the thread's: the
+//! engine keeps one per request and hands it to every compile the
+//! request makes, so the next compile bumps into the room the last one
+//! left and a small compile makes no allocation for its tree at all.
+//! [`crate::parse`] borrows it and the [`crate::Parsed`] it hands back
+//! borrows it in turn, so a parse cannot outlive the memory it is in,
+//! and a node is still read by its index in safe code. Beside the bump
+//! the arena keeps the parse's stacks, the lexer's stream before it is
+//! laid in the arena, the significant-token table, the event stream and
+//! the builder's frames, lent to each parse and taken back empty, so
+//! their room is reused too.
 
 use std::cell::Cell;
 
 use bumpalo::Bump;
 
-/// One arena: memory that is bumped into and given up whole.
+use crate::lexer::Token;
+
+/// One arena: memory that is bumped into and given up whole, and the
+/// room of the stacks a parse lends itself.
 #[derive(Default)]
 pub struct Arena {
     bump: Bump,
+    /// The stacks [`crate::parse`] lends its stages, taken for a parse
+    /// and put back after it, so a parse nested in another finds none
+    /// and makes its own.
+    scratch: Cell<Scratch>,
 }
 
 impl std::fmt::Debug for Arena {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Arena")
             .field("allocated", &self.bump.allocated_bytes())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-/// The most room the thread's arena keeps between compiles: a compile of
-/// a large file pays for its own and gives it up.
-const KEPT: usize = 256 * 1024;
-
-thread_local! {
-    static THREADS: Cell<Option<Arena>> = const { Cell::new(None) };
+/// The room [`crate::parse`] lends its stages and takes back empty.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    pub(crate) tokens: Vec<Token>,
+    pub(crate) significant: Vec<u32>,
+    pub(crate) stacks: crate::tree::Stacks,
 }
+
+impl Scratch {
+    /// The most room of one stack an arena keeps between parses: a parse
+    /// of a large file pays for its own and gives it up.
+    const KEPT: usize = 64 * 1024;
+
+    fn within(&self, bytes: usize) -> bool {
+        self.tokens.capacity() * size_of::<Token>() <= bytes
+            && self.significant.capacity() * size_of::<u32>() <= bytes
+            && self.stacks.within(bytes)
+    }
+}
+
+/// The most room the arena keeps when it is reset: a compile of a large
+/// file pays for its own and gives it up.
+const KEPT: usize = 256 * 1024;
 
 impl Arena {
     /// An empty arena, which allocates nothing until it is first used.
@@ -47,24 +74,26 @@ impl Arena {
         Arena::default()
     }
 
-    /// `f` over the thread's arena, reset once `f` returns: the
-    /// per-compile arena, so what `f` bumped into it is given up whole
-    /// and the room is the next compile's. A lend inside another finds
-    /// none and makes its own.
-    pub fn lend<R>(f: impl FnOnce(&Arena) -> R) -> R {
-        let mut arena = THREADS.take().unwrap_or_default();
-        let made = f(&arena);
-        arena.reset();
-        if arena.bump.allocated_bytes() <= KEPT {
-            THREADS.set(Some(arena));
+    /// Give up everything in the arena at once, keeping the room of its
+    /// last chunk for what is bumped into it next, up to 256 KiB.
+    pub fn reset(&mut self) {
+        self.bump.reset();
+        if self.bump.allocated_bytes() > KEPT {
+            self.bump = Bump::new();
         }
-        made
     }
 
-    /// Give up everything in the arena at once, keeping the room of its
-    /// last chunk for what is bumped into it next.
-    fn reset(&mut self) {
-        self.bump.reset();
+    /// The parse's stacks, lent until [`Arena::put_back`].
+    pub(crate) fn take_scratch(&self) -> Scratch {
+        self.scratch.take()
+    }
+
+    /// The parse's stacks back, kept where their room is within what an
+    /// arena keeps.
+    pub(crate) fn put_back(&self, scratch: Scratch) {
+        if scratch.within(Scratch::KEPT) {
+            self.scratch.set(scratch);
+        }
     }
 
     /// The bump allocator under the arena, for the builders of this
@@ -95,20 +124,17 @@ mod tests {
     use super::Arena;
 
     #[test]
-    fn a_lent_arena_is_kept_reset_and_a_nested_one_is_its_own() {
-        let outer = Arena::lend(|arena| {
-            let a = arena.copy(b"abc");
-            let nested = Arena::lend(|inner| {
-                assert_eq!(inner.copy(b"xyz"), b"xyz");
-                std::ptr::from_ref(inner) as usize
-            });
-            assert_eq!(a, b"abc");
-            assert_ne!(nested, std::ptr::from_ref(arena) as usize);
-            arena.bump.allocated_bytes()
-        });
-        assert!(outer > 0);
-        Arena::lend(|arena| {
-            assert_eq!(arena.concat(&[b"a\\", b"b"]), b"a\\b");
-        });
+    fn a_reset_arena_keeps_its_room_and_what_it_held_is_given_up() {
+        let mut arena = Arena::new();
+        assert_eq!(arena.copy(b"abc"), b"abc");
+        assert_eq!(arena.concat(&[b"a\\", b"b"]), b"a\\b");
+        let room = arena.bump.allocated_bytes();
+        assert!(room > 0);
+        arena.reset();
+        assert_eq!(arena.bump.allocated_bytes(), room);
+        let large = vec![0u8; 1024 * 1024];
+        assert_eq!(arena.copy(&large).len(), large.len());
+        arena.reset();
+        assert_eq!(arena.bump.allocated_bytes(), 0, "a large chunk is given up");
     }
 }

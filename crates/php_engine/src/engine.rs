@@ -1587,6 +1587,9 @@ impl Shared {
                 names: &self.names,
                 strings: &mut strings,
             },
+            // A unit for every request is compiled on the thread that
+            // asked, no request's arena at hand, so it brings its own.
+            &mut php_compile::syntax::Arena::new(),
         )
     }
 
@@ -1646,7 +1649,7 @@ impl Shared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
-        let unit = req.compiling(|heap, request_classes| {
+        let unit = req.compiling(|heap, request_classes, arena| {
             let origin = Origin {
                 filename,
                 cwd: &cwd,
@@ -1655,7 +1658,7 @@ impl Shared {
                 request_classes,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
-            compile(source, origin, ini, declared, stack, heap)
+            compile(source, origin, ini, declared, stack, heap, arena)
         })?;
         req.count_keys_made(unit.runtime_keys.len());
         Ok(req.take_unit(unit))
@@ -5533,6 +5536,7 @@ fn compile(
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
+    arena: &mut php_compile::syntax::Arena,
 ) -> Result<Unit, CompileError> {
     let options = php_compile::Options {
         filename: origin.filename,
@@ -5554,7 +5558,7 @@ fn compile(
         hooked: declared.hooked,
         extended_info: declared.extended_info,
     };
-    php_compile::compile_source(source, &options, strings)
+    php_compile::compile_source(arena, source, &options, strings)
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -7674,6 +7678,7 @@ mod tests {
                 Declared::default(),
                 StackLimit::UNCHECKED,
                 req.heap_mut(),
+                &mut php_compile::syntax::Arena::new(),
             );
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
