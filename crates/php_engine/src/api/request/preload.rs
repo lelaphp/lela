@@ -274,7 +274,7 @@ fn address(unit: &Arc<Unit>) -> usize {
 pub(crate) struct Preloading {
     scripts: Vec<(Vec<u8>, Arc<Unit>, u64)>,
     aliases_before: usize,
-    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Request::preloading_as_user`]).
+    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Request::preloading_in_child`]).
     in_child: bool,
 }
 
@@ -310,11 +310,12 @@ impl Request {
     }
 
     /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD_IN_CHILD`: whether
-    /// this is the preload's request served on the thread that took
-    /// `opcache.preload_user`'s credentials, php's preload child, where
-    /// `FFI::load` refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
+    /// this is the preload's request served on a thread of its own
+    /// ([`crate::api::abi::PreloadThread`]), php's preload child, as
+    /// opcache serves it under `opcache.preload_user`, where `FFI::load`
+    /// refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
     #[must_use]
-    pub fn preloading_as_user(&self) -> bool {
+    pub fn preloading_in_child(&self) -> bool {
         self.preloading
             .as_ref()
             .is_some_and(|preloading| preloading.in_child)

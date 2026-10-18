@@ -280,7 +280,7 @@ mod tests {
             format!("{what} {script}"),
             std::thread::current().id(),
             req.preloading(),
-            req.preloading_as_user(),
+            req.preloading_in_child(),
         ));
     }
 
