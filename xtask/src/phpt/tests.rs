@@ -544,7 +544,7 @@ fn a_skipif_is_judged_by_what_it_says_as_upstream_judges_it() {
         (
             "posix_kill(getmypid(), 9);",
             Judgement::Bork,
-            "invalid output from SKIPIF: Termsig=0",
+            "invalid output from SKIPIF: Termsig=9",
         ),
         // A `warn` with a reason runs the test, whose failure says it.
         (

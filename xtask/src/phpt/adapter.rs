@@ -834,8 +834,8 @@ fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) 
 /// (run-tests.php:2134).
 const SKIPIF_SHOWS: [&str; 2] = ["display_errors=1", "display_startup_errors=0"];
 
-/// What a `SKIPIF` wrote on stdout, trimmed as php's `trim` trims and
-/// read as upstream reads it (run-tests.php:2154-2190, 3595-3597).
+/// What a `SKIPIF` wrote on stdout, with upstream's `Termsig=` line,
+/// trimmed as php's `trim` trims and read as upstream reads it (run-tests.php:2154-2190, 3595-3597).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Said {
     /// It begins with `skip`, any case: the first line after the word.
@@ -855,54 +855,60 @@ pub(crate) enum Said {
 }
 
 impl Said {
-    pub(crate) fn of(stdout: &str) -> Said {
-        let said = stdout.trim_matches(TRIM);
+    /// What `written` says: what a `SKIPIF` wrote, as [`Said::written`]
+    /// hands it back.
+    pub(crate) fn of(written: &str) -> Said {
+        let said = written.trim_matches(TRIM);
         let after = |word: &str| {
             let head = said.get(..word.len())?;
             head.eq_ignore_ascii_case(word).then(|| &said[word.len()..])
         };
-        // `\s*(.+)`: the first line after the word and the space after it.
-        let reason = |rest: &str| {
-            let rest = rest.trim_start_matches(SPACE);
-            rest.lines().next().unwrap_or("").to_owned()
-        };
         let runs = said.is_empty()
             || said.starts_with("nocache")
-            || after("info").is_some_and(|rest| !rest.is_empty())
+            || reason(said, r"(?i)^info\s*(.+)").is_some()
             || after("xleak").or(after("flaky")).is_some();
-        let warn = after("warn").filter(|rest| rest.starts_with(SPACE));
-        match (after("skip"), after("xfail"), warn) {
-            (Some(rest), _, _) => Said::Skip(reason(rest)),
+        match (
+            after("skip"),
+            after("xfail"),
+            reason(said, r"(?i)^warn\s+(.+)"),
+        ) {
+            (Some(_), _, _) => Said::Skip(reason(said, r"(?i)^skip\s*(.+)").unwrap_or_default()),
             (_, Some(rest), _) => Said::XFail(rest.trim_start_matches(TRIM).to_owned()),
-            (_, _, Some(rest)) => Said::Warn(reason(rest)),
+            (_, _, Some(why)) => Said::Warn(why),
             _ if runs => Said::Run,
             _ => Said::Bork(said.to_owned()),
         }
     }
 
     /// What upstream's `system_with_timeout` hands back of a `SKIPIF`'s
-    /// run: its stdout, and a `Termsig=` line where a signal ended it or
-    /// it exited 129 to 159 (run-tests.php:1227-1233), which borks a test
-    /// whose `SKIPIF` crashed having written nothing. A process a signal
-    /// ended is read by `proc_get_status`'s `stopsig`, which is 0 for one
-    /// that was not stopped, so its line reads `Termsig=0`.
+    /// run: its stdout, and a `Termsig=` line where it exited 129 to 159
+    /// (run-tests.php:1227-1233), which borks a test whose `SKIPIF`
+    /// crashed having written nothing. Upstream's command line opens with
+    /// `unset`s (run-tests.php:2123), so the shell forks php and exits
+    /// with 128 and the signal that ended it: the oracle's
+    /// `proc_get_status` over that shape with a php that killed itself
+    /// with 11 answers `signaled` false and an exit of 139, and the line
+    /// reads `Termsig=11`, as it does here for a php a signal ended.
     pub(crate) fn written(out: &Observation) -> String {
         let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
-        match out.exit {
-            Ended::Signal(_) => said.push_str("\nTermsig=0\n"),
-            Ended::Status(code @ 129..=159) => _ = write!(said, "\nTermsig={}\n", code - 128),
-            Ended::Status(_) => {}
+        if let Ended::Signal(n) | Ended::Status(n @ 129..=159) = out.exit {
+            // The signal, or the shell's 128 over it.
+            write!(said, "\nTermsig={}\n", n % 128).ok();
         }
         said
     }
 }
 
+/// The reason upstream's `pattern` reads out of what a `SKIPIF` said, its
+/// one group, none where it does not match: `regex_lite`'s `\s` and `.`
+/// are PCRE's, the ASCII spaces and anything but a newline.
+fn reason(said: &str, pattern: &str) -> Option<String> {
+    let found = Regex::new(pattern).ok()?.captures(said)?;
+    Some(found.get(1)?.as_str().to_owned())
+}
+
 /// What php's `trim` and `ltrim` take off: `" \t\n\r\0\x0B"`.
 const TRIM: [char; 6] = [' ', '\t', '\n', '\r', '\0', '\x0B'];
-
-/// What PCRE's `\s` matches, in the patterns upstream reads a `SKIPIF`'s
-/// words by.
-const SPACE: [char; 6] = [' ', '\t', '\n', '\r', '\x0B', '\x0C'];
 
 /// A command line's words, split on whitespace: a test's `--ARGS--`.
 fn words(text: &str) -> Vec<String> {
@@ -963,11 +969,16 @@ mod tests {
         );
         // php's `trim` takes a NUL off and leaves a form feed.
         assert_eq!(Said::of("\0skip x\0\x0B"), skip("x"));
+        // PCRE's `\s+(.+)` gives back a space for the group, and `.` takes
+        // a carriage return.
+        assert_eq!(Said::of("warn \x0C"), Said::Warn("\x0C".to_owned()));
+        assert_eq!(Said::of("skip a\rb\nc"), skip("a\rb"));
         for borks in [
             warned,
             "info",
             "warn",
             "warnx",
+            "warn\x0C",
             "Warning: x",
             "nothing",
             "NOCACHE",
@@ -994,7 +1005,7 @@ mod tests {
                 wall: std::time::Duration::ZERO,
             })
         };
-        assert_eq!(written("", Ended::Signal(11)), "\nTermsig=0\n");
+        assert_eq!(written("", Ended::Signal(11)), "\nTermsig=11\n");
         assert_eq!(
             written("skip x", Ended::Status(139)),
             "skip x\nTermsig=11\n"
@@ -1002,7 +1013,7 @@ mod tests {
         assert_eq!(written("skip x", Ended::Status(1)), "skip x");
         assert_eq!(written("", Ended::Status(160)), "");
         let said = Said::of(&written("", Ended::Signal(9)));
-        assert_eq!(said, Said::Bork("Termsig=0".to_owned()));
+        assert_eq!(said, Said::Bork("Termsig=9".to_owned()));
     }
 
     #[test]
