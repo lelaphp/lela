@@ -159,13 +159,15 @@ impl PhpString {
         Ok(Owner::adopt(made))
     }
 
-    /// `zend_string_init_interned`: the one interned string for these
-    /// bytes, never refcounted, what php hands out for a name a
-    /// declaration made (`ce->name`, `fptr->common.function_name`,
-    /// `prop_info->name`): the engine's string where its startup or a
-    /// published unit interned these bytes, which costs the request
-    /// nothing, else the request's own, allocated on its first ask and
-    /// shared by every later one. The `Err` is the memory limit.
+    /// The string a declaration holds for these bytes, never refcounted,
+    /// what php copies out of a name a declaration made (`ce->name`,
+    /// `fptr->common.function_name`, `prop_info->name`) or out of
+    /// `ZSTR_KNOWN`: the engine's string where its startup or a published
+    /// unit interned these bytes, which costs the request nothing, else
+    /// the request's own, allocated on its first ask and the same string
+    /// at every later one. php's `zend_string_init_interned`, which hands
+    /// its caller a string of its own, is [`PhpString::existing_interned`].
+    /// The `Err` is the memory limit.
     ///
     /// ```php
     /// $r = new ReflectionClass('stdClass');
@@ -177,7 +179,7 @@ impl PhpString {
     /// int(96)
     /// ```
     pub fn interned(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        req.interned(bytes)
+        req.declared_string(bytes)
     }
 
     /// `zend_string_init_existing_interned`: the interned string for

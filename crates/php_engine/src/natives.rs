@@ -823,7 +823,7 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<PhpString, 
         }
     };
     let name = req.class_name_bytes(class);
-    req.interned(&name)
+    req.declared_string(&name)
 }
 
 /// `strlen(string $string): int`, php's `ZEND_FUNCTION(strlen)`

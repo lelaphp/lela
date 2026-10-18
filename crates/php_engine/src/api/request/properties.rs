@@ -8,7 +8,7 @@
 //! the source lists and the scope a write names are [`Properties`]'s,
 //! whose fields no file but this one reads.
 
-use php_heap::{Fatal, Heap, Intern, Obj, Ref, TableRow, Zval};
+use php_heap::{Fatal, Heap, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
 
@@ -1761,7 +1761,7 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
-        let interned = self.interned(name)?;
+        let interned = self.declared_string(name)?;
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
@@ -3303,8 +3303,7 @@ impl Request {
                         "InternalError: an object walk's slot with no declaration",
                     ));
                 };
-                let interned = self.heap.intern(&name);
-                let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
+                let key = php_heap::Key::Str(self.declared_string(&name)?.heap());
                 Ok(Some((key, Walked::Slot(slot))))
             }
             Some((_, TableRow::Entry(key), _)) => Ok(Some((key, Walked::Dynamic(key)))),
@@ -3444,7 +3443,7 @@ impl Request {
                     return Ok(None);
                 };
                 let (visibility, name) = (decl.visibility, decl.name.0.clone());
-                let name = self.interned(&name)?;
+                let name = self.declared_string(&name)?;
                 let row = (Key::Str(name), value, Some((info.declaring, visibility)));
                 Ok(Some((row, TableRow::Slot(slot))))
             }
@@ -3477,8 +3476,7 @@ impl Request {
         else {
             return Ok(key);
         };
-        let interned = self.heap.intern(prop);
-        self.fatal_of(interned).map(php_heap::Key::Str)
+        Ok(php_heap::Key::Str(self.declared_string(prop)?.heap()))
     }
 
     /// What [`Request::object_walk`] found at a place: the value, a view
@@ -3731,8 +3729,7 @@ impl Request {
             if z.is_undef() {
                 continue;
             }
-            let interned = self.heap.intern(name);
-            let name = self.fatal_of(interned).map(PhpString::of)?;
+            let name = self.declared_string(name)?;
             entries.push((Key::Str(name), Value::of_zval(z)));
         }
         if let Some(table) = o.properties() {
@@ -4196,7 +4193,7 @@ impl Request {
             }
             wrong = true;
         } else if let Some(table) = o.properties() {
-            let key = self.interned(name)?;
+            let key = self.declared_string(name)?;
             let key = php_heap::Key::Str(key.heap());
             if table.contains(key) {
                 let table = self.separated_properties(o)?;

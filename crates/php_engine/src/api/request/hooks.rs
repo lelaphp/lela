@@ -1085,7 +1085,7 @@ impl Request {
                     continue;
                 }
                 let value = self.read_hooked(object, &name, hooked, PropertyRead::Silent)?;
-                let key = self.interned(&name)?;
+                let key = self.declared_string(&name)?;
                 return Ok(Some((key, super::Walked::Hooked(value))));
             }
             let Some(slot) = self.slot_declared_by(class, declaring, &name) else {
@@ -1094,7 +1094,7 @@ impl Request {
             if object.heap().slot(slot).is_undef() {
                 continue;
             }
-            let key = self.interned(&name)?;
+            let key = self.declared_string(&name)?;
             return Ok(Some((key, super::Walked::Slot(slot))));
         }
         Ok(None)
@@ -1220,7 +1220,7 @@ impl Request {
         let keys = self.hooked_object_keys(class);
         let mut rows: Vec<HookedRow> = Vec::with_capacity(keys.len());
         for (name, declaring, visibility) in keys {
-            let interned = match self.interned(&name) {
+            let interned = match self.declared_string(&name) {
                 Ok(interned) => Key::Str(interned),
                 Err(thrown) => {
                     HookedRow::give_up_all(self, rows);
@@ -1345,7 +1345,8 @@ impl Request {
             let prefix = declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
             let key = match (&*key, prefix) {
                 (Key::Str(name), Some(prefix)) => {
-                    let mangled = self.interned(&[prefix.as_slice(), name.as_bytes()].concat());
+                    let mangled =
+                        self.declared_string(&[prefix.as_slice(), name.as_bytes()].concat());
                     key.give_up(self);
                     mangled.map(|mangled| Owner::take(self, Key::Str(mangled)))
                 }

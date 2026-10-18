@@ -3578,6 +3578,8 @@ pub(crate) enum Known {
     IncludeOnce = 16,
     RequireOnce = 17,
     Trace = 30,
+    Argv = 49,
+    Argc = 50,
 }
 
 impl Known {

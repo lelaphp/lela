@@ -190,10 +190,11 @@ impl Request {
     }
 
     /// [`Request::set_table_var`] over a name the caller holds as bytes,
-    /// keyed as `zend_hash_str_update` keys it ([`Request::with_name`]);
-    /// the value given up where the key cannot be made.
+    /// keyed as `zend_hash_str_update` keys it, `zend_string_init`, a
+    /// string the table keeps where it adds the name; the value given up
+    /// where the key cannot be made.
     fn set_table_var_named(&mut self, frame: FrameRef, name: &[u8], value: Owner<Value>) {
-        match PhpString::existing_interned(self, name) {
+        match self.string_init(name).map(Owner::adopt) {
             Ok(key) => {
                 self.set_table_var(frame, *key, value.hand_on(), Overwrite::InPlace);
                 key.give_up(self);

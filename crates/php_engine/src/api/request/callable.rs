@@ -787,7 +787,7 @@ impl Request {
                 // `zend_string_init_interned` of the class part, the
                 // string the lookup hands an autoloader, which a trace of
                 // what that loader throws then holds at no cost.
-                if self.interned(&class).is_err() {
+                if self.declared_string(&class).is_err() {
                     return Err(Refusal::Unsaid);
                 }
                 let quiet = if ce_org.is_some() {

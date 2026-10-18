@@ -209,7 +209,7 @@ impl Request {
     /// answers, else one of the request's own. The memory limit's fatal
     /// is recorded and ends the request.
     fn constant_name(&mut self, name: &[u8]) {
-        self.interned(name).ok();
+        self.declared_string(name).ok();
     }
 
     /// `PHP_SAPI` as `php_module_startup` registers it: the engine's

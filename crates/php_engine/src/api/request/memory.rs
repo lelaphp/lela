@@ -710,18 +710,20 @@ impl Request {
         Ok(array)
     }
 
-    /// An interned string, never refcounted, for `bytes`, as
-    /// `zend_string_init_interned_request` and `zend_new_interned_string`
-    /// answer it: the one the engine holds already, a name its startup
-    /// interned ([`crate::engine::Shared::permanent`]) or a string a
-    /// published unit's compilation interned (design §5.2), which costs
-    /// the request nothing, else this request's own, a string a unit
-    /// compiled for it alone interned among them, interned on its first
-    /// ask; the `Err` is the memory limit refusing the intern. A published
-    /// unit's strings are opcache's shared ones, which php's lookup finds
-    /// under opcache and, for the strings php -n interns per request
-    /// rather than for every constant, without it
-    /// (`trace:immutable-literal-arrays`).
+    /// The string a declaration holds for `bytes`, never refcounted: what
+    /// php copies out of `ce->name`, `function_name`, `prop_info->name`,
+    /// `op_array->vars`, an op array's constant or `ZSTR_KNOWN` with
+    /// `ZVAL_STR_COPY`, which allocates nothing. The engine's
+    /// declarations keep their names as bytes, so the string is the one
+    /// the engine holds already, a name its startup interned
+    /// ([`crate::engine::Shared::permanent`]) or a string a published
+    /// unit's compilation interned (design §5.2), which costs the request
+    /// nothing, else the one a unit compiled for this request alone holds
+    /// ([`php_heap::Heap`]'s [`Intern`]), made on the first ask where that
+    /// unit made none and the same string at every ask after; the `Err`
+    /// is the memory limit refusing it. Not php's
+    /// `zend_string_init_interned`, which hands a string of its own to
+    /// its caller.
     ///
     /// A class's and a method's names are `ce->name` and
     /// `function_name`, so only the array of names is counted:
@@ -735,7 +737,7 @@ impl Request {
     /// ```expect
     /// int(216)
     /// ```
-    pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+    pub(crate) fn declared_string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         if let Some(held) = self.shared.existing_interned(bytes) {
             return Ok(PhpString::of(held));
         }
@@ -743,12 +745,12 @@ impl Request {
         self.fatal_of(interned).map(PhpString::of)
     }
 
-    /// `ZSTR_KNOWN(known)`: [`Request::interned`] of a known name, read
+    /// `ZSTR_KNOWN(known)`: [`Request::declared_string`] of a known name, read
     /// off the engine's table by its position.
     pub(crate) fn known(&mut self, known: crate::engine::Known) -> Result<PhpString, Thrown> {
         match self.shared.known(known) {
             Some(held) => Ok(PhpString::of(held)),
-            None => self.interned(known.bytes()),
+            None => self.declared_string(known.bytes()),
         }
     }
 
