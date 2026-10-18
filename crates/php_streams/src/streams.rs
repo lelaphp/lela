@@ -3572,6 +3572,7 @@ pub(crate) trait StreamLayer {
         stream: Stream,
         f: impl FnOnce(&mut Request, &mut PhpStream) -> R,
     ) -> Option<R>;
+    fn streams_held<R>(&mut self, streams: &[Stream], wait: impl FnOnce(&mut Request) -> R) -> R;
     fn stream_ref(&self, stream: Stream) -> Option<&PhpStream>;
     fn stream_of(&self, value: &Value) -> Option<Stream>;
     fn stream_read_to_str(
@@ -4516,6 +4517,34 @@ impl StreamLayer for Request {
             }
         }
         Some(out)
+    }
+
+    /// [`StreamLayer::stream_op`] over several streams at once, for the
+    /// length of `wait`, each with an owner of its resource held: a
+    /// stream out already, or closed, is passed over, and one whose
+    /// resource was closed while it was out is freed as `wait` returns.
+    fn streams_held<R>(&mut self, streams: &[Stream], wait: impl FnOnce(&mut Request) -> R) -> R {
+        let mut taken = Vec::with_capacity(streams.len());
+        for stream in streams {
+            let res = stream.resource();
+            let out = res
+                .native_mut::<Option<PhpStream>>(self)
+                .and_then(Option::take);
+            if let Some(out) = out {
+                taken.push((Owner::take(self, res), out));
+            }
+        }
+        let answered = wait(self);
+        for (res, out) in taken {
+            match res.native_mut::<Option<PhpStream>>(self) {
+                Some(slot) => *slot = Some(out),
+                None => {
+                    self.streams().pclose_ret = out.free(self);
+                }
+            }
+            res.give_up(self);
+        }
+        answered
     }
 
     /// The stream a resource holds, read: `None` where it is closed, is

@@ -1013,6 +1013,7 @@ request::Streams
 request::Streams::clear_stat_cache
 request::Streams::fd_stream
 request::Streams::forget_relative_stats
+request::Streams::holding_streams
 request::Streams::input_stream
 request::Streams::memory_stream
 request::Streams::new_stream

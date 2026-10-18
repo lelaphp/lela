@@ -66,6 +66,18 @@ extern "C" fn later_reading(callback: Callback) {
     call_later(callback, Duration::from_millis(100), "reading");
 }
 
+extern "C" fn later_selecting(callback: Callback) {
+    call_later(callback, Duration::from_millis(100), "selecting");
+}
+
+extern "C" fn later_select_arrays(callback: Callback) {
+    call_later(callback, Duration::from_millis(100), "select-arrays");
+}
+
+extern "C" fn later_imported(callback: Callback) {
+    call_later(callback, Duration::from_millis(100), "imported");
+}
+
 /// `hold_unlent(float $seconds): void`: the request held for that long in
 /// a native that never lends it, as only curl's waits among the engine's
 /// natives are (#2595).
@@ -188,6 +200,71 @@ try { socket_write($p[1], "y"); } catch (Error $e) { echo $e->getMessage(), "\n"
          socket_read(): Argument #1 ($socket) has already been closed\n\
          socket_write(): Argument #1 ($socket) has already been closed\n"
     );
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// The thread calls back while the request waits in `stream_select`, and
+/// the callback closes the stream the wait stands on, then writes to its
+/// pair (#2664): the stream's fd stays open until the wait returns, which
+/// the write wakes, and the walk after it meets the stream closed, php's
+/// `TypeError` for a closed element.
+#[test]
+fn a_stream_closed_in_stream_select_keeps_its_fd_until_the_wait_returns() {
+    let (stdout, returned) = served(
+        later_selecting,
+        "selecting",
+        r#"$p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+$later(function ($x) use ($p) { fclose($p[0]); fwrite($p[1], "x"); return $x * 2; });
+$r = [$p[0]]; $w = $e = null;
+$t0 = hrtime(true);
+try { var_dump(stream_select($r, $w, $e, 3)); } catch (TypeError $t) { echo $t->getMessage(), "\n"; }
+echo hrtime(true) - $t0 < 2000000000 ? "woke" : "slept", "\n";
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "stream_select(): supplied resource is not a valid stream resource\nwoke\n"
+    );
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// The callback a `stream_select` wait serves assigns `null` to the
+/// array the wait was handed (#2664): the call holds it, and the walk
+/// after the wait reads it and writes the ready streams back.
+#[test]
+fn stream_select_holds_its_arrays_across_the_wait() {
+    let (stdout, returned) = served(
+        later_select_arrays,
+        "select-arrays",
+        r#"$p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+$r = [str_repeat('k', 3) => $p[0]]; $w = $e = null;
+$later(function ($x) use (&$r, $p) { $r = null; fwrite($p[1], "x"); return $x * 2; });
+var_dump(stream_select($r, $w, $e, 3), array_keys($r), $r['kkk'] === $p[0]);
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "int(1)\narray(1) {\n  [0]=>\n  string(3) \"kkk\"\n}\nbool(true)\n"
+    );
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// The callback a `socket_read` wait serves closes the stream the socket
+/// was imported from, which owns the fd the read waits on, and writes to
+/// its pair (#2664): the fd stays open until the read returns, which reads
+/// what was written.
+#[test]
+fn a_stream_closed_under_its_imported_socket_s_read_keeps_its_fd() {
+    let (stdout, returned) = served(
+        later_imported,
+        "imported",
+        r#"$p = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+$s = socket_import_stream($p[0]);
+$later(function ($x) use ($p) { fclose($p[0]); fwrite($p[1], "y"); return $x * 2; });
+var_dump(socket_read($s, 10));
+"#,
+    );
+    assert_eq!(stdout, "string(1) \"y\"\n");
     assert_eq!(returned.as_deref(), Some("42"));
 }
 
