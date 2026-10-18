@@ -5,11 +5,9 @@
 //! an op array or a linked table holds, a tier reads through the native
 //! face (#1911).
 
-use std::sync::Arc;
-
 use php_compile::SourceKind;
 use php_heap::{Fatal, FrameRef};
-use php_unit::Unit;
+use php_unit::PublishedUnit;
 
 use super::{Request, Symbol};
 use crate::api::raising::{Level, Thrown};
@@ -219,7 +217,7 @@ impl Request {
     /// `source` compiled as an `eval` under `name`, as a host's string
     /// is ([`Request::host_string`]), or none, what the compiler threw
     /// left pending.
-    fn compiled_eval(&mut self, source: &[u8], name: &[u8]) -> Option<Arc<Unit>> {
+    fn compiled_eval(&mut self, source: &[u8], name: &[u8]) -> Option<PublishedUnit> {
         match self.host_string(|req| req.compile_eval(source, name)) {
             Ok(unit) => Some(unit),
             Err(thrown) => {
@@ -233,7 +231,7 @@ impl Request {
     /// as a nested code frame is, or with none on a frame of its own over
     /// the global table, and every frame it left above the standing ones
     /// left.
-    fn serve_eval(&mut self, scope: Option<FrameRef>, unit: Arc<Unit>) -> Result<(), Fatal> {
+    fn serve_eval(&mut self, scope: Option<FrameRef>, unit: PublishedUnit) -> Result<(), Fatal> {
         let standing = self.vm.depth();
         let callee = if let Some(frame) = scope {
             self.push_code_frame(unit, frame, None)?
