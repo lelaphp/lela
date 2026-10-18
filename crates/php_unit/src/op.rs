@@ -175,9 +175,10 @@ impl Opcode {
 /// `handler` is php's `zend_op.handler`, the handler the opline is
 /// served by, which the compiler leaves `Unresolved` and publication
 /// resolves from the fields before it ([`Handler`]); php's is a pointer
-/// and this its number.
+/// and this its number. Aligned to thirty-two bytes, the size of php's,
+/// so an opline's place is its index shifted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
+#[repr(C, align(32))]
 pub struct Opline {
     pub opcode: Opcode,
     pub op1_type: OperandKind,
@@ -497,11 +498,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_opline_is_twenty_eight_bytes_and_the_enum_keeps_php_numbers() {
+    fn an_opline_is_thirty_two_bytes_and_the_enum_keeps_php_numbers() {
         assert_eq!(
             std::mem::size_of::<Opline>(),
-            28,
-            "php's twenty-four bytes of fields and the two of the handler"
+            32,
+            "php's zend_op: twenty-four bytes of fields, the handler and its alignment"
         );
         assert_eq!(std::mem::size_of::<Handler>(), 2);
         assert_eq!(

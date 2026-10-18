@@ -590,7 +590,7 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             req.sensed_after(body, op)?;
             match next.way() {
                 // `at` is the index of an opline that stands, so it is
-                // under the length of an op array, which no 28-byte opline
+                // under the length of an op array, which no 32-byte opline
                 // count brings to `u32::MAX`: the add does not wrap.
                 Way::Advance => at = at.wrapping_add(1),
                 Way::Jump(to) => at = to,
