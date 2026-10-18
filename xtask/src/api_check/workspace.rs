@@ -68,10 +68,7 @@ impl Present {
     pub fn sources(&self) -> Result<Vec<PathBuf>> {
         let mut out = Vec::new();
         for sub in ["src", "tests", "benches", "examples"] {
-            let dir = self.dir.join(sub);
-            if dir.is_dir() {
-                crate::reading::walk(&dir, &mut out)?;
-            }
+            crate::tally::files_under(&self.dir.join(sub), &mut out)?;
         }
         let build = self.dir.join("build.rs");
         if build.is_file() {

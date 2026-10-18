@@ -1040,9 +1040,7 @@ impl Store {
     /// it again.
     pub fn readings(&self) -> Result<Files> {
         let mut paths = Vec::new();
-        if self.root.is_dir() {
-            walk(&self.root, &mut paths)?;
-        }
+        crate::tally::files_under(&self.root, &mut paths)?;
         paths.sort();
         let mut files = Files::default();
         for path in paths
@@ -1435,19 +1433,6 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d)
-}
-
-/// Every file under `dir`, recursively, in directory order.
-pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// At most five names, and how many more there are: how a reading's
