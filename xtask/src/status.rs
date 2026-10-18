@@ -34,7 +34,7 @@ use crate::git::git;
 use crate::layout;
 use crate::manifest::{LockCeiling, Manifest, Measure, SCRIPTS, Seam, Week};
 use crate::oracle::hosts::{EngineHost, HOSTS};
-use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, TREE_VARIABLE};
+use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
 use crate::permit;
 use crate::phpt;
 use crate::port_map;
@@ -1589,14 +1589,20 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// variable's or the pin's, or the absence it named; and the pinned php,
 /// its version, keg path and md5. An eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
-/// records them (#2657). CI reads the two names
-/// off the JSON, `tree.variable` and `promise.variable`, and sets them
-/// under those names, so the workflow spells neither; the oracle runner
-/// pours the keg `binary` names and holds it to that md5 (#2253), and
-/// pours and pins each keg `closure` names at its version.
+/// records them (#2657), and a `variant` row per `[variant.<name>]` that
+/// pins a build for this machine's platform, its path and md5 (#2298).
+/// CI reads the two names off the JSON, `tree.variable` and
+/// `promise.variable`, and sets them under those names, so the workflow
+/// spells neither; the oracle runner pours the keg `binary` names and
+/// holds it to that md5 (#2253), pours and pins each keg `closure` names
+/// at its version, and lays each of `variants` at its path by its md5.
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
     let php = &pin.oracle;
+    let platform = Platform::this();
+    let builds: Vec<_> = (pin.variant.iter())
+        .filter_map(|(name, variant)| Some((name, variant.build(platform?)?)))
+        .collect();
     let named = source.named();
     let promise = std::env::var_os(PROMISE_VARIABLE).map(|v| v.to_string_lossy().into_owned());
     let pinned = source.path();
@@ -1637,41 +1643,33 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "md5": php.md5,
             },
             "closure": pin.closure.as_ref().map(Closure::kegs),
+            "variants": builds.iter().map(|(name, build)| ((*name).clone(), json!({
+                "platform": platform.map(Platform::key),
+                "path": build.path.display().to_string(),
+                "md5": build.md5,
+            }))).collect::<serde_json::Map<_, _>>(),
         }))?,
         Table::Md => {
-            let mut out = String::new();
-            writeln!(
-                out,
-                "| fact | variable | value | state |\n|---|---|---|---|"
-            )
-            .ok();
-            writeln!(
-                out,
-                "| tree | {TREE_VARIABLE} | {} | {} |",
-                cell(&display(named).unwrap_or_default()),
-                set(named.is_some())
-            )
-            .ok();
-            writeln!(
-                out,
-                "| promise | {PROMISE_VARIABLE} | {} | {} |",
-                cell(promise.as_deref().unwrap_or_default()),
-                set(promise.is_some())
-            )
-            .ok();
-            writeln!(
-                out,
-                "| pin |  | {} | {} |",
-                cell(&pinned.display().to_string()),
-                if pinned.is_dir() {
-                    "a directory"
-                } else {
-                    "not a directory"
-                }
-            )
-            .ok();
-            writeln!(out, "| tag |  | {} | the pin's |", cell(&source.tag)).ok();
-            writeln!(out, "| commit |  | {} | the pin's |", cell(&source.commit)).ok();
+            let mut out = "| fact | variable | value | state |\n|---|---|---|---|\n".to_owned();
+            let (o, row) = (&mut out, oracle_row);
+            let tree = display(named).unwrap_or_default();
+            row(o, "tree", TREE_VARIABLE, &tree, set(named.is_some()));
+            let promised = promise.as_deref().unwrap_or_default();
+            row(
+                o,
+                "promise",
+                PROMISE_VARIABLE,
+                promised,
+                set(promise.is_some()),
+            );
+            let dir = if pinned.is_dir() {
+                "a directory"
+            } else {
+                "not a directory"
+            };
+            row(o, "pin", "", &pinned.display().to_string(), dir);
+            row(o, "tag", "", &source.tag, "the pin's");
+            row(o, "commit", "", &source.commit, "the pin's");
             let (path, state) = match &found {
                 Ok(tree) => (
                     tree.display().to_string(),
@@ -1682,16 +1680,14 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 ),
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
-            writeln!(out, "| found |  | {} | {} |", cell(&path), cell(&state)).ok();
-            writeln!(
-                out,
-                "| binary |  | {} | php {}, md5 {} |",
-                cell(&php.path.display().to_string()),
-                php.version,
-                php.md5
-            )
-            .ok();
-            closure_row(&mut out, pin.closure.as_ref());
+            row(o, "found", "", &path, &state);
+            let binary = format!("php {}, md5 {}", php.version, php.md5);
+            row(o, "binary", "", &php.path.display().to_string(), &binary);
+            closure_row(o, pin.closure.as_ref());
+            for (name, build) in &builds {
+                let (fact, md5) = (format!("variant {name}"), format!("md5 {}", build.md5));
+                row(o, &fact, "", &build.path.display().to_string(), &md5);
+            }
             out
         }
     })
@@ -1706,8 +1702,14 @@ fn closure_row(out: &mut String, closure: Option<&Closure>) {
         .iter()
         .map(|(k, v)| format!("{k} {v}"))
         .collect();
-    let (count, kegs) = (kegs.len(), cell(&kegs.join(", ")));
-    writeln!(out, "| closure |  | {kegs} | {count} kegs, the pin's |").ok();
+    let count = format!("{} kegs, the pin's", kegs.len());
+    oracle_row(out, "closure", "", &kegs.join(", "), &count);
+}
+
+/// One row of the oracle section's table, its value and state as cells.
+fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: &str) {
+    let (value, state) = (cell(value), cell(state));
+    writeln!(out, "| {fact} | {variable} | {value} | {state} |").ok();
 }
 
 /// The `corpus` section: what CI checks out of the pinned php-src (#1713),

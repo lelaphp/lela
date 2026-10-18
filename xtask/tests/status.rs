@@ -747,17 +747,32 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
 }
 
 /// The pinned php a runner pours (#2253): its version, keg path and md5
-/// as the pin states them, so the oracle job reads the pin off this
-/// section and never parses `oracle.toml` a second time.
+/// as the pin states them, and each variant's build for this machine a
+/// runner lays (#2298), so the oracle job reads the pin off this section
+/// and never parses `oracle.toml` a second time.
 #[test]
 fn oracle_states_the_pinned_php_a_runner_pours() {
     let root = scratch("oracle-binary");
-    let oracle = Manifest::load(workspace()).unwrap().pin.oracle;
+    let pin = Manifest::load(workspace()).unwrap().pin;
+    let oracle = pin.oracle.clone();
     let path = oracle.path.display().to_string();
     let json = oracle_json(&root, None, None);
     assert_eq!(json["binary"]["version"], oracle.version.as_str());
     assert_eq!(json["binary"]["path"], path.as_str());
     assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
+    for name in pin.variant.keys() {
+        let built = pin.variant(name).unwrap().oracle;
+        let laid = &json["variants"][name.as_str()];
+        assert_eq!(
+            laid["md5"].as_str().unwrap_or_default(),
+            built.md5,
+            "{name}"
+        );
+        assert_eq!(
+            laid["path"].as_str().unwrap_or_default(),
+            built.path.to_str().unwrap()
+        );
+    }
     let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
     assert!(ok, "{err}");
     assert!(
