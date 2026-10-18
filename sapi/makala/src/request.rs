@@ -332,9 +332,11 @@ impl Refusal<'_> {
     }
 
     /// The line php-fpm logs for it, worded as its `zlog` words it, the
-    /// path's bytes as they came.
+    /// path's bytes as they came, and cut as `zlog_external` cuts a line
+    /// its buffer of [`ZLOG_BUFFER`] bytes does not hold: the bytes before
+    /// the last three it has room for, then `...`.
     fn logged(&self) -> Vec<u8> {
-        match self {
+        let mut line = match self {
             Refusal::Unknown => b"Primary script unknown".to_vec(),
             Refusal::Extension(path) => [
                 &b"Access to the script '"[..],
@@ -350,9 +352,19 @@ impl Refusal<'_> {
                 b")",
             ]
             .concat(),
+        };
+        if line.len() >= ZLOG_BUFFER {
+            line.truncate(ZLOG_BUFFER - b"...".len());
+            line.extend_from_slice(b"...");
         }
+        line
     }
 }
+
+/// `MAX_BUF_LENGTH`, the buffer php-fpm formats a line into before it
+/// hands it to `sapi_cgi_log_fastcgi` (`Z/sapi/fpm/fpm/zlog.c:20`,
+/// `zlog_external`).
+const ZLOG_BUFFER: usize = 2048;
 
 /// Whether the request is refused once it has started, in php-fpm's
 /// order (`Z/sapi/fpm/fpm/fpm_main.c:1854-1888`): where the path names no
@@ -881,6 +893,25 @@ mod tests {
             (path, thread)
         });
         path
+    }
+
+    /// A refusal's line is cut as `zlog_external` cuts one its buffer of
+    /// 2048 bytes does not hold, to 2045 bytes and `...`, and a line it
+    /// holds is whole.
+    #[test]
+    fn a_refusals_line_is_cut_where_php_fpms_buffer_ends() {
+        let long = [b"/".as_slice(), &[b'a'; 3000], b".php"].concat();
+        let unopened =
+            Refusal::Unopened(&long, std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        let line = unopened.logged();
+        assert_eq!(line.len(), ZLOG_BUFFER);
+        assert!(line.starts_with(b"Unable to open primary script: /aaa"));
+        assert!(line.ends_with(b"aaa..."));
+        let short = Refusal::Extension(b"/r/x.PHP").logged();
+        assert_eq!(
+            String::from_utf8_lossy(&short),
+            "Access to the script '/r/x.PHP' has been denied (see security.limit_extensions)"
+        );
     }
 
     /// A request that panics is answered 500, its thread serves the next,
