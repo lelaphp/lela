@@ -150,20 +150,16 @@ impl Kind {
     const ALL: [Kind; 3] = [Kind::Memory, Kind::Semaphores, Kind::Queue];
 
     fn of(letter: &str) -> Option<Kind> {
-        match letter {
-            "m" => Some(Kind::Memory),
-            "s" => Some(Kind::Semaphores),
-            "q" => Some(Kind::Queue),
-            _ => None,
-        }
+        Kind::ALL.into_iter().find(|kind| kind.letter() == letter)
     }
 
-    /// The `ipcrm` flag that removes one by its id.
-    fn flag(self) -> &'static str {
+    /// The letter `ipcs` prints it under, and `ipcrm`'s flag that removes
+    /// one by its id.
+    fn letter(self) -> &'static str {
         match self {
-            Kind::Memory => "-m",
-            Kind::Semaphores => "-s",
-            Kind::Queue => "-q",
+            Kind::Memory => "m",
+            Kind::Semaphores => "s",
+            Kind::Queue => "q",
         }
     }
 
@@ -729,7 +725,7 @@ fn remove(objects: Vec<&Object>, swept: &mut Swept) -> Result<()> {
     let mut refused = Vec::new();
     for object in objects {
         let removed = Command::new("ipcrm")
-            .arg(object.kind.flag())
+            .arg(format!("-{}", object.kind.letter()))
             .arg(object.id.to_string())
             .output()
             .context("running ipcrm")?;
@@ -760,8 +756,8 @@ fn remove(objects: Vec<&Object>, swept: &mut Swept) -> Result<()> {
             .any(|o| o.kind == object.kind && o.id == object.id)
         {
             bail!(
-                "ipcrm {} {} exited {}: {}",
-                object.kind.flag(),
+                "ipcrm -{} {} exited {}: {}",
+                object.kind.letter(),
                 object.id,
                 removed.status,
                 String::from_utf8_lossy(&removed.stderr).trim()
