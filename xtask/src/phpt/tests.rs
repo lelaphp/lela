@@ -235,7 +235,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
     // for its digest before the first program only (harness §4.3).
     let test = |n: u8| {
         format!(
-            "--TEST--\nn{n}\n--SKIPIF--\n<?php echo 'ok';\n--FILE--\n<?php echo {n};\n--CLEAN--\n<?php echo 'clean';\n--EXPECT--\n{n}\n"
+            "--TEST--\nn{n}\n--SKIPIF--\n<?php echo 'info ok';\n--FILE--\n<?php echo {n};\n--CLEAN--\n<?php echo 'clean';\n--EXPECT--\n{n}\n"
         )
     };
     let tests = [test(1), test(2), test(3)];
@@ -522,23 +522,32 @@ fn a_refusal_of_the_compiler_is_read_as_unread() {
 const FIXTURE: &str = "fixtures/phpt/UnreadConstruct.phpt";
 
 #[test]
-fn a_skipif_that_says_skip_skips_with_its_reason() {
+fn a_skipif_that_says_skip_skips_with_its_reason_and_one_that_warns_first_borks() {
     if oracle().is_none() {
         return;
     }
-    let (_tree, subset) = subset(
-        "skipif",
-        &[(
-            "skipped.phpt",
-            "--TEST--\nSkipped\n--SKIPIF--\n<?php echo \"skip nothing to see here\\n\";\n--FILE--\n<?php echo \"never\";\n--EXPECT--\nnever\n",
-        )],
-    );
-    let tally = run(&subset, &registry(""));
-    assert_eq!(
-        only(&tally),
-        (Judgement::Skip, "nothing to see here".to_owned()),
-        "{tally:#?}"
-    );
+    for (skipif, judgement, why) in [
+        (
+            "echo \"skip nothing to see here\\n\";",
+            Judgement::Skip,
+            "nothing to see here",
+        ),
+        // A warning before the skip, as mcast_ipv6_recv.phpt's unsilenced
+        // `socket_sendto` writes one: upstream borks it (#2857).
+        (
+            "trigger_error('w', E_USER_WARNING); echo 'skip';",
+            Judgement::Bork,
+            "invalid output from SKIPIF: Warning: w in ",
+        ),
+    ] {
+        let test = format!(
+            "--TEST--\nSkipped\n--SKIPIF--\n<?php {skipif}\n--FILE--\n<?php echo \"never\";\n--EXPECT--\nnever\n"
+        );
+        let (_tree, subset) = subset("skipif", &[("skipped.phpt", &test)]);
+        let tally = run(&subset, &registry(""));
+        let (judged, said) = only(&tally);
+        assert!(judged == judgement && said.starts_with(why), "{tally:#?}");
+    }
 }
 
 #[test]

@@ -292,12 +292,17 @@ impl<'a> Adapter<'a> {
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
         if let Some(body) = phpt.filled("SKIPIF") {
             let out = self.run_section(subset, test, &env, ("skip", body), phpt.has("PHPDBG"))?;
-            let said = String::from_utf8_lossy(&out.stdout).into_owned();
-            if let Some(reason) = reason_after("skip", &said) {
-                return Ok(Err(Judged::new(id, name, Judgement::Skip, reason)));
-            }
-            if let Some(reason) = reason_after("xfail", &said) {
-                expected_to_fail = Some(reason);
+            match Said::of(&String::from_utf8_lossy(&out.stdout)) {
+                Said::Skip(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
+                Said::Bork(said) => {
+                    let why = format!("invalid output from SKIPIF: {said}");
+                    let miss = Miss::bork(&why);
+                    return Ok(Err(
+                        Judged::new(id, name, Judgement::Bork, why).keeping(miss)
+                    ));
+                }
+                Said::XFail(why) => expected_to_fail = Some(why),
+                Said::Run => {}
             }
         }
         Ok(Ok(Admitted {
@@ -416,7 +421,8 @@ impl<'a> Adapter<'a> {
     /// A section that runs beside the test rather than as it: `SKIPIF`,
     /// which decides whether the test applies at all, and `CLEAN`, which
     /// takes away what it left. Neither is given the test's own `--INI--`,
-    /// as upstream gives neither. Both run under the oracle, not the
+    /// as upstream gives neither; a `SKIPIF` shows its errors and not those
+    /// of startup, as upstream's (run-tests.php:2134). Both run under the oracle, not the
     /// engine: what they answer must be true of the corpus whatever the
     /// engine can do yet, and a young engine must not be trusted with
     /// cleanup. Upstream runs them under the binary it is testing, so a
@@ -449,9 +455,11 @@ impl<'a> Adapter<'a> {
             }
             None => (&pin.oracle.path, &[][..]),
         };
+        let shown = ["display_errors=1", "display_startup_errors=0"].map(String::from);
         let out = self
             .oracle
             .run_under(&Invocation {
+                ini: if kind == "skip" { &shown } else { &[] },
                 flags,
                 env: env.entries(),
                 stdin: Stdin::Pipe(&[]),
@@ -821,21 +829,49 @@ fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) 
     out
 }
 
-/// The reason a `SKIPIF` gave, when its first word is `word`:
-/// upstream's `/^skip\s*(.+)/i` over what the section wrote.
-pub(crate) fn reason_after(word: &str, said: &str) -> Option<String> {
-    let said = said.trim_start();
-    if said.len() < word.len() || !said[..word.len()].eq_ignore_ascii_case(word) {
-        return None;
+/// What a `SKIPIF` wrote on stdout, trimmed and read as upstream reads it
+/// (run-tests.php:2154-2190, 3595-3597).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Said {
+    /// It begins with `skip`, any case: the first line after the word.
+    Skip(String),
+    /// It begins with `xfail`: why the test is expected to fail.
+    XFail(String),
+    /// The test runs: nothing; `nocache` and anything after it; `info` or
+    /// `warn` with a reason; `xleak` or `flaky`, sections this runner does
+    /// not act on.
+    Run,
+    /// Anything else, which upstream borks as no answer a `SKIPIF` may
+    /// give: a warning before a `skip` among it (#2857).
+    Bork(String),
+}
+
+impl Said {
+    pub(crate) fn of(stdout: &str) -> Said {
+        let said = stdout.trim();
+        let after = |word: &str| {
+            let head = said.get(..word.len())?;
+            head.eq_ignore_ascii_case(word)
+                .then(|| said[word.len()..].trim_start())
+        };
+        let reason = |rest: &str| rest.lines().next().unwrap_or("").to_owned();
+        if let Some(rest) = after("skip") {
+            Said::Skip(reason(rest))
+        } else if let Some(rest) = after("xfail") {
+            Said::XFail(rest.to_owned())
+        } else if said.is_empty()
+            || said.starts_with("nocache")
+            || after("info").is_some_and(|rest| !rest.is_empty())
+            || after("warn")
+                .is_some_and(|rest| !rest.is_empty() && said[4..].starts_with(char::is_whitespace))
+            || after("xleak").is_some()
+            || after("flaky").is_some()
+        {
+            Said::Run
+        } else {
+            Said::Bork(said.to_owned())
+        }
     }
-    Some(
-        said[word.len()..]
-            .trim()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_owned(),
-    )
 }
 
 /// A command line's words, split on whitespace: a test's `--ARGS--`.
@@ -871,21 +907,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_skipif_reason_is_the_text_after_the_word() {
-        assert_eq!(
-            reason_after("skip", "skip no pcre\n").as_deref(),
-            Some("no pcre")
-        );
-        assert_eq!(
-            reason_after("skip", "SKIP  no pcre").as_deref(),
-            Some("no pcre")
-        );
-        assert_eq!(reason_after("skip", "skip").as_deref(), Some(""));
-        assert_eq!(reason_after("skip", "nothing"), None);
-        assert_eq!(
-            reason_after("xfail", "xfail known"),
-            Some("known".to_owned())
-        );
+    fn a_skipif_is_read_as_upstream_reads_it_and_a_warning_before_its_skip_borks() {
+        let skip = |why: &str| Said::Skip(why.to_owned());
+        assert_eq!(Said::of("skip no pcre\n"), skip("no pcre"));
+        assert_eq!(Said::of("\n SKIP  no pcre\nmore"), skip("no pcre"));
+        assert_eq!(Said::of("skip"), skip(""));
+        assert_eq!(Said::of("xfail known"), Said::XFail("known".to_owned()));
+        for runs in [
+            "",
+            " \n",
+            "nocache",
+            "nocache junk",
+            "info x",
+            "warn x",
+            "xleak",
+            "flaky y",
+        ] {
+            assert_eq!(Said::of(runs), Said::Run, "{runs:?}");
+        }
+        // mcast_ipv6_recv.phpt's SKIPIF where the group joins and the
+        // send fails: its unsilenced warning stands before the skip.
+        let warned = "\nWarning: socket_sendto(): Unable to write to socket [65]: No route to host in /t/skip.php on line 24\nskip unable to send multicast packet.";
+        for borks in [warned, "info", "warn", "Warning: x", "nothing", "NOCACHE"] {
+            assert_eq!(
+                Said::of(borks),
+                Said::Bork(borks.trim().to_owned()),
+                "{borks:?}"
+            );
+        }
     }
 
     #[test]
