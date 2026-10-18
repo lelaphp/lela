@@ -274,6 +274,8 @@ fn address(unit: &Arc<Unit>) -> usize {
 pub(crate) struct Preloading {
     scripts: Vec<(Vec<u8>, Arc<Unit>, u64)>,
     aliases_before: usize,
+    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Request::preloading_as_user`]).
+    in_child: bool,
 }
 
 /// One class `preload_link` asks about: a top-level or an anonymous
@@ -307,6 +309,17 @@ impl Request {
         self.preloading.is_some()
     }
 
+    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD_IN_CHILD`: whether
+    /// this is the preload's request served on the thread that took
+    /// `opcache.preload_user`'s credentials, php's preload child, where
+    /// `FFI::load` refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
+    #[must_use]
+    pub fn preloading_as_user(&self) -> bool {
+        self.preloading
+            .as_ref()
+            .is_some_and(|preloading| preloading.in_child)
+    }
+
     /// `EX(prev_execute_data)->func->common.fn_flags &
     /// ZEND_ACC_PRELOADED`: whether the native being served was called
     /// from a function, a method or a closure the preload compiled, as
@@ -337,11 +350,14 @@ impl Request {
     }
 
     /// The request, started, is the preload's from here: every file it
-    /// compiles is compiled into the preload.
-    pub(crate) fn begin_preload(&mut self) {
+    /// compiles is compiled into the preload. `in_child` where it is
+    /// served on the thread that took `opcache.preload_user`'s
+    /// credentials, php's `ZEND_COMPILE_PRELOAD_IN_CHILD`.
+    pub(crate) fn begin_preload(&mut self, in_child: bool) {
         self.preloading = Some(Preloading {
             scripts: Vec::new(),
             aliases_before: self.aliases.len(),
+            in_child,
         });
     }
 
@@ -965,7 +981,7 @@ mod tests {
                 let mut published = Vec::new();
                 for round in 0..ROUNDS {
                     let mut req = Request::new(Arc::clone(&shared), RequestDescription::default());
-                    req.begin_preload();
+                    req.begin_preload(false);
                     let code = format!(
                         "class P{round} {{ function m() {{ return {round}; }} }} class Q{round} extends P{round} {{}}"
                     );
@@ -1065,7 +1081,7 @@ mod tests {
     fn a_class_before_its_parent_in_the_table_is_published_with_its_record() {
         let engine = Engine::builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        req.begin_preload();
+        req.begin_preload(false);
         let code = "trait T { public $t; function t() {} } \
                     class P { public $p; private $q; function p() {} } \
                     class_alias('P', 'PA'); class C extends PA { use T; public $c; public $p; }";

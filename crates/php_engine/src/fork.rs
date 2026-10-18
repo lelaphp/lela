@@ -93,10 +93,11 @@ impl Drop for Inside {
 }
 
 /// A thread the engine started, which a fork waits for: [`Inside`] from
-/// before the thread exists to after it is joined.
+/// before the thread exists to after it is joined; `T` is what its body
+/// answers.
 #[derive(Debug)]
-pub(crate) struct Thread {
-    handle: JoinHandle<()>,
+pub(crate) struct Thread<T = ()> {
+    handle: JoinHandle<T>,
     _inside: Inside,
 }
 
@@ -106,9 +107,51 @@ pub(crate) fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Option<
     start(thread::Builder::new().name(name.to_owned()), body).ok()
 }
 
+/// `body` over `input` on a thread of its own named `name` with a stack
+/// of `stack_size` bytes, counted inside the engine while it stands, and
+/// joined before this returns: what `body` answered, or the panic it
+/// ended in, for the caller to resume. `input` is handed over once the
+/// thread stands, so where the system refuses the thread it comes back
+/// with the error, and `body` never runs.
+pub(crate) fn run_joined<I: Send + 'static, T: Send + 'static>(
+    name: &str,
+    stack_size: usize,
+    input: I,
+    body: impl FnOnce(I) -> T + Send + 'static,
+) -> Result<thread::Result<T>, (io::Error, I)> {
+    // A rendezvous: the send returns once the thread holds `input`, and
+    // hands it back where the thread ended without taking it.
+    let (hand, handed) = std::sync::mpsc::sync_channel::<I>(0);
+    let builder = thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(stack_size);
+    let thread = match start(builder, move || handed.recv().ok().map(body)) {
+        Ok(thread) => thread,
+        Err(refused) => return Err((refused, input)),
+    };
+    let sent = hand.send(input);
+    let ended = thread.handle.join();
+    match (sent, ended) {
+        (Err(std::sync::mpsc::SendError(input)), _) => Err((
+            io::Error::other("the thread ended before it was handed its work"),
+            input,
+        )),
+        (Ok(()), Ok(Some(answer))) => Ok(Ok(answer)),
+        (Ok(()), Err(panicked)) => Ok(Err(panicked)),
+        // A send that returned was received, so the body ran and
+        // answered: no thread ends here, and one that did ended abnormally.
+        (Ok(()), Ok(None)) => Ok(Err(Box::new(
+            "the thread took its work and ended without an answer",
+        ))),
+    }
+}
+
 /// `body` on the thread `builder` describes, counted inside the engine
 /// from before it exists to after it is joined.
-fn start(builder: thread::Builder, body: impl FnOnce() + Send + 'static) -> io::Result<Thread> {
+fn start<T: Send + 'static>(
+    builder: thread::Builder,
+    body: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<Thread<T>> {
     let inside = Inside::enter();
     #[expect(
         clippy::disallowed_methods,

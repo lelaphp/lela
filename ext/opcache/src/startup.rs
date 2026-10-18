@@ -28,7 +28,7 @@ pub(crate) fn post_startup(
 ) -> PostStartup {
     match beneath.serve(req) {
         PostStartup::Serve => {}
-        answered @ (PostStartup::Preload(_) | PostStartup::Refuse { .. }) => return answered,
+        answered @ (PostStartup::Preload { .. } | PostStartup::Refuse { .. }) => return answered,
     }
     if verdict(req) != Startup::Ok {
         return PostStartup::Serve;
@@ -137,5 +137,8 @@ fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
         );
         return PostStartup::Refuse { status: -2 };
     }
-    PostStartup::Preload(script)
+    PostStartup::Preload {
+        script,
+        thread: None,
+    }
 }

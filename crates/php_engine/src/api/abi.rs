@@ -602,20 +602,57 @@ pub struct Shell {
 /// host, from the top of the chain ([`ExtensionBuilder::post_startup`]):
 /// what the top link answers decides, and beneath every link the chain
 /// answers [`PostStartup::Serve`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum PostStartup {
     /// Serve as built.
     Serve,
-    /// `accel_preload`: the file at the path compiled and served once, in a
-    /// request of its own, before the first request, and every class and
-    /// function it declared that links declared in every request after,
-    /// as they stand in the unit cache. A file that ends in a fatal or
-    /// an `exit` fails php's startup, and the process ends with status 1.
-    Preload(Vec<u8>),
+    /// `accel_preload`: the file at `script` compiled and served once, in
+    /// a request of its own, before the first request, and every class
+    /// and function it declared that links declared in every request
+    /// after, as they stand in the unit cache. A file that ends in a
+    /// fatal or an `exit` fails php's startup, and the process ends with
+    /// status 1.
+    Preload {
+        /// The file, as `opcache.preload` names it.
+        script: Vec<u8>,
+        /// The thread of its own the request is served on, or `None` to
+        /// serve it on the thread that finishes the startup.
+        thread: Option<PreloadThread>,
+    },
     /// Serve nothing: the process ends with `status`, as
     /// `zend_accel_error` at `ACCEL_LOG_FATAL` ends it with `exit(-2)`.
     Refuse { status: i32 },
 }
+/// The thread a preload is served on where the process's own may not
+/// serve it, php's preload child as `accel_finish_startup_preload_subprocess`
+/// forks it (`Z/ext/opcache/ZendAccelerator.c:5020-5040`), and what that
+/// thread takes before it serves any PHP: `take`, handed the preload's
+/// request on the thread, answers whether it took it, and `false` fails
+/// the startup with status 1, as the child's `exit(1)` does, the file
+/// never served. The thread that finishes the startup waits for it, as
+/// php's parent `waitpid`s, and the thread ends with the preload, so
+/// what `take` took ends with it; the process's other threads never
+/// have it.
+pub struct PreloadThread(Box<dyn FnOnce(&mut Request) -> bool + Send>);
+
+impl PreloadThread {
+    /// The thread that takes what `take` takes before the preload.
+    pub fn new(take: impl FnOnce(&mut Request) -> bool + Send + 'static) -> PreloadThread {
+        PreloadThread(Box::new(take))
+    }
+
+    /// What the thread takes, taken on the thread, on `req`.
+    pub(crate) fn take(self, req: &mut Request) -> bool {
+        (self.0)(req)
+    }
+}
+
+impl std::fmt::Debug for PreloadThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreloadThread")
+    }
+}
+
 /// The path resolver, php's `zend_resolve_path` as an extension overrides
 /// it: [`ExtensionBuilder::resolve_path`].
 pub(crate) type ResolvePathHook = fn(
