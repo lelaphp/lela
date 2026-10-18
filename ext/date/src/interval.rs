@@ -15,7 +15,7 @@ use crate::ffi::{self, ErrorContainer, Parsed, RelFields, RelTime, Time, UNSET};
 use crate::lent::{Lent, lent, release};
 use crate::obj::{
     CIVIL, INTERVAL, IntervalObj, WALL, class_id, interval_fields, interval_of, new_interval,
-    rows_array, set_diff, std_rows,
+    rows_array, set_diff, std_rows, write_fields,
 };
 
 /// `date_interval_initialize(&rt, format, len)`: the period of an ISO
@@ -669,6 +669,19 @@ impl DateInterval {
     /// ```expect
     /// int(1)
     /// ```
+    ///
+    /// It reads the object's own table, `Z_OBJPROP_P`, which the fields
+    /// are written into first and stay in, so a cast after it finds them
+    /// there:
+    ///
+    /// ```php
+    /// $i = new DateInterval('P1D');
+    /// @$i->__wakeup(); error_clear_last();
+    /// $m = memory_get_usage(); $a = (array) $i; echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 696
+    /// ```
     #[php(
         tentative,
         deprecated(
@@ -679,7 +692,9 @@ impl DateInterval {
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let object = this.object();
         // `Z_OBJPROP_P`, which `date_object_get_properties_interval` fills
-        // with the fields before it answers.
+        // with the fields before it answers: written into the object's own
+        // table, where they stay, and read with its rows.
+        write_fields(req, object)?;
         let own = std_rows(req, object)?;
         let state = object.native::<IntervalObj>(req).and_then(|i| {
             i.diff

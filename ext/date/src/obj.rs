@@ -1221,7 +1221,7 @@ impl ObjectHandlers for IntervalHandlers {
 /// `zend_hash_str_update`, a row it holds replaced where it stands and a
 /// new one appended, so the table's internal pointer stays where it
 /// stood.
-fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+pub(super) fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     let mut fields = interval_rows(req, object).into_iter();
     while let Some((name, value)) = fields.next() {
         let written = match PhpString::new(req, name) {
