@@ -1,0 +1,9 @@
+# A slice of docs/divergence.toml's shape: the merge base's one row.
+
+[[divergence]]
+id = "trace:fixture-base"
+kind = "trace"
+cause = "php-ub"
+reason = "The row both sides of the merge carry as the base had it (fixture)."
+status = "accepted"
+since = "2026-10-01"

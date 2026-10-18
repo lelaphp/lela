@@ -41,6 +41,16 @@
 //! call on what the harness holds; the agent's half is the row that was
 //! never there.
 //!
+//! A merge is the one place two additions meet. Two branches that each
+//! append a ruled row to the registry conflict at the second's merge, and
+//! the working file then holds git's markers, which no reader parses. So
+//! while `MERGE_HEAD` stands with the file unmerged, a proposal is judged
+//! against the blobs git keeps for the conflict ([`Ground::Merge`]): it is
+//! written when it is the union of what each side adds over the merge
+//! base, and the reading names both sides' additions. A change or a drop on
+//! either side, and a row neither side carries, is refused as any change
+//! is, by its path.
+//!
 //! An addition is not a decision. What a new row should say is a person's,
 //! settled on a ticket (`AGENTS.md`, *Documentation and where code lives*);
 //! this instrument is how a settled row reaches the file, and the reading
@@ -54,6 +64,7 @@ use anyhow::{Context, Result, bail};
 use toml::Value;
 
 use crate::divergence::{self, Registry};
+use crate::git;
 use crate::key::Snapshot;
 use crate::manifest::{self, Manifest};
 use crate::oracle::Pin;
@@ -80,15 +91,23 @@ pub enum Verdict {
     /// Nothing that stands was touched; the additions, by their path in
     /// the file, in the order the walk found them.
     Additive(Vec<String>),
+    /// A merge stands with the file conflicted, and the proposal is the
+    /// union of what each side adds over the merge base: `head`, what
+    /// `HEAD` carries beyond it, and `merged`, what `MERGE_HEAD` does,
+    /// which is what the write adds to `HEAD`'s file ([`Ground::Merge`]).
+    Union {
+        head: Vec<String>,
+        merged: Vec<String>,
+    },
     /// Something that stands was changed or removed; each one named.
     Refused(Vec<String>),
 }
 
 impl Verdict {
-    /// The additions of an additive verdict, none for a refused one.
+    /// What the write adds to the tracked file, none for a refused one.
     pub fn additions(&self) -> &[String] {
         match self {
-            Verdict::Additive(added) => added,
+            Verdict::Additive(added) | Verdict::Union { merged: added, .. } => added,
             Verdict::Refused(_) => &[],
         }
     }
@@ -97,14 +116,89 @@ impl Verdict {
 /// Judge one proposal against the file it would replace: additive when
 /// every value the tracked file carries stands unchanged in the proposal.
 pub fn judge(tracked: &str, proposed: &str) -> Result<Verdict> {
-    let old: toml::Table = toml::from_str(tracked).context("the tracked file is not TOML")?;
-    let new: toml::Table = toml::from_str(proposed).context("the proposed file is not TOML")?;
-    let mut walk = Walk::default();
-    walk.table("", &old, &new);
-    if walk.refused.is_empty() {
-        Ok(Verdict::Additive(walk.added))
+    let walk = Walk::over(tracked, proposed)?;
+    Ok(if walk.refused.is_empty() {
+        Verdict::Additive(walk.added)
     } else {
-        Ok(Verdict::Refused(walk.refused))
+        Verdict::Refused(walk.refused)
+    })
+}
+
+/// What a proposal is judged against, read once from the checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ground {
+    /// The tracked file as it stands.
+    File(String),
+    /// A merge stands (`MERGE_HEAD`) with the file unmerged in the index,
+    /// its working copy holding git's conflict markers, which no reader
+    /// parses: the three blobs git keeps for the conflict, the merge base
+    /// (stage 1, empty where it carries no such file), `HEAD`'s (stage 2)
+    /// and `MERGE_HEAD`'s (stage 3). Two branches that each append a ruled
+    /// row conflict this way at the second's merge (#2880).
+    Merge {
+        base: String,
+        head: String,
+        merged: String,
+    },
+}
+
+impl Ground {
+    /// The ground of `file` in the checkout at `root`, whose working copy
+    /// is `working`.
+    pub fn of(root: &Path, file: &str, working: String) -> Result<Ground> {
+        let unmerged = git::has_ref(root, "MERGE_HEAD")
+            && !git::git(root, &["ls-files", "--unmerged", "--", file], None)?.is_empty();
+        if !unmerged {
+            return Ok(Ground::File(working));
+        }
+        let stage = |n: u8| git::git(root, &["show", &format!(":{n}:{file}")], None);
+        Ok(Ground::Merge {
+            base: stage(1).unwrap_or_default(),
+            head: stage(2)?,
+            merged: stage(3)?,
+        })
+    }
+
+    /// The file a proposal replaces, as its reader is held to it: `HEAD`'s
+    /// while a merge stands.
+    fn tracked(&self) -> &str {
+        match self {
+            Ground::File(tracked) | Ground::Merge { head: tracked, .. } => tracked,
+        }
+    }
+
+    /// Judge one proposal on this ground. In a merge it is held to both
+    /// sides as to one tracked file each, and to the merge base: neither
+    /// side may change or drop what the base carries, the proposal may
+    /// change or drop nothing either side carries, and what it adds to
+    /// `HEAD`'s file is only what `MERGE_HEAD` adds over the base, so a
+    /// row neither side carries is refused by its path.
+    pub fn judge(&self, proposed: &str) -> Result<Verdict> {
+        let Ground::Merge { base, head, merged } = self else {
+            return judge(self.tracked(), proposed);
+        };
+        let (ours, theirs) = (Walk::over(base, head)?, Walk::over(base, merged)?);
+        let (over_head, over_merged) = (Walk::over(head, proposed)?, Walk::over(merged, proposed)?);
+        let neither = over_head
+            .added
+            .iter()
+            .filter(|path| !theirs.added.contains(path));
+        let mut refused: Vec<String> = (ours.refused.iter().map(|p| format!("{p} on HEAD")))
+            .chain(theirs.refused.iter().map(|p| format!("{p} on MERGE_HEAD")))
+            .chain(over_head.refused)
+            .chain(over_merged.refused)
+            .chain(neither.map(|path| format!("{path}, which neither side carries")))
+            .collect();
+        refused.sort();
+        refused.dedup();
+        Ok(if refused.is_empty() {
+            Verdict::Union {
+                head: ours.added,
+                merged: over_head.added,
+            }
+        } else {
+            Verdict::Refused(refused)
+        })
     }
 }
 
@@ -119,18 +213,19 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
         );
     }
     let path = root.join(file);
-    let tracked = fs::read_to_string(&path)
+    let working = fs::read_to_string(&path)
         .with_context(|| format!("reading the tracked {}", path.display()))?;
     let proposed = fs::read_to_string(proposal)
         .with_context(|| format!("reading the proposal at {}", proposal.display()))?;
-    let verdict = judge(&tracked, &proposed)?;
+    let ground = Ground::of(root, file, working)?;
+    let verdict = ground.judge(&proposed)?;
     let mut reading = Reading::stamped_over(
         INSTRUMENT,
         file,
         &Snapshot::disk_over(root, Path::new(file))?,
         Path::new(file),
     )?;
-    if let Err(unread) = loads(file, &tracked, &proposed) {
+    if let Err(unread) = loads(file, ground.tracked(), &proposed) {
         reading.status = Status::Fail;
         reading.message = format!(
             "{file}: the proposal would not load, so every instrument that reads the file would \
@@ -153,7 +248,7 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
             reading.status = Status::Skip;
             reading.message = format!("{file}: the proposal is the tracked file; nothing to write");
         }
-        Verdict::Additive(added) => {
+        Verdict::Additive(added) | Verdict::Union { merged: added, .. } => {
             if !dry_run {
                 crate::write(&path, &proposed)?;
                 // The reading is stamped over what steer left, a snapshot
@@ -163,16 +258,25 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
                 let after = Snapshot::disk_over(root, Path::new(file))?;
                 reading = Reading::stamped_over(INSTRUMENT, file, &after, Path::new(file))?;
             }
+            let dry = if dry_run {
+                " (dry run, not written)"
+            } else {
+                ""
+            };
+            let union = match &verdict {
+                Verdict::Union { head, .. } => format!(
+                    ", judged against HEAD's file since a merge is in progress: the union of \
+                     HEAD's {} and MERGE_HEAD's additions over their base, and nothing either \
+                     side carried changed",
+                    head.join(", ")
+                ),
+                _ => ", and nothing the file already carried changed".to_owned(),
+            };
             reading.status = Status::Pass;
             reading.count("added", added.len() as u64)?;
             reading.message = format!(
-                "{file}: {} added{}, and nothing the file already carried changed: {}",
+                "{file}: {} added{dry}{union}: {}",
                 added.len(),
-                if dry_run {
-                    " (dry run, not written)"
-                } else {
-                    ""
-                },
                 added.join(", ")
             );
         }
@@ -214,6 +318,15 @@ struct Walk {
 }
 
 impl Walk {
+    /// The walk of `tracked` against `proposed`, each parsed as TOML.
+    fn over(tracked: &str, proposed: &str) -> Result<Walk> {
+        let old: toml::Table = toml::from_str(tracked).context("the tracked file is not TOML")?;
+        let new: toml::Table = toml::from_str(proposed).context("the proposed file is not TOML")?;
+        let mut walk = Walk::default();
+        walk.table("", &old, &new);
+        Ok(walk)
+    }
+
     /// One value of the tracked file against the proposal's at the same
     /// path. A table recurses key by key, an array of tables recurses into
     /// every row it carries and admits new ones beside them, and every
@@ -312,7 +425,7 @@ fn path_of(at: &str, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Verdict, judge};
+    use super::{Ground, Verdict, judge};
 
     fn verdict(old: &str, new: &str) -> Verdict {
         judge(old, new).expect("both parse")
@@ -432,6 +545,58 @@ mod tests {
         assert_eq!(
             verdict(&tracked, &grown),
             Verdict::Refused(vec!["divergence[phpt:cause].covers".to_owned()])
+        );
+    }
+
+    /// A conflicted merge of the registry: the base's one row, HEAD's
+    /// row and `MERGE_HEAD`'s beside it.
+    fn merge() -> Ground {
+        let base = "[[divergence]]\nid = \"trace:base\"\nreason = \"r\"\n";
+        Ground::Merge {
+            base: base.to_owned(),
+            head: format!("{base}[[divergence]]\nid = \"trace:head\"\n"),
+            merged: format!("{base}[[divergence]]\nid = \"trace:merged\"\n"),
+        }
+    }
+
+    #[test]
+    fn a_merges_union_names_each_sides_addition_and_adds_what_merge_head_does() {
+        let union = "[[divergence]]\nid = \"trace:base\"\nreason = \"r\"\n\
+                     [[divergence]]\nid = \"trace:head\"\n\
+                     [[divergence]]\nid = \"trace:merged\"\n";
+        let verdict = merge().judge(union).expect("all parse");
+        assert_eq!(
+            verdict,
+            Verdict::Union {
+                head: vec!["divergence[trace:head]".to_owned()],
+                merged: vec!["divergence[trace:merged]".to_owned()],
+            }
+        );
+        assert_eq!(verdict.additions(), ["divergence[trace:merged]"]);
+    }
+
+    #[test]
+    fn a_merge_refuses_a_side_that_changed_the_base_and_a_proposal_that_drops_a_side() {
+        let Ground::Merge { base, head, .. } = merge() else {
+            unreachable!("merge() is a merge")
+        };
+        let changed = Ground::Merge {
+            merged: base.replace("\"r\"", "\"s\"") + "[[divergence]]\nid = \"trace:merged\"\n",
+            base,
+            head: head.clone(),
+        };
+        let union = format!("{head}[[divergence]]\nid = \"trace:merged\"\n");
+        let Verdict::Refused(refused) = changed.judge(&union).expect("all parse") else {
+            panic!("a side that changed the base is refused")
+        };
+        assert!(
+            refused.contains(&"divergence[trace:base].reason on MERGE_HEAD".to_owned()),
+            "{refused:?}"
+        );
+        assert_eq!(
+            merge().judge(&head).expect("all parse"),
+            Verdict::Refused(vec!["divergence[trace:merged] dropped".to_owned()]),
+            "HEAD's file alone drops what MERGE_HEAD adds"
         );
     }
 

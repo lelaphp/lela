@@ -1,0 +1,25 @@
+# A slice of docs/divergence.toml's shape: the merge base's one row.
+
+[[divergence]]
+id = "trace:fixture-base"
+kind = "trace"
+cause = "php-ub"
+reason = "The row both sides of the merge carry as neither side has it (fixture)."
+status = "accepted"
+since = "2026-10-01"
+
+[[divergence]]
+id = "trace:fixture-head"
+kind = "trace"
+cause = "php-ub"
+reason = "The row HEAD adds over the merge base (fixture)."
+status = "accepted"
+since = "2026-10-18"
+
+[[divergence]]
+id = "trace:fixture-merged"
+kind = "trace"
+cause = "php-ub"
+reason = "The row MERGE_HEAD adds over the merge base (fixture)."
+status = "accepted"
+since = "2026-10-18"

@@ -325,3 +325,116 @@ fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written(
             .ends_with(sapi)
     );
 }
+
+/// A scratch workspace standing in a conflicted merge of the registry:
+/// `merge/base.toml` committed, `merged` (a fixture under `merge/`) on a
+/// branch beside it, `merge/head.toml` on `HEAD`, and `git merge` of the
+/// branch stopped on the conflict both appends make, markers in the
+/// working file.
+fn merging(name: &str, merged: &str) -> Tree {
+    let file = xtask::divergence::FILE;
+    let root = scratch_at(name, file, &fixture("merge/base.toml"));
+    let git = |args: &[&str]| {
+        let run = std::process::Command::new("git")
+            .args(["-c", "user.name=x", "-c", "user.email=x@x"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        run.status.success()
+    };
+    let side = |branch: &str, body: &str| {
+        fs::write(root.join(file), fixture(body)).expect("the registry");
+        assert!(
+            git(&["commit", "-q", "-am", branch]),
+            "the commit on {branch}"
+        );
+    };
+    assert!(git(&["checkout", "-q", "-b", "merged"]));
+    side("merged", merged);
+    assert!(git(&["checkout", "-q", "-"]));
+    side("head", "merge/head.toml");
+    assert!(
+        !git(&["merge", "-q", "merged"]),
+        "the merge stops on the conflict"
+    );
+    assert!(
+        fs::read_to_string(root.join(file))
+            .expect("the registry")
+            .contains("<<<<<<<"),
+        "the working file holds the conflict's markers"
+    );
+    root
+}
+
+#[test]
+fn a_conflicted_merge_of_two_additions_is_resolved_by_their_union() {
+    let file = xtask::divergence::FILE;
+    let root = merging("union", "merge/merged.toml");
+    let proposal = root.join("proposed.toml");
+    let union = fixture("merge/union.toml");
+    fs::write(&proposal, &union).expect("the proposal");
+
+    let reading = steer::run(&root, file, &proposal, false).expect("the instrument runs");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
+    for named in [
+        "judged against HEAD's file since a merge is in progress",
+        "divergence[trace:fixture-head]",
+        "divergence[trace:fixture-merged]",
+    ] {
+        assert!(
+            reading.message.contains(named),
+            "the reading names {named}: {}",
+            reading.message
+        );
+    }
+    let written = fs::read_to_string(root.join(file)).expect("the registry");
+    assert_eq!(written, union, "the union is the file now");
+    assert!(!written.contains("<<<<<<<"), "no conflict marker stands");
+}
+
+#[test]
+fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries() {
+    // The negative controls of the union (xtask/fixtures/steer/README.md):
+    // a side that rewords a reason the base carries, a proposal that does,
+    // and a row neither side carries; each is refused at the path it
+    // names, and the conflicted file stands.
+    let file = xtask::divergence::FILE;
+    for (merged, proposal, path) in [
+        (
+            "merge/merged-reworded.toml",
+            "merge/union.toml",
+            "divergence[trace:fixture-base].reason on MERGE_HEAD",
+        ),
+        (
+            "merge/merged.toml",
+            "merge/changed-reason.toml",
+            "divergence[trace:fixture-base].reason",
+        ),
+        (
+            "merge/merged.toml",
+            "merge/neither.toml",
+            "divergence[trace:fixture-neither], which neither side carries",
+        ),
+    ] {
+        let name = format!("{merged}-{proposal}").replace(['/', '.'], "-");
+        let root = merging(&name, merged);
+        let conflicted = fs::read_to_string(root.join(file)).expect("the registry");
+        let at = root.join("proposed.toml");
+        fs::write(&at, fixture(proposal)).expect("the proposal");
+
+        let reading = steer::run(&root, file, &at, false).expect("the instrument runs");
+        assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
+        assert!(
+            reading.message.contains(path) && reading.message.contains("Nothing was written"),
+            "{name} is refused at {path}: {}",
+            reading.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(file)).expect("the registry"),
+            conflicted,
+            "{name}: a refused proposal writes nothing"
+        );
+    }
+}
