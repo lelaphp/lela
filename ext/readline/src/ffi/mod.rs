@@ -82,8 +82,10 @@ static mut ONCE: libc::pthread_once_t = libc::PTHREAD_ONCE_INIT;
 /// stands in a process-wide static.
 static mut KEY: libc::pthread_key_t = 0;
 
-/// `pthread_once`'s routine: the slot's key made.
-unsafe extern "C" fn make_key() {
+/// `pthread_once`'s routine: the slot's key made. Safe to name, since
+/// its one caller is `pthread_once` in [`key`], which serialises it and
+/// runs it once for the process.
+extern "C" fn make_key() {
     let key = &raw mut KEY;
     // SAFETY: called once, by `pthread_once`, before any read of `KEY`;
     // the slot needs no destructor, since a record lives on its lending
@@ -93,13 +95,28 @@ unsafe extern "C" fn make_key() {
     }
 }
 
+/// `pthread_once`'s routine parameter as `libc` declares it for the
+/// target: Apple's `<pthread.h>` takes a nullable `void (*)(void)`,
+/// which `libc` spells `Option<unsafe extern "C" fn()>`, and glibc's a
+/// bare `extern "C" fn()`.
+#[cfg(target_vendor = "apple")]
+type Routine = Option<unsafe extern "C" fn()>;
+#[cfg(not(target_vendor = "apple"))]
+type Routine = extern "C" fn();
+
+/// [`make_key`] as the target's [`Routine`].
+#[cfg(target_vendor = "apple")]
+const MAKE_KEY: Routine = Some(make_key);
+#[cfg(not(target_vendor = "apple"))]
+const MAKE_KEY: Routine = make_key;
+
 /// The slot's key, made on the first ask.
 fn key() -> libc::pthread_key_t {
     let once = &raw mut ONCE;
     // SAFETY: `ONCE` is only ever handed to `pthread_once`, which
     // serialises the one call of `make_key`.
     unsafe {
-        libc::pthread_once(once, Some(make_key));
+        libc::pthread_once(once, MAKE_KEY);
     }
     // SAFETY: written by `make_key`, which `pthread_once` ran to its end
     // before returning here, and never written again.
