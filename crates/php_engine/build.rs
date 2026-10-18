@@ -1,7 +1,8 @@
 //! The dispatch of design §4.3 seam 7, generated from `ops.toml` at the
 //! workspace root over `php_unit::Opcode`: one `match` arm per opcode the
-//! engine has a handler for, and one arm for every other opcode, which
-//! ends the request in the internal-error fatal that names it.
+//! engine has a handler for, and one arm naming every other opcode, which
+//! ends the request in the internal-error fatal that names it, so that
+//! the `match` names every variant and its table needs no range test.
 //!
 //! The spec is `ops.toml` and the bodies are `src/handlers.rs`, and this
 //! build joins them, so a handler whose name is no opcode of the spec is
@@ -173,6 +174,25 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
         };
         arms.push_str(&arm(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?);
     }
+    // Every opcode the engine has no handler for, named in one arm, so
+    // that the `match` names every variant and its jump table needs no
+    // test of the opcode's range ahead of it.
+    let unserved: Vec<String> = opcodes
+        .iter()
+        .filter(|(name, _)| !handlers.iter().any(|handler| &handler.name == *name))
+        .map(|(_, spec)| format!("Opcode::{}", spec.variant))
+        .collect();
+    if !unserved.is_empty() {
+        write!(
+            arms,
+            "        {} => Err(Fatal::error(format!(\n\
+             \x20           \"InternalError: {{}} has no handler in this engine yet\",\n\
+             \x20           op.opcode.name()\n\
+             \x20       ))),\n",
+            unserved.join("\n        | ")
+        )
+        .ok();
+    }
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
          /// `ops.toml` and the handlers beside it: the handler at the frame's\n\
@@ -201,10 +221,6 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          ) -> Result<Next, Fatal> {{\n\
          \x20   match op.opcode {{\n\
          {arms}\
-         \x20       other => Err(Fatal::error(format!(\n\
-         \x20           \"InternalError: {{}} has no handler in this engine yet\",\n\
-         \x20           other.name()\n\
-         \x20       ))),\n\
          \x20   }}\n\
          }}\n"
     ))
