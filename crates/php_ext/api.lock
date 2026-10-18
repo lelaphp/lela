@@ -1382,6 +1382,7 @@ values::SmartStr
 values::SmartStr::append
 values::SmartStr::as_bytes
 values::SmartStr::clear
+values::SmartStr::extract
 values::SmartStr::finish
 values::SmartStr::free
 values::SmartStr::remove

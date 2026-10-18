@@ -48,7 +48,25 @@ impl SmartStr {
     /// laid down first where there is none and grown where what it would
     /// hold reaches its size (`smart_str_alloc`), even for no bytes; the
     /// `Err` is the memory limit's fatal.
+    #[inline]
     pub fn append(&mut self, req: &mut Request, bytes: &[u8]) -> Result<(), Thrown> {
+        let len = self.len.saturating_add(bytes.len());
+        // What fits the allocation is copied in place, the common case.
+        if let Some(buf) = &mut self.buf
+            && len < buf.len()
+            && let Some(room) = buf.bytes_mut().get_mut(self.len..len)
+        {
+            room.copy_from_slice(bytes);
+            self.len = len;
+            return Ok(());
+        }
+        self.append_grown(req, bytes)
+    }
+
+    /// [`SmartStr::append`] where the allocation is to be laid down or
+    /// grown first.
+    #[cold]
+    fn append_grown(&mut self, req: &mut Request, bytes: &[u8]) -> Result<(), Thrown> {
         let len = self.len.saturating_add(bytes.len());
         let room = self.buf.as_ref().map_or(0, FreshStr::len);
         if self.buf.is_none() || len >= room {
@@ -105,6 +123,33 @@ impl SmartStr {
             return PhpString::new(req, b"");
         };
         buf.set_len(self.len);
+        Ok(Owner::adopt(PhpString::of(buf.finish())))
+    }
+
+    /// `smart_str_extract`: the string of what is held, trimmed first to
+    /// its length as `smart_str_trim_to_size` reallocates it, so the
+    /// string kept holds the bin of its bytes and not the buffer's; one
+    /// owner the caller's, and `ZSTR_EMPTY_ALLOC()` where nothing was
+    /// ever appended. The `Err` is the memory limit's fatal.
+    ///
+    /// ```php
+    /// $a = [1, 'a' => 2];
+    /// $m = memory_get_usage(); $s = var_export($a, true); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); memory_reset_peak_usage(); $s = var_export(range(1, 40), true); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 56
+    /// 5688 456
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn extract(mut self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
+        let Some(mut buf) = self.buf.take() else {
+            return PhpString::new(req, b"");
+        };
+        if buf.len() > self.len {
+            let cut = req.heap_mut().string_truncate(buf, self.len);
+            buf = req.fatal_of(cut)?;
+        }
         Ok(Owner::adopt(PhpString::of(buf.finish())))
     }
 
