@@ -105,12 +105,14 @@ pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
         options,
         &LineIndex::new(&arena, text),
         Vec::new(),
+        &mut Vec::new(),
     )
 }
 
 /// [`lex`] over a line table already built for `text`, which `parse`
-/// keeps for the parser and hands back on `Parsed`, into `tokens`, room
-/// a parse lends and takes back.
+/// keeps for the parser and hands back on `Parsed`, into `tokens`, with
+/// `states` the room of the state stack: both a parse lends and takes
+/// back, the stack's handed back empty in `states`.
 #[must_use]
 pub(crate) fn lex_with_lines(
     file: FileId,
@@ -118,8 +120,13 @@ pub(crate) fn lex_with_lines(
     options: &LexOptions,
     lines: &LineIndex<'_>,
     tokens: Vec<Token>,
+    states: &mut Vec<StateFrame>,
 ) -> Lexed {
-    Lexer::new(file, text, options, lines, tokens).lex(options.position)
+    let (lexed, mut above) = Lexer::new(file, text, options, lines, tokens, std::mem::take(states))
+        .lex(options.position);
+    above.clear();
+    *states = above;
+    lexed
 }
 
 /// A scanner state. The stack's factoring and the names are Zend's, so a
@@ -194,11 +201,11 @@ pub(crate) struct States {
 }
 
 impl States {
-    fn new(base: StateFrame) -> States {
-        States {
-            base,
-            above: Vec::new(),
-        }
+    /// The stack of `base` alone, its states above pushed into `above`'s
+    /// room.
+    fn new(base: StateFrame, mut above: Vec<StateFrame>) -> States {
+        above.clear();
+        States { base, above }
     }
 
     /// The active entry.
@@ -286,6 +293,7 @@ impl<'a> Lexer<'a> {
         options: &LexOptions,
         lines: &'a LineIndex<'a>,
         mut tokens: Vec<Token>,
+        above: Vec<StateFrame>,
     ) -> Lexer<'a> {
         // The 4 GiB cap `load_bytes` holds is what makes every `narrow`
         // below exact. Assert it once, at the one construction site.
@@ -304,16 +312,19 @@ impl<'a> Lexer<'a> {
             lines,
             short_open_tag: options.short_open_tag,
             pos: 0,
-            frames: States::new(StateFrame {
-                state: match options.position {
-                    Position::AtOpenTag | Position::AtShebang => State::InlineHtml,
-                    Position::AfterOpenTag => State::Scripting,
+            frames: States::new(
+                StateFrame {
+                    state: match options.position {
+                        Position::AtOpenTag | Position::AtShebang => State::InlineHtml,
+                        Position::AfterOpenTag => State::Scripting,
+                    },
+                    aux: StateAux {
+                        opener: here,
+                        heredoc: None,
+                    },
                 },
-                aux: StateAux {
-                    opener: here,
-                    heredoc: None,
-                },
-            }),
+                above,
+            ),
             // php source runs four to six bytes a token: room for a
             // token every four, so a small source never grows the stream
             // and a large one seldom does.
@@ -328,7 +339,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub(crate) fn lex(mut self, position: Position) -> Lexed {
+    /// The stream and the diagnostics, and the room of the state stack
+    /// above its base.
+    pub(crate) fn lex(mut self, position: Position) -> (Lexed, Vec<StateFrame>) {
         if position == Position::AtShebang {
             self.lex_shebang();
         }
@@ -358,10 +371,13 @@ impl<'a> Lexer<'a> {
             );
         }
         debug_assert_eq!(self.emitted, self.text.len(), "token coverage gap");
-        Lexed {
-            tokens: self.tokens,
-            diagnostics: self.diags,
-        }
+        (
+            Lexed {
+                tokens: self.tokens,
+                diagnostics: self.diags,
+            },
+            self.frames.above,
+        )
     }
 
     /// The active (top-of-stack) state. The base state is never popped, so

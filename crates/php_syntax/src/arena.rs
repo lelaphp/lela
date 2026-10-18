@@ -47,6 +47,10 @@ impl std::fmt::Debug for Arena {
 #[derive(Default)]
 pub(crate) struct Scratch {
     pub(crate) tokens: Vec<Token>,
+    /// The lexer's states above its base.
+    pub(crate) states: Vec<crate::lexer::StateFrame>,
+    /// The parser's open delimiters.
+    pub(crate) delims: Vec<(crate::SyntaxKind, crate::Span)>,
     pub(crate) significant: Vec<u32>,
     pub(crate) stacks: crate::tree::Stacks,
 }
@@ -58,6 +62,8 @@ impl Scratch {
 
     fn within(&self, bytes: usize) -> bool {
         self.tokens.capacity() * size_of::<Token>() <= bytes
+            && self.states.capacity() * size_of::<crate::lexer::StateFrame>() <= bytes
+            && self.delims.capacity() * size_of::<(crate::SyntaxKind, crate::Span)>() <= bytes
             && self.significant.capacity() * size_of::<u32>() <= bytes
             && self.stacks.within(bytes)
     }

@@ -147,6 +147,7 @@ pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parse
         &options.lex,
         &lines,
         std::mem::take(&mut scratch.tokens),
+        &mut scratch.states,
     );
     let input = parser::Input::new_in(
         source,
@@ -154,9 +155,11 @@ pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parse
         std::mem::take(&mut scratch.significant),
     );
     let events = std::mem::take(&mut scratch.stacks.events);
-    let mut p = parser::Parser::new_in(&input, file, &lines, events);
+    let delims = std::mem::take(&mut scratch.delims);
+    let mut p = parser::Parser::new_in(&input, file, &lines, events, delims);
     grammar::source_file(&mut p);
-    let events = p.finish();
+    let (events, delims) = p.finish();
+    scratch.delims = delims;
     scratch.significant = input.into_significant();
     let built = tree::build_in(arena, &lexed.tokens, &lines, events, &mut scratch.stacks);
     let tokens = arena.copy(&lexed.tokens);

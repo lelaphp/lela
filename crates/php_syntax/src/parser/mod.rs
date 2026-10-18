@@ -40,6 +40,16 @@ use crate::tree::{Event, TOMBSTONE};
 
 pub use input::Input;
 
+/// Where an `unexpected …` diagnostic stands, taken before the grammar
+/// knows whether it will raise one ([`Parser::lead`]): the token and the
+/// innermost open delimiter, so the diagnostic is built, and its text
+/// allocated, only where it is raised.
+#[derive(Clone, Copy, Debug)]
+pub struct Lead {
+    pos: usize,
+    open: Option<(SyntaxKind, Span)>,
+}
+
 /// The grammar's view of the parse.
 pub struct Parser<'t> {
     input: &'t Input<'t>,
@@ -170,7 +180,7 @@ impl<'t> Parser<'t> {
     /// same source.
     #[cfg(test)]
     pub fn new(input: &'t Input<'t>, file: FileId, lines: &'t LineIndex<'t>) -> Parser<'t> {
-        Parser::new_in(input, file, lines, Vec::new())
+        Parser::new_in(input, file, lines, Vec::new(), Vec::new())
     }
 
     /// [`Parser::new`] writing its events into the room `events` lends.
@@ -179,6 +189,7 @@ impl<'t> Parser<'t> {
         file: FileId,
         lines: &'t LineIndex<'t>,
         mut events: Vec<Event>,
+        mut delims: Vec<(SyntaxKind, Span)>,
     ) -> Parser<'t> {
         let burst_cap = u32::try_from(input.len())
             .unwrap_or(u32::MAX)
@@ -202,7 +213,10 @@ impl<'t> Parser<'t> {
             burst_cap,
             depth: 0,
             depth_reported: false,
-            delims: Vec::new(),
+            delims: {
+                delims.clear();
+                delims
+            },
             grants: Grants::default(),
             stmt_clause: None,
             errors_high_water: None,
@@ -497,15 +511,42 @@ impl<'t> Parser<'t> {
     /// Parse error: syntax error, unexpected token ";" in %s on line 2
     /// ```
     pub fn unexpected_here(&mut self) -> Diagnostic {
+        self.unexpected_under(self.delims.last().copied())
+    }
+
+    /// Where [`unexpected_here`](Self::unexpected_here) would stand now,
+    /// kept to build its diagnostic later and only where it is raised
+    /// ([`Parser::unexpected_at`]): the token, and the innermost open
+    /// delimiter, which is all the diagnostic reads.
+    pub fn lead(&self) -> Lead {
+        Lead {
+            pos: self.pos,
+            open: self.delims.last().copied(),
+        }
+    }
+
+    /// The diagnostic [`unexpected_here`](Self::unexpected_here) built
+    /// where `lead` was taken, word for word, though the parser has moved
+    /// on since.
+    pub fn unexpected_at(&mut self, lead: Lead) -> Diagnostic {
+        let pos = std::mem::replace(&mut self.pos, lead.pos);
+        let made = self.unexpected_under(lead.open);
+        self.pos = pos;
+        made
+    }
+
+    /// [`unexpected_here`](Self::unexpected_here) with `open` the
+    /// innermost open delimiter.
+    fn unexpected_under(&self, open: Option<(SyntaxKind, Span)>) -> Diagnostic {
         let span = self.unexpected_span();
         let line = self.line_here();
         if self.at_eof() {
-            if let Some(m) = self.unclosed_eof_message() {
+            if let Some(m) = self.unclosed_eof_under(open) {
                 return Diagnostic::new(span, line, m);
             }
             return Diagnostic::new(span, line, "syntax error, unexpected end of file");
         }
-        if let Some(m) = self.bracket_closer_message() {
+        if let Some(m) = self.bracket_closer_under(open) {
             return Diagnostic::new(span, line, m);
         }
         Diagnostic::new(
@@ -642,12 +683,18 @@ impl<'t> Parser<'t> {
     /// Parse error: Unmatched '}' in %s on line 2
     /// ```
     pub fn bracket_closer_message(&self) -> Option<String> {
+        self.bracket_closer_under(self.delims.last().copied())
+    }
+
+    /// [`Parser::bracket_closer_message`] with `open` the innermost open
+    /// delimiter.
+    fn bracket_closer_under(&self, open: Option<(SyntaxKind, Span)>) -> Option<String> {
         let cur = self.input.kind(self.pos);
         let cur_bracket = Bracket::from_closer(cur)?;
         let closer = cur_bracket.close_glyph();
-        match self.delims.last() {
+        match open {
             None => Some(format!("Unmatched '{closer}'")),
-            Some(&(open_kind, open_span)) => {
+            Some((open_kind, open_span)) => {
                 let open = Bracket::from_opener(open_kind)?;
                 if open == cur_bracket {
                     // A genuine match: not a balance error at this site.
@@ -677,7 +724,13 @@ impl<'t> Parser<'t> {
     /// Parse error: Unclosed '(' in %s on line 2
     /// ```
     pub fn unclosed_eof_message(&self) -> Option<String> {
-        let &(open_kind, open_span) = self.delims.last()?;
+        self.unclosed_eof_under(self.delims.last().copied())
+    }
+
+    /// [`Parser::unclosed_eof_message`] with `open` the innermost open
+    /// delimiter.
+    fn unclosed_eof_under(&self, open: Option<(SyntaxKind, Span)>) -> Option<String> {
+        let (open_kind, open_span) = open?;
         let open_c = Bracket::from_opener(open_kind)?.open_glyph();
         let open_line = self.line_of(open_span.start);
         let eof_line = self.line_of(u32::try_from(self.input.source().len()).unwrap_or(u32::MAX));
@@ -747,9 +800,11 @@ impl<'t> Parser<'t> {
         );
     }
 
-    /// Ends the parse: the event stream, for the builder.
-    pub fn finish(self) -> Vec<Event> {
-        self.events
+    /// Ends the parse: the event stream, for the builder, and the room of
+    /// the delimiter stack beside it, for a parse that lends it to the
+    /// next.
+    pub fn finish(self) -> (Vec<Event>, Vec<(SyntaxKind, Span)>) {
+        (self.events, self.delims)
     }
 }
 
