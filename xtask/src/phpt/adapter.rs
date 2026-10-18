@@ -282,7 +282,9 @@ impl<'a> Adapter<'a> {
         let env = self.environment(phpt, test, &ini, &subset.root)?;
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
         if let Some(body) = phpt.filled("SKIPIF") {
-            let out = self.run_section(subset, test, &env, ("skip", body), phpt.has("PHPDBG"))?;
+            let shown = SKIPIF_SHOWS.map(String::from);
+            let section = ("skip", body, &shown[..]);
+            let out = self.run_section(subset, test, &env, section, phpt.has("PHPDBG"))?;
             match Said::of(&String::from_utf8_lossy(&out.stdout)) {
                 Said::Skip(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
                 Said::Bork(said) => {
@@ -404,7 +406,7 @@ impl<'a> Adapter<'a> {
             },
         };
         if let Some(body) = phpt.filled("CLEAN") {
-            self.run_section(subset, test, env, ("clean", body), phpt.has("PHPDBG"))?;
+            self.run_section(subset, test, env, ("clean", body, &[]), phpt.has("PHPDBG"))?;
         }
         Ok(output)
     }
@@ -412,8 +414,8 @@ impl<'a> Adapter<'a> {
     /// A section that runs beside the test rather than as it: `SKIPIF`,
     /// which decides whether the test applies at all, and `CLEAN`, which
     /// takes away what it left. Neither is given the test's own `--INI--`,
-    /// as upstream gives neither; a `SKIPIF` shows its errors and not those
-    /// of startup, as upstream's (run-tests.php:2134). Both run under the oracle, not the
+    /// as upstream gives neither; a `SKIPIF` runs under [`SKIPIF_SHOWS`]
+    /// and a `CLEAN` under nothing more. Both run under the oracle, not the
     /// engine: what they answer must be true of the corpus whatever the
     /// engine can do yet, and a young engine must not be trusted with
     /// cleanup. Upstream runs them under the binary it is testing, so a
@@ -431,7 +433,7 @@ impl<'a> Adapter<'a> {
         subset: &Subset,
         test: &Test,
         env: &Environment,
-        (kind, body): (&str, &[u8]),
+        (kind, body, ini): (&str, &[u8], &[String]),
         debugger: bool,
     ) -> Result<Observation> {
         let program = test.beside(Some(kind));
@@ -446,11 +448,10 @@ impl<'a> Adapter<'a> {
             }
             None => (&pin.oracle.path, &[][..]),
         };
-        let shown = ["display_errors=1", "display_startup_errors=0"].map(String::from);
         let out = self
             .oracle
             .run_under(&Invocation {
-                ini: if kind == "skip" { &shown } else { &[] },
+                ini,
                 flags,
                 env: env.entries(),
                 stdin: Stdin::Pipe(&[]),
@@ -819,6 +820,11 @@ fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) 
     out.push_str(&text[last..]);
     out
 }
+
+/// The ini a `SKIPIF` runs under after the recipe's: its errors shown and
+/// not those of startup, as upstream's command line has it
+/// (run-tests.php:2134).
+const SKIPIF_SHOWS: [&str; 2] = ["display_errors=1", "display_startup_errors=0"];
 
 /// What a `SKIPIF` wrote on stdout, trimmed and read as upstream reads it
 /// (run-tests.php:2154-2190, 3595-3597).
