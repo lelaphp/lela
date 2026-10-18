@@ -258,8 +258,10 @@ impl Request {
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let table = self.object_handlers(object.heap());
-        let bytes = name.as_bytes().to_vec();
-        self.in_declared_scope(object.class(), &bytes, |req| {
+        // A view of the name, whose bytes the owner the write takes keeps
+        // alive until the write has read the scope off them.
+        let key = *name;
+        self.in_declared_scope(object.class(), key.as_bytes(), |req| {
             table.write_property(req, object, name, value)
         })
     }

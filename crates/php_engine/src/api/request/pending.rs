@@ -553,16 +553,35 @@ impl Request {
                 return Err(thrown);
             }
         };
-        if let Err(thrown) = write_prop(self, &throwable, b"file", file.into_value()) {
+        if let Err(thrown) = self.write_known(throwable, b"file", file.into_value()) {
             trace.give_up(self);
             return Err(thrown);
         }
         let line = Owner::int(i64::from(self.current_line()));
-        if let Err(thrown) = write_prop(self, &throwable, b"line", line) {
+        if let Err(thrown) = self.write_known(throwable, b"line", line) {
             trace.give_up(self);
             return Err(thrown);
         }
-        write_prop(self, &throwable, b"trace", trace.into_value())
+        self.write_known(throwable, b"trace", trace.into_value())
+    }
+
+    /// `zend_update_property_ex(base_ce, object, ZSTR_KNOWN(..), value)`:
+    /// one of the throwable's own properties written under its interned
+    /// name, which costs the write no string of its own.
+    fn write_known(
+        &mut self,
+        throwable: PhpObject,
+        name: &'static [u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        let name = match PhpString::interned(self, name) {
+            Ok(name) => Owner::take(self, name),
+            Err(thrown) => {
+                value.give_up(self);
+                return Err(thrown);
+            }
+        };
+        throwable.set_prop(self, name, value)
     }
 
     /// The first half of `zend_objects_destroy_object`'s protection of
