@@ -455,9 +455,15 @@ pub(super) fn with_connection<R>(
             "InternalError: a PDO handle's connection was asked for while a callback held it",
         ));
     };
-    let answered = f(req, &mut *conn);
+    let driver = dbh_ref(req, object, |d| d.driver).flatten();
+    let answered = crate::as_driver(req, driver, |req| f(req, &mut *conn));
     dbh_mut(req, object, |d| d.conn = Conn::Open(conn));
     answered
+}
+
+/// The connector of the connection `object`, none before it connected.
+pub(super) fn driver_of(req: &mut Request, object: PhpObject) -> Option<&'static dyn Connector> {
+    dbh_ref(req, object, |d| d.driver).flatten()
 }
 
 /// A connector call on the connection's connection whose failure PDO connections on
@@ -699,7 +705,7 @@ fn open(
             options,
             persistent,
         };
-        let conn = match driver.open(req, &source) {
+        let conn = match crate::as_driver(req, Some(driver), |req| driver.open(req, &source)) {
             Ok(conn) => conn,
             Err(failure) => return Err(error::throw_connect(req, failure)),
         };

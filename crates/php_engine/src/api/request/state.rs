@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::api::abi::{ExtensionEntry, States};
 
-use super::Request;
+use super::{Request, Supplier};
 
 /// The bundle's slot table for its extensions' states: each state's
 /// place among the request states, which are built in bundle order, and
@@ -225,6 +225,19 @@ impl Request {
             .registered
             .under(TypeId::of::<T>())
             .filter_map(|(_, value)| value.downcast_ref::<T>())
+    }
+
+    /// [`Request::registered`], each value beside the [`Supplier`] of the
+    /// extension that registered it, for code of another extension's that
+    /// calls into the value to serve that call as its supplier's
+    /// ([`Request::serve_supplied`]), as ext/pdo serves a connector's
+    /// calls as the connector's extension (#2864).
+    pub fn registered_by<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = (Supplier, &T)> {
+        self.shared
+            .supplied
+            .registered
+            .under(TypeId::of::<T>())
+            .filter_map(|(by, value)| Some((Supplier::of(by), value.downcast_ref::<T>()?)))
     }
 }
 

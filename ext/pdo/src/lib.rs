@@ -38,7 +38,7 @@ mod stmt;
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Request, Supplier};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use connector::Connector;
@@ -110,6 +110,27 @@ fn pdo_info(req: &mut Request) {
 /// in `MINIT` order.
 fn drivers(req: &Request) -> impl Iterator<Item = &'static dyn Connector> + '_ {
     req.registered::<&'static dyn Connector>().copied()
+}
+
+/// The extension that registered `driver`, as whose code its calls are
+/// served, so what a connector allocates is its own extension's in a debug
+/// build and not ext/pdo's (#2864).
+fn supplier_of(req: &Request, driver: &'static dyn Connector) -> Option<Supplier> {
+    req.registered_by::<&'static dyn Connector>()
+        .find(|(_, registered)| registered.name() == driver.name())
+        .map(|(supplier, _)| supplier)
+}
+
+/// `f` served as `driver`'s extension, where one registered it.
+pub(crate) fn as_driver<R>(
+    req: &mut Request,
+    driver: Option<&'static dyn Connector>,
+    f: impl FnOnce(&mut Request) -> R,
+) -> R {
+    match driver.and_then(|driver| supplier_of(req, driver)) {
+        Some(supplier) => req.serve_supplied(supplier, f),
+        None => f(req),
+    }
 }
 
 /// The registered connectors' names, one string each, in `MINIT` order:

@@ -644,7 +644,8 @@ pub(super) fn with_driver<R>(
             "InternalError: a PDOStatement's driver statement was asked for while a callback held it",
         ));
     };
-    let answered = f(req, &mut *driver);
+    let connector = dbh_of(req, object).and_then(|dbh| crate::dbh::driver_of(req, dbh));
+    let answered = crate::as_driver(req, connector, |req| f(req, &mut *driver));
     write(req, object, |s| s.slot = Slot::Ready(driver));
     Ok(answered)
 }

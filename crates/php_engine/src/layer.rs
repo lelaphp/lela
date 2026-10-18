@@ -39,6 +39,14 @@ pub use php_process::{
 /// a plain file and nothing else, a path resolves by `realpath(3)`
 /// (`zend_resolve_path_func`), no standard stream is registered and no
 /// stream outlives its request.
+///
+/// Unlike the hooks an extension supplies for its own behaviour, these
+/// are not served as their supplier: the layer is main's streams, which
+/// php calls on behalf of whatever opened the stream, an include,
+/// `fopen()` or the CLI's stdin. So what it allocates is tagged with the
+/// code that asked, as a stream php opens is charged to that request's
+/// operation, and the wrappers, filters and kinds an extension supplies
+/// to the layer are served as theirs (#2113, #2864).
 #[derive(Debug, Clone, Copy)]
 pub struct StreamHooks {
     /// `php_stream_open_for_zend_ex(USE_PATH | REPORT_ERRORS |
