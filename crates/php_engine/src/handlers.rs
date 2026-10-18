@@ -4317,23 +4317,158 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// string(1) "2"
 /// string(6) "strlen"
 /// ```
+///
+/// The first test is php's whole check for a value of a type the
+/// declaration names outright, `ZEND_TYPE_CONTAINS_CODE(ret_info->type,
+/// Z_TYPE_P(retval_ref))`: the op array's [`OpArray::return_mask`]
+/// against the type of the value a `CV`, a `TMP` or a `VAR` holds where
+/// it stands, which advances with the declaration unread, as `RECV`'s
+/// mask does. php tests a reference's own type there, which always
+/// misses and holds on the slow path; this tests the value it holds,
+/// which cannot be told apart, since a hit writes nothing. Bit 0 is
+/// never in a mask, so an undefined `CV` misses and warns below. A
+/// `CONST`, the end of the body, the place a by-reference return
+/// fetched and every value the mask misses take the declaration's whole
+/// check, as `zend_check_type_slow` does:
+///
+/// ```php
+/// function i(array $a): int { return $a[0]; }
+/// function f(array $a): float { $v = $a[1]; return $v; }
+/// function n(?int $x): ?int { return $x; }
+/// function u(array $a): int|string { return $a[2]; }
+/// var_dump(i([7, 1.5, "s"]), f([7, 1.5, "s"]), n(null), u([7, 1.5, "s"]));
+/// ```
+/// ```expect
+/// int(7)
+/// float(1.5)
+/// NULL
+/// string(1) "s"
+/// ```
+///
+/// A class, and `static`, which names the called class, hold an object
+/// on the slow path, and the error names the class `static` resolved to:
+///
+/// ```php
+/// class A { function me(): static { return $this; } function other(): static { return new A; } }
+/// class B extends A {}
+/// function c(object $o): A { return $o; }
+/// var_dump(get_class(c(new B)), get_class((new B)->me()));
+/// foreach ([fn () => c(new stdClass), fn () => (new B)->other()] as $f) {
+///     try { $f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// string(1) "B"
+/// string(1) "B"
+/// c(): Return value must be of type A, stdClass returned
+/// A::other(): Return value must be of type B, A returned
+/// ```
+///
+/// A by-reference return that holds hands back the place it fetched, or
+/// the reference a `CV` holds, untouched:
+///
+/// ```php
+/// function &d(array &$a): int { return $a[0]; }
+/// function &g(int &$v): int { return $v; }
+/// $a = [5]; $x = &d($a); $x = 6;
+/// $i = 1; $y = &g($i); $y = 2;
+/// var_dump($a[0], $i);
+/// ```
+/// ```expect
+/// int(6)
+/// int(2)
+/// ```
+///
+/// An undefined `CV` warns here and holds as `null` where the type
+/// allows it, and the `RETURN` after warns again; where it does not,
+/// the `TypeError` is over `null`:
+///
+/// ```php
+/// function n(): ?int { return $u; }
+/// var_dump(n());
+/// function i(): int { return $u; }
+/// try { i(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Warning: Undefined variable $u in %s on line 2
+/// NULL
+///
+/// Warning: Undefined variable $u in %s on line 4
+/// i(): Return value must be of type int, null returned
+/// ```
+///
+/// An `int` returned as `float` misses the mask and is widened, under
+/// `strict_types` as outside it:
+///
+/// ```php
+/// function f(int $i): float { return $i; }
+/// var_dump(f(1));
+/// ```
+/// ```expect
+/// float(1)
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// function f(int $i): float { return $i; }
+/// var_dump(f(1));
+/// ```
+/// ```expect
+/// float(1)
+/// ```
+///
+/// A temporary the mask misses is coerced where it stands outside
+/// `strict_types`, and is the `TypeError` under it:
+///
+/// ```php
+/// function s(int $i): string { return $i + 1; }
+/// var_dump(s(1));
+/// ```
+/// ```expect
+/// string(1) "2"
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// function s(int $i): string { return $i + 1; }
+/// try { s(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// s(): Return value must be of type string, int returned
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some((ty, by_ref)) = req
-        .vm()
-        .at(frame)
-        .and_then(|state| state.function)
-        .and_then(|function| req.function_decl(function))
-        .and_then(|decl| Some((decl.return_type.clone()?, decl.returns_by_ref)))
-    else {
+    if op.op1_type != OperandKind::Const {
+        let at = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
+        let returned = crate::operand::deref(at);
+        // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
+        // would test bit 12, which is `callable`'s.
+        let code_bit = 1u32 << (returned.kind() as u32);
+        if code.return_mask & php_unit::decl::Type::MAY_BE_ANY & code_bit != 0 {
+            return Ok(advanced());
+        }
+    }
+    return_mask_missed(req, frame, code, op)
+}
+
+/// [`verify_return_type`] past its mask: `zend_check_type_slow` over the
+/// declared type, the coercion beside it and the `TypeError`, out of
+/// line so the hit saves no register for it.
+#[cold]
+#[inline(never)]
+fn return_mask_missed(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    let Some((_, by_ref)) = declared_return(req, frame) else {
         return Ok(advance(req, frame));
     };
     if op.op1_type == OperandKind::Unused {
-        let thrown = return_type_error(req, frame, &ty, None);
+        let thrown = return_type_error(req, frame, None);
         return threw(req, frame, &thrown);
     }
     // A `VAR` a by-reference return fetched is the place it found, read
@@ -4356,16 +4491,23 @@ pub(crate) fn verify_return_type<T: Tier>(
     if constant {
         write_out(req, frame, code, op, &returned);
     }
-    if crate::api::coerce::holds(req, &returned, &ty, req.frame_scopes(frame)) {
+    // The declared type is read where the request holds it and let go
+    // before the one test that takes the request whole.
+    let scopes = req.frame_scopes(frame);
+    let held = declared_return(req, frame).map_or(crate::api::coerce::Holding::Yes, |(ty, _)| {
+        crate::api::coerce::holding(req, &returned, ty, scopes)
+    });
+    if held.resolve(req, &returned, scopes) {
         return Ok(advance(req, frame));
     }
     let strict = req.frame_strict_types(frame);
-    let coerced = match crate::api::coerce::scalar_type_hint(req, &returned, ty.mask(), strict) {
+    let mask = code.return_mask;
+    let coerced = match crate::api::coerce::scalar_type_hint(req, &returned, mask, strict) {
         Ok(coerced) => coerced,
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let Some(coerced) = coerced else {
-        let thrown = return_type_error(req, frame, &ty, Some(&returned));
+        let thrown = return_type_error(req, frame, Some(&returned));
         return threw(req, frame, &thrown);
     };
     if let Some(place) = indirect {
@@ -4401,19 +4543,24 @@ pub(crate) fn verify_return_type<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `EX(func)->common.arg_info - 1` of the frame's function where it
+/// declares a return type: the type, borrowed where the request holds
+/// it, and whether the function returns by reference.
+fn declared_return(req: &Request, frame: FrameRef) -> Option<(&php_unit::decl::Type, bool)> {
+    let function = req.vm().at(frame)?.function?;
+    let decl = req.function_decl(function)?;
+    Some((decl.return_type.as_ref()?, decl.returns_by_ref))
+}
+
 /// `zend_verify_return_error` (`Z/Zend/zend_execute.c:1421`): the
 /// `TypeError` over a return, `{fn}(): Return value must be of type
 /// {declared}, {given} returned`, with `none` for the end of a body that
 /// returned nothing. Its site is the function's own, where the loop
 /// stands, as an argument's is.
-fn return_type_error(
-    req: &mut Request,
-    frame: FrameRef,
-    ty: &php_unit::decl::Type,
-    returned: Option<&Value>,
-) -> Thrown {
+fn return_type_error(req: &mut Request, frame: FrameRef, returned: Option<&Value>) -> Thrown {
     let name = req.frame_function_name(frame);
-    let declared = resolved_type_name(req, frame, ty);
+    let declared = declared_return(req, frame)
+        .map_or_else(String::new, |(ty, _)| resolved_type_name(req, frame, ty));
     let given = match returned {
         Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
         None => String::from("none"),
