@@ -444,7 +444,10 @@ pub struct VmStack<H> {
     spare: Option<Loose>,
     /// `EG(current_execute_data)` as another process reads it: the
     /// address of the innermost linked room, zero where none stands
-    /// ([`VmStack::link_word`]).
+    /// ([`VmStack::link_word`]). An atomic for its one store of a whole
+    /// word: only this thread writes it, and a reader reads it with the
+    /// thread stopped, so `Relaxed` with the compiler fence before each
+    /// move ([`VmStack::link`]) is the order it needs.
     innermost: AtomicUsize,
 }
 
@@ -843,6 +846,13 @@ impl<H> VmStack<H> {
                 );
             }
             let at = page.slot(start + FRAME_HEADER_SLOTS);
+            // The copy carried the link; the word follows the room before
+            // the old one can go back with its page.
+            compiler_fence(Ordering::Release);
+            self.innermost.store(
+                page.slot(start).as_ptr().expose_provenance(),
+                Ordering::Relaxed,
+            );
             let bottom = if self.pages.len() == 1 {
                 self.kind.bottom()
             } else {
@@ -863,12 +873,6 @@ impl<H> VmStack<H> {
             if let Some(frame) = self.frames.last_mut() {
                 frame.at = at;
                 frame.placed = Placed::Opened;
-            }
-            // The copy carried the link; the word follows the room.
-            if let Some(frame) = self.frames.last() {
-                compiler_fence(Ordering::Release);
-                self.innermost
-                    .store(frame.room_address(), Ordering::Relaxed);
             }
         }
         if let Some(frame) = self.frames.last_mut() {
