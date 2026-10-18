@@ -26,7 +26,7 @@
 //! executables run one at a time unless its `Cargo.toml` declares that
 //! they share nothing, `executables = "side-by-side"` under
 //! `[package.metadata.xtask.test]`: then as many run at once as
-//! [`Beside::pool`] says, an executable that does share something held
+//! [`Beside::schedule`] says, an executable that does share something held
 //! apart from the others that name its key ([`Beside`]), what each one
 //! printed kept whole and read in the executables' order (#2869). The
 //! reading is stamped once they have ended, `ms` counts how long they
@@ -179,7 +179,7 @@ fn reading(
         return Ok(reading);
     };
     let started = Instant::now();
-    let (jobs, apart) = Beside::of(&built.package)?.pool(name, &built.executables)?;
+    let (jobs, apart) = Beside::of(&built.package)?.schedule(name, &built.executables)?;
     let mut all = Ran {
         passed: true,
         ..Ran::default()
@@ -238,7 +238,7 @@ fn reading(
 enum Beside {
     #[default]
     OneAtATime,
-    /// Side by side, as many at once as [`Beside::pool`] says, each apart
+    /// Side by side, as many at once as [`Beside::schedule`] says, each apart
     /// only from those it shares a key with: `apart`, by target name, is
     /// what an executable holds that another may hold too.
     SideBySide {
@@ -260,20 +260,17 @@ impl Beside {
             .with_context(|| format!("{at}: [package.metadata.xtask.test]"))
     }
 
-    /// The pool `executables` of `krate` run on, and what each may not
-    /// run beside, in their order. Side by side, the pool is the share of
+    /// How many of `all`, `krate`'s executables, run at once, and what each may
+    /// not run beside, in their order. Side by side, as many as the share of
     /// the machine cargo was given, `CARGO_BUILD_JOBS`, where the session
     /// sets one, and otherwise the cores, since each executable runs its
     /// own tests on threads of its own. A key held for a name that is no
     /// executable of the crate is an error.
-    fn pool(&self, krate: &str, executables: &[Executable]) -> Result<(NonZeroUsize, Vec<Apart>)> {
+    fn schedule(&self, krate: &str, all: &[Executable]) -> Result<(NonZeroUsize, Vec<Apart>)> {
         let Beside::SideBySide { apart } = self else {
-            return Ok((NonZeroUsize::MIN, vec![Apart::default(); executables.len()]));
+            return Ok((NonZeroUsize::MIN, vec![Apart::default(); all.len()]));
         };
-        if let Some(name) = apart
-            .keys()
-            .find(|n| executables.iter().all(|e| &e.name != *n))
-        {
+        if let Some(name) = apart.keys().find(|n| all.iter().all(|e| &e.name != *n)) {
             bail!(
                 "{krate}: [package.metadata.xtask.test] holds `{name}` apart, which is no test executable of it"
             );
@@ -282,11 +279,11 @@ impl Beside {
             .ok()
             .and_then(|j| j.parse().ok());
         let keys = |e: &Executable| apart.get(&e.name).cloned().unwrap_or_default();
-        let apart = executables.iter().map(|e| Apart {
+        let held = all.iter().map(|e| Apart {
             keys: keys(e),
             ..Apart::default()
         });
-        Ok((jobs.unwrap_or_else(tally::cores), apart.collect()))
+        Ok((jobs.unwrap_or_else(tally::cores), held.collect()))
     }
 }
 
