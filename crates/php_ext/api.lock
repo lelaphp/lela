@@ -852,6 +852,7 @@ request::Request::register_shutdown_function
 request::Request::register_tick_function
 request::Request::register_variable
 request::Request::registered
+request::Request::registered_by
 request::Request::remove_begin_handler
 request::Request::remove_end_handler
 request::Request::reporting_without

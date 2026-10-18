@@ -1404,3 +1404,15 @@ pub struct Supplier {
     #[cfg(debug_assertions)]
     origin: php_heap::Origin,
 }
+
+impl Supplier {
+    /// The supplier an extension is.
+    pub(crate) fn of(extension: ExtensionId) -> Supplier {
+        #[cfg(not(debug_assertions))]
+        let _ = extension;
+        Supplier {
+            #[cfg(debug_assertions)]
+            origin: extension.origin(),
+        }
+    }
+}
