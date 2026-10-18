@@ -188,12 +188,12 @@ impl Target {
         crate::reading::replace(&path(root, pin, scope), text.as_bytes())
     }
 
-    /// Whether the test is in the target: the oracle met it or failed it
+    /// Whether the test is in the target: the oracle met it, or failed it
     /// as its `--XFAIL--` asks.
     pub(crate) fn holds(&self, id: &str) -> bool {
         matches!(
             self.0.verdicts.get(id),
-            Some(Judgement::Pass | Judgement::XFail)
+            Some(Judgement::Pass | Judgement::Warn | Judgement::XFail)
         )
     }
 
@@ -258,7 +258,8 @@ impl Target {
         match self.0.verdicts.get(id) {
             Some(&oracle) if self.holds(id) => {
                 let accepted = engine == Judgement::Diverged || registry.accepted(id).is_some();
-                if engine == oracle || accepted {
+                // A target kept before #2922 calls a warned test a pass.
+                if engine == oracle || (engine.passed() && oracle.passed()) || accepted {
                     Standing::Met
                 } else {
                     Standing::Missed

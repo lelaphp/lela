@@ -563,6 +563,25 @@ fn a_skipif_is_judged_by_what_it_says_as_upstream_judges_it() {
     }
 }
 
+/// A test whose `--XFAIL--` section is there and which passes is
+/// upstream's lone `WARN` and this runner's `Warn`, which `--upstream`
+/// reads alike (#2922).
+#[test]
+fn an_xfail_test_that_passes_is_warned_alike_by_both_runners() {
+    let (Some(_), Some(source)) = (oracle(), source()) else {
+        return;
+    };
+    let test = "--TEST--\nKnown\n--XFAIL--\nknown\n--FILE--\n<?php echo 'ok';\n--EXPECT--\nok\n";
+    let (tree, subset) = subset("xpass", &[("xpass.phpt", test)]);
+    let ours = only(&run(&subset, &registry(""))).0;
+    fs::copy(source.join("run-tests.php"), tree.join("run-tests.php")).unwrap();
+    let pin = manifest().pin;
+    let said = upstream::upstream(pin.oracle().pin(), &tree, &["xpass.phpt".into()]).unwrap();
+    let theirs = upstream::verdict(&said, Path::new("xpass.phpt"));
+    assert_eq!((ours, theirs), (Judgement::Warn, Some("WARN")));
+    assert!(upstream::alike(Some(ours), theirs));
+}
+
 #[test]
 fn an_extension_the_binary_does_not_load_skips_in_upstreams_words() {
     if oracle().is_none() {
