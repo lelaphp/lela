@@ -2037,13 +2037,26 @@ impl<'a, H: Copy> Linker<'a, H> {
                 .and_then(|(at, _)| u32::try_from(at).ok())
         };
         let (constructor, destructor) = (magic(b"__construct"), magic(b"__destruct"));
+        let properties = self.member_rows::<PropertyDecl>(child, usize::MAX)?;
+        // A parent's private hooked property is counted though no row of
+        // `child`'s names it, as `do_inherit_property` counts it.
+        let hooked = properties.rows().iter().any(|row| {
+            self.row_member::<PropertyDecl>(child, row)
+                .is_some_and(|(_, property)| property.hooks.is_some())
+        }) || child
+            .parent
+            .as_ref()
+            .and_then(|parent| (self.lookup)(&parent.0))
+            .and_then(|held| held.record)
+            .is_some_and(|(_, record)| record.hooked);
         Some(LinkedClass {
             prototypes: self.prototypes(child, &methods)?,
             constructor,
             destructor,
             methods,
             constants: self.member_rows::<ClassConstDecl>(child, usize::MAX)?,
-            properties: self.member_rows::<PropertyDecl>(child, usize::MAX)?,
+            properties,
+            hooked,
             interfaces: self.interface_list(child)?,
         })
     }

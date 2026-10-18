@@ -104,6 +104,9 @@ impl Request {
     /// with no hooks, one declared `static`, and a name no class of the
     /// chain declares.
     pub(crate) fn hooked(&self, class: ClassId, name: &[u8]) -> Option<Hooked> {
+        if !self.class_has_hooks(class) {
+            return None;
+        }
         let (class, resolved) = self.scoped_property(class, name)?;
         self.hooked_of(class, &resolved)
     }
@@ -1098,8 +1101,22 @@ impl Request {
     }
 
     /// Whether any class of `class`'s chain declares a hooked property,
-    /// php's `ce->num_hooked_props`.
+    /// php's `ce->num_hooked_props`. A linked class answers from its
+    /// record, where a parent's private hooked property is counted though
+    /// the child's rows leave it out:
+    ///
+    /// ```php
+    /// class P { private $x { get => 5; } function f() { return $this->x; } }
+    /// class C extends P {}
+    /// var_dump((new C)->f());
+    /// ```
+    /// ```expect
+    /// int(5)
+    /// ```
     pub(crate) fn class_has_hooks(&self, class: ClassId) -> bool {
+        if let Some(record) = self.linked_class(class) {
+            return record.hooked;
+        }
         self.lineage(class).any(|here| {
             self.class_decl(here)
                 .is_some_and(|decl| decl.properties.iter().any(|p| p.hooks.is_some()))
