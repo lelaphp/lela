@@ -285,6 +285,9 @@ abi::Pool::idle_len
 abi::Pool::new
 abi::Pool::take
 abi::PostStartup
+abi::PreloadThread
+abi::PreloadThread::joined
+abi::PreloadThread::new
 abi::PropertiesFor
 abi::PropertyPlace
 abi::PropertyPurpose
@@ -840,6 +843,7 @@ request::Request::periods_elapsed
 request::Request::phpinfo_as_text
 request::Request::precision
 request::Request::preloading
+request::Request::preloading_in_child
 request::Request::property_info_row
 request::Request::property_info_rows
 request::Request::put_back_http_status

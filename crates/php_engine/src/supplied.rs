@@ -887,7 +887,10 @@ mod tests {
                 ExtensionBuilder::default().post_startup(|req, beneath| match beneath.serve(req) {
                     crate::api::abi::PostStartup::Serve => {
                         req.write_stderr(b"preloading\n");
-                        crate::api::abi::PostStartup::Preload(b"/nowhere".to_vec())
+                        crate::api::abi::PostStartup::Preload {
+                            script: b"/nowhere".to_vec(),
+                            thread: None,
+                        }
                     }
                     refused => refused,
                 }),

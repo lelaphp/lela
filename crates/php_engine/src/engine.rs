@@ -6327,7 +6327,10 @@ mod tests {
                 if script.is_empty() {
                     crate::api::abi::PostStartup::Serve
                 } else {
-                    crate::api::abi::PostStartup::Preload(script)
+                    crate::api::abi::PostStartup::Preload {
+                        script,
+                        thread: None,
+                    }
                 }
             })
             .build(&script.to_string_lossy())
