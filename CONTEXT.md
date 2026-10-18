@@ -122,7 +122,7 @@ _Avoid_: doctest, example, golden test
 
 **Tier**:
 What runs a program's op arrays: the interpreter alone, or the interpreter with compiled code beside it. The engine's loop asks the tier only at safepoints; the choice is bound once per engine. The design of record for the compiled tier is `jit-design.md`.
-_Avoid_: JIT (the crate, not the seam), executor (there is one), mode
+_Avoid_: JIT (the crate and its adapter, `Jit`, not the seam), executor (there is one), mode
 
 **Safepoint**:
 One of three places the loop asks the tier what to do: a loop back-edge, the activation of a frame after its parameter prologue has run without raising, and a return. Nothing else in the loop consults the tier. The compiler numbers the safepoints of each op array; the entry is number zero, and a back-edge or return carries its number in a field php leaves unused. Not a hook: that word is php's, for a property's `get` and `set` (**Property hook**).

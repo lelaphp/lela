@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=e902a20f12448a5f5b43c8cafb6660fb0cb3d7a4301ee084cfb57de58b3ea537 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=2741b56908889d928ebf17ab2e30442f243b2a67f257164ba4e8761d7fae80a2 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 412 |  |
 
-<!-- /computed in=b218a69449ba194c6b7ee6b5ebce4378229c23288c426d728cc218bd7eff0ef6 out=1d88cb4dc7a8457885458868705d89eee02ec38270cfa407f6e4ac81708e1c83 -->
+<!-- /computed in=2e349fd50a45e5c6268fa9231bfe8e25aba6597dc4ce99bd9dee96b5473caacd out=1d88cb4dc7a8457885458868705d89eee02ec38270cfa407f6e4ac81708e1c83 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -183,6 +183,7 @@ Options:
 ├── php_engine
 ├── php_ext
 ├── php_heap
+├── php_jit
 ├── php_link
 ├── php_macros
 ├── php_process
@@ -193,7 +194,7 @@ Options:
 ├── php_unit
 └── timelib_sys
 ```
-<!-- /computed in=116a29f2690535535ce478cb1937672cf8a93a8cbbbc2d2ae9137c2e8a3ebf08 out=08232d13ccb389a8e7ddf2fe175d9cd15829207c42a1da48168957adbdc5f201 -->
+<!-- /computed in=70b3b7eca9690068316f014f00bdd615bc6f89449cdfd3567d5ee9f795b18194 out=b73614d2eac7f713540dbdf7f6b1b890c6288f77445621d7a7118414d6885560 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

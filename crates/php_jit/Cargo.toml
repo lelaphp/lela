@@ -1,0 +1,30 @@
+# php_jit: the compiled tier (jit-design.md; design §4.1, §4.3 seam 8;
+# ADR-0006), `php_bundle`'s `jit` feature on the four targets its
+# `[[crate]]` row names. It reads `php_engine` through `tier.lock` alone
+# (jit-design.md §5.3, §6), and binds no Cranelift crate until a trace is
+# lowered.
+[package]
+name = "php_jit"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The compiled tier: Jit, the Tier beside the interpreter"
+
+[lints]
+workspace = true
+
+[dependencies]
+php_engine = { path = "../php_engine" }
+libc = { workspace = true }               # the code arena's mapping and its cache maintenance on macOS (jit-design.md §4.4), already in the lock
+
+[features]
+# The bench bar's program and the `bench` module it runs (#2742); off in
+# every build but the bar's.
+bench = []
+
+[[bin]]
+name = "php_jit_bench"
+path = "src/bin/php_jit_bench.rs"
+required-features = ["bench"]

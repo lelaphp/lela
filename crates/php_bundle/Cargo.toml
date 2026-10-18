@@ -42,9 +42,10 @@ workspace = true
 
 [features]
 default = ["standard", "spl", "date", "reflection", "pcre", "session", "pdo", "dom", "random", "filter", "tokenizer", "json", "iconv", "pdo_sqlite", "ctype", "hash", "libxml", "lexbor", "zlib", "phar", "uri", "opcache", "simplexml", "xml", "xmlreader", "xmlwriter", "sqlite3", "fileinfo", "xsl"]
-# The compiled tier (design §4.1, §11): a name that enables nothing until
-# php_jit exists, when it enables the crate on the four targets.
-jit = []
+# The compiled tier (design §4.1, §11; jit-design.md §6): php_jit on the
+# four targets its `[[crate]]` row names, where `Tier` names `php_jit::Jit`;
+# elsewhere the feature enables nothing and `Tier` stays `Nop`.
+jit = ["dep:php_jit"]
 # The in-process host (design §4.3 seam 4, §8): the `Capture` sink and a fresh
 # engine of `enabled()`, which an extension's own tests and the harness's
 # witness lane serve a snippet through. Off by default.
@@ -209,6 +210,10 @@ php_ext_readline = { path = "../../ext/readline", optional = true }
 php_ext_ffi = { path = "../../ext/ffi", optional = true }
 php_ext_intl = { path = "../../ext/intl", optional = true }
 php_ext_zend_test = { path = "../../ext/zend_test", optional = true }
+
+# The compiled tier, on the four targets alone (jit-design.md §6).
+[target.'cfg(all(any(target_os = "linux", target_os = "macos"), any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+php_jit = { path = "../php_jit", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

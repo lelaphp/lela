@@ -95,7 +95,7 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
         i64::try_from(packages).unwrap().into()
     );
 
-    let absent = readings.iter().find(|r| r.scope == "php_jit").unwrap();
+    let absent = readings.iter().find(|r| r.scope == "sapi/embed").unwrap();
     assert_eq!(
         absent.status,
         Status::Skip,

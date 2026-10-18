@@ -171,7 +171,7 @@ struct Served {
 impl Served {
     fn start(root: &Path, manifest: &Manifest, entry: &Entry) -> Result<Served> {
         let recipe = &manifest.pin.recipe;
-        let binary = profile::released(root, &MAKALA.package(), MAKALA.binary)?;
+        let binary = profile::released(root, &MAKALA.package(), MAKALA.binary, None)?;
         let own = Tree::new("bench-makala")?;
         own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");
