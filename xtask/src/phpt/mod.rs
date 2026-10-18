@@ -957,13 +957,15 @@ fn words(
                 "{scope}: no test of the subset ran, {} found; the recipe is the pinned oracle's and {why}",
                 tally.found
             ),
-            Outcome::Passed => format!(
-                "{scope}: {} passed, {} skipped, {} unread by the compiler of {} tests",
-                tally.count(Judgement::Pass),
-                tally.count(Judgement::Skip),
-                tally.count(Judgement::Unread),
-                tally.judged.len()
-            ),
+            // Every verdict the run gave, under the key its count is kept
+            // in, so the counts named add up to the tests (#2939).
+            Outcome::Passed => {
+                let counts = Judgement::ALL.map(|j| (tally.count(j), j.key()));
+                let named = counts.iter().filter(|(n, _)| *n > 0);
+                let named: Vec<String> = named.map(|(n, key)| format!("{n} {key}")).collect();
+                let tests = tally.judged.len();
+                format!("{scope}: {} of {tests} tests", named.join(", "))
+            }
         }
     } else {
         let named: Vec<String> = if empty {

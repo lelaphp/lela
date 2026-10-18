@@ -579,6 +579,32 @@ fn an_xfail_test_that_passes_is_warned_alike_by_both_runners() {
     assert!(upstream::alike(Some(ours), theirs));
 }
 
+/// A green reading's message names every verdict its run gave, each by
+/// the key its count is kept under, and the counts it names add up to
+/// the tests it says it is over (#2939).
+#[test]
+fn a_green_message_accounts_for_every_test_it_is_over() {
+    use Judgement::{Diverged, Pass, Skip, Unread, Unsent, Warn, XFail};
+    let (_tree, subset) = subset("green-words", &[]);
+    let verdicts = [Pass, Pass, Skip, XFail, Warn, Diverged, Unread, Unsent];
+    let tally = Tally {
+        judged: verdicts.map(|j| Judged::new("id", "name", j, "")).into(),
+        found: verdicts.len(),
+    };
+    let (outcome, source) = (Outcome::Passed, Path::new("."));
+    let message = words(
+        "ext/fixture",
+        &tally,
+        &outcome,
+        &subset,
+        false,
+        source,
+        &manifest(),
+    );
+    let counts = "2 passed, 1 skipped, 1 xfailed, 1 warned, 1 diverged, 1 unread, 1 unsent";
+    assert_eq!(message, format!("ext/fixture: {counts} of 8 tests"));
+}
+
 #[test]
 fn an_extension_the_binary_does_not_load_skips_in_upstreams_words() {
     if oracle().is_none() {
