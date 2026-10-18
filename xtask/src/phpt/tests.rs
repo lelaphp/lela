@@ -24,6 +24,21 @@ use crate::oracle::{Program, Promise, Runner};
 use crate::reading::Status;
 use crate::scratch::Tree;
 
+impl<'a> Under<'a> {
+    /// `runner`'s run on every core, holding its locks in `locks`, with
+    /// no lane, the pinned php here and no server.
+    fn of(runner: &'a Runner, locks: &'a Path) -> Under<'a> {
+        Under {
+            runner,
+            lane: None,
+            oracle_absent: None,
+            jobs: crate::tally::cores(),
+            served: None,
+            locks,
+        }
+    }
+}
+
 fn workspace() -> PathBuf {
     crate::built_root()
 }
@@ -114,14 +129,8 @@ fn run(subset: &Subset, registry: &Registry) -> Tally {
     let manifest = manifest();
     let oracle = manifest.pin.oracle();
     let locks = Tree::new("phpt-locks").unwrap();
-    let under = Under {
-        runner: &Runner::Engine(binary),
-        lane: None,
-        oracle_absent: None,
-        jobs: crate::tally::cores(),
-        served: None,
-        locks: locks.path(),
-    };
+    let runner = Runner::Engine(binary);
+    let under = Under::of(&runner, locks.path());
     run_subset(&oracle, registry, subset, under).unwrap().0
 }
 
@@ -252,14 +261,8 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
     assert_eq!(manifest.pin.digests_asserted(), 0);
     let oracle = manifest.pin.oracle();
     let locks = Tree::new("phpt-locks").unwrap();
-    let under = Under {
-        runner: &Runner::Engine(binary),
-        lane: None,
-        oracle_absent: None,
-        jobs: crate::tally::cores(),
-        served: None,
-        locks: locks.path(),
-    };
+    let runner = Runner::Engine(binary);
+    let under = Under::of(&runner, locks.path());
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
         .0;
@@ -345,14 +348,8 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     manifest.pin.recipe.limits.timeout_s = LIMIT;
     let oracle = manifest.pin.oracle();
     let locks = Tree::new("phpt-locks").unwrap();
-    let under = Under {
-        runner: &Runner::Engine(binary),
-        lane: None,
-        oracle_absent: None,
-        jobs: crate::tally::cores(),
-        served: None,
-        locks: locks.path(),
-    };
+    let runner = Runner::Engine(binary);
+    let under = Under::of(&runner, locks.path());
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
         .0;
@@ -580,6 +577,32 @@ fn an_xfail_test_that_passes_is_warned_alike_by_both_runners() {
     let theirs = upstream::verdict(&said, Path::new("xpass.phpt"));
     assert_eq!((ours, theirs), (Judgement::Warn, Some("WARN")));
     assert!(upstream::alike(Some(ours), theirs));
+}
+
+/// A green reading's message names every verdict its run gave, each by
+/// the key its count is kept under, and the counts it names add up to
+/// the tests it says it is over (#2939).
+#[test]
+fn a_green_message_accounts_for_every_test_it_is_over() {
+    use Judgement::{Diverged, Pass, Skip, Unread, Unsent, Warn, XFail};
+    let (_tree, subset) = subset("green-words", &[]);
+    let verdicts = [Pass, Pass, Skip, XFail, Warn, Diverged, Unread, Unsent];
+    let tally = Tally {
+        judged: verdicts.map(|j| Judged::new("id", "name", j, "")).into(),
+        found: verdicts.len(),
+    };
+    let (outcome, source) = (Outcome::Passed, Path::new("."));
+    let message = words(
+        "ext/fixture",
+        &tally,
+        &outcome,
+        &subset,
+        false,
+        source,
+        &manifest(),
+    );
+    let counts = "2 passed, 1 skipped, 1 xfailed, 1 warned, 1 diverged, 1 unread, 1 unsent";
+    assert_eq!(message, format!("ext/fixture: {counts} of 8 tests"));
 }
 
 #[test]
@@ -1185,12 +1208,8 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
     let oracle = manifest.pin.oracle();
     let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
-        runner: &engine,
-        lane: None,
         oracle_absent: Some(&why),
-        jobs: crate::tally::cores(),
-        served: None,
-        locks: locks.path(),
+        ..Under::of(&engine, locks.path())
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under)
         .unwrap()
@@ -1626,14 +1645,8 @@ fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran()
     subset.scope = "ext/pcre".to_owned();
     let manifest = manifest();
     let locks = Tree::new("phpt-locks").unwrap();
-    let under = Under {
-        runner: &Runner::Engine(binary),
-        lane: None,
-        oracle_absent: None,
-        jobs: crate::tally::cores(),
-        served: None,
-        locks: locks.path(),
-    };
+    let runner = Runner::Engine(binary);
+    let under = Under::of(&runner, locks.path());
     let source = manifest.pin.source.tree().unwrap_or_default();
     let reading = reading(
         &tally,
@@ -1659,13 +1672,10 @@ fn run_on(subset: &Subset, jobs: usize, limit_s: u64) -> Tally {
     manifest.pin.recipe.limits.timeout_s = limit_s;
     let oracle = manifest.pin.oracle();
     let locks = Tree::new("phpt-locks").unwrap();
+    let runner = Runner::Engine(binary);
     let under = Under {
-        runner: &Runner::Engine(binary),
-        lane: None,
-        oracle_absent: None,
         jobs: NonZeroUsize::new(jobs).unwrap(),
-        served: None,
-        locks: locks.path(),
+        ..Under::of(&runner, locks.path())
     };
     run_subset(&oracle, &registry(""), subset, under).unwrap().0
 }
@@ -2007,14 +2017,7 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
     let binary = oracle().unwrap();
     let runner = Runner::Engine(binary);
     let locks = Tree::new("phpt-locks").unwrap();
-    let under = Under {
-        runner: &runner,
-        lane: None,
-        oracle_absent: None,
-        jobs: crate::tally::cores(),
-        served: None,
-        locks: locks.path(),
-    };
+    let under = Under::of(&runner, locks.path());
     let unserved = run_subset(&down.pin.oracle(), &registry(""), &subset, under);
     assert!(unserved.is_err(), "{unserved:#?}");
     let manifest = manifest();

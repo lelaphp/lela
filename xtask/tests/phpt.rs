@@ -708,9 +708,7 @@ fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
     let (absolute, said) = run(root.path());
     assert_eq!(
         absolute.as_deref(),
-        Some(
-            "pass phpt ext/ctype: ext/ctype: 1 passed, 0 skipped, 0 unread by the compiler of 1 tests"
-        ),
+        Some("pass phpt ext/ctype: ext/ctype: 1 passed of 1 tests"),
         "{said}"
     );
     let (relative, said) = run(Path::new("."));
