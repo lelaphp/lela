@@ -551,7 +551,8 @@ fn beside(tree: &Path, suffix: &str) -> PathBuf {
 /// what keeps concurrent runs — and, inside one test binary, the trees of
 /// every test running beside the one that spawned a child — out of each
 /// other's way. A tree with no lock beside it was kept on purpose and is
-/// never a candidate.
+/// never a candidate. Every sweep takes it shared, so one holding it is
+/// never a live run to another reading it (#2942).
 ///
 /// Nothing here reports. A temporary directory this process may not read,
 /// a lock another run took between the listing and the open, a tree
@@ -575,7 +576,7 @@ fn reap(base: &Path) {
         let Ok(file) = File::options().read(true).write(true).open(&lock) else {
             continue;
         };
-        if file.try_lock().is_err() || !names(&lock, &file) {
+        if file.try_lock_shared().is_err() || !names(&lock, &file) {
             continue;
         }
         std::fs::remove_dir_all(base.join(tree)).ok();
@@ -885,7 +886,7 @@ pub(crate) fn stop_forsaken(name: &str) -> Vec<u32> {
             .write(true)
             .open(beside(tree, LOCK))
         {
-            Ok(lock) => lock.try_lock().is_ok(),
+            Ok(lock) => lock.try_lock_shared().is_ok(),
             Err(err) => err.kind() == std::io::ErrorKind::NotFound && !tree.exists(),
         }
     })
@@ -1260,6 +1261,9 @@ mod tests {
             .spawn()
             .unwrap();
         drop(cut.held.take());
+        // Held as a sweep elsewhere holds it, once one holding it whole lets go (#2942).
+        let _sweeping =
+            std::fs::File::open(beside(&cut, LOCK)).inspect(|lock| lock.lock_shared().unwrap());
         let stopped = stop_forsaken("strays");
         let child_ran = child.try_wait().unwrap().is_none();
         child.kill().ok();
