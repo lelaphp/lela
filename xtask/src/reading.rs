@@ -1358,6 +1358,15 @@ impl Outcome {
             Outcome::Unmet { failed, written } => bail!("{failed} of {written} readings fail"),
         }
     }
+
+    /// [`Outcome::exit`] for an instrument whose unmet exit says
+    /// `message` rather than the count.
+    pub(crate) fn exit_saying(self, message: impl FnOnce() -> String) -> Result<()> {
+        match self {
+            Outcome::Met => Ok(()),
+            Outcome::Unmet { .. } => bail!("{}", message()),
+        }
+    }
 }
 
 /// The `s` a count of one does not carry: every instrument's message

@@ -331,21 +331,26 @@ pub(crate) fn reading(
     Ok(reading)
 }
 
-/// What one `xtask compile-identity` run was asked for.
-#[derive(Debug, Clone, Default)]
+/// What one `xtask compile-identity` run was asked for, flattened onto the
+/// command line as it is.
+#[derive(Debug, Clone, Default, clap::Args)]
 pub struct Ask {
-    /// One file, on request (harness §7): its verdict is printed and
-    /// nothing is recorded, since one file is no measurement of a corpus,
-    /// and a difference is the exit.
+    /// One file, on request: its verdict is printed, a difference is the
+    /// exit, and nothing is recorded.
+    #[arg(long, value_name = "PATH", conflicts_with = "corpus")]
     pub file: Option<PathBuf>,
-    /// A corpus at a directory of its own: the nightly whole, denied at
-    /// the call.
+    /// A corpus at a directory of its own: the nightly whole, which CI
+    /// runs.
+    #[arg(long, value_name = "DIR")]
     pub corpus: Option<PathBuf>,
     /// The binary whose dump is held to the oracle's; without it, the
     /// engine's own where cargo puts it.
+    #[arg(long, value_name = "PATH")]
     pub engine: Option<PathBuf>,
-    /// A `[regime.<name>]` of the pin both sides dump under after `dump`
-    /// (#1822); none for the plain run.
+    /// A `[regime.<name>]` of the pin both sides dump under after `dump`:
+    /// `extended-info`, php's `-e`, is the per-commit corpus's second
+    /// (#1822). The reading's scope carries it, `php-src@regime=<name>`.
+    #[arg(long, value_name = "NAME")]
     pub regime: Option<String>,
 }
 

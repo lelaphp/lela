@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -64,7 +64,7 @@ use crate::miri;
 use crate::permit;
 use crate::phpt::against::{self, Against};
 use crate::port_map;
-use crate::reading::{Number, Outcome, Reading, Status, Store, plural};
+use crate::reading::{Number, Reading, Status, Store, plural};
 use crate::reply;
 use crate::ticket;
 use crate::track::{self, MAIN, Ticket, merge_base, short};
@@ -1118,14 +1118,8 @@ pub fn run(
     let verdict = judge(&snapshot, manifest, registry, store, base, not_run)?;
     let outcome = store.record(&[verdict.reading(manifest, &snapshot)?])?;
     print!("{}", verdict.render());
-    match outcome {
-        Outcome::Met => Ok(()),
-        Outcome::Unmet { .. } => bail!(
-            "{} condition{} of done unmet",
-            verdict.unmet.len(),
-            plural(verdict.unmet.len())
-        ),
-    }
+    let unmet = verdict.unmet.len();
+    outcome.exit_saying(|| format!("{unmet} condition{} of done unmet", plural(unmet)))
 }
 
 /// The Stop hook's stdin: the keys `done` reads (harness-design.md §13
