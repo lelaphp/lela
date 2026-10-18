@@ -1204,6 +1204,18 @@ pub trait Streams {
     /// host's fd 0 where it handed one, else nothing.
     fn stdin(&mut self) -> Result<Option<Owner<Stream>>, Thrown>;
 
+    /// `wait` with each of `streams` taken out of its resource for its
+    /// length, as one operation on a stream takes it, an owner of the
+    /// resource held, and put back after. A callback a lent wait serves
+    /// ([`Request::blocking`]) that `fclose`s one of them closes its
+    /// resource, and the stream, its fd with it, is freed as the wait
+    /// returns, so the fds a wait stands on stay open until it does, as
+    /// php's, during whose wait nothing runs (#2664). A stream that is
+    /// closed, not a stream, or out already, named twice among them, is
+    /// passed over.
+    fn holding_streams<R>(&mut self, streams: &[Stream], wait: impl FnOnce(&mut Request) -> R)
+    -> R;
+
     /// `php_stream_open_wrapper_ex(path, mode, REPORT_ERRORS | USE_PATH?)`,
     /// what `fopen()` is: the stream, or `None` after php's warning for
     /// the open that failed (`fopen` answers `false`); the `Err` is a
@@ -1704,6 +1716,14 @@ impl OwnedStream for Owner<Stream> {
 impl Streams for Request {
     fn stdin(&mut self) -> Result<Option<Owner<Stream>>, Thrown> {
         self.open_stream(b"php://stdin", b"r", false)
+    }
+
+    fn holding_streams<R>(
+        &mut self,
+        streams: &[Stream],
+        wait: impl FnOnce(&mut Request) -> R,
+    ) -> R {
+        self.streams_held(streams, wait)
     }
 
     fn open_stream(

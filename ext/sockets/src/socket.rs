@@ -11,7 +11,7 @@ use php_ext::abi::{GcTable, Instance, ObjectHandlers, Refusals};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
-use php_ext::request::{Request, Stream};
+use php_ext::request::{Request, Stream, Streams as _};
 use php_ext::values::{Owner, PhpObject, Resource, Value};
 
 use crate::State;
@@ -177,7 +177,17 @@ pub(crate) fn wait_on<R>(
         }
         fds.push(fd);
     }
-    let answered = req.blocking(|| wait(&fds));
+    // A socket over a stream's fd: the stream held out of its resource
+    // for the wait too, so a callback's `fclose` of it closes no fd the
+    // wait stands on until it returns (#2664).
+    let streams: Vec<Stream> = held
+        .iter()
+        .filter_map(|(_, handle)| match handle {
+            Handle::Stream { stream, .. } => live_stream(req, **stream),
+            _ => None,
+        })
+        .collect();
+    let answered = req.holding_streams(&streams, |req| req.blocking(|| wait(&fds)));
     let closed = sockets
         .iter()
         .position(|object| object.native::<Sock>(req).and_then(Sock::fd).is_none());

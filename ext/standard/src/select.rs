@@ -39,7 +39,7 @@ use std::os::fd::RawFd;
 use php_ext::abi::{OrFalse, Ref};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Cast, Request, Stream};
+use php_ext::request::{Cast, Request, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef};
 
@@ -75,7 +75,11 @@ pub(super) fn fetch_stream(
 /// (`Z/ext/standard/streamsfuncs.c:601`): each element fetched as a
 /// stream and cast for `select(2)`, php's warning for a kind with no
 /// fd.
-fn to_fd_set(req: &mut Request, array: PhpArray) -> Result<Vec<RawFd>, Thrown> {
+fn to_fd_set(
+    req: &mut Request,
+    array: PhpArray,
+    streams: &mut Vec<Stream>,
+) -> Result<Vec<RawFd>, Thrown> {
     let mut fds = Vec::new();
     // The array is walked with no owner of it taken: the by-reference
     // argument holds it while code of the program runs under the walk,
@@ -87,6 +91,7 @@ fn to_fd_set(req: &mut Request, array: PhpArray) -> Result<Vec<RawFd>, Thrown> {
             && fd != -1
         {
             fds.push(fd);
+            streams.push(stream);
         }
         Ok(ControlFlow::Continue(()))
     })?;
@@ -103,21 +108,44 @@ fn from_fd_set(
     set: &[RawFd],
 ) -> Result<(), Thrown> {
     let mut out = PhpArray::new(req)?;
+    // What a fetch threw, which php leaves in `EG(exception)` as its walk
+    // goes on past the element (`php_stream_from_zval_no_verify`, then
+    // `continue`), each later one chained on.
+    let mut pending: Option<Thrown> = None;
     // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(stream_array), …)`
     // (`Z/ext/standard/streamsfuncs.c:648`), holding nothing, as
     // [`to_fd_set`] walks.
-    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let element = row.value().deref();
-        let stream = fetch_stream(req, "stream_select", &element)?;
+        let stream = match fetch_stream(req, "stream_select", &element) {
+            Ok(stream) => stream,
+            Err(thrown) => {
+                pending = Some(match pending.take() {
+                    Some(earlier) => earlier.chain(req, thrown),
+                    None => thrown,
+                });
+                return Ok(ControlFlow::Continue(()));
+            }
+        };
         if let Some(fd) = stream.cast(req, Cast::Select, true)
             && set.contains(&fd)
         {
             keep(req, &mut out, &key, element)?;
         }
         Ok(ControlFlow::Continue(()))
-    })?;
-    target.set(req, Some(out))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(match pending {
+            Some(earlier) => earlier.chain(req, thrown),
+            None => thrown,
+        });
+    }
+    // `zval_ptr_dtor(stream_array); ZVAL_ARR(stream_array, ht)`, whatever
+    // the walk left pending.
+    target.set(req, Some(out))?;
+    pending.map_or(Ok(()), Err)
 }
 
 /// One element copied into the array written back, key and value one
@@ -235,13 +263,36 @@ fn stream_select(
     seconds: Option<i64>,
     #[php(default = null)] microseconds: Option<i64>,
 ) -> Result<OrFalse<i64>, Thrown> {
-    let [r_array, w_array, e_array] =
-        [&read, &write, &except].map(|each| each.get().copied().flatten());
+    let arrays = [&read, &write, &except].map(|each| each.get().copied().flatten());
+    // Each array held for the call, so a callback a lent wait serves that
+    // assigns over `$read` leaves the walk after the wait reading the
+    // array it was handed (#2664).
+    let held: Vec<Owner<PhpArray>> = arrays
+        .iter()
+        .flatten()
+        .map(|array| Owner::take(req, *array))
+        .collect();
+    let selected = select_over(req, [&read, &write, &except], arrays, seconds, microseconds);
+    for array in held {
+        array.give_up(req);
+    }
+    selected
+}
+
+/// `stream_select` past its arguments, over the arrays it holds.
+fn select_over(
+    req: &mut Request,
+    [read, write, except]: [&StreamArray; 3],
+    [r_array, w_array, e_array]: [Option<PhpArray>; 3],
+    seconds: Option<i64>,
+    microseconds: Option<i64>,
+) -> Result<OrFalse<i64>, Thrown> {
     let (sec, usec) = (seconds, microseconds);
     let mut sets: [Vec<RawFd>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut streams = Vec::new();
     for (set, array) in sets.iter_mut().zip([r_array, w_array, e_array]) {
         if let Some(array) = array {
-            *set = to_fd_set(req, array)?;
+            *set = to_fd_set(req, array, &mut streams)?;
         }
     }
     if sets.iter().all(Vec::is_empty) {
@@ -282,7 +333,7 @@ fn stream_select(
         None => None,
     };
     if let Some(array) = r_array {
-        let ready = emulate_read_fd_set(req, &read, array)?;
+        let ready = emulate_read_fd_set(req, read, array)?;
         if ready > 0 {
             if w_array.is_some() {
                 write.set(req, Some(Owner::take(req, PhpArray::empty())))?;
@@ -294,20 +345,25 @@ fn stream_select(
         }
     }
     let [read_set, write_set, except_set] = &sets;
-    let (retval, ready) =
-        match req.blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout)) {
-            Ok(answered) => answered,
-            Err(error) => {
-                let text = format!(
-                    "Unable to select [{}]: {} (max_fd={max_fd})",
-                    error.raw_os_error().unwrap_or(0),
-                    req.os_error_text(error.raw_os_error().unwrap_or(0))
-                );
-                docref(req, Level::Warning, &text);
-                return Ok(OrFalse::False);
-            }
-        };
-    for ((target, array), set) in [&read, &write, &except]
+    // The streams held out of their resources for the wait, so a
+    // callback's `fclose` of one closes no fd the wait stands on until it
+    // returns (#2664).
+    let waited = req.holding_streams(&streams, |req| {
+        req.blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout))
+    });
+    let (retval, ready) = match waited {
+        Ok(answered) => answered,
+        Err(error) => {
+            let text = format!(
+                "Unable to select [{}]: {} (max_fd={max_fd})",
+                error.raw_os_error().unwrap_or(0),
+                req.os_error_text(error.raw_os_error().unwrap_or(0))
+            );
+            docref(req, Level::Warning, &text);
+            return Ok(OrFalse::False);
+        }
+    };
+    for ((target, array), set) in [read, write, except]
         .into_iter()
         .zip([r_array, w_array, e_array])
         .zip(&ready)
