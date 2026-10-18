@@ -1060,9 +1060,16 @@ pub(crate) struct Claim {
     path: PathBuf,
     _lock: File,
     from: SystemTime,
-    /// Whether the claim has a window, as a witness run's and a System V
-    /// subset's do, or is of its processes alone ([`Claim::own`]).
-    window: bool,
+    covers: Covers,
+}
+
+/// What a claim covers: the machine's seconds from its making, a window,
+/// as a witness run's and a System V subset's does, or its processes
+/// alone ([`Claim::own`], #2750).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Covers {
+    Window,
+    Processes,
 }
 
 impl Claim {
@@ -1075,12 +1082,11 @@ impl Claim {
     /// subset's test ending and its own sweep. Swept ([`Claim::swept`]),
     /// it takes what its processes are named on and goes.
     pub(crate) fn own(lane: &str) -> Result<Claim> {
-        Claim::laid(&claims(), lane, false)
+        Claim::laid(&claims(), lane, Covers::Processes)
     }
 
-    /// A claim of `lane`'s in `dir`, from now, with a `window` or of its
-    /// processes alone.
-    fn laid(dir: &Path, lane: &str, window: bool) -> Result<Claim> {
+    /// A claim of `lane`'s in `dir`, from now, covering what `covers` says.
+    fn laid(dir: &Path, lane: &str, covers: Covers) -> Result<Claim> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut path = dir.join(format!(
@@ -1088,7 +1094,7 @@ impl Claim {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        if !window {
+        if covers == Covers::Processes {
             path.set_extension(OWN);
         }
         let taking = path.with_extension(TAKING);
@@ -1103,7 +1109,7 @@ impl Claim {
             path,
             _lock: lock,
             from,
-            window,
+            covers,
         })
     }
 
@@ -1117,7 +1123,7 @@ impl Claim {
     /// how every lane that holds one starts (#2115, #2448).
     pub(crate) fn taken(lane: &str, grace: Duration, removed: &mut Removed) -> Result<Claim> {
         removed.add("before the run, of what runs cut off left", reclaim(grace));
-        Claim::laid(&claims(), lane, true)
+        Claim::laid(&claims(), lane, Covers::Window)
     }
 
     /// The claim's file opened for appending, a handle apart from the
@@ -1150,7 +1156,7 @@ impl Claim {
     /// System V subset settles: what they are named on ([`left`]), and of
     /// what names no process, what [`unnamed_left`] takes.
     pub(crate) fn swept(self, before: &Standing, spawned: &Programs) -> Result<Swept> {
-        if !self.window {
+        if self.covers == Covers::Processes {
             let swept = sweep(before, spawned);
             fs::remove_file(&self.path).ok();
             return swept;
