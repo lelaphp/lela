@@ -27,7 +27,7 @@ use std::ffi::{c_char, c_double, c_float, c_int, c_uint, c_void};
 /// `timelib_rel_time`: a relative time, the body of a `DateInterval`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RelTime {
+pub struct RelFields {
     pub y: i64,
     pub m: i64,
     pub d: i64,
@@ -64,7 +64,7 @@ pub struct TimeFields {
     tz_abbr: *mut c_char,
     tz_info: *mut TzInfo,
     pub dst: c_int,
-    pub relative: RelTime,
+    pub relative: RelFields,
     pub sse: i64,
     pub have_time: c_uint,
     pub have_date: c_uint,
@@ -296,7 +296,7 @@ unsafe extern "C" {
         len: usize,
         begin: *mut *mut TimeFields,
         end: *mut *mut TimeFields,
-        period: *mut *mut RelTime,
+        period: *mut *mut RelFields,
         recurrences: *mut c_int,
         errors: *mut *mut ErrorContainer,
     );
@@ -342,7 +342,9 @@ unsafe extern "C" {
         transitions: *mut PosixTransitions,
     );
 
-    pub fn timelib_rel_time_dtor(t: *mut RelTime);
+    pub fn timelib_rel_time_ctor() -> *mut RelFields;
+    pub fn timelib_rel_time_clone(rt: *mut RelFields) -> *mut RelFields;
+    pub fn timelib_rel_time_dtor(t: *mut RelFields);
     pub fn timelib_time_ctor() -> *mut TimeFields;
     pub fn timelib_time_dtor(t: *mut TimeFields);
     pub fn timelib_time_clone(orig: *mut TimeFields) -> *mut TimeFields;
@@ -363,10 +365,10 @@ unsafe extern "C" {
         ts_set: *mut i64,
         ts_transit: *mut i64,
     ) -> c_int;
-    pub fn timelib_diff(one: *mut TimeFields, two: *mut TimeFields) -> *mut RelTime;
+    pub fn timelib_diff(one: *mut TimeFields, two: *mut TimeFields) -> *mut RelFields;
     pub fn timelib_diff_days(one: *mut TimeFields, two: *mut TimeFields) -> c_int;
-    pub fn timelib_add(t: *mut TimeFields, interval: *mut RelTime) -> *mut TimeFields;
-    pub fn timelib_add_wall(t: *mut TimeFields, interval: *mut RelTime) -> *mut TimeFields;
-    pub fn timelib_sub(t: *mut TimeFields, interval: *mut RelTime) -> *mut TimeFields;
-    pub fn timelib_sub_wall(t: *mut TimeFields, interval: *mut RelTime) -> *mut TimeFields;
+    pub fn timelib_add(t: *mut TimeFields, interval: *mut RelFields) -> *mut TimeFields;
+    pub fn timelib_add_wall(t: *mut TimeFields, interval: *mut RelFields) -> *mut TimeFields;
+    pub fn timelib_sub(t: *mut TimeFields, interval: *mut RelFields) -> *mut TimeFields;
+    pub fn timelib_sub_wall(t: *mut TimeFields, interval: *mut RelFields) -> *mut TimeFields;
 }

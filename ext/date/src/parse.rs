@@ -9,7 +9,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{
-    ErrorContainer, Errors, Parsed, RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID,
+    ErrorContainer, Errors, Parsed, RelFields, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID,
     ZONETYPE_OFFSET,
 };
 use crate::format::now;
@@ -536,7 +536,7 @@ fn parsed_kept(req: &mut Request, parsed: Parsed) -> Result<Owner<PhpArray>, Thr
 /// The `relative` row of a parse's answer: each field of its relative
 /// part, and the weekday, weekdays and first or last day of the month
 /// where it has them.
-fn relative_row(req: &mut Request, r: &RelTime) -> Result<Owner<PhpArray>, Thrown> {
+fn relative_row(req: &mut Request, r: &RelFields) -> Result<Owner<PhpArray>, Thrown> {
     let mut rel = PhpArray::new(req)?;
     for (name, n) in [
         (&b"year"[..], r.y),
