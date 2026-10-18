@@ -896,6 +896,18 @@ pub fn illegal_container_offset(
     throw_error(req, "TypeError", &message)
 }
 
+/// `zend_cannot_add_element`: php's `Error` for `$a[] = v` where
+/// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, one text for every
+/// append that refuses (`ZEND_ASSIGN_DIM`, `ZEND_ADD_ARRAY_ELEMENT`,
+/// `ZEND_ADD_ARRAY_UNPACK`, `add_next_index_*`'s callers).
+pub(crate) fn cannot_add_element(req: &mut Request) -> Thrown {
+    throw_error(
+        req,
+        "Error",
+        "Cannot add element to the array as the next element is already occupied",
+    )
+}
+
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of
 /// `class` with `message`, the one `previous` holds chained as its
 /// `previous` (`zend_throw_exception_internal`), as

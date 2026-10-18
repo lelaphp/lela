@@ -10494,11 +10494,7 @@ fn array_place(
     Ok(match landing {
         Ok(Landing::Entry(entry)) => Ok(php_heap::Zval::indirect(entry)),
         Ok(Landing::Gone) => Ok(php_heap::Zval::null()),
-        Ok(Landing::Occupied) => Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            "Cannot add element to the array as the next element is already occupied",
-        )),
+        Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
         Err(thrown) => Err(thrown),
     })
 }
@@ -14333,11 +14329,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
                     write_out(req, frame, code, op, &value);
                     Ok(())
                 }
-                Some((_, Ok(false))) => Err(crate::api::raising::throw_error(
-                    req,
-                    "Error",
-                    "Cannot add element to the array as the next element is already occupied",
-                )),
+                Some((_, Ok(false))) => Err(crate::api::raising::cannot_add_element(req)),
                 Some((_, Err(thrown))) => Err(thrown),
             }
         }
@@ -14363,11 +14355,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
                     write_out(req, frame, code, op, &Value::null());
                     Ok(())
                 }
-                Ok(Landing::Occupied) => Err(crate::api::raising::throw_error(
-                    req,
-                    "Error",
-                    "Cannot add element to the array as the next element is already occupied",
-                )),
+                Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
         }
@@ -14803,11 +14791,7 @@ pub(crate) fn assign_dim_op<T: Tier>(
                     write_out(req, frame, code, op, &Value::null());
                     Ok(())
                 }
-                Ok(Landing::Occupied) => Err(crate::api::raising::throw_error(
-                    req,
-                    "Error",
-                    "Cannot add element to the array as the next element is already occupied",
-                )),
+                Ok(Landing::Occupied) => Err(crate::api::raising::cannot_add_element(req)),
                 Err(thrown) => Err(thrown),
             }
         }
@@ -17212,11 +17196,7 @@ fn append_unpacked(req: &mut Request, a: php_heap::Arr, value: Value) -> Result<
     if req.array_append(a, value)? {
         return Ok(());
     }
-    Err(crate::api::raising::throw_error(
-        req,
-        "Error",
-        "Cannot add element to the array as the next element is already occupied",
-    ))
+    Err(crate::api::raising::cannot_add_element(req))
 }
 
 /// `ce->get_iterator` over an object a `...` spreads: its iterator, one
