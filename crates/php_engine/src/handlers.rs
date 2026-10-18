@@ -65,6 +65,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, none_pending};
+use crate::api::request::ropes::RopeAt;
 use crate::api::request::{Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
@@ -19301,24 +19302,20 @@ pub(crate) fn fast_concat<T: Tier, A: Operand + Default, B: Operand + Default>(
 
 /// `ZEND_ROPE_INIT` (`Z/Zend/zend_vm_def.h:3410`): the first piece of
 /// an interpolated string of three or more, converted as
-/// `zval_get_string_func` converts it ([`crate::ops::to_string`]), into
-/// element zero of the rope the `result` temporary holds, with
+/// `zval_get_string_func` converts it ([`crate::ops::to_string`]), as
+/// the first piece of a rope the `result` temporary names, with
 /// `extended_value` the number of pieces the rope will carry. php lays
 /// the rope's `zend_string *` pointers over the stretch of slots the
 /// compiler reserved, two to a zval; a zval here holds one value, so
-/// the rope is a packed array of the pieces in the stretch's first
-/// slot, sized for all of them at once, and the other reserved slots
-/// stay `UNDEF`. What a program sees is the same: the pieces converted in
+/// the temporary holds the rope's position among the request's
+/// ([`crate::api::request::ropes`]) and the other reserved slots stay
+/// `UNDEF`. What a program sees is the same: the pieces converted in
 /// order, each warning and `__toString` raised where php raises it, one
 /// string of their joined length at the `ROPE_END`. A piece whose
 /// conversion threw leaves the throwable pending
-/// (`ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`).
-///
-/// The three rope opcodes dispatch unspecialised, unlike the rest of
-/// design §5.8's hot list: what a rope costs is the array, laid down,
-/// appended to, walked and destroyed for every interpolated string,
-/// and not the reading of its pieces, which an inline path would save
-/// (#2580).
+/// (`ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`). A string piece is taken
+/// inline at each operand kind, as php's specialised handlers take it,
+/// and any other piece is converted after the opline is stood at.
 ///
 /// ```php
 /// $a = 1; $b = 2; echo "$a-$b-$a";
@@ -19339,17 +19336,21 @@ pub(crate) fn fast_concat<T: Tier, A: Operand + Default, B: Operand + Default>(
 /// Warning: Undefined variable $u in %s on line 2
 /// -2-|
 /// ```
-pub(crate) fn rope_init<T: Tier>(
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
+pub(crate) fn rope_init<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let rope = match req.array_sized(op.extended_value, true) {
-        Ok(rope) => rope,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    set_out(req, frame, code, op, Value::array(rope));
+    let rope = req.rope_open();
+    set_out(req, frame, code, op, rope.value());
+    if inline_rope_piece(req, frame, code, op, rope, B::default()) {
+        return Ok(advanced());
+    }
+    req.vm_mut().stand(frame, at);
     rope_piece(req, frame, code, op, rope)
 }
 
@@ -19385,13 +19386,20 @@ pub(crate) fn rope_init<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 4
 /// ```
-pub(crate) fn rope_add<T: Tier>(
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
+pub(crate) fn rope_add<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     let rope = rope_of(req, frame, code, op)?;
+    if inline_rope_piece(req, frame, code, op, rope, B::default()) {
+        return Ok(advanced());
+    }
+    req.vm_mut().stand(frame, at);
     rope_piece(req, frame, code, op, rope)
 }
 
@@ -19424,55 +19432,34 @@ pub(crate) fn rope_add<T: Tier>(
 /// Stack trace:
 /// #0 {main}:7
 /// ```
-pub(crate) fn rope_end<T: Tier>(
+pub(crate) fn rope_end<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let mut rope = rope_of(req, frame, code, op)?;
+    let rope = rope_of(req, frame, code, op)?;
     let rope_slot = exec::temporary_slot(code, op.op1);
-    let piece = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let converted = crate::ops::to_string(req, &piece);
-    exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    let appended = match converted {
-        Ok(text) => rope.append(req, Owner::adopt(Value::string(text))),
-        Err(thrown) => Err(thrown),
+    req.vm_mut().stand(frame, at);
+    let converted = if inline_rope_piece(req, frame, code, op, rope, B::default()) {
+        Ok(())
+    } else {
+        let piece = exec::operand(req, frame, code, op.op2_type, op.op2);
+        let converted = crate::ops::to_string(req, &piece);
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        converted.map(|text| {
+            req.rope_push(rope, text);
+        })
     };
-    if let Err(thrown) = appended {
-        let held = req.take_slot(frame, rope_slot);
-        req.release(held);
-        return threw(req, frame, &thrown);
-    }
-    // `zend_string_alloc` of the pieces' joined length, then each
-    // piece's bytes copied in, as php's `memcpy` loop copies them.
-    // `ZSTR_COPYABLE_CONCAT_PROPERTIES` narrowed by each piece's, so the
-    // string is valid UTF-8 where every piece was known to be.
-    let (len, utf8) = walk::rows(req, rope).fold((0_usize, true), |(len, utf8), (_, v)| {
-        v.as_php_string()
-            .map_or((len, utf8), |s| (len + s.len(), utf8 && s.is_valid_utf8()))
-    });
-    let joined = crate::api::values::FreshString::new(req, len).map(|mut fresh| {
-        let bytes = fresh.bytes_mut();
-        let mut at: usize = 0;
-        for (_, v) in walk::rows(req, rope) {
-            let Some(s) = v.as_php_string() else {
-                continue;
-            };
-            let end = at.saturating_add(s.len()).min(bytes.len());
-            if let Some(target) = bytes.get_mut(at..end) {
-                target.copy_from_slice(&s.as_bytes()[..target.len()]);
-            }
-            at = end;
+    let joined = match converted {
+        Ok(()) => req.rope_end(rope),
+        Err(thrown) => {
+            req.rope_close(rope);
+            Err(thrown)
         }
-        let joined = fresh.finish().hand_on();
-        if utf8 {
-            joined.mark_valid_utf8();
-        }
-        joined
-    });
-    let held = req.take_slot(frame, rope_slot);
-    req.release(held);
+    };
+    req.take_slot(frame, rope_slot);
     match joined {
         Ok(joined) => {
             set_out(req, frame, code, op, Value::string(joined));
@@ -19482,7 +19469,7 @@ pub(crate) fn rope_end<T: Tier>(
     }
 }
 
-/// The rope the opline's `op1` temporary holds, the packed array
+/// The rope the opline's `op1` temporary names, the position
 /// `ROPE_INIT` put there; a slot holding anything else is an invariant
 /// the compiler's rope emission keeps, so it is an internal error.
 fn rope_of(
@@ -19490,36 +19477,70 @@ fn rope_of(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-) -> Result<crate::api::values::PhpArray, Fatal> {
+) -> Result<RopeAt, Fatal> {
     let slot = exec::temporary_slot(code, op.op1);
-    req.slot(frame, slot).as_array().copied().ok_or_else(|| {
-        Fatal::error(format!(
-            "InternalError: {} over a temporary holding no rope",
-            op.opcode.name()
-        ))
-    })
+    req.slot(frame, slot)
+        .as_int()
+        .and_then(RopeAt::of)
+        .ok_or_else(|| {
+            Fatal::error(format!(
+                "InternalError: {} over a temporary holding no rope",
+                op.opcode.name()
+            ))
+        })
+}
+
+/// A string piece taken as php's `ROPE_*` handlers take one, with no
+/// conversion: a temporary's owner moved onto the rope and its slot
+/// emptied, a constant's or a CV's string with one more owner
+/// (`Z_ADDREF_P` where it is refcounted, `zend_string_copy`); `false`
+/// for any other piece, which [`rope_piece`] converts.
+#[inline(always)] // design §5.8: the string arm is the handler's body
+#[allow(clippy::inline_always)]
+fn inline_rope_piece(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    rope: RopeAt,
+    b: impl Operand,
+) -> bool {
+    let slots = req.slots_mut(frame);
+    let piece = b.read(slots, code, op.op2);
+    let Some(text) = piece.as_str() else {
+        return false;
+    };
+    if matches!(b.kind(), OperandKind::Tmp | OperandKind::Var) {
+        if let Some(held) = b.slot(code, op.op2).and_then(|at| slots.get_mut(at)) {
+            *held = Zval::UNDEF;
+        }
+    } else if piece.is_refcounted() {
+        req.addref(&Value::of_zval(piece));
+    }
+    req.rope_push(rope, PhpString::of(text));
+    true
 }
 
 /// One piece of a rope: the `op2` operand converted as
 /// `zval_get_string_func` converts it, the operand freed (`FREE_OP2`),
-/// and the string appended to the rope; a conversion that threw leaves
-/// the throwable pending, which is the `Threw` edge the loop reads.
+/// and the string pushed onto the rope; a conversion that threw leaves
+/// the throwable pending, which is the `Threw` edge the loop reads, and
+/// the pieces so far to the live range's cleanup.
 fn rope_piece(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    mut rope: crate::api::values::PhpArray,
+    rope: RopeAt,
 ) -> Edge {
     let piece = exec::operand(req, frame, code, op.op2_type, op.op2);
     let converted = crate::ops::to_string(req, &piece);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    let appended = match converted {
-        Ok(text) => rope.append(req, Owner::adopt(Value::string(text))),
-        Err(thrown) => Err(thrown),
-    };
-    match appended {
-        Ok(()) => Ok(advance(req, frame)),
+    match converted {
+        Ok(text) => {
+            req.rope_push(rope, text);
+            Ok(advance(req, frame))
+        }
         Err(thrown) => threw(req, frame, &thrown),
     }
 }

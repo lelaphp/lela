@@ -121,6 +121,7 @@ mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
 mod response;
+pub(crate) mod ropes;
 #[cfg(debug_assertions)]
 mod sensing;
 pub use crate::output::HttpStatus;
@@ -270,6 +271,8 @@ pub struct Request {
     /// The diagnostics' state ([`diagnostics::Diagnostics`]).
     diagnostics: diagnostics::Diagnostics,
     ending: Option<Ending>,
+    /// The pieces of the ropes the frames are building ([`ropes::Ropes`]).
+    ropes: ropes::Ropes,
     /// php's `EG(exit_status)`: what the process ends with, 255 written
     /// by `php_error_cb` for a fatal and the code by `exit`, whichever
     /// wrote last.
@@ -846,6 +849,7 @@ impl Request {
             diagnostics: diagnostics::Diagnostics::default(),
             response: response::Response::new(sink, output),
             ending: None,
+            ropes: ropes::Ropes::default(),
             exit_status,
             resources,
             http_globals: variables::HttpGlobals::default(),
