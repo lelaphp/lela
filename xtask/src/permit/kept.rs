@@ -92,7 +92,7 @@ pub(super) fn keep(checkout: &Path, path: &str, was: Option<&str>, call: &str) -
 /// never an empty list: `done` does not pass on no evidence.
 pub(crate) fn kept_changes(store: &Store, checkout: &Path) -> Result<Vec<Kept>> {
     let mut standing = Vec::new();
-    for file in crate::listed(&dir_of(store))? {
+    for file in crate::entries(&dir_of(store))? {
         if file.extension().is_none_or(|e| e != "json") {
             continue;
         }

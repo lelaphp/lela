@@ -905,7 +905,7 @@ impl Store {
 
     /// Each entry of the index of one scope: its key and its file.
     fn keys_of(&self, instrument: &str, scope: &str) -> Result<Vec<(String, PathBuf)>> {
-        let listed = crate::listed(&self.dir_of(instrument, scope)?)?;
+        let listed = crate::entries(&self.dir_of(instrument, scope)?)?;
         Ok(listed
             .into_iter()
             .filter_map(|path| Some((index_key(&path)?.to_owned(), path)))
@@ -1110,7 +1110,7 @@ fn prune(dir: &Path) -> Result<()> {
 
 /// The files of the log under `dir`, in name order; none where it is not.
 fn shards(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = crate::listed(dir)?;
+    let mut paths = crate::entries(dir)?;
     paths.retain(|p| p.extension().is_some_and(|e| e == "jsonl"));
     paths.sort();
     Ok(paths)

@@ -139,7 +139,7 @@ pub(crate) fn read_if(path: &Path) -> Result<Option<String>> {
 
 /// The paths of the entries of the directory `dir`, none where there is
 /// no such directory, an error naming it where it cannot be listed.
-pub(crate) fn listed(dir: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn entries(dir: &Path) -> Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
