@@ -24,6 +24,21 @@ use crate::oracle::{Program, Promise, Runner};
 use crate::reading::Status;
 use crate::scratch::Tree;
 
+impl<'a> Under<'a> {
+    /// `runner`'s run on every core, holding its locks in `locks`, with
+    /// no lane, the pinned php here and no server.
+    fn of(runner: &'a Runner, locks: &'a Path) -> Under<'a> {
+        Under {
+            runner,
+            lane: None,
+            oracle_absent: None,
+            jobs: crate::tally::cores(),
+            served: None,
+            locks,
+        }
+    }
+}
+
 fn workspace() -> PathBuf {
     crate::built_root()
 }

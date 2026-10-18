@@ -730,21 +730,6 @@ pub(crate) struct Under<'a> {
     pub locks: &'a Path,
 }
 
-impl<'a> Under<'a> {
-    /// `runner`'s run on every core, holding its locks in `locks`, with
-    /// no lane, the pinned php here and no server.
-    pub(crate) fn of(runner: &'a Runner, locks: &'a Path) -> Under<'a> {
-        Under {
-            runner,
-            lane: None,
-            oracle_absent: None,
-            jobs: crate::tally::cores(),
-            served: None,
-            locks,
-        }
-    }
-}
-
 /// The subset's reading: the counts in `numbers`, the failures named in
 /// the message, and the status the ladder allows.
 pub(crate) fn reading(

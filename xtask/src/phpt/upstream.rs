@@ -56,11 +56,13 @@ pub(crate) fn compare(
     let ours = {
         let copy = copy_of(&source, jobs)?;
         let runner = Runner::Control(oracle.pin().oracle.file()?.to_path_buf());
-        let served = own.served.as_deref();
         let under = Under {
+            runner: &runner,
+            lane: None,
+            oracle_absent: None,
             jobs,
-            served,
-            ..Under::of(&runner, &locks)
+            served: own.served.as_deref(),
+            locks: &locks,
         };
         let within = tests.iter().map(|test| copy.join(test)).collect();
         run_tests(oracle, registry, &subset.rooted(&copy), within, under)?.0
