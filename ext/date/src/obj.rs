@@ -1229,6 +1229,27 @@ impl ObjectHandlers for IntervalHandlers {
     /// y p q m d h i s f invert days from_string
     /// y m d h i s f invert days from_string
     /// ```
+    ///
+    /// Each field is written as `zend_hash_str_update` writes it
+    /// ([`PhpObject::set_str`]): a key the table lacks is a string of its
+    /// own, `zend_string_init`'s, one byte long or not, so the table a
+    /// read lays down costs what php's does:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $o = new stdClass; foreach (['y','m','d','h','i','s','f','invert','days','from_string'] as $k) $o->$k = 1; echo memory_get_usage() - $m, "\n";
+    /// $i = new DateInterval('P1D');
+    /// $m = memory_get_usage(); $a = get_object_vars($i); echo memory_get_usage() - $m, "\n";
+    /// $j = new DateInterval('P1D');
+    /// $m = memory_get_usage(); $b = (array) $j; echo memory_get_usage() - $m, "\n";
+    /// $k = new DateInterval('P1D');
+    /// $m = memory_get_usage(); foreach ($k as $x) {} echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 736
+    /// 1720
+    /// 1720
+    /// 1024
+    /// ```
     fn get_properties(&self, req: &mut Request, object: PhpObject) -> Result<walk::Table, Thrown> {
         write_fields(req, object)?;
         Std.get_properties(req, object)
@@ -1243,18 +1264,7 @@ impl ObjectHandlers for IntervalHandlers {
 pub(super) fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     let mut fields = interval_rows(req, object).into_iter();
     while let Some((name, value)) = fields.next() {
-        let written = match PhpString::new(req, name) {
-            Ok(name) => {
-                let written = object.set_row(req, &Key::Str(*name), value);
-                name.give_up(req);
-                written
-            }
-            Err(thrown) => {
-                value.give_up(req);
-                Err(thrown)
-            }
-        };
-        if let Err(thrown) = written {
+        if let Err(thrown) = object.set_str(req, name, value) {
             give_up_fields(req, fields.collect());
             return Err(thrown);
         }

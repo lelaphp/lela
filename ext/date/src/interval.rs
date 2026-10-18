@@ -728,6 +728,17 @@ impl DateInterval {
     /// ```expect
     /// 696
     /// ```
+    ///
+    /// The first call lays the table down and writes each field's key, as
+    /// `zend_hash_str_update` makes it:
+    ///
+    /// ```php
+    /// $w = new DateInterval('P1D');
+    /// $m = memory_get_usage(); @$w->__wakeup(); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 1592
+    /// ```
     #[php(
         tentative,
         deprecated(
