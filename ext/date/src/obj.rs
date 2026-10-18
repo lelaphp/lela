@@ -385,6 +385,17 @@ pub(super) fn new_interval(
     Ok(object.into_instance())
 }
 
+/// `create_date_period_interval` and `DatePeriod::getDateInterval`: a
+/// new `DateInterval` over a `timelib_rel_time_clone` of a period's
+/// interval, the object made first; its `civil_or_wall` is the zero
+/// `ecalloc` leaves, neither `CIVIL` nor `WALL`, as php never sets it.
+pub(super) fn period_interval(
+    req: &mut Request,
+    diff: &RelFields,
+) -> Result<Owner<Instance<DateInterval>>, Thrown> {
+    new_interval(req, 0, None, |req| lent(req, |l| RelTime::of(l, diff)))
+}
+
 /// The interval's relative time replaced, the one it had freed as
 /// `timelib_rel_time_dtor` frees it; none for none.
 pub(super) fn set_diff(
@@ -616,20 +627,26 @@ pub(super) fn interval_fields(
         .collect()
 }
 
+/// One of a period's three times, `start`, `current` or `end`.
+type PeriodTime = fn(&PeriodState) -> &Option<Time>;
+
 /// `create_date_period_datetime`: a date of the period's class over a
-/// `timelib_time_clone` of its start, current or end (`at` in
-/// [`PeriodState::times`]' order), the object made first, or
-/// `null` where the period has none.
-fn period_date(req: &mut Request, object: PhpObject, at: usize) -> Result<Owner<Value>, Thrown> {
+/// `timelib_time_clone` of the time `which` reads, the object made
+/// first, or `null` where the period has none.
+fn period_date(
+    req: &mut Request,
+    object: PhpObject,
+    which: PeriodTime,
+) -> Result<Owner<Value>, Thrown> {
     let class = object
         .native::<PeriodObj>(req)
-        .and_then(|p| p.start_ce.filter(|_| p.times()[at].is_some()));
+        .and_then(|p| p.start_ce.filter(|_| which(p).is_some()));
     let Some(class) = class else {
         return Ok(Owner::null());
     };
     let date = new_object(req, class)?;
     let copy = with_period(req, object, |req, p| {
-        lent(req, |l| p.times()[at].as_ref().map(|t| t.copy(l)))
+        lent(req, |l| which(p).as_ref().map(|t| t.copy(l)))
     });
     if let Err(thrown) = copy
         .transpose()
@@ -676,15 +693,14 @@ pub(super) fn period_field(
         p.include_end_date,
     );
     let scalar = match name {
-        b"start" => return period_date(req, object, 0),
-        b"current" => return period_date(req, object, 1),
-        b"end" => return period_date(req, object, 2),
+        b"start" => return period_date(req, object, |p| &p.start),
+        b"current" => return period_date(req, object, |p| &p.current),
+        b"end" => return period_date(req, object, |p| &p.end),
         b"interval" => {
             let Some(diff) = interval else {
                 return Ok(Owner::null());
             };
-            return new_interval(req, 0, None, |req| lent(req, |l| RelTime::of(l, &diff)))
-                .map(Owner::into_value);
+            return period_interval(req, &diff).map(Owner::into_value);
         }
         b"recurrences" => Value::int(recurrences),
         b"include_start_date" => Value::bool(include_start),
@@ -1537,11 +1553,6 @@ impl PeriodState {
             initialized: self.initialized,
             cursor: None,
         }
-    }
-
-    /// `start`, `current` and `end`, in that order.
-    pub(super) fn times(&self) -> [&Option<Time>; 3] {
-        [&self.start, &self.current, &self.end]
     }
 }
 

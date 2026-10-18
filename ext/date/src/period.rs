@@ -15,8 +15,8 @@ use crate::ffi::{self, RelFields, RelTime, Time};
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
 use crate::obj::{
-    IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, PeriodState, class_id, new_date, new_interval,
-    period_fields, rows_array, std_rows, uninitialized, with_period, with_time,
+    IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, PeriodState, class_id, new_date, period_fields,
+    period_interval, rows_array, std_rows, uninitialized, with_period, with_time,
 };
 
 /// `INT_MAX - 8`, the most recurrences a period may have.
@@ -786,7 +786,7 @@ impl DatePeriod {
             .native::<PeriodObj>(req)
             .and_then(|p| p.interval.as_deref().copied());
         match diff {
-            Some(diff) => new_interval(req, 0, None, |req| lent(req, |l| RelTime::of(l, &diff))),
+            Some(diff) => period_interval(req, &diff),
             None => Err(uninitialized(req, object.class())),
         }
     }
