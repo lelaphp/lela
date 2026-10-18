@@ -1548,6 +1548,7 @@ dependencies = [
 name = "php_jit"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "php_engine",
 ]
 
