@@ -1190,10 +1190,16 @@ impl Arr {
     /// value is copied and no owner taken. The key of a packed array's
     /// element is its position, as `ZVAL_LONG(result, pos)` reads it.
     #[must_use]
-    pub fn live_from(&self, pos: u32) -> Option<(u32, Key, Zval)> {
-        let pos = self.valid_pos(pos);
-        let (key, z) = self.entry_at(pos)?;
-        Some((pos, key, z))
+    pub fn live_from(&self, mut pos: u32) -> Option<(u32, Key, Zval)> {
+        let used = self.num_used();
+        while pos < used {
+            let z = self.value_at(pos);
+            if !z.is_undef() {
+                return Some((pos, self.key_at(pos), z));
+            }
+            pos += 1;
+        }
+        None
     }
 
     /// `zend_hash_internal_pointer_reset`, `reset()`.

@@ -89,7 +89,7 @@ pub fn float_to_long(f: f64) -> i64 {
 /// for one digit is the process's interned one, as php's `ZSTR_CHAR` is.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thrown> {
-    PhpString::new(req, n.to_string().as_bytes())
+    PhpString::new(req, crate::c_number::Long::of(n).as_bytes())
 }
 
 /// `zend_gcvt(f, precision, '.', exponent, buf)`, the one
