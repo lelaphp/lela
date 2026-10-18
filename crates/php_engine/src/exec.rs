@@ -232,7 +232,7 @@ impl CallerAt {
         let Some(packed) = self.0 else {
             return Caller::Outside;
         };
-        let frame = FrameRef((packed.get() & !CallerAt::LOOP) - 1);
+        let frame = FrameRef((packed.get() & !CallerAt::LOOP).saturating_sub(1));
         if packed.get() & CallerAt::LOOP == 0 {
             Caller::Opline(frame)
         } else {

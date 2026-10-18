@@ -1544,6 +1544,17 @@ pub(crate) struct Declared<'a> {
 }
 
 impl Shared {
+    /// Where the record of a native or a native method stands
+    /// ([`Shared::callees`]); none for every other function.
+    #[inline]
+    pub(crate) fn native_callee(
+        &self,
+        function: crate::api::call::Function,
+    ) -> Option<crate::readable::CalleeAt> {
+        let at = usize::try_from(function.0).ok()?;
+        self.callees.get(at).map(crate::readable::Record::at)
+    }
+
     /// `zend_flf_functions` by name, in the frameless table's order
     /// ([`Engine::frameless`]).
     pub(crate) fn frameless_names(&self) -> Vec<Name> {

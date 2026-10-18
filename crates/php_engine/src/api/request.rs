@@ -460,8 +460,8 @@ pub struct Request {
     user_functions: PinnedRows<UserFunction>,
     /// The callees of the functions no table holds one for, a
     /// class's native and a trampoline, each made the first time a
-    /// frame serves it ([`Request::described`]).
-    callees: std::collections::HashMap<Function, Box<crate::readable::Named>>,
+    /// frame serves it ([`Request::callee_at`]).
+    named_callees: std::collections::HashMap<Function, Box<crate::readable::Named>>,
     /// The names the request-only units it compiled carry, held while
     /// each unit lives ([`unit_names::UnitNames`]).
     unit_names: unit_names::UnitNames,
@@ -621,7 +621,7 @@ impl UserFunction {
 /// doubling size, each filled no further than the size it was made with,
 /// so a row stands where it was pushed for as long as the rows do. What
 /// a frame's header names a function's record in
-/// ([`UserFunction::described`]). A row of the first segment, nearly
+/// ([`UserFunction::callee_at`]). A row of the first segment, nearly
 /// every request's every row, is read as a vector's is, one bound and
 /// one index, since every call to a function of the request's reads its
 /// row.
@@ -1022,7 +1022,7 @@ impl Request {
             buckets,
             aliases: tables.aliases,
             user_functions: PinnedRows::default(),
-            callees: std::collections::HashMap::new(),
+            named_callees: std::collections::HashMap::new(),
             unit_names: unit_names::UnitNames::default(),
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),

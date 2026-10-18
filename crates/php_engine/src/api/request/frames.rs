@@ -952,7 +952,7 @@ impl Request {
     /// two, as `zend_get_call_trampoline_func` sizes the frame it
     /// reuses.
     /// With the room, where the callee's record stands, which the
-    /// call's header names ([`Request::described`]); none for a callee
+    /// call's header names ([`Request::callee_at`]); none for a callee
     /// no table holds one for, whose push makes it.
     #[inline]
     pub(crate) fn call_room(
@@ -977,11 +977,7 @@ impl Request {
         function: Function,
         count: u32,
     ) -> (usize, crate::readable::CalleeAt) {
-        let callee = usize::try_from(function.0)
-            .ok()
-            .and_then(|at| self.shared.callees.get(at))
-            .map(crate::readable::Record::at)
-            .unwrap_or_default();
+        let callee = self.shared.native_callee(function).unwrap_or_default();
         let shape = |function: Function| Some(self.user_function(function)?.shape);
         let room = if let Some(magic) = self
             .trampoline_of(function)
@@ -1085,7 +1081,7 @@ impl Request {
     }
 
     /// The record of the call `header` lays down written into it,
-    /// where its push was handed none ([`Request::described`]).
+    /// where its push was handed none ([`Request::callee_at`]).
     #[cold]
     #[inline(never)]
     fn lay_callee(&mut self, header: &mut exec::Header) {
@@ -1101,11 +1097,8 @@ impl Request {
     /// time a frame serves it and held for the request. `zend_pass_function`
     /// has none, as php's has no name.
     pub(crate) fn callee_at(&mut self, function: Function) -> crate::readable::CalleeAt {
-        if let Some(native) = usize::try_from(function.0)
-            .ok()
-            .and_then(|at| self.shared.callees.get(at))
-        {
-            return native.at();
+        if let Some(native) = self.shared.native_callee(function) {
+            return native;
         }
         if let Some(user) = self.user_function(function) {
             return user.callee_at();
@@ -1119,7 +1112,7 @@ impl Request {
         if function == Function::PASS {
             return crate::readable::CalleeAt::default();
         }
-        if let Some(named) = self.callees.get(&function) {
+        if let Some(named) = self.named_callees.get(&function) {
             return named.at();
         }
         let name = self
@@ -1128,7 +1121,7 @@ impl Request {
             .unwrap_or_default();
         let named = Box::new(crate::readable::Named::native(name));
         let at = named.at();
-        self.callees.insert(function, named);
+        self.named_callees.insert(function, named);
         at
     }
 
