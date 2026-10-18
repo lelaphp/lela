@@ -918,7 +918,7 @@ fn set_prefix(req: &mut Request, object: PhpObject, value: &Value) -> Result<(),
     let given = written_bytes(value);
     // `ZSTR_VAL(prefix_str)` read as the C string it is: up to its first
     // NUL, and none where that leaves nothing, the default namespace.
-    let c_prefix = &given[..given.iter().position(|b| *b == 0).unwrap_or(given.len())];
+    let c_prefix = php_ext::coerce::c_str(&given);
     let prefix: Option<&[u8]> = if c_prefix.is_empty() {
         None
     } else {

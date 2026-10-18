@@ -290,7 +290,7 @@ fn charsets(name: &[u8]) -> Option<(&[u8], &[u8])> {
         let at = bytes.iter().position(|&b| b == b'.')?;
         Some(&bytes[at + 1..])
     }
-    let name = name.split(|&b| b == 0).next().unwrap_or_default();
+    let name = php_ext::coerce::c_str(name);
     let from = after(after(name)?)?;
     let cut = from.iter().position(|&b| b == b'/' || b == b'.')?;
     let (from, to) = (&from[..cut], &from[cut + 1..]);

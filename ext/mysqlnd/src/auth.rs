@@ -479,7 +479,7 @@ impl ConnData {
         plugin_name: Option<&[u8]>,
         change_user: bool,
     ) -> Result<bool, Thrown> {
-        let user = &user[..user.iter().position(|b| *b == 0).unwrap_or(user.len())];
+        let user = php_ext::coerce::c_str(user);
         p.extend_from_slice(&user[..user.len().min(MAX_ALLOWED_USER_LEN)]);
         p.push(0);
         if auth_data.len() > 0xFF {
@@ -503,7 +503,7 @@ impl ConnData {
             }
         }
         if let Some(name) = plugin_name {
-            p.extend_from_slice(&name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())]);
+            p.extend_from_slice(php_ext::coerce::c_str(name));
             p.push(0);
         }
         let pairs = self

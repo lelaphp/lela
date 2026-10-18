@@ -907,12 +907,7 @@ impl XMLReader {
             ));
         };
         if let Some(name) = name {
-            let end = name
-                .as_bytes()
-                .iter()
-                .position(|b| *b == 0)
-                .unwrap_or(name.len());
-            let wanted = &name.as_bytes()[..end];
+            let wanted = php_ext::coerce::c_str(name.as_bytes());
             while n == 1 {
                 if quiet(req, object, |r| r.local_name()).flatten().as_deref() == Some(wanted) {
                     return Ok(true);

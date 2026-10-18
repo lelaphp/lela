@@ -290,6 +290,6 @@ fn tag_find(tag: &[u8], set: &[u8]) -> bool {
         }
     }
     norm.push(b'>');
-    let set = set.split(|c| *c == 0).next().unwrap_or(&[]);
+    let set = php_ext::coerce::c_str(set);
     super::memnstr(set, &norm, 0).is_some()
 }

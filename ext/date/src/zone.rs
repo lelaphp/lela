@@ -65,7 +65,7 @@ pub(super) fn on_update_timezone(req: &mut Request, value: Option<&[u8]>) -> Res
         .map_or_else(|| b"UTC".to_vec(), <[u8]>::to_vec);
     let message = format!(
         "Invalid date.timezone value '{}', using '{}' instead",
-        String::from_utf8_lossy(value.split(|b| *b == 0).next().unwrap_or_default()),
+        String::from_utf8_lossy(php_ext::coerce::c_str(value)),
         String::from_utf8_lossy(&kept)
     );
     docref(req, Level::Warning, &message);
@@ -115,7 +115,7 @@ pub(super) fn corrupt(req: &mut Request) -> Thrown {
 fn date_default_timezone_set(req: &mut Request, timezoneId: PhpString) -> bool {
     let zone = timezoneId.as_bytes().to_vec();
     if !Tzdb::builtin().is_valid(&zone) {
-        let shown = zone.split(|b| *b == 0).next().unwrap_or_default();
+        let shown = php_ext::coerce::c_str(&zone);
         let message = format!(
             "Timezone ID '{}' is invalid",
             String::from_utf8_lossy(shown)

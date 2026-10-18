@@ -538,7 +538,7 @@ fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown>
 
 /// The bytes as C's `%s` prints them, up to the first NUL.
 fn c_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes.split(|&b| b == 0).next().unwrap_or(&[])).into_owned()
+    String::from_utf8_lossy(php_ext::coerce::c_str(bytes)).into_owned()
 }
 
 /// The sentence the two failure flags together are refused with.
@@ -1338,7 +1338,7 @@ fn filter_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 /// ```
 #[php_function]
 fn filter_id(name: PhpString) -> OrFalse<i64> {
-    let name = name.as_bytes().split(|&b| b == 0).next().unwrap_or(&[]);
+    let name = php_ext::coerce::c_str(name.as_bytes());
     FILTERS
         .iter()
         .find(|(n, _, _)| n.as_bytes() == name)

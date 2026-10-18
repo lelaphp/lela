@@ -218,8 +218,7 @@ pub fn version_number() -> i64 {
 /// A C string of the bytes up to the first NUL, as php hands
 /// `ZSTR_VAL` to the library.
 fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// A C length of a Rust one, the library's `int`.

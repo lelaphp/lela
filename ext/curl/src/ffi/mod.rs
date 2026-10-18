@@ -79,8 +79,7 @@ const fn code(rc: sys::CURLcode) -> i32 {
 /// A C string of the bytes up to the first NUL, as php hands `ZSTR_VAL`
 /// to the library.
 fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// The bytes of a NUL-terminated string the library owns, `None` for its

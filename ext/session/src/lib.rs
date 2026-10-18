@@ -40,6 +40,7 @@ mod user;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IntoReturn};
 use php_ext::attr::php_const;
+use php_ext::coerce::c_str;
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpRef, PhpString, Value};
@@ -333,11 +334,6 @@ fn session_info(req: &mut Request) {
 }
 
 // ------------------------------------------------------------ helpers
-
-/// The bytes up to the first NUL, as C reads a `char *`.
-fn c_str(bytes: &[u8]) -> &[u8] {
-    bytes.split(|&b| b == 0).next().unwrap_or(&[])
-}
 
 /// The bytes as C's `%s` prints them.
 fn shown(bytes: &[u8]) -> String {

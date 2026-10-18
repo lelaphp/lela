@@ -77,7 +77,7 @@ fn extract_file(
     file: &[u8],
     idx: Option<usize>,
 ) -> Result<bool, Thrown> {
-    let file = file.split(|b| *b == 0).next().unwrap_or_default();
+    let file = php_ext::coerce::c_str(file);
     let Some(archive) = object
         .native_mut::<Intern>(req)
         .and_then(|i| i.za.as_deref_mut())

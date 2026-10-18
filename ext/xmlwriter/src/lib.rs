@@ -374,8 +374,7 @@ pub(crate) fn call(req: &mut Request, on: &impl Receiver, op: Op) -> Result<bool
     {
         put(req, object, writer);
         let name = name.as_bytes();
-        let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-        let shown = String::from_utf8_lossy(&name[..end]);
+        let shown = String::from_utf8_lossy(php_ext::coerce::c_str(name));
         let tail = format!("be a valid {subject}, \"{shown}\" given");
         return Err(arg_value_error(req, position, &tail));
     }

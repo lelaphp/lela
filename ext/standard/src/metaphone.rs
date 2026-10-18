@@ -53,7 +53,7 @@ fn no_gh_to_f(c: u8) -> bool {
 )]
 fn phonize(word: &[u8], max: usize) -> Vec<u8> {
     // The word is read as the C string it is: to its first NUL.
-    let word = word.split(|c| *c == 0).next().unwrap_or(&[]);
+    let word = php_ext::coerce::c_str(word);
     let raw = |i: usize| word.get(i).copied().unwrap_or(0);
     let up = |i: usize| c::to_upper(raw(i));
     let mut out = Vec::new();

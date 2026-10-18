@@ -13,6 +13,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::coerce::c_str;
 use php_ext::coerce::{atoi, to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
@@ -483,12 +484,6 @@ impl HeaderInfo {
     }
 }
 
-/// The part of a byte string a C function reads as a string: what comes
-/// before its first NUL.
-fn cstr(s: &[u8]) -> &[u8] {
-    s.split(|b| *b == 0).next().unwrap_or_default()
-}
-
 /// `php_stream_get_line(stream, NULL|buf, maxlen, &len)`: the next line
 /// with its end, at most `maxlen - 1` bytes of it, as bytes.
 fn get_line(
@@ -525,7 +520,7 @@ impl Ssl {
 /// whose name is `Proxy-Authorization:`, ignoring case, added to `header`
 /// with `\r\n`; whether there was one.
 fn proxy_authorization(lines: &[u8], header: &mut Vec<u8>) -> bool {
-    let lines = cstr(lines);
+    let lines = c_str(lines);
     let mut s = 0;
     while s < lines.len() {
         while matches!(lines.get(s), Some(b' ' | b'\t')) {
@@ -610,7 +605,7 @@ fn tunnel(
     let host = resource
         .host
         .as_deref()
-        .map(cstr)
+        .map(c_str)
         .unwrap_or_default()
         .to_vec();
     let given = match chain.ctx {
@@ -707,7 +702,7 @@ fn log(req: &mut Request, message: &str) {
 fn log_bytes(req: &mut Request, head: &str, bytes: &[u8]) {
     log(
         req,
-        &format!("{head}{}", String::from_utf8_lossy(cstr(bytes))),
+        &format!("{head}{}", String::from_utf8_lossy(c_str(bytes))),
     );
 }
 
@@ -738,7 +733,7 @@ fn wrap_http_ex(
         );
         return Err(throw_error(req, "ValueError", &text));
     };
-    let Some(mut resource) = parser.parse(req, cstr(path))? else {
+    let Some(mut resource) = parser.parse(req, c_str(path))? else {
         return Ok(None);
     };
     let scheme = resource.scheme.clone().unwrap_or_default();
@@ -760,7 +755,7 @@ fn wrap_http_ex(
         if let Some(proxy) = &chain.options.proxy {
             (use_ssl, true, request_fulluri, proxy.clone())
         } else {
-            let host = resource.host.as_deref().map(cstr).unwrap_or_default();
+            let host = resource.host.as_deref().map(c_str).unwrap_or_default();
             let mut transport = if use_ssl {
                 b"ssl://".to_vec()
             } else {
@@ -784,7 +779,7 @@ fn wrap_http_ex(
         // (ftp).
         (false, true, true, proxy)
     };
-    if request_fulluri && cstr(path).iter().any(|b| matches!(b, b'\n' | b'\r')) {
+    if request_fulluri && c_str(path).iter().any(|b| matches!(b, b'\n' | b'\r')) {
         log(
             req,
             "HTTP wrapper full URI path does not allow CR or LF characters",
@@ -939,7 +934,7 @@ fn wrap_http_ex(
             return out(req, chain, None, hop, &info, chunk_size);
         };
         let new_path = redirect_path(&resource, &location, use_ssl);
-        let Some(target) = parser.parse(req, cstr(&new_path))? else {
+        let Some(target) = parser.parse(req, c_str(&new_path))? else {
             log_bytes(req, "Invalid redirect URL! ", &new_path);
             return out(req, chain, None, hop, &info, chunk_size);
         };
@@ -993,15 +988,20 @@ fn request_bytes(
         None => buf.extend_from_slice(b"GET "),
     }
     if request_fulluri {
-        buf.extend_from_slice(cstr(path));
+        buf.extend_from_slice(c_str(path));
     } else {
-        match resource.path.as_deref().map(cstr).filter(|p| !p.is_empty()) {
+        match resource
+            .path
+            .as_deref()
+            .map(c_str)
+            .filter(|p| !p.is_empty())
+        {
             Some(file) => buf.extend_from_slice(file),
             None => buf.push(b'/'),
         }
         if let Some(query) = &resource.query {
             buf.push(b'?');
-            buf.extend_from_slice(cstr(query));
+            buf.extend_from_slice(c_str(query));
         }
     }
     match options.protocol_version {
@@ -1042,7 +1042,7 @@ fn request_bytes(
             scratch.extend_from_slice(&php_url_decode(password));
         }
         buf.extend_from_slice(b"Authorization: Basic ");
-        buf.extend_from_slice(cstr(&crate::base64::encode(&scratch)));
+        buf.extend_from_slice(c_str(&crate::base64::encode(&scratch)));
         buf.extend_from_slice(b"\r\n");
         chain.notify_info(req, NotifyCode::AuthRequired, None, 0);
     }
@@ -1051,12 +1051,12 @@ fn request_bytes(
         && let Some(from) = file_ini(req, b"from")
     {
         buf.extend_from_slice(b"From: ");
-        buf.extend_from_slice(cstr(&from));
+        buf.extend_from_slice(c_str(&from));
         buf.extend_from_slice(b"\r\n");
     }
     if !have.host {
         buf.extend_from_slice(b"Host: ");
-        buf.extend_from_slice(resource.host.as_deref().map(cstr).unwrap_or_default());
+        buf.extend_from_slice(resource.host.as_deref().map(c_str).unwrap_or_default());
         let port = resource.port.unwrap_or(0);
         if port != 0 && ((use_ssl && port != 443) || (!use_ssl && port != 80)) {
             buf.extend_from_slice(format!(":{port}").as_bytes());
@@ -1072,10 +1072,10 @@ fn request_bytes(
         .or_else(|| file_ini(req, b"user_agent"));
     if !have.user_agent
         && let Some(agent) = agent
-        && !cstr(&agent).is_empty()
+        && !c_str(&agent).is_empty()
     {
         buf.extend_from_slice(b"User-Agent: ");
-        buf.extend_from_slice(cstr(&agent));
+        buf.extend_from_slice(c_str(&agent));
         buf.extend_from_slice(b"\r\n");
     }
     let content = options.content.as_ref().filter(|_| hop.sends_content());
@@ -1086,7 +1086,7 @@ fn request_bytes(
             buf.extend_from_slice(format!("Content-Length: {}\r\n", content.len()).as_bytes());
             have.content_length = true;
         }
-        buf.extend_from_slice(cstr(&user_headers));
+        buf.extend_from_slice(c_str(&user_headers));
         buf.extend_from_slice(b"\r\n");
     }
     match content {
@@ -1299,7 +1299,7 @@ fn headers_parse(
     while at < end && matches!(last[at], b' ' | b'\t') {
         at += 1;
     }
-    let value = cstr(last.get(at..).unwrap_or_default()).to_vec();
+    let value = c_str(last.get(at..).unwrap_or_default()).to_vec();
     let starts =
         |name: &[u8]| last.len() >= name.len() && last[..name.len()].eq_ignore_ascii_case(name);
     let mut store = true;
@@ -1336,7 +1336,7 @@ fn headers_parse(
                     chain.ctx,
                     Notification::FileSize {
                         size: info.file_size,
-                        message: cstr(&last),
+                        message: c_str(&last),
                         message_code: 0,
                     },
                 );
@@ -1373,7 +1373,7 @@ fn redirect_path(resource: &UriStruct, location: &[u8], use_ssl: bool) -> Vec<u8
     let loc_path = if location.first() == Some(&b'/') {
         location.to_vec()
     } else if location.len() > 1
-        && let Some(path) = resource.path.as_deref().map(cstr)
+        && let Some(path) = resource.path.as_deref().map(c_str)
     {
         // `strrchr` finds the last `/` and the path is cut after it; a
         // path with none has its first byte made the `/`, or is `/`.
@@ -1391,8 +1391,8 @@ fn redirect_path(resource: &UriStruct, location: &[u8], use_ssl: bool) -> Vec<u8
         loc_path.extend_from_slice(location);
         loc_path
     };
-    let scheme = resource.scheme.as_deref().map(cstr).unwrap_or_default();
-    let host = resource.host.as_deref().map(cstr).unwrap_or_default();
+    let scheme = resource.scheme.as_deref().map(c_str).unwrap_or_default();
+    let host = resource.host.as_deref().map(c_str).unwrap_or_default();
     let port = resource.port.unwrap_or(0);
     let mut new_path = scheme.to_vec();
     new_path.extend_from_slice(b"://");

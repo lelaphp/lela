@@ -301,8 +301,7 @@ pub(crate) fn column_value(
         ffi::SQLITE_NULL => Value::null(),
         ffi::SQLITE_TEXT => {
             let text = stmt.column_text(column);
-            let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
-            return Ok(PhpString::new(req, &text[..end])?.into_value());
+            return Ok(PhpString::new(req, php_ext::coerce::c_str(&text))?.into_value());
         }
         _ => return Ok(PhpString::new(req, &stmt.column_blob(column))?.into_value()),
     };
@@ -656,9 +655,9 @@ fn query_single(
 
 /// `sqlite3_mprintf("%q", ..)`: each `'` doubled, up to the first NUL.
 fn escape(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    let mut out = Vec::with_capacity(end);
-    for &b in &bytes[..end] {
+    let bytes = php_ext::coerce::c_str(bytes);
+    let mut out = Vec::with_capacity(bytes.len());
+    for &b in bytes {
         out.push(b);
         if b == b'\'' {
             out.push(b'\'');

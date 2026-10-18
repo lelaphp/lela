@@ -2,6 +2,7 @@
 //! `session.c` each: its parameters, its refusals and warnings, and the
 //! state machine in `session` behind it.
 
+use php_ext::coerce::c_str;
 use std::ops::ControlFlow;
 
 use php_ext::abi::{Callable, OrFalse, Passed, Path, Raw, Union, Untyped};
@@ -104,7 +105,7 @@ fn session_module_name(
     let Some(name) = name else {
         return Ok(OrFalse::Value(current));
     };
-    if crate::c_str(&name).eq_ignore_ascii_case(b"user") {
+    if c_str(&name).eq_ignore_ascii_case(b"user") {
         current.give_up(req);
         return Err(php_ext::raising::argument_error(
             req,
@@ -190,7 +191,7 @@ fn session_id(
         return Ok(OrFalse::False);
     }
     let current = req.state::<State>().id.clone().unwrap_or_default();
-    let current = PhpString::new(req, crate::c_str(&current))?;
+    let current = PhpString::new(req, c_str(&current))?;
     if let Some(id) = id {
         req.state::<State>().id = Some(id.as_bytes().to_vec());
     }

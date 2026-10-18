@@ -165,8 +165,7 @@ fn request<'a>(lent: &Lent) -> &'a mut Request {
 
 /// `s` as a C string, cut at its first NUL as C reads it.
 fn c(s: &[u8]) -> CString {
-    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
-    CString::new(&s[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(s)).unwrap_or_default()
 }
 
 /// The bytes of a C string, empty for null (`SAFE_STRING`).

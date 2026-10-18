@@ -501,8 +501,7 @@ fn text(at: *const c_char) -> Vec<u8> {
 
 /// `bytes` as C reads them, ending at the first NUL.
 pub(crate) fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// `gdVersionString()`, `2.3.3` for the keg.

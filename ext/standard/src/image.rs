@@ -298,7 +298,7 @@ impl Warning {
     pub(super) fn text(&self, input: &[u8]) -> Vec<u8> {
         match self {
             Warning::ErrorReading => {
-                let name = input.split(|&b| b == 0).next().unwrap_or(&[]);
+                let name = php_ext::coerce::c_str(input);
                 let mut t = b"Error reading from ".to_vec();
                 t.extend_from_slice(name);
                 t.push(b'!');
@@ -1416,7 +1416,7 @@ fn get_wbmp(s: &mut Stream<'_>, want_size: bool) -> Option<GfxInfo> {
 /// `strtoimax` (clamped to 64 bits) and then stored into an `int`.
 fn scan_define(line: &[u8]) -> Option<(&[u8], i32)> {
     // sscanf sees a C string: stop at the first NUL.
-    let line = line.split(|&b| b == 0).next().unwrap_or(&[]);
+    let line = php_ext::coerce::c_str(line);
     let mut rest = line.strip_prefix(b"#define")?;
     let skip = |r: &[u8]| -> usize { r.iter().take_while(|&&b| is_space(b)).count() };
     rest = rest.get(skip(rest)..)?;

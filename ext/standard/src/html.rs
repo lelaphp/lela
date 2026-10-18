@@ -98,7 +98,7 @@ fn to_unicode(charset: Charset) -> Option<&'static [u16; 256]> {
 /// `charset_map`; a name it lacks is UTF-8 behind php's warning.
 fn determine_charset(req: &mut Request, hint: Option<&[u8]>, quiet: bool) -> Charset {
     // The hint is a C string: it ends at its first NUL.
-    let hint = hint.map(|h| h.split(|c| *c == 0).next().unwrap_or(&[]).to_vec());
+    let hint = hint.map(|h| php_ext::coerce::c_str(h).to_vec());
     let hint = match hint {
         Some(h) if !h.is_empty() => h,
         _ => ["internal_encoding", "default_charset"]

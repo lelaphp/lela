@@ -294,8 +294,7 @@ fn last_error() -> String {
 
 /// `ZSTR_VAL(s)` as C reads it: up to the first NUL, with one after.
 fn c_bytes(bytes: &[u8]) -> Vec<u8> {
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-    let mut owned = bytes.get(..end).unwrap_or_default().to_vec();
+    let mut owned = php_ext::coerce::c_str(bytes).to_vec();
     owned.push(0);
     owned
 }

@@ -107,12 +107,7 @@ fn version_cmp(v1: &[u8], v2: &[u8]) -> i64 {
     let at = |v: &[u8], i: usize| v.get(i).copied().unwrap_or(0);
     // The component at `p`: to the next NUL.
     let component = |v: &[u8], p: usize| -> Vec<u8> {
-        v.get(p..)
-            .unwrap_or(&[])
-            .split(|c| *c == 0)
-            .next()
-            .unwrap_or(&[])
-            .to_vec()
+        php_ext::coerce::c_str(v.get(p..).unwrap_or(&[])).to_vec()
     };
     let (mut p1, mut p2) = (0usize, 0usize);
     let (mut n1, mut n2): (Option<usize>, Option<usize>) = (Some(0), Some(0));

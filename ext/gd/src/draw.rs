@@ -1450,7 +1450,7 @@ fn text(
     let im = im(req, image)?;
     let col = int(color);
     let bytes = string.as_bytes();
-    let bytes = &bytes[..bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len())];
+    let bytes = php_ext::coerce::c_str(bytes);
     let (mut x, mut y) = (int(x), int(y));
     let first = i32::from(string.as_bytes().first().copied().unwrap_or(0));
     with_font(req, font, |req, f| {

@@ -285,7 +285,7 @@ pub(crate) fn float(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, T
                 "\"thousand\" option must not be empty",
             ));
         }
-        Some(given) => given.split(|&b| b == 0).next().unwrap_or(&[]).to_vec(),
+        Some(given) => php_ext::coerce::c_str(&given).to_vec(),
         None => b"',.".to_vec(),
     };
     let min = double_option(req, run, b"min_range")?;

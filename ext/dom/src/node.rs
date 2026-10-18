@@ -1538,7 +1538,7 @@ impl DOMNode {
             }
         }
         let found = node.search_ns(None).and_then(Ns::href);
-        let uri = &uri[..uri.iter().position(|b| *b == 0).unwrap_or(uri.len())];
+        let uri = php_ext::coerce::c_str(uri);
         Ok(found.as_deref() == Some(uri))
     }
 

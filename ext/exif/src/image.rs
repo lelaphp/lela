@@ -2,6 +2,8 @@
 //! the fourteen sections of values, the computed facts, the thumbnail,
 //! and the byte order and format vocabulary every read goes through.
 
+use php_ext::coerce::c_str;
+
 /// php's `motorola_intel`: the byte order a TIFF header declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Order {
@@ -551,7 +553,7 @@ impl Image {
         let (length, stored) = match format {
             Format::String => {
                 let value = value.filter(|_| !too_long(length));
-                let text = value.map_or(&[][..], |v| cstr(&v[..length]));
+                let text = value.map_or(&[][..], |v| c_str(&v[..length]));
                 (text.len(), Stored::Text(text.to_vec()))
             }
             Format::Byte | Format::SByte | Format::Ifd if length == 0 => {
@@ -561,7 +563,7 @@ impl Image {
                 match value.filter(|_| !too_long(length)) {
                     Some(v) => {
                         let bytes = if tag == 0x927C {
-                            cstr(&v[..length])
+                            c_str(&v[..length])
                         } else {
                             &v[..length]
                         };
@@ -643,7 +645,7 @@ impl Image {
                 format: Format::String,
                 length: 1,
                 name: name.to_vec(),
-                value: Stored::Text(cstr(value).to_vec()),
+                value: Stored::Text(c_str(value).to_vec()),
             };
             self.push(section, entry);
         }
@@ -660,11 +662,6 @@ impl Image {
         };
         self.push(section, entry);
     }
-}
-
-/// A C string's bytes: up to the first NUL.
-pub(crate) fn cstr(bytes: &[u8]) -> &[u8] {
-    bytes.split(|&b| b == 0).next().unwrap_or(&[])
 }
 
 /// A `size_t` through a `%d`: its low 32 bits as C's `int`.

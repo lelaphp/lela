@@ -603,8 +603,7 @@ pub(crate) fn by_nr(nr: u32) -> Option<&'static Charset> {
 /// SQLSTATE[HY000] [2019] Unknown character set
 /// ```
 pub(crate) fn by_name(name: &[u8]) -> Option<&'static Charset> {
-    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-    let name = name.get(..end).unwrap_or(name);
+    let name = php_ext::coerce::c_str(name);
     CHARSETS
         .iter()
         .find(|c| c.name.as_bytes().eq_ignore_ascii_case(name))

@@ -383,7 +383,7 @@ fn dump_object(
     // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an anonymous
     // class's name.
     let full = object.handlers(req).get_class_name(req, object);
-    let name = full.split(|b| *b == 0).next().unwrap_or_default();
+    let name = php_ext::coerce::c_str(&full);
     // `php_var_dump_object_prefix`: what a lazy object is.
     let prefix = match object.laziness() {
         Laziness::Eager => "",
@@ -424,7 +424,7 @@ fn dump_object(
             (Some(class), name) => {
                 shown.extend_from_slice(name);
                 shown.extend_from_slice(b"\":\"");
-                shown.extend_from_slice(class.split(|b| *b == 0).next().unwrap_or_default());
+                shown.extend_from_slice(php_ext::coerce::c_str(class));
                 shown.extend_from_slice(b"\":private");
             }
             (None, _) => {

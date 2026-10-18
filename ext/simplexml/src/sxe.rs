@@ -393,7 +393,7 @@ fn trimmed(bytes: &[u8]) -> Vec<u8> {
 /// A C string's bytes, as `xmlStrEqual` and libxml read a name: up to
 /// its first NUL.
 pub(crate) fn c_name(bytes: &[u8]) -> Vec<u8> {
-    bytes.split(|b| *b == 0).next().unwrap_or_default().to_vec()
+    php_ext::coerce::c_str(bytes).to_vec()
 }
 
 /// php's `type` argument to the read handlers.

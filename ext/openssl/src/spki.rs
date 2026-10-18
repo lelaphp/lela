@@ -21,7 +21,7 @@ type Step<'a> = (&'static str, &'a dyn Fn(&mut Spki) -> bool);
 /// taken out; `None` for one left empty, after php's warning.
 fn cleaned(req: &mut Request, spki: PhpString) -> Option<Vec<u8>> {
     let text = spki.as_bytes();
-    let text = &text[..text.iter().position(|&b| b == 0).unwrap_or(text.len())];
+    let text = php_ext::coerce::c_str(text);
     let out: Vec<u8> = text
         .iter()
         .copied()

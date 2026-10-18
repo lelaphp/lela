@@ -93,10 +93,7 @@ pub(crate) fn header_encode(
         0
     };
     let linefeed = &linefeed[..linefeed.len().min(8)];
-    let linefeed = &linefeed[..linefeed
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(linefeed.len())];
+    let linefeed = php_ext::coerce::c_str(linefeed);
     let mime_name = outcode.mime_name();
     let mut wchars = [0u32; WCHAR_BUFSIZE];
     let mut state = 0u32;

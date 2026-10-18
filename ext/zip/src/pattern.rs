@@ -357,10 +357,7 @@ fn settle(req: &mut Request, object: PhpObject, opts: &Options) -> bool {
         else {
             return false;
         };
-        let password = opts
-            .enc_password
-            .as_deref()
-            .map(|p| p.split(|b| *b == 0).next().unwrap_or_default());
+        let password = opts.enc_password.as_deref().map(php_ext::coerce::c_str);
         if archive
             .set_encryption(idx, crate::c::u16(opts.enc_method), password)
             .is_err()

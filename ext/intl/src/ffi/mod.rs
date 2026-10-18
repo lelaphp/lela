@@ -189,8 +189,7 @@ fn static_str(ptr: *const c_char) -> Option<&'static str> {
 /// A Rust byte string as the `char *` php hands ICU: what precedes the
 /// first NUL, as C reads it.
 pub(crate) fn c_string(bytes: &[u8]) -> CString {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    CString::new(&bytes[..end]).unwrap_or_default()
+    CString::new(php_ext::coerce::c_str(bytes)).unwrap_or_default()
 }
 
 /// A length in ICU's `int32_t`, or `U_BUFFER_OVERFLOW_ERROR` where the

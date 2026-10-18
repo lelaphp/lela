@@ -709,9 +709,7 @@ impl Node {
             .filter(|u| !u.is_empty());
         let node = fetch(req, this.object())?;
         let located = crate::node::locate_namespace(node, None);
-        let uri = uri
-            .as_deref()
-            .map(|u| &u[..u.iter().position(|b| *b == 0).unwrap_or(u.len())]);
+        let uri = uri.as_deref().map(php_ext::coerce::c_str);
         Ok(located.as_deref() == uri)
     }
 

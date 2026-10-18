@@ -1337,13 +1337,9 @@ pub(crate) fn mb_regex_encoding(
         let current = mbctype(req);
         return Ok(Union::A(new_string(req, current.name().as_bytes())?));
     };
-    let end = name
-        .as_bytes()
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(name.len());
-    let Some(mbctype) = Mbctype::named(&name.as_bytes()[..end]) else {
-        let text = String::from_utf8_lossy(&name.as_bytes()[..end]).into_owned();
+    let shown = php_ext::coerce::c_str(name.as_bytes());
+    let Some(mbctype) = Mbctype::named(shown) else {
+        let text = String::from_utf8_lossy(shown).into_owned();
         return Err(value_error(
             req,
             1,
