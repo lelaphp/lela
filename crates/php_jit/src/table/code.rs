@@ -45,10 +45,14 @@ pub(crate) trait Pages: Sized + Send + Sync {
 
     /// Makes what [`write`](Pages::write) put at `range` what the next
     /// instruction fetch of any thread at those executable addresses sees.
-    fn sync(&self, range: Range<usize>);
+    ///
+    /// # Safety
+    ///
+    /// `range` lies inside the mapping.
+    unsafe fn sync(&self, range: Range<usize>);
 
     /// The executable view's address of offset `at`, which lies inside the
-    /// mapping.
+    /// mapping; an address only, which reads and writes nothing.
     fn rx(&self, at: usize) -> NonNull<u8>;
 }
 
@@ -66,11 +70,23 @@ struct Region<P> {
     free: Box<[AtomicBool]>,
 }
 
+/// Which chunk of its arena a chunk is: made only by the arena, from the
+/// position of a chunk it has, so it always names one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChunkIdx(usize);
+
+impl ChunkIdx {
+    /// The offset of the chunk's first byte in the mapping.
+    fn start(self) -> usize {
+        self.0 * CHUNK
+    }
+}
+
 /// One chunk handed out: while any `Code` in it lives, or the arena is
 /// filling it, nobody else is given it.
 pub(crate) struct Chunk<P: Pages> {
     region: Arc<Region<P>>,
-    index: usize,
+    index: ChunkIdx,
 }
 
 impl<P: Pages> Drop for Chunk<P> {
@@ -78,9 +94,7 @@ impl<P: Pages> Drop for Chunk<P> {
     /// the arena may take it again; the release pairs with the acquire
     /// that takes it.
     fn drop(&mut self) {
-        if let Some(flag) = self.region.free.get(self.index) {
-            flag.store(true, Ordering::Release);
-        }
+        self.region.free[self.index.0].store(true, Ordering::Release);
     }
 }
 
@@ -105,7 +119,7 @@ impl<P: Pages> Code<P> {
     }
 
     /// Which chunk of the arena the body is in.
-    pub(crate) fn chunk(&self) -> usize {
+    pub(crate) fn chunk(&self) -> ChunkIdx {
         self.chunk.index
     }
 }
@@ -163,32 +177,39 @@ impl<P: Pages> Arena<P> {
         if !align.is_power_of_two() || bytes.len() > CHUNK {
             return Err(Full);
         }
-        if self.fitted(bytes.len(), align).is_none() {
-            // Let the filling chunk go first: holding no live `Code`, it
-            // is free again, and may be the one taken.
-            self.filling = None;
-            self.filling = Some(self.taken()?);
-        }
-        let at = self.fitted(bytes.len(), align).ok_or(Full)?;
-        let filling = self.filling.as_mut().ok_or(Full)?;
-        let start = filling.chunk.index * CHUNK + at;
+        // The filling chunk is let go first when the body does not fit it:
+        // holding no live `Code`, it is free again, and may be the one taken.
+        let fit = (self.filling.take()).and_then(|filling| {
+            let at = self.fitted(&filling, bytes.len(), align)?;
+            Some((filling, at))
+        });
+        let (mut filling, at) = if let Some(fit) = fit {
+            fit
+        } else {
+            let filling = self.taken()?;
+            let at = self.fitted(&filling, bytes.len(), align).ok_or(Full)?;
+            (filling, at)
+        };
+        let start = filling.chunk.index.start() + at;
         // SAFETY: `start..start + len` is inside this arena's chunk, past
         // its cursor, so no `Code` names it and no thread executes it.
         unsafe { self.region.pages.write(start, bytes) };
-        self.region.pages.sync(start..start + bytes.len());
+        // SAFETY: the same range, inside the mapping.
+        unsafe { self.region.pages.sync(start..start + bytes.len()) };
         filling.cursor = at + bytes.len();
-        Ok(Code {
+        let code = Code {
             entry: self.region.pages.rx(start),
             len: bytes.len(),
             chunk: Arc::clone(&filling.chunk),
-        })
+        };
+        self.filling = Some(filling);
+        Ok(code)
     }
 
-    /// Where in the filling chunk a body of `len` bytes aligned to `align`
-    /// starts, if it fits there.
-    fn fitted(&self, len: usize, align: usize) -> Option<usize> {
-        let filling = self.filling.as_ref()?;
-        let base = filling.chunk.index * CHUNK;
+    /// Where in `filling` a body of `len` bytes aligned to `align` starts,
+    /// if it fits there.
+    fn fitted(&self, filling: &Filling<P>, len: usize, align: usize) -> Option<usize> {
+        let base = filling.chunk.index.start();
         let cursor = self.region.pages.rx(base).as_ptr().addr() + filling.cursor;
         let at = cursor.checked_next_multiple_of(align)? - cursor + filling.cursor;
         (at.checked_add(len)? <= CHUNK).then_some(at)
@@ -206,7 +227,7 @@ impl<P: Pages> Arena<P> {
         Ok(Filling {
             chunk: Arc::new(Chunk {
                 region: Arc::clone(&self.region),
-                index,
+                index: ChunkIdx(index),
             }),
             cursor: 0,
         })
@@ -249,10 +270,10 @@ impl Pages for HeapPages {
         }
     }
 
-    fn sync(&self, _: Range<usize>) {}
+    unsafe fn sync(&self, _: Range<usize>) {}
 
     fn rx(&self, at: usize) -> NonNull<u8> {
-        NonNull::new(self.bytes[at].get()).unwrap_or(NonNull::dangling())
+        NonNull::from(&self.bytes[at]).cast()
     }
 }
 
@@ -334,10 +355,10 @@ mod mac {
             unsafe { libc::pthread_jit_write_protect_np(1) };
         }
 
-        fn sync(&self, range: Range<usize>) {
+        unsafe fn sync(&self, range: Range<usize>) {
             let start = self.rx(range.start).as_ptr().cast::<libc::c_void>();
-            // SAFETY: the range lies inside the mapping, which lives as long
-            // as `self`.
+            // SAFETY: the caller hands a range inside the mapping, which
+            // lives as long as `self`.
             unsafe { sys_icache_invalidate(start, range.len()) };
         }
 
@@ -394,7 +415,10 @@ mod tests {
         let a = published(&mut arena, &[1, 2, 3], 1)?;
         let b = published(&mut arena, &[4; 5], 16)?;
         let c = published(&mut arena, &[5; 8], 8)?;
-        assert_eq!((a.chunk(), b.chunk(), c.chunk()), (0, 0, 0));
+        assert_eq!(
+            (a.chunk(), b.chunk(), c.chunk()),
+            (ChunkIdx(0), ChunkIdx(0), ChunkIdx(0))
+        );
         assert_eq!(b.entry().as_ptr().addr() % 16, 0);
         assert_eq!(c.entry().as_ptr().addr() % 8, 0);
         assert!(offset(&arena, &b) >= 3 && offset(&arena, &c) >= offset(&arena, &b) + 5);
@@ -419,7 +443,7 @@ mod tests {
         let mut arena = arena(2)?;
         let big = published(&mut arena, &vec![9; CHUNK - 8], 1)?;
         let next = published(&mut arena, &[1; 16], 1)?;
-        assert_eq!((big.chunk(), next.chunk()), (0, 1));
+        assert_eq!((big.chunk(), next.chunk()), (ChunkIdx(0), ChunkIdx(1)));
         assert_eq!(offset(&arena, &next), CHUNK);
         assert_eq!(arena.chunks_in_use(), 2);
         assert_eq!(arena.publish(&vec![0; CHUNK - 8], 1).err(), Some(Full));
@@ -437,7 +461,10 @@ mod tests {
         let first = published(&mut arena, &vec![1; CHUNK], 1)?;
         let second = published(&mut arena, &[2; 8], 1)?;
         let kept = published(&mut arena, &vec![3; CHUNK - 8], 1)?;
-        assert_eq!((first.chunk(), second.chunk(), kept.chunk()), (0, 1, 1));
+        assert_eq!(
+            (first.chunk(), second.chunk(), kept.chunk()),
+            (ChunkIdx(0), ChunkIdx(1), ChunkIdx(1))
+        );
         assert_eq!(arena.chunks_in_use(), 2);
         drop(first);
         assert_eq!(
@@ -452,7 +479,7 @@ mod tests {
             "chunk 1 is still filling and holds a live code"
         );
         let reused = published(&mut arena, &[4; 8], 1)?;
-        assert_eq!((reused.chunk(), offset(&arena, &reused)), (0, 0));
+        assert_eq!((reused.chunk(), offset(&arena, &reused)), (ChunkIdx(0), 0));
         assert_eq!(arena.region.pages.read(0), 4);
         drop(kept);
         assert_eq!(
@@ -596,7 +623,7 @@ mod native {
     }
 
     /// The reused-chunk question of §4.4, over `ROUNDS` rounds: a body
-    /// entered on several threads and dropped; a thread started that has
+    /// entered on as many threads as the machine has cores, and dropped; a thread started that has
     /// never entered the chunk, waiting on an atomic pointer; a different
     /// body published at the same address of the reused chunk; and its
     /// entry stored in the pointer, the waiting thread entering the new
@@ -605,7 +632,10 @@ mod native {
     /// returned the old body's value.
     fn stale_entries(own_isb: bool) -> Result<u32, String> {
         const ROUNDS: u16 = 500;
-        const WARM: usize = 4;
+        // A core and not a thread holds instructions, and which core a
+        // thread runs on is the system's to choose: one warming thread per
+        // core, so the entering thread's core has likely run the old body.
+        let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let mut arena = arena(1)?;
         let mut stale = 0;
         // Each round starts with the arena's one chunk full, or never
@@ -638,7 +668,7 @@ mod native {
                     }
                 });
                 std::thread::scope(|warm| {
-                    for _ in 0..WARM {
+                    for _ in 0..cores {
                         warm.spawn(|| {
                             assert!((0..10_000).all(|_| entered(&first)() == u32::from(old)));
                         });
