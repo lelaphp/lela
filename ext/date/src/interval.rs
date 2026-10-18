@@ -324,12 +324,8 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     set_diff(req, object, None)?;
     let mut diff = lent(req, |l| RelTime::new(l))?;
     let civil = read_fields(req, hash, &mut diff);
-    if let Some(payload) = object.native_mut::<IntervalObj>(req) {
-        if let Ok(civil) = civil {
-            payload.civil_or_wall = civil;
-        }
-        payload.from_string = false;
-        payload.date_string = None;
+    if let (Ok(civil), Some(payload)) = (&civil, object.native_mut::<IntervalObj>(req)) {
+        payload.civil_or_wall = *civil;
     }
     set_diff(req, object, Some(diff))?;
     civil.map(drop)
@@ -611,6 +607,25 @@ impl DateInterval {
     ///   ["from_string"]=>
     ///   bool(false)
     /// }
+    /// ```
+    ///
+    /// The fields read leave `from_string` and `date_string` as they
+    /// stood, as php's reader of the fields writes neither.
+    ///
+    /// ```php
+    /// $i = DateInterval::createFromDateString('+1 day');
+    /// $i->__unserialize(['d' => 3]);
+    /// var_dump($i, $i->d, $i->format('%d'));
+    /// ```
+    /// ```expect
+    /// object(DateInterval)#1 (2) {
+    ///   ["from_string"]=>
+    ///   bool(true)
+    ///   ["date_string"]=>
+    ///   string(6) "+1 day"
+    /// }
+    /// int(3)
+    /// string(1) "3"
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let object = this.object();
