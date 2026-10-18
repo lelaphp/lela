@@ -17708,16 +17708,30 @@ pub(crate) fn fe_reset_r<T: Tier>(
             req.addref(&subject);
         }
         req.replace_slot(frame, slot, subject);
-        set_fe_iter(req, frame, slot, started);
-        if op.op1_type == OperandKind::Var {
-            exec::free_operand(req, frame, code, op.op1_type, op.op1);
-        }
-        if started.is_none() {
-            return jump_to(op.op2);
-        }
-        return Ok(advance(req, frame));
+        return fe_reset_walked(req, frame, code, op, started);
     }
     fe_reset_refused(req, frame, code, op, &subject)
+}
+
+/// The ending both resets share for a walk the heap's table of hash
+/// iterators follows, over a property table or by reference: the
+/// `VAR`'s `Z_FE_ITER`, a `VAR` operand freed (`FREE_OP1_IF_VAR`), and
+/// the jump `op2` names where the walk has nothing to start at.
+fn fe_reset_walked(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    started: Option<HashIter>,
+) -> Edge {
+    set_fe_iter(req, frame, exec::temporary_slot(code, op.out), started);
+    if op.op1_type == OperandKind::Var {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
+    if started.is_none() {
+        return jump_to(op.op2);
+    }
+    Ok(advance(req, frame))
 }
 
 /// `zend_fe_reset_iterator` (`Z/Zend/zend_execute.c:5368`), the arm both
@@ -18478,14 +18492,7 @@ pub(crate) fn fe_reset_rw<T: Tier>(
         }
     }
     .map(HashIter);
-    set_fe_iter(req, frame, slot, started);
-    if op.op1_type == OperandKind::Var {
-        exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    }
-    if started.is_none() {
-        return jump_to(op.op2);
-    }
-    Ok(advance(req, frame))
+    fe_reset_walked(req, frame, code, op, started)
 }
 
 /// `FE_RESET_RW` over a temporary or a constant: an array is wrapped in
@@ -18537,11 +18544,7 @@ fn fe_reset_rw_value(
             Ok(started) => started.map(HashIter),
             Err(thrown) => return threw(req, frame, &thrown),
         };
-        set_fe_iter(req, frame, slot, started);
-        if started.is_none() {
-            return jump_to(op.op2);
-        }
-        return Ok(advance(req, frame));
+        return fe_reset_walked(req, frame, code, op, started);
     }
     fe_reset_refused(req, frame, code, op, &subject)
 }
