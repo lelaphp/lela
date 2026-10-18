@@ -269,24 +269,6 @@ pub(crate) fn free_table_data(mm: &mut Mm, a: Arr) {
     }
 }
 
-/// `zend_hash_add_new(ht, str, &val)` under `zend_add_interned_string`
-/// (`Z/Zend/zend_string.c:173-185`): `s`, interned already, as its own
-/// key and as the value, out of `mm` for the data the first add lays
-/// down and for each doubling. The caller has looked the bytes up and
-/// found nothing, so the add is an add.
-pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
-    append_str(mm, a, s, Zval::string(s))
-}
-
-/// The data [`add_interned`]'s first add lays down, laid down ahead of
-/// it (`zend_hash_real_init_mixed`); nothing where it stands already.
-pub(crate) fn lay_interned(mm: &mut Mm, a: Arr) -> Result<(), Fatal> {
-    if a.is_uninitialized() {
-        a.real_init_mixed(mm)?;
-    }
-    Ok(())
-}
-
 /// `zend_hash_index_add_new(ht, index, &zv)` over a request's `mm` for a
 /// key the caller knows is not there, which is what `zend_list_insert`
 /// (`Z/Zend/zend_list.c:32-44`) knows of the id `nNextFreeElement` gave
@@ -994,17 +976,6 @@ impl Arr {
             idx = b.val.next();
         }
         None
-    }
-
-    /// `zend_interned_string_ht_lookup_ex` (`Z/Zend/zend_string.c:132-169`):
-    /// the string key whose hash is `h` and whose bytes are `bytes`, for
-    /// a table of interned strings asked about bytes that are not yet a
-    /// string. The walk is [`Arr::find_str`]'s over the chain `h` names,
-    /// comparing the bytes, since the caller holds no string to be the
-    /// same as.
-    pub(crate) fn find_bytes(self, h: u64, bytes: &[u8]) -> Option<Str> {
-        let idx = self.find_bucket_bytes(h, bytes)?;
-        self.read_bucket(idx).key
     }
 
     /// `zend_hash_str_find_bucket`: the bucket of the string key whose

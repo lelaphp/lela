@@ -5135,11 +5135,6 @@ impl Engine {
         source: Option<&[u8]>,
         written: Option<&[u8]>,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
-        let laid = req.heap_mut().lay_interned_table();
-        if let Err(thrown) = req.fatal_of(laid) {
-            req.leave_pending(&thrown);
-            return None;
-        }
         if let Some(source) = source {
             let script = req
                 .script_name()

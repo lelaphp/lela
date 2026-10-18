@@ -2512,11 +2512,13 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 315536 is the object store's table, the VM stack's first page,
+    /// 340112 is the compiler's arena, the object store's table, the VM
+    /// stack's first page,
     /// `EG(symbol_table)`'s data, the variables `php_hash_environment`
     /// and the CLI lay down, and what this source's interning costs, and
     /// every byte of it but the variables' is php's own
-    /// arithmetic. `init_executor` lays `EG(objects_store)` down
+    /// arithmetic. `init_compiler` lays `CG(arena)` down at 64 KiB
+    /// (`Z/Zend/zend_compile.c:455`), and `init_executor` lays `EG(objects_store)` down
     /// before the request serves a line, 1024 buckets of a pointer each,
     /// 8192 bytes of the request heap (`Z/Zend/zend_execute_API.c:171`,
     /// design §5.4), and `zend_vm_stack_init` the stack's first 262144
@@ -2534,13 +2536,10 @@ mod tests {
     /// `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))` over a 24-byte
     /// header, the bytes and the NUL, where `var_dump` and
     /// `memory_get_usage` are function names php interned at startup and
-    /// cost nothing. The 40960 beside them is the
-    /// table's own bucket array, which php `emalloc`s on the first string
-    /// a request interns and not at request start: 1024 buckets of 32
-    /// bytes and 2048 hash slots of 4, `HT_SIZE_EX(1024,
-    /// HT_SIZE_TO_MASK(1024))` (`Z/Zend/zend_types.h:486-493`) over the
-    /// `nTableSize` `zend_interned_strings_activate` sets
-    /// (`Z/Zend/zend_string.c:78-84`, `:346-349`). `STDIN`, `STDOUT` and
+    /// cost nothing. The table that finds the string again is off the
+    /// request's heap, as opcache keeps php's (`php_heap`'s
+    /// `string::Table`), where `php -n` `emalloc`s a 40960-byte bucket
+    /// array on the first string a request interns. `STDIN`, `STDOUT` and
     /// `STDERR`, which `do_cli` opens before a line runs, are the stream
     /// layer's, and an engine with none, as this test's, opens none of
     /// them; under the bundle they cost 1200 more. The 1632 is `$argv`
@@ -2566,8 +2565,8 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(381072)\n",
-            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            unflagged, "int(340112)\n",
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the one string the request interns, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
@@ -2630,15 +2629,13 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 381072 is the compiler's arena's
+    /// 2097152 is php's one 2 MiB chunk. 340112 is the compiler's arena's
     /// first block of 65536, the object store's 8192, the VM stack's
     /// first page of 262144, `EG(symbol_table)`'s data of 2560 (an engine with no
     /// stream layer opens none of the three standard streams `do_cli`
     /// opens, which cost 1200 under the bundle), the 1632 of the variables
     /// `php_hash_environment` and the CLI lay down, and what this source's
-    /// interning costs the request: the
-    /// table's own 40960 bucket array on the first string it interns,
-    /// and then the file's name 48 bytes; the three function names are
+    /// interning costs the request: the file's name, 48 bytes; the three function names are
     /// php's startup names and cost nothing. php counts its own interning the same
     /// way and then counts a request heap this engine does not have yet,
     /// so its number for this source, under the recipe as `witness.php`,
@@ -2651,8 +2648,8 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(381072)\nint(2097152)\n",
-            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            body, "int(340112)\nint(2097152)\n",
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the one string the request interns, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
     }
 }

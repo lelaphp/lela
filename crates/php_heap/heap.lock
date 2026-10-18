@@ -132,7 +132,6 @@ Heap::iterators_advance
 Heap::iterators_carry
 Heap::iterators_lower_pos
 Heap::iterators_update
-Heap::lay_interned_table
 Heap::lend
 Heap::mark_destructed
 Heap::memory_limit
