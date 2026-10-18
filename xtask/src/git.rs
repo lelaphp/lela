@@ -31,9 +31,7 @@ pub struct Stamp {
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
-        None => Ok(git(root, &["rev-parse", "--short=7", "HEAD"], None)?
-            .trim()
-            .to_owned()),
+        None => rev_parse(root, &["--short=7", "HEAD"]),
     }
 }
 
@@ -251,7 +249,21 @@ pub fn blob_id(content: &[u8]) -> String {
 
 /// Whether `root` has the ref `name` (`refs/heads/x`, `refs/remotes/origin/x`).
 pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
-    git(root, &["rev-parse", "--verify", "--quiet", name], None).is_ok()
+    rev_parse(root, &["--verify", "--quiet", name]).is_ok()
+}
+
+/// `git rev-parse` with `args` in `root`: what it printed, trimmed.
+pub(crate) fn rev_parse(root: &Path, args: &[&str]) -> Result<String> {
+    let out = git(root, &[&["rev-parse"], args].concat(), None)?;
+    Ok(out.trim().to_owned())
+}
+
+/// The checkout's own git dir, a linked worktree's under the main one's
+/// `worktrees/`, with its links resolved so `/tmp` and `/private/tmp` name
+/// one; `None` outside a repository.
+pub(crate) fn git_dir(checkout: &Path) -> Option<PathBuf> {
+    let dir = PathBuf::from(rev_parse(checkout, &["--absolute-git-dir"]).ok()?);
+    Some(std::fs::canonicalize(&dir).unwrap_or(dir))
 }
 
 /// `git` in a repository that is not the workspace's, such as the pinned

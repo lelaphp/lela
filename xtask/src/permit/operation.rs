@@ -272,7 +272,7 @@ pub(crate) fn foreign(
     };
     let caller = Session::of(call);
     checkouts.into_iter().find_map(|checkout| {
-        let git_dir = git_dir(&checkout)?;
+        let git_dir = git::git_dir(&checkout)?;
         let operation = Operation::in_progress(&git_dir)?;
         let ours = read(&starter_file(&checkout, &git_dir)).is_some_and(|starter| {
             caller.as_ref() == Some(&starter.session)
@@ -384,10 +384,8 @@ fn aimed(git: &Argv, operation: Operation, git_dir: &Path, checkout: &Path) -> b
         .filter(|word| !word.starts_with('-'))
         .filter_map(|word| {
             let commit = format!("{word}^{{commit}}");
-            let args = ["rev-parse", "--verify", "--quiet", commit.as_str()];
-            git::git(checkout, &args, None).ok()
+            git::rev_parse(checkout, &["--verify", "--quiet", &commit]).ok()
         })
-        .map(|commit| commit.trim().to_owned())
         .collect();
     operation.identity(git_dir).is_some_and(|identity| {
         identity
@@ -437,7 +435,7 @@ fn tend<'a>(
         .into_iter()
         .filter(|(argv, _)| argv.runs("git"))
         .filter_map(|(git, checkout)| {
-            let git_dir = git_dir(&checkout)?;
+            let git_dir = git::git_dir(&checkout)?;
             let file = starter_file(&checkout, &git_dir);
             Some((git, checkout, git_dir, file))
         })
@@ -535,12 +533,8 @@ fn write(file: &Path, starter: &Starter) -> Result<()> {
 /// run in several checkouts is held where its shell stands, since a
 /// `-C` moves one command and the call is held in one.
 pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
-    let top = git::git(
-        &acts_in(workspace, line),
-        &["rev-parse", "--show-toplevel"],
-        None,
-    );
-    let top = top.map_or_else(|_| workspace.to_path_buf(), |top| PathBuf::from(top.trim()));
+    let top = git::rev_parse(&acts_in(workspace, line), &["--show-toplevel"]);
+    let top = top.map_or_else(|_| workspace.to_path_buf(), PathBuf::from);
     fs::canonicalize(&top).unwrap_or(top)
 }
 
@@ -554,29 +548,14 @@ pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
 /// operation's and rides its commit; another session's staging there is what a `where =
 /// "operating"` rule refuses at the call ([`foreign`]).
 pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
-    let operation = Operation::in_progress(&git_dir(checkout)?)?;
+    let operation = Operation::in_progress(&git::git_dir(checkout)?)?;
     let args = ["diff", "--cached", "--quiet", "--diff-filter=u", "--", path];
     let differs = git::git(checkout, &args, None).is_err();
     differs.then_some(operation)
 }
 
-/// The checkout's own git dir, a linked worktree's under the main one's
-/// `worktrees/`, with its links resolved so `/tmp` and `/private/tmp` name
-/// one; `None` outside a repository.
-fn git_dir(checkout: &Path) -> Option<PathBuf> {
-    let dir = git::git(checkout, &["rev-parse", "--absolute-git-dir"], None).ok()?;
-    let dir = PathBuf::from(dir.trim());
-    Some(fs::canonicalize(&dir).unwrap_or(dir))
-}
-
 fn head(checkout: &Path) -> Option<String> {
-    git::git(
-        checkout,
-        &["rev-parse", "--verify", "--quiet", "HEAD"],
-        None,
-    )
-    .ok()
-    .map(|head| head.trim().to_owned())
+    git::rev_parse(checkout, &["--verify", "--quiet", "HEAD"]).ok()
 }
 
 /// Where the starter of `git_dir`'s operation is recorded: the main

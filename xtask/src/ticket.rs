@@ -278,15 +278,11 @@ impl Reach {
     /// Where `root`'s `HEAD` stands against its `main`, its own or
     /// `origin`'s: contained when the merge base of the two is `HEAD`.
     pub fn of(root: &Path) -> Result<Reach> {
-        let head = crate::git::git(root, &["rev-parse", "HEAD"], None)?
-            .trim()
-            .to_owned();
+        let head = crate::git::rev_parse(root, &["HEAD"])?;
         if crate::track::merge_base(root, &head, MAIN)? == head {
             return Ok(Reach::Landed);
         }
-        let branch = crate::git::git(root, &["rev-parse", "--abbrev-ref", "HEAD"], None)?
-            .trim()
-            .to_owned();
+        let branch = crate::git::rev_parse(root, &["--abbrev-ref", "HEAD"])?;
         Ok(Reach::Unmerged {
             commit: crate::track::short(&head).to_owned(),
             branch,
@@ -1741,7 +1737,7 @@ pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Resul
     let head = crate::git::git(root, &["rev-parse", "HEAD"], None)?;
     let range = if head.trim() != base {
         format!("{base}..HEAD")
-    } else if crate::git::git(root, &["rev-parse", "--verify", "--quiet", "HEAD^1"], None).is_ok() {
+    } else if crate::git::has_ref(root, "HEAD^1") {
         String::from("HEAD^1..HEAD")
     } else {
         // A root commit has no first parent, and so no merge to read.
