@@ -19,7 +19,6 @@
 //! never taken for "requires nothing".
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 
 use anyhow::{Context, Result};
 use syn::punctuated::Punctuated;
@@ -50,8 +49,7 @@ impl Declared {
             if module_of(krate, &file).is_none() {
                 continue;
             }
-            let text =
-                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let text = crate::read(&file)?;
             if !text.contains("dependencies(") && !text.contains("Dependency") {
                 continue;
             }

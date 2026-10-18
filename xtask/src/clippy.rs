@@ -496,8 +496,7 @@ fn path_text(path: &syn::Path) -> String {
 /// for a linter's table, the name alone for `rust`'s.
 fn cargo_lints(root: &Path, krate: &Crate) -> Result<Levels> {
     let read = |path: PathBuf| -> Result<toml::Table> {
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(&path)?;
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
     };
     let own = read(root.join(krate.path()).join("Cargo.toml"))?;

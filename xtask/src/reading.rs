@@ -992,8 +992,7 @@ impl Store {
         if !path.exists() {
             return Ok(Log::default());
         }
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(&path)?;
         Ok(Log::of(&text, Reading::from_json))
     }
 
@@ -1004,8 +1003,7 @@ impl Store {
         self.migrate()?;
         let mut all = Log::default();
         for path in shards(&self.root.join(LOG))? {
-            let text =
-                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let text = crate::read(&path)?;
             let log = Log::of(&text, Reading::from_json);
             all.readings.extend(log.readings);
             all.unreadable.extend(log.unreadable);
@@ -1032,8 +1030,7 @@ impl Store {
             if name == UNREAD {
                 continue;
             }
-            let text =
-                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let text = crate::read(&path)?;
             let lines: Vec<(Status, String)> = text
                 .lines()
                 .filter_map(|l| serde_json::from_str::<Brief>(l).ok())
@@ -1072,8 +1069,7 @@ impl Store {
     }
 
     fn read_file(path: &Path) -> Result<Reading> {
-        let text =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(path)?;
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
     }
 }
@@ -1379,6 +1375,12 @@ impl Outcome {
 /// counts something, so the word lives beside the shape they all write.
 pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// A span in whole milliseconds, as every reading that times something
+/// counts it under a key ending `_ms`, or `ms` alone.
+pub(crate) fn millis(span: std::time::Duration) -> u64 {
+    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The current time in UTC as a TOML datetime, to the second: what a

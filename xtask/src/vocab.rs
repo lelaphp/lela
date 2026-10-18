@@ -23,7 +23,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -225,15 +224,11 @@ pub(crate) fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
     let avoided = glossary.avoided_phrases();
     let mut scan = Scan::default();
     for file in rust_files(dir)? {
-        let text = read(&file)?;
+        let text = crate::read(&file)?;
         let relative = file.strip_prefix(dir).unwrap_or(&file);
         scan_source(relative, &text, &avoided, &mut scan);
     }
     Ok(scan)
-}
-
-fn read(file: &Path) -> Result<String> {
-    fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))
 }
 
 /// Scan one source file into `scan`.

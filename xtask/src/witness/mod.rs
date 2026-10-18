@@ -148,7 +148,7 @@ use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Linked, Oracle, Oracles, Pin, Regime, Runner};
-use crate::reading::{Reading, Status, Store, listed};
+use crate::reading::{Reading, Status, Store, listed, millis};
 use crate::scratch::Full;
 use crate::sources;
 use crate::tally::{self, Outcome};
@@ -407,7 +407,7 @@ pub(crate) fn reading(
     reading.count(numbers::UNREAD, tally.problems.len() as u64)?;
     reading.count(numbers::NOT_RUN, run.not_run())?;
     reading.count(numbers::UNSERVED, tally.unserved.len() as u64)?;
-    reading.count(numbers::WALL_MS, declared_ms(tally.wall))?;
+    reading.count(numbers::WALL_MS, millis(tally.wall))?;
     Ok(reading)
 }
 
@@ -473,12 +473,6 @@ fn under_rule(mut reading: Reading, rule: Option<&Rule>) -> Reading {
         reading.adr = rule.adr.adr_field();
     }
     reading
-}
-
-/// The declared wall as the reading counts it; a witness the recipe would
-/// time out on long before is not one this saturation can reach.
-fn declared_ms(wall: Duration) -> u64 {
-    u64::try_from(wall.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What one `xtask witness` run was asked for.
@@ -1271,8 +1265,7 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
     }
     for (name, mut blocks) in by_file {
         let file = root.join(name);
-        let text =
-            fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+        let text = crate::read(&file)?;
         let ends_with_newline = text.ends_with('\n');
         let mut kept: Vec<String> = text.lines().map(str::to_owned).collect();
         blocks.sort_by_key(|one| std::cmp::Reverse(one.line));

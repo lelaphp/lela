@@ -475,7 +475,7 @@ pub fn run(
                 ),
             };
             told(reading)
-    })
+    })?
     .into_iter()
     .collect()
 }

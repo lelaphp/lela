@@ -320,6 +320,34 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(String
     env
 }
 
+/// `cargo test --doc` over `crates` at `root` with `args` after them,
+/// both streams written to one file, where a test's line, cargo's
+/// `Doc-tests <lib>` and the compiler's words stand in the order they were
+/// written: whether it ended well, and the file's text.
+fn doc_run(root: &Path, run: &Run, crates: &[&Crate], args: Vec<String>) -> Result<(bool, String)> {
+    let dir = &run.target_dir;
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let written = dir.join(format!("xtask-doctests-{}.out", std::process::id()));
+    let file = File::create(&written).with_context(|| format!("creating {}", written.display()))?;
+    let mut command = Command::new("cargo");
+    command
+        .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
+        .current_dir(root)
+        .stdout(Stdio::from(
+            file.try_clone().context("sharing the doctests' file")?,
+        ))
+        .stderr(Stdio::from(file));
+    for krate in crates {
+        command.args(["-p", &krate.package()]);
+    }
+    command.args(args);
+    batch::without_git(&mut command);
+    let status = command.status().context("running cargo test --doc");
+    let text = fs::read_to_string(&written).unwrap_or_default();
+    fs::remove_file(&written).ok();
+    Ok((status?.success(), text))
+}
+
 /// Every built crate's doctests in one `cargo test --doc`, read back by
 /// crate. Cargo names each crate's run on stderr, `Doc-tests <lib>`, and
 /// the run's lines follow on stdout, so both are written to one file,
@@ -345,27 +373,7 @@ fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String
             Some((lib, k.name.clone()))
         })
         .collect();
-    fs::create_dir_all(&run.target_dir)
-        .with_context(|| format!("creating {}", run.target_dir.display()))?;
-    let written = run
-        .target_dir
-        .join(format!("xtask-doctests-{}.out", std::process::id()));
-    let file = File::create(&written).with_context(|| format!("creating {}", written.display()))?;
-    let mut command = Command::new("cargo");
-    command
-        .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
-        .current_dir(root)
-        .stdout(Stdio::from(
-            file.try_clone().context("sharing the doctests' file")?,
-        ))
-        .stderr(Stdio::from(file));
-    for krate in &with {
-        command.args(["-p", &krate.package()]);
-    }
-    batch::without_git(&mut command);
-    let status = command.status().context("running cargo test --doc")?;
-    let text = fs::read_to_string(&written).unwrap_or_default();
-    fs::remove_file(&written).ok();
+    let (ended, text) = doc_run(root, run, &with, Vec::new())?;
     let mut sections: BTreeMap<String, String> = BTreeMap::new();
     let mut current: Option<String> = None;
     for line in text.lines() {
@@ -384,7 +392,7 @@ fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String
         let counts = Counts::of(&section);
         // A crate's run that reported no result, in a run that failed,
         // is one cargo never reached: what cargo said is its text.
-        let reached = counts.binaries > 0 || status.success();
+        let reached = counts.binaries > 0 || ended;
         let passed = reached
             && !section
                 .lines()
@@ -475,42 +483,19 @@ impl Pin {
         if pinned.is_empty() {
             return Ok(BTreeMap::new());
         }
-        // The two streams go to one file, so a test's line and its
-        // compile's words stand in the order they were written.
-        fs::create_dir_all(&run.target_dir)
-            .with_context(|| format!("creating {}", run.target_dir.display()))?;
-        let written = run
-            .target_dir
-            .join(format!("xtask-pinned-{}.out", std::process::id()));
-        let file =
-            File::create(&written).with_context(|| format!("creating {}", written.display()))?;
-        let mut command = Command::new("cargo");
-        command
-            .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
-            .current_dir(root)
-            .stdout(Stdio::from(
-                file.try_clone()
-                    .context("sharing the pinned blocks' file")?,
-            ))
-            .stderr(Stdio::from(file));
-        for (krate, _) in &pinned {
-            command.args(["-p", &krate.package()]);
-        }
         // A test's name is its file, its item and its line; `compile fail`
         // is printed beside it and filters nothing, so the filters are the
         // pinned files and every doctest of them runs.
-        command.args(["--", "--nocapture", "--test-threads=1"]);
+        let mut args: Vec<String> = ["--", "--nocapture", "--test-threads=1"]
+            .map(String::from)
+            .into();
         let files: std::collections::BTreeSet<String> = pinned
             .iter()
             .flat_map(|(_, pins)| pins.iter().map(|pin| format!("{} - ", pin.file)))
             .collect();
-        command.args(files);
-        batch::without_git(&mut command);
-        command
-            .status()
-            .context("running cargo test --doc over the pinned blocks")?;
-        let said = Pin::said(&fs::read_to_string(&written).unwrap_or_default());
-        fs::remove_file(&written).ok();
+        args.extend(files);
+        let krates: Vec<&Crate> = pinned.iter().map(|(krate, _)| *krate).collect();
+        let said = Pin::said(&doc_run(root, run, &krates, args)?.1);
         let mut missed = BTreeMap::new();
         for (krate, pins) in pinned {
             let words: Vec<String> = pins.iter().filter_map(|pin| pin.missed_in(&said)).collect();

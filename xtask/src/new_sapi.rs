@@ -27,14 +27,13 @@
 //! `crates/php_bundle` (the enabled set), and a directory already at
 //! `sapi/<name>` (the crate is laid down once and never overwritten).
 
-use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::layout;
 use crate::manifest::Manifest;
-use crate::new_ext::{Laid, add_member, lint_attributes};
+use crate::new_ext::{Laid, lint_attributes};
 use crate::phpt;
 use crate::reading::listed;
 
@@ -82,27 +81,13 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str, binary: Option<&str>) -
     // The lints the manifest denies under the row, at both crate roots.
     let lints = lint_attributes(manifest, &row);
 
-    let mut laid = Laid {
-        dir: dir.clone(),
-        written: Vec::new(),
-        notes: Vec::new(),
-    };
-    for (rel, text) in [
+    let files = [
         ("Cargo.toml", cargo_toml(name, &package, &bin)),
         ("src/lib.rs", lib_rs(&lints, name, &bin)),
         ("src/main.rs", main_rs(&lints, &package, &bin)),
         ("tests/serve.rs", serve_rs(name, &bin)),
-    ] {
-        let path = dir.join(rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-        laid.written.push(format!("{row}/{rel}"));
-    }
-    if add_member(root, &row)? {
-        laid.written.push("Cargo.toml".to_owned());
-    }
+    ];
+    let mut laid = Laid::files(root, dir, &row, files)?;
 
     // Which subsets are the crate's is the `[[crate]]` row's sentence and
     // is read there, never spelled again here (#18, harness §4.1).

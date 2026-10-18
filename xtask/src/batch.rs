@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::manifest::Crate;
@@ -388,25 +388,8 @@ struct Metadata {
 
 impl Metadata {
     fn read(root: &Path) -> Result<Metadata> {
-        let out = Command::new("cargo")
-            .args([
-                "metadata",
-                "--format-version",
-                "1",
-                "--no-deps",
-                "--offline",
-            ])
-            .current_dir(root)
-            .output()
-            .context("running cargo metadata")?;
-        if !out.status.success() {
-            bail!(
-                "cargo metadata at {}: {}",
-                root.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        serde_json::from_slice(&out.stdout).context("cargo metadata wrote no metadata")
+        serde_json::from_str(&crate::key::cargo_metadata(root)?)
+            .context("cargo metadata wrote no metadata")
     }
 
     /// The package of `krate` and its directory, as cargo names it: a root

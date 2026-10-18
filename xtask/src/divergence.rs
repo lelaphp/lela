@@ -24,7 +24,7 @@
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -444,8 +444,7 @@ impl Registry {
     /// Load `docs/divergence.toml` from the workspace root.
     pub fn load(root: &Path) -> Result<Registry> {
         let path = root.join(FILE);
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(&path)?;
         let mut registry = Registry::parse(&text).with_context(|| format!("{}", path.display()))?;
         registry.path = Some(path);
         Ok(registry)

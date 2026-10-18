@@ -20,7 +20,6 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -48,7 +47,7 @@ const NONE: &str = "-";
 /// The lock's lines, rendered from the `[[op]]` rows of the file at
 /// `path`.
 pub fn lines(path: &Path) -> Result<BTreeSet<String>> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = crate::read(path)?;
     render(&text).with_context(|| format!("{}", path.display()))
 }
 

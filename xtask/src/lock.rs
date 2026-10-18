@@ -31,8 +31,7 @@ pub struct Package {
 impl CargoLock {
     pub fn load(root: &Path) -> Result<CargoLock> {
         let path = root.join(FILE);
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(&path)?;
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
     }
 
@@ -177,8 +176,7 @@ struct Module {
 impl Module {
     /// The items of `file`, this module's source.
     fn file(&self, file: &Path, out: &mut Vec<Expanded>) -> Result<()> {
-        let text =
-            fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        let text = crate::read(file)?;
         let parsed =
             syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
         self.items(&parsed.items, out)
