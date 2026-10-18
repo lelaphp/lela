@@ -96,7 +96,7 @@ use std::cmp::Ordering;
 use std::num::NonZeroI64;
 
 use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
-use php_syntax::{Arena, Holder, Parsed, SyntaxKind, TokenValue};
+use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
     Arr, Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string,
@@ -168,8 +168,9 @@ struct IfElem {
 /// line php's node for it carries, and how it was written, php's `attr`
 /// on the `encaps_var`, which `zend_compile_encaps_list` reads for its
 /// two deprecations.
-struct Piece {
-    fetch: Fetched,
+#[derive(Clone, Copy)]
+struct Piece<'a> {
+    fetch: Fetched<'a>,
     line: u32,
     written: Written,
 }
@@ -180,11 +181,12 @@ struct Piece {
 /// an expression under `{…}`, or
 /// the variable an
 /// expression under `${…}` names.
-enum Fetched {
-    Text(Vec<u8>),
-    Var(Vec<u8>),
-    Dim(Vec<u8>, Offset),
-    Prop(Vec<u8>, Vec<u8>, bool),
+#[derive(Clone, Copy)]
+enum Fetched<'a> {
+    Text(&'a [u8]),
+    Var(&'a [u8]),
+    Dim(&'a [u8], Offset<'a>),
+    Prop(&'a [u8], &'a [u8], bool),
     Node(tree::Expr),
     VarVar(tree::Expr),
 }
@@ -192,9 +194,10 @@ enum Fetched {
 /// The `[…]` after a variable inside a string, php's
 /// `encaps_var_offset`: the value a bare word or a number stands for,
 /// or the variable that names it.
-enum Offset {
+#[derive(Clone, Copy)]
+enum Offset<'a> {
     Value(Zval),
-    Var(Vec<u8>),
+    Var(&'a [u8]),
 }
 
 /// What stands after a `::`: a class constant, a class's own property
@@ -14527,8 +14530,8 @@ impl<'a> Emit<'a> {
         parts: &[tree::StringPart],
         holder: Holder<'_>,
         line: u32,
-    ) -> Result<Vec<Piece>, CompileError> {
-        let mut pieces: Vec<Piece> = Vec::new();
+    ) -> Result<&'a [Piece<'a>], CompileError> {
+        let mut pieces = self.arena.vec(parts.len());
         let mut bytes = Vec::new();
         let mut at = line;
         for part in parts {
@@ -14548,7 +14551,7 @@ impl<'a> Emit<'a> {
                 tree::StringPart::SimpleInterpolation(id) => {
                     let node = &self.parsed.tree[id];
                     let (var, suffix, var_line) = (node.var, node.suffix, node.line());
-                    let name = self.variable_name(var).to_vec();
+                    let name = self.variable_name(var);
                     let fetch = match suffix {
                         None => Fetched::Var(name),
                         Some(tree::SimpleInterpolationSuffix::SimpleDim(dim)) => {
@@ -14558,10 +14561,10 @@ impl<'a> Emit<'a> {
                             let prop = &self.parsed.tree[prop];
                             let nullsafe =
                                 prop.op.map(|op| self.kind(op)) == Some(SyntaxKind::NULLSAFE_ARROW);
-                            Fetched::Prop(name, self.text(prop.name).to_vec(), nullsafe)
+                            Fetched::Prop(name, self.text(prop.name), nullsafe)
                         }
                     };
-                    Self::piece(&mut pieces, &mut bytes, at, fetch, var_line, Written::Plain);
+                    self.piece(&mut pieces, &mut bytes, at, fetch, var_line, Written::Plain);
                 }
                 tree::StringPart::BracedInterpolation(id) => {
                     let node = &self.parsed.tree[id];
@@ -14569,7 +14572,7 @@ impl<'a> Emit<'a> {
                     let Some(inner) = inner else {
                         return Err(walk::unread(inner_line, "an interpolated expression"));
                     };
-                    Self::piece(
+                    self.piece(
                         &mut pieces,
                         &mut bytes,
                         at,
@@ -14601,7 +14604,7 @@ impl<'a> Emit<'a> {
                     });
                     let (fetch, written) = match (name, inner) {
                         (Some(name), _) => {
-                            let name = self.text(name).to_vec();
+                            let name = self.text(name);
                             let fetch = match dim {
                                 Some(dim) => Fetched::Dim(name, self.simple_dim(dim)?),
                                 None => Fetched::Var(name),
@@ -14613,36 +14616,40 @@ impl<'a> Emit<'a> {
                             return Err(walk::unread(inner_line, "an interpolated expression"));
                         }
                     };
-                    Self::piece(&mut pieces, &mut bytes, at, fetch, inner_line, written);
+                    self.piece(&mut pieces, &mut bytes, at, fetch, inner_line, written);
                 }
             }
         }
         if !bytes.is_empty() {
             pieces.push(Piece {
-                fetch: Fetched::Text(std::mem::take(&mut bytes)),
+                fetch: Fetched::Text(self.arena.copy(&bytes)),
                 line: at,
                 written: Written::Plain,
             });
         }
-        Ok(pieces)
+        Ok(pieces.into_slice())
     }
 
     /// One variable piece, after the written bytes before it as a piece
     /// of their own at the line those bytes began on.
+    /// The written bytes are laid in the arena and the room they were
+    /// gathered in kept for the next.
     fn piece(
-        pieces: &mut Vec<Piece>,
+        &self,
+        pieces: &mut ArenaVec<'a, Piece<'a>>,
         bytes: &mut Vec<u8>,
         at: u32,
-        fetch: Fetched,
+        fetch: Fetched<'a>,
         line: u32,
         written: Written,
     ) {
         if !bytes.is_empty() {
             pieces.push(Piece {
-                fetch: Fetched::Text(std::mem::take(bytes)),
+                fetch: Fetched::Text(self.arena.copy(bytes)),
                 line: at,
                 written: Written::Plain,
             });
+            bytes.clear();
         }
         pieces.push(Piece {
             fetch,
@@ -14655,14 +14662,14 @@ impl<'a> Emit<'a> {
     /// `encaps_var_offset`: a bare word is the string, a number is
     /// `T_NUM_STRING`'s value ([`Holder::Offset`]) and `-` before it is
     /// `zend_negate_num_string`, a variable is itself.
-    fn simple_dim(&mut self, id: NodeId<tree::SimpleDim>) -> Result<Offset, CompileError> {
+    fn simple_dim(&mut self, id: NodeId<tree::SimpleDim>) -> Result<Offset<'a>, CompileError> {
         let node = &self.parsed.tree[id];
         let line = node.line();
         let Some(index) = node.index else {
             return Err(walk::unread(line, "a dimension in a string"));
         };
         match self.kind(index) {
-            SyntaxKind::VARIABLE => Ok(Offset::Var(self.variable_name(index).to_vec())),
+            SyntaxKind::VARIABLE => Ok(Offset::Var(self.variable_name(index))),
             SyntaxKind::IDENT => {
                 let text = self.text(index).to_vec();
                 Ok(Offset::Value(self.string(&text)?))
@@ -14876,7 +14883,7 @@ impl<'a> Emit<'a> {
         // it, at the line the piece before it left, the list's own for
         // the first.
         let mut left = line;
-        for piece in &pieces {
+        for piece in pieces {
             self.line = left;
             match piece.written {
                 Written::Plain => {}
