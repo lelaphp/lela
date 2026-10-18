@@ -26,6 +26,7 @@ use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::Request;
+use crate::api::request::ropes::RopeAt;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 
 mod caches;
@@ -2775,7 +2776,14 @@ pub(crate) fn release_live(req: &mut Request, kind: php_unit::LiveKind, garbage:
                 object.heap().set_destructor_called(true);
             }
         }
-        php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop | php_unit::LiveKind::Rope => {}
+        // `ZEND_LIVE_ROPE`: the pieces converted so far, released.
+        php_unit::LiveKind::Rope => {
+            if let Some(rope) = garbage.as_int().and_then(RopeAt::of) {
+                req.rope_close(rope);
+            }
+            return;
+        }
+        php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop => {}
     }
     req.release(garbage);
 }
