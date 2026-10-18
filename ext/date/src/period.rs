@@ -11,7 +11,7 @@ use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, Val
 
 use crate::classes::{DateTimeInterface, Iterator, IteratorAggregate};
 use crate::datetime::restore_properties;
-use crate::ffi::{self, RelTime, Time};
+use crate::ffi::{self, RelFields, RelTime, Time};
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
 use crate::obj::{
@@ -27,7 +27,7 @@ const MAX_RECURRENCES: i64 = 2_147_483_647 - 8;
 struct Iso {
     start: Option<Time>,
     end: Option<Time>,
-    interval: Option<ffi::RelTime>,
+    interval: Option<RelFields>,
     recurrences: i64,
 }
 
@@ -56,7 +56,7 @@ fn from_iso(req: &mut Request, func: &str, text: &[u8]) -> Result<Iso, Thrown> {
         Ok(Iso {
             start: Some(start),
             end,
-            interval: parsed.period,
+            interval: parsed.period.as_deref().copied(),
             recurrences: i64::from(parsed.recurrences),
         })
     })?;
@@ -188,7 +188,9 @@ fn from_objects(
     };
     period.start = Some(start_time);
     period.start_ce = Some(start.class());
-    period.interval = interval.native::<IntervalObj>(req).and_then(|i| i.diff);
+    period.interval = interval
+        .native::<IntervalObj>(req)
+        .and_then(|i| i.diff.as_deref().copied());
     if let Some(end) = end {
         let Some(end_time) = copy_time(req, end)? else {
             return Err(uninitialized(req, interface));
@@ -206,7 +208,7 @@ fn copy_time(req: &mut Request, object: PhpObject) -> Result<Option<Time>, Throw
 
 /// `date_period_advance`: the interval added to the time as its relative
 /// part, and the time read back from the seconds.
-fn advance(lent: &Lent<'_>, time: &mut Time, interval: &RelTime) {
+fn advance(lent: &Lent<'_>, time: &mut Time, interval: &RelFields) {
     time.have_relative = 1;
     time.relative = *interval;
     time.sse_uptodate = 0;
@@ -423,7 +425,7 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
         .as_object()
         .filter(|o| o.class() == interval_class)
         .and_then(|o| o.native::<IntervalObj>(req))
-        .and_then(|i| i.diff)
+        .and_then(|i| i.diff.as_deref().copied())
     else {
         return Ok(false);
     };
@@ -779,7 +781,7 @@ impl DatePeriod {
         let object = this.object();
         let diff = object.native::<PeriodObj>(req).and_then(|p| p.interval);
         match diff {
-            Some(diff) => new_interval(req, diff, 0, None),
+            Some(diff) => new_interval(req, 0, None, |req| lent(req, |l| RelTime::of(l, &diff))),
             None => Err(uninitialized(req, object.class())),
         }
     }

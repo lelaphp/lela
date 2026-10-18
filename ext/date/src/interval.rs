@@ -11,11 +11,11 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::datetime::restore_properties;
-use crate::ffi::{self, ErrorContainer, Parsed, RelTime, Time, UNSET};
-use crate::lent::{Lent, lent};
+use crate::ffi::{self, ErrorContainer, Parsed, RelFields, RelTime, Time, UNSET};
+use crate::lent::{Lent, lent, release};
 use crate::obj::{
-    CIVIL, INTERVAL, IntervalObj, WALL, class_id, hold_diff, interval_fields, interval_of,
-    new_interval, rows_array, std_rows,
+    CIVIL, INTERVAL, IntervalObj, WALL, class_id, interval_fields, interval_of, new_interval,
+    rows_array, set_diff, std_rows,
 };
 
 /// `date_interval_initialize(&rt, format, len)`: the period of an ISO
@@ -56,26 +56,53 @@ fn initialize(req: &mut Request, text: &[u8]) -> Result<RelTime, Thrown> {
     ))
 }
 
-/// The relative part of a parse of `text`, or its first error.
-fn from_date_string(
-    lent: &mut Lent<'_>,
-    text: &[u8],
-) -> Result<(RelTime, bool), (i32, char, String)> {
-    let Parsed { time: t, errors } = Time::strtotime(lent, text);
-    let errors = errors
+/// `timelib_strtotime(text)` for its relative part, and the parse's
+/// first error, its position, character and message, where it has one.
+fn parse_relative(lent: &mut Lent<'_>, text: &[u8]) -> (Parsed, Option<(i32, char, String)>) {
+    let parsed = Time::strtotime(lent, text);
+    let errors = parsed
+        .errors
         .as_ref()
         .map(ErrorContainer::messages)
         .unwrap_or_default();
-    if let Some(e) = errors.errors.first() {
+    let first = errors.errors.first().map(|e| {
         let c = if e.character == 0 {
             ' '
         } else {
             char::from(e.character)
         };
-        return Err((e.position, c, String::from_utf8_lossy(&e.text).into_owned()));
-    }
-    let absolute = t.have_date != 0 || t.have_time != 0 || t.have_zone != 0;
-    Ok((t.relative, absolute))
+        (e.position, c, String::from_utf8_lossy(&e.text).into_owned())
+    });
+    (parsed, first)
+}
+
+/// `timelib_strtotime(text)`, then `date_interval_instantiate_from_time`
+/// over its relative part, or the sentence php refuses the string with;
+/// the parse freed after either, as php's `cleanup` frees it.
+fn from_date_string(
+    req: &mut Request,
+    text: &[u8],
+) -> Result<Result<Owner<Instance<DateInterval>>, String>, Thrown> {
+    let shown = String::from_utf8_lossy(text);
+    let (parsed, error) = lent(req, |l| parse_relative(l, text))?;
+    let t = &parsed.time;
+    let made = if let Some((at, c, message)) = error {
+        Ok(Err(format!(
+            "Unknown or bad format ({shown}) at position {at} ({c}): {message}"
+        )))
+    } else if t.have_date != 0 || t.have_time != 0 || t.have_zone != 0 {
+        Ok(Err(format!(
+            "String '{shown}' contains non-relative elements"
+        )))
+    } else {
+        let relative = t.relative;
+        new_interval(req, CIVIL, Some(text.to_vec()), |req| {
+            lent(req, |l| RelTime::of(l, &relative))
+        })
+        .map(Ok)
+    };
+    release(req, parsed)?;
+    made
 }
 
 /// `date_interval_create_from_date_string(string $datetime):
@@ -111,32 +138,18 @@ fn date_interval_create_from_date_string(
     req: &mut Request,
     datetime: PhpString,
 ) -> Result<OrFalse<Owner<Instance<DateInterval>>>, Thrown> {
-    let text = datetime.as_bytes();
-    let shown = String::from_utf8_lossy(text).into_owned();
-    match lent(req, |l| from_date_string(l, text))? {
-        Err((at, c, message)) => {
-            docref(
-                req,
-                Level::Warning,
-                &format!("Unknown or bad format ({shown}) at position {at} ({c}): {message}"),
-            );
+    match from_date_string(req, datetime.as_bytes())? {
+        Ok(interval) => Ok(OrFalse::Value(interval)),
+        Err(refusal) => {
+            docref(req, Level::Warning, &refusal);
             Ok(OrFalse::False)
         }
-        Ok((_, true)) => {
-            docref(
-                req,
-                Level::Warning,
-                &format!("String '{shown}' contains non-relative elements"),
-            );
-            Ok(OrFalse::False)
-        }
-        Ok((rel, false)) => new_interval(req, rel, CIVIL, Some(text.to_vec())).map(OrFalse::Value),
     }
 }
 
 /// `date_interval_format(format, len, t)`: `%` and a letter each
 /// replaced by its field.
-fn interval_format(format: &[u8], t: &RelTime) -> Vec<u8> {
+fn interval_format(format: &[u8], t: &RelFields) -> Vec<u8> {
     let mut out = Vec::new();
     let mut spec = false;
     #[allow(clippy::cast_possible_truncation)]
@@ -281,28 +294,51 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     if let Some(text) =
         find(hash, b"date_string").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     {
-        let relative = match lent(req, |l| from_date_string(l, &text))? {
-            Ok((relative, _)) => relative,
-            Err((position, c, message)) => {
-                return Err(throw_error(
-                    req,
-                    "Error",
-                    &format!(
-                        "Unknown or bad format ({}) at position {position} ({c}) while unserializing: {message}",
-                        String::from_utf8_lossy(&text),
-                    ),
-                ));
-            }
-        };
+        let (parsed, error) = lent(req, |l| parse_relative(l, &text))?;
+        if let Some((position, c, message)) = error {
+            let thrown = throw_error(
+                req,
+                "Error",
+                &format!(
+                    "Unknown or bad format ({}) at position {position} ({c}) while unserializing: {message}",
+                    String::from_utf8_lossy(&text),
+                ),
+            );
+            release(req, parsed)?;
+            return Err(thrown);
+        }
+        // The `diff` the interval had freed before the clone is made.
+        set_diff(req, object, None)?;
+        let relative = parsed.time.relative;
+        let diff = lent(req, |l| RelTime::of(l, &relative))?;
         if let Some(payload) = object.native_mut::<IntervalObj>(req) {
-            payload.diff = Some(relative);
             payload.civil_or_wall = CIVIL;
             payload.from_string = true;
             payload.date_string = Some(text);
         }
-        return hold_diff(req, object);
+        set_diff(req, object, Some(diff))?;
+        return release(req, parsed);
     }
-    let mut diff = RelTime::default();
+    // `timelib_rel_time_ctor()` in place of the `diff` the interval had,
+    // freed first, and each field read into it.
+    set_diff(req, object, None)?;
+    let mut diff = lent(req, |l| RelTime::new(l))?;
+    let civil = read_fields(req, hash, &mut diff);
+    if let Some(payload) = object.native_mut::<IntervalObj>(req) {
+        if let Ok(civil) = civil {
+            payload.civil_or_wall = civil;
+        }
+        payload.from_string = false;
+        payload.date_string = None;
+    }
+    set_diff(req, object, Some(diff))?;
+    civil.map(drop)
+}
+
+/// The fields of `php_date_interval_initialize_from_hash`, read into
+/// `diff` in php's order with php's defaults; the `civil_or_wall` it
+/// reads last.
+fn read_fields(req: &mut Request, hash: PhpArray, diff: &mut RelFields) -> Result<i64, Thrown> {
     let long_field = |req: &mut Request, name: &[u8], default: i64| -> Result<i64, Thrown> {
         match find(hash, name) {
             Some(v) if scalar(&v) => to_long(req, &v),
@@ -343,17 +379,10 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
         Some(v) if scalar(&v) => a64i(req, &v)?,
         _ => -1,
     };
-    let civil = match find(hash, b"civil_or_wall") {
-        Some(v) => to_long(req, &v)?,
-        None => CIVIL,
-    };
-    if let Some(payload) = object.native_mut::<IntervalObj>(req) {
-        payload.diff = Some(diff);
-        payload.civil_or_wall = civil;
-        payload.from_string = false;
-        payload.date_string = None;
+    match find(hash, b"civil_or_wall") {
+        Some(v) => to_long(req, &v),
+        None => Ok(CIVIL),
     }
-    hold_diff(req, object)
 }
 
 /// The names `restore_custom_dateinterval_properties` passes over.
@@ -456,10 +485,9 @@ impl DateInterval {
     fn __construct(req: &mut Request, this: This<Self>, duration: PhpString) -> Result<(), Thrown> {
         let diff = initialize(req, duration.as_bytes())?;
         if let Some(payload) = this.object().native_mut::<IntervalObj>(req) {
-            payload.diff = Some(diff);
             payload.civil_or_wall = WALL;
         }
-        hold_diff(req, this.object())
+        set_diff(req, this.object(), Some(diff))
     }
 
     /// `DateInterval::createFromDateString(string $datetime): DateInterval`:
@@ -483,20 +511,13 @@ impl DateInterval {
         req: &mut Request,
         datetime: PhpString,
     ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
-        let text = datetime.as_bytes();
-        let shown = String::from_utf8_lossy(text).into_owned();
-        match lent(req, |l| from_date_string(l, text))? {
-            Err((at, c, message)) => Err(throw_error(
+        match from_date_string(req, datetime.as_bytes())? {
+            Ok(interval) => Ok(interval),
+            Err(refusal) => Err(throw_error(
                 req,
                 "DateMalformedIntervalStringException",
-                &format!("Unknown or bad format ({shown}) at position {at} ({c}): {message}"),
+                &refusal,
             )),
-            Ok((_, true)) => Err(throw_error(
-                req,
-                "DateMalformedIntervalStringException",
-                &format!("String '{shown}' contains non-relative elements"),
-            )),
-            Ok((rel, false)) => new_interval(req, rel, CIVIL, Some(text.to_vec())),
         }
     }
 
@@ -621,7 +642,7 @@ impl DateInterval {
         let own = std_rows(req, object)?;
         let state = object
             .native::<IntervalObj>(req)
-            .and_then(|i| i.diff.map(|d| (d, i.date_string.clone())));
+            .and_then(|i| i.diff.as_deref().map(|d| (*d, i.date_string.clone())));
         let fields = match state {
             Some((diff, text)) => interval_fields(req, &diff, text.as_deref())?,
             None => Vec::new(),

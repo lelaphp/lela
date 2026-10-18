@@ -1,7 +1,7 @@
 //! What a date class holds on the request's heap of the timelib structs
 //! this crate keeps as Rust values. php builds timelib with its allocator
 //! pointed at `emalloc` (`config0.m4`'s `timelib_config.h`), so the
-//! `timelib_rel_time` an interval or a period holds and the abbreviation
+//! `timelib_rel_time` a period holds and the abbreviation
 //! a `DateTimeZone` copies are on php's request heap, where
 //! `memory_get_usage()` counts them. A `timelib_time` is timelib's own,
 //! made on the request's heap under its lend ([`crate::lent`]); the
