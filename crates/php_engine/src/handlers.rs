@@ -2114,13 +2114,7 @@ fn must_be_sent_by_ref(req: &Request, number: u32) -> bool {
 fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
     let function = req.building_call_function();
     let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
-    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-    let parameter = function
-        .and_then(|function| req.function_decl(function))
-        .and_then(|decl| decl.parameters.get(at).cloned())
-        .filter(|parameter| !parameter.variadic)
-        .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
-        .unwrap_or_default();
+    let parameter = crate::api::raising::arg_name_suffix(req, function, number);
     let message =
         format!("{name}(): Argument #{number}{parameter} could not be passed by reference");
     crate::api::raising::throw_error(req, "Error", &message)
@@ -4000,7 +3994,7 @@ fn verified_arg(
         req.reference_set(cell.heap(), coerced);
         return Ok(None);
     }
-    Err(arg_type_error(req, frame, number, at, &ty, argument))
+    Err(arg_type_error(req, frame, number, &ty, argument))
 }
 
 /// `ZEND_RECV_VARIADIC` (`Z/Zend/zend_vm_def.h:5773`): the arguments
@@ -4649,7 +4643,6 @@ fn arg_type_error(
     req: &mut Request,
     frame: FrameRef,
     number: u32,
-    at: usize,
     ty: &php_unit::decl::Type,
     argument: &Value,
 ) -> Thrown {
@@ -4660,18 +4653,9 @@ fn arg_type_error(
         Some(class) if req.class_name_bytes(class).contains(&0) => req.class_name(class),
         _ => req.frame_function_name(frame),
     });
-    // `get_function_arg_name`: php has a name for an argument up to the
-    // declared count alone, which excludes the variadic, so the error
-    // over an argument a variadic collected is `Argument #2` bare.
-    let decl = function.and_then(|function| req.function_decl(function));
-    let named = decl
-        .as_ref()
-        .is_some_and(|decl| at < decl.parameters.iter().filter(|p| !p.variadic).count());
-    let parameter = decl
-        .filter(|_| named)
-        .and_then(|decl| decl.parameters.get(at).cloned())
-        .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
-        .unwrap_or_default();
+    // The error over an argument a variadic collected is `Argument #2`
+    // bare: php names one up to the declared count alone.
+    let parameter = crate::api::raising::arg_name_suffix(req, function, number);
     let declared = resolved_type_name(req, frame, ty);
     let given = crate::ops::value_name(req, &argument.undef_as_null());
     let tail = match call_site(req, frame) {

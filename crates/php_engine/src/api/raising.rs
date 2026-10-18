@@ -951,6 +951,24 @@ pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
     throw_error(req, "Error", &message)
 }
 
+/// `get_function_arg_name` as php's argument errors print it after
+/// `#N`: ` ($name)`, with its leading space, for a parameter up to
+/// `num_args`, which excludes the variadic, and nothing past it, at
+/// `number` 0 or where there is no function.
+pub(crate) fn arg_name_suffix(
+    req: &Request,
+    function: Option<crate::api::call::Function>,
+    number: u32,
+) -> String {
+    let named = || {
+        let at = usize::try_from(number.checked_sub(1)?).ok()?;
+        let parameter = req.function_decl(function?)?.parameters.get(at)?;
+        let name = String::from_utf8_lossy(&parameter.name.0);
+        (!parameter.variadic).then(|| format!(" (${name})"))
+    };
+    named().unwrap_or_default()
+}
+
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of
 /// `class` with `message`, the one `previous` holds chained as its
 /// `previous` (`zend_throw_exception_internal`), as

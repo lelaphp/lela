@@ -645,13 +645,7 @@ impl Request {
     /// a reference of its own and go on.
     pub(crate) fn param_must_be_ref(&mut self, function: Function, number: u32) {
         let callee = self.qualified_name(function, None);
-        let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-        let name = self
-            .function_decl(function)
-            .and_then(|decl| decl.parameters.get(at))
-            .filter(|parameter| !parameter.variadic)
-            .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
-            .unwrap_or_default();
+        let name = crate::api::raising::arg_name_suffix(self, Some(function), number);
         let message = format!(
             "{callee}(): Argument #{number}{name} must be passed by reference, value given"
         );
