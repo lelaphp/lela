@@ -76,7 +76,9 @@ Its concurrent form measures throughput where the one request measures
 latency (#2660, `third-engine-design.md` §9.2's "8 threads, one process ≥
 php-fpm with 8 workers"). Each arm's rep is 8 clients at once, each
 sending the request again as soon as it is answered, one connection a
-request as the one-request arm sends it, until 3 seconds have passed;
+request as the one-request arm sends it (HTTP/1.0 over loopback TCP to
+the server, `FastCGI` over a Unix socket to php-fpm, so the bar times
+each host as it is reached), until 3 seconds have passed;
 each then finishes the request in flight, and the rep is the requests
 answered over the time from the first sent to the last answered. The
 servers are the bar's, started before its first rep: a server of 8
