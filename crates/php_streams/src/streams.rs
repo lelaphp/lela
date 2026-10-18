@@ -2873,7 +2873,21 @@ fn plain_open(
 /// int(0)
 /// bool(false)
 /// ```
-enum HostFd {
+///
+/// What php keeps of the stream on the request's heap is the kind's data
+/// over the fd it dupped, a `php_stdio_stream_data`, or a
+/// `php_netstream_data_t` where the fd is a socket, which `do_cli`'s
+/// three opens lay down before a program's first line
+/// ([`HostFd::data`]).
+struct HostFd {
+    end: HostEnd,
+    /// The kind's data php `pemalloc`s over the fd, on the request's heap
+    /// from [`Ops::lay_down`] to the close, standing for the struct.
+    data: Option<Emalloc>,
+}
+
+/// Which of the host's three a [`HostFd`] is.
+enum HostEnd {
     /// fd 0 under a host that handed none, over the body it reads.
     Stdin(Memory),
     /// fd 1 and fd 2, each with the label php's kind over the host's fd
@@ -2884,11 +2898,15 @@ enum HostFd {
 }
 
 impl HostFd {
+    fn new(end: HostEnd) -> HostFd {
+        HostFd { end, data: None }
+    }
+
     fn standard(&self) -> Standard {
-        match self {
-            HostFd::Stdin(_) => Standard::Stdin,
-            HostFd::Stdout(_) => Standard::Stdout,
-            HostFd::Stderr(_) => Standard::Stderr,
+        match self.end {
+            HostEnd::Stdin(_) => Standard::Stdin,
+            HostEnd::Stdout(_) => Standard::Stdout,
+            HostEnd::Stderr(_) => Standard::Stderr,
         }
     }
 
@@ -2902,20 +2920,33 @@ impl HostFd {
 
 impl Ops for HostFd {
     fn label(&self) -> &'static str {
-        match self {
-            HostFd::Stdin(_) => "STDIO",
-            HostFd::Stdout(label) | HostFd::Stderr(label) => label,
+        match self.end {
+            HostEnd::Stdin(_) => "STDIO",
+            HostEnd::Stdout(label) | HostEnd::Stderr(label) => label,
         }
     }
 
+    /// `_php_stream_fopen_from_fd_int`'s `php_stdio_stream_data`, or
+    /// `php_stream_sock_open_from_socket`'s `php_netstream_data_t` over a
+    /// socket.
+    fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        let size = if self.label() == "tcp_socket" {
+            sockets::NETSTREAM_DATA_SIZE
+        } else {
+            STDIO_DATA_SIZE
+        };
+        self.data = Some(Emalloc::new(req, size)?);
+        Ok(())
+    }
+
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        match self {
-            HostFd::Stdin(body) => body.write(req, buf),
-            HostFd::Stdout(_) => {
+        match &mut self.end {
+            HostEnd::Stdin(body) => body.write(req, buf),
+            HostEnd::Stdout(_) => {
                 req.write_stdout(buf);
                 Some(buf.len())
             }
-            HostFd::Stderr(_) => {
+            HostEnd::Stderr(_) => {
                 req.write_stderr(buf);
                 Some(buf.len())
             }
@@ -2923,7 +2954,7 @@ impl Ops for HostFd {
     }
 
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        if let HostFd::Stdin(body) = self {
+        if let HostEnd::Stdin(body) = &mut self.end {
             return body.read(req, buf, eof);
         }
         let text = format!(
@@ -2936,9 +2967,12 @@ impl Ops for HostFd {
     }
 
     fn close(&mut self, req: &mut Request) -> i32 {
-        match self {
-            HostFd::Stdin(body) => body.close(req),
-            HostFd::Stdout(_) | HostFd::Stderr(_) => 0,
+        if let Some(data) = self.data.take() {
+            data.free(req);
+        }
+        match &mut self.end {
+            HostEnd::Stdin(body) => body.close(req),
+            HostEnd::Stdout(_) | HostEnd::Stderr(_) => 0,
         }
     }
 
@@ -3189,18 +3223,18 @@ pub(crate) fn open_standard(
     if copied {
         return standard_open(req, standard, mode);
     }
-    let kind = match standard {
-        Standard::Stdin => HostFd::Stdin(Memory {
+    let end = match standard {
+        Standard::Stdin => HostEnd::Stdin(Memory {
             data: MemBytes::Host(Vec::new()),
             fpos: 0,
             mode: TempMode::ReadOnly,
             label: "STDIO",
             own: None,
         }),
-        Standard::Stdout => HostFd::Stdout(host_label(req, Standard::Stdout)),
-        Standard::Stderr => HostFd::Stderr(host_label(req, Standard::Stderr)),
+        Standard::Stdout => HostEnd::Stdout(host_label(req, Standard::Stdout)),
+        Standard::Stderr => HostEnd::Stderr(host_label(req, Standard::Stderr)),
     };
-    let mut stream = PhpStream::new(Box::new(kind), mode);
+    let mut stream = PhpStream::new(Box::new(HostFd::new(end)), mode);
     stream.flags.no_seek = true;
     stream.position = -1;
     Ok(Some(req.stream_alloc(stream)?))

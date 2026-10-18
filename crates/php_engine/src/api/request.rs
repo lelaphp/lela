@@ -121,6 +121,7 @@ mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
 mod response;
+mod rooms;
 pub(crate) mod ropes;
 #[cfg(debug_assertions)]
 mod sensing;
@@ -487,6 +488,9 @@ pub struct Request {
     /// `ZEND_COMPILE_DELAYED_BINDING` ([`Request::class_load`]), and
     /// whether this request's miss compiled it.
     accel_loaded: Option<(PublishedUnit, AccelServed)>,
+    /// php's bytes for state the engine keeps typed elsewhere
+    /// ([`rooms::Rooms`]).
+    rooms: rooms::Rooms,
     /// The unit the cache last served from what it holds, beside its
     /// early-bound classes as they were published with it (design §6.3),
     /// which its load declares by one insert each
@@ -1035,6 +1039,7 @@ impl Request {
             static_vars: static_vars::StaticVars::default(),
             preloading: None,
             accel_loaded: None,
+            rooms: rooms::Rooms::default(),
             early_bound: None,
             #[cfg(debug_assertions)]
             sensing: sensing::Sensing::default(),
