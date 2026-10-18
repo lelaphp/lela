@@ -614,19 +614,14 @@ fn readable_php_fpm(dir: &Path) -> Command {
     command
 }
 
-/// A request past `request_slowlog_timeout` whose child the master can
-/// read is logged with its frames after the head, as php's
-/// `fpm_php_trace_dump` writes them (#1301): one line per frame from the
-/// innermost, its address, the name of what it serves, a method's alone,
-/// `[INCLUDE_OR_EVAL]` for an included file, and the file and line it
-/// was called from; the main script's frame ends the walk. The engine
-/// lays the chain the master reads in its frames' rooms (design §5.6,
-/// revision 59), and the child publishes where it starts in its
-/// scoreboard slot.
-#[test]
-#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
-fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
-    let dir = tree("slowlog");
+/// The frame lines of the slow log entry of one request past
+/// `request_slowlog_timeout`, served by a pool of `name` whose
+/// configuration ends in `more`, each past its sixteen-digit room
+/// address, and the test directory as the engine resolved it. The
+/// request sleeps two calls under a method of a class an included file
+/// declares; the entry's head is held here.
+fn slow_frames(name: &str, more: &str) -> (Vec<String>, PathBuf) {
+    let dir = tree(name);
     let socket = socket(&dir);
     let path = dir.join("php-fpm.conf");
     let slowlog = dir.join("slow.log");
@@ -634,7 +629,7 @@ fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
         &path,
         format!(
             "[global]\nerror_log = {}\n[www]\nlisten = {}\npm = static\npm.max_children = 1\n\
-             slowlog = {}\nrequest_slowlog_timeout = 1\n",
+             slowlog = {}\nrequest_slowlog_timeout = 1\n{more}",
             dir.join("fpm.log").display(),
             socket.display(),
             slowlog.display()
@@ -690,8 +685,7 @@ fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
         Some(format!("script_filename = {shown}").as_str()),
         "{logged}"
     );
-    // Each frame's room address, sixteen hex digits, then what php writes.
-    let frames: Vec<String> = lines
+    let frames = lines
         .map(|line| {
             let address = line.get(3..19).unwrap_or_default();
             assert!(
@@ -703,6 +697,22 @@ fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
             line[21..].to_string()
         })
         .collect();
+    (frames, real)
+}
+
+/// A request past `request_slowlog_timeout` whose child the master can
+/// read is logged with its frames after the head, as php's
+/// `fpm_php_trace_dump` writes them (#1301): one line per frame from the
+/// innermost, its address, the name of what it serves, a method's alone,
+/// `[INCLUDE_OR_EVAL]` for an included file, and the file and line it
+/// was called from; the main script's frame ends the walk. The engine
+/// lays the chain the master reads in its frames' rooms (design §5.6,
+/// revision 59), and the child publishes where it starts in its
+/// scoreboard slot.
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
+    let (frames, real) = slow_frames("slowlog", "");
     let file = real.join("slow.php").display().to_string();
     let inc = real.join("inc.php").display().to_string();
     assert_eq!(
@@ -713,7 +723,19 @@ fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
             format!("g() {inc}:2"),
             format!("m() {inc}:3"),
             format!("[INCLUDE_OR_EVAL]() {file}:4"),
-        ],
-        "{logged}"
+        ]
+    );
+}
+
+/// `request_slowlog_trace_depth` cuts the walk at that many frames, the
+/// innermost first, as php's `--callers_limit` does.
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_s_frames_stop_at_the_trace_depth() {
+    let (frames, real) = slow_frames("slowlog-depth", "request_slowlog_trace_depth = 2\n");
+    let file = real.join("slow.php").display().to_string();
+    assert_eq!(
+        frames,
+        [format!("usleep() {file}:2"), format!("f() {file}:3")]
     );
 }
