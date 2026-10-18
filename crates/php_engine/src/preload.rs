@@ -134,9 +134,8 @@ impl Engine {
     /// what it took, and a deadline the preload arms is served by it.
     /// Where the take fails the file is never served and the startup
     /// fails with status 1, as the child's `exit(1)` fails it; where the
-    /// system refuses the thread it fails as php's refused `fork()` does,
-    /// a fatal of the engine's own with the status `ACCEL_LOG_FATAL`
-    /// ends the process with. A `pcntl_fork` in the preload is
+    /// system refuses the thread, `thread`'s `unstarted` answers, as
+    /// php's refused `fork()` does. A `pcntl_fork` in the preload is
     /// refused there, two things standing inside the engine (ADR-0010).
     fn preload_on(
         &self,
@@ -148,6 +147,7 @@ impl Engine {
         let stack = php_heap::call_stack_bounds()
             .map_or_else(php_heap::call_stack_default_size, |stack| stack.max_size);
         self.shared.timer.stand();
+        let unstarted = thread.unstarted();
         let engine = self.clone();
         let ran = crate::fork::run_apart(
             "php-preload",
@@ -165,13 +165,10 @@ impl Engine {
         match ran {
             Ok(Ok(finished)) => finished,
             Ok(Err(panicked)) => std::panic::resume_unwind(panicked),
-            Err((refused, (description, sink))) => {
+            Err((_, (description, sink))) => {
                 let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
-                req.note_startup_error(
-                    crate::api::raising::Level::CoreError,
-                    format!("Preloading failed to start its thread: {refused}").as_bytes(),
-                );
-                (Started::Refused(-2), req.release_sink())
+                let status = unstarted(&mut req);
+                (Started::Refused(status), req.release_sink())
             }
         }
     }
@@ -321,11 +318,14 @@ mod tests {
             })
             .post_startup(|req, _| PostStartup::Preload {
                 script: req.ini_get(b"t.preload").unwrap_or_default().to_vec(),
-                thread: Some(PreloadThread::new(|req| {
-                    seen(req, "take");
-                    req.write_stderr(b"taken\n");
-                    req.ini_get(b"t.take") == Some(&b"1"[..])
-                })),
+                thread: Some(PreloadThread::new(
+                    |req| {
+                        seen(req, "take");
+                        req.write_stderr(b"taken\n");
+                        req.ini_get(b"t.take") == Some(&b"1"[..])
+                    },
+                    |_| -2,
+                )),
             })
             .build(tag)
     }

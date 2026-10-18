@@ -172,8 +172,16 @@ fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
 fn as_user(_: &mut Request, script: Vec<u8>, account: Account) -> PostStartup {
     PostStartup::Preload {
         script,
-        thread: Some(PreloadThread::new(move |req| account.take(req))),
+        thread: Some(PreloadThread::new(move |req| account.take(req), unforked)),
     }
+}
+
+/// A preload thread the system refused: php's refused `fork()`, a fatal,
+/// which ends the process with `ACCEL_LOG_FATAL`'s status.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn unforked(req: &mut Request) -> i32 {
+    accel_log(req, Log::Fatal, "Preloading failed to fork()");
+    -2
 }
 
 /// A platform where no thread can take another user's ids for itself

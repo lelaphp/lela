@@ -630,20 +630,38 @@ pub enum PostStartup {
 /// request on the thread, answers whether it took it, and `false` fails
 /// the startup with status 1, as the child's `exit(1)` does, the file
 /// never served. The thread that finishes the startup waits for it, as
-/// php's parent `waitpid`s, and the thread ends with the preload, so
-/// what `take` took ends with it; the process's other threads never
-/// have it.
-pub struct PreloadThread(Box<dyn FnOnce(&mut Request) -> bool + Send>);
+/// php's parent `waitpid`s; the thread starts no thread of its own,
+/// since one would inherit what it took, and it ends with the preload,
+/// so what `take` took ends with it and the process's other threads
+/// never have it. Where the system refuses the thread, `unstarted` says
+/// so on the finishing thread's request, as php's refused `fork()` is
+/// its own fatal, and answers the status the process ends with.
+pub struct PreloadThread {
+    take: Box<dyn FnOnce(&mut Request) -> bool + Send>,
+    unstarted: fn(&mut Request) -> i32,
+}
 
 impl PreloadThread {
-    /// The thread that takes what `take` takes before the preload.
-    pub fn new(take: impl FnOnce(&mut Request) -> bool + Send + 'static) -> PreloadThread {
-        PreloadThread(Box::new(take))
+    /// The thread that takes what `take` takes before the preload, and
+    /// `unstarted` where the system refuses it.
+    pub fn new(
+        take: impl FnOnce(&mut Request) -> bool + Send + 'static,
+        unstarted: fn(&mut Request) -> i32,
+    ) -> PreloadThread {
+        PreloadThread {
+            take: Box::new(take),
+            unstarted,
+        }
     }
 
     /// What the thread takes, taken on the thread, on `req`.
     pub(crate) fn take(self, req: &mut Request) -> bool {
-        (self.0)(req)
+        (self.take)(req)
+    }
+
+    /// What answers a thread the system refused.
+    pub(crate) fn unstarted(&self) -> fn(&mut Request) -> i32 {
+        self.unstarted
     }
 }
 

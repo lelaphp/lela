@@ -88,7 +88,7 @@ fn ffi_load_refuses_in_the_preload_served_as_the_preload_user() {
         }])
         .post_startup(|req, _| PostStartup::Preload {
             script: req.ini_get(b"t.preload").unwrap_or_default().to_vec(),
-            thread: Some(PreloadThread::new(|_| true)),
+            thread: Some(PreloadThread::new(|_| true, |_| -2)),
         })
         .build("t");
     let engine = Engine::builder()
