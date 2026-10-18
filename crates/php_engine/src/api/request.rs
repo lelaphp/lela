@@ -496,6 +496,9 @@ pub struct Request {
     /// which its load declares by one insert each
     /// ([`Request::declare_classes`]).
     early_bound: Option<(PublishedUnit, crate::unit_cache::EarlyBound)>,
+    /// Whether the request's interning asks the engine's table yet,
+    /// opcache's `ZCG(counted)` ([`memory::SharedHold`]).
+    shared_hold: memory::SharedHold,
     /// The request in flight, which no fork but its own happens beside
     /// (#1807, [`Request::fork`]): entered before its deadlines are laid
     /// on the engine's timer and left after they are taken out, so no
@@ -975,6 +978,7 @@ impl Request {
             shared,
             description,
             inspect: inspect::Inspected::default(),
+            shared_hold: memory::SharedHold::Untaken,
             heap,
             vm,
             annexes: crate::exec::Annexes::default(),

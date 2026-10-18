@@ -1280,7 +1280,8 @@ fn handler_changeable(req: &mut Request) -> bool {
 fn user_ini(req: &mut Request) -> Result<(), Thrown> {
     req.state::<State>().set_handler = true;
     // `ZSTR_KNOWN(ZEND_STR_USER)`, which costs nothing.
-    let user = PhpString::existing_interned(req, b"user")?;
+    let user = PhpString::interned(req, b"user")?;
+    let user = Owner::take(req, user);
     let set = crate::ini::alter_made(req, b"session.save_handler", user);
     req.state::<State>().set_handler = false;
     set.map(|_| ())
