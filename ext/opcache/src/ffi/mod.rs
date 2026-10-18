@@ -86,6 +86,33 @@ pub(crate) fn take(name: &CStr, uid: u32, gid: u32) -> Result<(), Refused> {
     Ok(())
 }
 
+/// `prctl(PR_GET_DUMPABLE)`: the process's dumpable setting, which a
+/// thread's change of ids resets for every thread to
+/// `fs.suid_dumpable`, 0 by default (`commit_creds`, kernel/cred.c), so
+/// a process whose preload took a user's ids would dump no core and
+/// read as undumpable after; `None` where the call fails.
+#[cfg(target_os = "linux")]
+pub(crate) fn dumpable() -> Option<libc::c_int> {
+    let zero: libc::c_ulong = 0;
+    // SAFETY: `PR_GET_DUMPABLE` reads the four further arguments as
+    // unused numbers and writes no memory.
+    let flag = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, zero, zero, zero, zero) };
+    (flag >= 0).then_some(flag)
+}
+
+/// `prctl(PR_SET_DUMPABLE, flag)`: the setting [`dumpable`] read put back,
+/// once no thread of the process holds other ids, since a dumpable
+/// process lets a thread's user trace it.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_dumpable(flag: libc::c_int) {
+    let (flag, zero) = (libc::c_ulong::try_from(flag).unwrap_or_default(), 0);
+    // SAFETY: `PR_SET_DUMPABLE` takes the flag by value, reads the rest
+    // as unused numbers and writes no memory.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, flag, zero, zero, zero);
+    }
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     /// `<unistd.h>`'s `pthread_setugid_np`, which the `libc` crate does

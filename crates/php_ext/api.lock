@@ -286,6 +286,7 @@ abi::Pool::new
 abi::Pool::take
 abi::PostStartup
 abi::PreloadThread
+abi::PreloadThread::joined
 abi::PreloadThread::new
 abi::PropertiesFor
 abi::PropertyPlace

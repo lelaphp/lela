@@ -135,11 +135,12 @@ impl Engine {
     /// Where the take fails the file is never served and the startup
     /// fails with status 1, as the child's `exit(1)` fails it; where the
     /// system refuses the thread, `thread`'s `unstarted` answers, as
-    /// php's refused `fork()` does. A `pcntl_fork` in the preload is
+    /// php's refused `fork()` does. What `thread` hands to be done once
+    /// it has ended is done here, after the join. A `pcntl_fork` in the preload is
     /// refused there, two things standing inside the engine (ADR-0010).
     fn preload_on(
         &self,
-        thread: PreloadThread,
+        mut thread: PreloadThread,
         description: RequestDescription,
         sink: Lent,
         script: Vec<u8>,
@@ -148,6 +149,7 @@ impl Engine {
             .map_or_else(php_heap::call_stack_default_size, |stack| stack.max_size);
         self.shared.timer.stand();
         let unstarted = thread.unstarted();
+        let joined = thread.after_join();
         let engine = self.clone();
         let ran = crate::fork::run_apart(
             "php-preload",
@@ -162,6 +164,11 @@ impl Engine {
                 }
             },
         );
+        if ran.is_ok()
+            && let Some(joined) = joined
+        {
+            joined();
+        }
         match ran {
             Ok(Ok(finished)) => finished,
             Ok(Err(panicked)) => std::panic::resume_unwind(panicked),
@@ -316,16 +323,28 @@ mod tests {
                 seen(req, "raised");
                 beneath.serve(req);
             })
-            .post_startup(|req, _| PostStartup::Preload {
-                script: req.ini_get(b"t.preload").unwrap_or_default().to_vec(),
-                thread: Some(PreloadThread::new(
-                    |req| {
-                        seen(req, "take");
-                        req.write_stderr(b"taken\n");
-                        req.ini_get(b"t.take") == Some(&b"1"[..])
-                    },
-                    |_| -2,
-                )),
+            .post_startup(|req, _| {
+                let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
+                let joined = format!("joined {}", String::from_utf8_lossy(&script));
+                PostStartup::Preload {
+                    script,
+                    thread: Some(
+                        PreloadThread::new(
+                            |req| {
+                                seen(req, "take");
+                                req.write_stderr(b"taken\n");
+                                req.ini_get(b"t.take") == Some(&b"1"[..])
+                            },
+                            |_| -2,
+                        )
+                        .joined(move || {
+                            let mut seen = SEEN
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            seen.push((joined, std::thread::current().id(), false, false));
+                        }),
+                    ),
+                }
             })
             .build(tag)
     }
@@ -385,6 +404,7 @@ mod tests {
             [
                 ("take".to_owned(), false, false, false),
                 ("raised".to_owned(), false, true, true),
+                ("joined".to_owned(), true, false, false),
                 ("raised".to_owned(), true, false, false),
                 ("raised".to_owned(), true, false, false),
             ],

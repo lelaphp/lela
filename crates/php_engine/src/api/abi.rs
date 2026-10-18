@@ -635,10 +635,13 @@ pub enum PostStartup {
 /// so what `take` took ends with it and the process's other threads
 /// never have it. Where the system refuses the thread, `unstarted` says
 /// so on the finishing thread's request, as php's refused `fork()` is
-/// its own fatal, and answers the status the process ends with.
+/// its own fatal, and answers the status the process ends with. What
+/// [`PreloadThread::joined`] hands is done on the finishing thread once
+/// the thread has ended, whatever the preload answered.
 pub struct PreloadThread {
     take: Box<dyn FnOnce(&mut Request) -> bool + Send>,
     unstarted: fn(&mut Request) -> i32,
+    joined: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl PreloadThread {
@@ -651,7 +654,23 @@ impl PreloadThread {
         PreloadThread {
             take: Box::new(take),
             unstarted,
+            joined: None,
         }
+    }
+
+    /// `after` done on the thread that finishes the startup once the
+    /// preload's thread has ended: what only the process may put back
+    /// of what the take changed for it, such as Linux's dumpable setting,
+    /// which a thread's change of ids resets for the whole process.
+    #[must_use]
+    pub fn joined(mut self, after: impl FnOnce() + Send + 'static) -> PreloadThread {
+        self.joined = Some(Box::new(after));
+        self
+    }
+
+    /// What is done once the thread has ended, taken out.
+    pub(crate) fn after_join(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
+        self.joined.take()
     }
 
     /// What the thread takes, taken on the thread, on `req`.

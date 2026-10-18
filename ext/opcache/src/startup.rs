@@ -168,11 +168,20 @@ fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
 }
 
 /// The preload served on a thread that takes `account`'s ids first.
+/// On Linux the process's dumpable setting, which the thread's change of
+/// ids resets, is put back once the thread has ended, as php's master
+/// keeps its own while its child changes ids ([`crate::ffi::dumpable`]).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn as_user(_: &mut Request, script: Vec<u8>, account: Account) -> PostStartup {
+    let thread = PreloadThread::new(move |req| account.take(req), unforked);
+    #[cfg(target_os = "linux")]
+    let thread = match crate::ffi::dumpable() {
+        Some(flag) => thread.joined(move || crate::ffi::set_dumpable(flag)),
+        None => thread,
+    };
     PostStartup::Preload {
         script,
-        thread: Some(PreloadThread::new(move |req| account.take(req), unforked)),
+        thread: Some(thread),
     }
 }
 
