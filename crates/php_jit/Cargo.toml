@@ -17,3 +17,13 @@ workspace = true
 
 [dependencies]
 php_engine = { path = "../php_engine" }
+
+[features]
+# The bench bar's program and the `bench` module it runs (#2742); off in
+# every build but the bar's.
+bench = []
+
+[[bin]]
+name = "php_jit_bench"
+path = "src/bin/php_jit_bench.rs"
+required-features = ["bench"]

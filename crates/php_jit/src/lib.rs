@@ -22,6 +22,17 @@
 
 use php_engine::tier::{Flow, FrameRef, Request, Site, Tier};
 
+// The crossing has no caller until a trace calls a kernel, so it is built
+// for its tests and the bench bar alone (#2742).
+#[cfg(any(test, feature = "bench"))]
+#[allow(unsafe_code, reason = "seams.toml rule unsafe.homes: php_jit::enter")]
+mod enter;
+
+/// The bench bar's program (#2742), behind the `bench` feature, so the
+/// crate's own surface stays `Jit`.
+#[cfg(feature = "bench")]
+pub use enter::bench;
+
 /// The compiled tier (`jit-design.md` §2.4): asked at the loop's three
 /// safepoints, under `Mode::Off` it answers [`Flow::Continue`] before it
 /// reads the word the site carries, so it touches no shared state and
