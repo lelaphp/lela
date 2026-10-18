@@ -13,8 +13,10 @@
 //! as one meets it (#1995), a table copied as php copies it (#2005),
 //! the callback walks as a native meets them (#1980), the owners the
 //! face takes for a native and gives up (#2059, #2080), and the frames
-//! a fatal leaves, whose annexes leave with them (#2554), and an
-//! extension's optimizer passes where the unit cache runs them (#2386).
+//! a fatal leaves, whose annexes leave with them (#2554), an
+//! extension's optimizer passes where the unit cache runs them (#2386),
+//! and the running execution's trace number across a fiber switch and a
+//! generator's resume (#2738).
 
 use crate::api;
 
@@ -47,6 +49,7 @@ mod stepped;
 mod table_copy;
 pub(crate) mod test_ext;
 mod time_limit;
+mod trace_num;
 #[cfg(debug_assertions)]
 mod walks;
 #[cfg(debug_assertions)]

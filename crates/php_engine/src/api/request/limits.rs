@@ -2,9 +2,10 @@
 //! on the engine's timer, which raises it for `max_execution_time` and
 //! for every periodic interrupt an extension started, `set_time_limit()`,
 //! the interrupt hooks the bundle supplied, the thread's stack limit,
-//! and `fork(2)`, which joins the timer's thread around it. The
-//! interrupt, the deadlines and the stack limit are [`Limits`]'s, whose
-//! fields no file but this one reads.
+//! the running execution's trace number, which is the tier's recording
+//! exclusion, and `fork(2)`, which joins the timer's thread around it.
+//! The interrupt, the deadlines, the stack limit and the trace number
+//! are [`Limits`]'s, whose fields no file but this one reads.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -170,8 +171,8 @@ impl AsMut<Request> for Request {
     }
 }
 
-/// The interrupt, the deadlines and the stack limit, whose fields no
-/// file but this one reads.
+/// The interrupt, the deadlines, the stack limit and the trace number,
+/// whose fields no file but this one reads.
 pub(super) struct Limits {
     /// The interrupt, shared with whatever thread sets it (design §5.8).
     interrupt: Interrupt,
@@ -185,6 +186,11 @@ pub(super) struct Limits {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// php's `EG(jit_trace_num)`, the running execution's trace
+    /// number: zero at request start, swapped by a fiber switch with the
+    /// stack limit ([`Request::switch_execution`]) and set aside around
+    /// a generator's body ([`Request::trace_num`]).
+    trace_num: u32,
     /// How a function C calls back reaches the request
     /// ([`Request::reentry`]), made at the first ask and closed as the
     /// request is dropped.
@@ -211,6 +217,7 @@ impl Limits {
             deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
+            trace_num: 0,
             reentry: None,
         }
     }
@@ -228,6 +235,14 @@ impl Request {
     /// state does at a fiber switch ([`Request::switch_execution`]).
     pub(super) fn swap_stack_limit(&mut self, other: &mut StackLimit) {
         std::mem::swap(&mut self.limits.stack_limit, other);
+    }
+
+    /// The trace number and `other`'s change places, as the execution
+    /// state does at a fiber switch ([`Request::switch_execution`]):
+    /// `zend_fiber_capture_vm_state` and `zend_fiber_restore_vm_state`
+    /// carry `EG(jit_trace_num)` (`Z/Zend/zend_fibers.c:131`, `:148`).
+    pub(super) fn swap_trace_num(&mut self, other: &mut u32) {
+        std::mem::swap(&mut self.limits.trace_num, other);
     }
 
     /// The thread's stack limit as request start read it, for the
@@ -445,6 +460,32 @@ impl Request {
     #[must_use]
     pub fn interrupt(&self) -> &Interrupt {
         &self.limits.interrupt
+    }
+
+    /// The trace number of the execution the request runs on, php's
+    /// `EG(jit_trace_num)` (`jit-design.md` §4.9, revision 9; design
+    /// §5.11, revision 52): one word the engine stores per execution and
+    /// only the tier interprets, nonzero while the tier records on this
+    /// execution, which is its recording exclusion. The engine keeps it
+    /// with the execution state and never reads it: a fiber switch saves
+    /// and restores it, a fiber's body starts at zero
+    /// (`Z/Zend/zend_fibers.c:105-155`, `:599`), and a generator's body
+    /// runs at zero and its resumer reads its own again after it
+    /// (`Z/Zend/zend_generators.c:793-865`). A debugger serving a frame
+    /// below a fiber leaves it the running fiber's, as phpdbg moves
+    /// `EG(current_execute_data)` alone. A `tier.lock` item, and the
+    /// tier's alone: an extension has nothing to read in it and no
+    /// reason to write it.
+    #[must_use]
+    pub fn trace_num(&self) -> u32 {
+        self.limits.trace_num
+    }
+
+    /// The running execution's trace number written
+    /// ([`Request::trace_num`]): what the tier's recording guard sets
+    /// and clears. A `tier.lock` item.
+    pub fn set_trace_num(&mut self, trace_num: u32) {
+        self.limits.trace_num = trace_num;
     }
 
     /// How a function C calls back reaches this request (#1638, #1640):

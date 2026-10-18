@@ -1116,7 +1116,11 @@ fn drop_values(req: &mut Request, generator: PhpObject) {
 /// generator whose body a resumption of `orig` runs until it yields,
 /// returns or throws, following the delegation tree. A throwable the
 /// body left is left pending, as php leaves `EG(exception)` set for the
-/// frame that resumed it; the `Err` is a fatal.
+/// frame that resumed it; the `Err` is a fatal. The body runs at trace
+/// number zero and the resumer's is restored after it, as php backs
+/// `EG(jit_trace_num)` up with `EG(current_execute_data)` (`:793-797`,
+/// `:818`, `:865`), so a recording on the resumer's execution does not
+/// shut the generator's out and outlives none of its own.
 pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     let mut generator = current(req, orig);
     if !has_frame(req, generator) {
@@ -1148,6 +1152,8 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         let Some(frame) = push(req, generator) else {
             return Ok(());
         };
+        let resumer_trace = req.trace_num();
+        req.set_trace_num(0);
         with(req, generator, |g| g.resumed_through = through);
         let delegating =
             read(req, generator, |g| !matches!(g.values, Delegated::Nothing)).unwrap_or(false);
@@ -1159,6 +1165,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             drop_values(req, generator);
         } else if delegating && next_delegated(req, generator) {
             with(req, generator, |g| g.resumed_through = None);
+            req.set_trace_num(resumer_trace);
             suspend(req, generator)?;
             with(req, orig, |g| {
                 g.do_init = false;
@@ -1187,6 +1194,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             g.in_fiber = None;
             g.resumed_through = None;
         });
+        req.set_trace_num(resumer_trace);
         served?;
         if req.is_pending() {
             if same(generator, orig) {

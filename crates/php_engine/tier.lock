@@ -3,6 +3,8 @@
 api::request::Interrupt
 api::request::Interrupt::raised
 api::request::Request::interrupt
+api::request::Request::set_trace_num
+api::request::Request::trace_num
 tier::Argument
 tier::Aside
 tier::Called
