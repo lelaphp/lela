@@ -145,7 +145,7 @@ fn dump(fpm: &Fpm, p: usize, c: usize, memory: &crate::ffi::trace::Memory) -> Ve
         .scoreboard
         .and_then(|scoreboard| scoreboard.proc(child.scoreboard_i))
         .and_then(crate::scoreboard::Proc::view_once)
-        .map(|proc| (proc.script_filename, proc.frames))
+        .map(|proc| (proc.script_filename, proc.chain_word))
         .unwrap_or_default();
     let mut entry = b"\n".to_vec();
     entry.extend_from_slice(&crate::zlog::time_now());

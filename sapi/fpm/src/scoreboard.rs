@@ -123,10 +123,10 @@ pub(crate) struct Proc {
     memory: AtomicU64,
     /// Where the request's frames start in the child, the address of the
     /// engine's word that names the innermost one, published once per
-    /// request ([`Proc::set_frames`]); what php's master reads through
+    /// request ([`Proc::set_chain_word`]); what php's master reads through
     /// `&EG(current_execute_data)`, the same address in every child of
     /// one binary. Zero between requests.
-    frames: AtomicU64,
+    chain_word: AtomicU64,
 }
 
 /// A copy of a slot, `*proc` as `fpm_scoreboard_copy` takes it.
@@ -149,7 +149,7 @@ pub(crate) struct ProcView {
     pub(crate) cpu_duration_us: i64,
     pub(crate) last_request_cpu_us: i64,
     pub(crate) memory: u64,
-    pub(crate) frames: u64,
+    pub(crate) chain_word: u64,
 }
 
 impl ProcView {
@@ -610,7 +610,7 @@ impl Proc {
         self.stage.store(0, Ordering::Relaxed);
         self.content_length.store(0, Ordering::Relaxed);
         self.memory.store(0, Ordering::Relaxed);
-        self.frames.store(0, Ordering::Relaxed);
+        self.chain_word.store(0, Ordering::Relaxed);
         for text in [
             &self.request_uri.0[..],
             &self.query_string.0,
@@ -658,7 +658,7 @@ impl Proc {
             cpu_duration_us: self.cpu_duration_us.load(Ordering::Relaxed),
             last_request_cpu_us: self.last_request_cpu_us.load(Ordering::Relaxed),
             memory: self.memory.load(Ordering::Relaxed),
-            frames: self.frames.load(Ordering::Relaxed),
+            chain_word: self.chain_word.load(Ordering::Relaxed),
         };
         unlock(&self.lock);
         view
@@ -704,16 +704,16 @@ impl Proc {
             text[0].store(0, Ordering::Relaxed);
         }
         self.content_length.store(0, Ordering::Relaxed);
-        self.frames.store(0, Ordering::Relaxed);
+        self.chain_word.store(0, Ordering::Relaxed);
         unlock(&self.lock);
     }
 
     /// Where the request now served keeps its frames' chain, the address
     /// of the engine's word, under the slot's lock: what the master reads
     /// the frames from once it has stopped the child (`fpm_php_trace`).
-    pub(crate) fn set_frames(&self, word: u64) {
+    pub(crate) fn set_chain_word(&self, word: u64) {
         lock(&self.lock, Wait::Hang);
-        self.frames.store(word, Ordering::Relaxed);
+        self.chain_word.store(word, Ordering::Relaxed);
         unlock(&self.lock);
     }
 

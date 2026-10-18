@@ -718,7 +718,7 @@ impl Worker {
         let query = env.get(b"QUERY_STRING");
         let (served, _) = self.engine.serve(description, response, |innermost| {
             if let Some(proc) = self.proc() {
-                proc.set_frames(innermost.address());
+                proc.set_chain_word(innermost.address());
             }
             self.look(&info, head_only, query)
         });
