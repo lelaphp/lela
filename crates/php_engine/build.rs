@@ -293,37 +293,48 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
 /// `cfg(dispatch = "tailcall")`, one function per call, which serves its
 /// opline, finds the next and becomes its handler, and the table of them
 /// by `php_unit::Handler`, one entry per variant, so that an index past
-/// it is a build error in the table's constant.
+/// it is a build error in the table's constant and an entry no variant
+/// names is the unresolved handler's internal error.
 fn tails(calls: &[(String, Vec<String>)]) -> String {
     let handlers: usize = calls.iter().map(|(_, variants)| variants.len()).sum();
+    // An entry the table's assignments leave is the unresolved handler's,
+    // whose internal error names the opcode, never another opcode's body.
+    let unfilled = calls
+        .iter()
+        .position(|(_, variants)| variants.iter().any(|variant| variant == "Unresolved"))
+        .unwrap_or_default();
     let mut table = String::new();
     let mut bodies = String::new();
-    for (at, (call, variants)) in calls.iter().enumerate() {
+    for (number, (call, variants)) in calls.iter().enumerate() {
         for variant in variants {
             writeln!(
                 table,
-                "        table[Handler::{variant} as usize] = tail_{at}::<T, D>;"
+                "        table[Handler::{variant} as usize] = tail_{number}::<T, D>;"
             )
             .ok();
         }
-        let body = if call.starts_with("Err(") {
-            format!("    {call}\n")
+        // A call that is the internal error reads nothing it is handed.
+        let (unread, body) = if call.starts_with("Err(") {
+            ("#[allow(unused_variables)]\n", format!("    {call}\n"))
         } else {
-            format!(
-                "    let next = {call}?;\n\
-                 \x20   #[cfg(debug_assertions)]\n\
-                 \x20   req.sensed_after(code, op)?;\n\
-                 \x20   let (op, at) = match onward(req, frame, oplines, at, next, told)? {{\n\
-                 \x20       ControlFlow::Continue(onward) => onward,\n\
-                 \x20       ControlFlow::Break(next) => return Ok(next),\n\
-                 \x20   }};\n\
-                 \x20   become (table.of(op.handler))(req, frame, code, oplines, op, at, told, table)\n"
+            (
+                "",
+                format!(
+                    "    let next = {call}?;\n\
+                     \x20   #[cfg(debug_assertions)]\n\
+                     \x20   req.sensed_after(code, op)?;\n\
+                     \x20   let (op, at) = match onward(req, frame, oplines, at, next, told)? {{\n\
+                     \x20       ControlFlow::Continue(on) => on,\n\
+                     \x20       ControlFlow::Break(next) => return Ok(next),\n\
+                     \x20   }};\n\
+                     \x20   become (table.of(op.handler))(req, frame, code, oplines, op, at, told, table)\n"
+                ),
             )
         };
         write!(
             bodies,
-            "\n#[allow(unused_variables)]\n\
-             extern \"rust-preserve-none\" fn tail_{at}<T: Tier, D: Telling>(\n\
+            "\n{unread}\
+             extern \"rust-preserve-none\" fn tail_{number}<T: Tier, D: Telling>(\n\
              \x20   req: &mut Request,\n\
              \x20   frame: FrameRef,\n\
              \x20   code: &OpArray,\n\
@@ -362,7 +373,7 @@ fn tails(calls: &[(String, Vec<String>)]) -> String {
          \n\
          impl<T: Tier, D: Telling> Tails<T, D> {{\n\
          \x20   pub(crate) const TABLE: &Table<D> = &Table({{\n\
-         \x20       let mut table = [tail_0::<T, D> as Tail<D>; HANDLERS];\n\
+         \x20       let mut table = [tail_{unfilled}::<T, D> as Tail<D>; HANDLERS];\n\
          {table}\
          \x20       table\n\
          \x20   }});\n\

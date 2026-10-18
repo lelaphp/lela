@@ -23,16 +23,15 @@ use super::{Next, Tier, Way, past_the_end};
 use crate::api::request::Request;
 use crate::observer::Telling;
 
-/// One handler threaded: the opline at `at` of `oplines`, the op array
-/// `code` holds, served, and the handler of the one after it become, until
-/// an answer leaves the frame, which is handed back. Each saves no
-/// register of its caller's, as php's tailcall VM's handlers are
-/// `preserve_none`, so what the chain carries stays in the registers it
-/// is passed in across the calls a handler makes, and a handler that
-/// makes none saves nothing. `oplines` is `code`'s, handed down beside it
-/// so that finding the next opline loads neither their base nor their
-/// length, and the table is handed down too, so that finding its handler
-/// is one load.
+/// A handler threaded: the function that serves the opline it is handed
+/// at `at` and becomes the handler of the opline its answer names, or
+/// hands back an answer that leaves the frame. It saves no register of
+/// its caller's, as php's tailcall VM's handlers are `preserve_none`, so
+/// what the chain carries stays in the registers it is passed in across
+/// the calls a handler makes, and a handler that makes none saves
+/// nothing. `oplines` is `code`'s, handed down beside it so that finding
+/// the next opline loads neither their base nor their length, and the
+/// table is handed down too, so that finding its handler is one load.
 pub(crate) type Tail<D> = extern "rust-preserve-none" fn(
     &mut Request,
     FrameRef,
@@ -57,7 +56,8 @@ impl<D> Table<D> {
 }
 
 /// The chain from the opline at `at`: its handler called, and the answer
-/// the last handler of the chain left the frame with.
+/// the last handler of the chain left the frame with, which is always
+/// [`Way::Left`], since every other answer goes on in the chain.
 #[inline]
 pub(super) fn chain<T: Tier, D: Telling>(
     req: &mut Request,
