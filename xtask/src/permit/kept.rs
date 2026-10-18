@@ -14,8 +14,6 @@
 //! denied; none of them writes a record, so `done` tells an approved
 //! change from an unattributed one by the record and nothing else.
 
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -80,7 +78,7 @@ pub(super) fn keep(checkout: &Path, path: &str, was: Option<&str>, call: &str) -
         call: call.to_owned(),
     };
     if !stands(checkout, &kept)? {
-        return spend(&file);
+        return crate::remove(&file);
     }
     let text = serde_json::to_string(&kept).context("rendering the kept change")?;
     reading::replace(&file, text.as_bytes())
@@ -93,17 +91,8 @@ pub(super) fn keep(checkout: &Path, path: &str, was: Option<&str>, call: &str) -
 /// reader of the records makes. A store that cannot be read is an error,
 /// never an empty list: `done` does not pass on no evidence.
 pub(crate) fn kept_changes(store: &Store, checkout: &Path) -> Result<Vec<Kept>> {
-    let dir = dir_of(store);
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
-    };
     let mut standing = Vec::new();
-    for entry in entries {
-        let file = entry
-            .with_context(|| format!("listing {}", dir.display()))?
-            .path();
+    for file in crate::entries(&dir_of(store))? {
         if file.extension().is_none_or(|e| e != "json") {
             continue;
         }
@@ -113,7 +102,7 @@ pub(crate) fn kept_changes(store: &Store, checkout: &Path) -> Result<Vec<Kept>> 
         if stands(checkout, &kept)? {
             standing.push(kept);
         } else {
-            spend(&file)?;
+            crate::remove(&file)?;
         }
     }
     standing.sort_by(|a, b| a.path.cmp(&b.path));
@@ -139,23 +128,12 @@ fn head_blob(checkout: &Path, path: &str) -> Result<Option<String>> {
 
 /// The record at `file`, `None` where there is none.
 fn read(file: &Path) -> Result<Option<Kept>> {
-    match fs::read_to_string(file) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .with_context(|| format!("reading the kept change at {}", file.display())),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("reading {}", file.display())),
-    }
-}
-
-/// The record at `file` removed, where there is one.
-fn spend(file: &Path) -> Result<()> {
-    match fs::remove_file(file) {
-        Err(err) if err.kind() != ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("removing {}", file.display()))
-        }
-        _ => Ok(()),
-    }
+    let Some(text) = crate::read_if(file)? else {
+        return Ok(None);
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("reading the kept change at {}", file.display()))
 }
 
 fn dir_of(store: &Store) -> PathBuf {

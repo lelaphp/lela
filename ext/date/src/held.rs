@@ -1,21 +1,16 @@
-//! What a date class holds on the request's heap of the timelib structs
-//! this crate keeps as Rust values. php builds timelib with its allocator
-//! pointed at `emalloc` (`config0.m4`'s `timelib_config.h`), so the
-//! `timelib_rel_time` an interval or a period holds and the abbreviation
-//! a `DateTimeZone` copies are on php's request heap, where
-//! `memory_get_usage()` counts them. A `timelib_time` is timelib's own,
-//! made on the request's heap under its lend ([`crate::lent`]); the
-//! relative time and the abbreviation are copied into Rust values here,
-//! and a [`Held`] beside each stands for its blocks at the sizes php asks
-//! for (design §5.13).
+//! What a `DateTimeZone` holds on the request's heap of the abbreviation
+//! this crate keeps as a Rust value. php builds timelib with its
+//! allocator pointed at `emalloc` (`config0.m4`'s `timelib_config.h`), so
+//! the `timelib_strdup` copy of an abbreviation zone's `tzi.z.abbr` is on
+//! php's request heap, where `memory_get_usage()` counts it. The
+//! abbreviation is copied into a Rust value here, and a [`Held`] beside
+//! it stands for its block at the size php asks for (design §5.13). The
+//! timelib structs a date, an interval and a period hold are timelib's
+//! own, made on the request's heap under its lend ([`crate::lent`]).
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::Emalloc;
-
-/// `sizeof(timelib_rel_time)`, which `timelib_rel_time_ctor` and
-/// `timelib_rel_time_clone` ask for.
-pub(crate) const REL_TIME: usize = 104;
 
 /// The one block a struct php keeps on its heap stands for here.
 #[derive(Debug)]
@@ -28,11 +23,6 @@ pub(crate) struct Held {
 pub(crate) struct Shape(usize);
 
 impl Shape {
-    /// A `timelib_rel_time`.
-    pub(crate) fn rel_time() -> Shape {
-        Shape(REL_TIME)
-    }
-
     /// `timelib_strdup(abbr)`, a `DateTimeZone`'s `tzi.z.abbr`.
     pub(crate) fn abbr(abbr: &[u8]) -> Shape {
         Shape(abbr.len() + 1)

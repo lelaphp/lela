@@ -40,14 +40,16 @@ pub use stack::StackLimit;
 pub mod syntax {
     pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
-        Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, Position,
+        Arena, Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, Position,
         ScannedToken, SyntaxKind, Token, highlight, html_puts, lex, parse, scanned, strip,
     };
 }
 
+use std::borrow::Cow;
+
 use php_heap::{Fatal, FatalReason, Intern};
 use php_link::{Exact, Folded, Indexed};
-use php_syntax::Parsed;
+use php_syntax::{Arena, Parsed};
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Visibility};
 use php_unit::{Diagnostic, Level, Unit};
 
@@ -306,7 +308,10 @@ impl SourceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
     pub level: Level,
-    pub message: String,
+    /// php's text, a constant one borrowed where it is one, so a
+    /// refusal the compiler makes and drops, a fold that finds no
+    /// constant among them, allocates nothing.
+    pub message: Cow<'static, str>,
     pub line: u32,
     pub raised: Vec<Diagnostic>,
     /// Whether php throws the refusal as a `CompileError`,
@@ -376,17 +381,33 @@ pub enum Stage {
 /// ```expect regime=short-tags exit=0
 /// codeechoed
 /// ```
+///
+/// `arena` is the compile's ([`Arena`]): the parse and the compiler's
+/// temporaries are bumped into it, and it is reset once the unit is
+/// made, so the caller that keeps one arena for its compiles hands each
+/// the room the last one left.
 pub fn compile_source(
+    arena: &mut Arena,
+    source: &[u8],
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+) -> Result<Unit, CompileError> {
+    let made = compile_in(arena, source, options, strings);
+    arena.reset();
+    made
+}
+
+/// [`compile_source`] in `arena`, where the parse and the compiler's
+/// temporaries live until the unit is made.
+fn compile_in(
+    arena: &Arena,
     source: &[u8],
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
     let Some(multibyte) = options.multibyte else {
-        return compile(
-            &php_syntax::parse(source, &syntax_options(options)),
-            options,
-            strings,
-        );
+        let parsed = php_syntax::parse(arena, source, &syntax_options(options));
+        return compile_scanned(arena, &parsed, options, strings, None);
     };
     let from = match options.kind {
         SourceKind::File => multibyte::Source::File {
@@ -398,42 +419,56 @@ pub fn compile_source(
     let opened =
         multibyte::open(multibyte.encodings, source, from).map_err(|refused| CompileError {
             level: Level::CompileError,
-            message: refused.message(),
+            message: refused.message().into(),
             line: 0,
             raised: Vec::new(),
             thrown: false,
             stage: Stage::Opening,
         })?;
-    let parsed = php_syntax::parse(&opened.text, &syntax_options(options));
+    let parsed = php_syntax::parse(arena, &opened.text, &syntax_options(options));
     let scanning = multibyte::Scanning {
         original: source.get(opened.bom..).unwrap_or_default(),
         filter: opened.filter,
     };
-    compile_scanned(&parsed, options, strings, Some(scanning))
+    compile_scanned(arena, &parsed, options, strings, Some(scanning))
 }
 
 /// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
 /// (`Z/Zend/zend_language_scanner.l:604`, `Z/Zend/zend_ast.c:2954`):
 /// `source` parsed from where `options` begins the scanner, the parse's
 /// first fatal its refusal, and php's text of the tree, which is what
-/// `assert()`'s description is written by over the whole file.
+/// `assert()`'s description is written by over the whole file. The
+/// parse is in `arena`, reset once the text is made.
 pub fn export_source(
+    arena: &mut Arena,
     source: &[u8],
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Vec<u8>, CompileError> {
-    let parsed = php_syntax::parse(source, &syntax_options(options));
+    let made = export_in(arena, source, options, strings);
+    arena.reset();
+    made
+}
+
+/// [`export_source`] in `arena`.
+fn export_in(
+    arena: &Arena,
+    source: &[u8],
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+) -> Result<Vec<u8>, CompileError> {
+    let parsed = php_syntax::parse(arena, source, &syntax_options(options));
     if let Some(fatal) = parsed.diagnostics.iter().find(|d| d.level.is_fatal()) {
         return Err(CompileError {
             level: level_of(fatal.level),
-            message: fatal.message.clone(),
+            message: fatal.message.clone().into(),
             line: fatal.line,
             raised: Vec::new(),
             thrown: false,
             stage: Stage::Compiling,
         });
     }
-    emit::export(&parsed, options, strings)
+    emit::export(arena, &parsed, options, strings)
 }
 
 /// What the lexer is told of a source the compiler is handed: the
@@ -455,19 +490,22 @@ fn syntax_options(options: &Options<'_>) -> php_syntax::Options {
 }
 
 /// Compile one parsed file into a unit, interning its constant strings
-/// into `strings`.
-pub fn compile(
-    parsed: &Parsed,
+/// into `strings`, with the compiler's temporaries in `arena`, the one
+/// the parse lives in.
+pub fn compile<'a>(
+    arena: &'a Arena,
+    parsed: &'a Parsed<'a>,
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    compile_scanned(parsed, options, strings, None)
+    compile_scanned(arena, parsed, options, strings, None)
 }
 
 /// [`compile`] over a parse of what the scanner read through
-/// `scanning`, the file as it was opened.
+/// `scanning`, the file as it was opened, with `arena` the compile's.
 fn compile_scanned<'p>(
-    parsed: &'p Parsed,
+    arena: &'p Arena,
+    parsed: &'p Parsed<'p>,
     options: &Options<'p>,
     strings: &mut dyn Intern,
     scanning: Option<multibyte::Scanning<'p>>,
@@ -484,7 +522,7 @@ fn compile_scanned<'p>(
     // The parser's `declare` action runs as it parses
     // ([`multibyte::scan`]): what it warned stands among the parse's
     // diagnostics, and the fatal it threw stands where it threw it.
-    let scanned = multibyte::scan(parsed, options, scanning);
+    let scanned = multibyte::scan(arena, parsed, options, scanning);
     let parsed = &*scanned.parsed;
     let mut raised = Vec::new();
     for (at, diagnostic) in parsed.diagnostics.iter().enumerate() {
@@ -495,7 +533,7 @@ fn compile_scanned<'p>(
         if diagnostic.level.is_fatal() {
             return Err(CompileError {
                 level,
-                message: diagnostic.message.clone(),
+                message: diagnostic.message.clone().into(),
                 line: diagnostic.line,
                 raised,
                 thrown: false,
@@ -516,34 +554,38 @@ fn compile_scanned<'p>(
         return Err(refused.error(raised));
     }
     let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
-    match emit::unit(parsed, options, strings, halt) {
-        Ok(mut unit) => {
-            raised.append(&mut unit.diagnostics);
-            unit.diagnostics = raised;
+    // The unit is finished where `unit` made it, and handed back as it
+    // stands rather than moved out and into a result again.
+    let mut made = emit::unit(arena, parsed, options, strings, halt);
+    match &mut made {
+        Ok(unit) => {
+            if !raised.is_empty() {
+                raised.append(&mut unit.diagnostics);
+                unit.diagnostics = raised;
+            }
             let interned = match options.kind {
-                SourceKind::File => intern_names(&unit, strings),
-                SourceKind::Eval(_) => intern_declared(&unit, strings),
+                SourceKind::File => intern_names(unit, strings),
+                SourceKind::Eval(_) => intern_declared(unit, strings),
             };
-            match interned {
-                Ok(()) => Ok(unit),
-                // `zend_mm`'s limit, raised as `E_ERROR` where the
-                // compile asked for the memory.
-                Err(fatal) => Err(CompileError {
+            // `zend_mm`'s limit, raised as `E_ERROR` where the compile
+            // asked for the memory.
+            if let Err(fatal) = interned {
+                return Err(CompileError {
                     level: Level::Error,
-                    message: fatal_message(fatal),
+                    message: fatal_message(fatal).into(),
                     line: unit.main.line_end,
-                    raised: unit.diagnostics,
+                    raised: std::mem::take(&mut unit.diagnostics),
                     thrown: false,
                     stage: Stage::Compiling,
-                }),
+                });
             }
         }
-        Err(mut refused) => {
+        Err(refused) => {
             raised.append(&mut refused.raised);
             refused.raised = raised;
-            Err(refused)
         }
     }
+    made
 }
 
 /// The names a file's op arrays carry interned into `strings`, the home
@@ -599,8 +641,13 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 /// 0
 /// ```
 pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
-    let bodies = std::iter::once(&unit.main)
-        .chain(unit.functions.iter().map(|(_, body)| body))
+    for var in &unit.main.vars {
+        strings.intern(&var.0)?;
+    }
+    let bodies = unit
+        .functions
+        .iter()
+        .map(|(_, body)| body)
         .chain(unit.dynamic.iter().map(|(_, body)| body))
         .chain(unit.methods.iter().map(|method| &method.body))
         .chain(unit.hooks.iter().map(|hook| &hook.body));
@@ -684,6 +731,18 @@ pub(crate) fn fatal_message(fatal: Fatal) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// `source` parsed as a file under the lexer's defaults and compiled
+    /// through [`compile`], the parse and the compile in one arena.
+    fn compile_parsed(
+        source: &[u8],
+        options: &Options<'_>,
+        strings: &mut dyn Intern,
+    ) -> Result<Unit, CompileError> {
+        let arena = Arena::new();
+        let parsed = php_syntax::parse(&arena, source, &php_syntax::Options::default());
+        compile(&arena, &parsed, options, strings)
+    }
+
     use super::*;
     use php_link::Names;
     use php_unit::decl::{ConstExpr, ConstantName, Name, NameKind, Parameter, Type, Visibility};
@@ -734,12 +793,7 @@ mod tests {
 
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
         let mut strings = php_heap::Strings::new();
-        let unit = compile(
-            &php_syntax::parse(source, &php_syntax::Options::default()),
-            &bundled(),
-            &mut strings,
-        )
-        .unwrap_or_default();
+        let unit = compile_parsed(source, &bundled(), &mut strings).unwrap_or_default();
         (unit, strings)
     }
 
@@ -1028,7 +1082,7 @@ mod tests {
             short_open_tag,
             ..bundled()
         };
-        compile_source(source, &options, &mut strings)
+        compile_source(&mut Arena::new(), source, &options, &mut strings)
             .unwrap_or_default()
             .dump(&[])
             .text()
@@ -1104,7 +1158,7 @@ mod tests {
     fn the_entry_is_safepoint_zero_and_the_return_carries_its_own_number() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1;");
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1)],
             "the entry at opline zero, then the return"
         );
@@ -1250,11 +1304,8 @@ mod tests {
             ]),
             ..Options::default()
         };
-        let compiled = compile(
-            &php_syntax::parse(
-                b"<?php echo T_LNUMBER - 1, \\PHP_OS;",
-                &php_syntax::Options::default(),
-            ),
+        let compiled = compile_parsed(
+            b"<?php echo T_LNUMBER - 1, \\PHP_OS;",
             &options,
             &mut strings,
         );
@@ -1273,11 +1324,7 @@ mod tests {
             unit.main.literals[1].as_str().map(|s| s.bytes().to_vec()),
             Some(b"Darwin".to_vec())
         );
-        let lowered = compile(
-            &php_syntax::parse(b"<?php echo t_lnumber;", &php_syntax::Options::default()),
-            &options,
-            &mut strings,
-        );
+        let lowered = compile_parsed(b"<?php echo t_lnumber;", &options, &mut strings);
         assert!(lowered.is_ok(), "{lowered:?}");
         assert_eq!(
             lowered.unwrap_or_default().dump(&[]).text(),
@@ -1306,12 +1353,8 @@ mod tests {
                 cwd,
                 ..Options::default()
             };
-            let unit = compile(
-                &php_syntax::parse(b"<?php echo __DIR__;", &php_syntax::Options::default()),
-                &options,
-                &mut strings,
-            )
-            .unwrap_or_default();
+            let unit =
+                compile_parsed(b"<?php echo __DIR__;", &options, &mut strings).unwrap_or_default();
             literal_text(&unit, 0)
         }
         assert_eq!(
@@ -1710,8 +1753,8 @@ mod tests {
         // The precision the double is rendered at is the compile-time
         // ini entry, as `zend_double_to_str` reads `EG(precision)`.
         let mut strings = php_heap::Strings::new();
-        let unit = compile(
-            &php_syntax::parse(b"<?php echo 1 / 3 . '';", &php_syntax::Options::default()),
+        let unit = compile_parsed(
+            b"<?php echo 1 / 3 . '';",
             &Options {
                 precision: 3,
                 ..Options::default()
@@ -1897,12 +1940,7 @@ mod tests {
     fn a_fatal_carries_what_the_scanner_raised_before_it() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &Options::default(),
-                &mut strings,
-            )
-            .err()
+            compile_parsed(source, &Options::default(), &mut strings).err()
         };
         let overflow = |line| Diagnostic {
             level: Level::CompileWarning,
@@ -1970,7 +2008,7 @@ mod tests {
             "an empty condition is php's constant true"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(4), OplineIdx(5)],
             "the entry, the header the back-edge lands on, which is itself, the return"
         );
@@ -2054,7 +2092,7 @@ mod tests {
             "the comparison's, which the JMPNZ tests"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(2), OplineIdx(6)],
             "the entry, the body's first opline as the header, the return"
         );
@@ -2082,7 +2120,7 @@ mod tests {
             "landing on the body's first opline"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1), OplineIdx(3)],
             "the entry, the header at the ECHO, the return"
         );
@@ -2093,7 +2131,7 @@ mod tests {
 
         let (unit, _strings) = unit_and_strings(b"<?php foreach ($a as $v) { continue; }");
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1), OplineIdx(5)],
             "the entry, the header at the FE_FETCH_R, the return"
         );
@@ -2678,8 +2716,14 @@ mod tests {
     fn two_units_interned_into_one_table_share_their_constant_string() {
         let mut strings = php_heap::Strings::new();
         let compiled = [
-            compile_source(b"<?php echo 'shared';", &Options::default(), &mut strings),
             compile_source(
+                &mut Arena::new(),
+                b"<?php echo 'shared';",
+                &Options::default(),
+                &mut strings,
+            ),
+            compile_source(
+                &mut Arena::new(),
                 b"<?php echo 'shared', 'shared';",
                 &Options::default(),
                 &mut strings,
@@ -2867,12 +2911,8 @@ mod tests {
             (b"<?php echo count($a);", b"count"),
         ] {
             let mut strings = php_heap::Strings::new();
-            let unit = compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &Options::default(),
-                &mut strings,
-            )
-            .unwrap_or_default();
+            let unit =
+                compile_parsed(source, &Options::default(), &mut strings).unwrap_or_default();
             let oplines = &unit.main.oplines;
             assert!(
                 oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcallByName)
@@ -2898,8 +2938,7 @@ mod tests {
                 hooked,
                 ..bundled()
             };
-            let parsed = php_syntax::parse(source, &php_syntax::Options::default());
-            compile(&parsed, &options, &mut strings)
+            compile_parsed(source, &options, &mut strings)
                 .unwrap_or_default()
                 .main
                 .oplines
@@ -2995,7 +3034,8 @@ mod tests {
             ..bundled()
         };
         let mut strings = php_heap::Strings::new();
-        let unit = compile_source(b"echo 1; ?>x", &options, &mut strings).unwrap_or_default();
+        let unit = compile_source(&mut Arena::new(), b"echo 1; ?>x", &options, &mut strings)
+            .unwrap_or_default();
         assert_eq!(
             unit.dump(&[]).text(),
             main_dump(
@@ -3937,12 +3977,7 @@ mod tests {
     #[test]
     fn a_namespace_after_a_statement_is_php_s_compile_error() {
         let mut strings = php_heap::Strings::new();
-        let trouble = compile(
-            &php_syntax::parse(b"<?php 1;\nnamespace Foo;", &php_syntax::Options::default()),
-            &bundled(),
-            &mut strings,
-        )
-        .err();
+        let trouble = compile_parsed(b"<?php 1;\nnamespace Foo;", &bundled(), &mut strings).err();
         assert_eq!(
             trouble,
             Some(CompileError {
@@ -3959,12 +3994,8 @@ mod tests {
     #[test]
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
-        let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x . list($a);", &php_syntax::Options::default()),
-            &Options::default(),
-            &mut strings,
-        )
-        .err();
+        let trouble =
+            compile_parsed(b"<?php\n$x . list($a);", &Options::default(), &mut strings).err();
         assert_eq!(trouble.map(|e| e.line), Some(2));
     }
 
@@ -3975,12 +4006,7 @@ mod tests {
     #[test]
     fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
         let mut strings = php_heap::Strings::new();
-        let trouble = compile(
-            &php_syntax::parse(b"<?php\necho 1 +;", &php_syntax::Options::default()),
-            &Options::default(),
-            &mut strings,
-        )
-        .err();
+        let trouble = compile_parsed(b"<?php\necho 1 +;", &Options::default(), &mut strings).err();
         assert_eq!(
             trouble,
             Some(CompileError {
@@ -4355,18 +4381,13 @@ mod tests {
 
     /// The message one source refuses with, or nothing.
     fn refused_message(source: &[u8]) -> Option<String> {
-        refused(source).map(|e| e.message)
+        refused(source).map(|e| e.message.into_owned())
     }
 
     /// The compile error one source refuses with, or nothing.
     fn refused(source: &[u8]) -> Option<CompileError> {
         let mut strings = php_heap::Strings::new();
-        compile(
-            &php_syntax::parse(source, &php_syntax::Options::default()),
-            &bundled(),
-            &mut strings,
-        )
-        .err()
+        compile_parsed(source, &bundled(), &mut strings).err()
     }
 
     /// #256's program under the oracle's `[regime.dump]`: a `switch` of
@@ -4490,7 +4511,7 @@ mod tests {
                 }
                 (None, None) => {}
                 (found, wanted) => assert_eq!(
-                    found.map(|error| error.message),
+                    found.map(|error| error.message.into_owned()),
                     wanted.map(str::to_owned),
                     "{:?}",
                     String::from_utf8_lossy(source)
@@ -4508,7 +4529,7 @@ mod tests {
     fn an_unread_expression_inside_parentheses_names_the_expression() {
         let compiled = || CompileError {
             level: Level::Parse,
-            message: String::from("compiled"),
+            message: String::from("compiled").into(),
             line: 0,
             raised: Vec::new(),
             thrown: false,
@@ -5075,7 +5096,7 @@ mod tests {
         ] {
             let error = refused(source).unwrap_or_else(|| CompileError {
                 level: Level::Parse,
-                message: String::from("compiled"),
+                message: String::from("compiled").into(),
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
@@ -5183,16 +5204,13 @@ mod tests {
             ConstExpr::Str(b"A\\M".as_slice().into())
         );
         let mut strings = php_heap::Strings::new();
-        let refused = compile(
-            &php_syntax::parse(
-                b"<?php namespace A;\nclass M { const K = 1;\n const K = 2; }",
-                &php_syntax::Options::default(),
-            ),
+        let refused = compile_parsed(
+            b"<?php namespace A;\nclass M { const K = 1;\n const K = 2; }",
             &bundled(),
             &mut strings,
         )
         .err()
-        .map(|e| (e.level, e.message, e.line));
+        .map(|e| (e.level, e.message.into_owned(), e.line));
         assert_eq!(
             refused,
             Some((
@@ -5358,13 +5376,9 @@ mod tests {
     fn what_a_const_statement_refuses_is_what_php_refuses() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &bundled(),
-                &mut strings,
-            )
-            .err()
-            .map(|e| e.message)
+            compile_parsed(source, &bundled(), &mut strings)
+                .err()
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(
             refused(b"<?php const true = 1;").as_deref(),
@@ -5424,13 +5438,9 @@ mod tests {
     fn what_a_declare_refuses_is_what_php_refuses() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &bundled(),
-                &mut strings,
-            )
-            .err()
-            .map(|e| e.message)
+            compile_parsed(source, &bundled(), &mut strings)
+                .err()
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(
             refused(b"<?php echo 1; declare(strict_types=1);").as_deref(),
@@ -5928,13 +5938,9 @@ mod tests {
     fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &bundled(),
-                &mut strings,
-            )
-            .err()
-            .map(|e| e.message)
+            compile_parsed(source, &bundled(), &mut strings)
+                .err()
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(
             refused(b"<?php $this += 1;").as_deref(),
@@ -6004,11 +6010,8 @@ mod tests {
             ..Options::default()
         };
         let mut strings = php_heap::Strings::new();
-        let dump = compile(
-            &php_syntax::parse(
-                b"<?php namespace A; M::f(1); \\M::f(1);",
-                &php_syntax::Options::default(),
-            ),
+        let dump = compile_parsed(
+            b"<?php namespace A; M::f(1); \\M::f(1);",
             &options,
             &mut strings,
         )
@@ -6141,13 +6144,9 @@ mod tests {
     fn what_php_s_compiler_refuses_in_a_class_is_refused_in_its_words() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &bundled(),
-                &mut strings,
-            )
-            .err()
-            .map(|e| (e.level, e.message, e.line))
+            compile_parsed(source, &bundled(), &mut strings)
+                .err()
+                .map(|e| (e.level, e.message.into_owned(), e.line))
         };
         let compile_error =
             |message: &str, line| Some((Level::CompileError, message.to_string(), line));
@@ -6245,13 +6244,9 @@ mod tests {
     fn what_php_s_compiler_refuses_in_a_property_group_is_refused_in_its_words() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &bundled(),
-                &mut strings,
-            )
-            .err()
-            .map(|e| (e.level, e.message, e.line))
+            compile_parsed(source, &bundled(), &mut strings)
+                .err()
+                .map(|e| (e.level, e.message.into_owned(), e.line))
         };
         let compile_error =
             |message: &str, line| Some((Level::CompileError, message.to_string(), line));
@@ -8270,14 +8265,10 @@ class C {
         };
         let dump = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &options,
-                &mut strings,
-            )
-            .unwrap_or_default()
-            .dump(&[])
-            .text()
+            compile_parsed(source, &options, &mut strings)
+                .unwrap_or_default()
+                .dump(&[])
+                .text()
         };
         assert_eq!(
             dump(b"<?php $a = 1; phptoken::TOKENIZE('<?php ', $a);"),
@@ -8348,13 +8339,9 @@ class C {
     fn what_stands_beside_new_and_the_calls_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
-            compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
-                &bundled(),
-                &mut strings,
-            )
-            .err()
-            .map(|e| e.message)
+            compile_parsed(source, &bundled(), &mut strings)
+                .err()
+                .map(|e| e.message.into_owned())
         };
         assert_eq!(refused(b"<?php echo E::class;").as_deref(), None);
         assert_eq!(refused(b"<?php f($o->p, name: $o->q);").as_deref(), None);
@@ -8403,7 +8390,7 @@ class C {
              \x20    4: 0004 - 0005 (new)\n\
              \x20    15: 0022 - 0023 (new)\n"
         );
-        let refused_message = |source: &[u8]| refused(source).map(|e| e.message);
+        let refused_message = |source: &[u8]| refused(source).map(|e| e.message.into_owned());
         assert_eq!(
             refused_message(b"<?php function f() { return self::X; }").as_deref(),
             Some("Cannot use \"self\" when no class scope is active")
@@ -8455,7 +8442,7 @@ class C {
             "the literal is the array php folds"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[OplineIdx(0), OplineIdx(1), OplineIdx(5)],
             "the entry, the header the back-edge lands on, the return"
         );
@@ -8581,7 +8568,7 @@ class C {
             "two back-edges to one header carry one number, the header's"
         );
         assert_eq!(
-            unit.main.safepoints.as_slice(),
+            &*unit.main.safepoints,
             &[
                 OplineIdx(0),
                 OplineIdx(1),
@@ -8663,7 +8650,7 @@ class C {
         ] {
             let error = refused(source).unwrap_or_else(|| CompileError {
                 level: Level::Parse,
-                message: String::from("compiled"),
+                message: String::from("compiled").into(),
                 line: 0,
                 raised: Vec::new(),
                 thrown: false,
@@ -9088,7 +9075,7 @@ class C {
     fn a_jump_out_of_a_finally_block_is_phps_compile_error() {
         let out = refused(b"<?php\nforeach ([1] as $v) { try { echo 1; } finally {\nbreak; } }\n");
         assert_eq!(
-            out.map(|e| (e.message, e.line)),
+            out.map(|e| (e.message.into_owned(), e.line)),
             Some((String::from("jump out of a finally block is disallowed"), 3))
         );
         let inside = refused(
@@ -9139,12 +9126,12 @@ class C {
     fn a_goto_php_refuses_is_phps_compile_error() {
         let undefined = refused(b"<?php\ngoto missing;\n");
         assert_eq!(
-            undefined.map(|e| (e.message, e.line)),
+            undefined.map(|e| (e.message.into_owned(), e.line)),
             Some((String::from("'goto' to undefined label 'missing'"), 2))
         );
         let into = refused(b"<?php\ngoto inside;\nwhile (true) { inside: break; }\n");
         assert_eq!(
-            into.map(|e| (e.message, e.line)),
+            into.map(|e| (e.message.into_owned(), e.line)),
             Some((
                 String::from("'goto' into loop or switch statement is disallowed"),
                 2
@@ -9152,17 +9139,17 @@ class C {
         );
         let twice = refused(b"<?php\na:\na:\n");
         assert_eq!(
-            twice.map(|e| (e.message, e.line)),
+            twice.map(|e| (e.message.into_owned(), e.line)),
             Some((String::from("Label 'a' already defined"), 3))
         );
         let out = refused(b"<?php\ntry { echo 1; } finally { goto out; }\nout: echo 2;\n");
         assert_eq!(
-            out.map(|e| e.message),
+            out.map(|e| e.message.into_owned()),
             Some(String::from("jump out of a finally block is disallowed"))
         );
         let inside = refused(b"<?php\ngoto inside;\ntry { echo 1; } finally { inside: echo 2; }\n");
         assert_eq!(
-            inside.map(|e| e.message),
+            inside.map(|e| e.message.into_owned()),
             Some(String::from("jump into a finally block is disallowed"))
         );
     }
@@ -9183,6 +9170,7 @@ class C {
             ..bundled()
         };
         let dump = compile_source(
+            &mut Arena::new(),
             b"<?php namespace A; $a = assert(f());",
             &options,
             &mut strings,
@@ -9205,7 +9193,7 @@ class C {
     fn a_try_with_neither_a_catch_nor_a_finally_is_phps_compile_error() {
         let refused = refused(b"<?php\ntry { echo 1; }\n");
         assert_eq!(
-            refused.map(|e| e.message),
+            refused.map(|e| e.message.into_owned()),
             Some(String::from("Cannot use try without catch or finally"))
         );
     }
@@ -9360,7 +9348,7 @@ class C {
         ];
         for (source, message) in cases {
             assert_eq!(
-                refused(source).map(|e| e.message),
+                refused(source).map(|e| e.message.into_owned()),
                 Some(String::from(*message)),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -9450,7 +9438,7 @@ class C {
         ];
         for (source, message) in cases {
             assert_eq!(
-                refused(source).map(|e| e.message),
+                refused(source).map(|e| e.message.into_owned()),
                 Some(String::from(*message)),
                 "{}",
                 String::from_utf8_lossy(source)

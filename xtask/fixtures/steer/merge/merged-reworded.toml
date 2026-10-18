@@ -1,0 +1,17 @@
+# A slice of docs/divergence.toml's shape in a conflicted merge (README.md).
+
+[[divergence]]
+id = "trace:fixture-base"
+kind = "trace"
+cause = "php-ub"
+reason = "The row both sides of the merge carry as MERGE_HEAD rewords it (fixture)."
+status = "accepted"
+since = "2026-10-01"
+
+[[divergence]]
+id = "trace:fixture-merged"
+kind = "trace"
+cause = "php-ub"
+reason = "The row MERGE_HEAD adds over the merge base (fixture)."
+status = "accepted"
+since = "2026-10-18"

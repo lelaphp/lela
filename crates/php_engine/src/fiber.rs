@@ -137,6 +137,12 @@ pub struct Coroutine {
     /// standing when this one suspended, where that was another one a
     /// suspend passed through.
     previous: Option<PhpObject>,
+    /// `transfer->context` of the body's last switch where it names a
+    /// coroutine other than `caller`: the one the body ended into
+    /// ([`CoroutineEnd::Into`]), written as the body returns and taken by
+    /// the switch that ran it ([`switch_into`]), which runs that one in
+    /// its place.
+    into: Option<PhpObject>,
     /// `caller`, which the fiber observers read
     /// ([`ObservedFiber::resumed_by`]).
     caller: Option<Caller>,
@@ -215,6 +221,23 @@ pub trait HoldsCoroutine: Any + Send {
     fn coroutine(&mut self) -> &mut Coroutine;
 }
 
+/// How an extension's coroutine body ends, the last switch
+/// `zend_fiber_trampoline` makes: back to what resumed it, with a value;
+/// or into another coroutine, which `transfer->context` names, laid down
+/// in the same object's payload type ([`Coroutine::init`]) and not
+/// started, as `zend_test_fiber_execute` transfers into a `pipeTo`
+/// target. That one runs in the ending coroutine's place, resumed by what
+/// resumed it, and what it hands back is what that resume returns; the
+/// fiber observers see the one switch from the dead coroutine into it,
+/// then the dead one's destroy.
+#[derive(Debug)]
+pub enum CoroutineEnd {
+    /// The body returned this value.
+    Return(Owner<Value>),
+    /// The body transfers into the coroutine this object's payload holds.
+    Into(PhpObject),
+}
+
 /// The coroutine `object`'s payload holds, which its class always lays;
 /// an object without it is the engine's fatal.
 fn coroutine_of<P: HoldsCoroutine>(
@@ -285,6 +308,18 @@ enum Resumer {
     Unlinked,
 }
 
+impl Resumer {
+    /// What resumes a coroutine of `kind` with `transfer`.
+    fn of(kind: Kind, transfer: &Transfer) -> Resumer {
+        match (kind, transfer) {
+            (Kind::Fiber, Transfer::Value(_) | Transfer::Throw(_) | Transfer::Fatal) => {
+                Resumer::Native
+            }
+            (Kind::Fiber, Transfer::GracefulExit) | (Kind::Extension, _) => Resumer::Unlinked,
+        }
+    }
+}
+
 /// The request's fibers: the running ones, innermost last, and their
 /// suspend points; `EG(active_fiber)`; and `EG(fiber_stack_size)` once
 /// `ini_set()` has moved it.
@@ -320,14 +355,58 @@ enum Aside {
     /// above it, innermost last, the first of which held its execution
     /// and holds the one the request ran on in its place.
     Resumer { running: Vec<Running> },
-    /// A suspended coroutine's stack ([`Request::on_held_stack`]): every
-    /// running coroutine, the coroutine served, and the execution the
-    /// request ran on, which no running coroutine's `below` holds.
+    /// A held coroutine's stack ([`Request::on_held_stack`]): every
+    /// running coroutine, the coroutine served, the execution the
+    /// request ran on, which no running coroutine's `below` holds, and
+    /// the held stacks the chain runs on into below the coroutine's,
+    /// innermost first ([`take_chain`]).
     Suspended {
         running: Vec<Running>,
         coroutine: Context,
         displaced: Box<Execution>,
+        below: Vec<HeldStack>,
     },
+}
+
+/// A coroutine off the running chain, and the execution it held, which
+/// a serve took out to stand on the chain below the stack it serves on
+/// ([`take_chain`]).
+pub(crate) struct HeldStack {
+    pub(crate) coroutine: Context,
+    pub(crate) execution: Box<Execution>,
+}
+
+/// The executions php's `prev_execute_data` chain runs through from a
+/// frame of `top`, a coroutine off the running chain, each taken out of
+/// its coroutine for a serve on `top`'s ([`Request::on_held_stack`]):
+/// `top`'s own, then, while the coroutine reached waits on a suspend
+/// that passed through it with its bottom frame naming its resumer's,
+/// that resumer's, which a suspend holds too. The chain ends at a
+/// suspended coroutine's bottom, where `zend_fiber_suspend` cut it, and
+/// at one whose bottom names no resumer. None where `top` holds no
+/// execution with a frame in it.
+pub(crate) fn take_chain(
+    req: &mut Request,
+    top: Context,
+) -> Option<(Box<Execution>, Vec<HeldStack>)> {
+    let coroutine = top.coroutine(req)?;
+    let execution = coroutine.take_held()?;
+    let mut next = coroutine.linked_resumer();
+    let mut below = Vec::new();
+    while let Some(resumer) = next {
+        let Some(held) = resumer.coroutine(req) else {
+            break;
+        };
+        let Some(execution) = held.take_held() else {
+            break;
+        };
+        next = held.linked_resumer();
+        below.push(HeldStack {
+            coroutine: resumer,
+            execution,
+        });
+    }
+    Some((execution, below))
 }
 
 /// Where the request's own VM stack stands, which
@@ -434,7 +513,12 @@ impl Fibers {
     pub(crate) fn coroutine_on(&self, stack: usize) -> Option<Context> {
         match self.running.len().checked_sub(stack) {
             Some(0) | None => match self.aside.last() {
-                Some(Aside::Suspended { coroutine, .. }) => Some(*coroutine),
+                Some(Aside::Suspended {
+                    coroutine, below, ..
+                }) => match stack.saturating_sub(self.running.len()).checked_sub(1) {
+                    None => Some(*coroutine),
+                    Some(at) => below.get(at).map(|held| held.coroutine),
+                },
                 Some(Aside::Resumer { .. }) | None => None,
             },
             Some(above) => self.running.get(above - 1).map(|running| running.fiber),
@@ -477,21 +561,28 @@ impl Fibers {
     }
 
     /// Every running coroutine set aside while the request serves on the
-    /// stack of `coroutine`, suspended, `displaced` the execution it ran
-    /// on. [`Fibers::take_back`] undoes it.
-    pub(crate) fn set_aside_for(&mut self, coroutine: Context, displaced: Box<Execution>) {
+    /// stack of `coroutine`, held off the running chain, `displaced` the
+    /// execution it ran on and `below` the held stacks the chain runs on
+    /// into. [`Fibers::take_back`] undoes it.
+    pub(crate) fn set_aside_for(
+        &mut self,
+        coroutine: Context,
+        displaced: Box<Execution>,
+        below: Vec<HeldStack>,
+    ) {
         let running = std::mem::take(&mut self.running);
         self.aside.push(Aside::Suspended {
             running,
             coroutine,
             displaced,
+            below,
         });
     }
 
     /// [`Fibers::set_aside_for`] undone: the coroutines set aside running
-    /// again, and the coroutine served and the execution displaced
-    /// handed back.
-    pub(crate) fn take_back(&mut self) -> Option<(Context, Box<Execution>)> {
+    /// again, and the coroutine served, the execution displaced and the
+    /// held stacks below handed back.
+    pub(crate) fn take_back(&mut self) -> Option<(Context, Box<Execution>, Vec<HeldStack>)> {
         match self
             .aside
             .pop_if(|aside| matches!(aside, Aside::Suspended { .. }))?
@@ -500,9 +591,10 @@ impl Fibers {
                 running,
                 coroutine,
                 displaced,
+                below,
             } => {
                 self.running = running;
-                Some((coroutine, displaced))
+                Some((coroutine, displaced, below))
             }
             Aside::Resumer { .. } => None,
         }
@@ -551,16 +643,31 @@ impl Fibers {
         }
     }
 
+    /// The execution of the stack that resumed the innermost running
+    /// coroutine, its entry off the list: what the switch back from it
+    /// runs on again.
+    fn switch_back(&mut self) -> Execution {
+        self.running
+            .pop()
+            .map_or_else(Execution::default, |running| running.below)
+    }
+
     /// The execution states below the running stack, the innermost
     /// resumer's first and the request's own last: the rest of php's
     /// one `prev_execute_data` chain, which ends at a fiber a destroy
-    /// resumed.
+    /// resumed. Serving on a held coroutine's stack, no coroutine runs,
+    /// and the chain runs on through the held stacks under it.
     pub(crate) fn below(&self) -> impl Iterator<Item = &Execution> {
+        let held = match (self.running.is_empty(), self.aside.last()) {
+            (true, Some(Aside::Suspended { below, .. })) => below.as_slice(),
+            _ => &[],
+        };
         self.running
             .iter()
             .rev()
             .take_while(|running| running.by == Resumer::Native)
             .map(|running| &running.below)
+            .chain(held.iter().map(|held| &*held.execution))
     }
 }
 
@@ -836,12 +943,7 @@ pub(crate) fn view(
                         ExecuteData::Innermost => Standing::Held(own),
                         ExecuteData::Bottom => Standing::Bottom {
                             own,
-                            resumer: match coroutine.caller {
-                                Some(Caller::Coroutine(resumer)) if !coroutine.destroyed => {
-                                    Some(resumer)
-                                }
-                                _ => None,
-                            },
+                            resumer: coroutine.linked_resumer(),
                         },
                     }),
             }
@@ -1542,7 +1644,7 @@ pub(crate) fn stack_size_updated(req: &mut Request, value: Option<&[u8]>) -> boo
 fn execute<P: HoldsCoroutine>(
     req: &mut Request,
     object: PhpObject,
-    body: impl FnOnce(&mut Request) -> Result<Value, Thrown>,
+    body: impl FnOnce(&mut Request) -> Result<CoroutineEnd, Thrown>,
 ) -> Transfer {
     let opened = req.open_stack();
     if req.fatal_of(opened).is_err() {
@@ -1552,7 +1654,14 @@ fn execute<P: HoldsCoroutine>(
         return Transfer::Fatal;
     }
     let thrown = match body(req) {
-        Ok(value) => return Transfer::Value(value),
+        Ok(CoroutineEnd::Return(value)) => return Transfer::Value(value.hand_on()),
+        Ok(CoroutineEnd::Into(target)) => {
+            let Ok(coroutine) = coroutine_of::<P>(req, object) else {
+                return Transfer::Fatal;
+            };
+            coroutine.into = Some(target);
+            return Transfer::Value(Value::null());
+        }
         Err(thrown) => thrown,
     };
     let exited = matches!(
@@ -1598,6 +1707,11 @@ fn execute<P: HoldsCoroutine>(
 /// `previous`. The observers are told of the switch php makes and not of
 /// these steps: out of the coroutine the suspend was made in, and on the
 /// resume, into it.
+///
+/// A body that ends into another coroutine ([`CoroutineEnd::Into`])
+/// hands it the switch: the observers see the dead coroutine switch into
+/// it, and it runs in the dead one's place until it suspends or returns
+/// ([`run_ending_into`]), the switch back noticed out of it.
 ///
 /// The error-reporting level is swapped with the rest: a fiber starts at
 /// the level the entry says, whatever an `@` around the `start` masked,
@@ -1645,10 +1759,7 @@ fn switch_into<P: HoldsCoroutine>(
     // standing when this one suspended.
     let entering = coroutine.previous.take().unwrap_or(object);
     let kind = coroutine.kind;
-    let by = match (kind, &transfer) {
-        (Kind::Fiber, Transfer::Value(_) | Transfer::Throw(_) | Transfer::Fatal) => Resumer::Native,
-        (Kind::Fiber, Transfer::GracefulExit) | (Kind::Extension, _) => Resumer::Unlinked,
-    };
+    let by = Resumer::of(kind, &transfer);
     // `EG(current_fiber_context)`: the coroutine served now, or the
     // request's own stack, which the switch leaves and comes back to.
     // The handlers are called before the coroutine is marked running, as
@@ -1657,7 +1768,8 @@ fn switch_into<P: HoldsCoroutine>(
     // `zend_fiber_resume_internal` sets it before the switch.
     let resumer = req.fibers().current();
     let active = req.fibers().active;
-    coroutine_of::<P>(req, object)?.caller = Some(Caller::of(resumer));
+    let caller = Caller::of(resumer);
+    coroutine_of::<P>(req, object)?.caller = Some(caller);
     if kind == Kind::Fiber
         && let Some(previous) = active.and_then(|active| active.native_mut::<ZendFiber>(req))
     {
@@ -1678,7 +1790,9 @@ fn switch_into<P: HoldsCoroutine>(
         // resume left it, a new context having captured nothing yet.
         own.active = req.fibers().active;
     }
-    let switched = run_on::<P>(req, object, &mut stack, own, by, transfer)?;
+    // The coroutine running now: `object`, then each one a body ended into.
+    let mut object = object;
+    let switched = run_ending_into::<P>(req, &mut object, &mut stack, own, by, transfer, caller)?;
     // The switch back is noticed on the coroutine's side, its frames the
     // ones standing, as php notices it before the jump, and out of the
     // coroutine the suspend was made in.
@@ -1696,10 +1810,7 @@ fn switch_into<P: HoldsCoroutine>(
     let leaving = observed(req, Some(leaving), left);
     let back = observed(req, resumer, FiberStatus::Suspended);
     crate::observer::fiber_switched(req, leaving, back);
-    let mut execution = match req.fibers_mut().running.pop() {
-        Some(running) => running.below,
-        None => Execution::default(),
-    };
+    let mut execution = req.fibers_mut().switch_back();
     req.switch_execution(&mut execution);
     if kind == Kind::Fiber {
         req.fibers_mut().active = active;
@@ -1707,21 +1818,15 @@ fn switch_into<P: HoldsCoroutine>(
     if left == FiberStatus::Dead {
         crate::observer::fiber_destroyed(req, leaving);
     }
-    let coroutine = coroutine_of::<P>(req, object)?;
-    match switched {
+    let back = match switched {
         Ok(Switched::Suspended(back)) => {
+            let coroutine = coroutine_of::<P>(req, object)?;
             coroutine.stack = Some(stack);
             coroutine.execution = Some(Box::new(execution));
-            Ok(back)
+            back
         }
         Ok(Switched::Returned(back)) => {
-            coroutine.status = CoroutineStatus::Dead;
-            let record = coroutine.record.take();
-            if let Some(record) = record {
-                req.heap_mut().free_block(record);
-            }
-            let dropped = execution.vm.stack.close(req.heap_mut());
-            req.drop_frames(dropped);
+            bury::<P>(req, object, execution)?;
             if matches!(back, Transfer::Fatal) {
                 // `zend_fiber_switch_to` raises the fiber's bailout again
                 // on the resumer, which leaves its own open frames to
@@ -1729,16 +1834,120 @@ fn switch_into<P: HoldsCoroutine>(
                 // the fatal is rendered, and the frames still stand.
                 crate::observer::bailed_out(req);
             }
-            Ok(back)
+            back
         }
         Err(fatal) => {
-            coroutine.status = CoroutineStatus::Dead;
+            coroutine_of::<P>(req, object)?.status = CoroutineStatus::Dead;
             let dropped = execution.vm.stack.close(req.heap_mut());
             req.drop_frames(dropped);
             req.fatal_of::<()>(Err(fatal))?;
-            Ok(Transfer::Fatal)
+            Transfer::Fatal
         }
+    };
+    Ok(back)
+}
+
+/// [`run_on`] for the coroutine `object` names, and in its place each
+/// coroutine a body ends into ([`CoroutineEnd::Into`]), resumed by what
+/// resumed the first, `caller`, as `zend_test_fiber_execute` hands a
+/// `pipeTo` target the dead fiber's: `object` and `stack` are left the
+/// last one's, and how it came back is returned. A body that ends into
+/// one not laid down is the engine's fatal, which comes back as the
+/// transfer that body's fatal makes.
+fn run_ending_into<P: HoldsCoroutine>(
+    req: &mut Request,
+    object: &mut PhpObject,
+    stack: &mut FiberStack<Request>,
+    mut own: Execution,
+    mut by: Resumer,
+    mut transfer: Transfer,
+    caller: Caller,
+) -> Result<Result<Switched<Transfer>, php_heap::Fatal>, Thrown> {
+    loop {
+        let switched = run_on::<P>(req, *object, stack, own, by, transfer)?;
+        let back = match switched {
+            Ok(Switched::Returned(back)) => back,
+            switched => return Ok(switched),
+        };
+        let Some(target) = coroutine_of::<P>(req, *object)?.into.take() else {
+            return Ok(Ok(Switched::Returned(back)));
+        };
+        settle(req, Ok(back));
+        let Some((next, held, kind)) = laid_down::<P>(req, target) else {
+            let _ = crate::api::raising::fatal(
+                req,
+                "InternalError: a fiber coroutine ended into one not laid down",
+            );
+            return Ok(Ok(Switched::Returned(Transfer::Fatal)));
+        };
+        ended_into::<P>(req, *object, target, caller)?;
+        *object = target;
+        *stack = next;
+        own = *held;
+        own.active = req.fibers().active;
+        transfer = Transfer::Value(Value::null());
+        by = Resumer::of(kind, &transfer);
     }
+}
+
+/// The coroutine `object` holds, laid down and not started, taken out
+/// for its first resume: its machine stack, its first execution and its kind. None where
+/// it is not such a one.
+fn laid_down<P: HoldsCoroutine>(
+    req: &mut Request,
+    object: PhpObject,
+) -> Option<(FiberStack<Request>, Box<Execution>, Kind)> {
+    let coroutine = object.native_mut::<P>(req)?.coroutine();
+    if coroutine.status != CoroutineStatus::Init || coroutine.stack.is_none() {
+        return None;
+    }
+    let execution = coroutine.execution.take()?;
+    let stack = coroutine.stack.take()?;
+    Some((stack, execution, coroutine.kind))
+}
+
+/// `zend_fiber_trampoline`'s last switch where the body of the coroutine
+/// `object` holds ended into `target`'s ([`CoroutineEnd::Into`]), made
+/// from the dead one's side as php makes it on its stack: `target` takes
+/// the dead one's `caller`, the observers see the switch from the dead
+/// coroutine into it, the dead one's execution is swapped out and given
+/// back, and its destroy is noticed, as `target`'s trampoline destroys
+/// the coroutine it came from before its body is called.
+fn ended_into<P: HoldsCoroutine>(
+    req: &mut Request,
+    object: PhpObject,
+    target: PhpObject,
+    caller: Caller,
+) -> Result<(), Thrown> {
+    coroutine_of::<P>(req, object)?.caller = None;
+    let leaving = observed(req, Some(object), FiberStatus::Dead);
+    coroutine_of::<P>(req, target)?.caller = Some(caller);
+    let entering = observed(req, Some(target), FiberStatus::Init);
+    crate::observer::fiber_switched(req, leaving, entering);
+    coroutine_of::<P>(req, target)?.status = CoroutineStatus::Running;
+    let mut execution = req.fibers_mut().switch_back();
+    req.switch_execution(&mut execution);
+    bury::<P>(req, object, execution)?;
+    crate::observer::fiber_destroyed(req, leaving);
+    Ok(())
+}
+
+/// `zend_fiber_destroy_context`'s engine half for the coroutine `object`
+/// holds, whose body returned: dead, its stack record and the VM stack
+/// of `execution`, its own, given back.
+fn bury<P: HoldsCoroutine>(
+    req: &mut Request,
+    object: PhpObject,
+    mut execution: Execution,
+) -> Result<(), Thrown> {
+    let coroutine = coroutine_of::<P>(req, object)?;
+    coroutine.status = CoroutineStatus::Dead;
+    if let Some(record) = coroutine.record.take() {
+        req.heap_mut().free_block(record);
+    }
+    let dropped = execution.vm.stack.close(req.heap_mut());
+    req.drop_frames(dropped);
+    Ok(())
 }
 
 /// The machine switch onto the stack of the coroutine `object` holds, with
@@ -1772,10 +1981,7 @@ fn run_on<P: HoldsCoroutine>(
             .is_some_and(|holder| holder.coroutine().status == CoroutineStatus::Running);
         match switched {
             Ok(Switched::Suspended(carried)) if passed => {
-                own = match req.fibers_mut().running.pop() {
-                    Some(running) => running.below,
-                    None => Execution::default(),
-                };
+                own = req.fibers_mut().switch_back();
                 req.switch_execution(&mut own);
                 // Held by the coroutine while it waits, where a read of it
                 // finds it ([`view`]).
@@ -2065,7 +2271,7 @@ fn start(
             let previous = std::mem::replace(&mut fiber.result, value);
             req.release(previous);
         }
-        Ok(Value::null())
+        Ok(CoroutineEnd::Return(Owner::null()))
     };
     let error_reporting = req.ini_error_reporting();
     lay_down::<ZendFiber>(req, this, Kind::Fiber, error_reporting, body)?;
@@ -2083,7 +2289,7 @@ fn lay_down<P: HoldsCoroutine>(
     object: PhpObject,
     kind: Kind,
     error_reporting: i64,
-    body: impl FnOnce(&mut Request) -> Result<Value, Thrown> + 'static,
+    body: impl FnOnce(&mut Request) -> Result<CoroutineEnd, Thrown> + 'static,
 ) -> Result<(), Thrown> {
     let size = stack_size(req);
     let reserved = u64::try_from(Request::ini_parse_bytes(
@@ -2187,29 +2393,42 @@ impl Coroutine {
         self.status
     }
 
-    /// The execution a suspended coroutine left, where a kept frame of it
-    /// is looked for ([`Request::in_frame`]). None for one laid down and
-    /// not started, which has no frame, and for one a suspend passed
-    /// through, whose bottom frame still names its resumer's, so a chain
-    /// read from its frames would not end at the bottom as a suspended
-    /// one's does.
-    pub(crate) fn suspended(&self) -> Option<&Execution> {
+    /// The execution a coroutine off the running chain holds, where a
+    /// kept frame of it is looked for ([`Request::in_frame`]): one
+    /// suspended, or one running that waits on a suspend that passed
+    /// through it, which holds its execution while it waits ([`run_on`]);
+    /// one on the running chain holds none. None for one laid down and
+    /// not started, which has no frame.
+    pub(crate) fn held(&self) -> Option<&Execution> {
         match self.status {
-            CoroutineStatus::Suspended => self.execution.as_deref(),
-            CoroutineStatus::Init | CoroutineStatus::Running | CoroutineStatus::Dead => None,
+            CoroutineStatus::Suspended | CoroutineStatus::Running => self.execution.as_deref(),
+            CoroutineStatus::Init | CoroutineStatus::Dead => None,
         }
     }
 
-    /// [`Coroutine::suspended`], taken out for the request to serve on
-    /// ([`Request::on_held_stack`]); [`Coroutine::hold`] puts it back.
-    pub(crate) fn take_suspended(&mut self) -> Option<Box<Execution>> {
-        self.suspended()?;
+    /// [`Coroutine::held`], taken out for the request to serve on
+    /// ([`take_chain`]); [`Coroutine::hold`] puts it back.
+    fn take_held(&mut self) -> Option<Box<Execution>> {
+        self.held()?;
         self.execution.take()
     }
 
-    /// What [`Coroutine::take_suspended`] took, held again.
+    /// What [`Coroutine::take_held`] took, held again.
     pub(crate) fn hold(&mut self, execution: Box<Execution>) {
         self.execution = Some(execution);
+    }
+
+    /// The coroutine whose frame this one's bottom frame names, php's
+    /// `stack_bottom->prev_execute_data`, while a suspend that passed
+    /// through it leaves it waiting: a `Fiber`'s resumer, `caller`, where
+    /// a resume and not a destroy ran it. None for an extension's
+    /// coroutine, whose bottom `zend_test_fiber_execute` zeroes, and for
+    /// a suspended one, whose suspend cleared `caller`.
+    fn linked_resumer(&self) -> Option<Context> {
+        match (self.kind, self.caller) {
+            (Kind::Fiber, Some(Caller::Coroutine(resumer))) if !self.destroyed => Some(resumer),
+            _ => None,
+        }
     }
 
     /// `zend_fiber_init_context` for an extension's coroutine, the one
@@ -2218,15 +2437,16 @@ impl Coroutine {
     /// first [`Coroutine::resume`], and the fiber observers told of
     /// it. The body runs on a VM page of its own at the error-reporting
     /// level standing now, its bottom frame naming no resumer's, as
-    /// `zend_test_fiber_execute` lays it; what it returns is what that
-    /// resume, or the last one, returns, and what it throws is raised
+    /// `zend_test_fiber_execute` lays it; the value it returns is what
+    /// that resume, or the last one, returns, a coroutine it ends into
+    /// runs in its place ([`CoroutineEnd`]), and what it throws is raised
     /// there. A size below two pages, or a mapping the platform refuses,
     /// is php's `Exception`; a coroutine laid down before is the engine's
     /// fatal, as php asserts `ZEND_FIBER_STATUS_INIT`.
     pub fn init<P: HoldsCoroutine>(
         req: &mut Request,
         object: PhpObject,
-        body: impl FnOnce(&mut Request) -> Result<Owner<Value>, Thrown> + 'static,
+        body: impl FnOnce(&mut Request) -> Result<CoroutineEnd, Thrown> + 'static,
     ) -> Result<(), Thrown> {
         let coroutine = coroutine_of::<P>(req, object)?;
         if coroutine.status != CoroutineStatus::Init || coroutine.stack.is_some() {
@@ -2236,9 +2456,7 @@ impl Coroutine {
             ));
         }
         let error_reporting = req.error_reporting();
-        lay_down::<P>(req, object, Kind::Extension, error_reporting, move |req| {
-            body(req).map(Owner::hand_on)
-        })
+        lay_down::<P>(req, object, Kind::Extension, error_reporting, body)
     }
 
     /// `zend_fiber_switch_context` into the coroutine `object`'s payload

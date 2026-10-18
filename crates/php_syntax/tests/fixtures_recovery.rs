@@ -572,7 +572,9 @@ fn a_left_nested_chain_parses_in_linear_time() {
         (0..3)
             .map(|_| {
                 let at = cpu();
-                let parsed = php_syntax::parse(src.as_bytes(), &php_syntax::Options::default());
+                let arena = php_syntax::Arena::new();
+                let parsed =
+                    php_syntax::parse(&arena, src.as_bytes(), &php_syntax::Options::default());
                 let took = cpu().saturating_sub(at);
                 assert!(parsed.diagnostics.is_empty() && parsed.missing.is_empty());
                 took

@@ -40,6 +40,10 @@ Opline
 Opline::fuses
 Opline::jump_target
 OplineIdx
+Safepoints
+Safepoints::INLINE
+Safepoints::new
+Safepoints::push
 TopLevel
 TryCatch
 Unit

@@ -12,7 +12,7 @@ use php_ext::request::{Allocation, ObserveAllocations, Request};
 use php_ext::test::{Capture, Engine, LeakSensor};
 use php_ext::values::{Emalloc, Owner, PhpArray};
 
-use super::super::{RelTime, Time, TimeFields};
+use super::super::{RelFields, Time, TimeFields};
 use crate::State;
 use crate::lent::Lent;
 use crate::obj::{DateState, IntervalState, PeriodState, TzState};
@@ -60,11 +60,11 @@ fn put(block: &mut Emalloc, at: usize, bytes: &[u8]) {
     block.bytes_mut()[at..at + bytes.len()].copy_from_slice(bytes);
 }
 
-fn relative(req: &mut Request, value: &RelTime) -> Result<Emalloc, Thrown> {
-    let mut block = record(req, size_of::<RelTime>())?;
+fn relative(req: &mut Request, value: &RelFields) -> Result<Emalloc, Thrown> {
+    let mut block = record(req, size_of::<RelFields>())?;
     macro_rules! fields {
         ($($field:ident),+ $(,)?) => {
-            $(put(&mut block, offset_of!(RelTime, $field), &value.$field.to_ne_bytes());)+
+            $(put(&mut block, offset_of!(RelFields, $field), &value.$field.to_ne_bytes());)+
         };
     }
     fields!(
@@ -130,12 +130,6 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
     for (name, size, alignment, room) in [
         ("date", size_of::<DateState>(), align_of::<DateState>(), 8),
         (
-            "interval",
-            size_of::<IntervalState>(),
-            align_of::<IntervalState>(),
-            24,
-        ),
-        (
             "period",
             size_of::<PeriodState>(),
             align_of::<PeriodState>(),
@@ -149,19 +143,21 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
         assert!(size > room);
         assert!(alignment <= 8);
     }
-    // A `DateTimeZone`'s state lies inside its object since #2630.
+    // A `DateTimeZone`'s state lies inside its object since #2630, a
+    // `DateInterval`'s since #2855.
     assert!(size_of::<TzState>() <= 32 && align_of::<TzState>() <= 8);
+    assert!(size_of::<IntervalState>() <= 24 && align_of::<IntervalState>() <= 8);
     println!(
         "time={} relative={} zone={} diagnostic={} message={} block={} optional-block={}",
         size_of::<TimeFields>(),
-        size_of::<RelTime>(),
+        size_of::<RelFields>(),
         size_of::<timelib_sys::TzInfo>(),
         size_of::<timelib_sys::ErrorContainer>(),
         size_of::<timelib_sys::ErrorMessage>(),
         size_of::<Emalloc>(),
         size_of::<Option<Emalloc>>()
     );
-    assert_eq!(size_of::<RelTime>(), crate::held::REL_TIME);
+    assert_eq!(size_of::<RelFields>(), 104);
     assert!(size_of::<Option<Emalloc>>() > 8);
     println!(
         "direct owned-zone shape={} native-zone={}: rejected",
@@ -174,7 +170,7 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
 fn real_records(req: &mut Request) -> Result<(), Thrown> {
     let before = req.memory_usage(false);
     let observer = req.observe_allocations(Box::new(Recorder::default()));
-    let value = RelTime {
+    let value = RelFields {
         y: -2,
         d: 3,
         h: 4,
@@ -182,12 +178,15 @@ fn real_records(req: &mut Request) -> Result<(), Thrown> {
         days: 731,
         special_amount: -17,
         have_special_relative: 1,
-        ..RelTime::default()
+        ..RelFields::default()
     };
     let interval = relative(req, &value)?;
     let cloned = copy(req, &interval)?;
-    assert_eq!(read_i64(&cloned, offset_of!(RelTime, days)), 731);
-    assert_eq!(read_i64(&cloned, offset_of!(RelTime, special_amount)), -17);
+    assert_eq!(read_i64(&cloned, offset_of!(RelFields, days)), 731);
+    assert_eq!(
+        read_i64(&cloned, offset_of!(RelFields, special_amount)),
+        -17
+    );
     let abbreviation = bytes(req, b"EST")?;
     assert_eq!(abbreviation.bytes(), b"EST\0");
     let cloned_abbreviation = copy(req, &abbreviation)?;

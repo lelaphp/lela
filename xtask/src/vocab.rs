@@ -23,7 +23,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -31,7 +30,7 @@ use anyhow::{Context, Result, bail};
 use crate::glossary::{self, Avoided, Glossary};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::reading::{self, Outcome, Reading, Status, Store};
+use crate::reading::{Outcome, Reading, Status, Store};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "vocab";
@@ -225,15 +224,11 @@ pub(crate) fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
     let avoided = glossary.avoided_phrases();
     let mut scan = Scan::default();
     for file in rust_files(dir)? {
-        let text = read(&file)?;
+        let text = crate::read(&file)?;
         let relative = file.strip_prefix(dir).unwrap_or(&file);
         scan_source(relative, &text, &avoided, &mut scan);
     }
     Ok(scan)
-}
-
-fn read(file: &Path) -> Result<String> {
-    fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))
 }
 
 /// Scan one source file into `scan`.
@@ -450,7 +445,7 @@ fn matches(pattern: &str, path: &Path) -> bool {
 /// so is `fixtures/`, whose files are other crates' sources.
 fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    reading::walk(dir, &mut files)?;
+    crate::tally::files_under(dir, &mut files)?;
     files.retain(|p| {
         p.extension().is_some_and(|e| e == "rs")
             && !p

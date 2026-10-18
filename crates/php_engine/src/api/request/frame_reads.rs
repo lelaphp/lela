@@ -524,10 +524,10 @@ impl Request {
     /// stack for `f` as a resumption stands it and is suspended again
     /// after ([`crate::generator::with_kept_frame`]). And a suspended
     /// fiber's frame, on the stack the fiber holds, which the request runs
-    /// on for `f` with the chain ending at the fiber's bottom frame
-    /// ([`Request::on_held_stack`]). `None` for a frame popped, and for a
-    /// frame of a coroutine a suspend passed through, whose chain runs on
-    /// into its resumer's held stack, which no serve stands it on.
+    /// on for `f` with the chain ending at the fiber's bottom frame; and a
+    /// frame of a fiber a suspend passed through, waiting, whose chain
+    /// runs on into its resumer's held stack ([`Request::on_held_stack`]).
+    /// `None` for a frame popped.
     pub(super) fn in_frame<R>(
         &mut self,
         id: FrameId,
@@ -539,7 +539,7 @@ impl Request {
         if let Some(coroutine) = id.coroutine
             && let Some(at) = coroutine
                 .coroutine(self)
-                .and_then(|held| id.place_on(&held.suspended()?.vm))
+                .and_then(|held| id.place_on(&held.held()?.vm))
         {
             return self.on_held_stack(coroutine, |req| f(req, at));
         }

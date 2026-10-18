@@ -97,7 +97,7 @@ impl Emit<'_> {
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let arguments = Args::Written {
-            list: vec![Arg::Positional(Source::Node(value))],
+            list: self.arena.copy(&[Arg::Positional(Source::Node(value))]),
             line,
         };
         let callable = self.peel(callable);

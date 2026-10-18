@@ -433,6 +433,12 @@ pub struct Request {
     /// they made, which the next one counts on from
     /// ([`crate::engine::Shared::compile_for`]).
     keys_made: u32,
+    /// The arena every compile this request makes parses into and keeps
+    /// its temporaries in, reset after each (#2810): what php's
+    /// `CG(ast_arena)` is to one compile, its room kept for the next, so
+    /// an `eval` of a statement allocates nothing for its tree. Not the
+    /// engine's published arena of rows, the `arena` above.
+    compile_arena: php_compile::syntax::Arena,
     /// Whether the string compiling now is one the host evaluates of its
     /// own, which `zend_eval_stringl` compiles with `CG(compiler_options)`
     /// at `ZEND_COMPILE_DEFAULT_FOR_EVAL`, so without the engine's
@@ -894,6 +900,7 @@ impl Request {
             links: linking::Links::default(),
             record: recording::Record::default(),
             keys_made: 0,
+            compile_arena: php_compile::syntax::Arena::new(),
             compiling_host_string: false,
             no_extensions: false,
             script_encodings: None,

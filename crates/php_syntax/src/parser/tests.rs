@@ -25,7 +25,8 @@ fn marker_precede_chains() {
         (SyntaxKind::INT, 1),
     ]);
     let input = Input::new(text, &raw);
-    let lines = LineIndex::new(text);
+    let arena = crate::Arena::new();
+    let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
 
     let m = p.start();
@@ -38,7 +39,7 @@ fn marker_precede_chains() {
     rhs.complete(&mut p, SyntaxKind::LITERAL_EXPR);
     wrapper.complete(&mut p, SyntaxKind::BINARY_EXPR);
 
-    let events = p.finish();
+    let (events, _) = p.finish();
     // The first event carries the forward link to its wrapper.
     assert!(
         matches!(
@@ -51,7 +52,7 @@ fn marker_precede_chains() {
         "expected Start with forward_parent 3, got {:?}",
         events[0]
     );
-    let built = tree::build(&raw, &LineIndex::new(text), events);
+    let built = tree::build(&arena, &raw, &lines, events);
     assert_eq!(
         tree::dump(&built.tree, &raw, text),
         "BINARY_EXPR@0..3\n  LITERAL_EXPR@0..1\n    INT@0..1 \"1\"\n  PLUS@1..2 \"+\"\n  LITERAL_EXPR@2..3\n    INT@2..3 \"2\"\n"
@@ -63,7 +64,8 @@ fn at_reads_the_current_token_and_a_bump_moves_on() {
     let text = b"$x;";
     let raw = tokens(&[(SyntaxKind::VARIABLE, 2), (SyntaxKind::SEMICOLON, 1)]);
     let input = Input::new(text, &raw);
-    let lines = LineIndex::new(text);
+    let arena = crate::Arena::new();
+    let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     assert!(!p.at(SyntaxKind::COMMA));
     assert!(!p.at(SyntaxKind::IDENT));
@@ -80,7 +82,8 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = (1];";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let lines = LineIndex::new(text);
+    let arena = crate::Arena::new();
+    let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     p.bump(SyntaxKind::OPEN_TAG);
     p.bump(SyntaxKind::VARIABLE);
@@ -113,7 +116,8 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = 1";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let lines = LineIndex::new(text);
+    let arena = crate::Arena::new();
+    let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     while !p.at_eof() {
         p.bump_any();
@@ -130,7 +134,8 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = 1);\n\n$y = (\n1];";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let lines = LineIndex::new(text);
+    let arena = crate::Arena::new();
+    let lines = LineIndex::new(&arena, text);
     let mut p = Parser::new(&input, FileId(0), &lines);
     while !p.at(SyntaxKind::R_PAREN) {
         p.bump_any();
@@ -246,14 +251,15 @@ fn parenthesised(depth: usize) -> Vec<u8> {
 
 /// The source through the grammar's parenthesised path, one level of
 /// recursion per `(`.
-fn parse_nested(src: &[u8]) -> tree::Built {
+fn parse_nested(src: &[u8]) -> tree::Built<'static> {
     let lexed = lex(FileId(0), src, &LexOptions::default());
     assert!(lexed.diagnostics.is_empty(), "the lexer has no depth");
     let input = Input::new(src, &lexed.tokens);
-    let lines = LineIndex::new(src);
+    let arena: &'static crate::Arena = Box::leak(Box::new(crate::Arena::new()));
+    let lines = LineIndex::new(arena, src);
     let mut p = Parser::new(&input, FileId(0), &lines);
     crate::grammar::source_file(&mut p);
-    tree::build(&lexed.tokens, &lines, p.finish())
+    tree::build(arena, &lexed.tokens, &lines, p.finish().0)
 }
 
 /// The nesting cap: past [`MAX_DEPTH`] the construct is consumed flat, no

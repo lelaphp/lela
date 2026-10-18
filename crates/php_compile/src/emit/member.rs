@@ -41,12 +41,12 @@ pub(super) struct PropName {
 /// `zend_compile_static_call` hold it once compiled: the name its
 /// constant pair will carry, or the operand the program's value stands
 /// in.
-pub(super) enum MethodName {
-    Constant(Vec<u8>),
+pub(super) enum MethodName<'a> {
+    Constant(&'a [u8]),
     Computed((OperandKind, u32)),
 }
 
-impl Emit<'_> {
+impl<'a> Emit<'a> {
     /// The member after `->` or `?->`: the identifier, or `$p`, `$$p`,
     /// `${expr}` and `{expr}` as the expression that names it.
     pub(super) fn member_of(
@@ -202,12 +202,12 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Method name must be a string in %s on line 3
     /// ```
-    pub(super) fn method_name(&mut self, member: Member) -> Result<MethodName, CompileError> {
+    pub(super) fn method_name(&mut self, member: Member) -> Result<MethodName<'a>, CompileError> {
         let name = match member {
-            Member::Written(token) => self.text(token).to_vec(),
+            Member::Written(token) => self.text(token),
             Member::Computed(expr) => match self.expr(expr)? {
                 Where::Constant(value) => match value.as_str() {
-                    Some(name) => name.bytes().to_vec(),
+                    Some(name) => self.arena.copy(name.bytes()),
                     None => return Err(self.compile_error("Method name must be a string")),
                 },
                 computed => return Ok(MethodName::Computed(self.operand(computed))),

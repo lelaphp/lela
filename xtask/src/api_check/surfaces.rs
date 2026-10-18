@@ -22,7 +22,6 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -67,12 +66,8 @@ impl Surfaces {
     /// §4.10 of `root`'s [`DESIGN`], with the markers to be held against
     /// `source`; a workspace without the file has no rows.
     pub(crate) fn read(root: &Path, source: &Source) -> Result<Surfaces> {
-        let path = root.join(DESIGN);
-        let surfaces = match fs::read_to_string(&path) {
-            Ok(text) => Surfaces::parse(&text),
-            Err(e) if e.kind() == ErrorKind::NotFound => Surfaces::default(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
+        let text = crate::read_if(&root.join(DESIGN))?;
+        let surfaces = text.map_or_else(Surfaces::default, |text| Surfaces::parse(&text));
         Ok(Surfaces {
             pinned: Pinned::new(source),
             ..surfaces
@@ -201,8 +196,7 @@ pub(crate) fn write(crates: &Crates, inventory: &mut Inventory<'_>) -> Result<()
             )],
             ..Lock::default()
         });
-        fs::write(&path, lock.render(&[Block::of(None, items)]))
-            .with_context(|| format!("writing {}", path.display()))?;
+        crate::write(&path, lock.render(&[Block::of(None, items)]))?;
     }
     Ok(())
 }

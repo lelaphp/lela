@@ -41,15 +41,15 @@ impl Emit<'_> {
         id: NodeId<ClosureExpr>,
         line: u32,
     ) -> Result<Closure, CompileError> {
-        let node = self.parsed.tree[id].clone();
-        let attributes = self.walk_attributes(&node.attrs)?;
+        let node = self.parsed.tree[id];
+        let attributes = self.walk_attributes(self.list(node.attrs))?;
         let is_static = self.first_kind(node.range) == Some(SyntaxKind::STATIC_KW);
         let mut lexical = Vec::new();
         if let Some(clause) = node.uses {
-            for id in &self.parsed.tree[clause].closure_use_vars.clone() {
+            for id in self.list(self.parsed.tree[clause].closure_use_vars) {
                 let used = &self.parsed.tree[*id];
                 lexical.push(Use {
-                    name: self.variable_name(used.var),
+                    name: self.variable_name(used.var).to_vec(),
                     by_ref: used.byref.is_some(),
                     line: used.line(),
                 });
@@ -82,8 +82,8 @@ impl Emit<'_> {
     /// (`zend_compile_func_decl`), and whose end line is the token after
     /// the body's (#601 row 18).
     fn arrow_fn(&mut self, id: NodeId<ArrowFnExpr>, line: u32) -> Result<Closure, CompileError> {
-        let node = self.parsed.tree[id].clone();
-        let attributes = self.walk_attributes(&node.attrs)?;
+        let node = self.parsed.tree[id];
+        let attributes = self.walk_attributes(self.list(node.attrs))?;
         let is_static = self.first_kind(node.range) == Some(SyntaxKind::STATIC_KW);
         let parameters = self.walk_parameters(node.params)?;
         let return_type = match node.ret {

@@ -23,7 +23,7 @@
 use std::borrow::Cow;
 
 use php_syntax::tree::{self, DeclareStmt, TokenId};
-use php_syntax::{Holder, Parsed, Span, SyntaxKind, TokenValue};
+use php_syntax::{Arena, Holder, Parsed, Span, SyntaxKind, TokenValue};
 
 use crate::{CompileError, Level, Options};
 
@@ -435,7 +435,7 @@ impl Refusal {
     pub(crate) fn error(&self, raised: Vec<php_unit::Diagnostic>) -> CompileError {
         CompileError {
             level: self.level,
-            message: self.message.clone(),
+            message: self.message.clone().into(),
             line: self.line,
             raised,
             thrown: self.thrown,
@@ -449,7 +449,7 @@ impl Refusal {
 /// among its diagnostics; the fatal it stopped at, if any; and what
 /// maps an offset in the text read back to the file.
 pub(crate) struct Scanned<'p> {
-    pub(crate) parsed: Cow<'p, Parsed>,
+    pub(crate) parsed: Cow<'p, Parsed<'p>>,
     pub(crate) refused: Option<Refusal>,
     halt: Option<Halt<'p>>,
 }
@@ -515,12 +515,34 @@ struct Declared {
 /// warning that the declaration is ignored. Then the token filter the
 /// last one chose, over the parse.
 pub(crate) fn scan<'p>(
-    parsed: &'p Parsed,
+    arena: &'p Arena,
+    parsed: &'p Parsed<'p>,
+    options: &Options<'p>,
+    scanning: Option<Scanning<'p>>,
+) -> Scanned<'p> {
+    // No `declare` to read and no filter the file was opened through:
+    // the parse stands as it is, and nothing is walked.
+    if scanning.is_none_or(|s| s.filter.is_none()) && parsed.tree.nodes::<DeclareStmt>().is_empty()
+    {
+        return Scanned {
+            parsed: Cow::Borrowed(parsed),
+            refused: None,
+            halt: None,
+        };
+    }
+    scan_declared(arena, parsed, options, scanning)
+}
+
+/// [`scan`] over a parse with a `declare` to read or a filter the file
+/// was opened through.
+fn scan_declared<'p>(
+    arena: &'p Arena,
+    parsed: &'p Parsed<'p>,
     options: &Options<'p>,
     scanning: Option<Scanning<'p>>,
 ) -> Scanned<'p> {
     let scanning = scanning.unwrap_or(Scanning {
-        original: &parsed.source,
+        original: parsed.source,
         filter: None,
     });
     let multibyte = options.multibyte;
@@ -561,10 +583,12 @@ pub(crate) fn scan<'p>(
                 }
                 Read::Again(reread) => {
                     let close = declared.close as usize;
-                    let mut text = current.source.get(..close).unwrap_or_default().to_vec();
-                    text.extend_from_slice(reread.get(close..).unwrap_or_default());
+                    let text = arena.concat(&[
+                        current.source.get(..close).unwrap_or_default(),
+                        reread.get(close..).unwrap_or_default(),
+                    ]);
                     let syntax = crate::syntax_options(options);
-                    current = Cow::Owned(php_syntax::parse(&text, &syntax));
+                    current = Cow::Owned(php_syntax::parse(arena, text, &syntax));
                     continue 'reparse;
                 }
             }
@@ -692,7 +716,8 @@ fn position(diagnostics: &[php_syntax::Diagnostic], close: u32) -> usize {
 fn declared(parsed: &Parsed) -> Vec<Declared> {
     let mut all = Vec::new();
     for node in parsed.tree.nodes::<DeclareStmt>() {
-        let Some(last) = node.declare_directives.last() else {
+        let directives = parsed.tree.list(node.declare_directives);
+        let Some(last) = directives.last() else {
             continue;
         };
         let after = parsed.tree[*last].range.end();
@@ -705,7 +730,7 @@ fn declared(parsed: &Parsed) -> Vec<Declared> {
         };
         let end = close.offset + close.len;
         let line = parsed.lines.line_number(close.offset);
-        for directive in &node.declare_directives {
+        for directive in directives {
             let directive = &parsed.tree[*directive];
             if php_syntax::token_text(parsed, directive.name).eq_ignore_ascii_case(b"encoding")
                 && let Some(value) = directive.value
@@ -761,15 +786,15 @@ fn string_of(parsed: &Parsed, value: tree::Expr, precision: i32) -> Vec<u8> {
         }
         tree::Expr::InterpolatedStringExpr(id) => parts(
             Holder::DoubleQuoted(&tree[id]),
-            &mut literal_parts(&tree[id].parts).into_iter(),
+            &mut literal_parts(tree.list(tree[id].parts)).into_iter(),
         ),
         tree::Expr::HeredocExpr(id) => parts(
             Holder::Heredoc(&tree[id]),
-            &mut literal_parts(&tree[id].parts).into_iter(),
+            &mut literal_parts(tree.list(tree[id].parts)).into_iter(),
         ),
         tree::Expr::NowdocExpr(id) => parts(
             Holder::Nowdoc(&tree[id]),
-            &mut tree[id].text.iter().copied(),
+            &mut tree.list(tree[id].text).iter().copied(),
         ),
         _ => Vec::new(),
     }
@@ -850,7 +875,13 @@ mod tests {
             ..Options::default()
         };
         let mut strings = php_heap::Strings::new();
-        crate::compile_source(script, &options, &mut strings).map(|unit| (unit, strings))
+        crate::compile_source(
+            &mut php_syntax::Arena::new(),
+            script,
+            &options,
+            &mut strings,
+        )
+        .map(|unit| (unit, strings))
     }
 
     /// The dump, read while the unit's strings stand.
@@ -991,7 +1022,7 @@ mod tests {
         assert_eq!(
             refused
                 .err()
-                .map(|e| (e.message, e.line, e.thrown, e.raised.len())),
+                .map(|e| (e.message.into_owned(), e.line, e.thrown, e.raised.len())),
             Some(("Encoding must be a literal".to_owned(), 2, true, 1))
         );
     }

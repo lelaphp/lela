@@ -1431,7 +1431,8 @@ fn tokenize_parse(
             ..LexOptions::default()
         },
     };
-    let parsed = syntax::parse(code, &options);
+    let arena = syntax::Arena::new();
+    let parsed = syntax::parse(&arena, code, &options);
     for raised in &parsed.diagnostics {
         match raised.level {
             syntax::Level::Parse => {
@@ -1458,7 +1459,7 @@ fn tokenize_parse(
             syntax::Level::CompileError => {}
         }
     }
-    let mut tokens = tokens::tokens(code, &parsed.tokens);
+    let mut tokens = tokens::tokens(code, parsed.tokens);
     let fed = feedback::identifiers(&parsed);
     for token in &mut tokens {
         if fed.binary_search(&token.start).is_ok() {

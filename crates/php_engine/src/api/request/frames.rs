@@ -411,36 +411,52 @@ impl Request {
     }
 
     /// `f` served with the request running on the stack of `coroutine`,
-    /// suspended, as a debugger serves a suspended fiber's frame with
-    /// `EG(current_execute_data)` moved into `fiber->execute_data`'s
-    /// chain: every running coroutine set aside, so the chain runs from
-    /// that stack and ends at the coroutine's bottom frame, where
-    /// `zend_fiber_suspend` cut `prev_execute_data`. The request's own
-    /// stack is kept where [`crate::fiber::Fibers::request_stack`] finds
-    /// it, so `EG(symbol_table)`'s CVs are read where they stand, and the
-    /// serve holds one owner of the coroutine's object, so nothing `f`
-    /// does destroys it meanwhile. As in [`Request::on_stack`], the
+    /// held off the running chain, as a debugger serves a suspended
+    /// fiber's frame with `EG(current_execute_data)` moved into
+    /// `fiber->execute_data`'s chain: every running coroutine set aside,
+    /// so the chain runs from that stack, and on through the held stacks
+    /// below it while a suspend that passed through leaves each waiting
+    /// on the one under it, to the bottom frame of the last, where
+    /// `zend_fiber_suspend` cut `prev_execute_data`
+    /// ([`crate::fiber::take_chain`]). The request's own stack is kept
+    /// where [`crate::fiber::Fibers::request_stack`] finds it, so
+    /// `EG(symbol_table)`'s CVs are read where they stand, and the serve
+    /// holds one owner of each coroutine's object on the chain, so nothing
+    /// `f` does destroys one meanwhile. As in [`Request::on_stack`], the
     /// error-reporting level and the machine stack's limit stay the
     /// running fiber's, and no fiber starts, suspends or resumes
-    /// meanwhile. `None` where the coroutine is not suspended.
+    /// meanwhile. `None` where the coroutine holds no execution.
     pub(super) fn on_held_stack<R>(
         &mut self,
         coroutine: crate::fiber::Context,
         f: impl FnOnce(&mut Request) -> R,
     ) -> Option<R> {
-        let mut execution = coroutine.coroutine(self)?.take_suspended()?;
-        let object = coroutine.object().as_value();
-        self.addref(&object);
+        let (mut execution, below) = crate::fiber::take_chain(self, coroutine)?;
+        let objects: Vec<Value> = std::iter::once(coroutine)
+            .chain(below.iter().map(|held| held.coroutine))
+            .map(|held| held.object().as_value())
+            .collect();
+        for object in &objects {
+            self.addref(object);
+        }
         self.switch_stack(&mut execution);
-        self.fibers.set_aside_for(coroutine, execution);
+        self.fibers.set_aside_for(coroutine, execution, below);
         let served = self.with_fiber_switch_blocked(f);
-        if let Some((coroutine, mut execution)) = self.fibers.take_back() {
+        if let Some((coroutine, mut execution, below)) = self.fibers.take_back() {
             self.switch_stack(&mut execution);
-            if let Some(held) = coroutine.coroutine(self) {
-                held.hold(execution);
+            let held = std::iter::once(crate::fiber::HeldStack {
+                coroutine,
+                execution,
+            });
+            for held in held.chain(below) {
+                if let Some(coroutine) = held.coroutine.coroutine(self) {
+                    coroutine.hold(held.execution);
+                }
             }
         }
-        self.release(object);
+        for object in objects {
+            self.release(object);
+        }
         Some(served)
     }
 

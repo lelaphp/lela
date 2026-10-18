@@ -33,7 +33,7 @@ pub use enum_methods::enum_methods;
 pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{
     BoundVar, CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, MapPtrOffset, OpArray,
-    OperandKind, Opline, OplineIdx, TryCatch,
+    OperandKind, Opline, OplineIdx, Safepoints, TryCatch,
 };
 pub use opcode::{Handler, Opcode};
 pub use types::{type_to_string, type_to_string_called};

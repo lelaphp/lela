@@ -206,17 +206,15 @@ impl Spent {
 
     /// The three numbers put on `reading`, each where this has one.
     pub fn carry(self, reading: &mut Reading) {
-        if let Some(usd) = self.usd {
-            reading.numbers.insert(USD.to_owned(), Number::Float(usd));
-        }
-        if let Some(tokens) = self.tokens {
-            reading
-                .numbers
-                .insert(TOKENS.to_owned(), Number::Int(tokens));
-        }
-        if let Some(turn) = self.turn {
-            reading.numbers.insert(TURN.to_owned(), Number::Int(turn));
-        }
+        let numbers = [
+            (USD, self.usd.map(Number::Float)),
+            (TOKENS, self.tokens.map(Number::Int)),
+            (TURN, self.turn.map(Number::Int)),
+        ];
+        let had = numbers
+            .into_iter()
+            .filter_map(|(key, n)| Some((key.to_owned(), n?)));
+        reading.numbers.extend(had);
     }
 }
 

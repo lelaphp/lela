@@ -121,6 +121,53 @@ pub(crate) fn built_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The text of the file at `path`, an error naming it where it cannot be
+/// read: every instrument's read of a file it needs.
+pub(crate) fn read(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// The text of the file at `path`, `None` where there is no such file, an
+/// error naming it where it cannot be read.
+pub(crate) fn read_if(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// The paths of the entries of the directory `dir`, none where there is
+/// no such directory, an error naming it where it cannot be listed.
+pub(crate) fn entries(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
+    };
+    let listing = || format!("listing {}", dir.display());
+    entries
+        .map(|entry| Ok(entry.with_context(listing)?.path()))
+        .collect()
+}
+
+/// The file at `path` removed, where there is one, an error naming it
+/// where it cannot be.
+pub(crate) fn remove(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            Err(err).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `contents` written to the file at `path`, an error naming it where it
+/// cannot be: every instrument's write of a file it lays down.
+pub(crate) fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
+}
+
 /// `xtask/` as cargo names it for the process running, a test's among
 /// them, else the one in the workspace it runs in: what a test reads its
 /// fixtures under, never a path baked in at compile time (#2719).

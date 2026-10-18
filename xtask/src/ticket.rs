@@ -182,7 +182,7 @@ use serde::Deserialize;
 
 use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
-use crate::reading::{Reading, Status};
+use crate::reading::{Reading, Status, millis};
 use crate::steer::STEERABLE;
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
@@ -414,9 +414,10 @@ impl Successors {
     }
 
     /// Each successor exists at the tracker, is open, and shares one of
-    /// `tracks`, the closed ticket's, where those are not `main`'s; the
-    /// first that is not is the refusal.
-    fn held(&self, gh: &Gh, root: &Path, tracks: &[&str]) -> Result<()> {
+    /// the tracks of `closed`, the ticket that opens it, where those are
+    /// not `main`'s; the first that is not is the refusal.
+    fn held(&self, gh: &Gh, root: &Path, closed: &Issue) -> Result<()> {
+        let tracks = &tracks_of(closed.labels.iter().map(|l| l.name.as_str()))[..];
         if let Successors::Tickets(tickets) = self
             && tickets.is_empty()
         {
@@ -1639,11 +1640,6 @@ fn secs(span: Duration) -> String {
     format!("{:.1} s", span.as_secs_f64())
 }
 
-/// A span in whole milliseconds, for a count.
-fn millis(span: Duration) -> u64 {
-    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
-}
-
 /// A reading of the instrument over `scope`, stamped over the workspace
 /// as every reading of the instrument is.
 fn stamped(snapshot: &Snapshot, scope: &str) -> Result<Reading> {
@@ -1775,11 +1771,7 @@ fn ready(
     let session_id = (!reading.session.is_empty()).then_some(reading.session.as_str());
     let opened = successors.describe(session_id);
     successors
-        .held(
-            gh,
-            root,
-            &tracks_of(issue.labels.iter().map(|l| l.name.as_str())),
-        )
+        .held(gh, root, issue)
         .map_err(|err| format!("{err:#}; not ready, nothing recorded"))?;
     let branch = crate::track::head_branch(root)
         .ok_or("HEAD is detached, and a ready record is a branch's; not ready, nothing recorded")?;
@@ -1818,11 +1810,7 @@ fn close(
         .filter(|t| !issue.blocking.nodes.iter().any(|n| n.number == t.number()))
         .collect::<Vec<_>>();
     successors
-        .held(
-            gh,
-            root,
-            &tracks_of(issue.labels.iter().map(|l| l.name.as_str())),
-        )
+        .held(gh, root, issue)
         .and_then(|()| gh.blocking(root, ticket, &missing))
         .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))?;
     // The edge is set by now; a close the tracker refuses leaves it

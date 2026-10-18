@@ -137,7 +137,7 @@ The one flag on a request that the execution timer, signal delivery, an extensio
 _Avoid_: vm_interrupt (php's field), timeout flag, pending signal, tick (php's `register_tick_function`, `unregister_tick_function`)
 
 **Trace**:
-One recorded straight-line path through the op arrays, compiled to machine code, holding its unit alive, with exits back to the interpreter. A root starts at a hot safepoint; a side trace starts at a hot exit of another trace.
+One recorded straight-line path through the op arrays, compiled to machine code, with exits back to the interpreter, and freed with its epoch's trace table, never alone; the epoch keeps every unit it inlined until then. A root starts at a hot safepoint; a side trace starts at a hot exit of another trace.
 _Avoid_: compiled function, region (month three's word), tracelet (HHVM's)
 
 **Exit**:

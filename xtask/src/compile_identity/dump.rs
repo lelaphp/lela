@@ -450,7 +450,7 @@ impl Programs {
             .map_or_else(|| PathBuf::from("program"), PathBuf::from)
             .with_extension("php");
         let path = self.0.join(name);
-        fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+        crate::write(&path, body)?;
         Ok(path)
     }
 }
