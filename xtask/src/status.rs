@@ -948,8 +948,8 @@ fn outermost(rows: Vec<Row>) -> Vec<Row> {
 
 /// The counts that size a run rather than judge it; the subset's row
 /// carries them, so a comparison's cell leaves them out.
-const SIZE: [&str; 7] = [
-    "passed", "percent", "run", "skipped", "tests", "unread", "xfailed",
+const SIZE: [&str; 8] = [
+    "passed", "percent", "run", "skipped", "tests", "unread", "warned", "xfailed",
 ];
 
 /// The phpt rows as Markdown: one per subset, each comparison folded into

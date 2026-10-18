@@ -231,7 +231,7 @@ impl<'a> Adapter<'a> {
             (Compared::Same, Some(why)) => Judged::new(
                 &id,
                 &name,
-                Judgement::Pass,
+                Judgement::Warn,
                 format!("the XFAIL section says {why:?} and the test passes"),
             ),
             (Compared::Same, None) => Judged::new(&id, &name, Judgement::Pass, ""),

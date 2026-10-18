@@ -59,10 +59,11 @@ pub(crate) struct Row {
     f: u64,
     /// Unread: refused by the compiler before any test code ran.
     u: u64,
-    /// The rest of `tests`: skipped, expected failures, and whatever the
-    /// reading did not account for; `p + d + f + u + s` is `tests`.
+    /// The rest of `tests`: skipped, expected failures, warned, and
+    /// whatever the reading did not account for; `p + d + f + u + s` is
+    /// `tests`.
     s: u64,
-    /// The tests that met their expectation, passed or diverged.
+    /// The tests that met their expectation, passed, warned or diverged.
     met: u64,
     /// Met-of-target, where the reading was held to one (#1184); null
     /// where it was not.
