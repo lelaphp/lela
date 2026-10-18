@@ -606,11 +606,11 @@ impl Request {
         }
         // `sapi_get_request_time`, when the request started.
         let now = self.started().as_secs_f64();
-        let name = PhpString::new(self, b"REQUEST_TIME_FLOAT")?;
-        server.set(self, name.into_key(), Owner::float(now))?;
-        let name = PhpString::new(self, b"REQUEST_TIME")?;
+        let name = self.registered_key(b"REQUEST_TIME_FLOAT")?;
+        server.set(self, name, Owner::float(now))?;
+        let name = self.registered_key(b"REQUEST_TIME")?;
         let whole = self.request_time();
-        server.set(self, name.into_key(), Owner::int(whole))?;
+        server.set(self, name, Owner::int(whole))?;
         // `zend_hash_find_ex_ind` of both, and neither where one is
         // missing: the zval as the table holds it, a reference kept one.
         let found = |req: &mut Request, name: &[u8]| {
@@ -711,8 +711,7 @@ impl Request {
             if name.is_empty() || name.iter().any(|b| matches!(b, b' ' | b'.' | b'[')) {
                 continue;
             }
-            let name = PhpString::new(self, &name)?;
-            let name = Key::from_string(self, name);
+            let name = self.registered_key(&name)?;
             let value = match PhpString::new(self, &value) {
                 Ok(value) => value,
                 Err(thrown) => {
@@ -965,6 +964,17 @@ impl Request {
         }
     }
 
+    /// The key `php_register_variable_quick` writes a variable's name
+    /// under: an integer where `ZEND_HANDLE_NUMERIC_STR` reads one, with
+    /// no string made, and otherwise `zend_string_init_interned`'s
+    /// string ([`Request::interned`]), which the array keeps.
+    fn registered_key(&mut self, name: &[u8]) -> Result<Owner<Key>, Thrown> {
+        match php_heap::canonical_int(name) {
+            Some(index) => Ok(Owner::index(index)),
+            None => Ok(self.interned(name)?.into_key()),
+        }
+    }
+
     /// `php_register_variable_ex` into `track`, with `cookie` saying the
     /// track is `$_COOKIE`'s, whose plain name already there keeps the
     /// first value (RFC 2965's more specific path first). `value` is the
@@ -1183,19 +1193,19 @@ impl Request {
             value.give_up(self);
             return Ok(());
         }
-        let name = match PhpString::new(self, index) {
-            Ok(name) => name,
+        // `zend_symtable_str_exists` before the name is made, as
+        // `php_register_variable_ex` asks it.
+        if place.cookie && path.is_empty() && container.find_symtable(index).is_some() {
+            value.give_up(self);
+            return Ok(());
+        }
+        let key = match self.registered_key(index) {
+            Ok(key) => key,
             Err(thrown) => {
                 value.give_up(self);
                 return Err(thrown);
             }
         };
-        if place.cookie && path.is_empty() && container.get(&Key::lookup(*name)).is_some() {
-            name.give_up(self);
-            value.give_up(self);
-            return Ok(());
-        }
-        let key = Key::from_string(self, name);
         container.set(self, key, value)
     }
 

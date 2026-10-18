@@ -863,21 +863,21 @@ impl Permanent {
     }
 }
 
-/// One request's interned strings: what php's compiler and runtime
-/// intern while the request runs, held once so that a name is one
-/// string. Under opcache, the regime a request's memory is held to from
-/// its first line (design §5.13, #2863), php keeps no such table on the
-/// request's heap: `zend_string_init_interned` and
-/// `zend_new_interned_string` are `accel_init_interned_string_for_php`
-/// and `accel_new_interned_string_for_php`
+/// One request's own strings of its declarations: the constants and
+/// names of the units it compiled for itself and the names read off its
+/// declarations, held once so that a declaration's name is one string,
+/// as php's op arrays and class entries hold theirs. Under opcache, the
+/// regime a request's memory is held to from its first line (design
+/// §5.13, #2863), php keeps no `CG(interned_strings)` on the request's
+/// heap: `zend_string_init_interned` and `zend_new_interned_string` are
+/// `accel_init_interned_string_for_php` and
+/// `accel_new_interned_string_for_php`
 /// (`Z/ext/opcache/ZendAccelerator.c`), which hand out a plain string of
-/// the request's heap at the size `zend_string_init` takes, and
-/// `CG(interned_strings)` is never laid down, so php's 40960-byte bucket
-/// array, which `php -n` `emalloc`s on the first string a request
-/// interns, is not on it. Here the strings are the request's heap's, at
-/// that size, and the table that finds them again is a [`Permanent`] on
-/// the system allocator, which nothing counts, as opcache's table is
-/// not counted.
+/// the request's heap at the size `zend_string_init` takes, so php's
+/// 40960-byte bucket array, which `php -n` `emalloc`s on the first string
+/// a request interns, is not on it. Here the strings are the request's
+/// heap's, at that size, and the table that finds them again is a
+/// [`Permanent`] on the system allocator, which nothing counts.
 ///
 /// That is the regime the witness reads: under `php -n` php's compile
 /// lays the 40960 down before the first line, which the divergence

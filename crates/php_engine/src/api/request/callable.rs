@@ -784,18 +784,20 @@ impl Request {
             Some(at) => {
                 let scope = ce_org.or(frame.scope);
                 let class = callable[..at].to_vec();
-                // `zend_string_init_interned` of the class part, the
-                // string the lookup hands an autoloader, which a trace of
-                // what that loader throws then holds at no cost.
-                if self.declared_string(&class).is_err() {
+                // `zend_string_init_interned` of the class part, `cname`,
+                // held while `zend_is_callable_check_class` looks the class
+                // up and released after it.
+                let Ok(cname) = self.interned(&class) else {
                     return Err(Refusal::Unsaid);
-                }
+                };
                 let quiet = if ce_org.is_some() {
                     Deprecations::Suppressed
                 } else {
                     deprecations
                 };
-                strict = self.callable_class(&class, scope, frame, fcc, quiet)?;
+                let checked = self.callable_class(&class, scope, frame, fcc, quiet);
+                cname.give_up(self);
+                strict = checked?;
                 if let Some(org) = ce_org {
                     let calling = fcc.calling.unwrap_or(org);
                     if !self.instance_of(org, calling) {

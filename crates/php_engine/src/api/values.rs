@@ -182,16 +182,18 @@ impl PhpString {
         req.declared_string(bytes)
     }
 
-    /// `zend_string_init_existing_interned`: the interned string for
-    /// these bytes where the engine or the request holds one already, a
-    /// name or a constant some unit declared, which costs nothing and
-    /// interns nothing new; a new string of the request's otherwise, as
-    /// [`PhpString::new`] makes it. What php's unserializer makes of an
-    /// array's or an object's key. The `Err` is the memory limit.
+    /// `zend_string_init_existing_interned` and
+    /// `zend_string_init_interned` as opcache installs them,
+    /// `accel_init_interned_string_for_php`: the engine's string for these
+    /// bytes, a name or a constant the engine's startup or a published
+    /// unit holds, which costs nothing, once the request has compiled a
+    /// file; a string of the request's own otherwise, `zend_string_init`
+    /// whatever its length, and never one kept to be found again. What
+    /// php's unserializer makes of an array's or an object's key. The
+    /// `Err` is the memory limit.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn existing_interned(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-        let made = req.existing_interned(bytes)?;
-        Ok(Owner::adopt(made))
+        req.interned(bytes)
     }
 
     /// A string of `len` bytes written in place by `fill`, php's

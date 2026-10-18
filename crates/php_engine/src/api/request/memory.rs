@@ -43,6 +43,24 @@ impl Intern for RequestStrings<'_> {
     }
 }
 
+/// opcache's `ZCG(counted)`: whether the request holds opcache's shared
+/// memory, taken by `accel_activate_add` in `persistent_compile_file`
+/// once a file to compile is open (`Z/ext/opcache/ZendAccelerator.c:2106`)
+/// and given back at the request's end. Until then
+/// `accel_init_interned_string_for_php` and
+/// `accel_new_interned_string_for_php` ask the buffer nothing, so what a
+/// request interns before its first file compiles, `$_SERVER`'s names
+/// and a constant a host registers, is a string of its own whatever the
+/// engine holds; an `eval` and `-r`'s code compile no file and take no
+/// hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SharedHold {
+    /// No file compiled yet: nothing is looked up.
+    Untaken,
+    /// A file compiled: the engine's table answers.
+    Taken,
+}
+
 impl Request {
     /// The request's own memory, for the compilation whose unit is this
     /// request's alone (design §5.2): what a host handed the source for,
@@ -52,23 +70,54 @@ impl Request {
         &mut self.heap
     }
 
-    /// `zend_string_init_existing_interned` (`Z/Zend/zend_string.c`):
-    /// the interned string for `bytes` where the engine or this request
-    /// holds one already, and a new string of the request's otherwise.
-    pub(crate) fn existing_interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        match self.interned_held(bytes) {
-            Some(held) => Ok(held),
-            None => self.string(bytes),
+    /// `zend_string_init_interned` and
+    /// `zend_string_init_existing_interned` as opcache installs them,
+    /// both `accel_init_interned_string_for_php`
+    /// (`Z/ext/opcache/ZendAccelerator.c:610`): the engine's string for
+    /// `bytes` where the request has taken its [`SharedHold`] and the engine's
+    /// table, opcache's buffer, holds them, which costs the request
+    /// nothing, and otherwise a string of the request's own,
+    /// `zend_string_init`, whose one owner is the caller's. Nothing is
+    /// kept to be found again, so two asks are two strings, and the
+    /// empty string and one byte have no shortcut of their own: opcache's
+    /// buffer holds `ZSTR_CHAR`'s strings (`accel_copy_permanent_strings`,
+    /// `:650-652`), so they answer from the table once the hold is taken,
+    /// and before it they are strings of the request's as any other. The
+    /// `Err` is the memory limit.
+    ///
+    /// `php_hash_environment` names `$_SERVER`'s rows before the primary
+    /// file compiles, so a variable of one byte costs what one of two
+    /// does:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/first' . getmypid() . '.php';
+    /// file_put_contents($f, '<?php echo memory_get_usage();');
+    /// $read = function (array $env) use ($f) {
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', $f], [1 => ['pipe', 'w']], $pipes, null, $env);
+    ///     $out = stream_get_contents($pipes[1]); proc_close($p); return (int) $out;
+    /// };
+    /// $none = $read([]);
+    /// echo $read(['A' => '1']) - $none, " ", $read(['AB' => '1']) - $none, "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off process capture
+    /// 32 32
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        if self.shared_hold == SharedHold::Taken
+            && let Some(held) = self.shared.existing_interned(bytes)
+        {
+            return Ok(Owner::adopt(PhpString::of(held)));
         }
+        self.string_init(bytes).map(Owner::adopt)
     }
 
-    /// The interned string for `bytes` the engine's table or this
-    /// request's holds, `zend_interned_string_ht_lookup` over both.
-    fn interned_held(&self, bytes: &[u8]) -> Option<PhpString> {
-        self.shared
-            .existing_interned(bytes)
-            .or_else(|| self.heap.interned_find(bytes))
-            .map(PhpString::of)
+    /// The request's [`SharedHold`] taken, as `persistent_compile_file` takes
+    /// it on the first file the request compiles, and kept to the
+    /// request's end.
+    pub(crate) fn take_shared_hold(&mut self) {
+        self.shared_hold = SharedHold::Taken;
     }
 
     /// A string of `bytes` out of this request's heap, what

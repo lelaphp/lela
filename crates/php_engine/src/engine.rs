@@ -5149,6 +5149,8 @@ impl Engine {
         written: Option<&[u8]>,
     ) -> Option<Result<Arc<Unit>, CompileError>> {
         if let Some(source) = source {
+            // A source the host read is still `zend_compile_file`'s.
+            req.take_shared_hold();
             let script = req
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
