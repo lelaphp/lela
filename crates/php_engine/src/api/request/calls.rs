@@ -1096,10 +1096,9 @@ impl Request {
         }
         let Some(entry) = self.entry_of(function) else {
             let name = self.declared_name(function);
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::undefined_function(
                 self,
-                "Error",
-                &format!("Call to undefined function {name}()"),
+                name.as_bytes(),
             ));
         };
         self.serve_entry(function, entry, on_throw)

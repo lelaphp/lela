@@ -64,7 +64,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
-use crate::api::raising::{Thrown, none_pending};
+use crate::api::raising::{Thrown, non_static_method_call, none_pending, undefined_method};
 use crate::api::request::ropes::RopeAt;
 use crate::api::request::{Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
@@ -1454,14 +1454,7 @@ fn dynamic_call_string(
         return dynamic_call_static(req, class, method, this);
     }
     let Some(function) = exec::find_function(req, Bare::of(name)) else {
-        return Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            &format!(
-                "Call to undefined function {}()",
-                String::from_utf8_lossy(name)
-            ),
-        ));
+        return Err(crate::api::raising::undefined_function(req, name));
     };
     Ok(DynamicTarget {
         function,
@@ -1597,11 +1590,7 @@ fn dynamic_call_class(
 ) -> Result<crate::api::values::ClassId, Thrown> {
     match crate::api::call::autoload(req, name)? {
         Some(class) => Ok(class),
-        None => Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            &format!("Class \"{}\" not found", String::from_utf8_lossy(name)),
-        )),
+        None => Err(crate::api::raising::class_not_found(req, name)),
     }
 }
 
@@ -1815,14 +1804,7 @@ fn init_call(
             Ok(name) => name,
             Err(thrown) => return threw(req, frame, &thrown),
         };
-        let thrown = crate::api::raising::throw_error(
-            req,
-            "Error",
-            &format!(
-                "Call to undefined function {}()",
-                String::from_utf8_lossy(name.as_bytes())
-            ),
-        );
+        let thrown = crate::api::raising::undefined_function(req, name.as_bytes());
         req.release(Value::string(name));
         return threw(req, frame, &thrown);
     };
@@ -5316,7 +5298,13 @@ fn static_method(
         }
         None => match req.static_trampoline(class, name, this) {
             Some(trampoline) => trampoline,
-            None => return Err(undefined_method(req, class, written)),
+            None => {
+                return Err(undefined_method(
+                    req,
+                    class,
+                    written.as_str_bytes().unwrap_or_default(),
+                ));
+            }
         },
     };
     let never_cached = req.never_cached(function);
@@ -6028,7 +6016,11 @@ fn method_on(
             Undefined::OnCalled => object,
             Undefined::OnHanded => receiver.unwrap_or(object),
         };
-        return Err(undefined_method(req, named.class(), written));
+        return Err(undefined_method(
+            req,
+            named.class(),
+            written.as_str_bytes().unwrap_or_default(),
+        ));
     };
     if receiver.is_some() || req.method_accessible(function) {
         return Ok((function, receiver));
@@ -10940,13 +10932,9 @@ fn class_operand(
         }
         return Ok(class);
     }
-    Err(crate::api::raising::throw_error(
+    Err(crate::api::raising::class_not_found(
         req,
-        "Error",
-        &format!(
-            "Class \"{}\" not found",
-            String::from_utf8_lossy(written.as_str_bytes().unwrap_or_default())
-        ),
+        written.as_str_bytes().unwrap_or_default(),
     ))
 }
 
@@ -11191,35 +11179,6 @@ pub(crate) fn fetch_class<T: Tier>(
         }
         Err(thrown) => threw(req, frame, &thrown),
     }
-}
-
-/// `zend_undefined_method`: php's `Error` naming the class as declared
-/// and the method as written.
-fn undefined_method(
-    req: &mut Request,
-    class: crate::api::values::ClassId,
-    written: &Value,
-) -> Thrown {
-    let class = req.class_name(class);
-    crate::api::raising::throw_error(
-        req,
-        "Error",
-        &format!(
-            "Call to undefined method {class}::{}()",
-            String::from_utf8_lossy(written.as_str_bytes().unwrap_or_default())
-        ),
-    )
-}
-
-/// `zend_non_static_method_call`: php's `Error` naming the method's
-/// class and name as declared.
-fn non_static_method_call(req: &mut Request, function: Function) -> Thrown {
-    let name = req.qualified_name_of(function);
-    crate::api::raising::throw_error(
-        req,
-        "Error",
-        &format!("Non-static method {name}() cannot be called statically"),
-    )
 }
 
 /// The opline a handler that is two oplines stands at, and the

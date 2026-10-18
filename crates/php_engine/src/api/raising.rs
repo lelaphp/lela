@@ -908,6 +908,49 @@ pub(crate) fn cannot_add_element(req: &mut Request) -> Thrown {
     )
 }
 
+/// `zend_undefined_function`: php's `Error` naming the function as the
+/// call wrote it.
+pub(crate) fn undefined_function(req: &mut Request, name: &[u8]) -> Thrown {
+    let message = format!(
+        "Call to undefined function {}()",
+        String::from_utf8_lossy(name)
+    );
+    throw_error(req, "Error", &message)
+}
+
+/// `zend_undefined_method`: php's `Error` naming the class as declared
+/// and the method as written.
+pub(crate) fn undefined_method(
+    req: &mut Request,
+    class: crate::api::values::ClassId,
+    method: &[u8],
+) -> Thrown {
+    let class = req.class_name(class);
+    let message = format!(
+        "Call to undefined method {class}::{}()",
+        String::from_utf8_lossy(method)
+    );
+    throw_error(req, "Error", &message)
+}
+
+/// `zend_non_static_method_call`: php's `Error` naming the method's
+/// class and name as declared.
+pub(crate) fn non_static_method_call(
+    req: &mut Request,
+    function: crate::api::call::Function,
+) -> Thrown {
+    let name = req.qualified_name_of(function);
+    let message = format!("Non-static method {name}() cannot be called statically");
+    throw_error(req, "Error", &message)
+}
+
+/// `zend_fetch_class`'s refusal where no class answers the name, php's
+/// `Error` naming it as written.
+pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
+    let message = format!("Class \"{}\" not found", String::from_utf8_lossy(name));
+    throw_error(req, "Error", &message)
+}
+
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of
 /// `class` with `message`, the one `previous` holds chained as its
 /// `previous` (`zend_throw_exception_internal`), as
