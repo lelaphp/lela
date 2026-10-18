@@ -315,19 +315,17 @@ impl Request {
 
     /// The room `room` finds in the payload `object` carries as `T`
     /// linked as the innermost on the running stack, so the next frame
-    /// pushed links to it ([`php_heap::VmStack::link_room`]); false where
-    /// the object carries no such payload. The room stays linked until
-    /// [`Request::unlink_room`].
+    /// pushed links to it ([`php_heap::VmStack::link_room`]); nothing
+    /// where the object carries no such payload. The room stays linked
+    /// until [`Request::unlink_room`].
     pub(crate) fn link_room<T: std::any::Any + Send>(
         &mut self,
         object: PhpObject,
         room: fn(&mut T) -> &mut exec::FakeRoom,
-    ) -> bool {
-        let Some(payload) = self.heap.native_mut::<T>(object.heap()) else {
-            return false;
-        };
-        self.vm.stack.link_room(room(payload));
-        true
+    ) {
+        if let Some(payload) = self.heap.native_mut::<T>(object.heap()) {
+            self.vm.stack.link_room(room(payload));
+        }
     }
 
     /// The running stack's word moved back to what the room `room` finds

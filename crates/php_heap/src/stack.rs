@@ -436,7 +436,7 @@ impl<H> Frame<H> {
 /// ([`VmStack::link_room`]). Its link and its header are laid as a
 /// frame's room's are, `ROOM_BYTES` in all, so another process reads it
 /// as it reads any room on the chain.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[repr(C)]
 pub struct FakeRoom<H> {
     link: usize,
@@ -1676,7 +1676,7 @@ mod tests {
 
     /// A header that fills the room past its link, as the engine's does,
     /// which a [`FakeRoom`] asks of its header.
-    #[derive(Debug, Default, Clone)]
+    #[derive(Debug, Default)]
     #[expect(
         dead_code,
         reason = "a room's bytes are read as another process reads them"

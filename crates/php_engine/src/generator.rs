@@ -1161,53 +1161,22 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         if let Some(orig) = through {
             req.link_room(orig, fake_room);
         }
-        let Some(frame) = push(req, generator) else {
-            unlink_fake_room(req, through);
-            return Ok(());
-        };
-        with(req, generator, |g| g.resumed_through = through);
-        let delegating =
-            read(req, generator, |g| !matches!(g.values, Delegated::Nothing)).unwrap_or(false);
-        if delegating && req.is_pending() {
-            // `zend_generator_throw_exception`: a throwable raised into a
-            // generator stops the `yield from` over values it stands in,
-            // and their release is served with the generator's frame
-            // current, so a destructor it serves is called from there.
-            drop_values(req, generator);
-        } else if delegating && next_delegated(req, generator) {
-            with(req, generator, |g| g.resumed_through = None);
-            let suspended = suspend(req, generator);
-            unlink_fake_room(req, through);
-            suspended?;
-            with(req, orig, |g| {
-                g.do_init = false;
-                g.in_fiber = None;
-            });
-            with(req, generator, |g| g.in_fiber = None);
-            return Ok(());
+        let turned = turn(req, generator, through, standing);
+        if let Some(orig) = through {
+            req.unlink_room(orig, |g: &ZendGenerator| g.execute_fake.as_deref());
         }
-        if !req.is_pending() {
-            req.vm_mut().advance(frame);
-        }
-        crate::observer::generator_resumed(req, frame);
-        let run = req.resume_loop();
-        let served = run(req, frame);
-        if req.vm().depth() > standing {
-            // The body left the frame standing: a throwable it did not
-            // catch, which the unwinder has already cleaned the frame
-            // for (`zend_generator_close(generator, 1)` in
-            // `zend_dispatch_try_catch_finally_helper`), or a fatal.
-            while req.vm().depth() > standing.saturating_add(1) {
-                req.pop_frame();
+        match turned? {
+            Turn::NoFrame => return Ok(()),
+            Turn::Delegated => {
+                with(req, orig, |g| {
+                    g.do_init = false;
+                    g.in_fiber = None;
+                });
+                with(req, generator, |g| g.in_fiber = None);
+                return Ok(());
             }
-            finish_on_stack(req, generator, true);
+            Turn::Served => {}
         }
-        with(req, generator, |g| {
-            g.in_fiber = None;
-            g.resumed_through = None;
-        });
-        unlink_fake_room(req, through);
-        served?;
         if req.is_pending() {
             if same(generator, orig) {
                 close(req, generator, false);
@@ -1232,21 +1201,74 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     }
 }
 
+/// What one turn of [`resume`] did with the generator it serves.
+enum Turn {
+    /// It had no frame to put back on the stack.
+    NoFrame,
+    /// It stood in a `yield from` over values that gave the next one,
+    /// and is suspended again without running.
+    Delegated,
+    /// Its body ran until it yielded, returned or threw.
+    Served,
+}
+
+/// One turn of [`resume`] over `generator`, which a resumption of
+/// `through` runs where it is not the one resumed, the stack `standing`
+/// frames high before it: its frame on the stack, then the next of the
+/// values it delegates to, or its body served, and the frame off the
+/// stack again whichever way it left. A fatal is the `Err`.
+fn turn(
+    req: &mut Request,
+    generator: PhpObject,
+    through: Option<PhpObject>,
+    standing: usize,
+) -> Result<Turn, Fatal> {
+    let Some(frame) = push(req, generator) else {
+        return Ok(Turn::NoFrame);
+    };
+    with(req, generator, |g| g.resumed_through = through);
+    let delegating =
+        read(req, generator, |g| !matches!(g.values, Delegated::Nothing)).unwrap_or(false);
+    if delegating && req.is_pending() {
+        // `zend_generator_throw_exception`: a throwable raised into a
+        // generator stops the `yield from` over values it stands in, and
+        // their release is served with the generator's frame current, so
+        // a destructor it serves is called from there.
+        drop_values(req, generator);
+    } else if delegating && next_delegated(req, generator) {
+        with(req, generator, |g| g.resumed_through = None);
+        suspend(req, generator)?;
+        return Ok(Turn::Delegated);
+    }
+    if !req.is_pending() {
+        req.vm_mut().advance(frame);
+    }
+    crate::observer::generator_resumed(req, frame);
+    let run = req.resume_loop();
+    let served = run(req, frame);
+    if req.vm().depth() > standing {
+        // The body left the frame standing: a throwable it did not catch,
+        // which the unwinder has already cleaned the frame for
+        // (`zend_generator_close(generator, 1)` in
+        // `zend_dispatch_try_catch_finally_helper`), or a fatal.
+        while req.vm().depth() > standing.saturating_add(1) {
+            req.pop_frame();
+        }
+        finish_on_stack(req, generator, true);
+    }
+    with(req, generator, |g| {
+        g.in_fiber = None;
+        g.resumed_through = None;
+    });
+    served.map(|()| Turn::Served)
+}
+
 /// `orig_generator->execute_fake`, laid down the first time a resumption
 /// runs another generator through it.
 fn fake_room(generator: &mut ZendGenerator) -> &mut crate::exec::FakeRoom {
     generator
         .execute_fake
         .get_or_insert_with(|| Box::new(crate::exec::FakeRoom::new(crate::exec::Header::fake())))
-}
-
-/// The resumer's innermost room the innermost again, where `through`
-/// linked its placeholder, as php moves `EG(current_execute_data)` back
-/// once the frame above it has left.
-fn unlink_fake_room(req: &mut Request, through: Option<PhpObject>) {
-    if let Some(orig) = through {
-        req.unlink_room(orig, |g: &ZendGenerator| g.execute_fake.as_deref());
-    }
 }
 
 /// `check_node_running_in_fiber` (`Z/Zend/zend_generators.c:216`):
