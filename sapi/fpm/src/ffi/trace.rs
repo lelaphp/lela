@@ -1,9 +1,11 @@
 //! `fpm_trace_*`, the half of the slow log that stops a child and opens
 //! its memory: `fpm_trace_mach.c` on macOS, which stops the child with
 //! `SIGSTOP` and asks the kernel for its task port, and
-//! `fpm_trace_ptrace.c` elsewhere, which attaches to it. What the master
-//! reads there once it is open, the frames of the request, is not read
-//! (the crate's own doc).
+//! `fpm_trace_ptrace.c` elsewhere, which attaches to it. Once it is open
+//! the master reads bytes out of it ([`Memory::read`]), the request's
+//! frames as the engine lays them (design §5.6, revision 59): through
+//! `mach_vm_read_overwrite` on the task port, and `process_vm_readv` on
+//! Linux, which the attachment permits.
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -34,11 +36,87 @@ unsafe extern "C" {
         task: *mut libc::mach_port_t,
     ) -> libc::c_int;
     fn mach_error_string(error_value: libc::c_int) -> *const libc::c_char;
+    fn mach_vm_read_overwrite(
+        target_task: libc::mach_port_t,
+        address: u64,
+        size: u64,
+        data: u64,
+        outsize: *mut u64,
+    ) -> libc::c_int;
+    fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::c_int;
+}
+
+/// A stopped child's memory, open for the master to read: its task port
+/// on macOS, its pid where the master is attached to it.
+pub(crate) struct Memory {
+    #[cfg(target_os = "macos")]
+    task: libc::mach_port_t,
+    #[cfg(not(target_os = "macos"))]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pid: i32,
+}
+
+impl Memory {
+    /// `fpm_trace_get_long` and `fpm_trace_get_strz` underneath: the
+    /// bytes at `address` in the child, every one of `into`, or nothing
+    /// and `false`.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn read(&self, address: u64, into: &mut [u8]) -> bool {
+        let mut got = 0u64;
+        let len = into.len() as u64;
+        let local = into.as_mut_ptr().expose_provenance() as u64;
+        // SAFETY: `into` is a live buffer of `len` bytes the kernel writes
+        // at most `len` into, and `got` a live local.
+        let kr = unsafe { mach_vm_read_overwrite(self.task, address, len, local, &raw mut got) };
+        kr == KERN_SUCCESS && got == len
+    }
+
+    /// As on macOS, through `process_vm_readv`, which the attachment
+    /// `fpm_trace_signal` made permits.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn read(&self, address: u64, into: &mut [u8]) -> bool {
+        let len = into.len();
+        let local = libc::iovec {
+            iov_base: into.as_mut_ptr().cast(),
+            iov_len: len,
+        };
+        let Ok(remote) = usize::try_from(address) else {
+            return false;
+        };
+        let remote = libc::iovec {
+            iov_base: std::ptr::with_exposed_provenance_mut(remote),
+            iov_len: len,
+        };
+        // SAFETY: `local` names `into`, live and `len` bytes long, which the
+        // kernel writes at most `len` into; `remote` is the child's, which
+        // the kernel reads on its side.
+        let read = unsafe {
+            libc::process_vm_readv(self.pid, &raw const local, 1, &raw const remote, 1, 0)
+        };
+        usize::try_from(read).is_ok_and(|read| read == len)
+    }
+
+    /// Elsewhere no read is made: the frames are not written.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    pub(crate) fn read(&self, _address: u64, _into: &mut [u8]) -> bool {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Memory {
+    fn drop(&mut self) {
+        // SAFETY: `mach_task_self_` is the process's own task port.
+        let own = unsafe { mach_task_self_ };
+        // SAFETY: the task port is the send right `task_for_pid` gave this
+        // value, given back once.
+        unsafe { mach_port_deallocate(own, self.task) };
+    }
 }
 
 /// `fpm_trace_ready`: the child's task port, where the kernel gives it.
 #[cfg(target_os = "macos")]
-pub(crate) fn ready(pid: i32) -> bool {
+pub(crate) fn ready(pid: i32) -> Option<Memory> {
     let mut target: libc::mach_port_t = 0;
     // SAFETY: `mach_task_self_` is the process's own task port, which the
     // C library sets at startup and nothing writes after.
@@ -46,7 +124,7 @@ pub(crate) fn ready(pid: i32) -> bool {
     // SAFETY: `target` is a live local the call writes one port name to.
     let kr = unsafe { task_for_pid(own, pid, &raw mut target) };
     if kr == KERN_SUCCESS {
-        return true;
+        return Some(Memory { task: target });
     }
     // SAFETY: `mach_error_string` returns a static C string for any code.
     let text = unsafe { mach_error_string(kr) };
@@ -64,7 +142,7 @@ pub(crate) fn ready(pid: i32) -> bool {
         ""
     };
     crate::zlog!(Error @ fpm_trace_ready:65, "task_for_pid() failed: {text} ({kr}){hint}");
-    false
+    None
 }
 
 /// `fpm_trace_close`: nothing held past the read.
@@ -85,8 +163,8 @@ pub(crate) fn signal(pid: i32) -> bool {
 
 /// `fpm_trace_ready`: the attached child is ready as it stands.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn ready(_pid: i32) -> bool {
-    true
+pub(crate) fn ready(pid: i32) -> Option<Memory> {
+    Some(Memory { pid })
 }
 
 /// `fpm_trace_close`: the master detached.

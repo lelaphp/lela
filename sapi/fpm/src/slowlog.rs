@@ -92,8 +92,8 @@ pub(crate) fn check_timed_out(
 /// `fpm_php_trace`, the tracer of child `c` of pool `p` once it stopped:
 /// the slow request counted, and where the pool's slow log opens and the
 /// child's memory is readable, the entry `fpm_php_trace_dump` writes, its
-/// time, pool and pid and the program it serves; the child let go on
-/// after, whatever came of it.
+/// time, pool and pid, the program it serves and the request's frames;
+/// the child let go on after, whatever came of it.
 pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
     if let Some(scoreboard) = fpm.pools[p].scoreboard {
         scoreboard.update(
@@ -115,8 +115,9 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
         .open(crate::conf::path(&path));
     match opened {
         Ok(mut file) => {
-            if crate::ffi::trace::ready(pid) {
-                std::io::Write::write_all(&mut file, &dump(fpm, p, c)).ok();
+            if let Some(memory) = crate::ffi::trace::ready(pid) {
+                std::io::Write::write_all(&mut file, &dump(fpm, p, c, &memory)).ok();
+                drop(memory);
                 crate::ffi::trace::close(pid);
             }
         }
@@ -134,15 +135,17 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
     zlog!(Notice @ fpm_php_trace:223, "finished trace of {pid}");
 }
 
-/// `fpm_php_trace_dump`'s head: the time, the pool and the pid, and the
-/// program the request runs as the scoreboard holds it.
-fn dump(fpm: &Fpm, p: usize, c: usize) -> Vec<u8> {
+/// `fpm_php_trace_dump`: the head, the time, the pool and the pid and
+/// the program the request runs as the scoreboard holds it, then the
+/// request's frames read out of the stopped child ([`frames`]), and
+/// `+++ dump failed` where a read of them failed.
+fn dump(fpm: &Fpm, p: usize, c: usize, memory: &crate::ffi::trace::Memory) -> Vec<u8> {
     let child = &fpm.pools[p].children[c];
-    let script = fpm.pools[p]
+    let (script, word) = fpm.pools[p]
         .scoreboard
         .and_then(|scoreboard| scoreboard.proc(child.scoreboard_i))
         .and_then(crate::scoreboard::Proc::view_once)
-        .map(|proc| proc.script_filename)
+        .map(|proc| (proc.script_filename, proc.frames))
         .unwrap_or_default();
     let mut entry = b"\n".to_vec();
     entry.extend_from_slice(&crate::zlog::time_now());
@@ -156,5 +159,124 @@ fn dump(fpm: &Fpm, p: usize, c: usize) -> Vec<u8> {
     );
     entry.extend_from_slice(&script);
     entry.push(b'\n');
+    let depth = fpm.pools[p].config.request_slowlog_trace_depth;
+    let read = |at: u64, into: &mut [u8]| memory.read(at, into);
+    if frames(&read, word, depth, &mut entry).is_none() {
+        entry.extend_from_slice(b"+++ dump failed\n");
+    }
     entry
+}
+
+/// The bytes `fpm_trace_get_strz` reads into php's 1024-byte buffer:
+/// at most 1023, and none past a NUL.
+const STRZ: u64 = 1023;
+
+/// `valid_ptr`: an address that is not zero and is a word's.
+fn valid(at: u64) -> bool {
+    at != 0 && at.is_multiple_of(8)
+}
+
+/// `fpm_php_trace_dump`'s walk of `EG(current_execute_data)`, out of the
+/// child through `read`, from the word at `word` that names the innermost
+/// room, into `out`: per frame, up to `depth` of them, one line, the
+/// room's address, the name of what it serves, `[INCLUDE_OR_EVAL]` for a
+/// file's included or evaluated, `???` where it names nothing, then the
+/// file and the line of the nearest user code it was called from, its
+/// own caller's or further down, `unknown:0` where none is; the main op
+/// array's frame ends the walk. A room the engine laid that php's chain
+/// does not hold, a call still being built or a frame being popped, is
+/// passed over. None where a read failed, what was written standing.
+///
+/// A sleep two calls down reads, where the child's memory opens to the
+/// master:
+///
+/// ```text
+/// [0x000000010c8b4130] usleep() /srv/slow.php:2
+/// [0x000000010c8b40d0] f() /srv/slow.php:3
+/// ```
+fn frames(
+    read: &dyn Fn(u64, &mut [u8]) -> bool,
+    word: u64,
+    depth: i32,
+    out: &mut Vec<u8>,
+) -> Option<()> {
+    use php_sapi::readable::{Callee, Room, Standing};
+    let room = |at: u64| {
+        let mut bytes = [0u8; Room::BYTES];
+        read(at, &mut bytes).then(|| Room::read(&bytes)).flatten()
+    };
+    let callee = |at: u64| {
+        let mut bytes = [0u8; Callee::BYTES];
+        read(at, &mut bytes).then(|| Callee::read(&bytes)).flatten()
+    };
+    let strz = |at: u64, len: u64| {
+        let mut bytes = vec![0u8; usize::try_from(len.min(STRZ)).ok()?];
+        read(at, &mut bytes).then_some(())?;
+        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+        bytes.truncate(end);
+        Some(bytes)
+    };
+    if word == 0 {
+        return Some(());
+    }
+    let mut at = {
+        let mut bytes = [0u8; 8];
+        read(word, &mut bytes).then_some(())?;
+        u64::from_ne_bytes(bytes)
+    };
+    let mut limit = depth;
+    while at != 0 {
+        let frame = room(at)?;
+        if frame.standing == Standing::Passed {
+            at = frame.below;
+            continue;
+        }
+        let name = if valid(frame.callee) {
+            let served = callee(frame.callee)?;
+            if served.name.len == 0 {
+                if frame.standing == Standing::Top {
+                    return Some(());
+                }
+                b"[INCLUDE_OR_EVAL]".to_vec()
+            } else {
+                strz(served.name.at, served.name.len)?
+            }
+        } else {
+            b"???".to_vec()
+        };
+        out.extend_from_slice(format!("[0x{at:016x}] ").as_bytes());
+        out.extend_from_slice(&name);
+        out.extend_from_slice(b"()");
+        let (mut file, mut lineno) = (Vec::new(), 0u32);
+        let mut below = frame.below;
+        while below != 0 {
+            let down = room(below)?;
+            if down.standing == Standing::Passed {
+                below = down.below;
+                continue;
+            }
+            if !valid(down.callee) {
+                break;
+            }
+            if let Some(code) = callee(down.callee)?.code {
+                file = strz(code.file.at, code.file.len)?;
+                if let Some(line) = code.lineno_at(down.opline) {
+                    let mut bytes = [0u8; 4];
+                    read(line, &mut bytes).then_some(())?;
+                    lineno = u32::from_ne_bytes(bytes);
+                }
+                break;
+            }
+            below = down.below;
+        }
+        out.push(b' ');
+        out.extend_from_slice(if file.is_empty() { b"unknown" } else { &file });
+        out.extend_from_slice(format!(":{lineno}\n").as_bytes());
+        at = frame.below;
+        limit -= 1;
+        if limit == 0 {
+            break;
+        }
+    }
+    Some(())
 }

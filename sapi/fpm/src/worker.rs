@@ -716,7 +716,10 @@ impl Worker {
             board: Some(self.board()),
         });
         let query = env.get(b"QUERY_STRING");
-        let (served, _) = self.engine.serve(description, response, |_| {
+        let (served, _) = self.engine.serve(description, response, |innermost| {
+            if let Some(proc) = self.proc() {
+                proc.set_frames(innermost.address());
+            }
             self.look(&info, head_only, query)
         });
         if served.start_failed {

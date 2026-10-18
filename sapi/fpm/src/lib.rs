@@ -11,12 +11,11 @@
 //!
 //! What php-fpm has that this host leaves out: ACLs on a UNIX socket,
 //! `listen.setfib`, `AppArmor` and systemd, which the oracle's macOS build
-//! leaves out too; `-c`, since no php.ini is read (#1176); and the PHP
-//! frames of a slow request's trace where the child's memory is readable,
-//! which php reads out of it: the child is stopped and its memory asked
-//! for as php asks ([`slowlog`]), and the entry carries the request's
-//! time, pool, pid and program, until the engine's frame chain is one
-//! another process can read (#1384).
+//! leaves out too; and `-c`, since no php.ini is read (#1176). A slow
+//! request's trace is php's: the child stopped and its memory asked for
+//! as php asks, and where it opens, the request's frames read out of it
+//! from the chain the engine lays and the child publishes in its
+//! scoreboard slot ([`slowlog`]; design §5.6, revision 59).
 
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
