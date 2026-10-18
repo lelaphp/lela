@@ -78,7 +78,7 @@ impl Engine {
                 self.lines(&mut req, begin.as_deref(), each.as_ref(), end.as_deref());
             }
             CommandLine::Shell => {
-                if let Some(shell) = self.shared.supplied.shell.get() {
+                if let Some((by, shell)) = self.shared.supplied.shell.entry() {
                     crate::engine::auto_file(
                         &mut req,
                         b"auto_prepend_file",
@@ -90,7 +90,7 @@ impl Engine {
                     req.close_served_files();
                     if !req.bailing_out() {
                         req.end_in_exit(0);
-                        let status = (shell.serve)(&mut req);
+                        let status = req.serve_for(by, shell.serve);
                         req.end_in_exit(status);
                     }
                 }

@@ -183,8 +183,8 @@ impl Request {
     /// none, php without the cache.
     fn admission(&mut self, full: &[u8]) -> Admission {
         let shared = Arc::clone(&self.shared);
-        match shared.supplied.admission.get() {
-            Some(hook) => hook(self, full),
+        match shared.supplied.admission.entry() {
+            Some((by, hook)) => self.serve_for(by, |req| hook(req, full)),
             None => Admission::Held {
                 validation: Validation::EveryHit,
                 lookup: Lookup::Resolved,
@@ -674,8 +674,8 @@ impl Request {
     /// `zend_optimize_script`.
     pub(crate) fn run_optimizer_passes(&mut self, full: &[u8]) {
         let shared = Arc::clone(&self.shared);
-        for pass in shared.supplied.optimizer_passes.iter() {
-            pass(self, full);
+        for (by, pass) in shared.supplied.optimizer_passes.iter() {
+            self.serve_for(by, |req| pass(req, full));
         }
     }
 
@@ -683,8 +683,8 @@ impl Request {
     /// path, in bundle order ([`crate::api::abi::ExtensionBuilder::cached`]).
     pub(crate) fn tell_cached(&mut self, full: &[u8]) {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.supplied.cached.iter() {
-            hook(self, full);
+        for (by, hook) in shared.supplied.cached.iter() {
+            self.serve_for(by, |req| hook(req, full));
         }
     }
 }

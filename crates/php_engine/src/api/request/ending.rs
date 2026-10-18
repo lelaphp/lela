@@ -482,8 +482,8 @@ impl Request {
     /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended
     pub(crate) fn program_ended(&mut self) {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.supplied.program_ended.iter() {
-            hook(self);
+        for (by, hook) in shared.supplied.program_ended.iter() {
+            self.serve_for(by, hook);
         }
     }
 
@@ -497,7 +497,7 @@ impl Request {
         shared
             .supplied
             .fatal_logged
-            .get()
-            .map_or(AfterLog::Returned, |hook| hook(self))
+            .entry()
+            .map_or(AfterLog::Returned, |(by, hook)| self.serve_for(by, hook))
     }
 }

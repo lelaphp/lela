@@ -34,6 +34,7 @@
 //!
 //! [`ExtensionBuilder::opcodes`]: crate::api::abi::ExtensionBuilder::opcodes
 
+use crate::api::request::ExtensionId;
 use php_heap::FrameRef;
 use php_unit::Opcode;
 
@@ -135,7 +136,7 @@ pub(crate) struct OpcodeObserver {
 #[derive(Debug, Default)]
 pub(crate) struct ObservedOpcodes {
     any: Opcodes,
-    links: Box<[OpcodeLink]>,
+    links: Box<[(ExtensionId, OpcodeLink)]>,
 }
 
 impl ObservedOpcodes {
@@ -147,15 +148,18 @@ impl ObservedOpcodes {
         let links: Box<[_]> = chain
             .links()
             .iter()
-            .map(|observer| OpcodeLink {
-                declared: (observer.declared)(start),
-                handler: observer.handler,
+            .map(|&(by, observer)| {
+                let link = OpcodeLink {
+                    declared: (observer.declared)(start),
+                    handler: observer.handler,
+                };
+                (by, link)
             })
-            .filter(|link| !link.declared.is_empty())
+            .filter(|(_, link)| !link.declared.is_empty())
             .collect();
-        let any = links
-            .iter()
-            .fold(Opcodes::default(), |any, link| any.union(link.declared));
+        let any = links.iter().fold(Opcodes::default(), |any, (_, link)| {
+            any.union(link.declared)
+        });
         ObservedOpcodes { any, links }
     }
 

@@ -52,8 +52,8 @@ impl Provided for Dummy {
 
 /// The functions bound to `req`: the provider's, or Zend's dummies.
 pub(crate) fn bind(req: &mut Request) -> Box<dyn Provided> {
-    match provider(&req.shared) {
-        Some(bind) => bind(req),
+    match req.shared.supplied.encodings.entry() {
+        Some((by, bind)) => req.serve_for(by, bind),
         None => Box::new(Dummy),
     }
 }

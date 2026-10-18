@@ -918,8 +918,8 @@ impl Request {
         let Some(variables) = shared
             .supplied
             .treat_data
-            .get()
-            .map(|hook| hook(self, input, source))
+            .entry()
+            .map(|(by, hook)| self.serve_for(by, |req| hook(req, input, source)))
             .transpose()?
             .flatten()
         else {
@@ -944,8 +944,8 @@ impl Request {
         value: &[u8],
     ) -> Result<Option<Owner<Value>>, Thrown> {
         let shared = std::sync::Arc::clone(&self.shared);
-        match shared.supplied.input_filter.get() {
-            Some(hook) => hook(self, input, name, value),
+        match shared.supplied.input_filter.entry() {
+            Some((by, hook)) => self.serve_for(by, |req| hook(req, input, name, value)),
             None => Ok(Some(PhpString::new(self, value)?.into_value())),
         }
     }

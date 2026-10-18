@@ -103,13 +103,15 @@ pub(crate) fn told(req: &mut Request, frame: FrameRef) -> Result<(), Thrown> {
     }
     let shared = Arc::clone(&req.shared);
     let mut pending: Option<Thrown> = None;
-    for handler in shared.supplied.statement_handlers.iter() {
+    for (by, handler) in shared.supplied.statement_handlers.iter() {
         pending = match pending {
-            None => handler(&mut Statement { req, frame }).err(),
+            None => req
+                .serve_for(by, |req| handler(&mut Statement { req, frame }))
+                .err(),
             Some(thrown) => {
                 let ran_on = thrown.exception().copied();
                 let told = req.while_pending(&thrown, |req| {
-                    handler(&mut Statement { req, frame })
+                    req.serve_for(by, |req| handler(&mut Statement { req, frame }))
                         .map_err(|raised| req.raised_over(raised, ran_on))
                 });
                 match told {

@@ -334,43 +334,45 @@ impl Resolved {
     fn resolve(suppliers: impl IntoIterator<Item = (ExtensionId, Phase, Supplies)>) -> Resolved {
         let mut table = Resolved::default();
         let mut suppliers: Vec<_> = suppliers.into_iter().collect();
-        for (_, _, own) in &mut suppliers {
+        for (by, _, own) in &mut suppliers {
             table
                 .registered
-                .install(std::mem::take(&mut own.registered));
+                .install(*by, std::mem::take(&mut own.registered));
         }
         suppliers.sort_by_key(|&(_, phase, _)| phase);
         for (by, _, own) in suppliers {
-            table.interrupt.install(own.interrupt);
-            table.compile_file.install(own.compile_file);
-            table.compile_string.install(own.compile_string);
-            table.error.install(own.error);
-            table.gc_collect.install(own.gc_collect);
-            table.thrown.install(own.thrown);
-            table.resolve_path.install(own.resolve_path);
+            table.interrupt.install(by, own.interrupt);
+            table.compile_file.install(by, own.compile_file);
+            table.compile_string.install(by, own.compile_string);
+            table.error.install(by, own.error);
+            table.gc_collect.install(by, own.gc_collect);
+            table.thrown.install(by, own.thrown);
+            table.resolve_path.install(by, own.resolve_path);
             table.stream_hooks.install(by, own.stream_hooks);
-            table.post_startup.install(own.post_startup);
-            table.upload.install(own.upload);
-            table.ticks.install(own.ticks);
-            table.cached.install(own.cached);
-            table.optimizer_passes.install_all(own.optimizer_passes);
-            table.observers.install_all(own.observers);
-            table.error_observers.install_all(own.error_observers);
-            table.functions_declared.install_all(own.functions_declared);
-            table.classes_linked.install_all(own.classes_linked);
-            table.fiber_init.install_all(own.fiber_init);
-            table.fiber_switch.install_all(own.fiber_switch);
-            table.fiber_destroy.install_all(own.fiber_destroy);
-            table.opcodes.install(own.opcodes);
-            table.statement_handlers.install(own.statement_handler);
-            table.program_ended.install(own.program_ended);
+            table.post_startup.install(by, own.post_startup);
+            table.upload.install(by, own.upload);
+            table.ticks.install(by, own.ticks);
+            table.cached.install(by, own.cached);
+            table.optimizer_passes.install_all(by, own.optimizer_passes);
+            table.observers.install_all(by, own.observers);
+            table.error_observers.install_all(by, own.error_observers);
+            table
+                .functions_declared
+                .install_all(by, own.functions_declared);
+            table.classes_linked.install_all(by, own.classes_linked);
+            table.fiber_init.install_all(by, own.fiber_init);
+            table.fiber_switch.install_all(by, own.fiber_switch);
+            table.fiber_destroy.install_all(by, own.fiber_destroy);
+            table.opcodes.install(by, own.opcodes);
+            table.statement_handlers.install(by, own.statement_handler);
+            table.program_ended.install(by, own.program_ended);
             table.admission.install(by, own.admission);
             table.fatal_logged.install(by, own.fatal_logged);
             table.shell.install(by, own.shell);
             table.input_filter.install(by, own.input_filter);
             table.treat_data.install(by, own.treat_data);
             table.encodings.install(by, own.encodings);
-            table.intercepts.install(own.intercepts);
+            table.intercepts.install(by, own.intercepts);
         }
         table
     }
@@ -381,16 +383,17 @@ impl Resolved {
 /// link handed the ones beneath ([`Beneath`]), so each link chooses
 /// where its work stands against them, as each of php's chooses where
 /// it calls the pointer it saved.
-pub(crate) struct Chain<H>(Vec<H>);
+pub(crate) struct Chain<H>(Vec<(ExtensionId, H)>);
 
 impl<H: Copy> Chain<H> {
-    fn install(&mut self, hook: Option<H>) {
-        self.0.extend(hook);
+    fn install(&mut self, by: ExtensionId, hook: Option<H>) {
+        self.0.extend(hook.map(|hook| (by, hook)));
     }
 
-    /// Every link, the first supplier's first: what [`Beneath::top`]
-    /// enters from the last.
-    pub(crate) fn links(&self) -> &[H] {
+    /// Every link beside the extension that supplied it, the first
+    /// supplier's first: what [`Beneath::top`] enters from the last, each
+    /// link served as its extension.
+    pub(crate) fn links(&self) -> &[(ExtensionId, H)] {
         &self.0
     }
 }
@@ -427,20 +430,22 @@ pub(crate) enum Bail {
     DontBail,
 }
 
-/// A list each supplier appends to, served in supplier order.
-pub(crate) struct Listed<H>(Vec<H>);
+/// A list each supplier appends to, served in supplier order, each hook
+/// beside the extension that supplied it, as which it is served.
+pub(crate) struct Listed<H>(Vec<(ExtensionId, H)>);
 
 impl<H: Copy> Listed<H> {
-    fn install(&mut self, hook: Option<H>) {
-        self.0.extend(hook);
+    fn install(&mut self, by: ExtensionId, hook: Option<H>) {
+        self.0.extend(hook.map(|hook| (by, hook)));
     }
 
     /// Each of a supplier's, for a kind it may supply more than once.
-    fn install_all(&mut self, hooks: Vec<H>) {
-        self.0.extend(hooks);
+    fn install_all(&mut self, by: ExtensionId, hooks: Vec<H>) {
+        self.0.extend(hooks.into_iter().map(|hook| (by, hook)));
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = H> + '_ {
+    /// Each hook beside its extension, in supplier order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ExtensionId, H)> + '_ {
         self.0.iter().copied()
     }
 
@@ -475,26 +480,35 @@ impl<H: Copy> Last<H> {
     pub(crate) fn supplier(&self) -> Option<ExtensionId> {
         self.0.map(|(by, _)| by)
     }
+
+    /// The hook beside the extension that supplied it, as which it is
+    /// served.
+    pub(crate) fn entry(&self) -> Option<(ExtensionId, H)> {
+        self.0
+    }
 }
 
-/// Rows under a key, every supplier's in supplier order.
-pub(crate) struct Keyed<K, H>(Vec<(K, H)>);
+/// Rows under a key, every supplier's in supplier order, each beside the
+/// extension that supplied it.
+pub(crate) struct Keyed<K, H>(Vec<(ExtensionId, K, H)>);
 
 impl<K: PartialEq, H> Keyed<K, H> {
-    fn install(&mut self, rows: Vec<(K, H)>) {
-        self.0.extend(rows);
+    fn install(&mut self, by: ExtensionId, rows: Vec<(K, H)>) {
+        self.0.extend(rows.into_iter().map(|(k, h)| (by, k, h)));
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &(K, H)> {
+    /// Each row beside its extension.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &(ExtensionId, K, H)> {
         self.0.iter()
     }
 
-    /// The rows under `key`, in supplier order.
-    pub(crate) fn under(&self, key: K) -> impl Iterator<Item = &H> {
+    /// The rows under `key`, in supplier order, each beside its
+    /// extension.
+    pub(crate) fn under(&self, key: K) -> impl Iterator<Item = (ExtensionId, &H)> {
         self.0
             .iter()
-            .filter(move |(k, _)| *k == key)
-            .map(|(_, h)| h)
+            .filter(move |(_, k, _)| *k == key)
+            .map(|(by, _, h)| (*by, h))
     }
 }
 
