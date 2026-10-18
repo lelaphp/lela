@@ -582,7 +582,7 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
     if let Some(this) = closure.this {
         req.addref(&this.as_value());
     }
-    let cache = closure_cache(req, closure.function, closure.scope, from);
+    let cache = closure_cache(req, closure.function, closure.scope, from)?;
     let made = req.clone_with_payload(
         object,
         ClosureObject {
@@ -645,21 +645,21 @@ pub(crate) fn closure_cache(
     function: Function,
     scope: Option<ClassId>,
     from: ClosureCache,
-) -> ClosureCache {
+) -> Result<ClosureCache, Thrown> {
     let Some(user) = req.user_function(function) else {
-        return ClosureCache::Function;
+        return Ok(ClosureCache::Function);
     };
     let (cache, size) = (user.shape.cache, user.shape.cache_size);
     let real = matches!(user.body, crate::exec::Body::Dynamic(_));
     if let ClosureCache::Own(_) = from {
-        return ClosureCache::Own(req.own_cache());
+        return req.own_cache(size).map(ClosureCache::Own);
     }
     if !req.cache_laid(cache) {
         if real {
-            req.lay_closure_cache(cache, size, scope);
-            return ClosureCache::Function;
+            req.lay_closure_cache(cache, size, scope)?;
+            return Ok(ClosureCache::Function);
         }
-        return ClosureCache::Own(req.own_cache());
+        return req.own_cache(size).map(ClosureCache::Own);
     }
     let function_scope = if real {
         req.laid_for(cache)
@@ -667,9 +667,9 @@ pub(crate) fn closure_cache(
         req.method_class(function)
     };
     if function_scope == scope {
-        ClosureCache::Function
+        Ok(ClosureCache::Function)
     } else {
-        ClosureCache::Own(req.own_cache())
+        req.own_cache(size).map(ClosureCache::Own)
     }
 }
 
@@ -2346,7 +2346,7 @@ fn create_closure(
     if let Some(this) = this {
         req.addref(&this.as_value());
     }
-    let cache = closure_cache(req, info.function, scope, from);
+    let cache = closure_cache(req, info.function, scope, from)?;
     req.new_object_with(
         class,
         ClosureObject {

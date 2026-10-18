@@ -870,7 +870,7 @@ impl Request {
             // A copy's runtime cache is the request's, as the class is,
             // held for the rest of the request.
             if cache == CacheOf::Copy {
-                user.shape.cache = self.map.own_cache();
+                user.shape.cache = self.map.own_cache(None);
             }
             self.user_functions.push(user);
         }

@@ -114,22 +114,31 @@ impl RuntimeCaches {
     }
 
     /// A cache of the request's own for a function that is no op
-    /// array's own, a trait's method copied into a class the request
-    /// declared (`function_add_ref`'s fresh map pointer): a number of
-    /// the request's, one nothing holds any longer first, held for the
-    /// rest of the request.
-    pub(crate) fn own_cache(&mut self) -> CacheAt {
-        CacheAt::Request(MapPtr::new(self.next_number()))
+    /// array's own: a trait's method copied into a class the request
+    /// declared (`function_add_ref`'s fresh map pointer), whose cache the
+    /// arena holds once its first call lays it down, or a closure in
+    /// another scope than its function's cache was laid down for
+    /// (`zend_create_closure_ex`'s `ZEND_ACC_HEAP_RT_CACHE`), whose
+    /// `room` is php's `emalloc` of the cache, held until the closure
+    /// gives it back ([`RuntimeCaches::give_back`]). A number of the
+    /// request's, one nothing holds any longer first.
+    pub(crate) fn own_cache(&mut self, room: Option<php_heap::Block>) -> CacheAt {
+        let at = CacheAt::Request(MapPtr::new(self.next_number()));
+        self.map(at).room = room;
+        at
     }
 
     /// The cache at `at`, which was the request's own
-    /// ([`RuntimeCaches::own_cache`]), given back: emptied, as php's
-    /// `efree` of a closure's `ZEND_ACC_HEAP_RT_CACHE` cache frees it,
-    /// and its number handed out again. A pointer of the engine's is
-    /// never given back.
-    pub(crate) fn give_back(&mut self, at: CacheAt) {
+    /// ([`RuntimeCaches::own_cache`]), given back: emptied, its room
+    /// back to the request's heap, as php's `efree` of a closure's
+    /// `ZEND_ACC_HEAP_RT_CACHE` cache frees it, and its number handed
+    /// out again. A pointer of the engine's is never given back.
+    pub(crate) fn give_back(&mut self, heap: &mut php_heap::Heap, at: CacheAt) {
         if let CacheAt::Request(ptr) = at {
-            *self.request.map(ptr) = RuntimeCache::default();
+            let cache = std::mem::take(self.request.map(ptr));
+            if let Some(room) = cache.room {
+                heap.free_block(room);
+            }
             self.free.push(ptr.offset());
         }
     }
