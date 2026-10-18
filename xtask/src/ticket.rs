@@ -171,10 +171,10 @@
 //! rule is judged by `permit`, whose tools are `Edit`, `Write` and `Bash`,
 //! so a GitHub MCP server attached later would close a ticket unjudged.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -1024,7 +1024,7 @@ impl State {
 #[derive(Debug)]
 pub struct Gh {
     program: PathBuf,
-    spent: Mutex<BTreeMap<String, Spent>>,
+    spent: RefCell<BTreeMap<String, Spent>>,
 }
 
 /// The calls of one verb `gh` was asked, and the time they took, each
@@ -1045,13 +1045,13 @@ impl Gh {
     pub fn at(program: &Path) -> Gh {
         Gh {
             program: program.to_path_buf(),
-            spent: Mutex::default(),
+            spent: RefCell::default(),
         }
     }
 
     /// What every verb asked so far cost, and their sum.
     fn spent(&self) -> (BTreeMap<String, Spent>, Spent) {
-        let by_verb = self.spent.lock().map(|s| s.clone()).unwrap_or_default();
+        let by_verb = self.spent.borrow().clone();
         let all = by_verb.values().fold(Spent::default(), |sum, s| Spent {
             calls: sum.calls + s.calls,
             took: sum.took + s.took,
@@ -1127,24 +1127,7 @@ impl Gh {
             .with_context(|| format!("{ticket} was not closed"))?;
         Ok(())
     }
-}
 
-/// How often a read of the tracker is asked before its failure stands.
-/// Under load the machine runs out of ports for a moment, and `gh` fails
-/// with "can't assign requested address" a call later would not (#2804);
-/// a read changes nothing at the tracker, so asking it again is safe,
-/// where a close asked twice would comment twice.
-const READS: u32 = 3;
-
-/// What `gh` says of a number that is no issue, a failure no retry mends.
-const NO_ISSUE: &str = "Could not resolve to an issue";
-
-/// Whether `err` is the tracker's answer that the number is no issue.
-fn no_issue(err: &anyhow::Error) -> bool {
-    format!("{err:#}").contains(NO_ISSUE)
-}
-
-impl Gh {
     /// [`Gh::call`] for a call that only reads, asked up to [`READS`]
     /// times with a longer pause before each retry, but for the answer
     /// that there is no such issue.
@@ -1174,13 +1157,12 @@ impl Gh {
             .stderr(Stdio::piped())
             .output()
             .context("running gh");
-        if let Ok(mut spent) = self.spent.lock() {
-            let verb = spent
-                .entry(args.get(1).copied().unwrap_or("").to_owned())
-                .or_default();
-            verb.calls += 1;
-            verb.took += started.elapsed();
-        }
+        let mut spent = self.spent.borrow_mut();
+        let verb = spent
+            .entry(args.get(1).copied().unwrap_or("").to_owned())
+            .or_default();
+        verb.calls += 1;
+        verb.took += started.elapsed();
         let out = out?;
         if !out.status.success() {
             bail!(
@@ -1191,6 +1173,21 @@ impl Gh {
         }
         String::from_utf8(out.stdout).context("gh wrote something that is not UTF-8")
     }
+}
+
+/// How often a read of the tracker is asked before its failure stands.
+/// Under load the machine runs out of ports for a moment, and `gh` fails
+/// with "can't assign requested address" a call later would not (#2804);
+/// a read changes nothing at the tracker, so asking it again is safe,
+/// where a close asked twice would comment twice.
+const READS: u32 = 3;
+
+/// What `gh` says of a number that is no issue, a failure no retry mends.
+const NO_ISSUE: &str = "Could not resolve to an issue";
+
+/// Whether `err` is the tracker's answer that the number is no issue.
+fn no_issue(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(NO_ISSUE)
 }
 
 /// Every criterion of `rows` as the reading cites it: the criterion, the
@@ -1546,7 +1543,10 @@ impl Closed {
 /// On `main` the last reading is the run's own, under [`MERGED`]: what
 /// each phase took, each ticket's close and every `gh` call by its verb,
 /// and the run whole, so a merge's post-commit time is read from the
-/// store and not guessed (#2813).
+/// store and not guessed (#2813). The whole is the time inside this
+/// call: cargo's start of the binary before it, a no-op build of a fraction
+/// of a second where pre-commit has built it, and the store's write of
+/// the readings after it are outside.
 pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<Vec<Reading>> {
     let started = Instant::now();
     if Reach::of(root)? != Reach::Landed {
@@ -1561,13 +1561,13 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     let mut readings = Vec::new();
     let mut unready = Vec::new();
     let named = named_by_merges(root, &format!("{since}..HEAD"))?;
-    let read = Instant::now();
+    let hashing = Instant::now();
     let snapshot = Snapshot::disk(root)?;
-    let read = read.elapsed();
-    let mut made = Vec::new();
+    let hashed = hashing.elapsed();
+    let mut closes = Vec::new();
     for &ticket in &named {
         let began = Instant::now();
-        let closed = gh.view(root, ticket).and_then(|issue| {
+        let outcome = gh.view(root, ticket).and_then(|issue| {
             if issue.state == State::Closed {
                 return Ok(None);
             }
@@ -1578,12 +1578,12 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
             let act = Act::Close(Verdict::Done, successors, Reach::Landed);
             judged(root, manifest, gh, act, &issue, &snapshot, None).map(Some)
         });
-        match closed {
+        match outcome {
             Ok(Some(reading)) if reading.status != Status::Pass => {
                 readings.push(unclosed(reading, &again)?);
             }
             Ok(Some(reading)) => {
-                made.push(format!("closed {ticket} in {}", secs(began.elapsed())));
+                closes.push(format!("closed {ticket} in {}", secs(began.elapsed())));
                 readings.push(reading);
             }
             Ok(None) => {}
@@ -1599,35 +1599,35 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
             Err(err) => readings.push(failed(&snapshot, ticket, &err, &again)?),
         }
     }
-    let mut run = stamped(&snapshot, MERGED)?;
+    let mut own = stamped(&snapshot, MERGED)?;
+    let made = closes.len();
     let (by_verb, all) = gh.spent();
     let took = started.elapsed();
-    run.status = Status::Pass;
-    run.count("named", named.len() as u64)?;
-    run.count("closed", made.len() as u64)?;
-    run.count("gh_calls", all.calls)?;
-    run.count("gh_ms", millis(all.took))?;
-    run.count("workspace_ms", millis(read))?;
-    run.count("ms", millis(took))?;
+    own.status = Status::Pass;
+    own.count("named", named.len() as u64)?;
+    own.count("closed", made as u64)?;
+    own.count("gh_calls", all.calls)?;
+    own.count("gh_ms", millis(all.took))?;
+    own.count("workspace_ms", millis(hashed))?;
+    own.count("ms", millis(took))?;
     // Each phase: the closes in the order made, the tracker by verb, and
     // the read of the workspace every reading is stamped over.
-    let closes = made.len();
-    let mut phases = made;
+    let mut phases = closes;
     phases.extend(
         by_verb
             .iter()
             .map(|(verb, s)| format!("gh {verb} {} time(s) in {}", s.calls, secs(s.took))),
     );
-    phases.push(format!("the workspace read in {}", secs(read)));
-    run.message = format!(
+    phases.push(format!("the workspace read in {}", secs(hashed)));
+    own.message = format!(
         "the merges since {} name {} ticket(s), {} closed here; {}; {} in all",
         parent.trim(),
         named.len(),
-        closes,
+        made,
         phases.join("; "),
         secs(took)
     );
-    readings.push(run);
+    readings.push(own);
     Ok(readings)
 }
 
