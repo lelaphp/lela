@@ -1072,11 +1072,6 @@ pub(crate) struct Claim {
 }
 
 impl Claim {
-    /// A claim of `lane`'s in the user's claims directory, from now.
-    pub(crate) fn new(lane: &str) -> Result<Claim> {
-        Claim::within(&claims(), lane)
-    }
-
     /// A claim of `lane`'s processes alone, for a phpt subset outside
     /// [`SUBSETS`] (#2750). It has no window, so it covers nothing another
     /// run made and leaves nothing for a reclaim; while it is held, the
@@ -1087,11 +1082,6 @@ impl Claim {
     /// it takes what its processes are named on and goes.
     pub(crate) fn own(lane: &str) -> Result<Claim> {
         Claim::laid(&claims(), lane, false)
-    }
-
-    /// A claim of `lane`'s in `dir`, from now.
-    fn within(dir: &Path, lane: &str) -> Result<Claim> {
-        Claim::laid(dir, lane, true)
     }
 
     /// A claim of `lane`'s in `dir`, from now, with a `window` or of its
@@ -1133,7 +1123,7 @@ impl Claim {
     /// how every lane that holds one starts (#2115, #2448).
     pub(crate) fn taken(lane: &str, grace: Duration, removed: &mut Removed) -> Result<Claim> {
         removed.add("before the run, of what runs cut off left", reclaim(grace));
-        Claim::new(lane)
+        Claim::laid(&claims(), lane, true)
     }
 
     /// The claim's file opened for appending, a handle apart from the

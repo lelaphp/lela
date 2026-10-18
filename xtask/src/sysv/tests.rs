@@ -536,8 +536,8 @@ fn queues(taken: &[&Object], ids: &[u64]) -> Vec<u64> {
 #[test]
 fn what_is_made_while_another_run_holds_its_claim_is_left_until_both_end() {
     let dir = Tree::new("sysv-held").unwrap();
-    let ours = Claim::within(&dir, "ours").unwrap();
-    let theirs = Claim::within(&dir, "theirs").unwrap();
+    let ours = Claim::laid(&dir, "ours", true).unwrap();
+    let theirs = Claim::laid(&dir, "theirs", true).unwrap();
     let mut ids =
         perl("print msgget(IPC_PRIVATE, 0) // die $!, ' ', msgget(IPC_PRIVATE, 0) // die $!");
     ids.sort_unstable();
@@ -578,8 +578,11 @@ fn what_is_made_while_another_run_holds_its_claim_is_left_until_both_end() {
 #[test]
 fn an_ended_claim_another_run_held_beside_stands_until_it_ends() {
     let dir = Tree::new("sysv-beside").unwrap();
-    let theirs = Claim::within(&dir, "theirs").unwrap();
-    let path = Claim::within(&dir, "ours").unwrap().path().to_path_buf();
+    let theirs = Claim::laid(&dir, "theirs", true).unwrap();
+    let path = Claim::laid(&dir, "ours", true)
+        .unwrap()
+        .path()
+        .to_path_buf();
     let clock = Clock::now().unwrap();
     Claims::read(&dir, None).settle(Duration::from_secs(1), &clock);
     assert!(path.exists(), "taken while another run held its claim");
@@ -656,9 +659,9 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
         command.spawn().unwrap()
     };
     let dir = Tree::new("sysv-standing").unwrap();
-    let claim = Claim::within(&dir, "sysv-test").unwrap();
+    let claim = Claim::laid(&dir, "sysv-test", true).unwrap();
     let path = claim.path().to_path_buf();
-    let theirs = Claim::within(&dir, "theirs").unwrap();
+    let theirs = Claim::laid(&dir, "theirs", true).unwrap();
     let mut program = sleep(true);
     let mut others = [sleep(true), sleep(false), sleep(true)];
     let pids = [program.id(), others[0].id(), others[1].id()];
@@ -710,7 +713,7 @@ fn a_claim_left_unsettled_kills_its_programs_still_standing_and_nothing_else() {
 #[test]
 fn a_claim_left_unsettled_takes_what_its_journaled_programs_left() {
     let dir = Tree::new("sysv-journaled").unwrap();
-    let claim = Claim::within(&dir, "sysv-test").unwrap();
+    let claim = Claim::laid(&dir, "sysv-test", true).unwrap();
     let path = claim.path().to_path_buf();
     let queue = || {
         perl(
