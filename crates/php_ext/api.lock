@@ -74,6 +74,7 @@ abi::Coroutine::release
 abi::Coroutine::resume
 abi::Coroutine::status
 abi::Coroutine::suspend
+abi::CoroutineEnd
 abi::CoroutineStatus
 abi::CurrentPlace
 abi::DebugInfo
