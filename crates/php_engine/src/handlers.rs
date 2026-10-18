@@ -10676,16 +10676,12 @@ fn object_place(
             // nothing, and one the `VAR` is the last owner of is
             // the value it holds (`ZVAL_UNREF`).
             Ok(value) if value.as_php_ref().is_some() => {
-                if value.refcount() == 1
-                    && let Some(cell) = value.as_php_ref()
-                {
-                    let held = cell.get();
-                    req.addref(&held);
-                    req.release(value);
-                    Ok(held.to_zval())
+                let value = if value.refcount() == 1 {
+                    exec::owned_deref(req, value)
                 } else {
-                    Ok(value.to_zval())
-                }
+                    value
+                };
+                Ok(value.to_zval())
             }
             Ok(value) => {
                 if value.as_object().is_none() {
@@ -17088,7 +17084,7 @@ fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(),
     let walked = (|| -> Result<(), Thrown> {
         crate::interfaces::rewind(req, wrapper)?;
         while let Some((value, key)) = crate::interfaces::delegated(req, wrapper)? {
-            let value = owned_deref(req, value);
+            let value = exec::owned_deref(req, value);
             let name = match unpacked_key(req, key, "array") {
                 Ok(name) => name,
                 Err(thrown) => {
@@ -17135,25 +17131,13 @@ fn unpack_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
     crate::interfaces::get_iterator(req, object, false)
 }
 
-/// `ZVAL_DEREF` over a value one owner of which the caller holds: what
-/// the reference held, with the owner moved onto it.
-fn owned_deref(req: &mut Request, value: Value) -> Value {
-    let Some(cell) = value.as_php_ref().copied() else {
-        return value;
-    };
-    let held = cell.get();
-    req.addref(&held);
-    req.release(value);
-    held
-}
-
 /// The key an iterator handed a `...` over, one owner the caller holds,
 /// read as both unpack handlers read it: an int, or a string that is a
 /// decimal (`ZEND_HANDLE_NUMERIC`), is none, the next position; any other
 /// string is the name, its owner the caller's; anything else is php's
 /// `Error` naming what the unpacking was `during`.
 fn unpacked_key(req: &mut Request, key: Value, during: &str) -> Result<Option<PhpString>, Thrown> {
-    let key = owned_deref(req, key);
+    let key = exec::owned_deref(req, key);
     if let Some(name) = key.as_php_string().copied() {
         if matches!(
             crate::api::values::Key::lookup(name),
@@ -17426,7 +17410,7 @@ fn send_unpacked_iterator(
             Ok(None) => return Ok(Ok(())),
             Err(thrown) => return Ok(Err(thrown)),
         };
-        let value = owned_deref(req, value);
+        let value = exec::owned_deref(req, value);
         let name = match unpacked_key(req, key, "argument") {
             Ok(name) => name,
             Err(thrown) => {
@@ -23400,15 +23384,7 @@ pub(crate) fn yield_from<T: Tier>(
             value
         }
     };
-    let owned = match owned.as_php_ref() {
-        Some(cell) => {
-            let held = cell.get();
-            req.addref(&held);
-            req.release(owned);
-            held
-        }
-        None => owned,
-    };
+    let owned = exec::owned_deref(req, owned);
     let out = (op.out_type != OperandKind::Unused).then(|| exec::temporary_slot(code, op.out));
     match crate::generator::yield_from(req, generator, owned, op.op1_type == OperandKind::Const) {
         Ok(crate::generator::From::Finished(retval)) => {

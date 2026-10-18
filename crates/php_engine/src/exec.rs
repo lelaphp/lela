@@ -1936,15 +1936,7 @@ pub(crate) fn take_operand(
     match kind {
         OperandKind::Tmp | OperandKind::Var => {
             let value = req.take_slot(frame, temporary_slot(code, field));
-            match value.as_php_ref() {
-                Some(cell) => {
-                    let held = cell.get();
-                    req.addref(&held);
-                    req.release(value);
-                    held
-                }
-                None => value,
-            }
+            owned_deref(req, value)
         }
         OperandKind::Const | OperandKind::Cv | OperandKind::Unused => {
             let value = operand(req, frame, code, kind, field).deref();
@@ -1952,6 +1944,18 @@ pub(crate) fn take_operand(
             value
         }
     }
+}
+
+/// `ZVAL_DEREF` over a value one owner of which the caller holds: what
+/// the reference held, with the owner moved onto it.
+pub(crate) fn owned_deref(req: &mut Request, value: Value) -> Value {
+    let Some(cell) = value.as_php_ref().copied() else {
+        return value;
+    };
+    let held = cell.get();
+    req.addref(&held);
+    req.release(value);
+    held
 }
 
 /// `GET_OP*_ZVAL_PTR_DEREF(BP_VAR_R)` as a frameless call reads its
