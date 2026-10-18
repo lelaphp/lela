@@ -391,6 +391,9 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
             return Err(thrown);
         }
         pending = Some(match pending.take() {
+            // The write refused past the standing throwable answers it,
+            // with no owner of its own ([`while_pending`]).
+            Some(earlier) if earlier.exception() == thrown.exception() => earlier,
             Some(earlier) => earlier.chain(req, thrown),
             None => thrown,
         });
