@@ -930,3 +930,28 @@ fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
         reading.message
     );
 }
+
+/// The recipe prints the closure digest a darwin-arm64 build is made
+/// against (#2935) as xtask makes it: `scripts/oracle-build.py closure`
+/// over the tracked pin is the digest its macOS build names, which the
+/// pin's grammar holds to `[closure]`'s. Run where the macOS build is
+/// made, whose runner installs the recipe's Python.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_recipe_prints_the_closure_digest_the_tracked_macos_build_names() {
+    let out = std::process::Command::new("python3")
+        .arg("-I")
+        .arg(workspace().join("scripts/oracle-build.py"))
+        .arg("closure")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let pin = Pin::parse(&tracked_text()).unwrap();
+    let named = (pin.variant.values())
+        .filter_map(|variant| variant.build(Platform::DarwinArm64)?.closure.clone());
+    let named: Vec<String> = named.map(|digest| digest.to_string()).collect();
+    assert!(!named.is_empty(), "the tracked pin names a macOS build");
+    for digest in named {
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), digest);
+    }
+}
