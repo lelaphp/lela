@@ -846,7 +846,7 @@ fn hook_stdin(tool: &str, cwd: &Path, input: &serde_json::Value) -> String {
 fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build() {
     let tree = Tree::new("permit-hand-off").unwrap();
     let root = tree.join("repo");
-    xtask::scratch::repository(workspace(), &root).unwrap();
+    xtask::scratch::repository(workspace(), &root, &["."]).unwrap();
     let beside = worktree_beside(&tree, &root, "t-x/handed");
     let marker = "not available to agents, says the worktree's manifest";
     let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();

@@ -977,8 +977,7 @@ impl Manifest {
     /// Load `seams.toml` from the workspace root, then the pin it names.
     pub fn load(root: &Path) -> Result<Manifest> {
         let path = root.join(FILE);
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(&path)?;
         let mut manifest = Manifest::parse(&text).with_context(|| format!("{}", path.display()))?;
         manifest.pin = Pin::load(&root.join(&manifest.oracle.pin))?;
         manifest.root = root.to_path_buf();

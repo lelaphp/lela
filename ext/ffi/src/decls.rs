@@ -162,6 +162,14 @@ impl FFI {
         filename: PhpString,
     ) -> Result<Option<Owner<Instance<FFI>>>, Thrown> {
         validate_api_restriction(req)?;
+        // `ZEND_COMPILE_PRELOAD_IN_CHILD`: the preload's request served
+        // as `opcache.preload_user`, php's child, publishes no scope.
+        if req.preloading_in_child() {
+            return Err(ffi_error(
+                req,
+                "FFI::load() doesn't work in conjunction with \"opcache.preload_user\". Use \"ffi.preload\" instead.",
+            ));
+        }
         if req.preloading() {
             let Some(scope) = crate::preload::register(req, filename.as_bytes()) else {
                 return Ok(None);

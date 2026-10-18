@@ -614,9 +614,9 @@ fn readable_php_fpm(dir: &Path) -> Command {
     command
 }
 
-/// The program [`slow_frames`] serves where a test names none: it sleeps
-/// two calls under a method of a class an included file declares.
-const SLOW: &[(&str, &str)] = &[
+/// The request [`slow_frames`] serves unless told otherwise: a sleep two
+/// calls under a method of a class an included file declares.
+const NESTED: &[(&str, &str)] = &[
     (
         "slow.php",
         "<?php\nfunction f($n) { usleep(3000000); }\nfunction g() { f(1); }\ninclude __DIR__ . '/inc.php';\necho 'done';\n",
@@ -627,12 +627,11 @@ const SLOW: &[(&str, &str)] = &[
     ),
 ];
 
-/// The frame lines of the slow log entry of one request for `slow.php`
-/// past `request_slowlog_timeout`, served by a pool of `name` whose
-/// configuration ends in `more`, each past its sixteen-digit room
-/// address, and the test directory as the engine resolved it. `files`
-/// are laid in the directory first, `slow.php` among them, which ends
-/// by writing `done`; the entry's head is held here.
+/// The frame lines of the slow log entry of one request past
+/// `request_slowlog_timeout` for `slow.php` of `files`, which ends by
+/// echoing `done`, served by a pool of `name` whose configuration ends in
+/// `more`, each past its sixteen-digit room address, and the test
+/// directory as the engine resolved it; the entry's head is held here.
 fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, PathBuf) {
     let dir = tree(name);
     let socket = socket(&dir);
@@ -718,7 +717,7 @@ fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, 
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
-    let (frames, real) = slow_frames("slowlog", "", SLOW);
+    let (frames, real) = slow_frames("slowlog", "", NESTED);
     let file = real.join("slow.php").display().to_string();
     let inc = real.join("inc.php").display().to_string();
     assert_eq!(
@@ -766,10 +765,33 @@ fn a_slow_request_in_a_delegated_generator_writes_php_s_placeholder_line() {
 #[test]
 #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
 fn a_slow_request_s_frames_stop_at_the_trace_depth() {
-    let (frames, real) = slow_frames("slowlog-depth", "request_slowlog_trace_depth = 2\n", SLOW);
+    let (frames, real) = slow_frames("slowlog-depth", "request_slowlog_trace_depth = 2\n", NESTED);
     let file = real.join("slow.php").display().to_string();
     assert_eq!(
         frames,
         [format!("usleep() {file}:2"), format!("f() {file}:3")]
+    );
+}
+
+/// A request asleep in a fiber: the fiber's first frame is linked to the
+/// frame of the native that resumed it, as `zend_fiber_resume` writes
+/// `fiber->stack_bottom->prev_execute_data`, so the walk runs from the
+/// sleep through the fiber's callable into `Fiber::start` and the main
+/// script. php's own walk meets the fiber's zeroed bottom frame there,
+/// whose `function_name` is NULL and whose call kind is no kind it names
+/// (`ZEND_UNREACHABLE`), so this line has no oracle (#2897).
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_s_frames_run_through_a_fiber_into_its_resumer() {
+    let script = "<?php\n$fiber = new Fiber(function () {\n    usleep(3000000);\n});\n$fiber->start();\necho 'done';\n";
+    let (frames, real) = slow_frames("slowlog-fiber", "", &[("slow.php", script)]);
+    let file = real.join("slow.php").display().to_string();
+    assert_eq!(
+        frames,
+        [
+            format!("usleep() {file}:3"),
+            format!("{{closure:{file}:2}}() {file}:5"),
+            format!("start() {file}:5"),
+        ]
     );
 }

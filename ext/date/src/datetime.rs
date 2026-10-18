@@ -24,7 +24,7 @@ use php_ext::values::{
 use crate::State;
 use crate::classes::DateTimeInterface;
 use crate::ffi::{
-    self, ErrorContainer, NO_CLONE, OVERRIDE_TIME, Parsed, RelTime, Time, UNSET, ZONETYPE_ABBR,
+    self, ErrorContainer, NO_CLONE, OVERRIDE_TIME, Parsed, RelFields, Time, UNSET, ZONETYPE_ABBR,
     ZONETYPE_ID, ZONETYPE_OFFSET, Zone,
 };
 use crate::format::date_format as format_time;
@@ -523,7 +523,7 @@ fn modify_fields(l: &Lent<'_>, time: &mut Time, tmp: Time) {
     time.update_ts(l, None);
     time.update_from_sse(l);
     time.have_relative = 0;
-    time.relative = RelTime::default();
+    time.relative = RelFields::default();
 }
 
 /// `php_date_add`: `timelib_add_wall` for an interval a constructor
@@ -672,7 +672,7 @@ fn isodate_set(
         time.y = year;
         time.m = 1;
         time.d = 1;
-        time.relative = RelTime::default();
+        time.relative = RelFields::default();
         time.relative.d = ffi::daynr_from_weeknr(year, week, day_of_week);
         time.have_relative = 1;
         time.update_ts(l, None);
@@ -746,23 +746,25 @@ fn diff_of(
 ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
     check_time(req, one)?;
     check_time(req, two)?;
-    // `timelib_diff(dateobj1->time, dateobj2->time)`, both where they
-    // stand, the one time twice for a date diffed with itself.
-    let diff = with_time(req, one, |req, a| {
-        if one == two {
-            return lent(req, |l| a.diff(l, a));
+    new_interval(req, CIVIL, None, |req| {
+        // `timelib_diff(dateobj1->time, dateobj2->time)`, both where they
+        // stand, the one time twice for a date diffed with itself.
+        let diff = with_time(req, one, |req, a| {
+            if one == two {
+                return lent(req, |l| a.diff(l, a));
+            }
+            with_time(req, two, |req, b| lent(req, |l| a.diff(l, b)))
+                .unwrap_or_else(|| Err(uninitialized(req, two.class())))
+        });
+        let Some(diff) = diff else {
+            return Err(uninitialized(req, one.class()));
+        };
+        let mut diff = diff?;
+        if absolute {
+            diff.invert = 0;
         }
-        with_time(req, two, |req, b| lent(req, |l| a.diff(l, b)))
-            .unwrap_or_else(|| Ok(RelTime::default()))
-    });
-    let Some(diff) = diff else {
-        return Err(uninitialized(req, one.class()));
-    };
-    let mut diff = diff?;
-    if absolute {
-        diff.invert = 0;
-    }
-    new_interval(req, diff, CIVIL, None)
+        Ok(diff)
+    })
 }
 
 /// `php_date_initialize_from_hash`: `date`, `timezone_type` and

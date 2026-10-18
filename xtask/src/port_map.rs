@@ -271,8 +271,7 @@ impl PortMap {
     /// Load `data/port-map.v0.toml` from the workspace root.
     pub(crate) fn load(root: &Path) -> Result<PortMap> {
         let path = root.join(SEED);
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(&path)?;
         PortMap::parse(&text).with_context(|| format!("{}", path.display()))
     }
 

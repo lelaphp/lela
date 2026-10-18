@@ -180,7 +180,7 @@ fn serve_until_stopped(site: &Arc<Site>, listener: &TcpListener) -> i32 {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
-                site.log.write(Type::Error, &strerror(&error));
+                site.log.write(Type::Error, &php_sapi::strerror(&error));
                 status = 1;
                 break;
             }
@@ -230,7 +230,10 @@ fn accept(site: &Site, listener: &TcpListener, clients: &mut BTreeMap<RawFd, Con
         Err(error) => {
             site.log.write(
                 Type::Error,
-                &format!("Failed to accept a client (reason: {})", strerror(&error)),
+                &format!(
+                    "Failed to accept a client (reason: {})",
+                    php_sapi::strerror(&error)
+                ),
             );
             false
         }
@@ -283,7 +286,7 @@ fn strtol_port(digits: &str) -> Option<u16> {
 /// binds, `?` where php kept none.
 fn listen(host: &str, port: u16) -> Result<(TcpListener, u16), String> {
     let addresses = (host, port).to_socket_addrs().map_err(|error| {
-        let text = strerror(&error);
+        let text = php_sapi::strerror(&error);
         let gai = text
             .strip_prefix("failed to lookup address information: ")
             .unwrap_or(&text);
@@ -296,7 +299,7 @@ fn listen(host: &str, port: u16) -> Result<(TcpListener, u16), String> {
                 return Ok((listener, port));
             }
             Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EADDRINUSE)) => {
-                return Err(strerror(&error));
+                return Err(php_sapi::strerror(&error));
             }
             Err(_) => {}
         }
@@ -310,16 +313,6 @@ fn peer_name(peer: SocketAddr) -> String {
     match peer {
         SocketAddr::V4(v4) => format!("{}:{}", v4.ip(), v4.port()),
         SocketAddr::V6(v6) => format!("[{}]:{}", v6.ip(), v6.port()),
-    }
-}
-
-/// `strerror(errno)`'s text for an error the system raised, without the
-/// ` (os error N)` Rust adds.
-fn strerror(error: &std::io::Error) -> String {
-    let text = error.to_string();
-    match text.rfind(" (os error ") {
-        Some(at) => text[..at].to_owned(),
-        None => text,
     }
 }
 

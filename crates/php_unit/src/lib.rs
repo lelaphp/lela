@@ -24,8 +24,8 @@ mod types;
 mod unit;
 
 mod opcode {
-    //! The generated enum and its tables (`build.rs`).
-    use crate::op::Effects;
+    //! The generated enums and their tables (`build.rs`).
+    use crate::op::{Effects, Fused, OperandKind, Opline, data_kind};
     include!(concat!(env!("OUT_DIR"), "/opcode.rs"));
 }
 
@@ -33,8 +33,8 @@ pub use enum_methods::enum_methods;
 pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{
     BoundVar, CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, MapPtrOffset, OpArray,
-    OperandKind, Opline, OplineIdx, TryCatch,
+    OperandKind, Opline, OplineIdx, Safepoints, TryCatch,
 };
-pub use opcode::Opcode;
+pub use opcode::{Handler, Opcode};
 pub use types::{type_to_string, type_to_string_called};
 pub use unit::{AutoGlobal, Diagnostic, HookBody, Level, MethodBody, TopLevel, Unit, UnitCell};

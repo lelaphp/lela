@@ -35,11 +35,7 @@ pub(crate) fn place(subset: &Subset, host: Option<&Path>) -> Result<()> {
             continue;
         };
         let link = parent.join(FPM.binary);
-        match std::fs::remove_file(&link) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {}", link.display())),
-        }
+        crate::remove(&link)?;
         if let Some(host) = host {
             std::os::unix::fs::symlink(host, &link)
                 .with_context(|| format!("linking {} to {}", link.display(), host.display()))?;

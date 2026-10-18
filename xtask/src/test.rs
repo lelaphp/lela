@@ -6,8 +6,8 @@
 //! reading per crate that exists; `--crate` narrows it to the ones named,
 //! `--staged` to the crates with a staged change. The numbers are the sums
 //! over every test binary and the doctests of the crate: `passed`,
-//! `failed`, `ignored` and `filtered`; a crate whose tests do not build has
-//! none and fails all the same.
+//! `failed`, `ignored` and `filtered`, with `ms` beside them; a crate whose
+//! tests do not build has none and fails all the same.
 //!
 //! A run is three steps over every crate at once, as `cargo test` would
 //! take them one crate at a time (#2165), and a crate with a binary takes
@@ -15,14 +15,23 @@
 //! ([`batch::runs`], #2606). One `cargo build --tests
 //! --keep-going` builds every crate's test targets, cargo building crates
 //! side by side, and a crate that does not compile stops only the crates
-//! built on it ([`batch::Run`]). Each crate's test executables then run,
-//! crate after crate, each with the working directory and the environment
-//! `cargo test` gives it ([`environment`]); crates are not run side by
-//! side, since their tests may share System V objects, sockets, a `MySQL`
-//! server and scratch paths, and each binary runs its own tests in
-//! parallel as it always has. Last, one `cargo test --doc` runs the
-//! doctests of every crate that built, what it printed read back crate by crate
-//! from cargo's `Doc-tests` lines.
+//! built on it ([`batch::Run`]). Next, one `cargo test --doc` runs the
+//! doctests of every crate that built, what it printed read back crate by
+//! crate from cargo's `Doc-tests` lines. Last, each crate's test
+//! executables run, crate after crate, each with the working directory and
+//! the environment `cargo test` gives it ([`environment`]), and each
+//! running its own tests in parallel as it always has. Crates are not run
+//! side by side, since their tests may share System V objects, sockets, a
+//! `MySQL` server and scratch paths, and for the same reason a crate's own
+//! executables run one at a time unless its `Cargo.toml` declares that
+//! they share nothing, `executables = "side-by-side"` under
+//! `[package.metadata.xtask.test]`: then as many run at once as
+//! [`Beside::schedule`] says, an executable that does share something held
+//! apart from the others that name its key ([`Beside`]), what each one
+//! printed kept whole and read in the executables' order (#2869). The
+//! reading is stamped once they have ended, `ms` counts how long they
+//! ran, and a group per executable, `test worktree`, how long that one
+//! did.
 //!
 //! **A pinned error code.** A `compile_fail,E0382` block passes the stable
 //! rustdoc when it fails to compile for any reason; only a nightly's
@@ -35,16 +44,20 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
-use crate::batch::{self, Built, Executable, Run, Targets, tail};
+use crate::batch::{self, Built, Executable, Package, Run, Targets, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::reading::{Reading, Status, Store, plural};
+use crate::reading::{Number, Reading, Status, Store, millis, plural};
 use crate::sources;
+use crate::tally::{self, Apart};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "test";
@@ -58,7 +71,6 @@ pub use crate::batch::without_git;
 /// scratch repository's among them (#1416, #2747).
 pub fn committed(root: &Path, path: &str) -> Result<String> {
     let mut git = Command::new("git");
-    git.args(["show", &format!(":{path}")]).current_dir(root);
     if let Some(index) = std::env::var_os(batch::COMMIT_INDEX) {
         let dir = crate::git::git(root, &["rev-parse", "--absolute-git-dir"], None)
             .ok()
@@ -70,14 +82,8 @@ pub fn committed(root: &Path, path: &str) -> Result<String> {
             git.env("GIT_INDEX_FILE", index);
         }
     }
-    let out = git.output().with_context(|| format!("git show :{path}"))?;
-    if !out.status.success() {
-        bail!(
-            "git show :{path}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    String::from_utf8(out.stdout).with_context(|| format!("{path} is not UTF-8"))
+    let out = crate::git::run(git, root, &["show", &format!(":{path}")], None)?;
+    String::from_utf8(out).with_context(|| format!("{path} is not UTF-8"))
 }
 
 /// Run the tests of every crate that exists, or of `only`; one reading
@@ -129,6 +135,18 @@ struct Ran {
     text: String,
 }
 
+impl Ran {
+    /// `other` summed into this: its counts added, and what it printed
+    /// kept where it did not end well.
+    fn add(&mut self, other: &Ran) {
+        self.counts.add(&other.counts);
+        if !other.passed {
+            self.passed = false;
+            self.text.push_str(&other.text);
+        }
+    }
+}
+
 /// One crate's reading: pass when every test executable of the crate and
 /// its doctests ended well and no pinned code was `missed`, fail with the
 /// tail of what the ones that did not printed otherwise, each missed pin
@@ -139,67 +157,127 @@ fn reading(
     run: &Run,
     (doc, missed): (Option<&Ran>, &[String]),
 ) -> Result<Reading> {
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     let name = &krate.name;
     let Some(built) = run.crates.get(name).filter(|b| b.whole) else {
+        let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
         let said = run
             .crates
             .get(name)
             .map(Built::rendered)
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| run.stderr.clone());
-        for key in ["passed", "failed", "ignored", "filtered"] {
-            reading.count(key, 0)?;
-        }
+        Counts::default().count(&mut reading)?;
         reading.status = Status::Fail;
         reading.message = format!("{name}: the tests did not build\n{}", tail(&said, 40));
         return Ok(reading);
     };
-    let mut counts = Counts::default();
-    let mut passed = true;
-    let mut failing = String::new();
-    for executable in &built.executables {
+    let started = Instant::now();
+    let (jobs, apart) = Beside::of(&built.package)?.schedule(name, &built.executables)?;
+    let mut all = Ran {
+        passed: true,
+        ..Ran::default()
+    };
+    let mut took = BTreeMap::new();
+    let each = |executable: &Executable| {
+        let started = Instant::now();
         let ran = execute(executable, built, run)?;
-        counts.add(&ran.counts);
-        if !ran.passed {
-            passed = false;
-            failing.push_str(&ran.text);
-        }
-    }
+        let named = format!("{} {}", executable.kind, executable.name);
+        Ok((named, millis(started.elapsed()), ran))
+    };
+    let on = |(named, ms, ran): (String, u64, Ran)| {
+        took.insert(named, Number::count(ms));
+        all.add(&ran);
+    };
+    let batch = NonZeroUsize::MIN;
+    tally::pool(&built.executables, jobs, batch, &apart, each, on)?;
+    // Stamped once the executables have ended, so a span read off the
+    // store's stamps holds their run (#2869).
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
+    reading.count("ms", millis(started.elapsed()))?;
+    reading.groups = took;
     if let Some(doc) = doc {
-        counts.add(&doc.counts);
-        if !doc.passed {
-            passed = false;
-            failing.push_str(&doc.text);
-        }
+        all.add(doc);
     }
     for pin in missed {
-        counts.failed += 1;
-        passed = false;
-        failing.push_str(pin);
-        failing.push('\n');
+        all.counts.failed += 1;
+        all.passed = false;
+        all.text.push_str(pin);
+        all.text.push('\n');
     }
-    reading.count("passed", counts.passed)?;
-    reading.count("failed", counts.failed)?;
-    reading.count("ignored", counts.ignored)?;
-    reading.count("filtered", counts.filtered)?;
-    if passed {
+    let Ran { counts, passed, .. } = &all;
+    counts.count(&mut reading)?;
+    let (n, verb) = if *passed {
         reading.status = Status::Pass;
-        reading.message = format!(
-            "{name}: {} test{} passed",
-            counts.passed,
-            plural(usize::try_from(counts.passed).unwrap_or(usize::MAX))
-        );
+        (counts.passed, "passed")
     } else {
         reading.status = Status::Fail;
-        reading.message = format!(
-            "{name}: {} test{} failed\n{}",
-            counts.failed,
-            plural(usize::try_from(counts.failed).unwrap_or(usize::MAX)),
-            tail(&failing, 40)
-        );
+        (counts.failed, "failed")
+    };
+    let s = plural(usize::try_from(n).unwrap_or(usize::MAX));
+    reading.message = format!("{name}: {n} test{s} {verb}");
+    if !passed {
+        reading.message = format!("{}\n{}", reading.message, tail(&all.text, 40));
     }
     Ok(reading)
+}
+
+/// How a crate's test executables stand beside each other, as its
+/// `Cargo.toml` declares under `[package.metadata.xtask.test]`: one at a
+/// time unless it says otherwise, since a crate's tests may share System
+/// V objects, sockets, a `MySQL` server and scratch paths across its
+/// executables as well as across crates.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(tag = "executables", rename_all = "kebab-case", deny_unknown_fields)]
+enum Beside {
+    #[default]
+    OneAtATime,
+    /// Side by side, as many at once as [`Beside::schedule`] says, each apart
+    /// only from those it shares a key with: `apart`, by target name, is
+    /// what an executable holds that another may hold too.
+    SideBySide {
+        #[serde(default)]
+        apart: BTreeMap<String, Vec<String>>,
+    },
+}
+
+impl Beside {
+    /// What `package` declares; a declaration this does not read is an
+    /// error, never one at a time in silence.
+    fn of(package: &Package) -> Result<Beside> {
+        let Some(table) = (package.metadata.as_ref()).and_then(|m| m.get("xtask")?.get("test"))
+        else {
+            return Ok(Beside::OneAtATime);
+        };
+        let at = package.manifest_path.display();
+        serde_json::from_value(table.clone())
+            .with_context(|| format!("{at}: [package.metadata.xtask.test]"))
+    }
+
+    /// How many of `all`, `krate`'s executables, run at once, and what each may
+    /// not run beside, in their order. Side by side, as many as the share of
+    /// the machine cargo was given, `CARGO_BUILD_JOBS`, where the session
+    /// sets one, and otherwise the cores, since each executable runs its
+    /// own tests on threads of its own. A key held for a name that is no
+    /// executable of the crate is an error.
+    fn schedule(&self, krate: &str, all: &[Executable]) -> Result<(NonZeroUsize, Vec<Apart>)> {
+        let Beside::SideBySide { apart } = self else {
+            return Ok((NonZeroUsize::MIN, vec![Apart::default(); all.len()]));
+        };
+        if let Some(name) = apart.keys().find(|n| all.iter().all(|e| &e.name != *n)) {
+            bail!(
+                "{krate}: [package.metadata.xtask.test] holds `{name}` apart, which is no test executable of it"
+            );
+        }
+        let jobs = std::env::var("CARGO_BUILD_JOBS")
+            .ok()
+            .and_then(|j| j.parse().ok());
+        let keys = |e: &Executable| apart.get(&e.name).cloned().unwrap_or_default();
+        let held = all.iter().map(|e| Apart {
+            keys: keys(e),
+            ..Apart::default()
+        });
+        Ok((jobs.unwrap_or_else(tally::cores), held.collect()))
+    }
 }
 
 /// One test executable run as `cargo test` runs it: no argument, in the
@@ -320,6 +398,34 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(String
     env
 }
 
+/// `cargo test --doc` over `crates` at `root` with `args` after them,
+/// both streams written to one file, where a test's line, cargo's
+/// `Doc-tests <lib>` and the compiler's words stand in the order they were
+/// written: whether it ended well, and the file's text.
+fn doc_run(root: &Path, run: &Run, crates: &[&Crate], args: Vec<String>) -> Result<(bool, String)> {
+    let dir = &run.target_dir;
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let written = dir.join(format!("xtask-doctests-{}.out", std::process::id()));
+    let file = File::create(&written).with_context(|| format!("creating {}", written.display()))?;
+    let mut command = Command::new("cargo");
+    command
+        .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
+        .current_dir(root)
+        .stdout(Stdio::from(
+            file.try_clone().context("sharing the doctests' file")?,
+        ))
+        .stderr(Stdio::from(file));
+    for krate in crates {
+        command.args(["-p", &krate.package()]);
+    }
+    command.args(args);
+    batch::without_git(&mut command);
+    let status = command.status().context("running cargo test --doc");
+    let text = fs::read_to_string(&written).unwrap_or_default();
+    fs::remove_file(&written).ok();
+    Ok((status?.success(), text))
+}
+
 /// Every built crate's doctests in one `cargo test --doc`, read back by
 /// crate. Cargo names each crate's run on stderr, `Doc-tests <lib>`, and
 /// the run's lines follow on stdout, so both are written to one file,
@@ -345,27 +451,7 @@ fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String
             Some((lib, k.name.clone()))
         })
         .collect();
-    fs::create_dir_all(&run.target_dir)
-        .with_context(|| format!("creating {}", run.target_dir.display()))?;
-    let written = run
-        .target_dir
-        .join(format!("xtask-doctests-{}.out", std::process::id()));
-    let file = File::create(&written).with_context(|| format!("creating {}", written.display()))?;
-    let mut command = Command::new("cargo");
-    command
-        .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
-        .current_dir(root)
-        .stdout(Stdio::from(
-            file.try_clone().context("sharing the doctests' file")?,
-        ))
-        .stderr(Stdio::from(file));
-    for krate in &with {
-        command.args(["-p", &krate.package()]);
-    }
-    batch::without_git(&mut command);
-    let status = command.status().context("running cargo test --doc")?;
-    let text = fs::read_to_string(&written).unwrap_or_default();
-    fs::remove_file(&written).ok();
+    let (ended, text) = doc_run(root, run, &with, Vec::new())?;
     let mut sections: BTreeMap<String, String> = BTreeMap::new();
     let mut current: Option<String> = None;
     for line in text.lines() {
@@ -384,7 +470,7 @@ fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String
         let counts = Counts::of(&section);
         // A crate's run that reported no result, in a run that failed,
         // is one cargo never reached: what cargo said is its text.
-        let reached = counts.binaries > 0 || status.success();
+        let reached = counts.binaries > 0 || ended;
         let passed = reached
             && !section
                 .lines()
@@ -475,42 +561,19 @@ impl Pin {
         if pinned.is_empty() {
             return Ok(BTreeMap::new());
         }
-        // The two streams go to one file, so a test's line and its
-        // compile's words stand in the order they were written.
-        fs::create_dir_all(&run.target_dir)
-            .with_context(|| format!("creating {}", run.target_dir.display()))?;
-        let written = run
-            .target_dir
-            .join(format!("xtask-pinned-{}.out", std::process::id()));
-        let file =
-            File::create(&written).with_context(|| format!("creating {}", written.display()))?;
-        let mut command = Command::new("cargo");
-        command
-            .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
-            .current_dir(root)
-            .stdout(Stdio::from(
-                file.try_clone()
-                    .context("sharing the pinned blocks' file")?,
-            ))
-            .stderr(Stdio::from(file));
-        for (krate, _) in &pinned {
-            command.args(["-p", &krate.package()]);
-        }
         // A test's name is its file, its item and its line; `compile fail`
         // is printed beside it and filters nothing, so the filters are the
         // pinned files and every doctest of them runs.
-        command.args(["--", "--nocapture", "--test-threads=1"]);
+        let mut args: Vec<String> = ["--", "--nocapture", "--test-threads=1"]
+            .map(String::from)
+            .into();
         let files: std::collections::BTreeSet<String> = pinned
             .iter()
             .flat_map(|(_, pins)| pins.iter().map(|pin| format!("{} - ", pin.file)))
             .collect();
-        command.args(files);
-        batch::without_git(&mut command);
-        command
-            .status()
-            .context("running cargo test --doc over the pinned blocks")?;
-        let said = Pin::said(&fs::read_to_string(&written).unwrap_or_default());
-        fs::remove_file(&written).ok();
+        args.extend(files);
+        let krates: Vec<&Crate> = pinned.iter().map(|(krate, _)| *krate).collect();
+        let said = Pin::said(&doc_run(root, run, &krates, args)?.1);
         let mut missed = BTreeMap::new();
         for (krate, pins) in pinned {
             let words: Vec<String> = pins.iter().filter_map(|pin| pin.missed_in(&said)).collect();
@@ -584,6 +647,14 @@ struct Counts {
 }
 
 impl Counts {
+    /// The counts as the reading's numbers.
+    fn count(&self, reading: &mut Reading) -> Result<()> {
+        reading.count("passed", self.passed)?;
+        reading.count("failed", self.failed)?;
+        reading.count("ignored", self.ignored)?;
+        reading.count("filtered", self.filtered)
+    }
+
     /// `other` added to these counts.
     fn add(&mut self, other: &Counts) {
         self.binaries += other.binaries;

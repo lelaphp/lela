@@ -206,17 +206,15 @@ impl Spent {
 
     /// The three numbers put on `reading`, each where this has one.
     pub fn carry(self, reading: &mut Reading) {
-        if let Some(usd) = self.usd {
-            reading.numbers.insert(USD.to_owned(), Number::Float(usd));
-        }
-        if let Some(tokens) = self.tokens {
-            reading
-                .numbers
-                .insert(TOKENS.to_owned(), Number::Int(tokens));
-        }
-        if let Some(turn) = self.turn {
-            reading.numbers.insert(TURN.to_owned(), Number::Int(turn));
-        }
+        let numbers = [
+            (USD, self.usd.map(Number::Float)),
+            (TOKENS, self.tokens.map(Number::Int)),
+            (TURN, self.turn.map(Number::Int)),
+        ];
+        let had = numbers
+            .into_iter()
+            .filter_map(|(key, n)| Some((key.to_owned(), n?)));
+        reading.numbers.extend(had);
     }
 }
 
@@ -261,25 +259,7 @@ mod tests {
         git(&tree, &["init", "-q", "-b", "main"], None).unwrap();
         std::fs::write(tree.join("a.txt"), "a\n").unwrap();
         git(&tree, &["add", "--", "a.txt"], None).unwrap();
-        git(
-            &tree,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/var/empty",
-                "-c",
-                "user.name=x",
-                "-c",
-                "user.email=x@x",
-                "commit",
-                "-q",
-                "-m",
-                "scratch",
-            ],
-            None,
-        )
-        .unwrap();
+        crate::scratch::committing(&tree, &["commit", "-q", "-m", "scratch"]);
         tree
     }
 

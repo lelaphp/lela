@@ -92,11 +92,11 @@ fn read_head(root: &Path) -> Option<String> {
 /// tracked or not, as paths relative to `root`, sorted. What an instrument
 /// means by "the sources" of a scope; `tree_hash` is one hash over them.
 pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
-    files_under(root, &[scope.to_path_buf()])
+    files_under(root, &[scope])
 }
 
 /// [`files`] under each of `scopes` at once, one listing of their union.
-fn files_under(root: &Path, scopes: &[PathBuf]) -> Result<Vec<String>> {
+pub(crate) fn files_under(root: &Path, scopes: &[impl AsRef<Path>]) -> Result<Vec<String>> {
     let mut args = vec![
         "ls-files",
         "-z",
@@ -106,7 +106,12 @@ fn files_under(root: &Path, scopes: &[PathBuf]) -> Result<Vec<String>> {
         "--",
     ];
     for scope in scopes {
-        args.push(scope.to_str().context("the scope path is not UTF-8")?);
+        args.push(
+            scope
+                .as_ref()
+                .to_str()
+                .context("the scope path is not UTF-8")?,
+        );
     }
     let listing = git(root, &args, None)?;
     let mut paths: Vec<String> = listing
@@ -257,23 +262,26 @@ pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
 /// standing at the workspace's `HEAD` and every commit there was refused.
 pub(crate) fn elsewhere(root: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
-    command.arg("-C").arg(root).args(args).stdin(Stdio::null());
     crate::batch::without_git(&mut command);
-    let out = command.output().context("running git")?;
-    if !out.status.success() {
-        bail!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    String::from_utf8(out.stdout).context("git wrote something that is not UTF-8")
+    utf8(run(command, root, args, None)?)
 }
 
 /// Run git in `root` and return its stdout; a non-zero exit is an error
 /// carrying git's stderr.
 pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
-    let mut child = Command::new("git")
+    utf8(run(Command::new("git"), root, args, stdin)?)
+}
+
+/// `git`, as `command` stands, run in `root` with `stdin` fed to it: what
+/// it wrote on stdout, or the error that carries what it wrote on stderr
+/// when it exited non-zero.
+pub(crate) fn run(
+    mut command: Command,
+    root: &Path,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> Result<Vec<u8>> {
+    let mut child = command
         .arg("-C")
         .arg(root)
         .args(args)
@@ -291,13 +299,14 @@ pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<Str
     }
     let out = child.wait_with_output().context("waiting for git")?;
     if !out.status.success() {
-        bail!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("git {}: {}", args.join(" "), stderr.trim());
     }
-    String::from_utf8(out.stdout).context("git wrote something that is not UTF-8")
+    Ok(out.stdout)
+}
+
+fn utf8(stdout: Vec<u8>) -> Result<String> {
+    String::from_utf8(stdout).context("git wrote something that is not UTF-8")
 }
 
 /// One file the working tree differs in from a base commit.
@@ -318,14 +327,7 @@ pub fn changed_since(root: &Path, base: &str) -> Result<Vec<Change>> {
         &["diff", "--name-status", "-z", "--no-renames", base, "--"],
         None,
     )?;
-    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
-    let mut out = Vec::new();
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-        out.push(Change {
-            path: path.to_owned(),
-            deleted: status.starts_with('D'),
-        });
-    }
+    let mut out = changes(&listing);
     let untracked = git(
         root,
         &["ls-files", "-z", "--others", "--exclude-standard"],
@@ -361,16 +363,19 @@ pub fn staged(root: &Path) -> Result<Vec<Change>> {
         ],
         None,
     )?;
-    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
-    let mut out = Vec::new();
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-        out.push(Change {
-            path: path.to_owned(),
-            deleted: status.starts_with('D'),
-        });
-    }
+    let mut out = changes(&listing);
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+
+/// The changes a `git diff --name-status -z` listing names.
+fn changes(listing: &str) -> Vec<Change> {
+    let fields: Vec<&str> = listing.split('\0').filter(|f| !f.is_empty()).collect();
+    let change = |pair: &[&str]| Change {
+        path: pair[1].to_owned(),
+        deleted: pair[0].starts_with('D'),
+    };
+    fields.chunks_exact(2).map(change).collect()
 }
 
 /// The content of `path` in the index: `show(root, "", path)`, since git
@@ -510,25 +515,10 @@ mod tests {
         std::fs::write(root.join("docs/one.md"), "one\n").unwrap();
         std::fs::write(root.join("docs/deeper/two.toml"), "two = 2\n").unwrap();
         std::fs::write(root.join("elsewhere.md"), "not under docs\n").unwrap();
-        let named = ["-c", "user.name=x", "-c", "user.email=x@x"];
-        let unhooked = [
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        for args in [
-            &["init", "-q", "-b", "main"][..],
-            &["add", "-A"],
-            &[
-                &named[..],
-                &unhooked[..],
-                &["commit", "-q", "-m", "scratch"],
-            ]
-            .concat(),
-        ] {
+        for args in [&["init", "-q", "-b", "main"][..], &["add", "-A"]] {
             super::git(&root, args, None).unwrap();
         }
+        crate::scratch::committing(&root, &["commit", "-q", "-m", "scratch"]);
         let root = root.path();
         let out = |args: &[&str], stdin: Option<&str>| {
             let mut child = std::process::Command::new("git")

@@ -11,7 +11,6 @@
 //! the oracle's host from `[sapi]` beside the engine's witness build, the
 //! response's head let go and its body held.
 
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -202,8 +201,7 @@ pub(crate) fn served_by_server(
     let recipe = &oracle.pin().recipe;
     let own = Tree::new("crosscheck-server")?;
     let program = own.join(&recipe.script_name);
-    fs::write(&program, format!("{}{snippet}", recipe.preamble))
-        .with_context(|| format!("writing {}", program.display()))?;
+    crate::write(&program, format!("{}{snippet}", recipe.preamble))?;
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let started = Instant::now();
     let mut refused = Vec::new();

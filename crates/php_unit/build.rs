@@ -4,7 +4,9 @@
 //! `OUT_DIR/opcode.rs` and included by `opcode`, never committed (design
 //! §10). The enum keeps php's numbers as discriminants in the one byte
 //! `zend_op.opcode` is, including the two `unused_numbers`; its variants
-//! are php's names in camel case.
+//! are php's names in camel case. Beside it, the handler enum an opline
+//! is resolved to where its unit is published, one variant per opcode
+//! and per pair of kinds its row specialises (`Handler`).
 
 use std::env;
 use std::fmt::Write as _;
@@ -43,17 +45,34 @@ struct Op {
     effects: Vec<String>,
     result_used: bool,
     safepoint: bool,
-    /// `COMMUTATIVE` in the handler line's `SPEC(...)`, the
-    /// `ZEND_VM_COMMUTATIVE` bit of `zend_vm_opcodes_flags`.
-    commutative: bool,
+    /// The words of the handler line's `SPEC(...)`: `COMMUTATIVE`, the
+    /// `ZEND_VM_COMMUTATIVE` bit of `zend_vm_opcodes_flags`, and
+    /// `SMART_BRANCH`, a comparison's handler one over it and the `JMPZ`
+    /// or `JMPNZ` after it ([`Op::says`]).
+    spec: Vec<String>,
     /// php's `zend_vm_opcodes_flags` word for the opcode, without its
     /// two top bits.
     flags: u32,
+    /// Where the design's hot list specialises the opcode's handler
+    /// (`specialise`), the kinds of `op1` and of `op2` it is specialised
+    /// over, each `None` for an operand whose shape carries no zval kind
+    /// with php's `SPEC` bit, `ANY` or a field such as `JMP_ADDR`, which
+    /// `zend_vm_gen.php` does not specialise over.
+    kinds: Option<[Option<Vec<String>>; 2]>,
+}
+
+impl Op {
+    /// Whether the handler line's `SPEC(...)` says `word`.
+    fn says(&self, word: &str) -> bool {
+        self.spec.iter().any(|said| said == word)
+    }
 }
 
 fn generate(path: &Path) -> Result<String, String> {
     let ops = read(path)?;
-    render(&ops)
+    let mut out = render(&ops)?;
+    handlers(&ops, &mut out)?;
+    Ok(out)
 }
 
 /// The `[[op]]` rows, in number order.
@@ -88,14 +107,25 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             .unwrap_or_default();
         let result_used = row.get("result").and_then(toml::Value::as_str) == Some("used");
         let safepoint = row.get("safepoint").is_some();
-        let commutative = row
+        let spec_words = row
             .get("spec")
             .and_then(toml::Value::as_str)
-            .is_some_and(|spec| spec.split(',').any(|word| word == "COMMUTATIVE"));
+            .map(|spec| {
+                spec.split(',')
+                    .filter(|word| !word.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         let spec = |key: &str| row.get(key).and_then(toml::Value::as_str).unwrap_or("ANY");
         let flags = operand_flags(&name, spec("op1_raw"))?
             | (operand_flags(&name, spec("op2_raw"))? << 8)
             | ext_flags(&name, row.get("ext").and_then(toml::Value::as_str))?;
+        let kinds = row
+            .get("specialise")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+            .then(|| [specialised(row, "op1"), specialised(row, "op2")]);
         ops.push(Op {
             num,
             variant: camel(&name),
@@ -103,8 +133,9 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             effects,
             result_used,
             safepoint,
-            commutative,
+            spec: spec_words,
             flags,
+            kinds,
         });
     }
     ops.sort_by_key(|op| op.num);
@@ -200,7 +231,7 @@ fn render(ops: &[Op]) -> Result<String, String> {
     writeln!(
         out,
         "pub(crate) static COMMUTATIVE: [bool; LAST + 1] = [{}];",
-        by_num(&|op| op.commutative.to_string(), "false")
+        by_num(&|op| op.says("COMMUTATIVE").to_string(), "false")
     )
     .ok();
     // php's `zend_vm_opcodes_flags` without its two top bits, which
@@ -216,6 +247,213 @@ fn render(ops: &[Op]) -> Result<String, String> {
     )
     .ok();
     Ok(out)
+}
+
+/// The kinds a row lists for one operand, where its shape, `op1_raw` or
+/// `op2_raw`, carries a zval kind with php's `SPEC` bit.
+fn specialised(row: &toml::Value, field: &str) -> Option<Vec<String>> {
+    let raw = row
+        .get(format!("{field}_raw"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("ANY");
+    raw.split('|')
+        .any(|word| {
+            matches!(
+                word,
+                "CONST" | "TMP" | "VAR" | "CV" | "UNUSED" | "TMPVAR" | "TMPVARCV"
+            )
+        })
+        .then(|| {
+            row.get(field)
+                .and_then(toml::Value::as_array)
+                .map(|kinds| {
+                    kinds
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+}
+
+/// Each dimension one opcode's handler is resolved over, what the
+/// `match` reads with each value's pattern and the part of the variant's
+/// name it gives, and whether a kind is among them, which leaves the
+/// kinds a row does not list to a variant of their own.
+fn dimensions(op: &Op) -> Result<(Vec<Dimension>, bool), String> {
+    let (op1, op2) = match &op.kinds {
+        Some([op1, op2]) => (op1.as_ref(), op2.as_ref()),
+        None => (None, None),
+    };
+    let mut dimensions: Vec<Dimension> = Vec::new();
+    for (scrutinee, kinds) in [("op.op1_type", op1), ("op.op2_type", op2)] {
+        if let Some(kinds) = kinds {
+            let values = kinds
+                .iter()
+                .map(|k| kind(&op.name, k).map(|k| (format!("OperandKind::{k}"), k.to_owned())))
+                .collect::<Result<Vec<_>, String>>()?;
+            dimensions.push((scrutinee, values));
+        }
+    }
+    // `SPEC(OP_DATA=...)` on an opcode the hot list specialises: the
+    // kind of the `OP_DATA` opline's `op1` after it, as php's
+    // `_OP_DATA_CV` handlers are.
+    if op.kinds.is_some()
+        && let Some(listed) = op
+            .spec
+            .iter()
+            .find_map(|word| word.strip_prefix("OP_DATA="))
+    {
+        let values = listed
+            .split('|')
+            .map(|k| {
+                kind(&op.name, k).map(|k| (format!("Some(OperandKind::{k})"), format!("OpData{k}")))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        dimensions.push(("data_kind(next)", values));
+    }
+    let listed = !dimensions.is_empty();
+    if op.says("SMART_BRANCH") {
+        dimensions.push((
+            "Fused::of(op, next)",
+            ["No", "Jmpz", "Jmpnz"]
+                .iter()
+                .map(|way| {
+                    let name = if *way == "No" { "" } else { way };
+                    (format!("Fused::{way}"), name.to_owned())
+                })
+                .collect(),
+        ));
+    }
+    Ok((dimensions, listed))
+}
+
+/// What a `match` reads, and each value's pattern with the part of the
+/// variant's name it gives.
+type Dimension = (&'static str, Vec<(String, String)>);
+
+/// The handler enum and its resolution: one variant for an opcode
+/// `ops.toml` does not specialise, and for one it does a variant for
+/// every pair of the kinds it lists for the operands it specialises,
+/// `op1`'s then `op2`'s, and one for the kinds it does not list, as
+/// `zend_vm_gen.php` emits a handler per `SPEC` pair and
+/// `ZEND_NULL_HANDLER` for the rest; for an opcode whose handler line
+/// says `SMART_BRANCH`, each of those three times over, unfused and fused
+/// to the `JMPZ` or the `JMPNZ` after it, as php's `_JMPZ` and `_JMPNZ`
+/// handlers are. `Unresolved`, the default, is what an opline holds
+/// until its unit is published.
+fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
+    let mut variants = vec!["Unresolved".to_owned()];
+    let mut arms = String::new();
+    for op in ops {
+        let (dimensions, listed) = dimensions(op)?;
+        if dimensions.is_empty() {
+            variants.push(op.variant.clone());
+            writeln!(arms, "            Opcode::{0} => Handler::{0},", op.variant).ok();
+            continue;
+        }
+        let scrutinee = dimensions.iter().map(|(read, _)| *read).collect::<Vec<_>>();
+        let scrutinee = match scrutinee.as_slice() {
+            [one] => (*one).to_owned(),
+            many => format!("({})", many.join(", ")),
+        };
+        writeln!(
+            arms,
+            "            Opcode::{} => match {scrutinee} {{",
+            op.variant
+        )
+        .ok();
+        let mut rows: Vec<(Vec<String>, String)> = vec![(Vec::new(), op.variant.clone())];
+        for (_, values) in &dimensions {
+            rows = rows
+                .iter()
+                .flat_map(|(patterns, name)| {
+                    values.iter().map(move |(pattern, part)| {
+                        let mut patterns = patterns.clone();
+                        patterns.push(pattern.clone());
+                        (patterns, format!("{name}{part}"))
+                    })
+                })
+                .collect();
+        }
+        for (patterns, variant) in rows {
+            let pattern = match patterns.as_slice() {
+                [one] => one.clone(),
+                many => format!("({})", many.join(", ")),
+            };
+            writeln!(arms, "                {pattern} => Handler::{variant},").ok();
+            variants.push(variant);
+        }
+        if listed {
+            let unlisted = format!("{}Unlisted", op.variant);
+            writeln!(arms, "                _ => Handler::{unlisted},").ok();
+            variants.push(unlisted);
+        }
+        writeln!(arms, "            }},").ok();
+    }
+    if variants.len() > usize::from(u16::MAX) {
+        return Err(format!(
+            "{} handlers do not fit the u16 an opline holds",
+            variants.len()
+        ));
+    }
+    writeln!(
+        out,
+        "/// The handler an opline is served by, as `zend_vm_set_opcode_handler`\n\
+         /// picks `zend_op.handler` (`Z/Zend/zend_vm_execute.h`): its opcode, at\n\
+         /// the kinds of its operands where `ops.toml` specialises the opcode\n\
+         /// (`specialise`), one variant per pair of the kinds the row lists for\n\
+         /// the operands whose shape has php's `SPEC` bit, `AddCvConst` for an\n\
+         /// `ADD` of a CV and a constant and `JmpzCv` for a `JMPZ` over a CV,\n\
+         /// whose `op2` is a jump address, and `AddUnlisted` for the kinds it\n\
+         /// does not list, php's `ZEND_NULL_HANDLER`. Resolved once, where the\n\
+         /// unit is published ([`crate::Unit::published`]), so the dispatch\n\
+         /// reads one field and jumps once; `Unresolved` until then.\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]\n\
+         #[repr(u16)]\n\
+         pub enum Handler {{\n\
+         \x20   #[default]"
+    )
+    .ok();
+    for variant in &variants {
+        writeln!(out, "    {variant},").ok();
+    }
+    writeln!(
+        out,
+        "}}\n\
+         \n\
+         impl Handler {{\n\
+         \x20   /// The handler `op` is served by.\n\
+         \x20   // One arm per opcode: the length is the number of opcodes, and a\n\
+         \x20   // `_` is the kinds the row does not list, however few are left.\n\
+         \x20   #[allow(clippy::too_many_lines, clippy::match_wildcard_for_single_variants)]\n\
+         \x20   #[must_use]\n\
+         \x20   pub(crate) fn of(op: &Opline, next: Option<&Opline>) -> Handler {{\n\
+         \x20       match op.opcode {{\n\
+         {arms}\
+         \x20       }}\n\
+         \x20   }}\n\
+         }}"
+    )
+    .ok();
+    Ok(())
+}
+
+/// The variant of `OperandKind` a kind `ops.toml` lists names.
+fn kind(op: &str, kind: &str) -> Result<&'static str, String> {
+    Ok(match kind {
+        "CONST" => "Const",
+        "TMP" => "Tmp",
+        "VAR" => "Var",
+        "CV" => "Cv",
+        "UNUSED" => "Unused",
+        other => {
+            return Err(format!(
+                "{op}: operand kind {other} is not one an opline holds"
+            ));
+        }
+    })
 }
 
 /// One operand's byte of `zend_vm_opcodes_flags`, decoded from the

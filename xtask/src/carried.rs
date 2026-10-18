@@ -21,8 +21,6 @@
 //! not.
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -56,10 +54,9 @@ impl Carried {
     /// knows how to read.
     pub fn binary(root: &Path) -> Result<Carried> {
         let path = root.join(BINARY).join("Cargo.toml");
-        match fs::read_to_string(&path) {
-            Ok(text) => Carried::declared(&text).with_context(|| format!("{}", path.display())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Carried::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        match crate::read_if(&path)? {
+            Some(text) => Carried::declared(&text).with_context(|| format!("{}", path.display())),
+            None => Ok(Carried::default()),
         }
     }
 
@@ -71,10 +68,8 @@ impl Carried {
     pub(crate) fn linked(root: &Path) -> Result<Carried> {
         let mut carried = Carried::binary(root)?;
         let path = root.join("crates").join(BUNDLE).join("Cargo.toml");
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(carried),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        let Some(text) = crate::read_if(&path)? else {
+            return Ok(carried);
         };
         let table: toml::Table =
             toml::from_str(&text).with_context(|| format!("{}", path.display()))?;

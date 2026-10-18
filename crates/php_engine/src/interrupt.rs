@@ -279,6 +279,18 @@ impl Timer {
         control.thread.is_some() && control.shared.held().requests.is_empty()
     }
 
+    /// Its thread started where none stands, before any deadline: a
+    /// thread started from a thread apart ([`crate::fork::run_apart`])
+    /// would keep the ids it took, so the timer stands before one, and a
+    /// deadline the preload arms there is served by a thread with the
+    /// process's ids.
+    pub(crate) fn stand(&self) {
+        let mut control = self.control();
+        if control.thread.is_none() {
+            control.start();
+        }
+    }
+
     /// The thread and the schedule, held: in a process forked from the
     /// one the schedule is for, both forgotten first (see [`Timer`]).
     fn control(&self) -> MutexGuard<'_, Control> {
@@ -1017,7 +1029,7 @@ mod tests {
     /// of `for (;;) {}`, safepoint number one, which runs until the
     /// interrupt stops it.
     fn looping() -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::Jmp,
@@ -1025,11 +1037,12 @@ mod tests {
                     out: 1,
                     ..Opline::default()
                 }],
-                safepoints: vec![OplineIdx(0), OplineIdx(0)],
+                safepoints: vec![OplineIdx(0), OplineIdx(0)].into(),
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     fn description() -> RequestDescription {

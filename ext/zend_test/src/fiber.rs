@@ -8,8 +8,8 @@
 //! leaves, is the extension's request state.
 
 use php_ext::abi::{
-    Callable, CloneObj, Coroutine, CoroutineStatus, DtorObj, ExtensionBuilder, HoldsCoroutine,
-    Instance, NamedVariadic, ObjectHandlers, This,
+    Callable, CloneObj, Coroutine, CoroutineEnd, CoroutineStatus, DtorObj, ExtensionBuilder,
+    HoldsCoroutine, Instance, NamedVariadic, ObjectHandlers, This,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_named, new_object};
@@ -229,6 +229,53 @@ impl _ZendTestFiber {
     /// third 3
     /// NULL
     /// ```
+    ///
+    /// The body's end lays the target down on its own stack and
+    /// transfers into it from there, as `zend_test_fiber_execute` does:
+    /// the fiber observers see the target's init, then one switch from
+    /// the dead fiber into it, and the dead fiber's destroy before the
+    /// target runs. The child is served with the observers on, which
+    /// only startup sets, and its addresses numbered by first
+    /// appearance (#2506):
+    ///
+    /// ```php
+    /// $code = '$fiber = new _ZendTestFiber(fn () => 2);
+    /// $fiber->pipeTo(function (int $x) { echo "second $x\n"; return 3; });
+    /// var_dump($fiber->start());';
+    /// $args = [PHP_BINARY, '-n'];
+    /// foreach (['enabled', 'fiber_init', 'fiber_switch', 'fiber_destroy'] as $name) {
+    ///     array_push($args, '-d', "zend_test.observer.$name=1");
+    /// }
+    /// $p = proc_open([...$args, '-r', $code], [1 => ['pipe', 'w']], $pipes);
+    /// $out = stream_get_contents($pipes[1]);
+    /// proc_close($p);
+    /// $seen = [];
+    /// echo preg_replace_callback('/0x[0-9a-f]+/', function ($m) use (&$seen) {
+    ///     return '#' . ($seen[$m[0]] ??= count($seen) + 1);
+    /// }, $out);
+    /// ```
+    /// ```expect process
+    /// <!-- init 'Command line code' -->
+    /// <!-- init _ZendTestFiber::__construct() -->
+    /// <!-- init _ZendTestFiber::pipeTo() -->
+    /// <!-- init _ZendTestFiber::start() -->
+    /// <!-- alloc: #1 -->
+    /// <!-- switching from fiber #2 to #1 -->
+    /// <init '#1'>
+    /// <!-- init {closure:Command line code:1}() -->
+    /// <!-- alloc: #3 -->
+    /// <!-- switching from fiber #1 to #3 -->
+    /// <init '#3'>
+    /// <returned '#1'>
+    /// <!-- destroy: #1 -->
+    /// <!-- init {closure:Command line code:2}() -->
+    /// second 2
+    /// <!-- switching from fiber #3 to #2 -->
+    /// <returned '#3'>
+    /// <!-- destroy: #3 -->
+    /// <!-- init var_dump() -->
+    /// NULL
+    /// ```
     fn pipeTo(
         req: &mut Request,
         this: This<Self>,
@@ -422,6 +469,35 @@ impl _ZendTestFiber {
     /// a: 8 2
     /// b: 8 0
     /// ```
+    ///
+    /// Inside both, the chain from the inner `Fiber`'s frame goes through
+    /// each `start` into the test fiber's closure, whose bottom frame names
+    /// no resumer's; a suspend that passes through both leaves the chain
+    /// standing as it is, and a debugger's evaluation in the inner fiber's
+    /// frame reads it so (`tests/frames.rs`, #2765):
+    ///
+    /// ```php
+    /// function f() {
+    ///     try { throw new Exception("no"); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+    /// }
+    /// $test = new _ZendTestFiber(function () {
+    ///     $a = new Fiber(function () {
+    ///         $b = new Fiber(function () { f(); });
+    ///         $b->start();
+    ///     });
+    ///     $a->start();
+    /// });
+    /// $test->start();
+    /// ```
+    /// ```expect
+    /// #0 %s(7): f()
+    /// #1 [internal function]: {closure:{closure:{closure:%s:5}:6}:7}()
+    /// #2 %s(8): Fiber->start()
+    /// #3 [internal function]: {closure:{closure:%s:5}:6}()
+    /// #4 %s(10): Fiber->start()
+    /// #5 [internal function]: {closure:%s:5}()
+    /// #6 {main}
+    /// ```
     fn suspend(
         req: &mut Request,
         #[php(default = null)] value: Value,
@@ -502,8 +578,11 @@ fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendTestFiber, T
 
 /// `zend_fiber_init_context` over `zend_test_fiber_execute`: the
 /// callable called with `arguments` on the coroutine's stack and given up
-/// once the call is done; what it returned kept as `fiber->result`, the
-/// argument a pipe passed given up first, and handed back.
+/// once the call is done, with the argument a pipe passed; what it
+/// returned kept as `fiber->result` and handed back, or, where `pipeTo`
+/// made a target, the target laid down on this stack with that value as
+/// its one argument, the active fiber from here, and transferred into
+/// ([`CoroutineEnd::Into`]).
 fn lay_down(
     req: &mut Request,
     object: PhpObject,
@@ -530,53 +609,28 @@ fn lay_down(
             owner.give_up(req);
         }
         let value = outcome?;
-        let handed = Owner::take(req, *value);
-        payload(req, object)?.result = Some(value);
-        Ok(handed)
+        let returned = *value;
+        let fiber = payload(req, object)?;
+        fiber.result = Some(value);
+        let Some(target) = fiber.target.as_deref().copied() else {
+            return Ok(CoroutineEnd::Return(Owner::take(req, returned)));
+        };
+        let argument = Owner::take(req, returned);
+        payload(req, target)?.result = Some(argument);
+        lay_down(req, target, vec![returned], Vec::new())?;
+        req.state::<State>().active_fiber = Some(target);
+        Ok(CoroutineEnd::Into(target))
     })
 }
 
 /// `zend_test_fiber_resume`, with `ZT_G(active_fiber)` the fiber for its
-/// length; and the end of `zend_test_fiber_execute` for a fiber with a
-/// target: once its body has returned, the target is laid down with the
-/// return value as its one argument and runs in its place, the active fiber
-/// from then, as php's transfers into it.
+/// length, and a target the fiber's body ended into the active one while
+/// it runs in its place.
 fn run(req: &mut Request, object: PhpObject, value: Owner<Value>) -> Result<Owner<Value>, Thrown> {
     let previous = req.state::<State>().active_fiber.replace(object);
-    let mut back = Coroutine::resume::<ZendTestFiber>(req, object, value);
-    let mut ran = object;
-    while let Ok(handed) = back {
-        let Some((target, result)) = piped(req, ran) else {
-            back = Ok(handed);
-            break;
-        };
-        handed.give_up(req);
-        let argument = *result;
-        let started = payload(req, target).map(|fiber| fiber.result = Some(result));
-        back = started
-            .and_then(|()| lay_down(req, target, vec![argument], Vec::new()))
-            .and_then(|()| {
-                req.state::<State>().active_fiber = Some(target);
-                let null = Owner::null();
-                Coroutine::resume::<ZendTestFiber>(req, target, null)
-            });
-        ran = target;
-    }
+    let back = Coroutine::resume::<ZendTestFiber>(req, object, value);
     req.state::<State>().active_fiber = previous;
     back
-}
-
-/// The target of a dead fiber and one more owner of what it returned, the
-/// target's argument: what `zend_test_fiber_execute` transfers into;
-/// none where the fiber has not returned or has no target.
-fn piped(req: &mut Request, fiber: PhpObject) -> Option<(PhpObject, Owner<Value>)> {
-    let ended = payload(req, fiber).ok()?;
-    if ended.coroutine.status() != CoroutineStatus::Dead {
-        return None;
-    }
-    let target = ended.target.as_deref().copied()?;
-    let result = ended.result.as_deref().copied().unwrap_or_else(Value::null);
-    Some((target, Owner::take(req, result)))
 }
 
 /// `delegate_transfer_result`: what came back raised where it is a

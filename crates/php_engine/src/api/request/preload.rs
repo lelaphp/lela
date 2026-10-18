@@ -274,6 +274,8 @@ fn address(unit: &Arc<Unit>) -> usize {
 pub(crate) struct Preloading {
     scripts: Vec<(Vec<u8>, Arc<Unit>, u64)>,
     aliases_before: usize,
+    /// `ZEND_COMPILE_PRELOAD_IN_CHILD` ([`Request::preloading_in_child`]).
+    in_child: bool,
 }
 
 /// One class `preload_link` asks about: a top-level or an anonymous
@@ -307,6 +309,18 @@ impl Request {
         self.preloading.is_some()
     }
 
+    /// `CG(compiler_options) & ZEND_COMPILE_PRELOAD_IN_CHILD`: whether
+    /// this is the preload's request served on a thread of its own
+    /// ([`crate::api::abi::PreloadThread`]), php's preload child, as
+    /// opcache serves it under `opcache.preload_user`, where `FFI::load`
+    /// refuses to load a header (`Z/ext/ffi/ffi.c:3628`).
+    #[must_use]
+    pub fn preloading_in_child(&self) -> bool {
+        self.preloading
+            .as_ref()
+            .is_some_and(|preloading| preloading.in_child)
+    }
+
     /// `EX(prev_execute_data)->func->common.fn_flags &
     /// ZEND_ACC_PRELOADED`: whether the native being served was called
     /// from a function, a method or a closure the preload compiled, as
@@ -337,11 +351,14 @@ impl Request {
     }
 
     /// The request, started, is the preload's from here: every file it
-    /// compiles is compiled into the preload.
-    pub(crate) fn begin_preload(&mut self) {
+    /// compiles is compiled into the preload. `in_child` where it is
+    /// served on the thread that took `opcache.preload_user`'s
+    /// credentials, php's `ZEND_COMPILE_PRELOAD_IN_CHILD`.
+    pub(crate) fn begin_preload(&mut self, in_child: bool) {
         self.preloading = Some(Preloading {
             scripts: Vec::new(),
             aliases_before: self.aliases.len(),
+            in_child,
         });
     }
 
@@ -907,15 +924,28 @@ impl Tables {
 
 impl Request {
     /// The preload's file opened nothing: `php_stream_open_for_zend`'s
-    /// warning with no function to name, and the `require`'s fatal, at
-    /// no file and no line, as php's startup raises them.
+    /// warning with no function to name, the `strerror` of the plain
+    /// files wrapper's `open` of the path as written, which php tries
+    /// once `zend_resolve_path` found nothing (a file the preload's user
+    /// may not reach is "Permission denied"), and the `require`'s fatal,
+    /// at no file and no line, as php's startup raises them.
     pub(crate) fn preload_unopened(&mut self, script: &[u8]) {
         let include_path =
             String::from_utf8_lossy(self.ini_get(b"include_path").unwrap_or_default()).into_owned();
+        let path = self
+            .cwd()
+            .join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(script));
+        let reason = std::fs::File::open(path)
+            .err()
+            .and_then(|error| error.raw_os_error())
+            .map_or_else(
+                || String::from("No such file or directory"),
+                |code| self.os_error_text(code),
+            );
         crate::api::raising::raise_at(
             self,
             Level::Warning,
-            "PHP Startup: Failed to open stream: No such file or directory",
+            &format!("PHP Startup: Failed to open stream: {reason}"),
             UNKNOWN,
             0,
         );
@@ -965,7 +995,7 @@ mod tests {
                 let mut published = Vec::new();
                 for round in 0..ROUNDS {
                     let mut req = Request::new(Arc::clone(&shared), RequestDescription::default());
-                    req.begin_preload();
+                    req.begin_preload(false);
                     let code = format!(
                         "class P{round} {{ function m() {{ return {round}; }} }} class Q{round} extends P{round} {{}}"
                     );
@@ -1065,7 +1095,7 @@ mod tests {
     fn a_class_before_its_parent_in_the_table_is_published_with_its_record() {
         let engine = Engine::builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        req.begin_preload();
+        req.begin_preload(false);
         let code = "trait T { public $t; function t() {} } \
                     class P { public $p; private $q; function p() {} } \
                     class_alias('P', 'PA'); class C extends PA { use T; public $c; public $p; }";

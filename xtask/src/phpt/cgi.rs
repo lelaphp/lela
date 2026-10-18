@@ -20,7 +20,6 @@ use anyhow::{Context, Result};
 
 use super::environment::Environment;
 use super::file::Phpt;
-use super::miss::Miss;
 use super::{Judged, Judgement};
 use crate::oracle::{self, Normalise};
 
@@ -36,11 +35,7 @@ pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
     if let Some(dir) = link.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    match std::fs::remove_file(&link) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("removing {}", link.display())),
-    }
+    crate::remove(&link)?;
     std::os::unix::fs::symlink(binary, &link)
         .with_context(|| format!("linking {} to {}", link.display(), binary.display()))?;
     Ok(link)
@@ -172,10 +167,7 @@ impl Refused {
     pub(super) fn judged(self, id: &str, name: &str, why: String) -> Judged {
         match self {
             Refused::Skip => Judged::new(id, name, Judgement::Skip, why),
-            Refused::Bork => {
-                let miss = Miss::bork(&why);
-                Judged::new(id, name, Judgement::Bork, why).keeping(miss)
-            }
+            Refused::Bork => super::borked(id, name, why),
         }
     }
 }

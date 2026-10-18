@@ -50,3 +50,41 @@ echo strlen($z->getFromName('a.txt')), "\n";
         "1\n2 note 12 259\nxy 1\n30\n"
     );
 }
+
+/// #2667: an entry added after `AFL_WANT_TORRENTZIP` is set is written,
+/// as libzip 1.11.4 and 1.12.1 write it. `_zip_file_replace` clears the
+/// entry's extra fields through `zip_file_extra_field_delete(za, idx,
+/// ZIP_EXTRA_FIELD_ALL, ZIP_FL_CENTRAL | ZIP_FL_LOCAL)`
+/// (`lib/zip_file_replace.c:89`), which libzip 1.12 alone refuses with
+/// `ZIP_ER_NOT_ALLOWED` while torrentzip is wanted
+/// (`lib/zip_extra_field_api.c:61`). 1.12 leaves the named entry without
+/// data, and its close fails with `ZIP_ER_INTERNAL` where it stats the
+/// entry's unchanged data (`lib/zip_close.c:236`,
+/// `lib/zip_source_zip_new.c:90`). 1.12.1 lets that call through (libzip
+/// e3f6db9, "Fix adding and replacing files in torrentzip archives"), so
+/// the pinned oracle, which loads 1.12, misses `oo_torrentzip.phpt`, and
+/// this is held through `Capture` and not a witness.
+#[test]
+fn an_entry_added_once_torrentzip_is_wanted_is_written() {
+    let dir = std::env::temp_dir().join(format!("zip-torrentzip-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap_or_default();
+    let source = dir.join("a.txt");
+    std::fs::write(&source, "xyz").unwrap_or_default();
+    let source = source.to_string_lossy();
+    let path = dir.join("t.zip");
+    let path = path.to_string_lossy();
+    let code = format!(
+        r#"<?php
+$z = new ZipArchive;
+$z->open('{path}', ZipArchive::CREATE);
+$z->setArchiveFlag(ZipArchive::AFL_WANT_TORRENTZIP, 1);
+echo (int) $z->addFromString('b', 'abc'), (int) $z->addFile('{source}', 'a'), ' ', $z->status, "\n";
+echo (int) $z->close(), "\n";
+$z->open('{path}', ZipArchive::RDONLY);
+echo $z->getArchiveFlag(ZipArchive::AFL_IS_TORRENTZIP), ' ', $z->getNameIndex(0), $z->getNameIndex(1), ' ', $z->getFromName('a'), $z->getFromName('b'), "\n";
+"#
+    );
+    let out = serve(&code);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(String::from_utf8_lossy(&out), "11 0\n1\n1 ab xyzabc\n");
+}

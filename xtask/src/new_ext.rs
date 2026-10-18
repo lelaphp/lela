@@ -64,6 +64,37 @@ pub struct Laid {
     pub notes: Vec<String>,
 }
 
+impl Laid {
+    /// `files` written at their paths under `dir`, the crate `row` of the
+    /// workspace at `root`, and the crate made one of its members.
+    pub(crate) fn files<const N: usize>(
+        root: &Path,
+        dir: PathBuf,
+        row: &str,
+        files: [(&str, String); N],
+    ) -> Result<Laid> {
+        let mut written = Vec::new();
+        for (rel, text) in files {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            crate::write(&path, text)?;
+            written.push(format!("{row}/{rel}"));
+        }
+        if add_member(root, row)? {
+            written.push("Cargo.toml".to_owned());
+        }
+        let notes = Vec::new();
+        Ok(Laid {
+            dir,
+            written,
+            notes,
+        })
+    }
+}
+
 /// One file's edit, computed before it is made: the text the file is to
 /// hold and one line saying what changed in it.
 struct Edit {
@@ -79,8 +110,7 @@ impl Edit {
         if self.after == self.before {
             return Ok(false);
         }
-        fs::write(&self.path, &self.after)
-            .with_context(|| format!("writing {}", self.path.display()))?;
+        crate::write(&self.path, &self.after)?;
         Ok(true)
     }
 }
@@ -119,26 +149,12 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     let feature = bundle_feature(root, name)?;
     let line = bundle_line(root, name)?;
 
-    let mut laid = Laid {
-        dir: dir.clone(),
-        written: Vec::new(),
-        notes: Vec::new(),
-    };
-    for (rel, text) in [
+    let files = [
         ("Cargo.toml", cargo_toml(name)),
         ("src/lib.rs", lib_rs(manifest, name)),
         ("tests/capture.rs", capture_rs(name)),
-    ] {
-        let path = dir.join(rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-        laid.written.push(format!("{row}/{rel}"));
-    }
-    if add_member(root, &row)? {
-        laid.written.push("Cargo.toml".to_owned());
-    }
+    ];
+    let mut laid = Laid::files(root, dir, &row, files)?;
     for edit in [feature, line] {
         if edit.write()? {
             laid.written.push(relative(root, &edit.path));
@@ -332,9 +348,9 @@ fn denied_lints<'a>(manifest: &'a Manifest, row: &str) -> Vec<&'a Rule> {
 /// Add `ext/<name>` to the root manifest's `[workspace] members` unless a
 /// member or a glob already covers it; whether the file changed. The edit
 /// is textual, so the comments stay.
-pub(crate) fn add_member(root: &Path, row: &str) -> Result<bool> {
+fn add_member(root: &Path, row: &str) -> Result<bool> {
     let path = root.join("Cargo.toml");
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text = crate::read(&path)?;
     let table: toml::Table =
         toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
     let members = table
@@ -356,7 +372,7 @@ pub(crate) fn add_member(root: &Path, row: &str) -> Result<bool> {
     let (at, insert) = push_array(&text, start, row)?;
     let mut out = text.clone();
     out.insert_str(at, &insert);
-    fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    crate::write(&path, out)?;
     Ok(true)
 }
 
@@ -457,7 +473,7 @@ const LISTS: [&str; 2] = ["default", "linked"];
 /// written here.
 fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("Cargo.toml");
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text = crate::read(&path)?;
     let table: toml::Table =
         toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
     let package = format!("php_ext_{name}");
@@ -521,7 +537,7 @@ fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
 /// textual, so the comments stay; nothing is written here.
 fn bundle_line(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("src/lib.rs");
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text = crate::read(&path)?;
     let package = format!("php_ext_{name}");
     let entry = format!("{package}::extension");
     let mut at = 0;

@@ -13,8 +13,10 @@ use php_syntax::tree::{
 };
 use php_syntax::{Options, Parsed, parse};
 
-fn parsed(source: &str) -> Parsed {
-    let parsed = parse(source.as_bytes(), &Options::default());
+fn parsed(source: &str) -> Parsed<'static> {
+    let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
+    let source: &'static [u8] = Box::leak(source.as_bytes().into());
+    let parsed = parse(arena, source, &Options::default());
     assert!(
         parsed.diagnostics.is_empty() && parsed.missing.is_empty(),
         "{}\n{:?}\n{:?}",
@@ -26,7 +28,7 @@ fn parsed(source: &str) -> Parsed {
 }
 
 /// The doc comments of every node of `T`, in arena order, as text.
-fn docs<T: Node + HasDocComment>(parsed: &Parsed) -> Vec<Option<&str>> {
+fn docs<'p, T: Node + HasDocComment>(parsed: &'p Parsed<'_>) -> Vec<Option<&'p str>> {
     parsed
         .tree
         .nodes::<T>()

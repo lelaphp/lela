@@ -91,11 +91,12 @@
 //! `INIT_ARRAY` over the first element and `ADD_ARRAY_ELEMENT` over each
 //! after it, as `zend_compile_array` emits them.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::num::NonZeroI64;
 
 use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
-use php_syntax::{Holder, Parsed, SyntaxKind, TokenValue};
+use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
     Arr, Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string,
@@ -110,7 +111,7 @@ use php_unit::decl::{
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
-    OpArray, Opcode, OperandKind, Opline, OplineIdx, TopLevel, TryCatch, Unit,
+    OpArray, Opcode, OperandKind, Opline, OplineIdx, Safepoints, TopLevel, TryCatch, Unit,
 };
 
 use php_syntax::magic_const_name;
@@ -154,6 +155,7 @@ pub(crate) mod walk;
 /// `zend_compile_if` sets `CG(zend_lineno)` to it before an arm past
 /// the first compiles its condition and before the `JMP` that leaves an
 /// arm another follows.
+#[derive(Clone, Copy)]
 struct IfElem {
     cond: Option<tree::Expr>,
     body: Option<Stmt>,
@@ -166,8 +168,9 @@ struct IfElem {
 /// line php's node for it carries, and how it was written, php's `attr`
 /// on the `encaps_var`, which `zend_compile_encaps_list` reads for its
 /// two deprecations.
-struct Piece {
-    fetch: Fetched,
+#[derive(Clone, Copy)]
+struct Piece<'a> {
+    fetch: Fetched<'a>,
     line: u32,
     written: Written,
 }
@@ -178,11 +181,12 @@ struct Piece {
 /// an expression under `{…}`, or
 /// the variable an
 /// expression under `${…}` names.
-enum Fetched {
-    Text(Vec<u8>),
-    Var(Vec<u8>),
-    Dim(Vec<u8>, Offset),
-    Prop(Vec<u8>, Vec<u8>, bool),
+#[derive(Clone, Copy)]
+enum Fetched<'a> {
+    Text(&'a [u8]),
+    Var(&'a [u8]),
+    Dim(&'a [u8], Offset<'a>),
+    Prop(&'a [u8], &'a [u8], bool),
     Node(tree::Expr),
     VarVar(tree::Expr),
 }
@@ -190,28 +194,27 @@ enum Fetched {
 /// The `[…]` after a variable inside a string, php's
 /// `encaps_var_offset`: the value a bare word or a number stands for,
 /// or the variable that names it.
-enum Offset {
+#[derive(Clone, Copy)]
+enum Offset<'a> {
     Value(Zval),
-    Var(Vec<u8>),
+    Var(&'a [u8]),
 }
 
 /// What stands after a `::`: a class constant, a class's own property
 /// or the class's name, php's `ZEND_AST_CLASS_CONST`,
 /// `ZEND_AST_STATIC_PROP` and `ZEND_AST_CLASS_NAME`, which the grammar
 /// tells apart by the `$` and the keyword.
-enum Scoped {
+enum Scoped<'a> {
     Constant {
         class: ClassSpec,
-        name: ScopedName,
+        name: ScopedName<'a>,
     },
     Property {
         class: ClassSpec,
-        name: ScopedName,
+        name: ScopedName<'a>,
     },
     /// `C::class`, php's `ZEND_AST_CLASS_NAME`.
-    ClassName {
-        class: ClassSpec,
-    },
+    ClassName { class: ClassSpec },
 }
 
 /// The operands of an opline over a class's property, as
@@ -231,9 +234,9 @@ struct StaticOperands {
 /// other operand. One `$` of `A::$$n` is the property's own, so the
 /// name is the value of `$n`, php's `ZEND_AST_VAR` under
 /// `ZEND_AST_STATIC_PROP`.
-#[derive(Clone)]
-enum ScopedName {
-    Written(Vec<u8>),
+#[derive(Clone, Copy)]
+enum ScopedName<'a> {
+    Written(&'a [u8]),
     Computed(tree::Expr),
 }
 
@@ -312,8 +315,8 @@ enum ClassOperand {
 /// (`IS_CONST`); `self`, `parent` or `static`, the fetch type and its
 /// flags in the operand's number (`IS_UNUSED`); or the `VAR` a
 /// `FETCH_CLASS` wrote the class into.
-enum ClassRef {
-    Named(Vec<u8>),
+enum ClassRef<'a> {
+    Named(&'a [u8]),
     Scope(u32),
     Fetched(u32),
 }
@@ -356,8 +359,8 @@ fn class_fetch_type(name: &[u8]) -> u32 {
 /// `EG(symbol_table)` ([`by_name`]), or `$GLOBALS`, `is_globals_fetch`,
 /// which is `FETCH_GLOBALS` and no variable.
 #[derive(PartialEq, Eq)]
-enum SimpleVar {
-    Cv(Vec<u8>),
+enum SimpleVar<'a> {
+    Cv(&'a [u8]),
     This,
     Auto(AutoGlobal),
     Globals,
@@ -419,7 +422,13 @@ pub(crate) struct Emit<'a> {
     /// The parse this compiles: the tree the walk reads (design §4.9),
     /// and the token stream and the source a name, a value and a doc
     /// comment are read from.
-    parsed: &'a Parsed,
+    parsed: &'a Parsed<'a>,
+    /// The compile's arena, the parse's own, which the compiler's
+    /// temporaries are bumped into and given up with it (#2810): a name
+    /// as resolved or lowered on its way to the op array's constants,
+    /// which copy it, and the lists of a call's arguments, an array's
+    /// elements and an `if`'s arms.
+    arena: &'a Arena,
     strings: &'a mut dyn Intern,
     /// php's `precision` while the file compiles, [`Options::precision`].
     precision: i32,
@@ -543,7 +552,7 @@ pub(crate) struct Emit<'a> {
     vars: Vec<Name>,
     /// `CG(context).has_assigned_to_http_response_header`.
     http_response_header: ResponseHeader,
-    safepoints: Vec<OplineIdx>,
+    safepoints: Safepoints,
     temporaries: u32,
     cache_slots: u32,
     line: u32,
@@ -1302,13 +1311,15 @@ impl<'a> Emit<'a> {
     /// The walk's state before the first statement of `parsed`.
     #[allow(clippy::too_many_lines)] // the emitter laid down a field a line
     fn new(
-        parsed: &'a Parsed,
+        arena: &'a Arena,
+        parsed: &'a Parsed<'a>,
         options: &'a Options<'a>,
         strings: &'a mut dyn Intern,
         halt: Option<i64>,
     ) -> Emit<'a> {
         Emit {
             parsed,
+            arena,
             strings,
             precision: options.precision,
             assertions: assert::Assertions::of(options.assertions),
@@ -1393,18 +1404,19 @@ impl<'a> Emit<'a> {
 /// (`Z/Zend/zend_ast.c:2954`): php's text of each top statement at no
 /// indent, through the exporter `assert()`'s description is written by.
 pub(crate) fn export(
-    parsed: &Parsed,
+    arena: &Arena,
+    parsed: &Parsed<'_>,
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Vec<u8>, CompileError> {
-    let mut emit = Emit::new(parsed, options, strings, None);
+    let mut emit = Emit::new(arena, parsed, options, strings, None);
     let mut out = Vec::new();
     let file = parsed
         .tree
         .root()
         .and_then(php_syntax::tree::Element::id::<php_syntax::tree::SourceFile>);
     if let Some(file) = file {
-        emit.export_stmts(&mut out, &parsed.tree[file].stmts, 0)?;
+        emit.export_stmts(&mut out, parsed.tree.list(parsed.tree[file].stmts), 0)?;
     }
     Ok(out)
 }
@@ -1413,7 +1425,8 @@ pub(crate) fn export(
 /// then php's implicit final `RETURN 1` (`zend_emit_final_return`, with
 /// `extended_value` at -1), and the diagnostics raised on the way.
 pub(crate) fn unit(
-    parsed: &Parsed,
+    arena: &Arena,
+    parsed: &Parsed<'_>,
     options: &Options<'_>,
     strings: &mut dyn Intern,
     halt: Option<i64>,
@@ -1421,12 +1434,15 @@ pub(crate) fn unit(
     // The scanner stops at `__halt_compiler();` (the byte `halt_end`
     // names), so a halted file's last line is that statement's, and the
     // data after it counts no line.
-    let scanned = walk::halt_offset(parsed)
-        .and_then(|end| usize::try_from(end).ok())
-        .and_then(|end| parsed.source.get(..end))
-        .unwrap_or(&parsed.source);
-    let lines = u32::try_from(scanned.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
-    let mut emit = Emit::new(parsed, options, strings, halt);
+    // Read off the parse's line table: the lines up to that byte, or
+    // the whole source's where there is none.
+    let lines = match walk::halt_offset(parsed) {
+        Some(end) => parsed
+            .lines
+            .line_number(u32::try_from(end).unwrap_or(u32::MAX)),
+        None => parsed.lines.line_count(),
+    };
+    let mut emit = Emit::new(arena, parsed, options, strings, halt);
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
     if let Err(mut refused) = emit.source_file() {
@@ -1447,7 +1463,8 @@ pub(crate) fn unit(
                 level: Level::Error,
                 message: String::from(
                     "InternalError: a dynamic function definition whose body never landed",
-                ),
+                )
+                .into(),
                 line,
                 raised: emit.diagnostics,
                 thrown: false,
@@ -1485,7 +1502,7 @@ struct Saved {
     const_exprs: Vec<ConstExpr>,
     vars: Vec<Name>,
     http_response_header: ResponseHeader,
-    safepoints: Vec<OplineIdx>,
+    safepoints: Safepoints,
     temporaries: u32,
     cache_slots: u32,
     loops: Vec<Loop>,
@@ -1508,10 +1525,10 @@ struct Saved {
     active_hook: Option<HookKind>,
 }
 
-/// An op array's safepoints as it begins: the entry, number zero, with
-/// room for its returns, since every op array has one at least.
-fn entry_safepoints() -> Vec<OplineIdx> {
-    let mut safepoints = Vec::with_capacity(4);
+/// An op array's safepoints as it begins: the entry, number zero, inline
+/// with room for its returns ([`Safepoints`]).
+fn entry_safepoints() -> Safepoints {
+    let mut safepoints = Safepoints::new();
     safepoints.push(OplineIdx(0));
     safepoints
 }
@@ -1582,7 +1599,8 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
                 "InternalError: {} at opline {at} jumps back to {:04} {what}",
                 op.opcode.name().trim_start_matches("ZEND_"),
                 target.0
-            ),
+            )
+            .into(),
             line: op.lineno,
             raised: Vec::new(),
             thrown: false,
@@ -1601,7 +1619,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
     Ok(())
 }
 
-impl Emit<'_> {
+impl<'a> Emit<'a> {
     fn push(&mut self, opline: Opline) -> u32 {
         let at = self.next();
         self.oplines.push(Opline {
@@ -1685,9 +1703,14 @@ impl Emit<'_> {
 
     /// [`Self::cv_fetched`] over the CV numbered `cv`.
     fn cv_numbered(&mut self, cv: u32, fetch: Fetch) {
-        let name = self.vars.get(cv as usize).map(|name| name.0.to_vec());
-        if let Some(name) = name {
-            self.cv_fetched(&name, fetch);
+        // The one name `cv_fetched` reads anything of, so the CV's own is
+        // not copied out to be compared.
+        let header = self
+            .vars
+            .get(cv as usize)
+            .is_some_and(|name| &*name.0 == HTTP_RESPONSE_HEADER);
+        if header {
+            self.cv_fetched(HTTP_RESPONSE_HEADER, fetch);
         }
     }
 
@@ -1725,7 +1748,7 @@ impl Emit<'_> {
     /// The compile-time fatal for what stands on the statement's line:
     /// this compiler's sentence for what it cannot read yet, which the
     /// engine renders as the parse error #163 framed it as.
-    fn fatal(&self, message: impl Into<String>) -> CompileError {
+    fn fatal(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         CompileError {
             level: Level::Parse,
             message: message.into(),
@@ -1869,7 +1892,7 @@ impl Emit<'_> {
             // `zend_compile_stmt` and so each ticked where a
             // `declare(ticks)` scope stands ([`Self::tick`]).
             Stmt::EchoStmt(id) => {
-                for part in &tree[id].exprs {
+                for part in tree.list(tree[id].exprs) {
                     self.ext_stmt();
                     let value = self.expr(*part)?;
                     let (op1_type, op1) = self.operand(value);
@@ -1924,7 +1947,7 @@ impl Emit<'_> {
             }
             Stmt::TryStmt(id) => self.r#try(id)?,
             Stmt::UnsetStmt(id) => {
-                for target in &tree[id].targets {
+                for target in tree.list(tree[id].targets) {
                     self.ext_stmt();
                     self.unset(*target)?;
                     self.tick();
@@ -1932,7 +1955,7 @@ impl Emit<'_> {
             }
             Stmt::IfStmt(id) => self.r#if(id)?,
             Stmt::GlobalStmt(id) => {
-                for var in tree[id].vars.clone() {
+                for var in tree.list(tree[id].vars).iter().copied() {
                     self.ext_stmt();
                     self.global_var(var)?;
                     self.tick();
@@ -1993,18 +2016,21 @@ impl Emit<'_> {
             .map(|token| self.parsed.lines.line_number(token.offset))
     }
 
+    /// The items of one of the tree's lists, read for as long as the
+    /// parse lives, so a walk over them may compile into the emitter.
+    pub(crate) fn list<T: tree::Listed>(&self, list: tree::List<T>) -> &'a [T] {
+        self.parsed.tree.list(list)
+    }
+
     /// A token's text as the scanner handed it over, the token filter's
     /// where one stands ([`php_syntax::token_text`]).
-    fn text(&self, id: TokenId) -> &[u8] {
+    fn text(&self, id: TokenId) -> &'a [u8] {
         php_syntax::token_text(self.parsed, id)
     }
 
     /// A `<variable>` token's name, without its `$`.
-    fn variable_name(&self, id: TokenId) -> Vec<u8> {
-        self.text(id)
-            .strip_prefix(b"$")
-            .unwrap_or_default()
-            .to_vec()
+    fn variable_name(&self, id: TokenId) -> &'a [u8] {
+        self.text(id).strip_prefix(b"$").unwrap_or_default()
     }
 
     /// The doc comment a declaration took, by the token index the
@@ -2030,7 +2056,7 @@ impl Emit<'_> {
         &mut self,
         id: NodeId<tree::SimpleVarExpr>,
         line: u32,
-    ) -> Result<SimpleVar, CompileError> {
+    ) -> Result<SimpleVar<'a>, CompileError> {
         let Some(var) = self.parsed.tree[id].var else {
             return Err(walk::unread(line, "a variable"));
         };
@@ -2038,7 +2064,7 @@ impl Emit<'_> {
         if name == b"this" {
             return Ok(SimpleVar::This);
         }
-        if let Some(global) = AutoGlobal::of(&name) {
+        if let Some(global) = AutoGlobal::of(name) {
             self.arm(global);
             return Ok(SimpleVar::Auto(global));
         }
@@ -2132,7 +2158,7 @@ impl Emit<'_> {
                 self.assign_op_by_name(target, u32::from(Self::opcode_of(op) as u8), value)
             }
             tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
-                SimpleVar::Cv(name) => self.assign_op(&name, op, value),
+                SimpleVar::Cv(name) => self.assign_op(name, op, value),
                 SimpleVar::This | SimpleVar::Auto(_) | SimpleVar::Globals => {
                     Err(self.unread("a compound assignment to what is no variable"))
                 }
@@ -2197,7 +2223,7 @@ impl Emit<'_> {
             // what a call returned is no place to step.
             tree::Expr::CallExpr(id) => Err(self.call_written(id)),
             tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
-                SimpleVar::Cv(name) => Ok(self.incdec(&name, opcode)),
+                SimpleVar::Cv(name) => Ok(self.incdec(name, opcode)),
                 // `zend_compile_var` over `$this` under `BP_VAR_RW`:
                 // `FETCH_THIS` into a `VAR` and the step over it, which
                 // is the `TypeError` for an object as the program serves.
@@ -2417,9 +2443,9 @@ impl Emit<'_> {
         let (callee, args) = (node.callee, node.args);
         match callee {
             tree::Expr::NameRef(name) => {
-                let name = self.text(name).to_vec();
+                let name = self.text(name);
                 let arguments = self.arguments(args, line)?;
-                self.call(&name, &arguments, fetch)
+                self.call(name, &arguments, fetch)
             }
             tree::Expr::ScopedAccessExpr(scoped) => {
                 if let Some(called) = self.parent_hook_call(scoped, args, line)? {
@@ -2533,13 +2559,10 @@ impl Emit<'_> {
     /// string(2) "xx"
     /// string(1) "x"
     /// ```
-    fn constant_class(&mut self, operand: ClassOperand) -> Result<Option<Vec<u8>>, CompileError> {
+    fn constant_class(&mut self, operand: ClassOperand) -> Result<Option<&'a [u8]>, CompileError> {
         match operand {
-            ClassOperand::Name(token) => {
-                let written = self.text(token).to_vec();
-                Ok(Some(self.class_name(&written)))
-            }
-            ClassOperand::Value(value) => self.fq_class_name(value).map(Some),
+            ClassOperand::Name(token) => Ok(Some(self.class_name(self.text(token)))),
+            ClassOperand::Value(value) => Ok(Some(self.arena.copy(&self.fq_class_name(value)?))),
             ClassOperand::Expr(_) => Ok(None),
         }
     }
@@ -2621,9 +2644,9 @@ impl Emit<'_> {
     fn elements_of(
         &self,
         ids: &[NodeId<tree::ArrayElement>],
-    ) -> Result<Vec<Element>, CompileError> {
+    ) -> Result<&'a [Element], CompileError> {
         let tree = &self.parsed.tree;
-        let mut elements = Vec::with_capacity(ids.len());
+        let mut elements = self.arena.vec(ids.len());
         let mut last = self.line;
         for id in ids {
             let element = &tree[*id];
@@ -2646,7 +2669,7 @@ impl Emit<'_> {
                 }
             });
         }
-        Ok(elements)
+        Ok(elements.into_slice())
     }
 
     /// `C::NAME` and `C::$name`: a class constant or a class's
@@ -2657,7 +2680,7 @@ impl Emit<'_> {
         &self,
         id: NodeId<tree::ScopedAccessExpr>,
         line: u32,
-    ) -> Result<Scoped, CompileError> {
+    ) -> Result<Scoped<'a>, CompileError> {
         let node = &self.parsed.tree[id];
         let class = ClassSpec::of(node.scope);
         let tree = &self.parsed.tree;
@@ -2673,7 +2696,7 @@ impl Emit<'_> {
                 };
                 Ok(Scoped::Constant {
                     class,
-                    name: ScopedName::Written(self.text(name).to_vec()),
+                    name: ScopedName::Written(self.text(name)),
                 })
             }
             Some(tree::ScopedSelector::BracedMember(braced)) => Ok(Scoped::Constant {
@@ -2778,8 +2801,7 @@ impl Emit<'_> {
     fn block(&mut self, id: NodeId<Block>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         self.line = node.line();
-        let stmts = &node.stmts;
-        self.statements(stmts)
+        self.statements(self.list(node.stmts))
     }
 
     /// The body of a loop, an arm or a `declare`: a block's statements
@@ -2798,8 +2820,7 @@ impl Emit<'_> {
             (None, Some(list)) => {
                 let node = &self.parsed.tree[list];
                 self.line = node.line();
-                let stmts = &node.stmts;
-                self.statements(stmts)
+                self.statements(self.list(node.stmts))
             }
             (None, None) => Ok(()),
         }
@@ -2918,7 +2939,7 @@ impl Emit<'_> {
             return Err(walk::refused(line, "Cannot use [] for unsetting"));
         }
         match self.place(target)? {
-            Target::Cv(name) => self.unset_cv(&name),
+            Target::Cv(name) => self.unset_cv(name),
             Target::Dim(dim) => {
                 let tree::Expr::SubscriptExpr(id) = self.peel(dim) else {
                     return Err(self.fatal("an `unset` of an element that is no dimension"));
@@ -3113,7 +3134,7 @@ impl Emit<'_> {
     /// ```
     fn r#try(&mut self, id: NodeId<tree::TryStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
-        let catches = &node.catch_clauses;
+        let catches = self.list(node.catch_clauses);
         let finally = match node.finally_clause {
             Some(clause) => {
                 let clause = &self.parsed.tree[clause];
@@ -3227,8 +3248,8 @@ impl Emit<'_> {
         let Some(types) = clause.types else {
             return Err(walk::unread(line, "a `catch` naming no class"));
         };
-        let types: Vec<Vec<u8>> = self.parsed.tree[types]
-            .types
+        let types: Vec<Vec<u8>> = self
+            .list(self.parsed.tree[types].types)
             .iter()
             .map(|id| self.text(*id).to_vec())
             .collect();
@@ -3243,7 +3264,7 @@ impl Emit<'_> {
         {
             return Err(self.compile_error("Bad class name in the catch statement"));
         }
-        if var.as_deref() == Some(b"this".as_slice()) {
+        if var == Some(b"this".as_slice()) {
             return Err(self.compile_error("Cannot re-assign $this"));
         }
         let mut multicatch = Vec::new();
@@ -3381,11 +3402,11 @@ impl Emit<'_> {
         if self.depth != 1 {
             return self.nested_function_decl(function, &name);
         }
-        let lowered = name.to_ascii_lowercase();
+        let lowered = self.arena.lowercase(&name);
         if let Some((earlier, body)) = self
             .functions_declared
             .iter()
-            .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
+            .find(|(decl, _)| decl.name.0.eq_ignore_ascii_case(lowered))
         {
             return Err(self.compile_error(format!(
                 "Cannot redeclare function {} (previously declared in {}:{})",
@@ -3394,7 +3415,7 @@ impl Emit<'_> {
                 body.line_start
             )));
         }
-        if self.native_index(&lowered).is_some() {
+        if self.native_index(lowered).is_some() {
             return Err(self.compile_error(format!(
                 "Cannot redeclare function {}()",
                 String::from_utf8_lossy(&name)
@@ -3432,7 +3453,7 @@ impl Emit<'_> {
         self.dynamic.push(None);
         let offset = u32::try_from(self.dynamic_func_defs.len()).unwrap_or(u32::MAX);
         self.dynamic_func_defs.push(at);
-        let lowered = self.string(&name.to_ascii_lowercase())?;
+        let lowered = self.string(self.arena.lowercase(name))?;
         let op1 = self.literal(lowered);
         self.push(Opline {
             opcode: Opcode::DeclareFunction,
@@ -3693,7 +3714,11 @@ impl Emit<'_> {
     /// Fatal error: Duplicate declaration of static variable $a in %s on line 2
     /// ```
     fn static_var(&mut self, id: NodeId<tree::StaticVarStmt>) -> Result<(), CompileError> {
-        for declarator in self.parsed.tree[id].static_var_declarators.clone() {
+        for declarator in self
+            .list(self.parsed.tree[id].static_var_declarators)
+            .iter()
+            .copied()
+        {
             let declarator = &self.parsed.tree[declarator];
             let (line, init) = (declarator.line, declarator.init);
             let name = self.variable_name(declarator.var);
@@ -3705,7 +3730,7 @@ impl Emit<'_> {
             if self.static_vars.iter().any(|held| *held.name.0 == *name) {
                 return Err(self.compile_error(format!(
                     "Duplicate declaration of static variable ${}",
-                    String::from_utf8_lossy(&name)
+                    String::from_utf8_lossy(name)
                 )));
             }
             let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
@@ -3714,11 +3739,11 @@ impl Emit<'_> {
                 Some(init) => self.eval_const(init)?,
             };
             self.static_vars.push(BoundVar {
-                name: Name(name.as_slice().into()),
+                name: Name(name.into()),
                 value: folded.unwrap_or_else(Zval::null),
                 lexical: false,
             });
-            let op1 = self.lookup_cv(&name);
+            let op1 = self.lookup_cv(name);
             let (Some(init), None) = (init, folded) else {
                 self.push(Opline {
                     opcode: Opcode::BindStatic,
@@ -5218,7 +5243,7 @@ impl Emit<'_> {
         let early = toplevel
             && unlinked_free
             && self.bound_class(&name).is_none()
-            && !self.request_classes.holds(&name.to_ascii_lowercase())
+            && !self.request_classes.holds(self.arena.lowercase(&name))
             && match &parent {
                 None => true,
                 Some(parent) => self.bound_class(parent).is_some(),
@@ -5536,12 +5561,12 @@ impl Emit<'_> {
         self.line = class.line;
         let (op2_type, op2) = match parent {
             Some(parent) => {
-                let lowered = self.string(&parent.to_ascii_lowercase())?;
+                let lowered = self.string(self.arena.lowercase(&parent))?;
                 (OperandKind::Const, self.literal(lowered))
             }
             None => (OperandKind::Unused, 0),
         };
-        let lowered = self.string(&name.to_ascii_lowercase())?;
+        let lowered = self.string(self.arena.lowercase(&name))?;
         let op1 = self.literal(lowered);
         let extended_value = self.cache_slot();
         let out = self.temporary();
@@ -6161,7 +6186,7 @@ impl Emit<'_> {
         // compile, so what an argument raises is raised there.
         self.line = declared_at;
         for attribute in &class.attributes {
-            let name = self.class_name(&attribute.name);
+            let name = self.class_name(&attribute.name).to_vec();
             out.push(self.attribute(attribute, name, declared_at)?);
         }
         self.line = declared_at;
@@ -6430,7 +6455,7 @@ impl Emit<'_> {
         let mut out = Vec::with_capacity(written.len());
         self.line = declared_at;
         for attribute in written {
-            let name = self.class_name(&attribute.name);
+            let name = self.class_name(&attribute.name).to_vec();
             if let Some(config) = self.attribute_config(&name) {
                 let targets = config.targets();
                 if targets & target == 0 && targets & promoted != 0 {
@@ -6482,7 +6507,7 @@ impl Emit<'_> {
         let on_target = targets & target != 0;
         let refused = |message: String| CompileError {
             level: Level::Error,
-            message,
+            message: message.into(),
             line,
             raised: Vec::new(),
             thrown: false,
@@ -7032,7 +7057,7 @@ impl Emit<'_> {
                 String::from_utf8_lossy(written)
             )));
         }
-        Ok(self.class_name(written))
+        Ok(self.class_name(written).to_vec())
     }
 
     /// `zend_try_early_bind`: the class at `at` linked against what
@@ -7250,7 +7275,7 @@ impl Emit<'_> {
             php_link::Linked::Linked => Ok(true),
             php_link::Linked::Refused(refused) => Err(CompileError {
                 level: refused.refusal.level(),
-                message: refused.refusal.to_string(),
+                message: refused.refusal.to_string().into(),
                 line: refused.site.line,
                 raised: Vec::new(),
                 thrown: false,
@@ -7300,18 +7325,18 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         let (mut op2_type, mut op2) = match parent {
             Some(parent) => {
-                let lowered = self.string(&parent.to_ascii_lowercase())?;
+                let lowered = self.string(self.arena.lowercase(parent))?;
                 (OperandKind::Const, self.literal(lowered))
             }
             None => (OperandKind::Unused, 0),
         };
-        let lowered = name.to_ascii_lowercase();
+        let lowered = self.arena.lowercase(name);
         let mut key = Vec::with_capacity(lowered.len() + self.filename.len() + 16);
         key.push(0);
-        key.extend_from_slice(&lowered);
+        key.extend_from_slice(lowered);
         key.extend_from_slice(self.filename);
         key.extend_from_slice(format!(":{line}${:x}", self.keys_made()).as_bytes());
-        let lowered = self.string(&lowered)?;
+        let lowered = self.string(lowered)?;
         let op1 = self.literal(lowered);
         let filed = self.string(&key)?;
         self.literal(filed);
@@ -7547,7 +7572,10 @@ impl Emit<'_> {
                         (FETCH_CLASS_DEFAULT, ClassOperand::Value(_)) => {
                             (self.fq_name(&written)?, NameKind::FullyQualified)
                         }
-                        (FETCH_CLASS_DEFAULT, _) => self.resolve_class_marked(&written),
+                        (FETCH_CLASS_DEFAULT, _) => {
+                            let (class, kind) = self.resolve_class_marked(&written);
+                            (class.to_vec(), kind)
+                        }
                         _ => (written, NameKind::NotFullyQualified),
                     };
                     // `self::{'X'}` folds to the name; one that does
@@ -7567,13 +7595,13 @@ impl Emit<'_> {
                     // `zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST`
                     // arm: a constant of the class being declared is
                     // its value ([`Self::active_class_constant`]).
-                    if let Some(value) = self.active_class_constant(&class, &name)? {
+                    if let Some(value) = self.active_class_constant(&class, name)? {
                         return self.folded(value);
                     }
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
                         class_kind,
-                        name: Name(name.into_boxed_slice()),
+                        name: Name(name.into()),
                         line,
                     })
                 }
@@ -7626,7 +7654,7 @@ impl Emit<'_> {
             // its `ZEND_AST_UNPACK` with no key; a `&` is what
             // `zend_is_allowed_in_const_expr` refuses.
             tree::Expr::ArrayExpr(id) => {
-                let elements = self.elements_of(&tree[id].array_elements.clone())?;
+                let elements = self.elements_of(tree.list(tree[id].array_elements))?;
                 // `zend_ast_create_list`: the list's line is its first
                 // element's, whose `ZEND_AST_ARRAY_ELEM` is its value's.
                 let line = match elements.first() {
@@ -7636,7 +7664,7 @@ impl Emit<'_> {
                     _ => line,
                 };
                 let mut items = Vec::with_capacity(elements.len());
-                for element in elements {
+                for &element in elements {
                     items.push(match element {
                         Element::Value { key, value } => {
                             let key = match key {
@@ -7990,7 +8018,7 @@ impl Emit<'_> {
                 return Err(self.compile_error("Cannot create Closure for new expression"));
             };
             let mut named = false;
-            for argument in list {
+            for &argument in list {
                 arguments.push(match argument {
                     args::Arg::Positional(_) if named => {
                         return Err(self
@@ -7999,7 +8027,7 @@ impl Emit<'_> {
                     args::Arg::Positional(Source::Expr(value)) => (None, self.const_expr(value)?),
                     args::Arg::Named(name, Source::Expr(value)) => {
                         named = true;
-                        (Some(Name(name)), self.const_expr(value)?)
+                        (Some(Name(name.into())), self.const_expr(value)?)
                     }
                     args::Arg::Unpack(_) => {
                         return Err(self.compile_error(
@@ -8014,7 +8042,7 @@ impl Emit<'_> {
             }
         }
         Ok(ConstExpr::New {
-            class: Name(class.into_boxed_slice()),
+            class: Name(class.into()),
             arguments,
             line: class_line,
         })
@@ -8153,7 +8181,7 @@ impl Emit<'_> {
                 } else {
                     NameKind::NotFullyQualified
                 };
-                Ok(self.function_callable(resolved, name_kind, line))
+                Ok(self.function_callable(resolved.to_vec(), name_kind, line))
             }
             // `name_ast->kind == ZEND_AST_ZVAL`: a value the parser
             // wrote, which names the function where it is a string and
@@ -8210,7 +8238,7 @@ impl Emit<'_> {
                     self.compile_error("\"static\" is not allowed in compile-time constants")
                 );
             }
-            FETCH_CLASS_DEFAULT => self.resolve_class(&class),
+            FETCH_CLASS_DEFAULT => self.resolve_class(&class).to_vec(),
             _ => class,
         };
         let method = match member {
@@ -8290,7 +8318,7 @@ impl Emit<'_> {
         }
         let body = node.body.filter(|body| !matches!(body, Stmt::EmptyStmt(_)));
         let before = self.ticks;
-        for directive in &node.declare_directives {
+        for directive in self.list(node.declare_directives) {
             let directive = &self.parsed.tree[*directive];
             self.line = directive.line();
             let Some(written_value) = directive.value else {
@@ -8414,9 +8442,9 @@ impl Emit<'_> {
     /// }
     /// ```
     fn const_decl(&mut self, id: NodeId<tree::ConstStmt>) -> Result<(), CompileError> {
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let mut declared = None;
-        for declarator in &node.const_declarators {
+        for declarator in self.list(node.const_declarators) {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
             // The fold, or the tree `DECLARE_CONST` evaluates as it runs.
@@ -8455,15 +8483,15 @@ impl Emit<'_> {
         let Some((name, value, unevaluated)) = declared else {
             return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
         };
-        let first = node
-            .const_declarators
+        let first = self
+            .list(node.const_declarators)
             .first()
             .map_or(self.line, |declarator| self.parsed.tree[*declarator].line());
         self.line = first;
         if node.const_declarators.len() > 1 {
             return Err(self.compile_error("Cannot apply attributes to multiple constants at once"));
         }
-        let written = self.walk_attributes(&node.attrs)?;
+        let written = self.walk_attributes(self.list(node.attrs))?;
         let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
         // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
         // value the compiler could not fold is the tree of.
@@ -8677,9 +8705,15 @@ impl Emit<'_> {
     fn r#for(&mut self, id: NodeId<tree::ForStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let tree = &self.parsed.tree;
-        let init = node.init.map_or(&[][..], |init| &tree[init].exprs[..]);
-        let cond = node.cond.map_or(&[][..], |cond| &tree[cond].exprs[..]);
-        let step = node.step.map_or(&[][..], |step| &tree[step].exprs[..]);
+        let init = node
+            .init
+            .map_or(&[][..], |init| tree.list(tree[init].exprs));
+        let cond = node
+            .cond
+            .map_or(&[][..], |cond| tree.list(tree[cond].exprs));
+        let step = node
+            .step
+            .map_or(&[][..], |step| tree.list(tree[step].exprs));
         let init = self.expr_list(init)?;
         self.do_free(init);
         let jump = self.push(Opline {
@@ -8720,7 +8754,9 @@ impl Emit<'_> {
         let tree = &self.parsed.tree;
         // The arms in written order, one `ZEND_AST_IF_ELEM` each, in
         // whichever syntax the tree parsed.
-        let mut arms = Vec::new();
+        let mut arms = self
+            .arena
+            .vec(1 + node.elseif_clauses.len() + node.alt_elseif_clauses.len() + 1);
         let cond = self.required(node.cond, "an `if` with no condition")?;
         arms.push(IfElem {
             cond: Some(cond),
@@ -8729,7 +8765,7 @@ impl Emit<'_> {
             line: node.line(),
         });
         if node.stmt_list.is_some() {
-            for clause in &node.alt_elseif_clauses {
+            for clause in self.list(node.alt_elseif_clauses) {
                 let clause = &tree[*clause];
                 let cond = self.required(clause.cond, "an `elseif` with no condition")?;
                 arms.push(IfElem {
@@ -8749,7 +8785,7 @@ impl Emit<'_> {
                 });
             }
         } else {
-            for clause in &node.elseif_clauses {
+            for clause in self.list(node.elseif_clauses) {
                 let clause = &tree[*clause];
                 let cond = self.required(clause.cond, "an `elseif` with no condition")?;
                 arms.push(IfElem {
@@ -8771,7 +8807,7 @@ impl Emit<'_> {
         }
         let last = arms.len().saturating_sub(1);
         let mut jumps = Vec::new();
-        for (index, arm) in arms.into_iter().enumerate() {
+        for (index, arm) in arms.iter().enumerate() {
             let Some(cond) = arm.cond else {
                 // php asserts the arm with no condition is the last.
                 self.compound(arm.body, arm.stmt_list)?;
@@ -9002,8 +9038,8 @@ impl Emit<'_> {
         let (op2_type, op2) = match (self.peel(value), list) {
             (tree::Expr::SimpleVarExpr(var), None) => match self.simple_var_of(var, self.line)? {
                 SimpleVar::Cv(name) => {
-                    self.cv_fetched(&name, Fetch::Read);
-                    (OperandKind::Cv, self.lookup_cv(&name))
+                    self.cv_fetched(name, Fetch::Read);
+                    (OperandKind::Cv, self.lookup_cv(name))
                 }
                 SimpleVar::This => return Err(self.compile_error("Cannot re-assign $this")),
                 // `zend_try_compile_cv` refuses an auto-global, so the
@@ -9864,7 +9900,7 @@ impl Emit<'_> {
             .map_or(self.line, |op| op.lineno);
         let refused = |message: String| CompileError {
             level: Level::CompileError,
-            message,
+            message: message.into(),
             line,
             raised: Vec::new(),
             thrown: false,
@@ -9976,7 +10012,7 @@ impl Emit<'_> {
                 .map_or(self.line, |op| op.lineno);
             return Err(CompileError {
                 level: Level::CompileError,
-                message: String::from(refused),
+                message: String::from(refused).into(),
                 line,
                 raised: Vec::new(),
                 thrown: false,
@@ -9999,7 +10035,7 @@ impl Emit<'_> {
     fn switch(&mut self, id: NodeId<tree::SwitchStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let expr = self.required(node.subject, "a `switch` with no condition")?;
-        let cases = &node.switch_arms;
+        let cases = self.list(node.switch_arms);
         let subject = self.expr(expr)?;
         self.begin_loop(LoopVar::of(Opcode::Free, subject), None, true);
         let case_node = self.temporary();
@@ -10418,7 +10454,7 @@ impl Emit<'_> {
             let Some(conds) = self.parsed.tree[*arm].conds else {
                 continue;
             };
-            for cond in &self.parsed.tree[conds].exprs.clone() {
+            for cond in self.list(self.parsed.tree[conds].exprs) {
                 count += 1;
                 let Some(value) = self.eval_const(*cond)? else {
                     return Ok(false);
@@ -10438,7 +10474,7 @@ impl Emit<'_> {
         let tree = &self.parsed.tree;
         arms.iter()
             .filter_map(|arm| tree[*arm].conds)
-            .flat_map(|conds| tree[conds].exprs.iter().copied())
+            .flat_map(|conds| tree.list(tree[conds].exprs).iter().copied())
             .collect()
     }
 
@@ -10544,7 +10580,7 @@ impl Emit<'_> {
             let node = &self.parsed.tree[*arm];
             let (conds, body, line) = (node.conds, node.body, node.line());
             if let Some(conds) = conds {
-                for cond in &self.parsed.tree[conds].exprs.clone() {
+                for cond in self.list(self.parsed.tree[conds].exprs) {
                     if let Some(jump) = jumps.next() {
                         self.update_jump_target_to_next(jump);
                     }
@@ -10590,7 +10626,7 @@ impl Emit<'_> {
     /// compiler stands on: php's own sentence for what its compiler
     /// refuses after the parse, which ends the request as its
     /// `E_COMPILE_ERROR` does.
-    fn compile_error(&self, message: impl Into<String>) -> CompileError {
+    fn compile_error(&self, message: impl Into<Cow<'static, str>>) -> CompileError {
         CompileError {
             level: Level::CompileError,
             message: message.into(),
@@ -11148,8 +11184,8 @@ impl Emit<'_> {
         id: NodeId<tree::InterpolatedStringExpr>,
         line: u32,
     ) -> Result<Where, CompileError> {
-        let parts = self.parsed.tree[id].parts.clone();
-        self.encaps(&parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
+        let parts = self.list(self.parsed.tree[id].parts);
+        self.encaps(parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
     }
 
     /// `ZEND_AST_ENCAPS_LIST` written as a heredoc.
@@ -11158,8 +11194,8 @@ impl Emit<'_> {
         id: NodeId<tree::HeredocExpr>,
         line: u32,
     ) -> Result<Where, CompileError> {
-        let parts = self.parsed.tree[id].parts.clone();
-        self.encaps(&parts, Holder::Heredoc(&self.parsed.tree[id]), line)
+        let parts = self.list(self.parsed.tree[id].parts);
+        self.encaps(parts, Holder::Heredoc(&self.parsed.tree[id]), line)
     }
 
     /// `zend_compile_simple_var` through `zend_try_compile_cv`: the
@@ -11175,8 +11211,8 @@ impl Emit<'_> {
     ) -> Result<Where, CompileError> {
         match self.simple_var_of(id, line)? {
             SimpleVar::Cv(name) => {
-                self.cv_fetched(&name, fetch);
-                Ok(Where::Cv(self.lookup_cv(&name)))
+                self.cv_fetched(name, fetch);
+                Ok(Where::Cv(self.lookup_cv(name)))
             }
             SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
             SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global),
@@ -11186,8 +11222,8 @@ impl Emit<'_> {
 
     /// `ZEND_AST_ARRAY` read as a value.
     fn array_expr(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Where, CompileError> {
-        let elements = self.parsed.tree[id].array_elements.clone();
-        self.array(&elements)
+        let elements = self.list(self.parsed.tree[id].array_elements);
+        self.array(elements)
     }
 
     /// `ZEND_AST_UNARY_MINUS`, `ZEND_AST_UNARY_PLUS` and
@@ -11238,7 +11274,7 @@ impl Emit<'_> {
     ) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
         let arguments = match (node.operand, node.args) {
-            (Some(operand), _) => Args::of(&[operand], self.line_of(operand)),
+            (Some(operand), _) => Args::of(self.arena, &[operand], self.line_of(operand)),
             (None, Some(args)) => self.arguments(args, line)?,
             (None, None) => return Err(self.unread("a `clone`")),
         };
@@ -11250,7 +11286,7 @@ impl Emit<'_> {
     fn exit_expr(&mut self, id: NodeId<tree::ExitExpr>, line: u32) -> Result<Where, CompileError> {
         let arguments = match self.parsed.tree[id].args {
             Some(args) => self.arguments(args, line)?,
-            None => Args::of(&[], line),
+            None => Args::of(self.arena, &[], line),
         };
         self.call(b"\\exit", &arguments, Fetch::Read)
     }
@@ -11297,8 +11333,8 @@ impl Emit<'_> {
     fn match_expr(&mut self, id: NodeId<tree::MatchExpr>) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
         let subject = self.required(node.subject, "a `match`")?;
-        let arms = node.match_arms.clone();
-        self.r#match(subject, &arms)
+        let arms = self.list(node.match_arms);
+        self.r#match(subject, arms)
     }
 
     /// `ZEND_AST_NEW`, over a class named or an anonymous one.
@@ -11309,7 +11345,7 @@ impl Emit<'_> {
             let class = ClassRef::Fetched(self.anonymous_class(anon)?);
             let arguments = match args {
                 Some(args) => self.arguments(args, line)?,
-                None => Args::of(&[], line),
+                None => Args::of(self.arena, &[], line),
             };
             return self.new_of(&class, &arguments, line);
         }
@@ -11318,7 +11354,7 @@ impl Emit<'_> {
         };
         let arguments = match node.args {
             Some(args) => self.arguments(args, line)?,
-            None => Args::of(&[], line),
+            None => Args::of(self.arena, &[], line),
         };
         self.new_expression(class, &arguments)
     }
@@ -11339,7 +11375,7 @@ impl Emit<'_> {
 
     /// `ZEND_AST_ISSET` over each target, `&&` between them.
     fn isset_expr(&mut self, id: NodeId<tree::IssetExpr>) -> Result<Where, CompileError> {
-        let targets = self.parsed.tree[id].targets.clone();
+        let targets = self.list(self.parsed.tree[id].targets);
         let Some((&first, rest)) = targets.split_first() else {
             return Err(self.unread("an `isset`"));
         };
@@ -11809,7 +11845,7 @@ impl Emit<'_> {
         if !self.fn_flags.generator {
             return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
         }
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let key = match node.key {
             Some(key) => {
                 let key = self.parsed.tree[key].key;
@@ -12627,8 +12663,8 @@ impl Emit<'_> {
             node if self.is_by_name(node) => self.var_for_reference(node)?,
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => {
-                    self.cv_fetched(&name, Fetch::Write);
-                    (OperandKind::Cv, self.lookup_cv(&name))
+                    self.cv_fetched(name, Fetch::Write);
+                    (OperandKind::Cv, self.lookup_cv(name))
                 }
                 SimpleVar::This => {
                     let this = self.fetch_this(OperandKind::Var);
@@ -12812,7 +12848,7 @@ impl Emit<'_> {
             Target::StaticProp { class, name } => {
                 return self.assign_static_prop_ref(class, &name, source);
             }
-            Target::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(&name))),
+            Target::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(name))),
             Target::Dim(_) | Target::ByName(_) | Target::Prop { .. } => {
                 self.delayed_var(target, Fetch::Write)?
             }
@@ -13011,8 +13047,8 @@ impl Emit<'_> {
                 let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
                     return Err(self.fatal("a variable that is no CV"));
                 };
-                self.cv_fetched(&name, fetch);
-                Base::Settled((OperandKind::Cv, self.lookup_cv(&name)))
+                self.cv_fetched(name, fetch);
+                Base::Settled((OperandKind::Cv, self.lookup_cv(name)))
             }
             // `zend_compile_simple_var` with `delayed` over a name the
             // program computes or an auto-global's: the fetch by name
@@ -13367,11 +13403,11 @@ impl Emit<'_> {
         let tree::Expr::SimpleVarExpr(id) = self.chain_base(target) else {
             return self.expr(value);
         };
-        if self.simple_var_of(id, line)? != SimpleVar::Cv(name.clone()) {
+        if self.simple_var_of(id, line)? != SimpleVar::Cv(name) {
             return self.expr(value);
         }
-        self.cv_fetched(&name, Fetch::Read);
-        let cv = self.lookup_cv(&name);
+        self.cv_fetched(name, Fetch::Read);
+        let cv = self.lookup_cv(name);
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::QmAssign,
@@ -14400,7 +14436,7 @@ impl Emit<'_> {
                     if name == HTTP_RESPONSE_HEADER {
                         self.raise(Level::Deprecated, HTTP_RESPONSE_HEADER_DEPRECATED);
                     }
-                    self.fetch_by_name(&name, Symbols::Local)?
+                    self.fetch_by_name(name, Symbols::Local)?
                 }
                 SimpleVar::This => self.fetch_by_name(b"this", Symbols::Local)?,
                 SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global)?,
@@ -14492,8 +14528,8 @@ impl Emit<'_> {
         parts: &[tree::StringPart],
         holder: Holder<'_>,
         line: u32,
-    ) -> Result<Vec<Piece>, CompileError> {
-        let mut pieces: Vec<Piece> = Vec::new();
+    ) -> Result<&'a [Piece<'a>], CompileError> {
+        let mut pieces = self.arena.vec(parts.len());
         let mut bytes = Vec::new();
         let mut at = line;
         for part in parts {
@@ -14523,10 +14559,10 @@ impl Emit<'_> {
                             let prop = &self.parsed.tree[prop];
                             let nullsafe =
                                 prop.op.map(|op| self.kind(op)) == Some(SyntaxKind::NULLSAFE_ARROW);
-                            Fetched::Prop(name, self.text(prop.name).to_vec(), nullsafe)
+                            Fetched::Prop(name, self.text(prop.name), nullsafe)
                         }
                     };
-                    Self::piece(&mut pieces, &mut bytes, at, fetch, var_line, Written::Plain);
+                    self.piece(&mut pieces, &mut bytes, at, fetch, var_line, Written::Plain);
                 }
                 tree::StringPart::BracedInterpolation(id) => {
                     let node = &self.parsed.tree[id];
@@ -14534,7 +14570,7 @@ impl Emit<'_> {
                     let Some(inner) = inner else {
                         return Err(walk::unread(inner_line, "an interpolated expression"));
                     };
-                    Self::piece(
+                    self.piece(
                         &mut pieces,
                         &mut bytes,
                         at,
@@ -14566,7 +14602,7 @@ impl Emit<'_> {
                     });
                     let (fetch, written) = match (name, inner) {
                         (Some(name), _) => {
-                            let name = self.text(name).to_vec();
+                            let name = self.text(name);
                             let fetch = match dim {
                                 Some(dim) => Fetched::Dim(name, self.simple_dim(dim)?),
                                 None => Fetched::Var(name),
@@ -14578,36 +14614,40 @@ impl Emit<'_> {
                             return Err(walk::unread(inner_line, "an interpolated expression"));
                         }
                     };
-                    Self::piece(&mut pieces, &mut bytes, at, fetch, inner_line, written);
+                    self.piece(&mut pieces, &mut bytes, at, fetch, inner_line, written);
                 }
             }
         }
         if !bytes.is_empty() {
             pieces.push(Piece {
-                fetch: Fetched::Text(std::mem::take(&mut bytes)),
+                fetch: Fetched::Text(self.arena.copy(&bytes)),
                 line: at,
                 written: Written::Plain,
             });
         }
-        Ok(pieces)
+        Ok(pieces.into_slice())
     }
 
     /// One variable piece, after the written bytes before it as a piece
     /// of their own at the line those bytes began on.
+    /// The written bytes are laid in the arena and the room they were
+    /// gathered in kept for the next.
     fn piece(
-        pieces: &mut Vec<Piece>,
+        &self,
+        pieces: &mut ArenaVec<'a, Piece<'a>>,
         bytes: &mut Vec<u8>,
         at: u32,
-        fetch: Fetched,
+        fetch: Fetched<'a>,
         line: u32,
         written: Written,
     ) {
         if !bytes.is_empty() {
             pieces.push(Piece {
-                fetch: Fetched::Text(std::mem::take(bytes)),
+                fetch: Fetched::Text(self.arena.copy(bytes)),
                 line: at,
                 written: Written::Plain,
             });
+            bytes.clear();
         }
         pieces.push(Piece {
             fetch,
@@ -14620,7 +14660,7 @@ impl Emit<'_> {
     /// `encaps_var_offset`: a bare word is the string, a number is
     /// `T_NUM_STRING`'s value ([`Holder::Offset`]) and `-` before it is
     /// `zend_negate_num_string`, a variable is itself.
-    fn simple_dim(&mut self, id: NodeId<tree::SimpleDim>) -> Result<Offset, CompileError> {
+    fn simple_dim(&mut self, id: NodeId<tree::SimpleDim>) -> Result<Offset<'a>, CompileError> {
         let node = &self.parsed.tree[id];
         let line = node.line();
         let Some(index) = node.index else {
@@ -14841,7 +14881,7 @@ impl Emit<'_> {
         // it, at the line the piece before it left, the list's own for
         // the first.
         let mut left = line;
-        for piece in &pieces {
+        for piece in pieces {
             self.line = left;
             match piece.written {
                 Written::Plain => {}
@@ -15272,7 +15312,7 @@ impl Emit<'_> {
     }
 
     /// A node [`Self::constant_expr`] folds to nothing, refused as `why`.
-    fn no_constant(&self, why: &str) -> Result<Zval, CompileError> {
+    fn no_constant(&self, why: &'static str) -> Result<Zval, CompileError> {
         Err(self.fatal(why))
     }
 
@@ -15302,7 +15342,7 @@ impl Emit<'_> {
     fn nowdoc_constant(&mut self, id: NodeId<tree::NowdocExpr>) -> Result<Zval, CompileError> {
         let node = &self.parsed.tree[id];
         let mut bytes = Vec::new();
-        for token in &node.text {
+        for token in self.list(node.text) {
             if let Some(TokenValue::Bytes(text)) =
                 TokenValue::of(self.parsed, Holder::Nowdoc(node), *token)
             {
@@ -15330,8 +15370,8 @@ impl Emit<'_> {
     fn string_constant(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
         let tree = &self.parsed.tree;
         let parts: &[tree::StringPart] = match expr {
-            tree::Expr::InterpolatedStringExpr(id) => &tree[id].parts,
-            tree::Expr::HeredocExpr(id) => &tree[id].parts,
+            tree::Expr::InterpolatedStringExpr(id) => tree.list(tree[id].parts),
+            tree::Expr::HeredocExpr(id) => tree.list(tree[id].parts),
             _ => &[],
         };
         if parts
@@ -15429,8 +15469,8 @@ impl Emit<'_> {
 
     /// `ZEND_AST_ARRAY` whose every element folds.
     fn array_constant(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Zval, CompileError> {
-        let elements = self.parsed.tree[id].array_elements.clone();
-        self.constant_array(&elements)?
+        let elements = self.list(self.parsed.tree[id].array_elements);
+        self.constant_array(elements)?
             .ok_or_else(|| self.fatal("an array expression that is no constant"))
     }
 
@@ -15462,7 +15502,7 @@ impl Emit<'_> {
         let folded = if runtime {
             None
         } else {
-            self.special_constant(&resolved.to_ascii_lowercase(), &arguments)?
+            self.special_constant(self.arena.lowercase(resolved), &arguments)?
         };
         folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
     }
@@ -15493,7 +15533,7 @@ impl Emit<'_> {
                 let operand = self.evaluated_class(class)?;
                 let folded = match self.folded_name(&name)? {
                     Some(name) => match self.constant_class(operand)? {
-                        Some(class) => self.active_class_constant(&class, &name)?,
+                        Some(class) => self.active_class_constant(class, name)?,
                         None => None,
                     },
                     None => None,
@@ -15655,8 +15695,8 @@ impl Emit<'_> {
         let tree::Expr::ArrayExpr(id) = self.peel(expr) else {
             return Ok(None);
         };
-        let elements = self.parsed.tree[id].array_elements.clone();
-        self.constant_entries(&elements)
+        let elements = self.list(self.parsed.tree[id].array_elements);
+        self.constant_entries(elements)
     }
 
     /// [`Self::constant_array`]'s entries before they are laid down: the
@@ -15700,7 +15740,7 @@ impl Emit<'_> {
         let elements = self.elements_of(elements)?;
         let mut folded: Vec<FoldedElement> = Vec::with_capacity(elements.len());
         let mut constant = true;
-        for element in elements {
+        for &element in elements {
             let (key, value, by_ref) = match element {
                 Element::Value { key, value } => (key, value, false),
                 Element::Ref { key, value } => (key, value, true),
@@ -15867,7 +15907,7 @@ impl Emit<'_> {
         let mut init_at = 0usize;
         let mut out = 0u32;
         let mut packed = true;
-        for (i, element) in elements.into_iter().enumerate() {
+        for (i, &element) in elements.iter().enumerate() {
             let (key, value, by_ref) = match element {
                 Element::Unpack(value) => {
                     let value = self.expr(value)?;
@@ -16023,8 +16063,8 @@ impl Emit<'_> {
             }
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => {
-                    self.cv_fetched(&name, Fetch::Write);
-                    Ok((OperandKind::Cv, self.lookup_cv(&name)))
+                    self.cv_fetched(name, Fetch::Write);
+                    Ok((OperandKind::Cv, self.lookup_cv(name)))
                 }
                 SimpleVar::This => {
                     let this = self.fetch_this(OperandKind::Var);
@@ -16141,8 +16181,8 @@ impl Emit<'_> {
                 ..Opline::default()
             });
         }
-        let parts = self.parsed.tree[id].parts.clone();
-        let command = self.encaps(&parts, Holder::ShellExec(&self.parsed.tree[id]), line)?;
+        let parts = self.list(self.parsed.tree[id].parts);
+        let command = self.encaps(parts, Holder::ShellExec(&self.parsed.tree[id]), line)?;
         let (op1_type, op1) = self.operand(command);
         self.push(Opline {
             opcode: if known {
@@ -16185,25 +16225,25 @@ impl Emit<'_> {
             // `zend_compile_assert` over the name as written, which the
             // program resolves.
             if name.eq_ignore_ascii_case(b"assert") && !is_callable_convert {
-                return self.assert(&resolved, arguments, None);
+                return self.assert(resolved, arguments, None);
             }
-            return self.ns_call(&resolved, arguments, fetch);
+            return self.ns_call(resolved, arguments, fetch);
         }
-        let lowered = resolved.to_ascii_lowercase();
+        let lowered = self.arena.lowercase(resolved);
         // "Special assert() handling should apply independently of
         // compiler flags."
         if lowered == b"assert"
             && !is_callable_convert
-            && let Some(index) = self.native_index(&lowered)
+            && let Some(index) = self.native_index(lowered)
         {
-            return self.assert(&resolved, arguments, Some(index));
+            return self.assert(resolved, arguments, Some(index));
         }
-        let (callee, plan, stack, call_op) = match self.native_index(&lowered) {
+        let (callee, plan, stack, call_op) = match self.native_index(lowered) {
             Some(index) => {
                 // `zend_try_compile_special_func`, which a named argument
                 // keeps a call out of.
                 if let Some(positional) = arguments.positional() {
-                    if let Some(served) = self.special(&lowered, &positional, fetch)? {
+                    if let Some(served) = self.special(lowered, &positional, fetch)? {
                         return Ok(served);
                     }
                     // `find_frameless_function_info`: `type != BP_VAR_R`
@@ -16226,24 +16266,24 @@ impl Emit<'_> {
                     })
                     .unwrap_or_default();
                 let callee = Callee::of(parameters);
-                let plan = Plan::of(arguments, Some(&callee));
+                let plan = Plan::of(self.arena, arguments, Some(&callee));
                 let stack = used_stack(plan.count, None);
                 let call_op = self.get_call_op(Fbc::Native, flagged);
                 (callee, plan, stack, call_op)
             }
-            None => match self.declared_function(&lowered) {
+            None => match self.declared_function(lowered) {
                 Some((decl, body)) => {
                     let callee = Callee::of(&decl.parameters);
-                    let plan = Plan::of(arguments, Some(&callee));
+                    let plan = Plan::of(self.arena, arguments, Some(&callee));
                     let stack = used_stack(plan.count, Some(body));
                     let flagged = attributes::deprecated_or_no_discard(&decl.attributes);
                     let call_op = self.get_call_op(Fbc::User, flagged);
                     (callee, plan, stack, call_op)
                 }
-                None => return self.dynamic_call(&resolved, arguments),
+                None => return self.dynamic_call(resolved, arguments),
             },
         };
-        let lowered = self.string(&lowered)?;
+        let lowered = self.string(lowered)?;
         let lowered = self.literal(lowered);
         let slot = self.cache_slot();
         self.push(Opline {
@@ -16268,7 +16308,7 @@ impl Emit<'_> {
     fn declared_function(&self, lowered: &[u8]) -> Option<(&FunctionDecl, &OpArray)> {
         self.functions_declared
             .iter()
-            .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
+            .find(|(decl, _)| decl.name.0.eq_ignore_ascii_case(lowered))
             .map(|(decl, body)| (decl, body))
     }
 
@@ -16293,7 +16333,7 @@ impl Emit<'_> {
         {
             let class = self.resolved_class_literal(&name[..colon - 1])?;
             let method = self.func_name_literal(&name[colon + 1..])?;
-            let plan = Plan::of(arguments, None);
+            let plan = Plan::of(self.arena, arguments, None);
             let slots = self.cache_slots(2);
             self.push(Opline {
                 opcode: Opcode::InitStaticMethodCall,
@@ -16308,7 +16348,7 @@ impl Emit<'_> {
             return self.call_common(&plan, arguments, None, Opcode::DoFcall, line);
         }
         let pair = self.func_name_literal(name)?;
-        let plan = Plan::of(arguments, None);
+        let plan = Plan::of(self.arena, arguments, None);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitFcallByName,
@@ -16363,7 +16403,7 @@ impl Emit<'_> {
             return self.dynamic_call(name.bytes(), arguments);
         }
         let (op2_type, op2) = self.operand(value);
-        let plan = Plan::of(arguments, None);
+        let plan = Plan::of(self.arena, arguments, None);
         self.push(Opline {
             opcode: Opcode::InitDynamicCall,
             op2_type,
@@ -16436,7 +16476,7 @@ impl Emit<'_> {
         } else {
             0
         };
-        let plan = Plan::of(arguments, None);
+        let plan = Plan::of(self.arena, arguments, None);
         self.push(Opline {
             opcode: Opcode::New,
             op1_type,
@@ -16536,7 +16576,7 @@ impl Emit<'_> {
         let method = match self.method_name(method)? {
             MethodName::Constant(method) => method,
             MethodName::Computed((op2_type, op2)) => {
-                let plan = Plan::of(arguments, None);
+                let plan = Plan::of(self.arena, arguments, None);
                 let (op1_type, op1) = self.class_operand(&class)?;
                 let out = if op1_type == OperandKind::Const {
                     self.cache_slot()
@@ -16556,7 +16596,7 @@ impl Emit<'_> {
                 return self.call_common(&plan, arguments, None, Opcode::DoFcall, line);
             }
         };
-        let method = method.as_slice();
+        let method: &[u8] = method;
         let constructor = method.eq_ignore_ascii_case(b"__construct");
         let known = match &class {
             _ if constructor => None,
@@ -16573,7 +16613,7 @@ impl Emit<'_> {
             Some((Known::Native, callee)) => (Opcode::DoFcall, Some(callee)),
             None => (Opcode::DoFcall, None),
         };
-        let plan = Plan::of(arguments, callee.as_ref());
+        let plan = Plan::of(self.arena, arguments, callee.as_ref());
         let count = plan.count;
         let (op1_type, op1) = self.class_operand(&class)?;
         let opline = if constructor {
@@ -16657,8 +16697,8 @@ impl Emit<'_> {
         }
         let (op2_type, op2, out, known) = match self.method_name(method)? {
             MethodName::Constant(method) => {
-                let at = self.func_name_literal(&method)?;
-                let known = self.known_on_this(op1_type, &method);
+                let at = self.func_name_literal(method)?;
+                let known = self.known_on_this(op1_type, method);
                 (OperandKind::Const, at, self.cache_slots(2), known)
             }
             MethodName::Computed((kind, at)) => (kind, at, 0, None),
@@ -16670,7 +16710,7 @@ impl Emit<'_> {
             ),
             None => (Opcode::DoFcall, None),
         };
-        let plan = Plan::of(arguments, callee.as_ref());
+        let plan = Plan::of(self.arena, arguments, callee.as_ref());
         self.push(Opline {
             opcode: Opcode::InitMethodCall,
             op1_type,
@@ -16754,7 +16794,7 @@ impl Emit<'_> {
         self.ensure_valid_class_fetch_type(fetch)?;
         let name = match (fetch, operand) {
             (FETCH_CLASS_DEFAULT, ClassOperand::Value(_)) => self.fq_name(&written)?,
-            (FETCH_CLASS_DEFAULT, _) => self.class_name(&written),
+            (FETCH_CLASS_DEFAULT, _) => self.class_name(&written).to_vec(),
             (FETCH_CLASS_SELF, _) if self.scope_known() => match self.active_name() {
                 Some(active) => active,
                 None => return Ok(None),
@@ -16930,13 +16970,17 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
     /// ```
-    fn class_const(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
+    fn class_const(
+        &mut self,
+        class: ClassSpec,
+        name: &ScopedName<'a>,
+    ) -> Result<Where, CompileError> {
         // Both children evaluated, the class first; the class resolved
         // only where the name folded to a string.
         let operand = self.evaluated_class(class)?;
         if let Some(written) = self.folded_name(name)?
             && let Some(resolved) = self.constant_class(operand)?
-            && let Some(value) = self.active_class_constant(&resolved, &written)?
+            && let Some(value) = self.active_class_constant(resolved, written)?
         {
             return Ok(Where::Constant(value));
         }
@@ -16971,12 +17015,12 @@ impl Emit<'_> {
     /// out, or the string a computed one folds to, so `C::{'X'}` and
     /// `C::{'X' . ''}` are `C::X`; nothing where it folds to no string or
     /// does not fold.
-    fn folded_name(&mut self, name: &ScopedName) -> Result<Option<Vec<u8>>, CompileError> {
+    fn folded_name(&mut self, name: &ScopedName<'a>) -> Result<Option<&'a [u8]>, CompileError> {
         Ok(match name {
-            ScopedName::Written(bytes) => Some(bytes.clone()),
+            ScopedName::Written(bytes) => Some(*bytes),
             ScopedName::Computed(expr) => self
                 .eval_const(*expr)?
-                .and_then(|value| value.as_str().map(|s| s.bytes().to_vec())),
+                .and_then(|value| value.as_str().map(|s| self.arena.copy(s.bytes()))),
         })
     }
 
@@ -17287,14 +17331,14 @@ impl Emit<'_> {
     /// class up by (`Z_STR_P(RT_CONSTANT(opline, opline->op1) + 1)`).
     fn class_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
         let resolved = self.class_name(name);
-        self.resolved_class_literal(&resolved)
+        self.resolved_class_literal(resolved)
     }
 
     /// `zend_add_class_name_literal` over a name already resolved.
     fn resolved_class_literal(&mut self, resolved: &[u8]) -> Result<u32, CompileError> {
-        let lowered = resolved.to_ascii_lowercase();
+        let lowered = self.arena.lowercase(resolved);
         let written = self.string(resolved)?;
-        let lowered = self.string(&lowered)?;
+        let lowered = self.string(lowered)?;
         let at = self.literal(written);
         self.literal(lowered);
         Ok(at)
@@ -17349,7 +17393,7 @@ impl Emit<'_> {
     /// the class goes is the class it names as `ZEND_NAME_FQ`
     /// ([`Self::fq_class_name`]); any other expression is
     /// [`Self::computed_class_ref`]'s.
-    fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef, CompileError> {
+    fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef<'a>, CompileError> {
         let operand = self.decoded_class(class)?;
         self.class_ref_of(operand, flags)
     }
@@ -17359,17 +17403,21 @@ impl Emit<'_> {
         &mut self,
         operand: ClassOperand,
         flags: u32,
-    ) -> Result<ClassRef, CompileError> {
+    ) -> Result<ClassRef<'a>, CompileError> {
         let written = match operand {
-            ClassOperand::Name(token) => self.text(token).to_vec(),
-            ClassOperand::Value(value) => return Ok(ClassRef::Named(self.fq_class_name(value)?)),
+            ClassOperand::Name(token) => self.text(token),
+            ClassOperand::Value(value) => {
+                return Ok(ClassRef::Named(
+                    self.arena.copy(&self.fq_class_name(value)?),
+                ));
+            }
             ClassOperand::Expr(expr) => return self.computed_class_ref(expr, flags),
         };
         if written.starts_with(b"\\") {
-            return Ok(ClassRef::Named(self.class_name(&written)));
+            return Ok(ClassRef::Named(self.class_name(written)));
         }
-        match class_fetch_type(&written) {
-            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.class_name(&written))),
+        match class_fetch_type(written) {
+            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.class_name(written))),
             fetch => {
                 self.ensure_valid_class_fetch_type(fetch)?;
                 Ok(ClassRef::Scope(fetch | flags))
@@ -17387,7 +17435,7 @@ impl Emit<'_> {
         &mut self,
         expr: tree::Expr,
         flags: u32,
-    ) -> Result<ClassRef, CompileError> {
+    ) -> Result<ClassRef<'a>, CompileError> {
         let value = match self.expr(expr)? {
             Where::Constant(value) => value,
             value => {
@@ -17409,7 +17457,9 @@ impl Emit<'_> {
             return Err(self.compile_error("Illegal class name"));
         };
         match class_fetch_type(name.bytes()) {
-            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.fq_name(name.bytes())?)),
+            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(
+                self.arena.copy(&self.fq_name(name.bytes())?),
+            )),
             fetch => {
                 self.ensure_valid_class_fetch_type(fetch)?;
                 Ok(ClassRef::Scope(fetch | flags))
@@ -17430,7 +17480,7 @@ impl Emit<'_> {
     /// NULL
     /// NULL
     /// ```
-    fn class_link(&mut self, class: ClassSpec) -> Result<ClassRef, CompileError> {
+    fn class_link(&mut self, class: ClassSpec) -> Result<ClassRef<'a>, CompileError> {
         if let ClassSpec::Expr(expr) = class {
             self.chain_inner = Some(self.peel(expr));
         }
@@ -17461,7 +17511,7 @@ impl Emit<'_> {
     /// declaration of the file took under the same namespace.
     #[cfg(test)]
     fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
-        self.known_method_of(&self.class_name(class), method)
+        self.known_method_of(self.class_name(class), method)
             .map(|(known, _)| known)
     }
 
@@ -17552,9 +17602,9 @@ impl Emit<'_> {
     /// (`Z_STR_P(function_name+1)`).
     fn func_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
         let written = name;
-        let lowered = written.to_ascii_lowercase();
+        let lowered = self.arena.lowercase(written);
         let written = self.string(written)?;
-        let lowered = self.string(&lowered)?;
+        let lowered = self.string(lowered)?;
         let at = self.literal(written);
         self.literal(lowered);
         Ok(at)
@@ -17566,7 +17616,7 @@ impl Emit<'_> {
     /// for the program to be served, which is php's
     /// `!is_fully_qualified && FC(current_namespace)`: an unqualified
     /// name no `use function` names, inside a namespace.
-    fn function_name(&self, name: &[u8]) -> (Vec<u8>, bool) {
+    fn function_name(&self, name: &[u8]) -> (&'a [u8], bool) {
         let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Function);
         (resolved, !fully_qualified && self.namespace.is_some())
     }
@@ -17590,7 +17640,7 @@ impl Emit<'_> {
         let (resolved, _) = self.function_name(self.text(name));
         Some((
             resolved.to_ascii_lowercase(),
-            &self.parsed.tree[node.args].args,
+            self.list(self.parsed.tree[node.args].args),
         ))
     }
 
@@ -17601,7 +17651,7 @@ impl Emit<'_> {
     /// fallback.
     fn constant_resolved(&self, name: &[u8]) -> ConstantName {
         let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Const);
-        let resolved = Name(resolved.into_boxed_slice());
+        let resolved = Name(resolved.into());
         if !fully_qualified && self.namespace.is_some() {
             ConstantName::UnqualifiedInNamespace(resolved)
         } else {
@@ -17614,9 +17664,9 @@ impl Emit<'_> {
     /// every other name is [`Self::resolve_class`]'s, the file's imports
     /// read, with nothing waiting for the program, since a class name
     /// resolves at compile time.
-    fn class_name(&self, name: &[u8]) -> Vec<u8> {
+    fn class_name(&self, name: &[u8]) -> &'a [u8] {
         if class_fetch_type(name) != FETCH_CLASS_DEFAULT {
-            return name.to_vec();
+            return self.arena.copy(name);
         }
         self.resolve_class(name)
     }
@@ -17624,14 +17674,11 @@ impl Emit<'_> {
     /// `zend_prefix_with_ns`: the name a declaration takes, the current
     /// namespace, a `\` and the name as written where a namespace
     /// stands, and the name as written where none does.
-    fn prefix_with_ns(&self, name: &[u8]) -> Vec<u8> {
+    fn prefix_with_ns(&self, name: &[u8]) -> &'a [u8] {
         let Some(namespace) = &self.namespace else {
-            return name.to_vec();
+            return self.arena.copy(name);
         };
-        let mut full = namespace.clone();
-        full.push(b'\\');
-        full.extend_from_slice(name);
-        full
+        self.arena.concat(&[namespace, b"\\", name])
     }
 
     /// `zend_compile_const` over `zend_resolve_const_name` and
@@ -18122,7 +18169,7 @@ impl Emit<'_> {
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let name_constants = self.ns_func_name_literal(name)?;
-        let lowered = name.to_ascii_lowercase();
+        let lowered = self.arena.lowercase(name);
         let unqualified = lowered
             .rsplit(|b| *b == b'\\')
             .next()
@@ -18139,7 +18186,7 @@ impl Emit<'_> {
             && self.frameless_arity(index, positional.len()).is_some()
         {
             self.in_jmp_frameless_branch = true;
-            let over = self.string(&lowered)?;
+            let over = self.string(lowered)?;
             let op1 = self.literal(over);
             let at = self.push(Opline {
                 opcode: Opcode::JmpFrameless,
@@ -18149,7 +18196,7 @@ impl Emit<'_> {
             });
             branch = Some((at, index));
         }
-        let plan = Plan::of(arguments, None);
+        let plan = Plan::of(self.arena, arguments, None);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitNsFcallByName,
@@ -18190,14 +18237,14 @@ impl Emit<'_> {
     /// slots in a row, which the engine reads as the two after the first
     /// (`Z_STR_P(function_name + 1)`, `+ 2`).
     fn ns_func_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
-        let lowered = name.to_ascii_lowercase();
+        let lowered = self.arena.lowercase(name);
         let unqualified = lowered
             .rsplit(|b| *b == b'\\')
             .next()
             .unwrap_or_default()
             .to_vec();
         let written = self.string(name)?;
-        let lowered = self.string(&lowered)?;
+        let lowered = self.string(lowered)?;
         let unqualified = self.string(&unqualified)?;
         let at = self.literal(written);
         self.literal(lowered);
@@ -18433,7 +18480,7 @@ impl Emit<'_> {
         match expr {
             tree::Expr::SimpleVarExpr(id) => {
                 if let Some(var) = tree[id].var {
-                    note_var(names, &self.variable_name(var));
+                    note_var(names, self.variable_name(var));
                 }
             }
             tree::Expr::VarVarExpr(id) => self.implicit_uses_of_name(names, tree[id].inner),
@@ -18444,15 +18491,19 @@ impl Emit<'_> {
             | tree::Expr::NowdocExpr(_)
             | tree::Expr::NameRef(_) => {}
             tree::Expr::InterpolatedStringExpr(id) => {
-                self.implicit_uses_of_parts(names, &tree[id].parts);
+                self.implicit_uses_of_parts(names, tree.list(tree[id].parts));
             }
-            tree::Expr::HeredocExpr(id) => self.implicit_uses_of_parts(names, &tree[id].parts),
-            tree::Expr::ShellExecExpr(id) => self.implicit_uses_of_parts(names, &tree[id].parts),
+            tree::Expr::HeredocExpr(id) => {
+                self.implicit_uses_of_parts(names, tree.list(tree[id].parts));
+            }
+            tree::Expr::ShellExecExpr(id) => {
+                self.implicit_uses_of_parts(names, tree.list(tree[id].parts));
+            }
             tree::Expr::ArrayExpr(id) => {
-                self.implicit_uses_of_elements(names, &tree[id].array_elements);
+                self.implicit_uses_of_elements(names, tree.list(tree[id].array_elements));
             }
             tree::Expr::ListExpr(id) => {
-                self.implicit_uses_of_elements(names, &tree[id].array_elements);
+                self.implicit_uses_of_elements(names, tree.list(tree[id].array_elements));
             }
             tree::Expr::UnaryExpr(id) => self.implicit_uses_of_any(names, tree[id].operand),
             tree::Expr::PrefixIncDecExpr(id) => self.implicit_uses_of_any(names, tree[id].operand),
@@ -18492,10 +18543,10 @@ impl Emit<'_> {
             tree::Expr::MatchExpr(id) => {
                 let node = &tree[id];
                 self.implicit_uses_of_any(names, node.subject);
-                for arm in &node.match_arms {
+                for arm in self.list(node.match_arms) {
                     let arm = &tree[*arm];
                     if let Some(conds) = arm.conds {
-                        for cond in &tree[conds].exprs {
+                        for cond in tree.list(tree[conds].exprs) {
                             self.implicit_uses(names, *cond);
                         }
                     }
@@ -18524,7 +18575,7 @@ impl Emit<'_> {
             tree::Expr::YieldFromExpr(id) => self.implicit_uses_of_any(names, tree[id].source),
             tree::Expr::IncludeExpr(id) => self.implicit_uses_of_any(names, tree[id].operand),
             tree::Expr::IssetExpr(id) => {
-                for target in &tree[id].targets {
+                for target in tree.list(tree[id].targets) {
                     self.implicit_uses(names, *target);
                 }
             }
@@ -18592,8 +18643,8 @@ impl Emit<'_> {
             }
             tree::Expr::ClosureExpr(id) => {
                 if let Some(clause) = tree[id].uses {
-                    for used in &tree[clause].closure_use_vars {
-                        note(names, &self.variable_name(tree[*used].var));
+                    for used in tree.list(tree[clause].closure_use_vars) {
+                        note(names, self.variable_name(tree[*used].var));
                     }
                 }
             }
@@ -18632,7 +18683,7 @@ impl Emit<'_> {
     /// The arguments of a list, each one's expression.
     fn implicit_uses_of_args(&self, names: &mut Vec<Vec<u8>>, args: NodeId<tree::ArgList>) {
         let tree = &self.parsed.tree;
-        for arg in &tree[args].args {
+        for arg in tree.list(tree[args].args) {
             match arg {
                 tree::Arg::Expr(expr) => self.implicit_uses(names, *expr),
                 tree::Arg::NamedArg(arg) => self.implicit_uses_of_any(names, tree[*arg].value),
@@ -18671,7 +18722,7 @@ impl Emit<'_> {
                 tree::StringPart::LiteralStringPart(_) => {}
                 tree::StringPart::SimpleInterpolation(id) => {
                     let node = &tree[id];
-                    note_var(names, &self.variable_name(node.var));
+                    note_var(names, self.variable_name(node.var));
                     if let Some(tree::SimpleInterpolationSuffix::SimpleDim(dim)) = node.suffix {
                         self.implicit_uses_of_dim(names, dim);
                     }
@@ -18700,7 +18751,7 @@ impl Emit<'_> {
         if let Some(index) = self.parsed.tree[dim].index
             && self.kind(index) == SyntaxKind::VARIABLE
         {
-            note_var(names, &self.variable_name(index));
+            note_var(names, self.variable_name(index));
         }
     }
 }
@@ -19511,13 +19562,13 @@ pub(crate) fn written(parsed: &Parsed, expr: tree::Expr) -> Option<Literal> {
                 TokenValue::Float(_) | TokenValue::Bytes(_) => Some(Literal::Other),
             }
         }
-        tree::Expr::InterpolatedStringExpr(id) => tree[id]
-            .parts
+        tree::Expr::InterpolatedStringExpr(id) => tree
+            .list(tree[id].parts)
             .iter()
             .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
             .then_some(Literal::Other),
-        tree::Expr::HeredocExpr(id) => tree[id]
-            .parts
+        tree::Expr::HeredocExpr(id) => tree
+            .list(tree[id].parts)
             .iter()
             .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
             .then_some(Literal::Other),
@@ -19559,12 +19610,14 @@ mod tests {
     /// file's own statement list, which is where a class binds at
     /// compile time.
     fn in_namespace<'a>(
-        parsed: &'a Parsed,
+        arena: &'a Arena,
+        parsed: &'a Parsed<'a>,
         strings: &'a mut php_heap::Strings,
         options: &'a Options<'a>,
     ) -> Emit<'a> {
         Emit {
             parsed,
+            arena,
             strings,
             precision: options.precision,
             assertions: assert::Assertions::of(options.assertions),
@@ -19605,7 +19658,7 @@ mod tests {
             const_exprs: Vec::new(),
             vars: Vec::new(),
             http_response_header: ResponseHeader::Predefined,
-            safepoints: Vec::new(),
+            safepoints: Safepoints::new(),
             temporaries: 0,
             cache_slots: 0,
             line: 1,
@@ -19658,7 +19711,8 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         let options = Options::default();
         let parsed = Parsed::default();
-        let mut emit = in_namespace(&parsed, &mut strings, &options);
+        let arena = Arena::new();
+        let mut emit = in_namespace(&arena, &parsed, &mut strings, &options);
         let read = Class {
             name: b"M".to_vec(),
             kind: ClassKind::Class,
@@ -19740,7 +19794,7 @@ mod tests {
         let refused = |oplines: &[Opline]| {
             headers_numbered(oplines, &entry)
                 .err()
-                .map(|refused| (refused.level, refused.message))
+                .map(|refused| (refused.level, refused.message.into_owned()))
         };
         assert_eq!(
             refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::Jmp, 0, 2)]),

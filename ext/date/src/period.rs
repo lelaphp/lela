@@ -11,12 +11,12 @@ use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, Val
 
 use crate::classes::{DateTimeInterface, Iterator, IteratorAggregate};
 use crate::datetime::restore_properties;
-use crate::ffi::{self, RelTime, Time};
+use crate::ffi::{self, RelFields, RelTime, Time};
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
 use crate::obj::{
-    IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, PeriodState, class_id, hold_period, new_date,
-    new_interval, period_fields, rows_array, std_rows, uninitialized, with_period, with_time,
+    IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, PeriodState, class_id, new_date, period_fields,
+    period_interval, rows_array, std_rows, uninitialized, with_period, with_time,
 };
 
 /// `INT_MAX - 8`, the most recurrences a period may have.
@@ -27,7 +27,7 @@ const MAX_RECURRENCES: i64 = 2_147_483_647 - 8;
 struct Iso {
     start: Option<Time>,
     end: Option<Time>,
-    interval: Option<ffi::RelTime>,
+    interval: Option<RelTime>,
     recurrences: i64,
 }
 
@@ -114,15 +114,14 @@ fn finish(
     Ok(())
 }
 
-/// The period's payload set, with what its structs hold on the
-/// request's heap. The `Err` is the memory limit.
+/// The period's payload set, the one it had freed. The `Err` is the
+/// memory limit.
 fn store(req: &mut Request, object: PhpObject, period: PeriodObj) -> Result<(), Thrown> {
     let old = match object.native_mut::<PeriodObj>(req) {
-        Some(payload) => payload.replace(period),
+        Some(payload) => std::mem::replace(payload, period),
         None => period,
     };
-    release(req, old)?;
-    hold_period(req, object)
+    release(req, old)
 }
 
 /// `period` stored where `made` built it whole, and released where
@@ -145,7 +144,7 @@ fn store_made(
 /// The period's state as it stands, each time copied, to be changed and
 /// stored back.
 fn copied(req: &mut Request, object: PhpObject) -> Result<PeriodObj, Thrown> {
-    with_period(req, object, |req, period| lent(req, |l| period.copied(l)))
+    with_period(req, object, |req, p| lent(req, |l| Box::new(p.copied(l))))
         .transpose()
         .map(Option::unwrap_or_default)
 }
@@ -188,7 +187,12 @@ fn from_objects(
     };
     period.start = Some(start_time);
     period.start_ce = Some(start.class());
-    period.interval = interval.native::<IntervalObj>(req).and_then(|i| i.diff);
+    let diff = interval
+        .native::<IntervalObj>(req)
+        .and_then(|i| i.diff.as_deref().copied());
+    if let Some(diff) = diff {
+        period.interval = Some(lent(req, |l| RelTime::of(l, &diff))?);
+    }
     if let Some(end) = end {
         let Some(end_time) = copy_time(req, end)? else {
             return Err(uninitialized(req, interface));
@@ -206,7 +210,7 @@ fn copy_time(req: &mut Request, object: PhpObject) -> Result<Option<Time>, Throw
 
 /// `date_period_advance`: the interval added to the time as its relative
 /// part, and the time read back from the seconds.
-fn advance(lent: &Lent<'_>, time: &mut Time, interval: &RelTime) {
+fn advance(lent: &Lent<'_>, time: &mut Time, interval: &RelFields) {
     time.have_relative = 1;
     time.relative = *interval;
     time.sse_uptodate = 0;
@@ -313,12 +317,11 @@ pub(super) fn iterator_element(
         lent(req, |l| walk(l, period, index))
     });
     let current = walked.transpose()?.flatten();
-    let kept = hold_period(req, object).and_then(|()| {
-        if index > 0 {
-            object.rebuild_properties(req)?;
-        }
+    let kept = if index > 0 {
+        object.rebuild_properties(req)
+    } else {
         Ok(())
-    });
+    };
     let (Ok(()), Some(base)) = (&kept, base) else {
         release(req, current)?;
         return kept.map(|()| None);
@@ -339,7 +342,7 @@ pub(super) fn iterator_element(
 /// [`iterator_element`] says, and a copy of it where `has_more` answers
 /// there is one.
 fn walk(l: &Lent<'_>, period: &mut PeriodState, index: usize) -> Option<Time> {
-    let interval = period.interval.unwrap_or_default();
+    let interval = period.interval.as_deref().copied().unwrap_or_default();
     let steps = match period.cursor {
         Some(at) if at <= index && period.current.is_some() => index - at,
         _ => {
@@ -423,11 +426,13 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
         .as_object()
         .filter(|o| o.class() == interval_class)
         .and_then(|o| o.native::<IntervalObj>(req))
-        .and_then(|i| i.diff)
+        .and_then(|i| i.diff.as_deref().copied())
     else {
         return Ok(false);
     };
-    period.interval = Some(diff);
+    // The interval the period had freed before the clone is made.
+    release(req, period.interval.take())?;
+    period.interval = Some(lent(req, |l| RelTime::of(l, &diff))?);
     let Some(recurrences) = find(b"recurrences")
         .and_then(|v| v.as_int())
         .filter(|n| (0..=i64::from(i32::MAX)).contains(n))
@@ -777,9 +782,11 @@ impl DatePeriod {
         this: This<Self>,
     ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         let object = this.object();
-        let diff = object.native::<PeriodObj>(req).and_then(|p| p.interval);
+        let diff = object
+            .native::<PeriodObj>(req)
+            .and_then(|p| p.interval.as_deref().copied());
         match diff {
-            Some(diff) => new_interval(req, diff, 0, None),
+            Some(diff) => period_interval(req, &diff),
             None => Err(uninitialized(req, object.class())),
         }
     }

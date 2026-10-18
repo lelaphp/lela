@@ -429,6 +429,34 @@ pub(crate) struct Graph {
     closures: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
 }
 
+/// `cargo metadata --format-version 1 --no-deps` over the workspace whose
+/// manifest is `root`'s, asked at `root` so its toolchain file holds.
+pub(crate) fn cargo_metadata(root: &Path) -> Result<String> {
+    let manifest = root.join("Cargo.toml");
+    let out = Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .current_dir(root)
+        .output()
+        .context("running cargo metadata")?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "cargo metadata over {}: {}",
+            manifest.display(),
+            said.trim()
+        );
+    }
+    String::from_utf8(out.stdout).context("cargo metadata wrote no UTF-8")
+}
+
 /// The graphs read in this process, by root: `cargo metadata` runs once
 /// per root and not once per crate.
 static READ: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Graph>>>> = OnceLock::new();
@@ -450,31 +478,10 @@ impl Graph {
     }
 
     fn read(root: &Path) -> Result<Graph> {
-        let manifest = root.join("Cargo.toml");
-        if !manifest.is_file() {
+        if !root.join("Cargo.toml").is_file() {
             return Ok(Graph::default());
         }
-        let out = Command::new("cargo")
-            .args([
-                "metadata",
-                "--format-version",
-                "1",
-                "--no-deps",
-                "--offline",
-            ])
-            .arg("--manifest-path")
-            .arg(&manifest)
-            .output()
-            .context("running cargo metadata")?;
-        if !out.status.success() {
-            bail!(
-                "cargo metadata over {}: {}",
-                manifest.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let text = String::from_utf8(out.stdout).context("cargo metadata wrote no UTF-8")?;
-        Graph::from_metadata(&text)
+        Graph::from_metadata(&cargo_metadata(root)?)
     }
 
     /// The graph from what `cargo metadata --format-version 1 --no-deps`
@@ -591,7 +598,7 @@ struct Dependency {
 pub(crate) fn fixture(name: &str) -> crate::scratch::Tree {
     let tree = crate::scratch::Tree::new(&format!("closure-{name}")).unwrap();
     let fixture = crate::built_root().join("xtask/fixtures/closure");
-    crate::scratch::repository(&fixture, &tree).unwrap();
+    crate::scratch::repository(&fixture, &tree, &["."]).unwrap();
     tree
 }
 

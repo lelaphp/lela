@@ -59,7 +59,7 @@ impl Waited {
     pub(crate) fn add(&mut self, waited: Duration) {
         if !waited.is_zero() {
             self.tests += 1;
-            self.for_ms += u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+            self.for_ms += crate::reading::millis(waited);
         }
     }
 }

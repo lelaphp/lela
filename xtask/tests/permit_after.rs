@@ -989,3 +989,113 @@ fn a_start_admitted_while_another_merge_stood_is_recorded_once_it_has_run() {
     assert!(!hook("PreToolUse", "face", commit).contains("git.operation"));
     assert!(hook("PreToolUse", "host", commit).contains("git.operation"));
 }
+
+/// #2880, the coordinator's sequence through both hooks: a merge whose
+/// sides each append a row to the registry stops on the conflict, git's
+/// union of the three blobs is the proposal, `steer` writes it, and the
+/// merge is staged and committed. No call is denied, steer's write is
+/// steer's and stands, and the merge commits the union.
+#[test]
+fn a_steer_call_that_lands_a_merges_union_stands_and_the_merge_commits_it() {
+    let root = scratch("steer-union");
+    let file = "docs/divergence.toml";
+    let rows = xtask::package_dir().join("fixtures/steer/merge");
+    let base = std::fs::read_to_string(rows.join("base.toml")).unwrap();
+    let row = |side: &str| {
+        let whole = std::fs::read_to_string(rows.join(side)).unwrap();
+        whole.strip_prefix(base.as_str()).unwrap().to_owned()
+    };
+    let tracked = read(&root, file);
+    let main = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(&root, &["checkout", "-q", "-b", "merged"]);
+    std::fs::write(root.join(file), format!("{tracked}{}", row("merged.toml"))).unwrap();
+    git(&root, &["commit", "-q", "-am", "the merged side's row"]);
+    git(&root, &["checkout", "-q", main.trim()]);
+    std::fs::write(root.join(file), format!("{tracked}{}", row("head.toml"))).unwrap();
+    git(&root, &["commit", "-q", "-am", "HEAD's row"]);
+    let union = format!("{tracked}{}{}", row("head.toml"), row("merged.toml"));
+
+    let call = |id: &str, command: &str| {
+        let (code, out, err) = permit(
+            &root,
+            &stdin("PreToolUse", SESSION, id, &root, command),
+            &[],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert!(!out.contains("\"deny\""), "{command} is admitted: {out}");
+        shell(&root, command);
+        let (code, out, err) = permit(
+            &root,
+            &stdin("PostToolUse", SESSION, id, &root, command),
+            &["--after"],
+        );
+        assert_eq!(code, 0, "{err}");
+        out
+    };
+    call("toolu_union_start", "git merge --no-commit merged || true");
+    assert!(
+        read(&root, file).contains("<<<<<<<"),
+        "the merge stopped on the conflict"
+    );
+    call(
+        "toolu_union_proposal",
+        &format!(
+            "{{ git show :2:{file}; git show :3:{file} | \
+             tail -n +$(( $(git show :1:{file} | wc -l) + 1 )); }} > proposal.toml"
+        ),
+    );
+    // HEAD's blob and what MERGE_HEAD appends past the base's lines; not
+    // `git merge-file --union`, which shares the `[[divergence]]` line two
+    // appended rows open with and so makes one row of two.
+    assert_eq!(
+        read(&root, "proposal.toml"),
+        union,
+        "the union is the two rows"
+    );
+    let steer = format!(
+        "{} --root {} steer {file} --from proposal.toml",
+        xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")).display(),
+        root.display()
+    );
+    let steered = call("toolu_union_steer", &steer);
+    assert_eq!(steered.trim(), "", "steer's write is steer's: {steered}");
+    assert_eq!(read(&root, file), union, "steer's write stands");
+    call("toolu_union_add", &format!("git add -- {file}"));
+    call("toolu_union_commit", "git commit -q -m merged");
+    assert_eq!(git(&root, &["show", &format!("HEAD:{file}")]), union);
+    assert_eq!(
+        git(&root, &["rev-list", "--parents", "-n1", "HEAD"])
+            .split(' ')
+            .count(),
+        3,
+        "the commit is the merge's"
+    );
+}
+
+/// #2880: a merge's conflicted registry is guarded as any file is. A line
+/// that writes the resolution itself, not through steer, has it put back
+/// to the conflict's markers, and the call is denied there.
+#[test]
+fn a_conflicted_registry_written_beside_steer_is_put_back_to_its_markers() {
+    let root = scratch("conflict-written");
+    let file = "docs/divergence.toml";
+    let tracked = read(&root, file);
+    let main = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(&root, &["checkout", "-q", "-b", "merged"]);
+    std::fs::write(root.join(file), format!("{tracked}\n# the merged side\n")).unwrap();
+    git(&root, &["commit", "-q", "-am", "merged"]);
+    git(&root, &["checkout", "-q", main.trim()]);
+    std::fs::write(root.join(file), format!("{tracked}\n# HEAD's side\n")).unwrap();
+    git(&root, &["commit", "-q", "-am", "head"]);
+    shell(&root, "git merge -q merged || true");
+    let conflicted = read(&root, file);
+    assert!(
+        conflicted.contains("<<<<<<<"),
+        "the merge stopped on the conflict"
+    );
+
+    let command = format!("python3 -c \"open('{file}', 'w').write('# resolved\\n')\"");
+    let (out, _) = through_the_hooks(&root, "toolu_conflict_written", &command);
+    assert_eq!(read(&root, file), conflicted, "put back to the markers");
+    assert_denied(&root, &out, file, "# resolved");
+}

@@ -36,7 +36,7 @@
 //! counts what was removed as `sysv_removed` and its message names it.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -144,13 +144,9 @@ impl Kept {
     /// Every whole line of the journal; a line the death cut short is the
     /// last one and is passed over.
     fn read(path: &Path) -> Result<Kept> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                return Err(e).with_context(|| format!("reading the journal {}", path.display()));
-            }
-        };
+        let text = crate::read_if(path)
+            .context("reading the journal")?
+            .unwrap_or_default();
         let mut kept = Kept::default();
         for line in text.lines() {
             let Ok(entry) = serde_json::from_str::<Entry>(line) else {

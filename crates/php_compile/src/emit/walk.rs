@@ -26,6 +26,7 @@ use php_syntax::tree::{
 use php_syntax::{Parsed, SyntaxKind, TextRange, tree};
 use php_unit::Level;
 use php_unit::decl::{ClassKind, Visibility};
+use std::borrow::Cow;
 
 mod expr;
 mod hooks;
@@ -152,6 +153,12 @@ pub(super) struct ClassModifiers {
 /// before it compiles the body and emits `GENERATOR_CREATE` after the
 /// parameters.
 pub(super) fn generators(tree: &tree::Tree) -> Vec<u32> {
+    // A file with no `yield` has no generator, and its shape is not
+    // walked to find none.
+    if tree.nodes::<tree::YieldExpr>().is_empty() && tree.nodes::<tree::YieldFromExpr>().is_empty()
+    {
+        return Vec::new();
+    }
     let mut open: Vec<(usize, Option<u32>)> = Vec::new();
     let mut found = Vec::new();
     for (at, element) in tree.elements().iter().enumerate() {
@@ -216,7 +223,7 @@ impl Emit<'_> {
                 missing.field
             )));
         }
-        let stmts = &self.parsed.tree[file].stmts;
+        let stmts = self.list(self.parsed.tree[file].stmts);
         self.depth = self.depth.saturating_add(1);
         let compiled = self.top_statements(stmts);
         self.depth = self.depth.saturating_sub(1);
@@ -272,7 +279,7 @@ impl Emit<'_> {
             // a `namespace` or a `strict_types` declaration.
             if let Stmt::Block(block) = stmt {
                 self.statements_seen = self.statements_seen.saturating_add(1);
-                self.top_statements(&self.parsed.tree[*block].stmts)?;
+                self.top_statements(self.list(self.parsed.tree[*block].stmts))?;
                 continue;
             }
             self.line = stmt.line(self.parsed);
@@ -324,7 +331,7 @@ impl Emit<'_> {
             (None, None) => Err(unread(node.line(), "a namespace declaration")),
             (name, Some(body)) => Ok(Namespace::Bracketed {
                 name,
-                body: self.parsed.tree[body].stmts.to_vec(),
+                body: self.list(self.parsed.tree[body].stmts).to_vec(),
             }),
             (Some(name), None) => Ok(Namespace::Unbracketed(name)),
         }
@@ -335,7 +342,7 @@ impl Emit<'_> {
     fn internal(&self, what: impl AsRef<str>) -> CompileError {
         CompileError {
             level: Level::Error,
-            message: format!("InternalError: {}", what.as_ref()),
+            message: format!("InternalError: {}", what.as_ref()).into(),
             line: self.line,
             raised: Vec::new(),
             thrown: false,
@@ -368,26 +375,26 @@ impl Emit<'_> {
         match stmt {
             Stmt::ClassDecl(id) => {
                 let node = &tree[id];
-                let modifiers = self.walk_class_modifiers(&node.modifiers, false)?;
+                let modifiers = self.walk_class_modifiers(self.list(node.modifiers), false)?;
                 let Some(name) = node.name else {
                     return Err(unread(line, "a class"));
                 };
                 let parent = match node.extends {
-                    Some(extends) => tree[extends]
-                        .types
+                    Some(extends) => tree
+                        .list(tree[extends].types)
                         .first()
                         .map(|id| self.text(*id).to_vec()),
                     None => None,
                 };
                 let interfaces = match node.implements {
-                    Some(implements) => tree[implements]
-                        .types
+                    Some(implements) => tree
+                        .list(tree[implements].types)
                         .iter()
                         .map(|id| self.text(*id).to_vec())
                         .collect(),
                     None => Vec::new(),
                 };
-                let attributes = self.walk_attributes(&node.attrs)?;
+                let attributes = self.walk_attributes(self.list(node.attrs))?;
                 self.walk_class(
                     ClassKind::Class,
                     Some(name),
@@ -407,14 +414,14 @@ impl Emit<'_> {
                     return Err(unread(line, "an interface"));
                 };
                 let interfaces = match node.extends {
-                    Some(extends) => tree[extends]
-                        .types
+                    Some(extends) => tree
+                        .list(tree[extends].types)
                         .iter()
                         .map(|id| self.text(*id).to_vec())
                         .collect(),
                     None => Vec::new(),
                 };
-                let attributes = self.walk_attributes(&node.attrs)?;
+                let attributes = self.walk_attributes(self.list(node.attrs))?;
                 self.walk_class(
                     ClassKind::Interface,
                     Some(name),
@@ -432,7 +439,7 @@ impl Emit<'_> {
                 let Some(name) = node.name else {
                     return Err(unread(line, "a trait"));
                 };
-                let attributes = self.walk_attributes(&node.attrs)?;
+                let attributes = self.walk_attributes(self.list(node.attrs))?;
                 self.walk_class(
                     ClassKind::Trait,
                     Some(name),
@@ -464,8 +471,8 @@ impl Emit<'_> {
             return Err(unread(line, "an enum"));
         };
         let interfaces = match node.implements {
-            Some(implements) => tree[implements]
-                .types
+            Some(implements) => tree
+                .list(tree[implements].types)
                 .iter()
                 .map(|id| self.text(*id).to_vec())
                 .collect(),
@@ -478,7 +485,7 @@ impl Emit<'_> {
             },
             None => None,
         };
-        let attributes = self.walk_attributes(&node.attrs)?;
+        let attributes = self.walk_attributes(self.list(node.attrs))?;
         let (doc_comment, body, range) = (node.doc_comment, node.body, node.range());
         let mut class = self.walk_class(
             ClassKind::Enum,
@@ -508,20 +515,20 @@ impl Emit<'_> {
         let tree = &self.parsed.tree;
         let node = &tree[id];
         let line = node.line;
-        let modifiers = self.walk_class_modifiers(&node.modifiers, true)?;
+        let modifiers = self.walk_class_modifiers(self.list(node.modifiers), true)?;
         let parent = node
             .extends
-            .and_then(|extends| tree[extends].types.first())
+            .and_then(|extends| tree.list(tree[extends].types).first())
             .map(|id| self.text(*id).to_vec());
         let interfaces = match node.implements {
-            Some(implements) => tree[implements]
-                .types
+            Some(implements) => tree
+                .list(tree[implements].types)
                 .iter()
                 .map(|id| self.text(*id).to_vec())
                 .collect(),
             None => Vec::new(),
         };
-        let attributes = self.walk_attributes(&node.attrs)?;
+        let attributes = self.walk_attributes(self.list(node.attrs))?;
         let (doc_comment, body, range) = (node.doc_comment, node.body, node.range());
         let class = self.walk_class(
             ClassKind::Class,
@@ -543,9 +550,9 @@ impl Emit<'_> {
         &mut self,
         id: NodeId<tree::FunctionDecl>,
     ) -> Result<Function, CompileError> {
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let line = node.line();
-        let attributes = self.walk_attributes(&node.attrs)?;
+        let attributes = self.walk_attributes(self.list(node.attrs))?;
         let name = self.text(node.name).to_vec();
         let function = self.walk_function(
             name,
@@ -581,9 +588,9 @@ impl Emit<'_> {
     ) -> Result<Vec<Attr>, CompileError> {
         let mut out = Vec::new();
         for group in groups {
-            let attributes = self.parsed.tree[*group].attributes.clone();
-            for attribute in &attributes {
-                let attribute = self.parsed.tree[*attribute].clone();
+            let attributes = self.list(self.parsed.tree[*group].attributes);
+            for attribute in attributes {
+                let attribute = self.parsed.tree[*attribute];
                 let line = attribute.line();
                 let arguments = match attribute.args {
                     Some(args) => self.attribute_arguments(args, line)?,
@@ -607,9 +614,9 @@ impl Emit<'_> {
         id: NodeId<tree::ArgList>,
         line: u32,
     ) -> Result<Vec<AttrArgument>, CompileError> {
-        let args = self.parsed.tree[id].args.clone();
+        let args = self.list(self.parsed.tree[id].args);
         let mut out = Vec::with_capacity(args.len());
-        for arg in &args {
+        for arg in args {
             out.push(match arg {
                 tree::Arg::Expr(expr) => AttrArgument::Positional(*expr),
                 tree::Arg::NamedArg(named) => {
@@ -651,7 +658,7 @@ impl Emit<'_> {
             None => None,
         };
         let body = match body {
-            Some(body) => self.parsed.tree[body].stmts.to_vec(),
+            Some(body) => self.list(self.parsed.tree[body].stmts).to_vec(),
             // A trait's method written with no block, which
             // `zend_begin_method_decl` holds to its `abstract`; its op
             // array is the prologue and the final return alone.
@@ -677,14 +684,15 @@ impl Emit<'_> {
     /// The parameters of a list, php's `ZEND_AST_PARAM` each: the type,
     /// the `&`, the `...`, the name, the default and the promotion.
     fn walk_parameters(&mut self, id: NodeId<ParamList>) -> Result<Vec<Parameter>, CompileError> {
-        let params = self.parsed.tree[id].params.clone();
+        let params = self.list(self.parsed.tree[id].params);
         let mut out = Vec::with_capacity(params.len());
-        for param in &params {
-            let param = self.parsed.tree[*param].clone();
+        for param in params {
+            let param = self.parsed.tree[*param];
             let line = param.line();
-            let attributes = self.walk_attributes(&param.attrs)?;
-            let modifiers = self.walk_modifiers(&param.modifiers, line, Target::Parameter)?;
-            let name = self.variable_name(param.var);
+            let attributes = self.walk_attributes(self.list(param.attrs))?;
+            let modifiers =
+                self.walk_modifiers(self.list(param.modifiers), line, Target::Parameter)?;
+            let name = self.variable_name(param.var).to_vec();
             let hooks = match param.hooks {
                 Some(list) => Some(self.walk_hooks(list, &name)?),
                 None => None,
@@ -1061,8 +1069,8 @@ impl Emit<'_> {
             line,
             end_line: self.end_line(range),
         };
-        let members = self.parsed.tree[body].class_members.clone();
-        for member in &members {
+        let members = self.list(self.parsed.tree[body].class_members);
+        for member in members {
             let line = match member {
                 ClassMember::PropertyDecl(id) => Some(self.parsed.tree[*id].line()),
                 ClassMember::EnumCaseDecl(id) => Some(self.parsed.tree[*id].line()),
@@ -1094,12 +1102,16 @@ impl Emit<'_> {
         class: &mut Class,
         id: NodeId<tree::TraitUseDecl>,
     ) -> Result<(), CompileError> {
-        let node = self.parsed.tree[id].clone();
-        let names = node.traits.iter().map(|t| self.text(*t).to_vec()).collect();
+        let node = self.parsed.tree[id];
+        let names = self
+            .list(node.traits)
+            .iter()
+            .map(|t| self.text(*t).to_vec())
+            .collect();
         let mut adaptations = Vec::new();
         if let Some(list) = node.adaptations {
-            let list = self.parsed.tree[list].trait_adaptations.clone();
-            for adaptation in &list {
+            let list = self.list(self.parsed.tree[list].trait_adaptations);
+            for adaptation in list {
                 adaptations.push(self.walk_adaptation(*adaptation)?);
             }
         }
@@ -1155,8 +1167,8 @@ impl Emit<'_> {
                 Ok(Adaptation::Insteadof {
                     trait_name,
                     method,
-                    excluded: tree[id]
-                        .excluded
+                    excluded: tree
+                        .list(tree[id].excluded)
                         .iter()
                         .map(|t| self.text(*t).to_vec())
                         .collect(),
@@ -1217,12 +1229,12 @@ impl Emit<'_> {
         class: &mut Class,
         id: NodeId<tree::EnumCaseDecl>,
     ) -> Result<(), CompileError> {
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let line = node.line();
         if class.kind != ClassKind::Enum {
             return Err(refused(line, "Case can only be used in enums"));
         }
-        let attributes = self.walk_attributes(&node.attrs)?;
+        let attributes = self.walk_attributes(self.list(node.attrs))?;
         let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
             return Err(unread(line, "an enum case whose name is no identifier"));
         };
@@ -1248,15 +1260,15 @@ impl Emit<'_> {
         class: &mut Class,
         id: NodeId<tree::ClassConstDecl>,
     ) -> Result<(), CompileError> {
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let line = node.line();
-        let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Constant)?;
+        let modifiers = self.walk_modifiers(self.list(node.modifiers), line, Target::Constant)?;
         if modifiers.has(Flag::Var) {
             return Err(self.internal("a class constant the grammar wrote `var` before"));
         }
-        for declarator in &node.const_declarators {
+        for declarator in self.list(node.const_declarators) {
             let (name, value, line) = self.const_declarator(*declarator)?;
-            let attributes = self.walk_attributes(&node.attrs)?;
+            let attributes = self.walk_attributes(self.list(node.attrs))?;
             let doc_comment = self.doc_comment(self.parsed.tree[*declarator].doc_comment);
             class.body.push(ClassStmt::Constant(Constant {
                 name,
@@ -1281,9 +1293,9 @@ impl Emit<'_> {
         class: &mut Class,
         id: NodeId<tree::PropertyDecl>,
     ) -> Result<(), CompileError> {
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let line = node.line();
-        let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Property)?;
+        let modifiers = self.walk_modifiers(self.list(node.modifiers), line, Target::Property)?;
         if let Some(list) = node.hooks
             && node.property_declarators.len() > 1
         {
@@ -1294,17 +1306,18 @@ impl Emit<'_> {
                 level: Level::Parse,
                 message: String::from(
                     "syntax error, unexpected token \"{\", expecting \",\" or \";\"",
-                ),
+                )
+                .into(),
                 line: at,
                 raised: Vec::new(),
                 thrown: false,
                 stage: crate::Stage::Compiling,
             });
         }
-        for declarator in &node.property_declarators {
-            let declarator = self.parsed.tree[*declarator].clone();
-            let attributes = self.walk_attributes(&node.attrs)?;
-            let name = self.variable_name(declarator.var);
+        for declarator in self.list(node.property_declarators) {
+            let declarator = self.parsed.tree[*declarator];
+            let attributes = self.walk_attributes(self.list(node.attrs))?;
+            let name = self.variable_name(declarator.var).to_vec();
             let hooks = match node.hooks {
                 Some(list) => Some(self.walk_hooks(list, &name)?),
                 None => None,
@@ -1335,13 +1348,13 @@ impl Emit<'_> {
         class: &mut Class,
         id: NodeId<tree::MethodDecl>,
     ) -> Result<(), CompileError> {
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let line = node.line();
-        let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Method)?;
+        let modifiers = self.walk_modifiers(self.list(node.modifiers), line, Target::Method)?;
         if modifiers.has(Flag::Var) {
             return Err(self.internal("a method the grammar wrote `var` before"));
         }
-        let attributes = self.walk_attributes(&node.attrs)?;
+        let attributes = self.walk_attributes(self.list(node.attrs))?;
         let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
             return Err(unread(line, "a method"));
         };
@@ -1378,7 +1391,7 @@ impl Emit<'_> {
 pub(super) fn unread(line: u32, what: &str) -> CompileError {
     CompileError {
         level: Level::Parse,
-        message: format!("{what} this compiler cannot read yet"),
+        message: format!("{what} this compiler cannot read yet").into(),
         line,
         raised: Vec::new(),
         thrown: false,
@@ -1398,7 +1411,7 @@ fn class_name_kind(kind: ClassKind) -> &'static str {
 }
 
 /// php's compile error at the node's own line.
-pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
+pub(super) fn refused(line: u32, message: impl Into<Cow<'static, str>>) -> CompileError {
     CompileError {
         level: Level::CompileError,
         message: message.into(),
@@ -1430,7 +1443,7 @@ pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
 /// CompileError: __HALT_COMPILER() can only be used from the outermost scope
 /// CompileError: Encoding must be a literal
 /// ```
-pub(super) fn thrown(line: u32, message: impl Into<String>) -> CompileError {
+pub(super) fn thrown(line: u32, message: impl Into<Cow<'static, str>>) -> CompileError {
     CompileError {
         thrown: true,
         ..refused(line, message)
@@ -1763,8 +1776,11 @@ pub(super) struct Constant {
 /// statements end with `__halt_compiler();`, as `zend_compile_const`
 /// finds that statement at the end of `CG(ast)`; none in any other.
 pub(crate) fn halt_offset(parsed: &Parsed) -> Option<i64> {
+    if parsed.tree.nodes::<tree::HaltCompilerStmt>().is_empty() {
+        return None;
+    }
     let file = parsed.tree.root()?.id::<tree::SourceFile>()?;
-    match parsed.tree[file].stmts.last()? {
+    match parsed.tree.list(parsed.tree[file].stmts).last()? {
         Stmt::HaltCompilerStmt(id) => Some(halt_end(parsed, *id)),
         _ => None,
     }

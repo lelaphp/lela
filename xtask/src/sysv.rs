@@ -268,13 +268,6 @@ impl Standing {
                     let Some(kind) = Kind::of(letter) else {
                         continue;
                     };
-                    let column = |name: &str| {
-                        header
-                            .iter()
-                            .position(|h| *h == name)
-                            .and_then(|at| fields.get(at))
-                            .and_then(|v| v.parse::<u64>().ok())
-                    };
                     let text = |name: &str| {
                         header
                             .iter()
@@ -282,6 +275,7 @@ impl Standing {
                             .and_then(|at| fields.get(at))
                             .copied()
                     };
+                    let column = |name: &str| text(name).and_then(|v| v.parse::<u64>().ok());
                     let Some(id) = column("ID") else {
                         continue;
                     };
@@ -298,12 +292,7 @@ impl Standing {
                         Kind::Queue => (&["LSPID", "LRPID"], 0),
                         Kind::Semaphores => (&[], 0),
                     };
-                    let named = named
-                        .iter()
-                        .filter_map(|name| column(name))
-                        .filter(|pid| *pid != 0)
-                        .filter_map(|pid| u32::try_from(pid).ok())
-                        .collect();
+                    let named = pids(named, column);
                     objects.push(Object {
                         kind,
                         id,
@@ -326,10 +315,7 @@ impl Standing {
         if !dir.is_dir() {
             return Ok(None);
         }
-        let read = |name: &str| {
-            let file = dir.join(name);
-            std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))
-        };
+        let read = |name: &str| crate::read(&dir.join(name));
         Ok(Some(Standing::of_proc(
             &read("shm")?,
             &read("msg")?,
@@ -372,12 +358,7 @@ impl Standing {
                 let key = text("key")
                     .and_then(|k| k.parse::<i32>().ok())
                     .map_or(u64::MAX, |k| u64::from(u32::from_ne_bytes(k.to_ne_bytes())));
-                let named = named
-                    .iter()
-                    .filter_map(|name| column(name))
-                    .filter(|pid| *pid != 0)
-                    .filter_map(|pid| u32::try_from(pid).ok())
-                    .collect();
+                let named = pids(named, column);
                 objects.push(Object {
                     kind,
                     id,
@@ -397,6 +378,17 @@ impl Standing {
         }
         Standing(objects)
     }
+}
+
+/// The processes a listed object names, by the columns `names` its line
+/// carries them in: the nonzero ones.
+fn pids(names: &[&str], column: impl Fn(&str) -> Option<u64>) -> BTreeSet<u32> {
+    names
+        .iter()
+        .filter_map(|name| column(name))
+        .filter(|pid| *pid != 0)
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .collect()
 }
 
 /// Each semaphore set's processes, by `perl`'s `semctl(GETPID)` over its

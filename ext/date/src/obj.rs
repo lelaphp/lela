@@ -19,15 +19,18 @@ use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::ffi::{RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone};
+use crate::ffi::{
+    RelFields, RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone,
+};
 use crate::format::date_format;
 use crate::held::{Held, Shape};
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
 
-/// `PHP_DATE_CIVIL` and `PHP_DATE_WALL`.
-pub(super) const CIVIL: i64 = 1;
-pub(super) const WALL: i64 = 2;
+/// `PHP_DATE_CIVIL` and `PHP_DATE_WALL`, the values of
+/// `php_interval_obj`'s `int civil_or_wall`.
+pub(super) const CIVIL: i32 = 1;
+pub(super) const WALL: i32 = 2;
 
 /// `php_date_obj`: the time, none until a constructor set it. timelib
 /// made it on the request's heap ([`crate::lent`]), so its
@@ -111,23 +114,30 @@ pub(crate) type TzObj = TzState;
 
 const _: () = assert!(size_of::<TzState>() <= 32);
 
-/// `php_interval_obj`.
+/// `php_interval_obj`: the relative time, none until a constructor set
+/// it. timelib made it on the request's heap ([`crate::lent`]), where
+/// php's `diff` points. Three words, so a `DateInterval`'s state lies
+/// inside the 24 bytes php's `php_interval_obj` holds past its
+/// `zend_object` and its `new` asks the system allocator for nothing.
 #[derive(Default)]
 pub(crate) struct IntervalState {
     pub diff: Option<RelTime>,
-    pub civil_or_wall: i64,
+    pub civil_or_wall: i32,
     pub from_string: bool,
-    pub date_string: Option<Vec<u8>>,
-    /// What the relative time holds on the request's heap, the
-    /// `timelib_rel_time` php's `diff` points at; kept by [`hold_diff`].
-    held: Option<Held>,
+    /// The string a relative time was parsed from, the one the caller
+    /// passed, shared as php's `zend_string_copy` shares it.
+    pub date_string: Option<Owner<PhpString>>,
 }
 
-/// The payload: `php_interval_obj` keeps its state behind pointers, and so the
-/// payload is one, inside the `sizeof` php allocates (design §5.13).
-pub(crate) type IntervalObj = Box<IntervalState>;
+/// The payload, inside the `sizeof` php allocates (design §5.13): the
+/// state itself, which fits it.
+pub(crate) type IntervalObj = IntervalState;
 
-/// `php_period_obj`.
+const _: () = assert!(size_of::<IntervalState>() <= 24);
+
+/// `php_period_obj`: its three times and its relative time are
+/// timelib's, made on the request's heap ([`crate::lent`]) where php's
+/// point.
 #[derive(Default)]
 pub(crate) struct PeriodState {
     pub start: Option<Time>,
@@ -142,10 +152,6 @@ pub(crate) struct PeriodState {
     /// How many steps past its rewind `current` stands, the index the
     /// last iterator over the period asked for; none before any walk.
     pub cursor: Option<usize>,
-    /// What `interval` holds on the request's heap, the
-    /// `timelib_rel_time` php's points at; kept by [`hold_period`]. The
-    /// three times are timelib's, on the request's heap already.
-    held: Option<Held>,
 }
 
 /// The payload: `php_period_obj` keeps its state behind pointers, and so the
@@ -351,48 +357,72 @@ pub(super) fn tz_from_time(t: &Time) -> Option<TzKind> {
     }
 }
 
-/// A new `DateInterval` over `diff`.
+/// `php_date_instantiate(date_ce_interval, return_value)` and then its
+/// `diff` set to what `diff` makes: the object first, as php makes it
+/// before the relative time.
 pub(super) fn new_interval(
     req: &mut Request,
-    diff: RelTime,
-    civil_or_wall: i64,
-    date_string: Option<Vec<u8>>,
+    civil_or_wall: i32,
+    date_string: Option<PhpString>,
+    diff: impl FnOnce(&mut Request) -> Result<RelTime, Thrown>,
 ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
     let class = class_id(req, "DateInterval")?;
     let object = new_object(req, class)?;
+    let diff = match diff(req) {
+        Ok(diff) => diff,
+        Err(thrown) => {
+            object.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let date_string = date_string.map(|s| Owner::take(req, s));
     if let Some(payload) = object.native_mut::<IntervalObj>(req) {
-        payload.diff = Some(diff);
         payload.civil_or_wall = civil_or_wall;
         payload.from_string = date_string.is_some();
         payload.date_string = date_string;
     }
-    hold_diff(req, *object)?;
+    if let Err(thrown) = set_diff(req, *object, Some(diff)) {
+        object.give_up(req);
+        return Err(thrown);
+    }
     Ok(object.into_instance())
 }
 
-/// What the interval's relative time holds on the request's heap
-/// brought to its `diff`: a `timelib_rel_time` where it has one, made by
-/// `timelib_rel_time_ctor` or `_clone` as php's `diff` is, and none
-/// where it has none, `timelib_rel_time_dtor`. Whatever sets `diff`
-/// calls it after the write. The `Err` is the memory limit.
-pub(super) fn hold_diff(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+/// `create_date_period_interval` and `DatePeriod::getDateInterval`: a
+/// new `DateInterval` over a `timelib_rel_time_clone` of a period's
+/// interval, the object made first; its `civil_or_wall` is the zero
+/// `ecalloc` leaves, neither `CIVIL` nor `WALL`, as php never sets it.
+pub(super) fn period_interval(
+    req: &mut Request,
+    diff: &RelFields,
+) -> Result<Owner<Instance<DateInterval>>, Thrown> {
+    new_interval(req, 0, None, |req| lent(req, |l| RelTime::of(l, diff)))
+}
+
+/// The interval's relative time replaced, the one it had freed as
+/// `timelib_rel_time_dtor` frees it; none for none.
+pub(super) fn set_diff(
+    req: &mut Request,
+    object: PhpObject,
+    diff: Option<RelTime>,
+) -> Result<(), Thrown> {
     let Some(payload) = object.native_mut::<IntervalObj>(req) else {
-        return Ok(());
+        return release(req, diff);
     };
-    let shape = payload.diff.map(|_| Shape::rel_time());
-    let held = payload.held.take();
-    let held = Held::hold(req, held, shape)?;
-    if let Some(payload) = object.native_mut::<IntervalObj>(req) {
-        payload.held = held;
+    match std::mem::replace(&mut payload.diff, diff) {
+        Some(old) => release(req, old),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// The relative time a `DateInterval` holds, or the uninitialised error.
-pub(super) fn interval_of(req: &mut Request, object: PhpObject) -> Result<(RelTime, i64), Thrown> {
+pub(super) fn interval_of(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<(RelFields, i32), Thrown> {
     let diff = object
         .native::<IntervalObj>(req)
-        .and_then(|i| i.diff.map(|d| (d, i.civil_or_wall)));
+        .and_then(|i| i.diff.as_deref().map(|d| (*d, i.civil_or_wall)));
     match diff {
         Some(diff) => Ok(diff),
         None => Err(uninitialized(req, object.class())),
@@ -565,16 +595,13 @@ pub(super) fn tz_fields(req: &mut Request, kind: &TzKind) -> Result<Fields, Thro
 /// `date_interval_object_to_hash`.
 pub(super) fn interval_fields(
     req: &mut Request,
-    diff: &RelTime,
-    date_string: Option<&[u8]>,
-) -> Result<Fields, Thrown> {
+    diff: &RelFields,
+    date_string: Option<PhpString>,
+) -> Fields {
     if let Some(text) = date_string {
-        let text = PhpString::new(req, text)?.into_value();
+        let text = Owner::take(req, text).into_value();
         let from_string = Owner::bool(true);
-        return Ok(vec![
-            (&b"from_string"[..], from_string),
-            (b"date_string", text),
-        ]);
+        return vec![(&b"from_string"[..], from_string), (b"date_string", text)];
     }
     #[allow(clippy::cast_precision_loss)]
     let f = diff.us as f64 / 1_000_000.0;
@@ -597,27 +624,41 @@ pub(super) fn interval_fields(
         ),
         (b"from_string", Value::bool(false)),
     ];
-    Ok(scalars
+    scalars
         .into_iter()
         .map(|(name, value)| (name, Owner::take(req, value)))
-        .collect())
+        .collect()
 }
 
+/// One of a period's three times, `start`, `current` or `end`.
+type PeriodTime = fn(&PeriodState) -> &Option<Time>;
+
 /// `create_date_period_datetime`: a date of the period's class over a
-/// copy of one of its times, or `null`.
-pub(super) fn period_date(
+/// `timelib_time_clone` of the time `which` reads, the object made
+/// first, or `null` where the period has none.
+fn period_date(
     req: &mut Request,
-    copy: Option<Time>,
-    class: Option<ClassId>,
+    object: PhpObject,
+    which: PeriodTime,
 ) -> Result<Owner<Value>, Thrown> {
+    let class = object
+        .native::<PeriodObj>(req)
+        .and_then(|p| p.start_ce.filter(|_| which(p).is_some()));
     let Some(class) = class else {
-        release(req, copy)?;
         return Ok(Owner::null());
     };
-    let Some(copy) = copy else {
-        return Ok(Owner::null());
-    };
-    Ok(new_date(req, class, copy)?.into_value())
+    let date = new_object(req, class)?;
+    let copy = with_period(req, object, |req, p| {
+        lent(req, |l| which(p).as_ref().map(|t| t.copy(l)))
+    });
+    if let Err(thrown) = copy
+        .transpose()
+        .and_then(|copy| set_time(req, *date, copy.flatten()))
+    {
+        date.give_up(req);
+        return Err(thrown);
+    }
+    Ok(date.into_value())
 }
 
 /// The period's state, taken out of its payload for the length of
@@ -636,41 +677,48 @@ pub(super) fn with_period<R>(
     Some(answered)
 }
 
-/// `date_period_object_to_hash`.
-pub(super) fn period_fields(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
+/// The value of one of the seven names php's `date_period_read_property`
+/// answers, made as `date_period_object_to_hash` makes its row: a date
+/// over a clone of a time, an interval over a clone of the relative
+/// time, the object made first and `null` for none, or a scalar.
+pub(super) fn period_field(
+    req: &mut Request,
+    object: PhpObject,
+    name: &[u8],
+) -> Result<Owner<Value>, Thrown> {
     let Some(p) = object.native::<PeriodObj>(req) else {
-        return Ok(Vec::new());
+        return Ok(Owner::null());
     };
-    let (class, interval) = (p.start_ce, p.interval);
-    let (recurrences, include_start, include_end) =
-        (p.recurrences, p.include_start_date, p.include_end_date);
-    let copies = with_period(req, object, |req, p| {
-        lent(req, |l| {
-            p.times_mut().map(|t| t.as_ref().map(|t| t.copy(l)))
-        })
-    })
-    .transpose()?
-    .unwrap_or_default();
-    let mut copies = copies.into_iter();
-    let mut fields = Vec::with_capacity(7);
-    for name in [&b"start"[..], b"current", b"end"] {
-        let date = period_date(req, copies.next().flatten(), class);
-        if let Err(thrown) = push_field(req, &mut fields, name, date) {
-            release(req, copies.collect::<Vec<_>>())?;
-            return Err(thrown);
+    let (interval, recurrences, include_start, include_end) = (
+        p.interval.as_deref().copied(),
+        p.recurrences,
+        p.include_start_date,
+        p.include_end_date,
+    );
+    let scalar = match name {
+        b"start" => return period_date(req, object, |p| &p.start),
+        b"current" => return period_date(req, object, |p| &p.current),
+        b"end" => return period_date(req, object, |p| &p.end),
+        b"interval" => {
+            let Some(diff) = interval else {
+                return Ok(Owner::null());
+            };
+            return period_interval(req, &diff).map(Owner::into_value);
         }
-    }
-    let interval = match interval {
-        Some(diff) => new_interval(req, diff, 0, None).map(Owner::into_value),
-        None => Ok(Owner::null()),
+        b"recurrences" => Value::int(recurrences),
+        b"include_start_date" => Value::bool(include_start),
+        b"include_end_date" => Value::bool(include_end),
+        _ => Value::null(),
     };
-    push_field(req, &mut fields, b"interval", interval)?;
-    for (name, value) in [
-        (&b"recurrences"[..], Value::int(recurrences)),
-        (b"include_start_date", Value::bool(include_start)),
-        (b"include_end_date", Value::bool(include_end)),
-    ] {
-        fields.push((name, Owner::take(req, value)));
+    Ok(Owner::take(req, scalar))
+}
+
+/// `date_period_object_to_hash`: the seven rows, each made in its turn.
+pub(super) fn period_fields(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
+    let mut fields = Vec::with_capacity(PERIOD_FIELDS.len());
+    for name in PERIOD_FIELDS {
+        let made = period_field(req, object, name);
+        push_field(req, &mut fields, name, made)?;
     }
     Ok(fields)
 }
@@ -932,7 +980,7 @@ impl IntervalHandlers {
     /// `date_interval_read_property` for one of its names: the field, or
     /// `None` for a name it does not answer.
     fn field(req: &Request, object: PhpObject, name: &[u8]) -> Option<Value> {
-        let diff = object.native::<IntervalObj>(req)?.diff?;
+        let diff = object.native::<IntervalObj>(req)?.diff.as_deref()?;
         #[allow(clippy::cast_precision_loss)]
         let value = match name {
             b"y" => diff.y,
@@ -955,14 +1003,20 @@ impl IntervalHandlers {
 }
 
 impl ObjectHandlers for IntervalHandlers {
-    /// `date_object_free_storage_interval`: `timelib_rel_time_dtor`.
+    /// `date_object_free_storage_interval`: the `date_string` released,
+    /// then `timelib_rel_time_dtor`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let held = object
+        let Some((text, diff)) = object
             .native_mut::<IntervalObj>(req)
-            .and_then(|i| i.held.take());
-        if let Some(held) = held {
-            held.free(req);
+            .map(|i| (i.date_string.take(), i.diff.take()))
+        else {
+            return;
+        };
+        if let Some(text) = text {
+            text.give_up(req);
         }
+        // Freeing allocates nothing, so the limit refuses nothing.
+        let _freed = release(req, diff);
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -1186,8 +1240,8 @@ impl ObjectHandlers for IntervalHandlers {
 /// `zend_hash_str_update`, a row it holds replaced where it stands and a
 /// new one appended, so the table's internal pointer stays where it
 /// stood.
-fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    let mut fields = interval_rows(req, object)?.into_iter();
+pub(super) fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let mut fields = interval_rows(req, object).into_iter();
     while let Some((name, value)) = fields.next() {
         let written = match PhpString::new(req, name) {
             Ok(name) => {
@@ -1209,17 +1263,21 @@ fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 }
 
 /// The interval's fields, none for one no constructor set.
-fn interval_rows(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
-    let state = object
-        .native::<IntervalObj>(req)
-        .and_then(|i| i.diff.map(|d| (d, i.date_string.clone())));
+fn interval_rows(req: &mut Request, object: PhpObject) -> Fields {
+    let state = object.native::<IntervalObj>(req).and_then(|i| {
+        i.diff
+            .as_deref()
+            .map(|d| (*d, i.date_string.as_deref().copied()))
+    });
     match state {
-        Some((diff, date_string)) => interval_fields(req, &diff, date_string.as_deref()),
-        None => Ok(Vec::new()),
+        Some((diff, date_string)) => interval_fields(req, &diff, date_string),
+        None => Vec::new(),
     }
 }
 
-/// `date_object_clone_interval`.
+/// `date_object_clone_interval`: a fresh object of the class, its
+/// members copied and `__clone` served, then the relative time copied
+/// into it by `timelib_rel_time_clone`.
 fn clone_interval(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     // `date_object_new_*` then `zend_objects_clone_members`: the copy's
     // payload is fresh while `__clone` runs, as php's is, and is filled
@@ -1227,21 +1285,28 @@ fn clone_interval(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObjec
     let copy = object.clone_with(req, IntervalObj::default())?;
     let state = object.native::<IntervalObj>(req).map(|i| {
         (
-            i.diff,
             i.civil_or_wall,
             i.from_string,
-            i.date_string.clone(),
+            i.date_string.as_deref().copied(),
         )
     });
-    if let (Some((diff, civil, from, text)), Some(payload)) =
-        (state, copy.native_mut::<IntervalObj>(req))
+    let state = state.map(|(civil, from, text)| (civil, from, text.map(|s| Owner::take(req, s))));
+    if let (Some((civil, from, text)), Some(payload)) = (state, copy.native_mut::<IntervalObj>(req))
     {
-        payload.diff = diff;
         payload.civil_or_wall = civil;
         payload.from_string = from;
         payload.date_string = text;
     }
-    if let Err(thrown) = hold_diff(req, *copy) {
+    let diff = object
+        .native::<IntervalObj>(req)
+        .and_then(|i| i.diff.as_deref().copied());
+    let set = match diff {
+        Some(diff) => {
+            lent(req, |l| RelTime::of(l, &diff)).and_then(|d| set_diff(req, *copy, Some(d)))
+        }
+        None => Ok(()),
+    };
+    if let Err(thrown) = set {
         copy.give_up(req);
         return Err(thrown);
     }
@@ -1300,25 +1365,33 @@ impl ObjectHandlers for PeriodHandlers {
         120
     }
 
+    /// `date_object_free_storage_period`: the three times, then the
+    /// relative time.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let taken = object.native_mut::<PeriodObj>(req).map(|p| {
             let times = [p.start.take(), p.current.take(), p.end.take()];
-            (times, p.held.take())
+            (times, p.interval.take())
         });
-        let Some((times, held)) = taken else {
-            return;
-        };
-        if let Some(held) = held {
-            held.free(req);
-        }
         // Freeing allocates nothing, so the limit refuses nothing.
-        let _freed = release(req, times);
+        let _freed = release(req, taken);
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_period)
     }
 
+    /// `date_period_read_property`: the one field read, made alone, so a
+    /// read of `interval` makes one interval and nothing beside it.
+    ///
+    /// ```php
+    /// $p = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 2);
+    /// $m = memory_get_usage(); $x = $p->interval->d; echo memory_get_usage() - $m, ' ', spl_object_id(new stdClass), "\n";
+    /// $m = memory_get_usage(); $x = $p->start; echo memory_get_usage() - $m, ' ', spl_object_id(new stdClass), "\n";
+    /// ```
+    /// ```expect
+    /// 0 3
+    /// 320 2
+    /// ```
     fn read_property(
         &self,
         req: &mut Request,
@@ -1332,15 +1405,7 @@ impl ObjectHandlers for PeriodHandlers {
         if read == PropertyRead::Write {
             return Err(readonly(req, name));
         }
-        let mut found = None;
-        for (field, value) in period_fields(req, object)? {
-            if field == name {
-                found = Some(value);
-            } else {
-                value.give_up(req);
-            }
-        }
-        Ok(found.unwrap_or_else(Owner::null))
+        period_field(req, object, name)
     }
 
     fn write_property(
@@ -1475,54 +1540,23 @@ impl ObjectHandlers for PeriodHandlers {
 impl PeriodState {
     /// The period's state, copied, without the rows its last property
     /// read made and with no walk standing on `current`: each time by
-    /// `timelib_time_clone`, onto the request's heap.
-    pub(super) fn copied(&self, lent: &Lent<'_>) -> PeriodObj {
+    /// `timelib_time_clone` and then the interval by
+    /// `timelib_rel_time_clone`, onto the request's heap.
+    pub(super) fn copied(&self, lent: &Lent<'_>) -> PeriodState {
         let copy = |t: &Option<Time>| t.as_ref().map(|t| t.copy(lent));
-        Box::new(PeriodState {
+        PeriodState {
             start: copy(&self.start),
             start_ce: self.start_ce,
             current: copy(&self.current),
             end: copy(&self.end),
-            interval: self.interval,
+            interval: self.interval.as_deref().map(|r| RelTime::of(lent, r)),
             recurrences: self.recurrences,
             include_start_date: self.include_start_date,
             include_end_date: self.include_end_date,
             initialized: self.initialized,
             cursor: None,
-            held: None,
-        })
+        }
     }
-
-    /// `start`, `current` and `end`, in that order.
-    pub(super) fn times_mut(&mut self) -> [&mut Option<Time>; 3] {
-        [&mut self.start, &mut self.current, &mut self.end]
-    }
-
-    /// `state` put in place of the period's, what its interval holds kept
-    /// for [`hold_period`] to bring to the new one; the state it had
-    /// answered, for its caller to release under a lend.
-    pub(super) fn replace(&mut self, mut state: PeriodObj) -> PeriodObj {
-        state.held = self.held.take();
-        std::mem::swap(self, &mut state);
-        state
-    }
-}
-
-/// What the period's interval holds on the request's heap brought to it:
-/// a `timelib_rel_time`, as `timelib_rel_time_clone` copies it, none for
-/// none. Whatever sets the interval calls it after the change. The
-/// `Err` is the memory limit.
-pub(super) fn hold_period(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    let Some(period) = object.native_mut::<PeriodObj>(req) else {
-        return Ok(());
-    };
-    let shape = period.interval.map(|_| Shape::rel_time());
-    let held = period.held.take();
-    let held = Held::hold(req, held, shape)?;
-    if let Some(period) = object.native_mut::<PeriodObj>(req) {
-        period.held = held;
-    }
-    Ok(())
 }
 
 /// `date_object_clone_period`.
@@ -1531,16 +1565,16 @@ fn clone_period(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
     let copy = object.clone_with(req, PeriodObj::default())?;
-    let state = with_period(req, object, |req, period| lent(req, |l| period.copied(l)))
+    let state = with_period(req, object, |req, p| lent(req, |l| Box::new(p.copied(l))))
         .transpose()
         .and_then(|state| {
             let old = state.and_then(|state| {
                 copy.native_mut::<PeriodObj>(req)
-                    .map(|payload| payload.replace(state))
+                    .map(|payload| std::mem::replace(payload, state))
             });
             release(req, old)
         });
-    if let Err(thrown) = state.and_then(|()| hold_period(req, *copy)) {
+    if let Err(thrown) = state {
         copy.give_up(req);
         return Err(thrown);
     }

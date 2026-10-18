@@ -42,7 +42,6 @@
 //! so a `pub` item behind a feature is always listed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -671,7 +670,7 @@ fn generates(module: &Module, name: &str) -> bool {
 }
 
 fn parse(file: &Path) -> Result<Vec<Item>> {
-    let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let text = crate::read(file)?;
     let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
     Ok(parsed.items)
 }
@@ -788,7 +787,7 @@ impl UsePath {
 /// Every `use` path in a file, inline modules and function bodies
 /// included.
 pub fn uses(file: &Path) -> Result<Vec<UsePath>> {
-    let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let text = crate::read(file)?;
     let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
     let mut collector = Collector(Vec::new());
     collector.visit_file(&parsed);

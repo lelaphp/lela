@@ -20,7 +20,6 @@
 //! taken for "always registered".
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -240,7 +239,7 @@ fn and<S: AsRef<str>>(names: &[S]) -> String {
 /// entries name no feature of the bundle and are left out.
 fn features(krate: &Present) -> Result<BTreeMap<String, Vec<String>>> {
     let path = krate.dir.join("Cargo.toml");
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text = crate::read(&path)?;
     let table: toml::Table =
         toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
     let Some(features) = table.get("features").and_then(Value::as_table) else {
@@ -267,7 +266,7 @@ fn features(krate: &Present) -> Result<BTreeMap<String, Vec<String>>> {
 /// Every `php_ext_<name>::extension` path in one file, in the order
 /// written, with the `cfg`s around it.
 fn registrations(file: &Path) -> Result<Vec<Registration>> {
-    let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let text = crate::read(file)?;
     let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
     let mut calls = Calls::default();
     calls.visit_file(&parsed);

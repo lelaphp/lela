@@ -415,8 +415,7 @@ fn read(roots: &[PathBuf], tree: &str, scope: &str) -> Result<Option<Run>> {
     for root in roots {
         let file = path(root, tree, scope);
         if file.is_file() {
-            let text =
-                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let text = crate::read(&file)?;
             let run = serde_json::from_str(&text)
                 .with_context(|| format!("{} is not a run", file.display()))?;
             return Ok(Some(run));

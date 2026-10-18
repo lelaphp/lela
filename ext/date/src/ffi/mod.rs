@@ -10,7 +10,8 @@
 //! - [`Time`], an owned `timelib_time` beside the `Arc` of the zone its
 //!   `tz_info` points at, so the zone outlives every date that reads it;
 //!   its numbers are [`TimeFields`], read and written as plain fields;
-//! - [`RelTime`], `timelib_rel_time` by value;
+//! - [`RelTime`], an owned `timelib_rel_time`, a `DateInterval`'s `diff`
+//!   and a `DatePeriod`'s `interval`; its numbers are [`RelFields`];
 //! - [`Tzdb`], the bundled database, the data compiled into the binary, never written;
 //! - [`Zones`], `DATEG(tzcache)`: the zones a request parsed, by the name
 //!   asked for, which the parsers' zone wrapper reads as php's
@@ -53,7 +54,7 @@ use crate::lent::{Lent, lent};
 #[cfg(test)]
 mod tests;
 
-pub(crate) use sys::{RelTime, TimeFields};
+pub(crate) use sys::{RelFields, TimeFields};
 
 /// `TIMELIB_ZONETYPE_*`.
 pub(crate) const ZONETYPE_OFFSET: u32 = 1;
@@ -974,15 +975,14 @@ impl Time {
     /// `timelib_diff(one, two)`.
     pub(crate) fn diff(&self, _: &Lent<'_>, other: &Time) -> RelTime {
         // SAFETY: two live times; the relative time answered is ours.
-        let raw = unsafe { sys::timelib_diff(self.ptr(), other.ptr()) };
-        take_rel(raw)
+        RelTime::adopt(unsafe { sys::timelib_diff(self.ptr(), other.ptr()) })
     }
 
     fn arith(
         &self,
         _: &Lent<'_>,
-        rel: &RelTime,
-        f: unsafe extern "C" fn(*mut TimeFields, *mut RelTime) -> *mut TimeFields,
+        rel: &RelFields,
+        f: unsafe extern "C" fn(*mut TimeFields, *mut RelFields) -> *mut TimeFields,
     ) -> Time {
         let mut rel = *rel;
         // SAFETY: a live time and a local copy of the interval; the time
@@ -998,22 +998,22 @@ impl Time {
     }
 
     /// `timelib_add`.
-    pub(crate) fn add(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+    pub(crate) fn add(&self, lent: &Lent<'_>, rel: &RelFields) -> Time {
         self.arith(lent, rel, sys::timelib_add)
     }
 
     /// `timelib_add_wall`.
-    pub(crate) fn add_wall(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+    pub(crate) fn add_wall(&self, lent: &Lent<'_>, rel: &RelFields) -> Time {
         self.arith(lent, rel, sys::timelib_add_wall)
     }
 
     /// `timelib_sub`.
-    pub(crate) fn sub(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+    pub(crate) fn sub(&self, lent: &Lent<'_>, rel: &RelFields) -> Time {
         self.arith(lent, rel, sys::timelib_sub)
     }
 
     /// `timelib_sub_wall`.
-    pub(crate) fn sub_wall(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+    pub(crate) fn sub_wall(&self, lent: &Lent<'_>, rel: &RelFields) -> Time {
         self.arith(lent, rel, sys::timelib_sub_wall)
     }
 
@@ -1183,16 +1183,57 @@ fn parse_zone_in(lent: &mut Lent<'_>, text: &CStr) -> ZoneRead {
     }
 }
 
-/// A relative time timelib allocated, copied and freed.
-fn take_rel(raw: *mut RelTime) -> RelTime {
-    if raw.is_null() {
-        return RelTime::default();
+/// An owned `timelib_rel_time`, made by timelib on the request's heap
+/// where php's timelib makes the one a `DateInterval`'s `diff` or a
+/// `DatePeriod`'s `interval` points at, and freed by its drop.
+pub(crate) struct RelTime(NonNull<RelFields>);
+
+// SAFETY: the relative time is owned here alone and points at nothing.
+unsafe impl Send for RelTime {}
+
+impl Drop for RelTime {
+    fn drop(&mut self) {
+        // SAFETY: the relative time timelib made, and this its one owner.
+        unsafe { sys::timelib_rel_time_dtor(self.0.as_ptr()) };
     }
-    // SAFETY: timelib answered an initialised relative time it allocated.
-    let out = unsafe { *raw };
-    // SAFETY: ours, and copied above.
-    unsafe { sys::timelib_rel_time_dtor(raw) };
-    out
+}
+
+impl std::ops::Deref for RelTime {
+    type Target = RelFields;
+    fn deref(&self) -> &RelFields {
+        // SAFETY: a live relative time owned by `self`.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl std::ops::DerefMut for RelTime {
+    fn deref_mut(&mut self) -> &mut RelFields {
+        // SAFETY: a live relative time owned by `self`, borrowed uniquely.
+        unsafe { self.0.as_mut() }
+    }
+}
+
+impl RelTime {
+    /// A relative time timelib allocated; a null answer is an allocation
+    /// failing, which the process does not outlive.
+    fn adopt(raw: *mut RelFields) -> RelTime {
+        RelTime(NonNull::new(raw).unwrap_or_else(|| std::process::abort()))
+    }
+
+    /// `timelib_rel_time_ctor()`: every field zero.
+    pub(crate) fn new(_: &Lent<'_>) -> RelTime {
+        // SAFETY: the call takes nothing; the relative time answered is ours.
+        RelTime::adopt(unsafe { sys::timelib_rel_time_ctor() })
+    }
+
+    /// `timelib_rel_time_clone(rt)`: a copy of `fields`, a relative time's
+    /// or a parse's `relative`.
+    pub(crate) fn of(_: &Lent<'_>, fields: &RelFields) -> RelTime {
+        let rt = ptr::from_ref(fields).cast_mut();
+        // SAFETY: the clone only reads the fields it copies; the relative
+        // time answered is ours.
+        RelTime::adopt(unsafe { sys::timelib_rel_time_clone(rt) })
+    }
 }
 
 /// What `timelib_strtointerval` makes of an ISO 8601 interval.
@@ -1211,7 +1252,7 @@ pub(super) fn strtointerval(_: &Lent<'_>, s: &[u8]) -> IsoInterval {
     let text = terminated(s);
     let mut begin: *mut TimeFields = ptr::null_mut();
     let mut end: *mut TimeFields = ptr::null_mut();
-    let mut period: *mut RelTime = ptr::null_mut();
+    let mut period: *mut RelFields = ptr::null_mut();
     let mut recurrences: c_int = 0;
     let mut errors: *mut sys::ErrorContainer = ptr::null_mut();
     // SAFETY: the bytes and their length and five locals the call writes;
@@ -1230,7 +1271,7 @@ pub(super) fn strtointerval(_: &Lent<'_>, s: &[u8]) -> IsoInterval {
     IsoInterval {
         begin: (!begin.is_null()).then(|| Time::adopt(begin, None, &Answered::default())),
         end: (!end.is_null()).then(|| Time::adopt(end, None, &Answered::default())),
-        period: (!period.is_null()).then(|| take_rel(period)),
+        period: NonNull::new(period).map(RelTime),
         recurrences,
         errors: ErrorContainer::adopt(errors)
             .map(|container| container.messages())
