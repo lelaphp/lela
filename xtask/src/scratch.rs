@@ -824,16 +824,20 @@ fn stop_strays_in(name: &str, ours: impl Fn(&Path) -> bool) -> Vec<u32> {
 
 /// The orphans whose command line names the files of the program run as
 /// `script`, its path up to its extension's dot, as `FPM\Tester` names
-/// the php-fpm it starts by its configuration `<that>conf`: what a program
+/// the php-fpm it starts by its configuration `<that>ini`: what a program
 /// killed past its limit started outside its group, stopped with their
 /// groups, and their pids, so a php-fpm master that left by `setsid()`
 /// holds no port past the test that started it (#2777). None for a
-/// program run by a relative name, a snippet's, which names no test.
+/// program run by a relative name, a snippet's, which names no test, nor
+/// for one whose name has no extension.
 pub(crate) fn stop_naming(script: &Path) -> Vec<u32> {
-    let Some(path) = script.to_str().filter(|_| script.is_absolute()) else {
+    let (Some(path), Some(extension)) = (script.to_str(), script.extension()) else {
         return Vec::new();
     };
-    let stem = &path[..path.rfind('.').map_or(path.len(), |dot| dot + 1)];
+    if !script.is_absolute() {
+        return Vec::new();
+    }
+    let stem = &path[..path.len() - extension.len()];
     stop_orphans(|orphans| {
         let named = orphans
             .iter()

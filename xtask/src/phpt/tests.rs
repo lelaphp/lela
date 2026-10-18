@@ -1863,7 +1863,7 @@ fn what_a_program_past_the_limit_left_outside_its_group_goes_with_it() {
 leaves a session
 --FILE--
 <?php
-$conf = __DIR__ . '/' . basename(__FILE__, 'php') . 'conf';
+$conf = __DIR__ . '/' . basename(__FILE__, 'php') . 'ini';
 $pid = __DIR__ . '/left.pid';
 shell_exec("perl -MPOSIX -e 'POSIX::setsid(); open my \$f, q(>), \$ARGV[1]; print \$f \$\$; close \$f; sleep 120' $conf $pid > /dev/null 2>&1 &");
 sleep(60);
