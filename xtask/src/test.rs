@@ -84,13 +84,8 @@ pub fn committed(root: &Path, path: &str) -> Result<String> {
         }
     }
     let out = git.output().with_context(|| format!("git show :{path}"))?;
-    if !out.status.success() {
-        bail!(
-            "git show :{path}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    String::from_utf8(out.stdout).with_context(|| format!("{path} is not UTF-8"))
+    let out = crate::git::ran(&format!("show :{path}"), out)?;
+    String::from_utf8(out).with_context(|| format!("{path} is not UTF-8"))
 }
 
 /// Run the tests of every crate that exists, or of `only`; one reading

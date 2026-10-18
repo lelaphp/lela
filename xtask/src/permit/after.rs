@@ -75,7 +75,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::INSTRUMENT;
@@ -784,13 +784,7 @@ fn cat_blob(checkout: &Path, id: &str) -> Result<Vec<u8>> {
         .stdin(Stdio::null())
         .output()
         .context("running git cat-file")?;
-    if !out.status.success() {
-        bail!(
-            "git cat-file blob {id}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(out.stdout)
+    git::ran(&format!("cat-file blob {id}"), out)
 }
 
 #[cfg(test)]
