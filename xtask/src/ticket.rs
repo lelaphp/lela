@@ -530,18 +530,6 @@ impl Criteria {
         self.ticked.len() + self.unticked.len()
     }
 
-    /// Every unticked box by name, numbered so a comma in one is not a gap
-    /// between two.
-    fn unticked_named(&self) -> String {
-        named(&self.unticked)
-    }
-
-    /// Every ticked box by name, the same way, for the withdrawal one
-    /// refuses.
-    fn ticked_named(&self) -> String {
-        named(&self.ticked)
-    }
-
     /// Every criterion is ticked and there is at least one.
     pub fn met(&self) -> bool {
         self.count() > 0 && self.unticked.is_empty()
@@ -1234,7 +1222,7 @@ fn half_done(criteria: &Criteria) -> String {
         } else {
             "are"
         },
-        criteria.ticked_named()
+        named(&criteria.ticked)
     )
 }
 
@@ -1372,7 +1360,7 @@ fn judged(
     session_id
         .unwrap_or_default()
         .clone_into(&mut reading.session);
-    let names = criteria.unticked_named();
+    let names = named(&criteria.unticked);
     let boxes = format!(
         "{} of {} criteria ticked",
         criteria.ticked.len(),

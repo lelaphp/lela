@@ -212,10 +212,9 @@ impl<'a> Oracles<'a> {
         let Some(name) = variant else {
             return Ok(&self.main);
         };
-        match self.variants.get(name) {
-            Some(oracle) => Ok(oracle),
-            None => Err(self.main.pin().unknown(name)),
-        }
+        self.variants
+            .get(name)
+            .ok_or_else(|| self.main.pin().unknown(name))
     }
 
     /// The main oracle's.
