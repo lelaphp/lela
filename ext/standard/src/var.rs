@@ -20,7 +20,7 @@ use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, GiveUp, Guarded, Hold, Unwritten};
-use php_ext::values::{Key, Owner, PhpString, RecursionGuard, SmartStr, Value};
+use php_ext::values::{Emalloc, Key, Owner, PhpString, RecursionGuard, SmartStr, Value};
 
 use crate::string::Decimal;
 
@@ -1118,6 +1118,31 @@ fn unmangled(out: &mut Vec<u8>, key: &[u8]) {
 ///   - Return [ ?string ]
 /// }
 /// ```
+///
+/// The export is built in one `smart_str` on the request's heap and handed
+/// over trimmed, `smart_str_extract`, and what php allocates on the way,
+/// each indent's `spprintf` and a string's `php_addcslashes` and
+/// `php_str_to_str`, is held while it is appended, so the peak and what
+/// stays are php's:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $r = $f(); return [memory_get_peak_usage() - $s, memory_get_usage() - $s]; }
+/// foreach ([[1, 'a' => 2], range(1, 40), str_repeat("x'\\\0", 100), ['k' => str_repeat('y', 3000)], (object) ['p' => 1.5, 'q' => [true, null]], 1.0, "plain"] as $i => $v) {
+///     [$p, $u] = pk(fn() => var_export($v, true));
+///     echo $i, ' ', $p, ' ', $u, "\n";
+/// }
+/// ob_start(); $s = memory_get_usage(); memory_reset_peak_usage(); var_export(range(1, 40)); $p = memory_get_peak_usage() - $s; ob_end_clean(); echo "print ", $p, "\n";
+/// ```
+/// ```expect
+/// 0 584 272
+/// 1 4352 728
+/// 2 6528 2008
+/// 3 12544 3288
+/// 4 512 344
+/// 5 288 248
+/// 6 320 248
+/// print 5688
+/// ```
 #[php_function]
 fn var_export(
     req: &mut Request,
@@ -1125,17 +1150,26 @@ fn var_export(
     #[php(default = false)] r#return: bool,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
     let returned = r#return;
-    // One buffer for the whole export, as php's one `smart_str`.
-    let mut out = Vec::with_capacity(OPENED);
-    export(req, &mut out, &value, 1)?;
+    // One `smart_str` for the whole export, on the request's heap.
+    let mut out = SmartStr::default();
+    if let Err(thrown) = export(req, &mut out, &value, 1) {
+        out.free(req);
+        return Err(thrown);
+    }
     // What a reader of an object's properties left pending, a lazy
     // object's initializer that threw, is thrown once what was read is
     // written, as php's `EG(exception)` is after `PHPWRITE`.
     if returned {
-        pending(req)?;
-        return PhpString::new(req, &out).map(Some);
+        // `RETURN_STR(smart_str_extract(&buf))`: the buffer is the string.
+        let string = out.extract(req)?;
+        if let Err(thrown) = pending(req) {
+            string.give_up(req);
+            return Err(thrown);
+        }
+        return Ok(Some(string));
     }
-    req.write(&out);
+    req.write(out.as_bytes());
+    out.free(req);
     pending(req)?;
     Ok(None)
 }
@@ -1176,7 +1210,7 @@ fn var_export(
 /// What a property read or a lazy object's initializer threw.
 pub fn export(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut impl ExportOut,
     value: &Value,
     level: usize,
 ) -> Result<(), Thrown> {
@@ -1184,25 +1218,28 @@ pub fn export(
     call_stack_end(req)?;
     let value = value.deref();
     if let Some(b) = value.as_bool() {
-        out.extend_from_slice(if b { b"true" } else { b"false" });
+        out.put(req, if b { b"true" } else { b"false" })?;
     } else if let Some(n) = value.as_int() {
         // `ZEND_LONG_MIN` written whole would read back as a float.
         if n == i64::MIN {
-            push_long(out, i64::MIN + 1);
-            out.extend_from_slice(b"-1");
+            put_long(req, out, i64::MIN + 1)?;
+            out.put(req, b"-1")?;
         } else {
-            push_long(out, n);
+            put_long(req, out, n)?;
         }
     } else if let Some(f) = value.as_float() {
         // `smart_str_append_double` with `zero_fraction`: the text, and
         // `.0` after a finite one that carries no point of its own.
         let text = float_format(f, req.serialize_precision(), Exponent::Upper);
-        out.extend_from_slice(text.as_bytes());
+        out.put(req, text.as_bytes())?;
         if f.is_finite() && !text.contains('.') {
-            out.extend_from_slice(b".0");
+            out.put(req, b".0")?;
         }
     } else if let Some(s) = value.as_php_string() {
-        quoted(out, s.as_bytes());
+        let temps = Escaped::new(req, s.as_bytes())?;
+        let put = quoted(req, out, s.as_bytes());
+        temps.free(req);
+        put?;
     } else if let Some(array) = value.as_array().copied() {
         // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` beside
         // `GC_PROTECT_RECURSION(myht)` and `ZEND_HASH_FOREACH_KEY_VAL`
@@ -1213,38 +1250,48 @@ pub fn export(
         // owner given up as `GC_DELREF(myht)` (`:587`), no root. The
         // text is laid down before the walk and taken back where the walk
         // found the array marked, since php writes `NULL` in its place.
-        let opened = out.len();
+        let opened = out.written();
         if level > 1 {
-            out.push(b'\n');
-            out.extend(std::iter::repeat_n(b' ', level - 1));
+            out.put(req, b"\n")?;
+            spaces(req, out, level - 1)?;
         }
-        out.extend_from_slice(b"array (\n");
+        out.put(req, b"array (\n")?;
         let held = Hold::Owner(GiveUp::DtorNogc);
         let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
-            out.extend(std::iter::repeat_n(b' ', level + 1));
+            // `php_array_element_export`: a string key escaped before
+            // the indent is written.
             match row.key() {
-                Key::Int(n) => push_long(out, *n),
-                Key::Str(s) => quoted(out, s.as_bytes()),
+                Key::Int(n) => {
+                    spaces(req, out, level + 1)?;
+                    put_long(req, out, *n)?;
+                }
+                Key::Str(s) => {
+                    let temps = Escaped::new(req, s.as_bytes())?;
+                    let put =
+                        spaces(req, out, level + 1).and_then(|()| quoted(req, out, s.as_bytes()));
+                    temps.free(req);
+                    put?;
+                }
             }
-            out.extend_from_slice(b" => ");
+            out.put(req, b" => ")?;
             export(req, out, row.value(), level + 2)?;
-            out.extend_from_slice(b",\n");
+            out.put(req, b",\n")?;
             Ok(ControlFlow::Continue(()))
         })?;
         if let Guarded::Recursive = walked {
             out.truncate(opened);
-            out.extend_from_slice(b"NULL");
+            out.put(req, b"NULL")?;
             circular(req);
             return Ok(());
         }
         if level > 1 {
-            out.extend(std::iter::repeat_n(b' ', level - 1));
+            spaces(req, out, level - 1)?;
         }
-        out.push(b')');
+        out.put(req, b")")?;
     } else if let Some(object) = value.as_object() {
         return export_object(req, out, *object, level);
     } else {
-        out.extend_from_slice(b"NULL");
+        out.put(req, b"NULL")?;
     }
     Ok(())
 }
@@ -1269,12 +1316,12 @@ pub fn export(
 /// ```
 fn export_object(
     req: &mut Request,
-    out: &mut Vec<u8>,
+    out: &mut impl ExportOut,
     object: php_ext::values::PhpObject,
     level: usize,
 ) -> Result<(), Thrown> {
     if object.is_recursive_in(req, RecursionGuard::Export) {
-        out.extend_from_slice(b"NULL");
+        out.put(req, b"NULL")?;
         circular(req);
         return Ok(());
     }
@@ -1293,23 +1340,23 @@ fn export_object(
     let (name, is_enum) = (decl.name.0.to_vec(), matches!(decl.kind, ClassKind::Enum));
     let standard = name == b"stdClass";
     if level > 1 {
-        out.push(b'\n');
-        out.extend(std::iter::repeat_n(b' ', level - 1));
+        out.put(req, b"\n")?;
+        spaces(req, out, level - 1)?;
     }
     if standard {
-        out.extend_from_slice(b"(object) array(\n");
+        out.put(req, b"(object) array(\n")?;
     } else {
-        out.push(b'\\');
-        out.extend_from_slice(&name);
+        out.put(req, b"\\")?;
+        out.put(req, &name)?;
         if is_enum {
-            out.extend_from_slice(b"::");
+            out.put(req, b"::")?;
             let case = object
                 .prop(req, b"name")
                 .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
                 .unwrap_or_default();
-            out.extend_from_slice(&case);
+            out.put(req, &case)?;
         } else {
-            out.extend_from_slice(b"::__set_state(array(\n");
+            out.put(req, b"::__set_state(array(\n")?;
         }
     }
     // `ZEND_HASH_FOREACH_KEY_VAL_IND(myht, index, key, val)` over the
@@ -1318,21 +1365,27 @@ fn export_object(
         Ok(None)
     } else {
         walk::properties(req, &held, Unwritten::Skipped, |req, row| {
-            out.extend(std::iter::repeat_n(b' ', level + 2));
+            spaces(req, out, level + 2)?;
             // `php_object_element_export`: a name quoted, unmangled; an
             // integer key as it stands.
             match row.key() {
                 Key::Str(key) => {
                     let (_, name) = unmangle(key.as_bytes());
-                    out.push(b'\'');
-                    escaped(out, name);
-                    out.push(b'\'');
+                    // `php_addcslashes_str`'s string, held while it is
+                    // appended.
+                    let (slashed, _) = addcslashed(req, name)?;
+                    let put = out
+                        .put(req, b"'")
+                        .and_then(|()| escaped(req, out, name))
+                        .and_then(|()| out.put(req, b"'"));
+                    slashed.free(req);
+                    put?;
                 }
-                Key::Int(n) => push_long(out, *n),
+                Key::Int(n) => put_long(req, out, *n)?,
             }
-            out.extend_from_slice(b" => ");
+            out.put(req, b" => ")?;
             export(req, out, row.value(), level + 2)?;
-            out.extend_from_slice(b",\n");
+            out.put(req, b",\n")?;
             Ok(ControlFlow::<()>::Continue(()))
         })
     };
@@ -1341,24 +1394,146 @@ fn export_object(
     written?;
     released?;
     if level > 1 && !is_enum {
-        out.extend(std::iter::repeat_n(b' ', level - 1));
+        spaces(req, out, level - 1)?;
     }
     if standard {
-        out.push(b')');
+        out.put(req, b")")?;
     } else if !is_enum {
-        out.extend_from_slice(b"))");
+        out.put(req, b"))")?;
     }
     Ok(())
 }
 
-/// What the export's buffer opens with, so a small value is written
-/// without growing it; php's `smart_str` opens at `SMART_STR_START_LEN`,
-/// 231 bytes, and a `Vec`'s capacity is not observable.
-const OPENED: usize = 256;
+/// Where `php_var_export_ex` writes: php's `smart_str`, a [`SmartStr`] on
+/// the request's heap, which `var_export` hands over as its string, or a
+/// buffer of the caller's (`zend_test`'s observer).
+pub trait ExportOut {
+    /// `smart_str_appendl`; the `Err` is the memory limit's fatal.
+    ///
+    /// # Errors
+    ///
+    /// The memory limit's fatal.
+    fn put(&mut self, req: &mut Request, bytes: &[u8]) -> Result<(), Thrown>;
+    /// The bytes written so far, `ZSTR_LEN(buf->s)`.
+    fn written(&self) -> usize;
+    /// What was written past `len` taken back.
+    fn truncate(&mut self, len: usize);
+}
+
+impl ExportOut for SmartStr {
+    fn put(&mut self, req: &mut Request, bytes: &[u8]) -> Result<(), Thrown> {
+        self.append(req, bytes)
+    }
+
+    fn written(&self) -> usize {
+        self.as_bytes().len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        let written = self.written();
+        self.remove(len..written);
+    }
+}
+
+impl ExportOut for Vec<u8> {
+    fn put(&mut self, _: &mut Request, bytes: &[u8]) -> Result<(), Thrown> {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn written(&self) -> usize {
+        self.len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        Vec::truncate(self, len);
+    }
+}
+
+/// `buffer_append_spaces` (`Z/ext/standard/var.c:450`): `n` spaces,
+/// made as php makes them, `spprintf("%*c")` into a buffer of its own,
+/// appended and then freed.
+fn spaces(req: &mut Request, out: &mut impl ExportOut, n: usize) -> Result<(), Thrown> {
+    const SPACES: [u8; 32] = [b' '; 32];
+    let printed = Emalloc::printf_buffer(req, n)?;
+    let mut left = n;
+    let mut put = Ok(());
+    while left > 0 && put.is_ok() {
+        let take = left.min(SPACES.len());
+        put = out.put(req, &SPACES[..take]);
+        left -= take;
+    }
+    printed.free(req);
+    put
+}
+
+/// `_ZSTR_STRUCT_SIZE(len)`, what a `zend_string` of `len` bytes asks
+/// `emalloc` for on the oracle's LP64.
+const fn string_size(len: usize) -> usize {
+    (24 + len + 1).next_multiple_of(8)
+}
+
+/// `php_addcslashes(s, "'\\", 2)`'s string: `zend_string_safe_alloc(4,
+/// len, 0, 0)`, cut to what it wrote where that is shorter.
+fn addcslashed(req: &mut Request, bytes: &[u8]) -> Result<(Emalloc, usize), Thrown> {
+    let len = bytes.len();
+    let wrote = len + bytes.iter().filter(|b| matches!(b, b'\'' | b'\\')).count();
+    let mut block = Emalloc::new(req, 4 * len + string_size(0))?;
+    if wrote < 4 * len {
+        block = block.resize(req, string_size(wrote))?;
+    }
+    Ok((block, wrote))
+}
+
+/// The two strings php's export makes of a string it writes, held while
+/// it is appended: `php_addcslashes` over `'` and `\\`, then
+/// `php_str_to_str` of that over a NUL, a copy where it holds none.
+struct Escaped {
+    slashed: Emalloc,
+    spliced: Emalloc,
+}
+
+impl Escaped {
+    fn new(req: &mut Request, bytes: &[u8]) -> Result<Escaped, Thrown> {
+        let (slashed, len) = addcslashed(req, bytes)?;
+        #[allow(clippy::naive_bytecount)] // a string's NULs, one loop, not a crate
+        let nuls = bytes.iter().filter(|b| **b == 0).count();
+        let spliced = if len > 1 && nuls > 0 {
+            // `zend_string_safe_alloc(count, str_len - needle_len, length)`,
+            // then `zend_string_truncate` to what it wrote.
+            let made = Emalloc::new(req, nuls * 11 + string_size(len));
+            match made.and_then(|made| made.resize(req, string_size(len + nuls * 11))) {
+                Ok(made) => made,
+                Err(thrown) => {
+                    slashed.free(req);
+                    return Err(thrown);
+                }
+            }
+        } else {
+            // A copy where no NUL stands, or the splice itself for a
+            // string that is one NUL.
+            let copied = if len == 1 && nuls == 1 { 12 } else { len };
+            match Emalloc::new(req, string_size(copied)) {
+                Ok(made) => made,
+                Err(thrown) => {
+                    slashed.free(req);
+                    return Err(thrown);
+                }
+            }
+        };
+        Ok(Escaped { slashed, spliced })
+    }
+
+    /// `zend_string_free` of both, in php's order.
+    fn free(self, req: &mut Request) {
+        self.slashed.free(req);
+        self.spliced.free(req);
+    }
+}
 
 /// `smart_str_append_long`: `n` in decimal, written into the buffer.
-fn push_long(out: &mut Vec<u8>, n: i64) {
-    out.extend_from_slice(Decimal::of(n).as_bytes());
+fn put_long(req: &mut Request, out: &mut impl ExportOut, n: i64) -> Result<(), Thrown> {
+    out.put(req, Decimal::of(n).as_bytes())
 }
 
 /// `var_export does not handle circular references`, the warning php
@@ -1370,23 +1545,24 @@ fn circular(req: &mut Request) {
 /// A string as php writes it into exported source: `php_addcslashes`
 /// over `'` and `\`, then `php_str_to_str` splicing a NUL out of the
 /// quoted text as `' . "\0" . '`, between the quotes php puts around it.
-fn quoted(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.push(b'\'');
-    escaped(out, bytes);
-    out.push(b'\'');
+fn quoted(req: &mut Request, out: &mut impl ExportOut, bytes: &[u8]) -> Result<(), Thrown> {
+    out.put(req, b"'")?;
+    escaped(req, out, bytes)?;
+    out.put(req, b"'")
 }
 
 /// The escaping itself, which a property name takes without the NUL
-/// splice php leaves to a value's string.
-fn escaped(out: &mut Vec<u8>, bytes: &[u8]) {
-    for byte in bytes {
-        match byte {
-            b'\'' | b'\\' => {
-                out.push(b'\\');
-                out.push(*byte);
-            }
-            0 => out.extend_from_slice(b"' . \"\\0\" . '"),
-            _ => out.push(*byte),
+/// splice php leaves to a value's string: each stretch of bytes that needs
+/// none written as it stands.
+fn escaped(req: &mut Request, out: &mut impl ExportOut, bytes: &[u8]) -> Result<(), Thrown> {
+    let mut rest = bytes;
+    while let Some(at) = rest.iter().position(|b| matches!(b, b'\'' | b'\\' | 0)) {
+        out.put(req, &rest[..at])?;
+        match rest[at] {
+            0 => out.put(req, b"' . \"\\0\" . '")?,
+            byte => out.put(req, &[b'\\', byte])?,
         }
+        rest = &rest[at + 1..];
     }
+    out.put(req, rest)
 }
