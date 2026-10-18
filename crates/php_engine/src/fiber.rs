@@ -355,14 +355,55 @@ enum Aside {
     /// above it, innermost last, the first of which held its execution
     /// and holds the one the request ran on in its place.
     Resumer { running: Vec<Running> },
-    /// A suspended coroutine's stack ([`Request::on_held_stack`]): every
-    /// running coroutine, the coroutine served, and the execution the
-    /// request ran on, which no running coroutine's `below` holds.
+    /// A held coroutine's stack ([`Request::on_held_stack`]): every
+    /// running coroutine, the coroutine served, the execution the
+    /// request ran on, which no running coroutine's `below` holds, and
+    /// the held stacks the chain runs on into below the coroutine's,
+    /// innermost first ([`take_held`]).
     Suspended {
         running: Vec<Running>,
         coroutine: Context,
         displaced: Box<Execution>,
+        below: Vec<Held>,
     },
+}
+
+/// A coroutine off the running chain, and the execution it held, which
+/// a serve took out to stand on the chain below the stack it serves on
+/// ([`take_held`]).
+pub(crate) struct Held {
+    pub(crate) coroutine: Context,
+    pub(crate) execution: Box<Execution>,
+}
+
+/// The executions php's `prev_execute_data` chain runs through from a
+/// frame of `top`, a coroutine off the running chain, each taken out of
+/// its coroutine for a serve on `top`'s ([`Request::on_held_stack`]):
+/// `top`'s own, then, while the coroutine reached waits on a suspend
+/// that passed through it with its bottom frame naming its resumer's,
+/// that resumer's, which a suspend holds too. The chain ends at a
+/// suspended coroutine's bottom, where `zend_fiber_suspend` cut it, and
+/// at one whose bottom names no resumer. None where `top` holds no
+/// execution with a frame in it.
+pub(crate) fn take_held(req: &mut Request, top: Context) -> Option<(Box<Execution>, Vec<Held>)> {
+    let coroutine = top.coroutine(req)?;
+    let execution = coroutine.take_held()?;
+    let mut next = coroutine.linked_resumer();
+    let mut below = Vec::new();
+    while let Some(resumer) = next {
+        let Some(held) = resumer.coroutine(req) else {
+            break;
+        };
+        let Some(execution) = held.take_held() else {
+            break;
+        };
+        next = held.linked_resumer();
+        below.push(Held {
+            coroutine: resumer,
+            execution,
+        });
+    }
+    Some((execution, below))
 }
 
 /// Where the request's own VM stack stands, which
@@ -469,7 +510,12 @@ impl Fibers {
     pub(crate) fn coroutine_on(&self, stack: usize) -> Option<Context> {
         match self.running.len().checked_sub(stack) {
             Some(0) | None => match self.aside.last() {
-                Some(Aside::Suspended { coroutine, .. }) => Some(*coroutine),
+                Some(Aside::Suspended {
+                    coroutine, below, ..
+                }) => match stack.saturating_sub(self.running.len()).checked_sub(1) {
+                    None => Some(*coroutine),
+                    Some(at) => below.get(at).map(|held| held.coroutine),
+                },
                 Some(Aside::Resumer { .. }) | None => None,
             },
             Some(above) => self.running.get(above - 1).map(|running| running.fiber),
@@ -512,21 +558,28 @@ impl Fibers {
     }
 
     /// Every running coroutine set aside while the request serves on the
-    /// stack of `coroutine`, suspended, `displaced` the execution it ran
-    /// on. [`Fibers::take_back`] undoes it.
-    pub(crate) fn set_aside_for(&mut self, coroutine: Context, displaced: Box<Execution>) {
+    /// stack of `coroutine`, held off the running chain, `displaced` the
+    /// execution it ran on and `below` the held stacks the chain runs on
+    /// into. [`Fibers::take_back`] undoes it.
+    pub(crate) fn set_aside_for(
+        &mut self,
+        coroutine: Context,
+        displaced: Box<Execution>,
+        below: Vec<Held>,
+    ) {
         let running = std::mem::take(&mut self.running);
         self.aside.push(Aside::Suspended {
             running,
             coroutine,
             displaced,
+            below,
         });
     }
 
     /// [`Fibers::set_aside_for`] undone: the coroutines set aside running
-    /// again, and the coroutine served and the execution displaced
-    /// handed back.
-    pub(crate) fn take_back(&mut self) -> Option<(Context, Box<Execution>)> {
+    /// again, and the coroutine served, the execution displaced and the
+    /// held stacks below handed back.
+    pub(crate) fn take_back(&mut self) -> Option<(Context, Box<Execution>, Vec<Held>)> {
         match self
             .aside
             .pop_if(|aside| matches!(aside, Aside::Suspended { .. }))?
@@ -535,9 +588,10 @@ impl Fibers {
                 running,
                 coroutine,
                 displaced,
+                below,
             } => {
                 self.running = running;
-                Some((coroutine, displaced))
+                Some((coroutine, displaced, below))
             }
             Aside::Resumer { .. } => None,
         }
@@ -598,13 +652,19 @@ impl Fibers {
     /// The execution states below the running stack, the innermost
     /// resumer's first and the request's own last: the rest of php's
     /// one `prev_execute_data` chain, which ends at a fiber a destroy
-    /// resumed.
+    /// resumed. Serving on a held coroutine's stack, no coroutine runs,
+    /// and the chain runs on through the held stacks under it.
     pub(crate) fn below(&self) -> impl Iterator<Item = &Execution> {
+        let held = match (self.running.is_empty(), self.aside.last()) {
+            (true, Some(Aside::Suspended { below, .. })) => below.as_slice(),
+            _ => &[],
+        };
         self.running
             .iter()
             .rev()
             .take_while(|running| running.by == Resumer::Native)
             .map(|running| &running.below)
+            .chain(held.iter().map(|held| &*held.execution))
     }
 }
 
@@ -880,12 +940,7 @@ pub(crate) fn view(
                         ExecuteData::Innermost => Standing::Held(own),
                         ExecuteData::Bottom => Standing::Bottom {
                             own,
-                            resumer: match coroutine.caller {
-                                Some(Caller::Coroutine(resumer)) if !coroutine.destroyed => {
-                                    Some(resumer)
-                                }
-                                _ => None,
-                            },
+                            resumer: coroutine.linked_resumer(),
                         },
                     }),
             }
@@ -2338,29 +2393,42 @@ impl Coroutine {
         self.status
     }
 
-    /// The execution a suspended coroutine left, where a kept frame of it
-    /// is looked for ([`Request::in_frame`]). None for one laid down and
-    /// not started, which has no frame, and for one a suspend passed
-    /// through, whose bottom frame still names its resumer's, so a chain
-    /// read from its frames would not end at the bottom as a suspended
-    /// one's does.
-    pub(crate) fn suspended(&self) -> Option<&Execution> {
+    /// The execution a coroutine off the running chain holds, where a
+    /// kept frame of it is looked for ([`Request::in_frame`]): one
+    /// suspended, or one running that waits on a suspend that passed
+    /// through it, which holds its execution while it waits ([`run_on`]);
+    /// one on the running chain holds none. None for one laid down and
+    /// not started, which has no frame.
+    pub(crate) fn held(&self) -> Option<&Execution> {
         match self.status {
-            CoroutineStatus::Suspended => self.execution.as_deref(),
-            CoroutineStatus::Init | CoroutineStatus::Running | CoroutineStatus::Dead => None,
+            CoroutineStatus::Suspended | CoroutineStatus::Running => self.execution.as_deref(),
+            CoroutineStatus::Init | CoroutineStatus::Dead => None,
         }
     }
 
-    /// [`Coroutine::suspended`], taken out for the request to serve on
-    /// ([`Request::on_held_stack`]); [`Coroutine::hold`] puts it back.
-    pub(crate) fn take_suspended(&mut self) -> Option<Box<Execution>> {
-        self.suspended()?;
+    /// [`Coroutine::held`], taken out for the request to serve on
+    /// ([`take_held`]); [`Coroutine::hold`] puts it back.
+    fn take_held(&mut self) -> Option<Box<Execution>> {
+        self.held()?;
         self.execution.take()
     }
 
-    /// What [`Coroutine::take_suspended`] took, held again.
+    /// What [`take_held`] took, held again.
     pub(crate) fn hold(&mut self, execution: Box<Execution>) {
         self.execution = Some(execution);
+    }
+
+    /// The coroutine whose frame this one's bottom frame names, php's
+    /// `stack_bottom->prev_execute_data`, while a suspend that passed
+    /// through it leaves it waiting: a `Fiber`'s resumer, `caller`, where
+    /// a resume and not a destroy ran it. None for an extension's
+    /// coroutine, whose bottom `zend_test_fiber_execute` zeroes, and for
+    /// a suspended one, whose suspend cleared `caller`.
+    fn linked_resumer(&self) -> Option<Context> {
+        match (self.kind, self.caller) {
+            (Kind::Fiber, Some(Caller::Coroutine(resumer))) if !self.destroyed => Some(resumer),
+            _ => None,
+        }
     }
 
     /// `zend_fiber_init_context` for an extension's coroutine, the one
