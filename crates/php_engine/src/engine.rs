@@ -4959,6 +4959,7 @@ impl Engine {
         }
         let web = description.web.is_some();
         let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
+        req.lay_start_rooms();
         if traced || self.shared.trace_to.is_some() {
             req.trace_natives();
         }
@@ -5048,6 +5049,14 @@ impl Engine {
         // `php_execute_script_ex` leaves as it is beside the expanded
         // `opened_path`, and which opcache makes the file's key of.
         let written = req.script_name().map(<[u8]>::to_vec);
+        let old_cwd = req.old_cwd();
+        if script
+            && source.is_none()
+            && let Some(written) = &written
+        {
+            // The memory limit's fatal is recorded and ends the request.
+            req.open_primary_handle(written).ok();
+        }
         let mut left = None;
         if script {
             // php-cgi and php-fpm open the file before
@@ -5068,6 +5077,8 @@ impl Engine {
         if let Some(left) = left {
             req.go_back(left);
         }
+        req.give_back_old_cwd(old_cwd);
+        req.close_primary_handle();
         ran
     }
 
