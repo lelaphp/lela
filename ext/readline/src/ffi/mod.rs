@@ -70,9 +70,60 @@ struct Lent {
     at: usize,
 }
 
-/// The record of the lending call in progress, null outside one; the
-/// library's own state is process-wide, and so is this.
-static mut LENT: *mut Lent = ptr::null_mut();
+/// `pthread_once` for [`KEY`], made once for the process.
+static mut ONCE: libc::pthread_once_t = libc::PTHREAD_ONCE_INIT;
+
+/// The key of the per-thread slot that holds the record of the lending
+/// call in progress on the thread, null outside one: libedit's callbacks
+/// carry no user data, so what php keeps per thread under `ZEND_TLS` is
+/// kept in a slot of a `pthread_key_t`, made once through `pthread_once`
+/// (design §7.2's readline row, revision 76; #1606, #2821). The key is
+/// written once, by [`make_key`], and read after; no request's pointer
+/// stands in a process-wide static.
+static mut KEY: libc::pthread_key_t = 0;
+
+/// `pthread_once`'s routine: the slot's key made.
+unsafe extern "C" fn make_key() {
+    let key = &raw mut KEY;
+    // SAFETY: called once, by `pthread_once`, before any read of `KEY`;
+    // the slot needs no destructor, since a record lives on its lending
+    // frame and the slot is null outside one.
+    unsafe {
+        libc::pthread_key_create(key, None);
+    }
+}
+
+/// The slot's key, made on the first ask.
+fn key() -> libc::pthread_key_t {
+    let once = &raw mut ONCE;
+    // SAFETY: `ONCE` is only ever handed to `pthread_once`, which
+    // serialises the one call of `make_key`.
+    unsafe {
+        libc::pthread_once(once, Some(make_key));
+    }
+    // SAFETY: written by `make_key`, which `pthread_once` ran to its end
+    // before returning here, and never written again.
+    unsafe { KEY }
+}
+
+/// The thread's slot: the record of the lending call in progress, null
+/// outside one.
+fn slot() -> *mut Lent {
+    let key = key();
+    // SAFETY: a key `pthread_key_create` made; the slot holds what
+    // `set_slot` put there on this thread, or null.
+    unsafe { libc::pthread_getspecific(key) }.cast()
+}
+
+/// The thread's slot set to `record`.
+fn set_slot(record: *mut Lent) {
+    let key = key();
+    // SAFETY: a key `pthread_key_create` made, and the value one this
+    // thread's lending frame owns, or null.
+    unsafe {
+        libc::pthread_setspecific(key, record.cast());
+    }
+}
 
 /// `call` with `req` lent to whatever the library calls back while it
 /// runs, the lending before it put back after, so a callback that lends
@@ -83,24 +134,25 @@ fn lend<R>(req: &mut Request, call: impl FnOnce() -> R) -> R {
         candidates: Vec::new(),
         at: 0,
     };
-    // SAFETY: the record of the call in progress, read by copy.
-    let outer = unsafe { LENT };
-    // SAFETY: the record lives on this frame until it is put back below,
-    // after `call` returns.
-    unsafe { LENT = &raw mut lent };
+    lending(&mut lent, call)
+}
+
+/// `call` with `record` in the thread's slot, the record before it put
+/// back after.
+fn lending<R>(record: &mut Lent, call: impl FnOnce() -> R) -> R {
+    let outer = slot();
+    set_slot(record);
     let answer = call();
-    // SAFETY: as above.
-    unsafe { LENT = outer };
+    set_slot(outer);
     answer
 }
 
 /// The lending call's record, `None` outside one.
 fn lent<'a>() -> Option<&'a mut Lent> {
-    // SAFETY: the record of the call in progress, read by copy.
-    let at = unsafe { LENT };
-    // SAFETY: set by `lend` to a record on its frame, live until `lend`
-    // returns, which it does not while the library calls back; the
-    // lending native touches neither the record nor its request until
+    let at = slot();
+    // SAFETY: set by `lending` to a record on its frame, live until
+    // `lending` returns, which it does not while the library calls back;
+    // the lending native touches neither the record nor its request until
     // then, so this is the one live borrow of both.
     unsafe { at.as_mut() }
 }
@@ -441,4 +493,56 @@ pub(crate) fn redisplay() {
 pub(crate) fn on_new_line() {
     // SAFETY: no argument.
     unsafe { sys::rl_on_new_line() };
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::{Lent, lending, slot};
+
+    /// A record with no request, enough for the slot, which holds the
+    /// record and reads none of it.
+    fn record() -> Lent {
+        Lent {
+            req: std::ptr::null_mut(),
+            candidates: Vec::new(),
+            at: 0,
+        }
+    }
+
+    /// A lending inside another's call puts its own record in the slot and
+    /// the outer one back as it returns, and the slot is empty outside both.
+    #[test]
+    fn a_lending_nests_and_puts_the_outer_record_back() {
+        let (mut outer, mut inner) = (record(), record());
+        let (outer_at, inner_at): (*mut Lent, *mut Lent) = (&raw mut outer, &raw mut inner);
+        assert!(slot().is_null());
+        lending(&mut outer, || {
+            assert_eq!(slot(), outer_at);
+            lending(&mut inner, || assert_eq!(slot(), inner_at));
+            assert_eq!(slot(), outer_at);
+        });
+        assert!(slot().is_null());
+    }
+
+    /// Each thread's slot is its own: a thread started inside another's
+    /// lending finds its slot empty, lends its own record, and leaves the
+    /// first thread's record where it stood.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // a test's own thread, which no fork waits on
+    fn two_threads_lend_records_of_their_own() {
+        let mut first = record();
+        let first_at: *mut Lent = &raw mut first;
+        lending(&mut first, || {
+            let joined = std::thread::spawn(|| {
+                assert!(slot().is_null());
+                let mut second = record();
+                let second_at: *mut Lent = &raw mut second;
+                lending(&mut second, || assert_eq!(slot(), second_at));
+                assert!(slot().is_null());
+            })
+            .join();
+            assert!(joined.is_ok());
+            assert_eq!(slot(), first_at);
+        });
+    }
 }
