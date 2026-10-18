@@ -34,6 +34,16 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 die() { printf 'runner.sh: %s\n' "$*" >&2; exit 1; }
 
+# The size either runner's target/ is held under, in GiB: written into the
+# runner's environment as DAX_TARGET_GIB, which the workspace action's
+# scripts/ci/bound-target.sh reads (#2299). Provisional until it is measured
+# on the runners: three times the dev machine's main checkout's target/,
+# 19.4 GiB on 2026-10-18 over its dev, release, release-da, miri and
+# featured builds. Every building job logs target/'s size first, and the
+# number is set from how fast that grows across the bumps of the pin, the
+# toolchain and the dependencies.
+target_gib=60
+
 machine=${1:-}; shift || true
 url="" token="" name=$(hostname -s) pin=""
 while [ $# -gt 0 ]; do
@@ -66,6 +76,17 @@ register() {
         (cd "$dir" && as_user env PATH="$path" ./config.sh --unattended --url "$url" --token "$token" \
             --name "$name" --labels "$labels" --work _work --replace)
     fi
+    # config.sh writes .env, which the runner reads as every job's
+    # environment when it starts; the bound is one line of it.
+    local env=$dir/.env want changed=""
+    want=$({ grep -v '^DAX_TARGET_GIB=' "$env" 2>/dev/null || true; echo "DAX_TARGET_GIB=$target_gib"; })
+    if [ "$want" = "$(cat "$env" 2>/dev/null)" ]; then
+        say "target/ is held under $target_gib GiB already; kept"
+    else
+        say "target/ held under $target_gib GiB, in the runner's environment"
+        printf '%s\n' "$want" | as_user tee "$env" >/dev/null
+        changed=1
+    fi
     if [ -f "$dir/.service" ]; then
         say "the runner's service is installed; kept"
     elif [ "$os" = linux ]; then
@@ -73,7 +94,7 @@ register() {
     else
         (cd "$dir" && ./svc.sh install)
     fi
-    (cd "$dir" && { ./svc.sh start || true; ./svc.sh status; })
+    (cd "$dir" && { [ -z "$changed" ] || ./svc.sh stop || true; ./svc.sh start || true; ./svc.sh status; })
 }
 
 linux() {
