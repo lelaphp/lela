@@ -93,11 +93,11 @@ impl Emit<'_> {
         let ty = match written {
             TypeExpr::NamedType(id) => self.single_typename(id)?,
             TypeExpr::UnionType(id) => {
-                let members = self.parsed.tree[id].types.to_vec();
+                let members = self.list(self.parsed.tree[id].types).to_vec();
                 self.union_type(&members)?
             }
             TypeExpr::IntersectionType(id) => {
-                let members = self.parsed.tree[id].types.to_vec();
+                let members = self.list(self.parsed.tree[id].types).to_vec();
                 self.intersection_type(&members)?
             }
             TypeExpr::ParenType(_) => return Err(unread(self.line, "a DNF type")),
@@ -249,7 +249,7 @@ impl Emit<'_> {
                         _ => return Err(unread(self.line, "a type")),
                     };
                     has_only_iterable_class = false;
-                    let inner = self.parsed.tree[id].types.to_vec();
+                    let inner = self.list(self.parsed.tree[id].types).to_vec();
                     let single = self.intersection_type(&inner)?;
                     for earlier in out.iter().filter(|ty| is_complex(ty)) {
                         match earlier {

@@ -40,14 +40,14 @@ pub use stack::StackLimit;
 pub mod syntax {
     pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
-        Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, Position,
+        Arena, Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, Position,
         ScannedToken, SyntaxKind, Token, highlight, html_puts, lex, parse, scanned, strip,
     };
 }
 
 use php_heap::{Fatal, FatalReason, Intern};
 use php_link::{Exact, Folded, Indexed};
-use php_syntax::Parsed;
+use php_syntax::{Arena, Parsed};
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Visibility};
 use php_unit::{Diagnostic, Level, Unit};
 
@@ -381,12 +381,20 @@ pub fn compile_source(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
+    Arena::lend(|arena| compile_in(arena, source, options, strings))
+}
+
+/// [`compile_source`] in `arena`, where the parse and the compiler's
+/// temporaries live until the unit is made.
+fn compile_in(
+    arena: &Arena,
+    source: &[u8],
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+) -> Result<Unit, CompileError> {
     let Some(multibyte) = options.multibyte else {
-        return compile(
-            &php_syntax::parse(source, &syntax_options(options)),
-            options,
-            strings,
-        );
+        let parsed = php_syntax::parse(arena, source, &syntax_options(options));
+        return compile_scanned(arena, &parsed, options, strings, None);
     };
     let from = match options.kind {
         SourceKind::File => multibyte::Source::File {
@@ -404,12 +412,12 @@ pub fn compile_source(
             thrown: false,
             stage: Stage::Opening,
         })?;
-    let parsed = php_syntax::parse(&opened.text, &syntax_options(options));
+    let parsed = php_syntax::parse(arena, &opened.text, &syntax_options(options));
     let scanning = multibyte::Scanning {
         original: source.get(opened.bom..).unwrap_or_default(),
         filter: opened.filter,
     };
-    compile_scanned(&parsed, options, strings, Some(scanning))
+    compile_scanned(arena, &parsed, options, strings, Some(scanning))
 }
 
 /// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
@@ -422,18 +430,20 @@ pub fn export_source(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Vec<u8>, CompileError> {
-    let parsed = php_syntax::parse(source, &syntax_options(options));
-    if let Some(fatal) = parsed.diagnostics.iter().find(|d| d.level.is_fatal()) {
-        return Err(CompileError {
-            level: level_of(fatal.level),
-            message: fatal.message.clone(),
-            line: fatal.line,
-            raised: Vec::new(),
-            thrown: false,
-            stage: Stage::Compiling,
-        });
-    }
-    emit::export(&parsed, options, strings)
+    Arena::lend(|arena| {
+        let parsed = php_syntax::parse(arena, source, &syntax_options(options));
+        if let Some(fatal) = parsed.diagnostics.iter().find(|d| d.level.is_fatal()) {
+            return Err(CompileError {
+                level: level_of(fatal.level),
+                message: fatal.message.clone(),
+                line: fatal.line,
+                raised: Vec::new(),
+                thrown: false,
+                stage: Stage::Compiling,
+            });
+        }
+        emit::export(&parsed, options, strings)
+    })
 }
 
 /// What the lexer is told of a source the compiler is handed: the
@@ -457,17 +467,18 @@ fn syntax_options(options: &Options<'_>) -> php_syntax::Options {
 /// Compile one parsed file into a unit, interning its constant strings
 /// into `strings`.
 pub fn compile(
-    parsed: &Parsed,
+    parsed: &Parsed<'_>,
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    compile_scanned(parsed, options, strings, None)
+    Arena::lend(|arena| compile_scanned(arena, parsed, options, strings, None))
 }
 
 /// [`compile`] over a parse of what the scanner read through
-/// `scanning`, the file as it was opened.
+/// `scanning`, the file as it was opened, with `arena` the compile's.
 fn compile_scanned<'p>(
-    parsed: &'p Parsed,
+    arena: &'p Arena,
+    parsed: &'p Parsed<'p>,
     options: &Options<'p>,
     strings: &mut dyn Intern,
     scanning: Option<multibyte::Scanning<'p>>,
@@ -484,7 +495,7 @@ fn compile_scanned<'p>(
     // The parser's `declare` action runs as it parses
     // ([`multibyte::scan`]): what it warned stands among the parse's
     // diagnostics, and the fatal it threw stands where it threw it.
-    let scanned = multibyte::scan(parsed, options, scanning);
+    let scanned = multibyte::scan(arena, parsed, options, scanning);
     let parsed = &*scanned.parsed;
     let mut raised = Vec::new();
     for (at, diagnostic) in parsed.diagnostics.iter().enumerate() {
@@ -735,7 +746,11 @@ mod tests {
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
         let mut strings = php_heap::Strings::new();
         let unit = compile(
-            &php_syntax::parse(source, &php_syntax::Options::default()),
+            &php_syntax::parse(
+                &php_syntax::Arena::new(),
+                source,
+                &php_syntax::Options::default(),
+            ),
             &bundled(),
             &mut strings,
         )
@@ -1252,6 +1267,7 @@ mod tests {
         };
         let compiled = compile(
             &php_syntax::parse(
+                &php_syntax::Arena::new(),
                 b"<?php echo T_LNUMBER - 1, \\PHP_OS;",
                 &php_syntax::Options::default(),
             ),
@@ -1274,7 +1290,11 @@ mod tests {
             Some(b"Darwin".to_vec())
         );
         let lowered = compile(
-            &php_syntax::parse(b"<?php echo t_lnumber;", &php_syntax::Options::default()),
+            &php_syntax::parse(
+                &php_syntax::Arena::new(),
+                b"<?php echo t_lnumber;",
+                &php_syntax::Options::default(),
+            ),
             &options,
             &mut strings,
         );
@@ -1307,7 +1327,11 @@ mod tests {
                 ..Options::default()
             };
             let unit = compile(
-                &php_syntax::parse(b"<?php echo __DIR__;", &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    b"<?php echo __DIR__;",
+                    &php_syntax::Options::default(),
+                ),
                 &options,
                 &mut strings,
             )
@@ -1711,7 +1735,11 @@ mod tests {
         // ini entry, as `zend_double_to_str` reads `EG(precision)`.
         let mut strings = php_heap::Strings::new();
         let unit = compile(
-            &php_syntax::parse(b"<?php echo 1 / 3 . '';", &php_syntax::Options::default()),
+            &php_syntax::parse(
+                &php_syntax::Arena::new(),
+                b"<?php echo 1 / 3 . '';",
+                &php_syntax::Options::default(),
+            ),
             &Options {
                 precision: 3,
                 ..Options::default()
@@ -1898,7 +1926,11 @@ mod tests {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &Options::default(),
                 &mut strings,
             )
@@ -2868,7 +2900,11 @@ mod tests {
         ] {
             let mut strings = php_heap::Strings::new();
             let unit = compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &Options::default(),
                 &mut strings,
             )
@@ -2898,7 +2934,8 @@ mod tests {
                 hooked,
                 ..bundled()
             };
-            let parsed = php_syntax::parse(source, &php_syntax::Options::default());
+            let arena = php_syntax::Arena::new();
+            let parsed = php_syntax::parse(&arena, source, &php_syntax::Options::default());
             compile(&parsed, &options, &mut strings)
                 .unwrap_or_default()
                 .main
@@ -3938,7 +3975,11 @@ mod tests {
     fn a_namespace_after_a_statement_is_php_s_compile_error() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php 1;\nnamespace Foo;", &php_syntax::Options::default()),
+            &php_syntax::parse(
+                &php_syntax::Arena::new(),
+                b"<?php 1;\nnamespace Foo;",
+                &php_syntax::Options::default(),
+            ),
             &bundled(),
             &mut strings,
         )
@@ -3960,7 +4001,11 @@ mod tests {
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x . list($a);", &php_syntax::Options::default()),
+            &php_syntax::parse(
+                &php_syntax::Arena::new(),
+                b"<?php\n$x . list($a);",
+                &php_syntax::Options::default(),
+            ),
             &Options::default(),
             &mut strings,
         )
@@ -3976,7 +4021,11 @@ mod tests {
     fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\necho 1 +;", &php_syntax::Options::default()),
+            &php_syntax::parse(
+                &php_syntax::Arena::new(),
+                b"<?php\necho 1 +;",
+                &php_syntax::Options::default(),
+            ),
             &Options::default(),
             &mut strings,
         )
@@ -4362,7 +4411,11 @@ mod tests {
     fn refused(source: &[u8]) -> Option<CompileError> {
         let mut strings = php_heap::Strings::new();
         compile(
-            &php_syntax::parse(source, &php_syntax::Options::default()),
+            &php_syntax::parse(
+                &php_syntax::Arena::new(),
+                source,
+                &php_syntax::Options::default(),
+            ),
             &bundled(),
             &mut strings,
         )
@@ -5185,6 +5238,7 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         let refused = compile(
             &php_syntax::parse(
+                &php_syntax::Arena::new(),
                 b"<?php namespace A;\nclass M { const K = 1;\n const K = 2; }",
                 &php_syntax::Options::default(),
             ),
@@ -5359,7 +5413,11 @@ mod tests {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &bundled(),
                 &mut strings,
             )
@@ -5425,7 +5483,11 @@ mod tests {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &bundled(),
                 &mut strings,
             )
@@ -5929,7 +5991,11 @@ mod tests {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &bundled(),
                 &mut strings,
             )
@@ -6006,6 +6072,7 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         let dump = compile(
             &php_syntax::parse(
+                &php_syntax::Arena::new(),
                 b"<?php namespace A; M::f(1); \\M::f(1);",
                 &php_syntax::Options::default(),
             ),
@@ -6142,7 +6209,11 @@ mod tests {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &bundled(),
                 &mut strings,
             )
@@ -6246,7 +6317,11 @@ mod tests {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &bundled(),
                 &mut strings,
             )
@@ -8271,7 +8346,11 @@ class C {
         let dump = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &options,
                 &mut strings,
             )
@@ -8349,7 +8428,11 @@ class C {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
             compile(
-                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &php_syntax::parse(
+                    &php_syntax::Arena::new(),
+                    source,
+                    &php_syntax::Options::default(),
+                ),
                 &bundled(),
                 &mut strings,
             )

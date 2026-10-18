@@ -328,7 +328,9 @@ fn what_the_scanner_hands_over_as_a_token_the_parser_names() {
 
 #[test]
 fn the_options_are_the_file_and_the_lexers() {
+    let arena = php_syntax::Arena::new();
     let parsed = parse(
+        &arena,
         b"<? echo 1 2;",
         &Options {
             file: FileId(7),
@@ -342,6 +344,7 @@ fn the_options_are_the_file_and_the_lexers() {
     // to refuse.
     assert_eq!(parsed.diagnostics, []);
     let parsed = parse(
+        &arena,
         b"<?php echo 1 2;",
         &Options {
             file: FileId(7),

@@ -296,7 +296,7 @@ impl Emit<'_> {
                 self.evaluate(ctor)?;
             }
             if let Some(args) = args {
-                for arg in self.parsed.tree[args].args.clone().iter().copied() {
+                for arg in self.list(self.parsed.tree[args].args).iter().copied() {
                     match arg {
                         tree::Arg::Expr(value) => self.evaluate(value)?,
                         tree::Arg::NamedArg(named) => {

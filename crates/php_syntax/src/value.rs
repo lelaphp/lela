@@ -145,11 +145,11 @@ impl TokenValue {
                 TokenValue::Bytes(unescape(text, Quote::Backquote))
             }
             (Holder::Heredoc(node), SyntaxKind::STRING_TEXT) => {
-                let text = body(text, &parsed.tokens, token, node.end);
+                let text = body(text, parsed.tokens, token, node.end);
                 TokenValue::Bytes(unescape(text, Quote::Heredoc))
             }
             (Holder::Nowdoc(node), SyntaxKind::STRING_TEXT) => {
-                TokenValue::Bytes(body(text, &parsed.tokens, token, node.end).to_vec())
+                TokenValue::Bytes(body(text, parsed.tokens, token, node.end).to_vec())
             }
             (Holder::Offset(_), SyntaxKind::ENCAPS_INT | SyntaxKind::INT) => offset(text),
             _ => return None,

@@ -317,7 +317,7 @@ impl Emit<'_> {
     ) -> Result<Args, CompileError> {
         let node = &self.parsed.tree[id];
         let mut list = Vec::with_capacity(node.args.len());
-        for arg in &node.args {
+        for arg in self.list(node.args) {
             match arg {
                 tree::Arg::Expr(expr) => list.push(Arg::Positional(Source::Expr(*expr))),
                 tree::Arg::NamedArg(named) => {

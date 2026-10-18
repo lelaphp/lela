@@ -69,12 +69,15 @@
 //! the fixture harness prints the broken promise beside the dump and no
 //! parent reads a node that was never resolved.
 
+use bumpalo::collections::Vec as BumpVec;
+
 use crate::SyntaxKind;
+use crate::arena::Arena;
 use crate::lexer::Token;
 use crate::line_index::LineIndex;
 use crate::source::{Diagnostic, TextRange};
 
-use super::{Element, Nodes, Resolved, TokenId, Tree, line, resolve};
+use super::{Building, Element, Pools, Resolved, TokenId, Tree, line, resolve};
 
 /// One parser event. The parser emits a flat stream; the builder assembles
 /// the tree, so the parser is tested without trees and the builder without
@@ -129,9 +132,9 @@ pub struct Missing {
 
 /// What one build produced.
 #[derive(Debug, Default)]
-pub struct Built {
-    /// The tree.
-    pub tree: Tree,
+pub struct Built<'a> {
+    /// The tree, in the arena the build was handed.
+    pub tree: Tree<'a>,
     /// The diagnostics the parser raised, in stream order.
     pub diagnostics: Vec<Diagnostic>,
     /// Every required child the parser did not supply, in finish order.
@@ -162,34 +165,40 @@ struct Frame {
     enclosing: Option<SyntaxKind>,
 }
 
-struct Builder<'a> {
-    tokens: &'a [Token],
-    lines: &'a LineIndex,
+struct Builder<'s, 'a> {
+    tokens: &'s [Token],
+    lines: &'s LineIndex<'s>,
     /// The next token not yet passed over.
     raw: usize,
     /// The last significant token consumed.
     prev: Option<usize>,
     /// php's `CG(doc_comment)`: the pending doc comment (the docs above).
     doc_comment: Option<TokenId>,
-    elements: Vec<Element>,
+    elements: BumpVec<'a, Element>,
     /// The direct children of every open frame, innermost last.
     pending: Vec<Element>,
     frames: Vec<Frame>,
     /// The kinds of one forward-parent chain while it is opened, kept
     /// between chains so a chain costs no allocation of its own.
     chain: Vec<SyntaxKind>,
-    nodes: Nodes,
+    nodes: Building<'a>,
+    pools: Pools<'a>,
     missing: Vec<Missing>,
 }
 
 /// Build the tree of `events` over `tokens`, the lossless stream the
-/// parser read, with `lines` the line table of the source the tokens
-/// index, which every node's line is read from. Unbalanced events do not
-/// fail the build: a `Finish` with nothing open is dropped, and a frame
-/// still open at the end is finished.
+/// parser read, into `arena`, with `lines` the line table of the source
+/// the tokens index, which every node's line is read from. Unbalanced
+/// events do not fail the build: a `Finish` with nothing open is
+/// dropped, and a frame still open at the end is finished.
 #[must_use]
-pub fn build(tokens: &[Token], lines: &LineIndex, events: Vec<Event>) -> Built {
-    build_in(tokens, lines, events, &mut Stacks::default())
+pub fn build<'a>(
+    arena: &'a Arena,
+    tokens: &[Token],
+    lines: &LineIndex<'_>,
+    events: Vec<Event>,
+) -> Built<'a> {
+    build_in(arena, tokens, lines, events, &mut Stacks::default())
 }
 
 /// The builder's stacks that die with the build: the open frames, their
@@ -225,34 +234,42 @@ fn lent<T>(stack: &mut Vec<T>, at_least: usize) -> Vec<T> {
 
 /// [`build`] over the stacks `stacks` lends, handed back empty with
 /// `events`' room among them.
-pub(crate) fn build_in(
+pub(crate) fn build_in<'a>(
+    arena: &'a Arena,
     tokens: &[Token],
-    lines: &LineIndex,
+    lines: &LineIndex<'_>,
     mut events: Vec<Event>,
     stacks: &mut Stacks,
-) -> Built {
+) -> Built<'a> {
     // The shape holds an element per `Start` and per `Token`, so it is
     // laid down once at that length, and grows only where the root takes
-    // tokens the parser left unconsumed.
-    let shaped = events
-        .iter()
-        .filter(|event| match event {
-            Event::Start { kind, .. } => *kind != TOMBSTONE,
-            Event::Token { .. } => true,
-            _ => false,
+    // tokens the parser left unconsumed; each kind's nodes are laid down
+    // at the count of its `Start`s.
+    let opened = || {
+        events.iter().filter_map(|event| match event {
+            Event::Start { kind, .. } if *kind != TOMBSTONE => Some(*kind),
+            _ => None,
         })
+    };
+    let consumed = events
+        .iter()
+        .filter(|event| matches!(event, Event::Token { .. }))
         .count();
+    let shaped = opened().count() + consumed;
+    let bump = arena.bump();
+    let nodes = Building::new(bump, opened());
     let mut builder = Builder {
         tokens,
         lines,
         raw: 0,
         prev: None,
         doc_comment: None,
-        elements: Vec::with_capacity(shaped),
+        elements: BumpVec::with_capacity_in(shaped, bump),
         pending: lent(&mut stacks.pending, shaped.min(2 * OPEN)),
         frames: lent(&mut stacks.frames, OPEN),
         chain: std::mem::take(&mut stacks.chain),
-        nodes: Nodes::default(),
+        nodes,
+        pools: Pools::new(bump),
         missing: Vec::new(),
     };
     let mut diagnostics = Vec::new();
@@ -323,15 +340,16 @@ pub(crate) fn build_in(
     };
     Built {
         tree: Tree {
-            elements: builder.elements.into_boxed_slice(),
-            nodes: builder.nodes,
+            elements: builder.elements.into_bump_slice(),
+            nodes: bump.alloc(builder.nodes.freeze()),
+            lists: bump.alloc(builder.pools.freeze()),
         },
         diagnostics,
         missing: builder.missing,
     }
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     /// Pass over the whitespace and comments before the next significant
     /// token, tracking php's pending doc comment.
     fn skip_insignificant(&mut self) {
@@ -461,6 +479,7 @@ impl Builder<'_> {
         let line = line::of(frame.kind, children, &site);
         let (kind, index) = match resolve(
             &mut self.nodes,
+            &mut self.pools,
             frame.kind,
             range,
             line,
@@ -546,8 +565,10 @@ mod tests {
         crate::lexer::lex(FileId(0), source, &LexOptions::default()).tokens
     }
 
-    fn build_over(source: &[u8], tokens: &[Token], events: Vec<Event>) -> Built {
-        build(tokens, &LineIndex::new(source), events)
+    /// The build of `events` in an arena of its own, kept for the test.
+    fn build_over(source: &[u8], tokens: &[Token], events: Vec<Event>) -> Built<'static> {
+        let arena: &'static Arena = Box::leak(Box::new(Arena::new()));
+        build(arena, tokens, &LineIndex::new(arena, source), events)
     }
 
     /// `class X {}` as events, under an open `SOURCE_FILE`; the take

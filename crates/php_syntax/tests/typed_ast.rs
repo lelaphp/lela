@@ -16,13 +16,19 @@ use php_syntax::{FileId, LexOptions, SyntaxKind, Token, lex, parse};
 struct Hand {
     source: &'static [u8],
     tokens: Vec<Token>,
-    built: Built,
+    built: Built<'static>,
 }
 
 impl Hand {
     fn new(source: &'static [u8], events: Vec<Event>) -> Hand {
         let tokens = lex(FileId(0), source, &LexOptions::default()).tokens;
-        let built = tree::build(&tokens, &php_syntax::LineIndex::new(source), events);
+        let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
+        let built = tree::build(
+            arena,
+            &tokens,
+            &php_syntax::LineIndex::new(arena, source),
+            events,
+        );
         Hand {
             source,
             tokens,
@@ -384,9 +390,10 @@ fn the_token_texts_concatenate_to_the_input() {
         b"<?= 'x' ?>\n<?php 0x1G;",
         b"\xff\xfe<?php \"\xc3\x28\";",
     ] {
-        let parsed = parse(source, &php_syntax::Options::default());
+        let arena = php_syntax::Arena::new();
+        let parsed = parse(&arena, source, &php_syntax::Options::default());
         let mut text = Vec::new();
-        for token in &parsed.tokens {
+        for token in parsed.tokens {
             text.extend_from_slice(
                 &parsed.source[token.offset as usize..(token.offset + token.len) as usize],
             );

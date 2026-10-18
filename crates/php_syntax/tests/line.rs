@@ -33,7 +33,8 @@ use php_syntax::{Options, SyntaxKind, parse};
 
 /// The line of every node of `kind` in `src`, in source order.
 fn lines(src: &str, kind: SyntaxKind) -> Vec<u32> {
-    let parsed = parse(src.as_bytes(), &Options::default());
+    let arena = php_syntax::Arena::new();
+    let parsed = parse(&arena, src.as_bytes(), &Options::default());
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     assert!(parsed.missing.is_empty(), "{:?}", parsed.missing);
     parsed

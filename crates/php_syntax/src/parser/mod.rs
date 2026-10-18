@@ -47,7 +47,7 @@ pub struct Parser<'t> {
     file: FileId,
     /// The line table, for the line a diagnostic reports and php's `on
     /// line N` inside the bracket-balance text.
-    lines: &'t LineIndex,
+    lines: &'t LineIndex<'t>,
     events: Vec<Event>,
     /// Forward-progress fuel: spent on every lookahead, refilled on every
     /// consumed token. Exhaustion trips [`Parser::is_stuck`]. A legitimate
@@ -169,7 +169,7 @@ impl<'t> Parser<'t> {
     /// A parser at the start of `input`, `lines` being the table over the
     /// same source.
     #[cfg(test)]
-    pub fn new(input: &'t Input<'t>, file: FileId, lines: &'t LineIndex) -> Parser<'t> {
+    pub fn new(input: &'t Input<'t>, file: FileId, lines: &'t LineIndex<'t>) -> Parser<'t> {
         Parser::new_in(input, file, lines, Vec::new())
     }
 
@@ -177,7 +177,7 @@ impl<'t> Parser<'t> {
     pub(crate) fn new_in(
         input: &'t Input<'t>,
         file: FileId,
-        lines: &'t LineIndex,
+        lines: &'t LineIndex<'t>,
         mut events: Vec<Event>,
     ) -> Parser<'t> {
         let burst_cap = u32::try_from(input.len())

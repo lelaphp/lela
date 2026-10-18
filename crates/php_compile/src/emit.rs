@@ -419,7 +419,7 @@ pub(crate) struct Emit<'a> {
     /// The parse this compiles: the tree the walk reads (design §4.9),
     /// and the token stream and the source a name, a value and a doc
     /// comment are read from.
-    parsed: &'a Parsed,
+    parsed: &'a Parsed<'a>,
     strings: &'a mut dyn Intern,
     /// php's `precision` while the file compiles, [`Options::precision`].
     precision: i32,
@@ -1302,7 +1302,7 @@ impl<'a> Emit<'a> {
     /// The walk's state before the first statement of `parsed`.
     #[allow(clippy::too_many_lines)] // the emitter laid down a field a line
     fn new(
-        parsed: &'a Parsed,
+        parsed: &'a Parsed<'a>,
         options: &'a Options<'a>,
         strings: &'a mut dyn Intern,
         halt: Option<i64>,
@@ -1404,7 +1404,7 @@ pub(crate) fn export(
         .root()
         .and_then(php_syntax::tree::Element::id::<php_syntax::tree::SourceFile>);
     if let Some(file) = file {
-        emit.export_stmts(&mut out, &parsed.tree[file].stmts, 0)?;
+        emit.export_stmts(&mut out, parsed.tree.list(parsed.tree[file].stmts), 0)?;
     }
     Ok(out)
 }
@@ -1424,7 +1424,7 @@ pub(crate) fn unit(
     let scanned = walk::halt_offset(parsed)
         .and_then(|end| usize::try_from(end).ok())
         .and_then(|end| parsed.source.get(..end))
-        .unwrap_or(&parsed.source);
+        .unwrap_or(parsed.source);
     let lines = u32::try_from(scanned.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
     let mut emit = Emit::new(parsed, options, strings, halt);
     // A fatal leaves the file with what `zend_error` had raised before
@@ -1601,7 +1601,7 @@ fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), 
     Ok(())
 }
 
-impl Emit<'_> {
+impl<'a> Emit<'a> {
     fn push(&mut self, opline: Opline) -> u32 {
         let at = self.next();
         self.oplines.push(Opline {
@@ -1869,7 +1869,7 @@ impl Emit<'_> {
             // `zend_compile_stmt` and so each ticked where a
             // `declare(ticks)` scope stands ([`Self::tick`]).
             Stmt::EchoStmt(id) => {
-                for part in &tree[id].exprs {
+                for part in tree.list(tree[id].exprs) {
                     self.ext_stmt();
                     let value = self.expr(*part)?;
                     let (op1_type, op1) = self.operand(value);
@@ -1924,7 +1924,7 @@ impl Emit<'_> {
             }
             Stmt::TryStmt(id) => self.r#try(id)?,
             Stmt::UnsetStmt(id) => {
-                for target in &tree[id].targets {
+                for target in tree.list(tree[id].targets) {
                     self.ext_stmt();
                     self.unset(*target)?;
                     self.tick();
@@ -1932,7 +1932,7 @@ impl Emit<'_> {
             }
             Stmt::IfStmt(id) => self.r#if(id)?,
             Stmt::GlobalStmt(id) => {
-                for var in tree[id].vars.clone() {
+                for var in tree.list(tree[id].vars).iter().copied() {
                     self.ext_stmt();
                     self.global_var(var)?;
                     self.tick();
@@ -1991,6 +1991,12 @@ impl Emit<'_> {
             .tokens
             .get(id.0 as usize)
             .map(|token| self.parsed.lines.line_number(token.offset))
+    }
+
+    /// The items of one of the tree's lists, read for as long as the
+    /// parse lives, so a walk over them may compile into the emitter.
+    pub(crate) fn list<T: tree::Listed>(&self, list: tree::List<T>) -> &'a [T] {
+        self.parsed.tree.list(list)
     }
 
     /// A token's text as the scanner handed it over, the token filter's
@@ -2778,8 +2784,7 @@ impl Emit<'_> {
     fn block(&mut self, id: NodeId<Block>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         self.line = node.line();
-        let stmts = &node.stmts;
-        self.statements(stmts)
+        self.statements(self.list(node.stmts))
     }
 
     /// The body of a loop, an arm or a `declare`: a block's statements
@@ -2798,8 +2803,7 @@ impl Emit<'_> {
             (None, Some(list)) => {
                 let node = &self.parsed.tree[list];
                 self.line = node.line();
-                let stmts = &node.stmts;
-                self.statements(stmts)
+                self.statements(self.list(node.stmts))
             }
             (None, None) => Ok(()),
         }
@@ -3113,7 +3117,7 @@ impl Emit<'_> {
     /// ```
     fn r#try(&mut self, id: NodeId<tree::TryStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
-        let catches = &node.catch_clauses;
+        let catches = self.list(node.catch_clauses);
         let finally = match node.finally_clause {
             Some(clause) => {
                 let clause = &self.parsed.tree[clause];
@@ -3227,8 +3231,8 @@ impl Emit<'_> {
         let Some(types) = clause.types else {
             return Err(walk::unread(line, "a `catch` naming no class"));
         };
-        let types: Vec<Vec<u8>> = self.parsed.tree[types]
-            .types
+        let types: Vec<Vec<u8>> = self
+            .list(self.parsed.tree[types].types)
             .iter()
             .map(|id| self.text(*id).to_vec())
             .collect();
@@ -3693,7 +3697,11 @@ impl Emit<'_> {
     /// Fatal error: Duplicate declaration of static variable $a in %s on line 2
     /// ```
     fn static_var(&mut self, id: NodeId<tree::StaticVarStmt>) -> Result<(), CompileError> {
-        for declarator in self.parsed.tree[id].static_var_declarators.clone() {
+        for declarator in self
+            .list(self.parsed.tree[id].static_var_declarators)
+            .iter()
+            .copied()
+        {
             let declarator = &self.parsed.tree[declarator];
             let (line, init) = (declarator.line, declarator.init);
             let name = self.variable_name(declarator.var);
@@ -7626,7 +7634,7 @@ impl Emit<'_> {
             // its `ZEND_AST_UNPACK` with no key; a `&` is what
             // `zend_is_allowed_in_const_expr` refuses.
             tree::Expr::ArrayExpr(id) => {
-                let elements = self.elements_of(&tree[id].array_elements.clone())?;
+                let elements = self.elements_of(tree.list(tree[id].array_elements))?;
                 // `zend_ast_create_list`: the list's line is its first
                 // element's, whose `ZEND_AST_ARRAY_ELEM` is its value's.
                 let line = match elements.first() {
@@ -8290,7 +8298,7 @@ impl Emit<'_> {
         }
         let body = node.body.filter(|body| !matches!(body, Stmt::EmptyStmt(_)));
         let before = self.ticks;
-        for directive in &node.declare_directives {
+        for directive in self.list(node.declare_directives) {
             let directive = &self.parsed.tree[*directive];
             self.line = directive.line();
             let Some(written_value) = directive.value else {
@@ -8414,9 +8422,9 @@ impl Emit<'_> {
     /// }
     /// ```
     fn const_decl(&mut self, id: NodeId<tree::ConstStmt>) -> Result<(), CompileError> {
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let mut declared = None;
-        for declarator in &node.const_declarators {
+        for declarator in self.list(node.const_declarators) {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
             // The fold, or the tree `DECLARE_CONST` evaluates as it runs.
@@ -8455,15 +8463,15 @@ impl Emit<'_> {
         let Some((name, value, unevaluated)) = declared else {
             return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
         };
-        let first = node
-            .const_declarators
+        let first = self
+            .list(node.const_declarators)
             .first()
             .map_or(self.line, |declarator| self.parsed.tree[*declarator].line());
         self.line = first;
         if node.const_declarators.len() > 1 {
             return Err(self.compile_error("Cannot apply attributes to multiple constants at once"));
         }
-        let written = self.walk_attributes(&node.attrs)?;
+        let written = self.walk_attributes(self.list(node.attrs))?;
         let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
         // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
         // value the compiler could not fold is the tree of.
@@ -8677,9 +8685,15 @@ impl Emit<'_> {
     fn r#for(&mut self, id: NodeId<tree::ForStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let tree = &self.parsed.tree;
-        let init = node.init.map_or(&[][..], |init| &tree[init].exprs[..]);
-        let cond = node.cond.map_or(&[][..], |cond| &tree[cond].exprs[..]);
-        let step = node.step.map_or(&[][..], |step| &tree[step].exprs[..]);
+        let init = node
+            .init
+            .map_or(&[][..], |init| tree.list(tree[init].exprs));
+        let cond = node
+            .cond
+            .map_or(&[][..], |cond| tree.list(tree[cond].exprs));
+        let step = node
+            .step
+            .map_or(&[][..], |step| tree.list(tree[step].exprs));
         let init = self.expr_list(init)?;
         self.do_free(init);
         let jump = self.push(Opline {
@@ -8729,7 +8743,7 @@ impl Emit<'_> {
             line: node.line(),
         });
         if node.stmt_list.is_some() {
-            for clause in &node.alt_elseif_clauses {
+            for clause in self.list(node.alt_elseif_clauses) {
                 let clause = &tree[*clause];
                 let cond = self.required(clause.cond, "an `elseif` with no condition")?;
                 arms.push(IfElem {
@@ -8749,7 +8763,7 @@ impl Emit<'_> {
                 });
             }
         } else {
-            for clause in &node.elseif_clauses {
+            for clause in self.list(node.elseif_clauses) {
                 let clause = &tree[*clause];
                 let cond = self.required(clause.cond, "an `elseif` with no condition")?;
                 arms.push(IfElem {
@@ -9999,7 +10013,7 @@ impl Emit<'_> {
     fn switch(&mut self, id: NodeId<tree::SwitchStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let expr = self.required(node.subject, "a `switch` with no condition")?;
-        let cases = &node.switch_arms;
+        let cases = self.list(node.switch_arms);
         let subject = self.expr(expr)?;
         self.begin_loop(LoopVar::of(Opcode::Free, subject), None, true);
         let case_node = self.temporary();
@@ -10418,7 +10432,7 @@ impl Emit<'_> {
             let Some(conds) = self.parsed.tree[*arm].conds else {
                 continue;
             };
-            for cond in &self.parsed.tree[conds].exprs.clone() {
+            for cond in self.list(self.parsed.tree[conds].exprs) {
                 count += 1;
                 let Some(value) = self.eval_const(*cond)? else {
                     return Ok(false);
@@ -10438,7 +10452,7 @@ impl Emit<'_> {
         let tree = &self.parsed.tree;
         arms.iter()
             .filter_map(|arm| tree[*arm].conds)
-            .flat_map(|conds| tree[conds].exprs.iter().copied())
+            .flat_map(|conds| tree.list(tree[conds].exprs).iter().copied())
             .collect()
     }
 
@@ -10544,7 +10558,7 @@ impl Emit<'_> {
             let node = &self.parsed.tree[*arm];
             let (conds, body, line) = (node.conds, node.body, node.line());
             if let Some(conds) = conds {
-                for cond in &self.parsed.tree[conds].exprs.clone() {
+                for cond in self.list(self.parsed.tree[conds].exprs) {
                     if let Some(jump) = jumps.next() {
                         self.update_jump_target_to_next(jump);
                     }
@@ -11148,8 +11162,8 @@ impl Emit<'_> {
         id: NodeId<tree::InterpolatedStringExpr>,
         line: u32,
     ) -> Result<Where, CompileError> {
-        let parts = self.parsed.tree[id].parts.clone();
-        self.encaps(&parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
+        let parts = self.list(self.parsed.tree[id].parts);
+        self.encaps(parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
     }
 
     /// `ZEND_AST_ENCAPS_LIST` written as a heredoc.
@@ -11158,8 +11172,8 @@ impl Emit<'_> {
         id: NodeId<tree::HeredocExpr>,
         line: u32,
     ) -> Result<Where, CompileError> {
-        let parts = self.parsed.tree[id].parts.clone();
-        self.encaps(&parts, Holder::Heredoc(&self.parsed.tree[id]), line)
+        let parts = self.list(self.parsed.tree[id].parts);
+        self.encaps(parts, Holder::Heredoc(&self.parsed.tree[id]), line)
     }
 
     /// `zend_compile_simple_var` through `zend_try_compile_cv`: the
@@ -11186,8 +11200,8 @@ impl Emit<'_> {
 
     /// `ZEND_AST_ARRAY` read as a value.
     fn array_expr(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Where, CompileError> {
-        let elements = self.parsed.tree[id].array_elements.clone();
-        self.array(&elements)
+        let elements = self.list(self.parsed.tree[id].array_elements);
+        self.array(elements)
     }
 
     /// `ZEND_AST_UNARY_MINUS`, `ZEND_AST_UNARY_PLUS` and
@@ -11297,8 +11311,8 @@ impl Emit<'_> {
     fn match_expr(&mut self, id: NodeId<tree::MatchExpr>) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
         let subject = self.required(node.subject, "a `match`")?;
-        let arms = node.match_arms.clone();
-        self.r#match(subject, &arms)
+        let arms = self.list(node.match_arms);
+        self.r#match(subject, arms)
     }
 
     /// `ZEND_AST_NEW`, over a class named or an anonymous one.
@@ -11339,7 +11353,7 @@ impl Emit<'_> {
 
     /// `ZEND_AST_ISSET` over each target, `&&` between them.
     fn isset_expr(&mut self, id: NodeId<tree::IssetExpr>) -> Result<Where, CompileError> {
-        let targets = self.parsed.tree[id].targets.clone();
+        let targets = self.list(self.parsed.tree[id].targets);
         let Some((&first, rest)) = targets.split_first() else {
             return Err(self.unread("an `isset`"));
         };
@@ -11809,7 +11823,7 @@ impl Emit<'_> {
         if !self.fn_flags.generator {
             return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
         }
-        let node = self.parsed.tree[id].clone();
+        let node = self.parsed.tree[id];
         let key = match node.key {
             Some(key) => {
                 let key = self.parsed.tree[key].key;
@@ -15302,7 +15316,7 @@ impl Emit<'_> {
     fn nowdoc_constant(&mut self, id: NodeId<tree::NowdocExpr>) -> Result<Zval, CompileError> {
         let node = &self.parsed.tree[id];
         let mut bytes = Vec::new();
-        for token in &node.text {
+        for token in self.list(node.text) {
             if let Some(TokenValue::Bytes(text)) =
                 TokenValue::of(self.parsed, Holder::Nowdoc(node), *token)
             {
@@ -15330,8 +15344,8 @@ impl Emit<'_> {
     fn string_constant(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
         let tree = &self.parsed.tree;
         let parts: &[tree::StringPart] = match expr {
-            tree::Expr::InterpolatedStringExpr(id) => &tree[id].parts,
-            tree::Expr::HeredocExpr(id) => &tree[id].parts,
+            tree::Expr::InterpolatedStringExpr(id) => tree.list(tree[id].parts),
+            tree::Expr::HeredocExpr(id) => tree.list(tree[id].parts),
             _ => &[],
         };
         if parts
@@ -15429,8 +15443,8 @@ impl Emit<'_> {
 
     /// `ZEND_AST_ARRAY` whose every element folds.
     fn array_constant(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Zval, CompileError> {
-        let elements = self.parsed.tree[id].array_elements.clone();
-        self.constant_array(&elements)?
+        let elements = self.list(self.parsed.tree[id].array_elements);
+        self.constant_array(elements)?
             .ok_or_else(|| self.fatal("an array expression that is no constant"))
     }
 
@@ -15655,8 +15669,8 @@ impl Emit<'_> {
         let tree::Expr::ArrayExpr(id) = self.peel(expr) else {
             return Ok(None);
         };
-        let elements = self.parsed.tree[id].array_elements.clone();
-        self.constant_entries(&elements)
+        let elements = self.list(self.parsed.tree[id].array_elements);
+        self.constant_entries(elements)
     }
 
     /// [`Self::constant_array`]'s entries before they are laid down: the
@@ -16141,8 +16155,8 @@ impl Emit<'_> {
                 ..Opline::default()
             });
         }
-        let parts = self.parsed.tree[id].parts.clone();
-        let command = self.encaps(&parts, Holder::ShellExec(&self.parsed.tree[id]), line)?;
+        let parts = self.list(self.parsed.tree[id].parts);
+        let command = self.encaps(parts, Holder::ShellExec(&self.parsed.tree[id]), line)?;
         let (op1_type, op1) = self.operand(command);
         self.push(Opline {
             opcode: if known {
@@ -17590,7 +17604,7 @@ impl Emit<'_> {
         let (resolved, _) = self.function_name(self.text(name));
         Some((
             resolved.to_ascii_lowercase(),
-            &self.parsed.tree[node.args].args,
+            self.list(self.parsed.tree[node.args].args),
         ))
     }
 
@@ -18444,15 +18458,19 @@ impl Emit<'_> {
             | tree::Expr::NowdocExpr(_)
             | tree::Expr::NameRef(_) => {}
             tree::Expr::InterpolatedStringExpr(id) => {
-                self.implicit_uses_of_parts(names, &tree[id].parts);
+                self.implicit_uses_of_parts(names, tree.list(tree[id].parts));
             }
-            tree::Expr::HeredocExpr(id) => self.implicit_uses_of_parts(names, &tree[id].parts),
-            tree::Expr::ShellExecExpr(id) => self.implicit_uses_of_parts(names, &tree[id].parts),
+            tree::Expr::HeredocExpr(id) => {
+                self.implicit_uses_of_parts(names, tree.list(tree[id].parts));
+            }
+            tree::Expr::ShellExecExpr(id) => {
+                self.implicit_uses_of_parts(names, tree.list(tree[id].parts));
+            }
             tree::Expr::ArrayExpr(id) => {
-                self.implicit_uses_of_elements(names, &tree[id].array_elements);
+                self.implicit_uses_of_elements(names, tree.list(tree[id].array_elements));
             }
             tree::Expr::ListExpr(id) => {
-                self.implicit_uses_of_elements(names, &tree[id].array_elements);
+                self.implicit_uses_of_elements(names, tree.list(tree[id].array_elements));
             }
             tree::Expr::UnaryExpr(id) => self.implicit_uses_of_any(names, tree[id].operand),
             tree::Expr::PrefixIncDecExpr(id) => self.implicit_uses_of_any(names, tree[id].operand),
@@ -18492,10 +18510,10 @@ impl Emit<'_> {
             tree::Expr::MatchExpr(id) => {
                 let node = &tree[id];
                 self.implicit_uses_of_any(names, node.subject);
-                for arm in &node.match_arms {
+                for arm in self.list(node.match_arms) {
                     let arm = &tree[*arm];
                     if let Some(conds) = arm.conds {
-                        for cond in &tree[conds].exprs {
+                        for cond in tree.list(tree[conds].exprs) {
                             self.implicit_uses(names, *cond);
                         }
                     }
@@ -18524,7 +18542,7 @@ impl Emit<'_> {
             tree::Expr::YieldFromExpr(id) => self.implicit_uses_of_any(names, tree[id].source),
             tree::Expr::IncludeExpr(id) => self.implicit_uses_of_any(names, tree[id].operand),
             tree::Expr::IssetExpr(id) => {
-                for target in &tree[id].targets {
+                for target in tree.list(tree[id].targets) {
                     self.implicit_uses(names, *target);
                 }
             }
@@ -18592,7 +18610,7 @@ impl Emit<'_> {
             }
             tree::Expr::ClosureExpr(id) => {
                 if let Some(clause) = tree[id].uses {
-                    for used in &tree[clause].closure_use_vars {
+                    for used in tree.list(tree[clause].closure_use_vars) {
                         note(names, &self.variable_name(tree[*used].var));
                     }
                 }
@@ -18632,7 +18650,7 @@ impl Emit<'_> {
     /// The arguments of a list, each one's expression.
     fn implicit_uses_of_args(&self, names: &mut Vec<Vec<u8>>, args: NodeId<tree::ArgList>) {
         let tree = &self.parsed.tree;
-        for arg in &tree[args].args {
+        for arg in tree.list(tree[args].args) {
             match arg {
                 tree::Arg::Expr(expr) => self.implicit_uses(names, *expr),
                 tree::Arg::NamedArg(arg) => self.implicit_uses_of_any(names, tree[*arg].value),
@@ -19511,13 +19529,13 @@ pub(crate) fn written(parsed: &Parsed, expr: tree::Expr) -> Option<Literal> {
                 TokenValue::Float(_) | TokenValue::Bytes(_) => Some(Literal::Other),
             }
         }
-        tree::Expr::InterpolatedStringExpr(id) => tree[id]
-            .parts
+        tree::Expr::InterpolatedStringExpr(id) => tree
+            .list(tree[id].parts)
             .iter()
             .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
             .then_some(Literal::Other),
-        tree::Expr::HeredocExpr(id) => tree[id]
-            .parts
+        tree::Expr::HeredocExpr(id) => tree
+            .list(tree[id].parts)
             .iter()
             .all(|part| matches!(part, tree::StringPart::LiteralStringPart(_)))
             .then_some(Literal::Other),

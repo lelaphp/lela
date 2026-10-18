@@ -39,6 +39,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod arena;
 mod kind {
     //! The generated enum and its display names (`build.rs`).
     include!(concat!(env!("OUT_DIR"), "/syntax_kind.rs"));
@@ -56,6 +57,7 @@ mod source;
 pub mod tree;
 mod value;
 
+pub use arena::Arena;
 pub use highlight::{Colours, highlight, html_puts, strip};
 pub use kind::SyntaxKind;
 pub use lexer::{LexOptions, Lexed, Position, Token, lex};
@@ -76,23 +78,24 @@ pub struct Options {
     pub lex: LexOptions,
 }
 
-/// What one parse produced (design §4.1): the retained source, the
-/// lossless token stream over it, its line table, the tree, the
-/// diagnostics in php's phase order and the promises the grammar broke.
+/// What one parse produced (design §4.1): the source, the lossless token
+/// stream over it, its line table, the tree, the diagnostics in php's
+/// phase order and the promises the grammar broke. The stream, the table
+/// and the tree are in the [`Arena`] the parse was handed, and borrow it:
+/// a parse lives as long as its compile and is given up with the arena
+/// (#2810).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Parsed {
+pub struct Parsed<'a> {
     /// The source as given; tokens are offsets into it.
-    pub source: Box<[u8]>,
+    pub source: &'a [u8],
     /// Every token of the source in order, whitespace and comments
-    /// included: the texts concatenate to `source`. Kept as the lexer
-    /// grew it: a parse lives as long as its compile, and shrinking the
-    /// stream to its length would copy it.
-    pub tokens: Vec<Token>,
+    /// included: the texts concatenate to `source`.
+    pub tokens: &'a [Token],
     /// The line table over `source`, which every diagnostic's line was
     /// read from.
-    pub lines: LineIndex,
+    pub lines: LineIndex<'a>,
     /// The tree over the significant tokens.
-    pub tree: Tree,
+    pub tree: Tree<'a>,
     /// The diagnostics in the order php would raise them, so the first
     /// is the one php reports and the rest are what recovery found
     /// after it. php's scanner runs a token ahead of its parser and
@@ -113,30 +116,40 @@ pub struct Parsed {
     pub filtered: Filtered,
 }
 
-impl Parsed {
+impl Parsed<'_> {
     /// The dump of the tree, `KIND@start..end` per node and
     /// `KIND@start..end "text"` per token ([`tree::dump`]).
     #[must_use]
     pub fn dump(&self) -> String {
-        tree::dump(&self.tree, &self.tokens, &self.source)
+        tree::dump(&self.tree, self.tokens, self.source)
     }
 }
 
-/// Parse one source file. The entry indexes the lines, lexes the source,
-/// hands the stream through the grammar to the builder and retains all
-/// of it, with the diagnostics merged into php's phase order
-/// ([`Parsed::diagnostics`]) and the broken promises the build reported.
+/// Parse one source file into `arena`. The entry indexes the lines, lexes
+/// the source, hands the stream through the grammar to the builder and
+/// keeps all of it in the arena beside the source, which it borrows, with
+/// the diagnostics merged into php's phase order ([`Parsed::diagnostics`])
+/// and the broken promises the build reported.
 ///
-/// The stacks that die with the parse, the significant-token table, the
-/// event stream and the builder's frames, are the thread's [`Scratch`],
-/// lent and taken back empty, so a thread that parses again reuses their
-/// room and a parse of a statement allocates none of them.
+/// The stacks that die with the parse, the lexer's stream before it is
+/// laid in the arena, the significant-token table, the event stream and
+/// the builder's frames, are the thread's [`Scratch`], lent and taken
+/// back empty, so a thread that parses again reuses their room and a
+/// parse of a statement allocates none of them; with an arena that has
+/// room, as [`Arena::lend`]'s has after the first compile, it allocates
+/// nothing at all.
 #[must_use]
-pub fn parse(source: &[u8], options: &Options) -> Parsed {
+pub fn parse<'a>(arena: &'a Arena, source: &'a [u8], options: &Options) -> Parsed<'a> {
     let file = options.file;
     let mut scratch = SCRATCH.take();
-    let lines = LineIndex::new(source);
-    let lexed = lexer::lex_with_lines(file, source, &options.lex, &lines);
+    let lines = LineIndex::new(arena, source);
+    let lexed = lexer::lex_with_lines(
+        file,
+        source,
+        &options.lex,
+        &lines,
+        std::mem::take(&mut scratch.tokens),
+    );
     let input = parser::Input::new_in(
         source,
         &lexed.tokens,
@@ -147,14 +160,16 @@ pub fn parse(source: &[u8], options: &Options) -> Parsed {
     grammar::source_file(&mut p);
     let events = p.finish();
     scratch.significant = input.into_significant();
-    let built = tree::build_in(&lexed.tokens, &lines, events, &mut scratch.stacks);
+    let built = tree::build_in(arena, &lexed.tokens, &lines, events, &mut scratch.stacks);
+    let tokens = arena.copy(&lexed.tokens);
+    let diagnostics = in_php_order(tokens, lexed.diagnostics, built.diagnostics);
+    scratch.tokens = lexed.tokens;
     if scratch.within(Scratch::KEPT) {
         SCRATCH.set(scratch);
     }
-    let diagnostics = in_php_order(&lexed.tokens, lexed.diagnostics, built.diagnostics);
     Parsed {
-        source: source.into(),
-        tokens: lexed.tokens,
+        source,
+        tokens,
         lines,
         tree: built.tree,
         diagnostics,
@@ -168,6 +183,7 @@ pub fn parse(source: &[u8], options: &Options) -> Parsed {
 /// another finds none and makes its own.
 #[derive(Default)]
 struct Scratch {
+    tokens: Vec<Token>,
     significant: Vec<u32>,
     stacks: tree::Stacks,
 }
@@ -178,7 +194,9 @@ impl Scratch {
     const KEPT: usize = 64 * 1024;
 
     fn within(&self, bytes: usize) -> bool {
-        self.significant.capacity() * size_of::<u32>() <= bytes && self.stacks.within(bytes)
+        self.tokens.capacity() * size_of::<Token>() <= bytes
+            && self.significant.capacity() * size_of::<u32>() <= bytes
+            && self.stacks.within(bytes)
     }
 }
 

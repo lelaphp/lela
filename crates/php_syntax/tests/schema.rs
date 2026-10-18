@@ -175,8 +175,8 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
     let structs = emitted.matches("\npub struct ").count();
     assert_eq!(
         structs,
-        grammar.struct_nodes().len() + 1,
-        "one struct per struct node, and the arena"
+        grammar.struct_nodes().len() + 2,
+        "one struct per struct node, the arena and its lists"
     );
     let resolvers = emitted.matches("\n    fn resolve(\n").count();
     assert_eq!(
@@ -184,7 +184,8 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
         grammar.struct_nodes().len(),
         "one resolver per struct node"
     );
-    assert!(emitted.contains("\npub struct Nodes {\n"));
+    assert!(emitted.contains("\npub struct Nodes<'a> {\n"));
+    assert!(emitted.contains("\npub struct Lists<'a> {\n"));
     // A list the schema writes head-and-tail is one field, not a head
     // beside a tail (#225).
     for absent in [
@@ -201,18 +202,18 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
             "emitted tree.rs holds {absent:?}"
         );
     }
-    // `!` children are the bare type; everything else is `Option` or a slice.
+    // `!` children are the bare type; everything else is `Option` or a list.
     for needle in [
         "    pub lhs: Expr,\n",
         "    pub op: Option<TokenId>,\n",
         "    pub body: NodeId<ClassBody>,\n",
         "    pub name: TokenId,\n",
         "    pub params: NodeId<ParamList>,\n",
-        "    pub stmts: Box<[Stmt]>,\n",
-        "    pub modifiers: Box<[Modifier]>,\n",
+        "    pub stmts: List<Stmt>,\n",
+        "    pub modifiers: List<Modifier>,\n",
         "    pub doc_comment: Option<TokenId>,\n",
-        "    pub types: Box<[TypeExpr]>,\n",
-        "    pub types: Box<[TokenId]>,\n",
+        "    pub types: List<TypeExpr>,\n",
+        "    pub types: List<TokenId>,\n",
         "    pub neg: Option<TokenId>,\n",
         "pub enum Expr {\n",
         "    NameRef(TokenId),\n",
@@ -232,9 +233,7 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
 /// node stands there without a cast.
 #[test]
 fn the_included_nodes_are_built_from_fields() {
-    use php_syntax::tree::{
-        BinaryExpr, Expr, HasModifiers, Modifier, Node, NodeId, Param, TokenId,
-    };
+    use php_syntax::tree::{BinaryExpr, Expr, HasModifiers, List, Node, NodeId, Param, TokenId};
     use php_syntax::{SyntaxKind, TextRange};
 
     let sum = BinaryExpr {
@@ -252,11 +251,8 @@ fn the_included_nodes_are_built_from_fields() {
     let param = Param {
         range: TextRange::new(0, 10),
         line: 1,
-        attrs: Box::new([]),
-        modifiers: Box::new([
-            Modifier::PublicKw(TokenId(0)),
-            Modifier::ReadonlyKw(TokenId(1)),
-        ]),
+        attrs: List::default(),
+        modifiers: List::new(4, 2),
         doc_comment: None,
         ty: None,
         byref: None,

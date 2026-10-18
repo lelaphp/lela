@@ -101,11 +101,11 @@ impl Emit<'_> {
                 }
             },
             tree::Expr::ListExpr(id) => Target::List(List {
-                elements: tree[id].array_elements.clone(),
+                elements: tree.list(tree[id].array_elements).into(),
                 style: ListStyle::List,
             }),
             tree::Expr::ArrayExpr(id) => Target::List(List {
-                elements: tree[id].array_elements.clone(),
+                elements: tree.list(tree[id].array_elements).into(),
                 style: if tree[id].long.is_some() {
                     ListStyle::Long
                 } else {

@@ -395,7 +395,7 @@ impl Emit<'_> {
                 Written::Relative(_) => return Err(self.unexpected_name(&prefix)),
                 Written::FullyQualified(rest) | Written::NotQualified(rest) => rest.to_vec(),
             };
-            for item in group.use_group_items.clone() {
+            for item in self.list(group.use_group_items).iter().copied() {
                 let item = &self.parsed.tree[item];
                 let name = self.text(item.name).to_vec();
                 if !matches!(Written::of(&name), Written::NotQualified(_)) {
@@ -414,7 +414,7 @@ impl Emit<'_> {
             return Ok(());
         }
         let kind = Symbol::of(statement_kind);
-        for clause in node.use_clauses.clone() {
+        for clause in self.list(node.use_clauses).iter().copied() {
             let clause = &self.parsed.tree[clause];
             self.line = clause.line;
             let written = self.text(clause.name).to_vec();

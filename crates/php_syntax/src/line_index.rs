@@ -15,37 +15,43 @@ pub struct LineCol {
 ///
 /// Construction is `O(len)`; a lookup is a binary search. Lines split on
 /// `\n` only, so `\r\n` leaves the `\r` as the last column of its line and
-/// every byte stays addressable.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LineIndex {
+/// every byte stays addressable. The table is in the arena of the parse
+/// it serves ([`crate::Arena`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct LineIndex<'a> {
     /// Byte offset of the first byte of each line after the first, which
     /// starts at 0: one entry per `\n`, so a text of one line, an `eval`
-    /// of a statement, allocates nothing for its table.
-    breaks: Vec<u32>,
+    /// of a statement, takes no room for its table. The default is the
+    /// index of the empty text: one line, no bytes.
+    breaks: &'a [u32],
     /// Total length in bytes.
     len: u32,
 }
 
-impl Default for LineIndex {
-    /// The index of the empty text: one line, no bytes.
-    fn default() -> LineIndex {
-        LineIndex::new(b"")
-    }
-}
-
-impl LineIndex {
-    /// Builds the index for `text`, which [`crate::load_bytes`] has held
-    /// under 4 GiB; a longer text is indexed up to that length.
+impl<'a> LineIndex<'a> {
+    /// Builds the index for `text` in `arena`, which [`crate::load_bytes`]
+    /// has held under 4 GiB; a longer text is indexed up to that length.
+    /// The breaks are counted first, so the table is one allocation of
+    /// its length.
     #[must_use]
-    pub fn new(text: &[u8]) -> LineIndex {
+    pub fn new(arena: &'a crate::Arena, text: &[u8]) -> LineIndex<'a> {
         let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-        let mut breaks = Vec::new();
-        for (pos, byte) in text.iter().enumerate().take(len as usize) {
+        let text = text.get(..len as usize).unwrap_or(text);
+        #[allow(clippy::naive_bytecount)] // a count the compiler vectorises; no package for it
+        let count = text.iter().filter(|byte| **byte == b'\n').count();
+        if count == 0 {
+            return LineIndex { breaks: &[], len };
+        }
+        let mut breaks = bumpalo::collections::Vec::with_capacity_in(count, arena.bump());
+        for (pos, byte) in text.iter().enumerate() {
             if *byte == b'\n' {
                 breaks.push(u32::try_from(pos + 1).unwrap_or(u32::MAX));
             }
         }
-        LineIndex { breaks, len }
+        LineIndex {
+            breaks: breaks.into_bump_slice(),
+            len,
+        }
     }
 
     /// Number of lines (a trailing `\n` opens a final empty line).
@@ -125,7 +131,8 @@ mod tests {
 
     #[test]
     fn ascii_lines() {
-        let idx = LineIndex::new(b"<?php\necho 1;\n");
+        let arena = crate::Arena::new();
+        let idx = LineIndex::new(&arena, b"<?php\necho 1;\n");
         assert_eq!(idx.line_count(), 3); // trailing \n opens an empty line
         assert_eq!(idx.line_col(0), lc(0, 0));
         assert_eq!(idx.line_col(5), lc(0, 5)); // the \n itself
@@ -139,14 +146,16 @@ mod tests {
 
     #[test]
     fn crlf_keeps_cr_addressable() {
-        let idx = LineIndex::new(b"a\r\nb");
+        let arena = crate::Arena::new();
+        let idx = LineIndex::new(&arena, b"a\r\nb");
         assert_eq!(idx.line_col(1), lc(0, 1)); // the \r
         assert_eq!(idx.line_col(3), lc(1, 0));
     }
 
     #[test]
     fn offsets_past_end_clamp() {
-        let idx = LineIndex::new(b"ab");
+        let arena = crate::Arena::new();
+        let idx = LineIndex::new(&arena, b"ab");
         assert_eq!(idx.line_col(99), lc(0, 2));
     }
 
@@ -154,7 +163,8 @@ mod tests {
     fn high_bytes_are_one_column_each() {
         // "péh🐘x": é is 2 bytes, 🐘 is 4; a column is a byte count.
         let text = "p\u{e9}h\u{1F418}x";
-        let idx = LineIndex::new(text.as_bytes());
+        let arena = crate::Arena::new();
+        let idx = LineIndex::new(&arena, text.as_bytes());
         assert_eq!(idx.line_col(3), lc(0, 3));
         assert_eq!(idx.line_col(8), lc(0, 8));
         assert_eq!(idx.line_col(9), lc(0, 9));
@@ -162,7 +172,8 @@ mod tests {
 
     #[test]
     fn empty_file() {
-        let idx = LineIndex::new(b"");
+        let arena = crate::Arena::new();
+        let idx = LineIndex::new(&arena, b"");
         assert!(idx.is_empty());
         assert_eq!(idx.line_count(), 1);
         assert_eq!(idx.line_col(0), lc(0, 0));
@@ -171,7 +182,8 @@ mod tests {
 
     #[test]
     fn line_ranges() {
-        let idx = LineIndex::new(b"ab\ncd");
+        let arena = crate::Arena::new();
+        let idx = LineIndex::new(&arena, b"ab\ncd");
         assert_eq!(idx.line_range(0), Some((0, 3)));
         assert_eq!(idx.line_range(1), Some((3, 5)));
         assert_eq!(idx.line_range(2), None);

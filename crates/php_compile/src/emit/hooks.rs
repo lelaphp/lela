@@ -527,8 +527,8 @@ impl Emit<'_> {
         if self.active_class.is_none() {
             return Err(self.compile_error("Cannot use \"parent\" when no class scope is active"));
         }
-        if self.parsed.tree[args]
-            .args
+        if self
+            .list(self.parsed.tree[args].args)
             .iter()
             .any(|arg| matches!(arg, php_syntax::tree::Arg::VariadicPlaceholder(_)))
         {

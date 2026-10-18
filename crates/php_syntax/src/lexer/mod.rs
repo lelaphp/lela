@@ -98,19 +98,28 @@ pub struct Lexed {
 /// `INITIAL`, for a file, and [`State::Scripting`] after an open tag.
 #[must_use]
 pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
-    lex_with_lines(file, text, options, &LineIndex::new(text))
+    let arena = crate::Arena::new();
+    lex_with_lines(
+        file,
+        text,
+        options,
+        &LineIndex::new(&arena, text),
+        Vec::new(),
+    )
 }
 
 /// [`lex`] over a line table already built for `text`, which `parse`
-/// keeps for the parser and hands back on `Parsed`.
+/// keeps for the parser and hands back on `Parsed`, into `tokens`, room
+/// a parse lends and takes back.
 #[must_use]
 pub(crate) fn lex_with_lines(
     file: FileId,
     text: &[u8],
     options: &LexOptions,
-    lines: &LineIndex,
+    lines: &LineIndex<'_>,
+    tokens: Vec<Token>,
 ) -> Lexed {
-    Lexer::new(file, text, options, lines).lex(options.position)
+    Lexer::new(file, text, options, lines, tokens).lex(options.position)
 }
 
 /// A scanner state. The stack's factoring and the names are Zend's, so a
@@ -257,7 +266,7 @@ pub(crate) struct Lexer<'a> {
     pub(crate) file: FileId,
     pub(crate) text: &'a [u8],
     /// The line table, for the line a diagnostic reports.
-    lines: &'a LineIndex,
+    lines: &'a LineIndex<'a>,
     pub(crate) short_open_tag: bool,
     /// Current scan position; always a token boundary between dispatches.
     pub(crate) pos: usize,
@@ -275,7 +284,8 @@ impl<'a> Lexer<'a> {
         file: FileId,
         text: &'a [u8],
         options: &LexOptions,
-        lines: &'a LineIndex,
+        lines: &'a LineIndex<'a>,
+        mut tokens: Vec<Token>,
     ) -> Lexer<'a> {
         // The 4 GiB cap `load_bytes` holds is what makes every `narrow`
         // below exact. Assert it once, at the one construction site.
@@ -307,7 +317,11 @@ impl<'a> Lexer<'a> {
             // php source runs four to six bytes a token: room for a
             // token every four, so a small source never grows the stream
             // and a large one seldom does.
-            tokens: Vec::with_capacity(text.len() / 4 + 4),
+            tokens: {
+                tokens.clear();
+                tokens.reserve(text.len() / 4 + 4);
+                tokens
+            },
             diags: Vec::new(),
             halt: HaltStage::Off,
             emitted: 0,

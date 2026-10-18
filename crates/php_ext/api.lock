@@ -1091,6 +1091,10 @@ request::erealloc
 request::select
 request::take_signals
 request::url_decode
+syntax::Arena
+syntax::Arena::concat
+syntax::Arena::lend
+syntax::Arena::new
 syntax::Diagnostic
 syntax::Diagnostic::new
 syntax::Diagnostic::of
@@ -1122,6 +1126,7 @@ syntax::Token
 syntax::TokenId
 syntax::Tree
 syntax::Tree::elements
+syntax::Tree::list
 syntax::Tree::nodes
 syntax::Tree::root
 syntax::highlight

@@ -287,11 +287,11 @@ impl Emit<'_> {
         let tree = &self.parsed.tree;
         match self.peel(expr) {
             tree::Expr::ListExpr(id) => Some(List {
-                elements: tree[id].array_elements.clone(),
+                elements: tree.list(tree[id].array_elements).into(),
                 style: ListStyle::List,
             }),
             tree::Expr::ArrayExpr(id) => Some(List {
-                elements: tree[id].array_elements.clone(),
+                elements: tree.list(tree[id].array_elements).into(),
                 style: if tree[id].long.is_some() {
                     ListStyle::Long
                 } else {

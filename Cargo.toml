@@ -104,6 +104,7 @@ libc = "0.2"                        # the platform's headers, for `php_heap`'s p
 nix = { version = "0.31", default-features = false }  # ext/posix and ext/pcntl: the process, its credentials, its signals and the user database (design §7.2, revision 35)
 corosensei = "0.3"                  # a fiber's machine stack and the switch onto it, in `php_heap` (design §4.1, §5.11)
 cc = "1"                            # ext/date's build.rs compiles the vendored timelib (design §7.2, §12)
+bumpalo = { version = "3.20.3", features = ["collections"] }  # php_syntax: the arena a parse and its compile live in, reset per compile (ADR-0003, #2810); already in the lock under wasm-bindgen
 expect-test = "1.5"                 # the parser's snapshot fixtures, regenerated once per file (record §4.9)
 sha2 = { version = "0.11", default-features = false }  # ext/hash: `compress256` and `compress512` under php's own SHA-2 contexts (design §7.2)
 keccak = "0.2"                      # ext/hash: Keccak-f[1600] under php's SHA-3 sponge (design §7.2)

@@ -12,7 +12,8 @@ use php_syntax::{Holder, Options, TokenValue, parse};
 
 /// The value of every `LiteralExpr` in `src`, in source order.
 fn values(src: &str) -> Vec<TokenValue> {
-    let parsed = parse(src.as_bytes(), &Options::default());
+    let arena = php_syntax::Arena::new();
+    let parsed = parse(&arena, src.as_bytes(), &Options::default());
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let mut nodes: Vec<&LiteralExpr> = parsed.tree.nodes::<LiteralExpr>().iter().collect();
     nodes.sort_by_key(|n| n.range.start);
@@ -28,7 +29,8 @@ fn values(src: &str) -> Vec<TokenValue> {
 /// The bytes of every text part of the one heredoc in `src`, in source
 /// order.
 fn parts(src: &str) -> Vec<Vec<u8>> {
-    let parsed = parse(src.as_bytes(), &Options::default());
+    let arena = php_syntax::Arena::new();
+    let parsed = parse(&arena, src.as_bytes(), &Options::default());
     let bytes = |v: Option<TokenValue>| match v {
         Some(TokenValue::Bytes(b)) => b,
         other => panic!("not bytes: {other:?}"),
@@ -39,8 +41,9 @@ fn parts(src: &str) -> Vec<Vec<u8>> {
         _ => None,
     };
     if let Some(node) = parsed.tree.nodes::<HeredocExpr>().first() {
-        return node
-            .parts
+        return parsed
+            .tree
+            .list(node.parts)
             .iter()
             .filter_map(|p| text(p).map(|t| TokenValue::of(&parsed, Holder::Heredoc(node), t)))
             .map(bytes)
