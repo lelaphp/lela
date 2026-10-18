@@ -1057,7 +1057,7 @@ fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
                 return Body::Refused(format!(
                     "REQUEST_BODY_FILE: open('{}') failed: {} ({})",
                     String::from_utf8_lossy(file),
-                    crate::conf::errno(&e).desc(),
+                    php_sapi::strerror(&e),
                     crate::conf::errno(&e) as i32
                 ));
             }
@@ -1096,7 +1096,7 @@ fn unopened(path: &[u8], error: &std::io::Error) -> HostPage {
         Error @ main:1881,
         "Unable to open primary script: {} ({})",
         String::from_utf8_lossy(path),
-        crate::conf::errno(error).desc()
+        php_sapi::strerror(error)
     );
     php_sapi::cgi::unopened(Some(error))
 }
