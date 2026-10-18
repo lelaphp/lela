@@ -462,11 +462,10 @@ pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
     git(to, &["init", "-q", "-b", "main"], None)?;
     if let Some(common) = crate::git::common_dir(workspace) {
         let alternates = to.join(".git/objects/info/alternates");
-        std::fs::write(
+        crate::write(
             &alternates,
             format!("{}\n", common.join("objects").display()),
-        )
-        .with_context(|| format!("writing {}", alternates.display()))?;
+        )?;
     }
     git(to, &["config", "core.hooksPath", "scripts/hooks"], None)?;
     git(to, &["add", "-A"], None)?;
