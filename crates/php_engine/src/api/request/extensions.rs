@@ -257,7 +257,7 @@ impl Request {
         self.constant_table()
             .into_iter()
             .filter(|(owner, _, _)| *owner == Some(module))
-            .map(|(_, name, _)| Name(name.into()))
+            .map(|(_, name, _)| Name(name.to_vec().into()))
             .collect()
     }
 

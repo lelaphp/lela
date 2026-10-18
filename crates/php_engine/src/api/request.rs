@@ -60,7 +60,7 @@ mod class_data;
 mod classes;
 use classes::AccelServed;
 mod constants;
-pub(crate) use constants::halt_offset_key;
+pub(crate) use constants::{ConstantAt, halt_offset_key};
 mod diagnostics;
 use diagnostics::{DISPLAY_ERRORS_STDERR, display_errors_mode_of, fatal_errors};
 pub use diagnostics::{FormatDate, Syslog};

@@ -7108,24 +7108,44 @@ pub(crate) fn fetch_class_constant<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 4
 /// ```
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn fetch_constant<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    // `CACHED_PTR(opline->extended_value)`: the constant a pass before
+    // found, read without a lookup.
+    if let exec::Cached::Constant(at) = req.cached(frame, CacheSlot(op.extended_value))
+        && let Some(value) = req.constant_at(at)
+    {
+        req.addref(&value);
+        set_out(req, frame, code, op, value);
+        return Ok(advance(req, frame));
+    }
+    fetch_constant_found(req, frame, code, op)
+}
+
+/// [`fetch_constant`] where its slot holds nothing: the lookup, by the
+/// name and then, for an unqualified name in a namespace, the global one,
+/// and the slot written for a constant that is not deprecated.
+#[inline(never)]
+fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     if op.op2_type != OperandKind::Const {
         return Err(Fatal::error(
             "InternalError: ZEND_FETCH_CONSTANT over a name no literal carries",
         ));
     }
+    let slot = CacheSlot(op.extended_value);
     let mut key = named(code, op.op2.saturating_add(1));
-    let mut found = req.constant_named(&key);
+    let mut found = req.constant_found(&key);
     if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
         key = named(code, op.op2.saturating_add(2));
-        found = req.constant_named(&key);
+        found = req.constant_found(&key);
     }
-    let Some(value) = found else {
+    let Some((at, value, deprecated)) = found else {
         let written = String::from_utf8_lossy(&named(code, op.op2)).into_owned();
         let thrown = crate::api::raising::throw_error(
             req,
@@ -7136,6 +7156,10 @@ pub(crate) fn fetch_constant<T: Tier>(
     };
     req.addref(&value);
     set_out(req, frame, code, op, value);
+    if !deprecated {
+        req.prime(frame, slot, exec::Cached::Constant(at));
+        return Ok(advance(req, frame));
+    }
     // `if (ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED)`
     // (`Z/Zend/zend_execute.c:5439`): the value is copied first and the
     // deprecation raised after, and the opline then advances under
@@ -11400,7 +11424,8 @@ pub(crate) fn jmp_frameless<T: Tier>(
         | Cached::Function(_)
         | Cached::Class(_)
         | Cached::ClassAndCallee { .. }
-        | Cached::Property { .. } => {
+        | Cached::Property { .. }
+        | Cached::Constant(_) => {
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
                 .as_str_bytes()

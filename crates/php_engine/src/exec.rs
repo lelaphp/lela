@@ -1159,6 +1159,9 @@ pub(crate) enum Cached {
     /// Nothing written yet: the table is looked up on this pass.
     #[default]
     Unprimed,
+    /// The constant a `FETCH_CONSTANT` found on its first pass, where it
+    /// is not deprecated (`zend_quick_get_constant`'s `CACHE_PTR`).
+    Constant(crate::api::request::ConstantAt),
     /// The callee an `INIT_FCALL`, `INIT_FCALL_BY_NAME` or
     /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass.
     Function(Function),
