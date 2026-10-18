@@ -21,6 +21,7 @@
 )]
 
 use std::any::Any;
+use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use php_engine::tier::{Fatal, Request};
@@ -30,16 +31,23 @@ use php_engine::tier::{Fatal, Request};
 /// for exactly that call. Compiled code reads `req` at offset zero;
 /// `pending` has no C layout and is the wrappers' alone. The interrupt
 /// pointer at offset eight joins with the first trace that tests it.
+/// It borrows the request mutably for `'a`, so the request outlives it and
+/// nothing else touches the request while compiled code may.
 #[repr(C)]
-pub(crate) struct ExitCtx<R = Request> {
+pub(crate) struct ExitCtx<'a, R = Request> {
     req: *mut R,
     pending: Option<Pending>,
+    lent: PhantomData<&'a mut R>,
 }
 
-impl<R> ExitCtx<R> {
-    /// The `ExitCtx` over `req`, lent for as long as it lives.
-    pub(crate) fn new(req: &mut R) -> ExitCtx<R> {
-        ExitCtx { req, pending: None }
+impl<'a, R> ExitCtx<'a, R> {
+    /// The `ExitCtx` over `req`, which it borrows for as long as it lives.
+    pub(crate) fn new(req: &'a mut R) -> ExitCtx<'a, R> {
+        ExitCtx {
+            req,
+            pending: None,
+            lent: PhantomData,
+        }
     }
 
     /// What a wrapper kept for `enter`, taken: a fatal to return, or a
@@ -82,15 +90,15 @@ pub(crate) enum Status {
 #[inline(always)] // jit-design.md §4.6: the wrapper is the one frame between compiled code and the kernel
 #[allow(clippy::inline_always)]
 pub(crate) unsafe fn crossed<R, T>(
-    cx: *mut ExitCtx<R>,
+    cx: *mut ExitCtx<'_, R>,
     out: *mut T,
     kernel: impl FnOnce(&mut R) -> Result<T, Fatal>,
 ) -> Status {
     // SAFETY: the caller hands the live context `enter` made, borrowed by
     // nothing else for the length of this call.
     let cx = unsafe { &mut *cx };
-    // SAFETY: `req` came from the `&mut R` the context was made over, which
-    // outlives it, and compiled code touches the request only through
+    // SAFETY: `req` came from the `&'a mut R` the `ExitCtx` borrows for its
+    // whole life, and compiled code touches the request only through
     // wrappers, one at a time on its stack.
     let req = unsafe { &mut *cx.req };
     match catch_unwind(AssertUnwindSafe(|| kernel(req))) {
@@ -130,7 +138,7 @@ macro_rules! kernels {
                 /// As [`crossed`](crate::enter::crossed): `cx` is live and
                 /// unborrowed, and `out` is valid for one write.
                 pub(crate) unsafe extern "C" fn $name(
-                    cx: *mut $crate::enter::ExitCtx<$request>,
+                    cx: *mut $crate::enter::ExitCtx<'_, $request>,
                     $($arg: $ty,)*
                     out: *mut $out,
                 ) -> $crate::enter::Status {
@@ -205,20 +213,26 @@ pub mod bench {
         let mut last = 0;
         match through {
             Through::Wrapper => {
-                let wrapper: unsafe extern "C" fn(*mut ExitCtx<Tally>, u64, *mut u64) -> Status =
-                    black_box(wrapped::tally);
+                let wrapper: unsafe extern "C" fn(
+                    *mut ExitCtx<'_, Tally>,
+                    u64,
+                    *mut u64,
+                ) -> Status = black_box(wrapped::tally);
                 let mut cx = ExitCtx::new(&mut tally);
                 for i in 0..n {
                     // SAFETY: `cx` is this frame's live context, borrowed by
                     // nothing else, and `last` takes one write.
                     let status = unsafe { wrapper(&raw mut cx, i, &raw mut last) };
-                    match (status, cx.take_pending()) {
-                        (Status::Continue, _) => {}
-                        (_, Some(Pending::Panic(payload))) => resume_unwind(payload),
-                        (_, Some(Pending::Bailout(fatal))) => return Err(fatal),
-                        (_, None) => {
-                            return Err(Fatal::error("a wrapper stopped and kept nothing"));
-                        }
+                    // As compiled code does: the answer alone on the way
+                    // through, the `ExitCtx` read only when a call stopped.
+                    if status != Status::Continue {
+                        return match cx.take_pending() {
+                            Some(Pending::Panic(payload)) => resume_unwind(payload),
+                            Some(Pending::Bailout(fatal)) => Err(fatal),
+                            None => Err(Fatal::error(
+                                "InternalError: a kernel wrapper stopped and kept nothing",
+                            )),
+                        };
                     }
                 }
             }
