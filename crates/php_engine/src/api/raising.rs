@@ -969,6 +969,22 @@ pub(crate) fn arg_name_suffix(
     named().unwrap_or_default()
 }
 
+/// `zend_throw_non_object_error`: php's `Error` for a property `verb`
+/// ("assign", "modify", "increment/decrement") on a container that is
+/// no object, the property named as written and the container by
+/// `zend_zval_value_name`, an undefined one as `null`.
+pub(crate) fn non_object_error(
+    req: &mut Request,
+    verb: &str,
+    name: &[u8],
+    container: &Value,
+) -> Thrown {
+    let shown = crate::ops::value_name(req, &container.undef_as_null());
+    let name = String::from_utf8_lossy(name);
+    let message = format!("Attempt to {verb} property \"{name}\" on {shown}");
+    throw_error(req, "Error", &message)
+}
+
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of
 /// `class` with `message`, the one `previous` holds chained as its
 /// `previous` (`zend_throw_exception_internal`), as

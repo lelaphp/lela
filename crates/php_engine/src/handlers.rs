@@ -8494,15 +8494,7 @@ fn non_object_place(
     }
     let ran_on = req.pending();
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let shown = crate::ops::value_name(req, &container.undef_as_null());
-    let thrown = crate::api::raising::throw_error(
-        req,
-        "Error",
-        &format!(
-            "Attempt to modify property \"{}\" on {shown}",
-            String::from_utf8_lossy(name)
-        ),
-    );
+    let thrown = crate::api::raising::non_object_error(req, "modify", name, container);
     req.raised_over(thrown, ran_on)
 }
 
@@ -12751,13 +12743,8 @@ fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             }
         }
         (Ok(name), None) => {
-            let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
-            let shown = crate::ops::value_name(req, &container.undef_as_null());
-            let thrown = crate::api::raising::throw_error(
-                req,
-                "Error",
-                &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
-            );
+            let name = name.as_str_bytes().unwrap_or_default();
+            let thrown = crate::api::raising::non_object_error(req, "assign", name, &container);
             write_out(req, frame, code, op, &Value::null());
             req.release(value);
             Err(thrown)
@@ -15115,13 +15102,8 @@ pub(crate) fn assign_obj_op<T: Tier>(
                 let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
             }
             let ran_on = req.pending();
-            let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
-            let shown = crate::ops::value_name(req, &container.undef_as_null());
-            let thrown = crate::api::raising::throw_error(
-                req,
-                "Error",
-                &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
-            );
+            let name = name.as_str_bytes().unwrap_or_default();
+            let thrown = crate::api::raising::non_object_error(req, "assign", name, &container);
             let thrown = req.raised_over(thrown, ran_on);
             let thrown = req.free_pending(thrown, |req| {
                 exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -15926,13 +15908,9 @@ fn incdec_obj(
     ) {
         (Ok(name), Some(object)) => incdec_property(req, frame, code, op, step, object, &name)?,
         (Ok(name), None) => {
-            let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
-            let shown = crate::ops::value_name(req, &container.undef_as_null());
-            let thrown = crate::api::raising::throw_error(
-                req,
-                "Error",
-                &format!("Attempt to increment/decrement property \"{shown_name}\" on {shown}"),
-            );
+            let name = name.as_str_bytes().unwrap_or_default();
+            let thrown =
+                crate::api::raising::non_object_error(req, "increment/decrement", name, &container);
             write_out(req, frame, code, op, &Value::null());
             Err(thrown)
         }
