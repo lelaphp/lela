@@ -212,7 +212,9 @@ fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result
         }
     };
     if let Some(n) = long {
-        return Ok(Value::string(req.string(n.to_string().as_bytes())?));
+        return Ok(Value::string(
+            req.string(crate::c_number::Long::of(n).as_bytes())?,
+        ));
     }
     req.addref(given);
     Ok(*given)

@@ -544,7 +544,9 @@ impl Request {
             let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(self, table).collect();
             for (key, value) in rows {
                 let key = match key {
-                    Key::Int(n) => PhpString::new(self, n.to_string().as_bytes())?.into_key(),
+                    Key::Int(n) => {
+                        PhpString::new(self, crate::c_number::Long::of(n).as_bytes())?.into_key()
+                    }
                     Key::Str(_) => Owner::take(self, key),
                 };
                 spelt.set(self, key, Owner::take(self, value))?;

@@ -119,9 +119,63 @@ pub fn c_str(bytes: &[u8]) -> &[u8] {
     bytes.split(|&b| b == 0).next().unwrap_or(bytes)
 }
 
+/// A `zend_long`'s decimal text, as `zend_long_to_str` and
+/// `smart_str_append_long` write it, its sign before its digits, laid in
+/// a buffer of its own: `i64::MIN`'s sign and nineteen digits fill it.
+pub(crate) struct Long {
+    buf: [u8; 20],
+    start: usize,
+}
+
+impl Long {
+    pub(crate) fn of(n: i64) -> Long {
+        let mut buf = [0u8; 20];
+        let mut start = buf.len();
+        let mut magnitude = n.unsigned_abs();
+        loop {
+            start -= 1;
+            // A digit, below ten.
+            #[allow(clippy::cast_possible_truncation)]
+            let digit = (magnitude % 10) as u8;
+            buf[start] = b'0' + digit;
+            magnitude /= 10;
+            if magnitude == 0 {
+                break;
+            }
+        }
+        if n < 0 {
+            start -= 1;
+            buf[start] = b'-';
+        }
+        Long { buf, start }
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{atoi, c_str, strtol, strtol_prefixed};
+    use super::{Long, atoi, c_str, strtol, strtol_prefixed};
+
+    /// A long's text is Rust's `to_string`'s at the edges and between.
+    #[test]
+    fn a_long_is_written_as_its_decimal() {
+        for n in [
+            0,
+            7,
+            -7,
+            10,
+            -10,
+            1_234_567,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+        ] {
+            assert_eq!(Long::of(n).as_bytes(), n.to_string().as_bytes());
+        }
+    }
 
     /// A C string ends at its first NUL, is empty where it leads, and is
     /// every byte where there is none.

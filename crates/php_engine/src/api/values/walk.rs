@@ -889,10 +889,13 @@ enum Keep<T: View> {
 }
 
 impl<T: View> Keep<T> {
-    /// `view` kept as `lent` says.
+    /// `view` kept as `lent` says; a view of what counts no owner, a
+    /// number or an interned string, which nothing the body does can
+    /// free, kept as a view where a pin would stand.
     fn lent(req: &mut Request, view: T, lent: Lent) -> Keep<T> {
         match lent {
             Lent::Owned => Keep::Owned(Owner::take(req, view)),
+            Lent::Pinned if !view.counted().to_zval().is_refcounted() => Keep::Viewed(view),
             Lent::Pinned => Keep::Pinned(Pin::take(req, view)),
             Lent::Viewed => Keep::Viewed(view),
         }
@@ -923,6 +926,9 @@ impl<T: View> Keep<T> {
     /// a walk keeps its row in one place across the body's call, which a
     /// recursion through the walk pays for at every level.
     fn let_go(&mut self, req: &mut Request) {
+        if let Keep::Viewed(_) = self {
+            return;
+        }
         let view = self.get().clone();
         match std::mem::replace(self, Keep::Viewed(view)) {
             Keep::Owned(owner) => owner.give_up_nogc(req),
@@ -1105,7 +1111,11 @@ impl Row {
     /// reference taken first, then the value let go, which the reference
     /// holds.
     fn lend(&mut self, req: &mut Request, cell: PhpRef) -> PhpRef {
-        let kept = Keep::lent(req, cell.as_value(), self.value.lent_as());
+        let lent = match self.value.lent_as() {
+            Lent::Owned => Lent::Owned,
+            Lent::Pinned | Lent::Viewed => Lent::of(self.watch, self.at),
+        };
+        let kept = Keep::lent(req, cell.as_value(), lent);
         let mut value = std::mem::replace(&mut self.value, kept);
         value.let_go(req);
         cell

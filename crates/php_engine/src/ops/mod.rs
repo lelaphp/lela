@@ -56,7 +56,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
         // `zend_long_to_str` and `zend_double_to_str` mark what they
         // make valid UTF-8, the digits being ASCII.
         ValueRef::Int(n) => req
-            .string(n.to_string().as_bytes())
+            .string(crate::c_number::Long::of(n).as_bytes())
             .inspect(PhpString::mark_valid_utf8),
         ValueRef::Float(f) => {
             // `zend_double_to_str`: the text, then the warning php raises
