@@ -395,8 +395,10 @@ pub(super) fn set_diff(
     let Some(payload) = object.native_mut::<IntervalObj>(req) else {
         return release(req, diff);
     };
-    let old = std::mem::replace(&mut payload.diff, diff);
-    release(req, old)
+    match std::mem::replace(&mut payload.diff, diff) {
+        Some(old) => release(req, old),
+        None => Ok(()),
+    }
 }
 
 /// The relative time a `DateInterval` holds, or the uninitialised error.
