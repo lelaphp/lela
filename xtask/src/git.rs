@@ -327,14 +327,7 @@ pub fn changed_since(root: &Path, base: &str) -> Result<Vec<Change>> {
         &["diff", "--name-status", "-z", "--no-renames", base, "--"],
         None,
     )?;
-    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
-    let mut out = Vec::new();
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-        out.push(Change {
-            path: path.to_owned(),
-            deleted: status.starts_with('D'),
-        });
-    }
+    let mut out = changes(&listing);
     let untracked = git(
         root,
         &["ls-files", "-z", "--others", "--exclude-standard"],
@@ -370,16 +363,19 @@ pub fn staged(root: &Path) -> Result<Vec<Change>> {
         ],
         None,
     )?;
-    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
-    let mut out = Vec::new();
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-        out.push(Change {
-            path: path.to_owned(),
-            deleted: status.starts_with('D'),
-        });
-    }
+    let mut out = changes(&listing);
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+
+/// The changes a `git diff --name-status -z` listing names.
+fn changes(listing: &str) -> Vec<Change> {
+    let fields: Vec<&str> = listing.split('\0').filter(|f| !f.is_empty()).collect();
+    let change = |pair: &[&str]| Change {
+        path: pair[1].to_owned(),
+        deleted: pair[0].starts_with('D'),
+    };
+    fields.chunks_exact(2).map(change).collect()
 }
 
 /// The content of `path` in the index: `show(root, "", path)`, since git
