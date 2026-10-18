@@ -15,14 +15,20 @@
 //! ([`batch::runs`], #2606). One `cargo build --tests
 //! --keep-going` builds every crate's test targets, cargo building crates
 //! side by side, and a crate that does not compile stops only the crates
-//! built on it ([`batch::Run`]). Each crate's test executables then run,
-//! crate after crate, each with the working directory and the environment
-//! `cargo test` gives it ([`environment`]); crates are not run side by
-//! side, since their tests may share System V objects, sockets, a `MySQL`
-//! server and scratch paths, and each binary runs its own tests in
-//! parallel as it always has. Last, one `cargo test --doc` runs the
-//! doctests of every crate that built, what it printed read back crate by crate
-//! from cargo's `Doc-tests` lines.
+//! built on it ([`batch::Run`]). Next, one `cargo test --doc` runs the
+//! doctests of every crate that built, what it printed read back crate by
+//! crate from cargo's `Doc-tests` lines. Last, each crate's test
+//! executables run, crate after crate, each with the working directory and
+//! the environment `cargo test` gives it ([`environment`]), and each
+//! running its own tests in parallel as it always has. Crates are not run
+//! side by side, since their tests may share System V objects, sockets, a
+//! `MySQL` server and scratch paths, and for the same reason a crate's own
+//! executables run one at a time unless its `Cargo.toml` declares that
+//! they share nothing, `executables = "side-by-side"` under
+//! `[package.metadata.xtask.test]`: then as many run at once as
+//! [`Beside::pool`] says, an executable that does share something held
+//! apart from the others that name its key ([`Beside`]), what each one
+//! printed kept whole and read in the executables' order (#2869).
 //!
 //! **A pinned error code.** A `compile_fail,E0382` block passes the stable
 //! rustdoc when it fails to compile for any reason; only a nightly's
@@ -35,16 +41,19 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
-use crate::batch::{self, Built, Executable, Run, Targets, tail};
+use crate::batch::{self, Built, Executable, Package, Run, Targets, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status, Store, plural};
 use crate::sources;
+use crate::tally::{self, Apart};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "test";
@@ -129,6 +138,18 @@ struct Ran {
     text: String,
 }
 
+impl Ran {
+    /// `other` summed into this: its counts added, and what it printed
+    /// kept where it did not end well.
+    fn add(&mut self, other: &Ran) {
+        self.counts.add(&other.counts);
+        if !other.passed {
+            self.passed = false;
+            self.text.push_str(&other.text);
+        }
+    }
+}
+
 /// One crate's reading: pass when every test executable of the crate and
 /// its doctests ended well and no pinned code was `missed`, fail with the
 /// tail of what the ones that did not printed otherwise, each missed pin
@@ -148,58 +169,106 @@ fn reading(
             .map(Built::rendered)
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| run.stderr.clone());
-        for key in ["passed", "failed", "ignored", "filtered"] {
-            reading.count(key, 0)?;
-        }
+        Counts::default().count(&mut reading)?;
         reading.status = Status::Fail;
         reading.message = format!("{name}: the tests did not build\n{}", tail(&said, 40));
         return Ok(reading);
     };
-    let mut counts = Counts::default();
-    let mut passed = true;
-    let mut failing = String::new();
-    for executable in &built.executables {
-        let ran = execute(executable, built, run)?;
-        counts.add(&ran.counts);
-        if !ran.passed {
-            passed = false;
-            failing.push_str(&ran.text);
-        }
-    }
+    let (jobs, apart) = Beside::of(&built.package)?.pool(name, &built.executables)?;
+    let mut all = Ran {
+        passed: true,
+        ..Ran::default()
+    };
+    let each = |executable: &Executable| execute(executable, built, run);
+    let on = |ran: Ran| all.add(&ran);
+    let batch = NonZeroUsize::MIN;
+    tally::pool(&built.executables, jobs, batch, &apart, each, on)?;
     if let Some(doc) = doc {
-        counts.add(&doc.counts);
-        if !doc.passed {
-            passed = false;
-            failing.push_str(&doc.text);
-        }
+        all.add(doc);
     }
     for pin in missed {
-        counts.failed += 1;
-        passed = false;
-        failing.push_str(pin);
-        failing.push('\n');
+        all.counts.failed += 1;
+        all.passed = false;
+        all.text.push_str(pin);
+        all.text.push('\n');
     }
-    reading.count("passed", counts.passed)?;
-    reading.count("failed", counts.failed)?;
-    reading.count("ignored", counts.ignored)?;
-    reading.count("filtered", counts.filtered)?;
-    if passed {
+    let Ran { counts, passed, .. } = &all;
+    counts.count(&mut reading)?;
+    let (n, verb) = if *passed {
         reading.status = Status::Pass;
-        reading.message = format!(
-            "{name}: {} test{} passed",
-            counts.passed,
-            plural(usize::try_from(counts.passed).unwrap_or(usize::MAX))
-        );
+        (counts.passed, "passed")
     } else {
         reading.status = Status::Fail;
-        reading.message = format!(
-            "{name}: {} test{} failed\n{}",
-            counts.failed,
-            plural(usize::try_from(counts.failed).unwrap_or(usize::MAX)),
-            tail(&failing, 40)
-        );
+        (counts.failed, "failed")
+    };
+    let s = plural(usize::try_from(n).unwrap_or(usize::MAX));
+    reading.message = format!("{name}: {n} test{s} {verb}");
+    if !passed {
+        reading.message = format!("{}\n{}", reading.message, tail(&all.text, 40));
     }
     Ok(reading)
+}
+
+/// How a crate's test executables stand beside each other, as its
+/// `Cargo.toml` declares under `[package.metadata.xtask.test]`: one at a
+/// time unless it says otherwise, since a crate's tests may share System
+/// V objects, sockets, a `MySQL` server and scratch paths across its
+/// executables as well as across crates.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(tag = "executables", rename_all = "kebab-case", deny_unknown_fields)]
+enum Beside {
+    #[default]
+    OneAtATime,
+    /// Side by side, as many at once as [`Beside::pool`] says, each apart
+    /// only from those it shares a key with: `apart`, by target name, is
+    /// what an executable holds that another may hold too.
+    SideBySide {
+        #[serde(default)]
+        apart: BTreeMap<String, Vec<String>>,
+    },
+}
+
+impl Beside {
+    /// What `package` declares; a declaration this does not read is an
+    /// error, never one at a time in silence.
+    fn of(package: &Package) -> Result<Beside> {
+        let Some(table) = (package.metadata.as_ref()).and_then(|m| m.get("xtask")?.get("test"))
+        else {
+            return Ok(Beside::OneAtATime);
+        };
+        let at = package.manifest_path.display();
+        serde_json::from_value(table.clone())
+            .with_context(|| format!("{at}: [package.metadata.xtask.test]"))
+    }
+
+    /// The pool `executables` of `krate` run on, and what each may not
+    /// run beside, in their order. Side by side, the pool is the share of
+    /// the machine cargo was given, `CARGO_BUILD_JOBS`, where the session
+    /// sets one, and otherwise the cores, since each executable runs its
+    /// own tests on threads of its own. A key held for a name that is no
+    /// executable of the crate is an error.
+    fn pool(&self, krate: &str, executables: &[Executable]) -> Result<(NonZeroUsize, Vec<Apart>)> {
+        let Beside::SideBySide { apart } = self else {
+            return Ok((NonZeroUsize::MIN, vec![Apart::default(); executables.len()]));
+        };
+        if let Some(name) = apart
+            .keys()
+            .find(|n| executables.iter().all(|e| &e.name != *n))
+        {
+            bail!(
+                "{krate}: [package.metadata.xtask.test] holds `{name}` apart, which is no test executable of it"
+            );
+        }
+        let jobs = std::env::var("CARGO_BUILD_JOBS")
+            .ok()
+            .and_then(|j| j.parse().ok());
+        let keys = |e: &Executable| apart.get(&e.name).cloned().unwrap_or_default();
+        let apart = executables.iter().map(|e| Apart {
+            keys: keys(e),
+            ..Apart::default()
+        });
+        Ok((jobs.unwrap_or_else(tally::cores), apart.collect()))
+    }
 }
 
 /// One test executable run as `cargo test` runs it: no argument, in the
@@ -569,6 +638,14 @@ struct Counts {
 }
 
 impl Counts {
+    /// The counts as the reading's numbers.
+    fn count(&self, reading: &mut Reading) -> Result<()> {
+        reading.count("passed", self.passed)?;
+        reading.count("failed", self.failed)?;
+        reading.count("ignored", self.ignored)?;
+        reading.count("filtered", self.filtered)
+    }
+
     /// `other` added to these counts.
     fn add(&mut self, other: &Counts) {
         self.binaries += other.binaries;

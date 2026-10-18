@@ -104,6 +104,7 @@ impl Built {
                     {
                         self.executables.push(Executable {
                             path,
+                            name: target.name.clone(),
                             kind: target.kind.first().cloned().unwrap_or_default(),
                         });
                     }
@@ -137,6 +138,9 @@ pub(crate) struct Message {
 #[derive(Debug, Clone)]
 pub(crate) struct Executable {
     pub(crate) path: PathBuf,
+    /// The target's name: `worktree` for `tests/worktree.rs`, the
+    /// library's for its unit tests.
+    pub(crate) name: String,
     /// The target's kind, `lib`, `bin` or `test`: an integration test's
     /// executable runs with `CARGO_TARGET_TMPDIR` set.
     pub(crate) kind: String,
@@ -165,6 +169,9 @@ pub(crate) struct Package {
     pub(crate) rust_version: Option<String>,
     #[serde(default)]
     pub(crate) readme: Option<String>,
+    /// The manifest's `[package.metadata]`, as cargo hands it on unread.
+    #[serde(default)]
+    pub(crate) metadata: Option<serde_json::Value>,
     #[serde(default)]
     targets: Vec<Target>,
 }

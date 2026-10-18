@@ -163,7 +163,11 @@ fn scratch(name: &str) -> Tree {
 /// The scratch tree as a repository, committed once, so an edit of the
 /// crate after is the diff `done` judges with `--base HEAD`.
 fn repository(name: &str) -> Tree {
-    let root = scratch(name);
+    committed(scratch(name))
+}
+
+/// `root` committed once.
+fn committed(root: Tree) -> Tree {
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
     sh(&root, &["git", "init", "-q", "-b", "main"]);
     sh(&root, &["git", "add", "-A"]);
@@ -269,4 +273,87 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
     store.record(&readings).unwrap();
     let verdict = judge();
     assert!(verdict.met(), "{verdict:#?}");
+}
+
+/// An integration test of the fixture's crate that writes when it ran,
+/// in milliseconds, to the scratch directory the crate's integration
+/// tests share, `CARGO_TARGET_TMPDIR`, as `<NAME>.span`.
+const SPAN: &str = r#"#[test]
+fn spans() {
+    let at = || std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let from = at();
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("NAME.span"), format!("{from} {}", at())).unwrap();
+}
+"#;
+
+/// `xtask test` over the fixture's crate with three integration tests,
+/// `a`, `b` and `c`, its `Cargo.toml` ending in `declared`, at most three
+/// executables at once: the reading, and when each test ran, from and to.
+fn spans(name: &str, declared: &str) -> (Reading, [(u128, u128); 3]) {
+    let root = scratch(name);
+    let heap = root.join("crates/php_heap");
+    std::fs::write(heap.join("src/lib.rs"), "//! Nothing to test.\n").unwrap();
+    std::fs::create_dir_all(heap.join("tests")).unwrap();
+    for test in ["a", "b", "c"] {
+        std::fs::write(
+            heap.join(format!("tests/{test}.rs")),
+            SPAN.replace("NAME", test),
+        )
+        .unwrap();
+    }
+    let toml = std::fs::read_to_string(heap.join("Cargo.toml")).unwrap();
+    std::fs::write(heap.join("Cargo.toml"), format!("{toml}{declared}")).unwrap();
+    let root = committed(root);
+    let out = Command::new(xtask::scratch::xtask(env!("CARGO_BIN_EXE_xtask")))
+        .arg("--root")
+        .arg(root.path())
+        .args(["test", "--crate", "php_heap"])
+        .env("CARGO_BUILD_JOBS", "3")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reading = Store::of_workspace(root.path())
+        .read("test", "php_heap")
+        .unwrap()
+        .unwrap();
+    assert_eq!(int(&reading, "passed"), 3, "{reading:#?}");
+    let span = |test: &str| {
+        let text = std::fs::read_to_string(root.join(format!("target/tmp/{test}.span"))).unwrap();
+        let (from, to) = text.split_once(' ').unwrap();
+        (from.parse().unwrap(), to.parse().unwrap())
+    };
+    (reading, [span("a"), span("b"), span("c")])
+}
+
+fn overlap((a_from, a_to): (u128, u128), (b_from, b_to): (u128, u128)) -> bool {
+    a_from < b_to && b_from < a_to
+}
+
+/// A crate's test executables run one at a time unless its `Cargo.toml`
+/// says they share nothing; then they run side by side, but for those
+/// that hold one key apart, which never overlap (#2869).
+#[test]
+fn executables_run_side_by_side_where_declared_and_apart_where_they_share_a_key() {
+    let declared = "\n[package.metadata.xtask.test]\nexecutables = \"side-by-side\"\n\
+                    apart = { a = [\"shared\"], b = [\"shared\"] }\n";
+    let (_, [a, b, c]) = spans("test-beside", declared);
+    assert!(!overlap(a, b), "a and b hold one key: {a:?} {b:?}");
+    assert!(
+        overlap(a, c) || overlap(b, c),
+        "c runs beside one: {a:?} {b:?} {c:?}"
+    );
+
+    let (_, [a, b, c]) = spans("test-one-at-a-time", "");
+    assert!(
+        !overlap(a, b) && !overlap(a, c) && !overlap(b, c),
+        "{a:?} {b:?} {c:?}"
+    );
 }

@@ -7,6 +7,12 @@ rust-version.workspace = true
 publish = false
 description = "The harness: instruments, readings and the one renderer (harness-design.md §4)"
 
+# `xtask test` runs these test executables side by side (#2869): each lays
+# what it writes down in trees of its own (`scratch::Tree`), so none shares
+# a path, a store, a port or a System V key with another.
+[package.metadata.xtask.test]
+executables = "side-by-side"
+
 [lints]
 workspace = true
 
