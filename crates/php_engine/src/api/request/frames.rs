@@ -313,6 +313,34 @@ impl Request {
         self.vm.resume(&mut self.heap, frame, calls)
     }
 
+    /// The room `room` finds in the payload `object` carries as `T`
+    /// linked as the innermost on the running stack, so the next frame
+    /// pushed links to it ([`php_heap::VmStack::link_room`]); nothing
+    /// where the object carries no such payload. The room stays linked
+    /// until [`Request::unlink_room`].
+    pub(crate) fn link_room<T: std::any::Any + Send>(
+        &mut self,
+        object: PhpObject,
+        room: fn(&mut T) -> &mut exec::FakeRoom,
+    ) {
+        if let Some(payload) = self.heap.native_mut::<T>(object.heap()) {
+            self.vm.stack.link_room(room(payload));
+        }
+    }
+
+    /// The running stack's word moved back to what the room `room` finds
+    /// in `object`'s payload links, once the frame linked above it has
+    /// left ([`php_heap::VmStack::unlink_room`]).
+    pub(crate) fn unlink_room<T: std::any::Any + Send>(
+        &mut self,
+        object: PhpObject,
+        room: fn(&T) -> Option<&exec::FakeRoom>,
+    ) {
+        if let Some(room) = self.heap.native::<T>(object.heap()).and_then(room) {
+            self.vm.stack.unlink_room(room);
+        }
+    }
+
     /// A call a generator froze, given up as `cleanup_unfinished_calls`
     /// gives up one standing: back on the stack and popped.
     pub(crate) fn release_frozen_call(&mut self, call: crate::exec::HeapFrame) {

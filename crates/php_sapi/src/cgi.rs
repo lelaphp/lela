@@ -16,7 +16,7 @@ use php_proto::c_str;
 use php_proto::cgi::{CNumber, Environment, Files, RequestInfo, Settings, Shape, Stat};
 
 use crate::ini::enabled;
-use crate::{Engine, IniEvent, IniValue, Method, ResponseHead, WebRequest};
+use crate::{Engine, HostPage, IniEvent, IniValue, Method, ResponseHead, WebRequest};
 
 /// The file system as `init_request_info` and the built-in server's path
 /// rules (`php_proto::vpath`) ask it, each path read as `realpath(3)` and
@@ -261,6 +261,28 @@ pub fn ini_text(value: &IniValue) -> Vec<u8> {
     }
 }
 
+/// The page php-cgi and php-fpm answer for a program that
+/// `php_fopen_primary_script` did not open, `error` the open's, none
+/// where there was no path to open (`Z/sapi/cgi/cgi_main.c:2478-2487`,
+/// `Z/sapi/fpm/fpm/fpm_main.c:1879-1888`): `Access denied.` under a 403
+/// where the open failed with `EACCES` alone, and `No input file
+/// specified.` under a 404 for every other errno, `EPERM` among them,
+/// which Rust's `ErrorKind::PermissionDenied` takes with `EACCES`.
+#[must_use]
+pub fn unopened(error: Option<&std::io::Error>) -> HostPage {
+    let denied = error.and_then(std::io::Error::raw_os_error) == Some(libc::EACCES);
+    let (code, body): (i64, &[u8]) = if denied {
+        (403, b"Access denied.\n")
+    } else {
+        (404, b"No input file specified.\n")
+    };
+    HostPage {
+        code,
+        headers: Vec::new(),
+        body: body.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use php_proto::cgi::{Opens, Shape};
@@ -301,6 +323,26 @@ mod tests {
             ),
             b""
         );
+    }
+
+    /// `EACCES` alone is `Access denied.`: `EPERM`, which macOS answers
+    /// for a file under a directory the process may not read, is `No
+    /// input file specified.`, as is every other errno and no path at
+    /// all, each php's page whole (#2876).
+    #[test]
+    fn a_script_that_does_not_open_is_denied_for_eacces_alone() {
+        let page = |errno: Option<i32>| {
+            let error = errno.map(std::io::Error::from_raw_os_error);
+            let page = unopened(error.as_ref());
+            (page.code, page.body, page.headers.is_empty())
+        };
+        let denied = (403, b"Access denied.\n".to_vec(), true);
+        let missing = (404, b"No input file specified.\n".to_vec(), true);
+        assert_eq!(page(Some(libc::EACCES)), denied);
+        assert_eq!(page(Some(libc::EPERM)), missing);
+        assert_eq!(page(Some(libc::ENOENT)), missing);
+        assert_eq!(page(Some(libc::EISDIR)), missing);
+        assert_eq!(page(None), missing);
     }
 
     /// A path is asked of the disk as far as its first NUL, as `stat(2)`

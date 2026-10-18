@@ -40,6 +40,11 @@ pub(crate) type Stack = php_heap::VmStack<Header>;
 /// One frame of a [`Stack`], or one a generator holds off it.
 pub(crate) type HeapFrame = php_heap::Frame<Header>;
 
+/// php's `execute_fake`: a room a generator holds, which a resumption
+/// through it links between the frame it runs and the resumer's
+/// ([`Header::fake`]).
+pub(crate) type FakeRoom = php_heap::FakeRoom<Header>;
+
 /// Which op array of a unit a frame serves: the main one, the body of
 /// one of the unit's functions, the body of a function no name bound
 /// while the file compiled and a `DECLARE_FUNCTION` bound where it
@@ -582,6 +587,28 @@ impl Header {
             opline: 0,
             num_args: 0,
             run_time_cache: CacheAt::of(code.runtime_cache),
+            annex: None,
+            info: CallInfo::default(),
+        }
+    }
+
+    /// The header of php's `execute_fake`, a `zend_execute_data` that
+    /// serves nothing, its `func` `NULL`: on php's chain where it is
+    /// linked, and named by no record, so another process reads it as
+    /// `???` (`Z/sapi/fpm/fpm/fpm_php_trace.c`).
+    pub(crate) fn fake() -> Header {
+        Header {
+            callee: crate::readable::CalleeAt::default(),
+            function: None,
+            this: None,
+            closure: None,
+            called_scope: None,
+            caller: CallerAt(None),
+            returns_to: None,
+            identity: Cell::new(None),
+            opline: 0,
+            num_args: 0,
+            run_time_cache: CacheAt::default(),
             annex: None,
             info: CallInfo::default(),
         }

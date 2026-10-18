@@ -16,6 +16,7 @@
 use std::cell::Cell;
 use std::io::Write;
 
+use php_ext::abi::AfterLog;
 use php_sapi::{Aborted, OutputSink, ResponseHead};
 
 /// A row of php's colour table (`colors[]`,
@@ -382,21 +383,33 @@ impl OutputSink for Kept {
 }
 
 /// What a [`Kept`] sink kept, written as the request would have written
-/// it; whether any of it was logged.
-pub fn replay(written: &[Written]) -> bool {
+/// it, each diagnostic's entry before its display, and `fatal` served
+/// once the entry logged last is written: a refused compile ends at its
+/// fatal, which `php_sapi_phpdbg_log_message` follows with its listing,
+/// and its prompt once php is fully started, inside the log and so
+/// before `php_error_cb` displays the fatal
+/// (`Z/sapi/phpdbg/phpdbg.c:731-770`, `Z/main/main.c:1411-1495`). A log
+/// that bailed out leaves the display unwritten; nothing logged serves
+/// no `fatal`. Which of the two it was is the answer, `Returned` where
+/// nothing was logged.
+pub fn replay(written: &[Written], fatal: impl FnOnce() -> AfterLog) -> AfterLog {
+    let logged = written
+        .iter()
+        .rposition(|each| matches!(each, Written::Log(_)))
+        .map_or(0, |at| at + 1);
+    let (through_fatal, displayed) = written.split_at(logged);
     let mut sink = Sink;
-    let mut logged = false;
-    for each in written {
-        match each {
-            Written::Out(bytes) => {
-                sink.write(bytes).ok();
-            }
-            Written::Log(entry) => {
-                logged = true;
-                sink.log(entry);
-            }
-            Written::Err(bytes) => sink.write_stderr(bytes),
+    let mut write = |each: &Written| match each {
+        Written::Out(bytes) => {
+            sink.write(bytes).ok();
         }
+        Written::Log(entry) => sink.log(entry),
+        Written::Err(bytes) => sink.write_stderr(bytes),
+    };
+    through_fatal.iter().for_each(&mut write);
+    if logged > 0 && fatal() == AfterLog::BailedOut {
+        return AfterLog::BailedOut;
     }
-    logged
+    displayed.iter().for_each(write);
+    AfterLog::Returned
 }
