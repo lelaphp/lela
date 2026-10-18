@@ -678,7 +678,7 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
     })
     .flatten()?;
     let Suspended { mut frame, calls } = *suspended;
-    frame.header_mut().caller = crate::exec::Caller::Outside;
+    frame.header_mut().set_caller(crate::exec::Caller::Outside);
     let table = req.kept_frame(&frame).symbol_table();
     let frame = req.resume_frame(frame, calls).ok()?;
     if let Some(table) = table {
@@ -858,7 +858,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     // `ZEND_CALL_RELEASE_THIS` and `Z_ADDREF` on a receiver the frame
     // was lent: the generator's frame outlives the call that lent it.
     let lent = req.vm_mut().at_mut(frame).and_then(|state| {
-        state.returns_to = None;
+        state.set_returns_to(None);
         match state.receiver() {
             Some(crate::exec::Receiver::Lent(this)) => {
                 state.set_receiver(Some(crate::exec::Receiver::Owned(this)));

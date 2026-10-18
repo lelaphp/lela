@@ -26,36 +26,53 @@ use super::RuntimeCache;
 /// the offset the engine gave the op array, or an entry of the caches
 /// the request holds for the op arrays of the units compiled for it
 /// alone, at the number it gave the op array.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum CacheAt {
+///
+/// One half-word, so a frame's header holds it in four bytes: the entry's
+/// number, with [`CacheAt::REQUEST`] set for the request's own table, as
+/// [`crate::api::values::ClassId::LOCAL`] marks a class of the request's.
+/// Both numbers count op arrays, the engine's those it published and the
+/// request's those of its own units standing at once, far below the bit.
+/// Two are one where they name the same entry of the same table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheAt(u32);
+
+/// Which table a [`CacheAt`] names an entry of, and the entry.
+enum Table {
     Engine(MapPtr<RuntimeCache>),
     Request(MapPtr<RuntimeCache>),
 }
 
 impl CacheAt {
+    /// The bit that marks an entry of the request's own caches.
+    const REQUEST: u32 = 1 << 31;
+
     /// The cache an op array's `runtime_cache` names, the one place the
     /// unit's number becomes the engine's pointer.
     pub(crate) fn of(offset: MapPtrOffset) -> CacheAt {
         match offset {
-            MapPtrOffset::Engine(at) => CacheAt::Engine(MapPtr::new(at)),
-            MapPtrOffset::Request(at) => CacheAt::Request(MapPtr::new(at)),
+            MapPtrOffset::Engine(at) => CacheAt::engine(at),
+            MapPtrOffset::Request(at) => CacheAt::request(at),
+        }
+    }
+
+    fn engine(at: u32) -> CacheAt {
+        CacheAt(at & !CacheAt::REQUEST)
+    }
+
+    fn request(at: u32) -> CacheAt {
+        CacheAt(at | CacheAt::REQUEST)
+    }
+
+    /// The table and the entry, decoded.
+    fn table(self) -> Table {
+        let at = MapPtr::new(self.0 & !CacheAt::REQUEST);
+        if self.0 & CacheAt::REQUEST == 0 {
+            Table::Engine(at)
+        } else {
+            Table::Request(at)
         }
     }
 }
-
-/// Two pointers are one where they name the same entry of the same
-/// table.
-impl PartialEq for CacheAt {
-    fn eq(&self, other: &CacheAt) -> bool {
-        match (self, other) {
-            (CacheAt::Engine(one), CacheAt::Engine(two))
-            | (CacheAt::Request(one), CacheAt::Request(two)) => one.offset() == two.offset(),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for CacheAt {}
 
 impl Default for CacheAt {
     fn default() -> CacheAt {
@@ -88,9 +105,9 @@ impl RuntimeCaches {
     /// not reached it.
     #[inline]
     pub(crate) fn get(&self, at: CacheAt) -> Option<&RuntimeCache> {
-        match at {
-            CacheAt::Engine(ptr) => self.engine.get(ptr),
-            CacheAt::Request(ptr) => self.request.get(ptr),
+        match at.table() {
+            Table::Engine(ptr) => self.engine.get(ptr),
+            Table::Request(ptr) => self.request.get(ptr),
         }
     }
 
@@ -105,9 +122,9 @@ impl RuntimeCaches {
     /// The cache at `at`, an empty one laid in where the request had
     /// none.
     pub(crate) fn map(&mut self, at: CacheAt) -> &mut RuntimeCache {
-        match at {
-            CacheAt::Engine(ptr) => self.engine.map(ptr),
-            CacheAt::Request(ptr) => self.request.map(ptr),
+        match at.table() {
+            Table::Engine(ptr) => self.engine.map(ptr),
+            Table::Request(ptr) => self.request.map(ptr),
         }
     }
 
@@ -117,7 +134,7 @@ impl RuntimeCaches {
     /// the request's, one nothing holds any longer first, held for the
     /// rest of the request.
     pub(crate) fn own_cache(&mut self) -> CacheAt {
-        CacheAt::Request(MapPtr::new(self.next_number()))
+        CacheAt::request(self.next_number())
     }
 
     /// The cache at `at`, which was the request's own
@@ -126,7 +143,7 @@ impl RuntimeCaches {
     /// and its number handed out again. A pointer of the engine's is
     /// never given back.
     pub(crate) fn give_back(&mut self, at: CacheAt) {
-        if let CacheAt::Request(ptr) = at {
+        if let Table::Request(ptr) = at.table() {
             *self.request.map(ptr) = RuntimeCache::default();
             self.free.push(ptr.offset());
         }

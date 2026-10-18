@@ -20,10 +20,9 @@ use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{
-    RelFields, RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone,
+    Abbr, RelFields, RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone,
 };
 use crate::format::date_format;
-use crate::held::{Held, Shape};
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent, release};
 
@@ -49,21 +48,42 @@ pub(crate) type DateObj = Box<DateState>;
 /// abbreviation with its offset and whether it is daylight time. Two
 /// words, so a `DateTimeZone`'s state lies inside the 32 bytes php's
 /// `php_timezone_obj` holds past its `zend_object` and its `new` asks the
-/// system allocator for nothing; the rare abbreviation is boxed.
+/// system allocator for nothing. A clone of the value shares the zone,
+/// as a reader of php's `tzi` does; a `DateTimeZone` of its own makes
+/// its own copy ([`TzKind::copy`]).
 #[derive(Clone)]
 pub enum TzKind {
     Id(Arc<Zone>),
     Offset(i64),
-    Abbr(Box<AbbrZone>),
+    Abbr(Arc<AbbrZone>),
 }
 
-/// `timelib_abbr_info`: an abbreviation zone's offset from UTC in
-/// seconds, its name and whether it is daylight time.
-#[derive(Clone)]
+/// `timelib_abbr_info`, php's `tzi.z`: an abbreviation zone's offset
+/// from UTC in seconds, whether it is daylight time, and its
+/// abbreviation, which is the `timelib_strdup` copy php's `tzi.z.abbr`
+/// is, on the request's heap, made where php makes it and freed where
+/// php frees it.
 pub struct AbbrZone {
     pub utc_offset: i64,
-    pub abbr: Vec<u8>,
     pub dst: i32,
+    abbr: Abbr,
+}
+
+impl AbbrZone {
+    /// The zone of `utc_offset`, `dst` and `timelib_strdup(abbr)`.
+    pub(super) fn new(lent: &Lent<'_>, utc_offset: i64, dst: i32, abbr: &[u8]) -> AbbrZone {
+        AbbrZone {
+            utc_offset,
+            dst,
+            abbr: Abbr::dup(lent, abbr),
+        }
+    }
+
+    /// The abbreviation, `tzi.z.abbr`.
+    #[must_use]
+    pub fn abbr(&self) -> &[u8] {
+        self.abbr.bytes()
+    }
 }
 
 impl TzKind {
@@ -76,16 +96,33 @@ impl TzKind {
         })
     }
 
-    /// The zone given up. An identifier's `timelib_tzinfo` is dropped
-    /// under a lend where this is its last owner, so what timelib
-    /// allocated goes back to the request's heap (ADR-0014); while the
-    /// request's cache keeps it, as it keeps every zone it parsed, and
-    /// for an offset or an abbreviation, which hold none of timelib's
-    /// memory, the drop frees nothing of timelib's and needs no lend.
+    /// The zone given up. Where this is the last owner of an
+    /// identifier's `timelib_tzinfo` or of an abbreviation's copy, the
+    /// drop is under a lend, so what timelib allocated goes back to the
+    /// request's heap (ADR-0014); the request's cache keeps every zone it
+    /// parsed, and an offset holds none of timelib's memory.
     pub(super) fn release(self, req: &mut Request) -> Result<(), Thrown> {
         match self {
             TzKind::Id(zone) if Arc::strong_count(&zone) == 1 => release(req, zone),
+            TzKind::Abbr(zone) if Arc::strong_count(&zone) == 1 => release(req, zone),
             _ => Ok(()),
+        }
+    }
+
+    /// The zone as a `DateTimeZone` of its own holds it, what
+    /// `date_object_clone_timezone` copies: an abbreviation's
+    /// `timelib_strdup` made again, the rest shared.
+    pub(super) fn copy(&self, req: &mut Request) -> Result<TzKind, Thrown> {
+        match self {
+            TzKind::Abbr(zone) => lent(req, |l| {
+                TzKind::Abbr(Arc::new(AbbrZone::new(
+                    l,
+                    zone.utc_offset,
+                    zone.dst,
+                    zone.abbr(),
+                )))
+            }),
+            other => Ok(other.clone()),
         }
     }
 
@@ -94,18 +131,15 @@ impl TzKind {
         match self {
             TzKind::Id(zone) => zone.name().to_vec(),
             TzKind::Offset(offset) => offset_string(*offset).into_bytes(),
-            TzKind::Abbr(zone) => zone.abbr.clone(),
+            TzKind::Abbr(zone) => zone.abbr().to_vec(),
         }
     }
 }
 
-/// `php_timezone_obj`.
+/// `php_timezone_obj`: its zone, none until a constructor set it.
 #[derive(Default)]
 pub(crate) struct TzState {
     pub tz: Option<TzKind>,
-    /// The `tzi.z.abbr` copy an abbreviation zone holds on the request's
-    /// heap; kept by [`set_tz`].
-    held: Option<Held>,
 }
 
 /// The payload, inside the `sizeof` php allocates (design §5.13): the
@@ -305,33 +339,25 @@ pub(super) fn new_timezone(req: &mut Request, kind: TzKind) -> Result<Owner<PhpO
     Ok(object)
 }
 
-/// The object's zone replaced, `set_timezone_from_timelib_time`: an
-/// abbreviation zone's `tzi.z.abbr` freed and copied again with
-/// `timelib_strdup`, the one block a `DateTimeZone` holds on the
-/// request's heap; an identifier's `tzinfo` is the request's cache's
-/// and an offset holds none. The `Err` is the memory limit.
+/// The object's zone replaced, `set_timezone_from_timelib_time`'s
+/// store: the zone given, made where php makes its `tzi` (an
+/// abbreviation's copy by [`AbbrZone::new`] or [`TzKind::copy`]), and the
+/// zone it held given up, an abbreviation's copy freed as php's
+/// `timelib_free(tzobj->tzi.z.abbr)` frees it. The `Err` is the memory
+/// limit.
 pub(super) fn set_tz(
     req: &mut Request,
     object: PhpObject,
     kind: Option<TzKind>,
 ) -> Result<(), Thrown> {
-    let shape = match &kind {
-        Some(TzKind::Abbr(zone)) => Some(Shape::abbr(&zone.abbr)),
-        _ => None,
-    };
     let Some(payload) = object.native_mut::<TzObj>(req) else {
         return kind.map_or(Ok(()), |kind| kind.release(req));
     };
     let old = std::mem::replace(&mut payload.tz, kind);
-    let held = payload.held.take();
-    if let Some(old) = old {
-        old.release(req)?;
+    match old {
+        Some(old) => old.release(req),
+        None => Ok(()),
     }
-    let held = Held::hold(req, held, shape)?;
-    if let Some(payload) = object.native_mut::<TzObj>(req) {
-        payload.held = held;
-    }
-    Ok(())
 }
 
 /// The zone a `DateTimeZone` holds, or the uninitialised error.
@@ -343,16 +369,18 @@ pub(super) fn tz_of(req: &mut Request, object: PhpObject) -> Result<TzKind, Thro
     }
 }
 
-/// `set_timezone_from_timelib_time`: the zone a time carries.
-pub(super) fn tz_from_time(t: &Time) -> Option<TzKind> {
+/// `set_timezone_from_timelib_time`: the zone a time carries, an
+/// abbreviation's `timelib_strdup(t->tz_abbr)` made under the lend.
+pub(super) fn tz_from_time(lent: &Lent<'_>, t: &Time) -> Option<TzKind> {
     match t.zone_type {
         ZONETYPE_ID => t.zone().map(|z| TzKind::Id(Arc::clone(z))),
         ZONETYPE_OFFSET => Some(TzKind::Offset(i64::from(t.z))),
-        ZONETYPE_ABBR => Some(TzKind::Abbr(Box::new(AbbrZone {
-            utc_offset: i64::from(t.z),
-            abbr: t.tz_abbr().to_vec(),
-            dst: t.dst,
-        }))),
+        ZONETYPE_ABBR => Some(TzKind::Abbr(Arc::new(AbbrZone::new(
+            lent,
+            i64::from(t.z),
+            t.dst,
+            t.tz_abbr(),
+        )))),
         _ => None,
     }
 }
@@ -565,8 +593,8 @@ fn has_debug_info(req: &mut Request, object: PhpObject) -> bool {
 /// `date_object_to_hash`: `date`, and where the time is local its
 /// `timezone_type` and `timezone`.
 pub(super) fn date_fields(req: &mut Request, t: &Time) -> Result<Fields, Thrown> {
-    let text = lent(req, |l| date_format(l, b"x-m-d H:i:s.u", t, true))?;
-    let mut fields = vec![(&b"date"[..], PhpString::new(req, &text)?.into_value())];
+    let text = date_format(req, b"x-m-d H:i:s.u", t, true)?;
+    let mut fields = vec![(&b"date"[..], text.into_value())];
     if t.is_localtime != 0 {
         let zone_type = Owner::int(i64::from(t.zone_type));
         fields.push((b"timezone_type", zone_type));
@@ -851,15 +879,10 @@ pub(crate) static TIMEZONE: TzHandlers = TzHandlers;
 
 impl ObjectHandlers for TzHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let taken = object
-            .native_mut::<TzObj>(req)
-            .map(|t| (t.tz.take(), t.held.take()));
-        let Some((kind, held)) = taken else {
+        let taken = object.native_mut::<TzObj>(req).map(|t| t.tz.take());
+        let Some(kind) = taken else {
             return;
         };
-        if let Some(held) = held {
-            held.free(req);
-        }
         if let Some(kind) = kind {
             // Freeing allocates nothing, so the limit refuses nothing.
             let _freed = kind.release(req);
@@ -958,6 +981,13 @@ fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObjec
     // after it.
     let copy = object.clone_with(req, TzObj::default())?;
     let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
+    let kind = match kind.map(|kind| kind.copy(req)).transpose() {
+        Ok(kind) => kind,
+        Err(thrown) => {
+            copy.give_up(req);
+            return Err(thrown);
+        }
+    };
     if let Err(thrown) = set_tz(req, *copy, kind) {
         copy.give_up(req);
         return Err(thrown);
@@ -1229,6 +1259,27 @@ impl ObjectHandlers for IntervalHandlers {
     /// y p q m d h i s f invert days from_string
     /// y m d h i s f invert days from_string
     /// ```
+    ///
+    /// Each field is written as `zend_hash_str_update` writes it
+    /// ([`PhpObject::set_str`]): a key the table lacks is a string of its
+    /// own, `zend_string_init`'s, one byte long or not, so the table a
+    /// read lays down costs what php's does:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $o = new stdClass; foreach (['y','m','d','h','i','s','f','invert','days','from_string'] as $k) $o->$k = 1; echo memory_get_usage() - $m, "\n";
+    /// $i = new DateInterval('P1D');
+    /// $m = memory_get_usage(); $a = get_object_vars($i); echo memory_get_usage() - $m, "\n";
+    /// $j = new DateInterval('P1D');
+    /// $m = memory_get_usage(); $b = (array) $j; echo memory_get_usage() - $m, "\n";
+    /// $k = new DateInterval('P1D');
+    /// $m = memory_get_usage(); foreach ($k as $x) {} echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 736
+    /// 1720
+    /// 1720
+    /// 1024
+    /// ```
     fn get_properties(&self, req: &mut Request, object: PhpObject) -> Result<walk::Table, Thrown> {
         write_fields(req, object)?;
         Std.get_properties(req, object)
@@ -1243,18 +1294,7 @@ impl ObjectHandlers for IntervalHandlers {
 pub(super) fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     let mut fields = interval_rows(req, object).into_iter();
     while let Some((name, value)) = fields.next() {
-        let written = match PhpString::new(req, name) {
-            Ok(name) => {
-                let written = object.set_row(req, &Key::Str(*name), value);
-                name.give_up(req);
-                written
-            }
-            Err(thrown) => {
-                value.give_up(req);
-                Err(thrown)
-            }
-        };
-        if let Err(thrown) = written {
+        if let Err(thrown) = object.set_str(req, name, value) {
             give_up_fields(req, fields.collect());
             return Err(thrown);
         }

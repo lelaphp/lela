@@ -276,7 +276,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
     // A program whose path holds a NUL is never run, as
     // `php_cli_server_dispatch_script` refuses it: the request ends with
     // the head it has (`vpath::holds_nul`, #2695).
-    let (_, sink) = engine.serve(description, Box::new(sink), || {
+    let (_, sink) = engine.serve(description, Box::new(sink), |_| {
         if php_proto::vpath::holds_nul(&program.path_translated) {
             return HostServes::Nothing;
         }

@@ -811,6 +811,7 @@ impl Request {
             });
             let flags = crate::attributes::Flags::of(&decl.function.attributes);
             let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body));
+            let record = UserFunction::record(&unit, body, &decl.function.name.0);
             rows.push(MemberRow {
                 method: Some(method),
                 user: UserFunction {
@@ -819,6 +820,7 @@ impl Request {
                     member,
                     flags,
                     shape,
+                    record,
                 },
                 cache,
             });
@@ -839,6 +841,7 @@ impl Request {
                 });
                 let flags = crate::attributes::Flags::of(&hook.function.attributes);
                 let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body));
+                let record = UserFunction::record(&unit, body, &hook.function.name.0);
                 rows.push(MemberRow {
                     method: None,
                     user: UserFunction {
@@ -847,6 +850,7 @@ impl Request {
                         member,
                         flags,
                         shape,
+                        record,
                     },
                     cache,
                 });
@@ -1657,6 +1661,7 @@ impl Request {
             member: None,
             flags,
             shape,
+            record: UserFunction::record(unit, exec::Body::Dynamic(at), &decl.name.0),
         });
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
@@ -1688,12 +1693,17 @@ impl Request {
         }
         let function = Function::local(self.user_functions.len())?;
         let (flags, shape) = dynamic_traits(unit, at);
+        let name = unit
+            .dynamic
+            .get(usize::try_from(at).ok()?)
+            .map_or(&[][..], |(decl, _)| &decl.name.0);
         self.user_functions.push(UserFunction {
             unit: PublishedUnit::clone(unit),
             body,
             member: None,
             flags,
             shape,
+            record: UserFunction::record(unit, body, name),
         });
         Some(function)
     }
@@ -1727,7 +1737,10 @@ impl Request {
     /// argument's `RECV` and for a return.
     pub(crate) fn frame_scopes(&self, frame: FrameRef) -> crate::api::coerce::Scopes {
         let own = self.frame_scope(frame);
-        let called = self.vm.at(frame).and_then(|state| state.called_scope);
+        let called = self
+            .vm
+            .at(frame)
+            .and_then(crate::exec::Header::called_scope);
         crate::api::coerce::Scopes {
             own,
             called: called.or(own),
@@ -1862,6 +1875,7 @@ impl Request {
             member: None,
             flags: crate::attributes::Flags::of(&decl.attributes),
             shape: FrameShape::of(decl, exec::body_of(unit, body)),
+            record: UserFunction::record(unit, body, &decl.name.0),
         });
         self.functions.push(&decl.name.0, declared);
         Some(true)

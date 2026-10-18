@@ -739,7 +739,7 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
     let sink = Box::new(Process);
     let mut refused = false;
     let (served, _): (Observables, _) = match (&primary, invocation.behavior) {
-        (Primary::Path(path), Behavior::Standard) => engine.serve(description, sink, || {
+        (Primary::Path(path), Behavior::Standard) => engine.serve(description, sink, |_| {
             refusal(path.as_deref()).map_or(HostServes::Program, |page| {
                 refused = true;
                 HostServes::Page(page)
@@ -747,11 +747,11 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
         }),
         (Primary::Path(path), _) if let Some(page) = refusal(path.as_deref()) => {
             refused = true;
-            engine.serve(description, sink, || HostServes::Page(page))
+            engine.serve(description, sink, |_| HostServes::Page(page))
         }
         (_, Behavior::Highlight) => engine.highlight(description, sink),
         (_, Behavior::Strip) => engine.strip(description, sink),
-        _ => engine.serve(description, sink, || HostServes::Program),
+        _ => engine.serve(description, sink, |_| HostServes::Program),
     };
     // `main` returns `FAILURE` where `php_request_startup` failed, an
     // extension's `rinit` having raised (#1775), and php-cgi ends there
@@ -782,7 +782,7 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
         if let Primary::Path(path) = &primary
             && let Some(page) = refusal(path.as_deref())
         {
-            engine.serve(description, Box::new(Process), || HostServes::Page(page));
+            engine.serve(description, Box::new(Process), |_| HostServes::Page(page));
             return 255;
         }
         let name = description.script_name.clone().unwrap_or_default();

@@ -204,6 +204,74 @@ impl Caller {
     }
 }
 
+/// A [`Caller`] in the header's one half-word: none for
+/// [`Caller::Outside`], and otherwise the frame one more than its place,
+/// as [`AnnexId`] is, with [`CallerAt::LOOP`] set for [`Caller::Loop`]. A
+/// stack's frames are numbered far below the bit, each taking a room of
+/// eighty bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CallerAt(Option<std::num::NonZeroU32>);
+
+impl CallerAt {
+    const LOOP: u32 = 1 << 31;
+
+    fn of(caller: Caller) -> CallerAt {
+        let (frame, from_loop) = match caller {
+            Caller::Opline(frame) => (frame, false),
+            Caller::Loop(frame) => (frame, true),
+            Caller::Outside => return CallerAt(None),
+        };
+        let bit = if from_loop { CallerAt::LOOP } else { 0 };
+        CallerAt(Some(
+            std::num::NonZeroU32::MIN.saturating_add(frame.0 & !CallerAt::LOOP) | bit,
+        ))
+    }
+
+    fn caller(self) -> Caller {
+        let Some(packed) = self.0 else {
+            return Caller::Outside;
+        };
+        let frame = FrameRef((packed.get() & !CallerAt::LOOP).saturating_sub(1));
+        if packed.get() & CallerAt::LOOP == 0 {
+            Caller::Opline(frame)
+        } else {
+            Caller::Loop(frame)
+        }
+    }
+}
+
+/// The slot of the caller's that takes what a frame returns, one more
+/// than the slot so the header's `Option` of it is a half-word, as
+/// [`AnnexId`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReturnSlot(std::num::NonZeroU32);
+
+impl ReturnSlot {
+    fn of(slot: u32) -> ReturnSlot {
+        ReturnSlot(std::num::NonZeroU32::MIN.saturating_add(slot))
+    }
+
+    fn slot(self) -> u32 {
+        self.0.get() - 1
+    }
+}
+
+/// The called scope in the header's half-word, its class's identity
+/// inverted so the `Option` costs nothing: [`ClassId::local`] numbers no
+/// class at `u32::MAX`, so every class has a non-zero inversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopeAt(std::num::NonZeroU32);
+
+impl ScopeAt {
+    fn of(scope: Option<ClassId>) -> Option<ScopeAt> {
+        std::num::NonZeroU32::new(!scope?.0).map(ScopeAt)
+    }
+
+    fn class(self) -> ClassId {
+        ClassId(!self.0.get())
+    }
+}
+
 /// `EX(This)` as an object, and whether the call holds an owner of it,
 /// which php says with `ZEND_CALL_RELEASE_THIS`. php sets that bit, and
 /// takes the owner, where the call's receiver came from a value the
@@ -419,17 +487,23 @@ impl std::ops::DerefMut for ExtraNamed {
 }
 
 /// A frame's header, php's `zend_execute_data`, laid in the room the VM
-/// stack keeps before the frame's slots (design §5.6): one record with
-/// the slots after it, pushed and popped with them, written whole by
-/// the push and read and written in place after. Everything here is a
-/// word; what a frame owns and only some frames have stands in its
-/// [`Annex`], made where it is needed and named by [`Header::annex`].
+/// stack keeps before the frame's slots, past the stack's link (design
+/// §5.6): one record with the slots after it, pushed and popped with
+/// them, written whole by the push and read and written in place after.
+/// Everything here is a word or a half-word; what a frame owns and only
+/// some frames have stands in its [`Annex`], made where it is needed and
+/// named by [`Header::annex`]. It is `#[repr(C)]` because another
+/// process reads three of its fields at fixed offsets, the record,
+/// the opline and the flags ([`crate::readable`]), and the fields are in
+/// that order and then by size, so the header fills the seventy-two
+/// bytes php's eighty leave past the link with nothing between them.
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub(crate) struct Header {
-    /// `EX(func)`: the linked function the frame serves; none for an
-    /// included, evaluated or main file's op array, which is no
-    /// function and whose unit the frame's [`Annex`] holds.
-    pub(crate) function: Option<Function>,
+    /// `EX(func)` as another process reads it: the record of what
+    /// the frame serves ([`crate::readable::Record`]), written by the
+    /// push and never read here.
+    pub(crate) callee: crate::readable::CalleeAt,
     /// `Z_OBJ(EX(This))`: the receiver of a method call; whether the
     /// frame owns it is [`CallInfo::release_this`] ([`Receiver`]).
     this: Option<PhpObject>,
@@ -441,15 +515,6 @@ pub(crate) struct Header {
     /// `BIND_STATIC` prologue of the body reads its bound variables off
     /// this and nothing else does; none for every other frame.
     pub(crate) closure: Option<PhpObject>,
-    /// The called scope, `static`; none for the main op array or a
-    /// function.
-    pub(crate) called_scope: Option<ClassId>,
-    /// `EX(prev_execute_data)` as far as a diagnostic reads it
-    /// ([`Caller`]).
-    pub(crate) caller: Caller,
-    /// The slot of the caller's ([`Caller::frame`]) that takes what this
-    /// frame returns, when the call that pushed it wants the value.
-    pub(crate) returns_to: Option<u32>,
     /// The frame's identity, given the first time an extension keeps it
     /// ([`crate::api::request::FrameId`]) and never given again in the
     /// request; none until then. It moves with the header, so a
@@ -459,9 +524,25 @@ pub(crate) struct Header {
     pub(crate) identity: Cell<Option<crate::api::request::Identity>>,
     /// Where in the op array the loop stands, `EX(opline)`.
     pub(crate) opline: u32,
+    /// `ZEND_CALL_INFO`: the frame's flags.
+    pub(crate) info: CallInfo,
+    /// `EX(func)`: the linked function the frame serves; none for an
+    /// included, evaluated or main file's op array, which is no
+    /// function and whose unit the frame's [`Annex`] holds.
+    pub(crate) function: Option<Function>,
     /// `ZEND_CALL_NUM_ARGS`: how many arguments the call that pushed the
     /// frame placed, which the `RECV*` prologue reads.
     pub(crate) num_args: u32,
+    /// `EX(prev_execute_data)` as far as a diagnostic reads it
+    /// ([`Caller`], [`Header::caller`]).
+    caller: CallerAt,
+    /// The slot of the caller's ([`Caller::frame`]) that takes what this
+    /// frame returns, when the call that pushed it wants the value
+    /// ([`Header::returns_to`]).
+    returns_to: Option<ReturnSlot>,
+    /// The called scope, `static`; none for the main op array or a
+    /// function ([`Header::called_scope`]).
+    called_scope: Option<ScopeAt>,
     /// `EX(run_time_cache)`: where the op array's runtime cache stands
     /// in the request's map table (design §5.6), read off the op array
     /// as `RUN_TIME_CACHE(op_array)` reads it when the frame is
@@ -473,9 +554,14 @@ pub(crate) struct Header {
     run_time_cache: CacheAt,
     /// What the frame owns beyond words, where it owns anything.
     pub(crate) annex: Option<AnnexId>,
-    /// `ZEND_CALL_INFO`: the frame's flags.
-    pub(crate) info: CallInfo,
 }
+
+// The header fills the room php's `zend_execute_data` leaves past the
+// stack's link, and no more (`php_heap::Frame`'s `FITS` holds the same).
+const _: () = assert!(
+    std::mem::size_of::<Header>() == php_heap::ROOM_BYTES - php_heap::HEADER_AT,
+    "a frame header fills php's zend_execute_data room past the link"
+);
 
 impl Header {
     /// The header of a frame serving `function`, or a file's op array
@@ -484,11 +570,12 @@ impl Header {
     /// to no slot, pushed from outside the loop.
     pub(crate) fn of(function: Option<Function>, code: &OpArray) -> Header {
         Header {
+            callee: crate::readable::CalleeAt::default(),
             function,
             this: None,
             closure: None,
             called_scope: None,
-            caller: Caller::Outside,
+            caller: CallerAt(None),
             returns_to: None,
             identity: Cell::new(None),
             opline: 0,
@@ -506,11 +593,12 @@ impl Header {
         let mut info = CallInfo::default();
         info.set(CallInfo::CALL | CallInfo::BUILDING, true);
         Header {
+            callee: crate::readable::CalleeAt::default(),
             function: Some(function),
             this: None,
             closure: None,
             called_scope: None,
-            caller: Caller::Outside,
+            caller: CallerAt(None),
             returns_to: None,
             identity: Cell::new(None),
             opline: 0,
@@ -558,11 +646,45 @@ impl Header {
     pub(crate) fn runtime_cache(&self) -> CacheAt {
         self.run_time_cache
     }
+
+    /// `EX(prev_execute_data)` as far as a diagnostic reads it.
+    pub(crate) fn caller(&self) -> Caller {
+        self.caller.caller()
+    }
+
+    pub(crate) fn set_caller(&mut self, caller: Caller) {
+        self.caller = CallerAt::of(caller);
+    }
+
+    /// The slot of the caller's that takes what the frame returns.
+    pub(crate) fn returns_to(&self) -> Option<u32> {
+        self.returns_to.map(ReturnSlot::slot)
+    }
+
+    pub(crate) fn set_returns_to(&mut self, slot: Option<u32>) {
+        self.returns_to = slot.map(ReturnSlot::of);
+    }
+
+    /// The called scope, `static`.
+    pub(crate) fn called_scope(&self) -> Option<ClassId> {
+        self.called_scope.map(ScopeAt::class)
+    }
+
+    pub(crate) fn set_called_scope(&mut self, scope: Option<ClassId>) {
+        self.called_scope = ScopeAt::of(scope);
+    }
+
+    /// Where another process reads the record, the opline and the
+    /// flags, past the room's link ([`crate::readable::Room::read`]).
+    pub(crate) const CALLEE_AT: usize = std::mem::offset_of!(Header, callee);
+    pub(crate) const OPLINE_AT: usize = std::mem::offset_of!(Header, opline);
+    pub(crate) const INFO_AT: usize = std::mem::offset_of!(Header, info);
 }
 
 /// `ZEND_CALL_INFO`'s flags as this engine's frame has them, one bit
 /// each behind a name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(transparent)]
 pub(crate) struct CallInfo(u32);
 
 impl CallInfo {
@@ -614,6 +736,23 @@ impl CallInfo {
     /// the declared parameters beyond the CVs and the temporaries
     /// (`zend_copy_extra_args`), which the frame's leave gives up.
     const EXTRA_ARGS: u32 = 1 << 9;
+    /// `ZEND_CALL_TOP_CODE`: the frame of a main op array, pushed with
+    /// nothing executing below it, where the walk another process makes
+    /// of the chain ends (`fpm_php_trace_dump`).
+    const TOP_CODE: u32 = 1 << 10;
+
+    /// The flags as another process read them ([`crate::readable`]).
+    pub(crate) fn of(bits: u32) -> CallInfo {
+        CallInfo(bits)
+    }
+
+    pub(crate) fn top_code(self) -> bool {
+        self.has(Self::TOP_CODE)
+    }
+
+    pub(crate) fn set_top_code(&mut self, on: bool) {
+        self.set(Self::TOP_CODE, on);
+    }
 
     fn has(self, bit: u32) -> bool {
         self.0 & bit != 0
@@ -729,6 +868,11 @@ pub(crate) struct Annex {
     /// for the frame's life: a function's frame has its unit through the
     /// function table, which holds it.
     pub(crate) unit: Option<PublishedUnit>,
+    /// The file's op array as another process reads it, php's
+    /// `EX(func)` of a code frame ([`crate::readable`]): no name, the
+    /// unit's file and oplines. The header names it from the push on,
+    /// and it stands, boxed, until the frame pops.
+    pub(crate) record: Option<Box<crate::readable::Record>>,
     /// `EX(func)->op_array.scope` where the frame serves no function of
     /// its own: the including frame's scope, which `INCLUDE_OR_EVAL`
     /// writes onto the op array it pushes (`new_op_array->scope =
@@ -890,7 +1034,7 @@ impl<'a> FrameAt<'a> {
     }
 
     pub(crate) fn called_scope(self) -> Option<ClassId> {
-        self.header().called_scope
+        self.header().called_scope()
     }
 
     pub(crate) fn closure(self) -> Option<PhpObject> {
@@ -898,7 +1042,7 @@ impl<'a> FrameAt<'a> {
     }
 
     pub(crate) fn caller(self) -> Caller {
-        self.header().caller
+        self.header().caller()
     }
 
     pub(crate) fn opline(self) -> u32 {
@@ -1650,7 +1794,7 @@ impl Vm {
     /// nothing when the call that pushed it wants no value.
     pub(crate) fn returns_to(&self, frame: FrameRef) -> Option<(FrameRef, u32)> {
         let header = self.at(frame)?;
-        Some((header.caller.frame()?, header.returns_to?))
+        Some((header.caller().frame()?, header.returns_to()?))
     }
 
     /// Where the loop stands in `frame`.
@@ -1780,6 +1924,12 @@ pub(crate) fn innermost_try(code: &OpArray, op_num: u32) -> Option<u32> {
 /// The main op array of `unit`, what the frame `serve` pushes serves.
 pub(crate) fn code_of(unit: &Unit) -> &OpArray {
     &unit.main
+}
+
+/// The record of `unit`'s main op array as another process reads
+/// it: a file's, no name, php's `NULL` `function_name`.
+pub(crate) fn code_record(unit: &Unit) -> crate::readable::Record {
+    crate::readable::Record::user(&[], code_of(unit))
 }
 
 /// The op array `body` names in `unit`; none for an index the unit has

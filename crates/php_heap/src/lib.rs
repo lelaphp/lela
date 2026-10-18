@@ -80,7 +80,7 @@ pub use resource::{Res, ResourceType};
 #[cfg(debug_assertions)]
 pub use sensed::Origin;
 pub use sort::zend_sort;
-pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, Slot, VmStack};
+pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, HEADER_AT, ROOM_BYTES, Slot, VmStack};
 pub use string::{FreshStr, Intern, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
