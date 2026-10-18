@@ -698,13 +698,28 @@ impl PhpArray {
         key: Owner<Key>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
+        self.write_at(req, key, value, Request::array_update)
+    }
+
+    /// [`PhpArray::set`] and [`PhpArray::add_new`] past the one call that
+    /// tells them apart, `write`: the array separated, or the key and the
+    /// value given up where it cannot be, and the key's owner given up
+    /// once the bucket took its own.
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn write_at(
+        &mut self,
+        req: &mut Request,
+        key: Owner<Key>,
+        value: Owner<Value>,
+        write: fn(&mut Request, php_heap::Arr, php_heap::Key, Value) -> Result<(), Thrown>,
+    ) -> Result<(), Thrown> {
         if let Err(thrown) = self.separate(req) {
             key.give_up(req);
             value.give_up(req);
             return Err(thrown);
         }
         let key = key.hand_on();
-        let written = req.array_update(self.0, key.heap(), value.hand_on());
+        let written = write(req, self.0, key.heap(), value.hand_on());
         if let Key::Str(s) = key {
             req.release(Value::string(s));
         }
@@ -804,17 +819,7 @@ impl PhpArray {
         key: Owner<Key>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        if let Err(thrown) = self.separate(req) {
-            key.give_up(req);
-            value.give_up(req);
-            return Err(thrown);
-        }
-        let key = key.hand_on();
-        let written = req.array_add_new(self.0, key.heap(), value.hand_on());
-        if let Key::Str(s) = key {
-            req.release(Value::string(s));
-        }
-        written
+        self.write_at(req, key, value, Request::array_add_new)
     }
 
     /// Replace the value at `key` in place; `false`, and `value` given
