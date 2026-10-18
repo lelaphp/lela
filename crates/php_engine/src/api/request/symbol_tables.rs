@@ -53,13 +53,16 @@ impl Request {
         let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
             return;
         };
-        let Ok(names) = self.frame_var_names(frame) else {
+        let Some((unit, body)) = self.frame_unit(frame) else {
             return;
         };
-        for (at, name) in names.into_iter().enumerate() {
+        let Some(code) = exec::body_of(&unit, body) else {
+            return;
+        };
+        for (at, name) in code.vars.iter().enumerate() {
             let at = u32::try_from(at).unwrap_or(u32::MAX);
             let found = self.table_mut(table).and_then(|entries| {
-                let index = position(entries, name.as_bytes())?;
+                let index = position(entries, &name.0)?;
                 Some(std::mem::replace(
                     &mut entries[index].1,
                     Symbol::Indirect(frame, at),
@@ -70,6 +73,12 @@ impl Request {
                 Some(Symbol::Held(cell)) => self.unhold(cell),
                 Some(Symbol::Indirect(other, slot)) => self.take_slot(other, slot),
                 None => {
+                    // The interned string the unit's compile made of the
+                    // name ([`Request::frame_var_names`]); a refusal has
+                    // ended the request.
+                    let Ok(name) = self.interned(&name.0) else {
+                        return;
+                    };
                     self.table_push(table, name, Symbol::Indirect(frame, at));
                     continue;
                 }
@@ -98,15 +107,30 @@ impl Request {
         let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) else {
             return;
         };
-        let Ok(names) = self.frame_var_names(frame) else {
+        let Some((unit, body)) = self.frame_unit(frame) else {
             return;
         };
-        for (at, name) in names.into_iter().enumerate() {
+        let Some(code) = exec::body_of(&unit, body) else {
+            return;
+        };
+        for (at, name) in code.vars.iter().enumerate() {
             let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
             if value.tag() == TypeTag::Undef {
-                self.symbol_del(table, name.as_bytes());
-            } else {
-                self.symbol_update(table, name, value);
+                self.symbol_del(table, &name.0);
+                continue;
+            }
+            // The bucket still names the CV, as the attach left it: the
+            // value takes its place with no name to look up again.
+            if let Some(entries) = self.table_mut(table)
+                && let Some(index) = position(entries, &name.0)
+                && matches!(entries[index].1, Symbol::Indirect(..))
+            {
+                entries[index].1 = Symbol::Value(value);
+                continue;
+            }
+            match self.interned(&name.0) {
+                Ok(name) => self.symbol_update(table, name, value),
+                Err(_) => self.release(value),
             }
         }
     }
@@ -164,11 +188,7 @@ impl Request {
     /// `Err` is the memory limit, met only by a unit no compile
     /// interned.
     pub(super) fn frame_var_names(&mut self, frame: FrameRef) -> Result<Vec<PhpString>, Thrown> {
-        let Some((unit, body)) = self
-            .frame_at(frame)
-            .and_then(exec::FrameAt::unit)
-            .map(|(unit, body)| (std::sync::Arc::clone(unit), body))
-        else {
+        let Some((unit, body)) = self.frame_unit(frame) else {
             return Ok(Vec::new());
         };
         let Some(code) = exec::body_of(&unit, body) else {
@@ -178,6 +198,15 @@ impl Request {
             .iter()
             .map(|name| self.interned(&name.0))
             .collect()
+    }
+
+    /// The unit and the body of the op array `frame` serves, one more
+    /// share of the unit so the frame's names are read while the
+    /// request is written.
+    fn frame_unit(&self, frame: FrameRef) -> Option<(std::sync::Arc<php_unit::Unit>, exec::Body)> {
+        self.frame_at(frame)
+            .and_then(exec::FrameAt::unit)
+            .map(|(unit, body)| (std::sync::Arc::clone(unit), body))
     }
 
     pub(super) fn table_mut(&mut self, table: TableId) -> Option<&mut Vec<(PhpString, Symbol)>> {

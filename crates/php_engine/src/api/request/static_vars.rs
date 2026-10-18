@@ -45,6 +45,10 @@ pub(super) struct StaticVars {
     /// [`php_unit::OpArray::bound_vars`], which the published unit never
     /// holds (design §5.14). A closure's are its object's.
     tables: HashMap<Statics, PhpArray>,
+    /// How many of `tables` are a main op array's, which every code
+    /// frame's push forgets ([`Request::forget_main_statics`]) and which
+    /// most requests have none of.
+    mains: usize,
 }
 
 impl Request {
@@ -133,8 +137,11 @@ impl Request {
                     Some(*table)
                 } else {
                     let table = exec::starting_statics(self, code)?;
-                    if let Some(table) = table {
-                        self.static_vars.tables.insert(of, table);
+                    if let Some(table) = table
+                        && self.static_vars.tables.insert(of, table).is_none()
+                        && matches!(of, Statics::Main(_))
+                    {
+                        self.static_vars.mains += 1;
                     }
                     table
                 }
@@ -202,7 +209,11 @@ impl Request {
     /// `offset` given up: php compiles a file afresh at each include, so
     /// its main op array's table starts over each time it is entered.
     pub(super) fn forget_main_statics(&mut self, offset: php_unit::MapPtrOffset) {
+        if self.static_vars.mains == 0 {
+            return;
+        }
         if let Some(table) = self.static_vars.tables.remove(&Statics::Main(offset)) {
+            self.static_vars.mains -= 1;
             self.release(Value::array(table));
         }
     }
@@ -213,6 +224,7 @@ impl Request {
     /// destructors are behind the request by then, so this frees and
     /// serves nothing.
     pub(crate) fn destroy_static_vars(&mut self) {
+        self.static_vars.mains = 0;
         for (_, table) in std::mem::take(&mut self.static_vars.tables) {
             self.release(Value::array(table));
         }

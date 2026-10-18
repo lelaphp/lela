@@ -80,6 +80,9 @@ pub(crate) struct RuntimeCaches {
     /// Each request-only unit the request took, and the numbers its op
     /// arrays hold.
     held: Vec<(Weak<Unit>, Vec<u32>)>,
+    /// The vectors of numbers units nothing holds any longer stood in,
+    /// emptied, for the next units to take.
+    spare: Vec<Vec<u32>>,
 }
 
 impl RuntimeCaches {
@@ -147,7 +150,7 @@ impl RuntimeCaches {
     /// the unit was found over, as php frees a heap cache with its op
     /// array.
     pub(crate) fn take(&mut self, mut unit: Unit) -> Arc<Unit> {
-        let (free, request) = (&mut self.free, &mut self.request);
+        let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
         self.held.retain_mut(|(unit, numbers)| {
             if unit.strong_count() > 0 {
                 return true;
@@ -156,9 +159,10 @@ impl RuntimeCaches {
                 *request.map(MapPtr::new(number)) = RuntimeCache::default();
             }
             free.append(numbers);
+            spare.push(std::mem::take(numbers));
             false
         });
-        let mut numbers = Vec::new();
+        let mut numbers = self.spare.pop().unwrap_or_default();
         for code in op_arrays_mut(&mut unit) {
             let number = self.next_number();
             code.runtime_cache = MapPtrOffset::Request(number);
