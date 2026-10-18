@@ -840,13 +840,18 @@ fn corpus_states_the_pin_the_patterns_and_the_key_they_make() {
         "{key}"
     );
     let pin = Manifest::load(workspace()).unwrap().pin;
+    let variants = pin
+        .variant
+        .keys()
+        .map(|name| pin.variant(name).unwrap().oracle.md5);
+    let kept: Vec<String> = std::iter::once(pin.oracle.md5.clone())
+        .chain(variants.filter(|md5| !md5.is_empty()))
+        .map(|md5| format!("target/harness/phpt-runs/pin-{}-{md5}", pin.source.tag))
+        .collect();
     assert_eq!(
         corpus["targets"],
-        format!(
-            "target/harness/phpt-runs/pin-{}-{}",
-            pin.source.tag, pin.oracle.md5
-        ),
-        "the targets are kept under the pin's tag and the oracle's digest"
+        serde_json::json!(kept),
+        "the targets are kept under the pin's tag and each oracle's digest"
     );
     // The hosts the lane hands a test to (#1908), the binary under test
     // first: each `sapi/*` crate of the workspace, by the package and the

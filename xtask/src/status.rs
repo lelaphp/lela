@@ -1719,8 +1719,10 @@ fn oracle_row(out: &mut String, fact: &str, variable: &str, value: &str, state: 
 /// roots, and the cache key, the commit and a digest of the patterns, so a
 /// change to the roots never restores a checkout made by the old ones.
 /// Beside the checkout, `targets`: where a workspace keeps the targets
-/// under the pin, relative to its root, which CI keeps between runs so an
-/// engine's reading is held to its subset's target (#1733); and `hosts`,
+/// under the pin, the main oracle's and each variant's this machine pins,
+/// relative to its root, which CI keeps between runs so an engine's
+/// reading is held to its subset's target (#1733) and a bound on
+/// `target/` keeps alone (#2299); and `hosts`,
 /// each host the lane hands a test to by its crate, package and binary
 /// ([`HOSTS`]), which CI builds (#1908).
 fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
@@ -1730,7 +1732,11 @@ fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
     digest.update(patterns.join("\n").as_bytes());
     let digest = digest.digest().to_string();
     let key = format!("php-src-{}-{}", source.commit, &digest[..12]);
-    let targets = phpt::target::kept_under(pin).display().to_string();
+    let variants = pin.variant.keys().filter_map(|name| pin.variant(name).ok());
+    let pins = std::iter::once(pin.clone()).chain(variants.filter(|v| !v.oracle.md5.is_empty()));
+    let targets: Vec<String> = pins
+        .map(|p| phpt::target::kept_under(&p).display().to_string())
+        .collect();
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&json!({
             "tag": source.tag,
@@ -1746,15 +1752,13 @@ fn corpus_section(pin: &Pin, format: Table) -> Result<String> {
             })),
         }))?,
         Table::Md => {
-            let mut out = String::new();
-            writeln!(out, "| fact | value |").ok();
-            writeln!(out, "|---|---|").ok();
+            let mut out = "| fact | value |\n|---|---|\n".to_owned();
             writeln!(out, "| tag | {} |", cell(&source.tag)).ok();
             writeln!(out, "| commit | {} |", cell(&source.commit)).ok();
             writeln!(out, "| phpt_files | {} |", source.phpt_files).ok();
             writeln!(out, "| patterns | {} |", cell(&patterns.join(" "))).ok();
             writeln!(out, "| key | {key} |").ok();
-            writeln!(out, "| targets | {} |", cell(&targets)).ok();
+            writeln!(out, "| targets | {} |", cell(&targets.join(" "))).ok();
             let packages: Vec<String> = HOSTS.map(EngineHost::package).into();
             writeln!(out, "| hosts | {} |", cell(&packages.join(" "))).ok();
             out
