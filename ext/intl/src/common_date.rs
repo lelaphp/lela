@@ -46,7 +46,7 @@ pub(crate) fn convert_datetimezone(
 ) -> Result<Option<Zone>, Thrown> {
     let id = match kind {
         Some(TzKind::Id(zone)) => zone.name().to_vec(),
-        Some(TzKind::Abbr { abbr, .. }) => abbr.clone(),
+        Some(TzKind::Abbr(zone)) => zone.abbr.clone(),
         Some(TzKind::Offset(seconds)) => {
             #[allow(clippy::cast_possible_truncation, reason = "php's (int) cast")]
             let mins = (*seconds as i32) / 60;

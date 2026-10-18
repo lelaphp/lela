@@ -1,4 +1,5 @@
 # The pub items of ext/date beyond extension(), its surface: design §4.10's rows hold its edges, this file its items, and `xtask api-check --write` rewrites it.
+AbbrZone
 DateParts
 Offset
 TzKind

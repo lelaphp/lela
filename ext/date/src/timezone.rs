@@ -15,8 +15,8 @@ use crate::ffi::{self, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::format_timestamp;
 use crate::lent::{Lent, lent};
 use crate::obj::{
-    TIMEZONE, TzKind, TzObj, class_id, lent_time, rows_array, set_str, set_string, set_tz,
-    std_rows, tz_fields, tz_of,
+    AbbrZone, TIMEZONE, TzKind, TzObj, class_id, lent_time, rows_array, set_str, set_string,
+    set_tz, std_rows, tz_fields, tz_of,
 };
 
 /// Why `timezone_initialize` refuses a zone: the sentence php prints for
@@ -90,11 +90,11 @@ fn parse(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, Refusal> {
     match read.zone_type {
         ZONETYPE_ID => read.zone.map(TzKind::Id).ok_or(Refusal::Unknown),
         ZONETYPE_OFFSET => Ok(TzKind::Offset(z)),
-        ZONETYPE_ABBR => Ok(TzKind::Abbr {
+        ZONETYPE_ABBR => Ok(TzKind::Abbr(Box::new(AbbrZone {
             utc_offset: z,
             abbr: read.abbr,
             dst: read.dst,
-        }),
+        }))),
         _ => Err(Refusal::Unknown),
     }
 }
@@ -230,9 +230,7 @@ fn offset_of(req: &mut Request, object: PhpObject, date: PhpObject) -> Result<i6
     let offset = lent_time(req, date, |l, time| match &kind {
         TzKind::Id(zone) => i64::from(zone.offset_in(l, time.sse).offset),
         TzKind::Offset(offset) => *offset,
-        TzKind::Abbr {
-            utc_offset, dst, ..
-        } => utc_offset + i64::from(*dst) * 3600,
+        TzKind::Abbr(zone) => zone.utc_offset + i64::from(zone.dst) * 3600,
     });
     kind.release(req)?;
     offset

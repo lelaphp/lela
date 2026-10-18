@@ -31,9 +31,9 @@ use crate::format::date_format as format_time;
 use crate::interval::DateInterval;
 use crate::lent::{Lent, lent};
 use crate::obj::{
-    CIVIL, DATE, DateObj, TzKind, WALL, again, check_time, class_id, clone_date, date_fields,
-    interval_of, lent_time, new_interval, new_timezone, rows_array, set_time, std_rows, time_of,
-    tz_from_time, tz_of, uninitialized, with_time,
+    AbbrZone, CIVIL, DATE, DateObj, TzKind, WALL, again, check_time, class_id, clone_date,
+    date_fields, interval_of, lent_time, new_interval, new_timezone, rows_array, set_time,
+    std_rows, time_of, tz_from_time, tz_of, uninitialized, with_time,
 };
 use crate::parse::keep_errors;
 use crate::timezone::DateTimeZone;
@@ -178,11 +178,12 @@ fn now_in(
             now.z = z;
             None
         }
-        Some(TzKind::Abbr {
-            utc_offset,
-            abbr,
-            dst,
-        }) => {
+        Some(TzKind::Abbr(zone)) => {
+            let AbbrZone {
+                utc_offset,
+                abbr,
+                dst,
+            } = *zone;
             #[allow(clippy::cast_possible_truncation)]
             let z = utc_offset as i32;
             now.z = z;
@@ -596,11 +597,9 @@ fn timezone_set(req: &mut Request, object: PhpObject, timezone: PhpObject) -> Re
     lent_time(req, object, |l, time| {
         match &kind {
             TzKind::Offset(offset) => time.set_timezone_from_offset(l, *offset),
-            TzKind::Abbr {
-                utc_offset,
-                abbr,
-                dst,
-            } => time.set_timezone_from_abbr(l, *utc_offset, abbr, *dst),
+            TzKind::Abbr(zone) => {
+                time.set_timezone_from_abbr(l, zone.utc_offset, &zone.abbr, zone.dst);
+            }
             TzKind::Id(zone) => time.set_timezone(l, zone),
         }
         let sse = time.sse;

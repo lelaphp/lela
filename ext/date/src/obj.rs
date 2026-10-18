@@ -43,16 +43,24 @@ pub(crate) type DateObj = Box<DateState>;
 
 /// What a `DateTimeZone` holds, `php_timezone_obj`'s `type` and `tzi`:
 /// a zone of the database, an offset from UTC in seconds, or an
-/// abbreviation with its offset and whether it is daylight time.
+/// abbreviation with its offset and whether it is daylight time. Two
+/// words, so a `DateTimeZone`'s state lies inside the 32 bytes php's
+/// `php_timezone_obj` holds past its `zend_object` and its `new` asks the
+/// system allocator for nothing; the rare abbreviation is boxed.
 #[derive(Clone)]
 pub enum TzKind {
     Id(Arc<Zone>),
     Offset(i64),
-    Abbr {
-        utc_offset: i64,
-        abbr: Vec<u8>,
-        dst: i32,
-    },
+    Abbr(Box<AbbrZone>),
+}
+
+/// `timelib_abbr_info`: an abbreviation zone's offset from UTC in
+/// seconds, its name and whether it is daylight time.
+#[derive(Clone)]
+pub struct AbbrZone {
+    pub utc_offset: i64,
+    pub abbr: Vec<u8>,
+    pub dst: i32,
 }
 
 impl TzKind {
@@ -60,7 +68,7 @@ impl TzKind {
     pub(super) fn zone_type(&self) -> i64 {
         i64::from(match self {
             TzKind::Offset(_) => ZONETYPE_OFFSET,
-            TzKind::Abbr { .. } => ZONETYPE_ABBR,
+            TzKind::Abbr(_) => ZONETYPE_ABBR,
             TzKind::Id(_) => ZONETYPE_ID,
         })
     }
@@ -83,7 +91,7 @@ impl TzKind {
         match self {
             TzKind::Id(zone) => zone.name().to_vec(),
             TzKind::Offset(offset) => offset_string(*offset).into_bytes(),
-            TzKind::Abbr { abbr, .. } => abbr.clone(),
+            TzKind::Abbr(zone) => zone.abbr.clone(),
         }
     }
 }
@@ -97,9 +105,11 @@ pub(crate) struct TzState {
     held: Option<Held>,
 }
 
-/// The payload: `php_timezone_obj` keeps its state behind pointers, and so the
-/// payload is one, inside the `sizeof` php allocates (design §5.13).
-pub(crate) type TzObj = Box<TzState>;
+/// The payload, inside the `sizeof` php allocates (design §5.13): the
+/// state itself, which fits it.
+pub(crate) type TzObj = TzState;
+
+const _: () = assert!(size_of::<TzState>() <= 32);
 
 /// `php_interval_obj`.
 #[derive(Default)]
@@ -300,7 +310,7 @@ pub(super) fn set_tz(
     kind: Option<TzKind>,
 ) -> Result<(), Thrown> {
     let shape = match &kind {
-        Some(TzKind::Abbr { abbr, .. }) => Some(Shape::abbr(abbr)),
+        Some(TzKind::Abbr(zone)) => Some(Shape::abbr(&zone.abbr)),
         _ => None,
     };
     let Some(payload) = object.native_mut::<TzObj>(req) else {
@@ -332,11 +342,11 @@ pub(super) fn tz_from_time(t: &Time) -> Option<TzKind> {
     match t.zone_type {
         ZONETYPE_ID => t.zone().map(|z| TzKind::Id(Arc::clone(z))),
         ZONETYPE_OFFSET => Some(TzKind::Offset(i64::from(t.z))),
-        ZONETYPE_ABBR => Some(TzKind::Abbr {
+        ZONETYPE_ABBR => Some(TzKind::Abbr(Box::new(AbbrZone {
             utc_offset: i64::from(t.z),
             abbr: t.tz_abbr().to_vec(),
             dst: t.dst,
-        }),
+        }))),
         _ => None,
     }
 }

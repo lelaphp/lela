@@ -63,7 +63,7 @@ use crate::datetime::{DateTime, DateTimeImmutable};
 use crate::ffi::{ErrorContainer, Tzdb, Zones};
 pub use crate::ffi::{Offset, Zone};
 use crate::interval::DateInterval;
-pub use crate::obj::TzKind;
+pub use crate::obj::{AbbrZone, TzKind};
 use crate::period::DatePeriod;
 use crate::timezone::DateTimeZone;
 
