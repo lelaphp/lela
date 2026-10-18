@@ -188,8 +188,8 @@ fn reading_of(scan: &Scan, snapshot: &Snapshot, rule: &Rule, krate: &Crate) -> R
     let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     reading.rule.clone_from(&rule.id);
     reading.adr = rule.adr.adr_field();
-    reading.count("items", u64::try_from(scan.items)?)?;
-    reading.count("prose", u64::try_from(scan.prose)?)?;
+    reading.set("items", scan.items);
+    reading.set("prose", scan.prose);
     reading.count("hits", u64::try_from(scan.findings.len())?)?;
     reading.status = Status::of(scan.findings.is_empty());
     reading.message = if scan.findings.is_empty() {

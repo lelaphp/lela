@@ -1550,11 +1550,8 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
         return Ok(Vec::new());
     }
     // The commit `since` names now, for a message read after `HEAD` moves.
-    let parent = crate::git::git(root, &["rev-parse", "--short", since], None)?;
-    let again = format!(
-        "`xtask ticket merged --since {}` on main again",
-        parent.trim()
-    );
+    let parent = crate::git::rev_parse(root, &["--short", since])?;
+    let again = format!("`xtask ticket merged --since {parent}` on main again");
     let mut readings = Vec::new();
     let mut unready = Vec::new();
     let named = named_by_merges(root, &format!("{since}..HEAD"))?;
@@ -1734,10 +1731,10 @@ fn named_by_merges(root: &Path, range: &str) -> Result<Vec<Ticket>> {
 /// reads it the same; a branch reads the merges it carries, `main`'s
 /// being behind its base. The store is read, never the tracker.
 pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Result<Vec<String>> {
-    let head = crate::git::git(root, &["rev-parse", "HEAD"], None)?;
-    let range = if head.trim() != base {
+    let head = crate::git::rev_parse(root, &["HEAD"])?;
+    let range = if head != base {
         format!("{base}..HEAD")
-    } else if crate::git::has_ref(root, "HEAD^1") {
+    } else if crate::git::rev_parse(root, &["--verify", "--quiet", "HEAD^1"]).is_ok() {
         String::from("HEAD^1..HEAD")
     } else {
         // A root commit has no first parent, and so no merge to read.

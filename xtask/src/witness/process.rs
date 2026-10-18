@@ -38,7 +38,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use anyhow::{Result, anyhow};
 
@@ -66,8 +66,11 @@ const TRACE: &str = "PHP_WITNESS_TRACE";
 #[derive(Debug)]
 pub(crate) struct Binary {
     root: PathBuf,
-    built: Mutex<BTreeMap<Build, Result<PathBuf, String>>>,
+    built: Mutex<BTreeMap<Build, Slot>>,
 }
+
+/// Where one build's path, or its failure, is kept once it ran.
+type Slot = Arc<OnceLock<Result<PathBuf, String>>>;
 
 /// A binary a run builds: a host by its crate, and the bundle feature
 /// `php` is built with on, where there is one.
@@ -102,7 +105,8 @@ impl Binary {
     #[cfg(test)]
     fn stand(&self, host: EngineHost, feature: Option<&str>, path: PathBuf) {
         let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-        built.insert((host.krate, feature.map(str::to_owned)), Ok(path));
+        let key = (host.krate, feature.map(str::to_owned));
+        built.insert(key, Arc::new(OnceLock::from(Ok(path))));
     }
 
     /// Where `host`'s binary is, built from the tree now if this run has
@@ -120,9 +124,14 @@ impl Binary {
     /// `PHP_WITNESS_TRACE` names a file, with no build of its own for the
     /// lane (#2168).
     fn built(&self, host: EngineHost, feature: Option<&str>) -> Result<PathBuf> {
-        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
-        let key = (host.krate, feature.map(str::to_owned));
-        let path = built.entry(key).or_insert_with(|| {
+        // The map's lock is held to find the build's slot alone, so one
+        // host's build never waits on another's.
+        let slot = {
+            let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+            let key = (host.krate, feature.map(str::to_owned));
+            Arc::clone(built.entry(key).or_default())
+        };
+        let path = slot.get_or_init(|| {
             let on = feature.map(|feature| format!("{BUNDLE}/{feature}"));
             let into = feature.map(|feature| profile::featured(&self.root, feature));
             let (package, binary) = (host.package(), host.binary);
