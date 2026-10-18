@@ -178,9 +178,9 @@ pub(super) fn verdict<'a>(said: &'a str, test: &Path) -> Option<&'a str> {
         |line: &str| line.contains(&format!("[{shown}]")) || line.contains(&format!("/{shown}]"));
     let lines: Vec<&str> = said.lines().collect();
     let end = lines.iter().position(|line| placed(line))?;
-    let ends =
-        |line: &&str| line.contains(".phpt]") || line.starts_with("===") || line.starts_with("---");
-    let record = lines[..end].iter().rev().take_while(|line| !ends(line));
+    let record = lines[..end].iter().rev().take_while(|line| {
+        !(line.contains(".phpt]") || line.starts_with("===") || line.starts_with("---"))
+    });
     std::iter::once(&lines[end]).chain(record).find_map(|line| {
         let (word, _) = line.split_once(' ')?;
         let result = !word.is_empty() && word.bytes().all(|b| b.is_ascii_uppercase() || b == b'&');

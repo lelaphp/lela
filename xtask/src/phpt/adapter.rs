@@ -842,25 +842,18 @@ impl Said {
         let said = stdout.trim();
         let after = |word: &str| {
             let head = said.get(..word.len())?;
-            head.eq_ignore_ascii_case(word)
-                .then(|| said[word.len()..].trim_start())
+            head.eq_ignore_ascii_case(word).then(|| &said[word.len()..])
         };
-        let reason = |rest: &str| rest.lines().next().unwrap_or("").to_owned();
-        if let Some(rest) = after("skip") {
-            Said::Skip(reason(rest))
-        } else if let Some(rest) = after("xfail") {
-            Said::XFail(rest.to_owned())
-        } else if said.is_empty()
+        let runs = said.is_empty()
             || said.starts_with("nocache")
             || after("info").is_some_and(|rest| !rest.is_empty())
-            || after("warn")
-                .is_some_and(|rest| !rest.is_empty() && said[4..].starts_with(char::is_whitespace))
-            || after("xleak").is_some()
-            || after("flaky").is_some()
-        {
-            Said::Run
-        } else {
-            Said::Bork(said.to_owned())
+            || after("warn").is_some_and(|rest| rest.starts_with(char::is_whitespace))
+            || after("xleak").or(after("flaky")).is_some();
+        match (after("skip"), after("xfail")) {
+            (Some(rest), _) => Said::Skip(rest.trim_start().lines().next().unwrap_or("").into()),
+            (_, Some(rest)) => Said::XFail(rest.trim_start().to_owned()),
+            _ if runs => Said::Run,
+            _ => Said::Bork(said.to_owned()),
         }
     }
 }
