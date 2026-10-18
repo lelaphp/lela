@@ -5,12 +5,15 @@
 //! verbosity, and a started cache with `opcache.preload` set names the
 //! file the unit cache preloads.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use php_ext::abi::PreloadThread;
 use php_ext::abi::{Beneath, PostStartup, chain};
 use php_ext::coerce::atoi;
 use php_ext::process;
 use php_ext::request::{CacheBudget, Request};
 
 use crate::ini::{Log, accel_log, flag, long, value};
+use crate::preload_user::Account;
 use crate::{Startup, cli, consumption, max_cached_keys, verdict};
 
 /// `sizeof(zend_accel_shared_globals)` on the oracle's build, what
@@ -102,11 +105,13 @@ fn refused(req: &mut Request) -> Option<String> {
 /// `accel_finish_startup`: the file `opcache.preload` names, where the
 /// cache is not the file cache alone, checked against
 /// `opcache.preload_user` as `accel_finish_startup_preload_subprocess`
-/// checks it. php asks `geteuid()`; this asks the real user id, the same
-/// id for a binary that is not set-user-id. Under uid 0 with a
-/// `preload_user`, php forks and preloads in a child that took that
-/// user's ids; this engine's process serves requests on threads, which
-/// share its ids, so it preloads as the process runs.
+/// checks it (`Z/ext/opcache/ZendAccelerator.c:4979-5045`). Under uid 0
+/// with a `preload_user` naming another user, php forks and preloads in
+/// a child that took that user's ids; this engine's process serves
+/// requests on threads, which share its ids, so the preload is served on
+/// a thread of its own that takes the user's ids for itself alone
+/// first ([`Account::take`]), and the process keeps its own (#1258's
+/// ruling, 2026-09-30).
 fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
     let script = value(req, "opcache.preload").to_vec();
     if script.is_empty() {
@@ -120,8 +125,13 @@ fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
         );
         return PostStartup::Serve;
     }
+    let here = PostStartup::Preload {
+        script: script.clone(),
+        thread: None,
+    };
     let user = value(req, "opcache.preload_user").to_vec();
-    if process::uid() != 0 {
+    let euid = process::euid();
+    if euid != 0 {
         if !user.is_empty() {
             accel_log(
                 req,
@@ -129,7 +139,12 @@ fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
                 "\"opcache.preload_user\" is ignored because the current user is not \"root\"",
             );
         }
-    } else if user.is_empty() && !cli(req) {
+        return here;
+    }
+    if user.is_empty() {
+        if cli(req) {
+            return here;
+        }
         accel_log(
             req,
             Log::Fatal,
@@ -137,6 +152,34 @@ fn preload(req: &mut Request, file_cache_only: bool) -> PostStartup {
         );
         return PostStartup::Refuse { status: -2 };
     }
+    let Some(account) = Account::named(&user) else {
+        let user = String::from_utf8_lossy(&user);
+        accel_log(
+            req,
+            Log::Fatal,
+            &format!("Preloading failed to getpwnam(\"{user}\")"),
+        );
+        return PostStartup::Refuse { status: -2 };
+    };
+    if account.uid == euid {
+        return here;
+    }
+    as_user(req, script, account)
+}
+
+/// The preload served on a thread that takes `account`'s ids first.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn as_user(_: &mut Request, script: Vec<u8>, account: Account) -> PostStartup {
+    PostStartup::Preload {
+        script,
+        thread: Some(PreloadThread::new(move |req| account.take(req))),
+    }
+}
+
+/// A platform where no thread can take another user's ids for itself
+/// alone: the preload is served as the process runs.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn as_user(_: &mut Request, script: Vec<u8>, _: Account) -> PostStartup {
     PostStartup::Preload {
         script,
         thread: None,
