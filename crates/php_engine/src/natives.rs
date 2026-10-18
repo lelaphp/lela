@@ -2485,6 +2485,25 @@ mod tests {
     use crate::test::Capture;
 
     /// What the engine wrote and what ended it, for one source.
+    /// The bin `virtual_cwd_activate`'s copy of the working directory
+    /// takes, `CWD_STATE_COPY`'s `emalloc(cwd_length + 1)`
+    /// (`Z/Zend/zend_virtual_cwd.c:233`, `api::request::rooms`): the one
+    /// part of a request's starting usage that depends on where it
+    /// starts, which for these tests is the directory cargo runs them
+    /// in, 80 bytes in a worktree's `crates/php_engine` and 56 in the
+    /// main checkout's, whose path is sixteen bytes shorter.
+    fn cwd_copy() -> usize {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut heap = php_heap::Heap::new();
+        let before = heap.memory_usage(false);
+        let Ok(block) = heap.block(cwd.as_os_str().len() + 1) else {
+            return 0;
+        };
+        let size = heap.memory_usage(false).saturating_sub(before);
+        heap.free_block(block);
+        size
+    }
+
     fn served(source: &str) -> (String, Option<String>) {
         let served = Engine::builder()
             .build()
@@ -2512,7 +2531,8 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 344696 is the compiler's arena, the object store's table, the VM
+    /// 344616 and the working directory's copy ([`cwd_copy`]) is the
+    /// compiler's arena, the object store's table, the VM
     /// stack's first page, `PHP_CLI_PROCESS_TITLE`'s `zend_constant` and
     /// name, the main op array's copy and runtime cache,
     /// as an include's (`exec::HeapOpArray`), the rooms php keeps for
@@ -2570,7 +2590,8 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(344696)\n",
+            unflagged,
+            format!("int({})\n", 344_616 + cwd_copy()),
             "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
         );
         assert_eq!(flagged, "int(2097152)\n");
@@ -2634,7 +2655,8 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 344712 is the usage of the pin
+    /// 2097152 is php's one 2 MiB chunk. 344632 and the working
+    /// directory's copy ([`cwd_copy`]) is the usage of the pin
     /// above, and the sixteen bytes more the peak the reset leaves stood
     /// at as the reset ran: the compiler's arena's
     /// first block of 65536, the rooms of the pin above, the object
@@ -2656,7 +2678,8 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(344712)\nint(2097152)\n",
+            body,
+            format!("int({})\nint(2097152)\n", 344_632 + cwd_copy()),
             "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48, the start's rooms; an engine with no stream layer opens no standard streams"
         );
     }
