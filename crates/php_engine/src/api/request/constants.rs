@@ -13,7 +13,7 @@ use php_link::NameHasher;
 use php_unit::decl::Attribute;
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Owner, PhpArray, PhpString, Value, adopted};
+use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value, adopted};
 
 use super::{ExtensionId, Request, Standard};
 
@@ -45,12 +45,22 @@ enum ConstantOwner {
     User(Option<Box<[u8]>>),
 }
 
+/// `sizeof(zend_constant)`: the value, the name, the attributes and the
+/// file, which `zend_register_constant` `pemalloc`s for every constant a
+/// request registers (`zend_hash_add_constant`,
+/// `Z/Zend/zend_constants.c`).
+const ZEND_CONSTANT: usize = 40;
+
 /// One row a request added to `EG(zend_constants)`: its owner, its name
 /// as `zend_register_constant` keys it, its value, and
 /// `zend_constant::attributes`, what a `DECLARE_ATTRIBUTED_CONST` hung
 /// on it, with `CONST_DEPRECATED` decoded from them where it was
 /// registered.
 struct ConstantRow {
+    /// php's `zend_constant` on the request's heap, which the row is in
+    /// the engine's own shape; none where the memory limit refused it,
+    /// whose fatal ends the request.
+    room: Option<Emalloc>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
     /// its namespace lowered, which every lookup compares against.
@@ -63,8 +73,14 @@ struct ConstantRow {
 }
 
 impl ConstantRow {
-    fn new(owner: ConstantOwner, name: Vec<u8>, value: Value) -> ConstantRow {
+    fn new(
+        room: Option<Emalloc>,
+        owner: ConstantOwner,
+        name: Vec<u8>,
+        value: Value,
+    ) -> ConstantRow {
         ConstantRow {
+            room,
             owner,
             given: name.clone(),
             name,
@@ -159,8 +175,41 @@ impl Request {
     pub(super) fn free_constants(&mut self) {
         self.constants.index.clear();
         for row in std::mem::take(&mut self.constants.rows).into_iter().rev() {
-            self.release(row.value);
+            self.free_row(row);
         }
+    }
+
+    /// A row out of `EG(zend_constants)`: its value given up and its
+    /// `zend_constant` freed, `free_zend_constant`.
+    fn free_row(&mut self, row: ConstantRow) {
+        self.release(row.value);
+        if let Some(room) = row.room {
+            room.free(self);
+        }
+    }
+
+    /// `zend_register_constant`'s `pemalloc(sizeof(zend_constant))` for a
+    /// row the request adds: what `define()` costs the request, and what
+    /// a host's or an extension's constant registered while it runs costs
+    /// beside its name:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); define('ABCDEF', 1); const GHIJKL = 2; echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 80
+    /// ```
+    fn constant_room(&mut self) -> Option<Emalloc> {
+        Emalloc::new(self, ZEND_CONSTANT).ok()
+    }
+
+    /// The name of a constant a host or an extension registers while the
+    /// request runs, `zend_string_init_interned`: the engine's string
+    /// where its table holds the name, as opcache's interned buffer
+    /// answers, else one of the request's own. The memory limit's fatal
+    /// is recorded and ends the request.
+    fn constant_name(&mut self, name: &[u8]) {
+        self.interned(name).ok();
     }
 
     /// `PHP_SAPI` as `php_module_startup` registers it: the engine's
@@ -307,7 +356,9 @@ impl Request {
             .and_then(crate::exec::FrameAt::code)
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        let room = self.constant_room();
         self.constants.push(ConstantRow {
+            room,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -364,7 +415,10 @@ impl Request {
     /// `Core`'s group and before what the program defines. A sink: the
     /// row takes the value's owner.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
+        self.constant_name(name);
+        let room = self.constant_room();
         self.constants.push(ConstantRow::new(
+            room,
             ConstantOwner::Core,
             name.to_vec(),
             value.hand_on(),
@@ -401,7 +455,10 @@ impl Request {
             return false;
         }
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        self.constant_name(name);
+        let room = self.constant_room();
         self.constants.push(ConstantRow {
+            room,
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
             given: name.to_vec(),
@@ -493,7 +550,7 @@ impl Request {
         handles.set_stdin(stdin);
         for name in [&b"STDIN"[..], b"STDOUT", b"STDERR"] {
             if let Some(row) = self.constants.remove(name) {
-                self.release(row.value);
+                self.free_row(row);
             }
         }
         self.register_file_handles(true)
