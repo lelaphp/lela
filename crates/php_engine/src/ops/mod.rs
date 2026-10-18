@@ -22,7 +22,8 @@ use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_pre
 use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
-    Level, Thrown, deprecated, illegal_container_offset, none_pending, throw, throw_error, warning,
+    Level, Thrown, cannot_add_element, deprecated, illegal_container_offset, none_pending, throw,
+    throw_error, warning,
 };
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Table};
@@ -4178,11 +4179,7 @@ pub(crate) fn add_array_element(
             if req.array_append(a, value)? {
                 return Ok(());
             }
-            return Err(throw_error(
-                req,
-                "Error",
-                "Cannot add element to the array as the next element is already occupied",
-            ));
+            return Err(cannot_add_element(req));
         }
         Offset::At { key, constant } => match array_offset(req, &key, constant) {
             Ok(key) => key,

@@ -2112,20 +2112,39 @@ pub(crate) fn take_operand(
     match kind {
         OperandKind::Tmp | OperandKind::Var => {
             let value = req.take_slot(frame, temporary_slot(code, field));
-            match value.as_php_ref() {
-                Some(cell) => {
-                    let held = cell.get();
-                    req.addref(&held);
-                    req.release(value);
-                    held
-                }
-                None => value,
-            }
+            owned_deref(req, value)
         }
         OperandKind::Const | OperandKind::Cv | OperandKind::Unused => {
             let value = operand(req, frame, code, kind, field).deref();
             req.addref(&value);
             value
+        }
+    }
+}
+
+/// `ZVAL_DEREF` over a value one owner of which the caller holds: what
+/// the reference held, with the owner moved onto it.
+pub(crate) fn owned_deref(req: &mut Request, value: Value) -> Value {
+    let Some(cell) = value.as_php_ref().copied() else {
+        return value;
+    };
+    let held = cell.get();
+    req.addref(&held);
+    req.release(value);
+    held
+}
+
+/// A hash key as a value of its own, what a fetch writes to its
+/// `result` (`RETURN_VALUE_USED`) and a generator delegating to an
+/// array takes as its key: an integer as it stands, and a string with
+/// one more owner (`ZVAL_STR_COPY`).
+pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
+    match key {
+        php_heap::Key::Long(n) => Value::int(n),
+        php_heap::Key::Str(s) => {
+            let s = Value::string(PhpString::of(s));
+            req.addref(&s);
+            s
         }
     }
 }

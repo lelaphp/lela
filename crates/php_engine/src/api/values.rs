@@ -848,11 +848,7 @@ impl PhpArray {
         if self.try_append(req, value)? {
             return Ok(());
         }
-        Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            "Cannot add element to the array as the next element is already occupied",
-        ))
+        Err(crate::api::raising::cannot_add_element(req))
     }
 
     /// `$a[] = value`, or `false`, and `value` given up, when
