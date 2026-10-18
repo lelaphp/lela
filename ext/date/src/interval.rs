@@ -81,8 +81,9 @@ fn parse_relative(lent: &mut Lent<'_>, text: &[u8]) -> (Parsed, Option<(i32, cha
 /// the parse freed after either, as php's `cleanup` frees it.
 fn from_date_string(
     req: &mut Request,
-    text: &[u8],
+    datetime: PhpString,
 ) -> Result<Result<Owner<Instance<DateInterval>>, String>, Thrown> {
+    let text = datetime.as_bytes();
     let shown = String::from_utf8_lossy(text);
     let (parsed, error) = lent(req, |l| parse_relative(l, text))?;
     let t = &parsed.time;
@@ -96,7 +97,7 @@ fn from_date_string(
         )))
     } else {
         let relative = t.relative;
-        new_interval(req, CIVIL, Some(text.to_vec()), |req| {
+        new_interval(req, CIVIL, Some(datetime), |req| {
             lent(req, |l| RelTime::of(l, &relative))
         })
         .map(Ok)
@@ -138,7 +139,7 @@ fn date_interval_create_from_date_string(
     req: &mut Request,
     datetime: PhpString,
 ) -> Result<OrFalse<Owner<Instance<DateInterval>>>, Thrown> {
-    match from_date_string(req, datetime.as_bytes())? {
+    match from_date_string(req, datetime)? {
         Ok(interval) => Ok(OrFalse::Value(interval)),
         Err(refusal) => {
             docref(req, Level::Warning, &refusal);
@@ -291,17 +292,20 @@ fn a64i(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
 /// float(-8446744073719.552)
 /// ```
 fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(), Thrown> {
-    if let Some(text) =
-        find(hash, b"date_string").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-    {
-        let (parsed, error) = lent(req, |l| parse_relative(l, &text))?;
+    let date_string = find(hash, b"date_string").and_then(|v| match v.as_ref() {
+        ValueRef::Str(s) => Some(*s),
+        _ => None,
+    });
+    if let Some(date_string) = date_string {
+        let text = date_string.as_bytes();
+        let (parsed, error) = lent(req, |l| parse_relative(l, text))?;
         if let Some((position, c, message)) = error {
             let thrown = throw_error(
                 req,
                 "Error",
                 &format!(
                     "Unknown or bad format ({}) at position {position} ({c}) while unserializing: {message}",
-                    String::from_utf8_lossy(&text),
+                    String::from_utf8_lossy(text),
                 ),
             );
             release(req, parsed)?;
@@ -311,10 +315,14 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
         set_diff(req, object, None)?;
         let relative = parsed.time.relative;
         let diff = lent(req, |l| RelTime::of(l, &relative))?;
-        if let Some(payload) = object.native_mut::<IntervalObj>(req) {
+        let text = Owner::take(req, date_string);
+        let old = object.native_mut::<IntervalObj>(req).map(|payload| {
             payload.civil_or_wall = CIVIL;
             payload.from_string = true;
-            payload.date_string = Some(text);
+            payload.date_string.replace(text)
+        });
+        if let Some(Some(old)) = old {
+            old.give_up(req);
         }
         set_diff(req, object, Some(diff))?;
         return release(req, parsed);
@@ -502,12 +510,29 @@ impl DateInterval {
     /// }
     /// String 'tomorrow noon' contains non-relative elements
     /// ```
+    ///
+    /// The interval keeps the string it was given, `zend_string_copy`,
+    /// one more owner of it and no copy, as its clone and its rows do:
+    ///
+    /// ```php
+    /// $s = str_repeat('+1 day ', 50);
+    /// $m = memory_get_usage(); $i = DateInterval::createFromDateString($s); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($s); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $c = clone $i; $a = $i->__serialize(); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($i, $c, $a); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 176
+    /// 0
+    /// 688
+    /// -1248
+    /// ```
     #[php(tentative)]
     fn createFromDateString(
         req: &mut Request,
         datetime: PhpString,
     ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
-        match from_date_string(req, datetime.as_bytes())? {
+        match from_date_string(req, datetime)? {
             Ok(interval) => Ok(interval),
             Err(refusal) => Err(throw_error(
                 req,
@@ -568,9 +593,9 @@ impl DateInterval {
         let (diff, _) = interval_of(req, object)?;
         let text = object
             .native::<IntervalObj>(req)
-            .and_then(|i| i.date_string.clone());
+            .and_then(|i| i.date_string.as_deref().copied());
         let own = std_rows(req, object)?;
-        let fields = interval_fields(req, &diff, text.as_deref())?;
+        let fields = interval_fields(req, &diff, text);
         rows_array(req, &own, fields, true)
     }
 
@@ -655,11 +680,13 @@ impl DateInterval {
         // `Z_OBJPROP_P`, which `date_object_get_properties_interval` fills
         // with the fields before it answers.
         let own = std_rows(req, object)?;
-        let state = object
-            .native::<IntervalObj>(req)
-            .and_then(|i| i.diff.as_deref().map(|d| (*d, i.date_string.clone())));
+        let state = object.native::<IntervalObj>(req).and_then(|i| {
+            i.diff
+                .as_deref()
+                .map(|d| (*d, i.date_string.as_deref().copied()))
+        });
         let fields = match state {
-            Some((diff, text)) => interval_fields(req, &diff, text.as_deref())?,
+            Some((diff, text)) => interval_fields(req, &diff, text),
             None => Vec::new(),
         };
         let hash = rows_array(req, &own, fields, false)?;

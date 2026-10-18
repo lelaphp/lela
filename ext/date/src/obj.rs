@@ -121,7 +121,9 @@ pub(crate) struct IntervalState {
     pub diff: Option<RelTime>,
     pub civil_or_wall: i64,
     pub from_string: bool,
-    pub date_string: Option<Vec<u8>>,
+    /// The string a relative time was parsed from, the one the caller
+    /// passed, shared as php's `zend_string_copy` shares it.
+    pub date_string: Option<Owner<PhpString>>,
 }
 
 /// The payload: `php_interval_obj` keeps its state behind pointers, and so the
@@ -356,7 +358,7 @@ pub(super) fn tz_from_time(t: &Time) -> Option<TzKind> {
 pub(super) fn new_interval(
     req: &mut Request,
     civil_or_wall: i64,
-    date_string: Option<Vec<u8>>,
+    date_string: Option<PhpString>,
     diff: impl FnOnce(&mut Request) -> Result<RelTime, Thrown>,
 ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
     let class = class_id(req, "DateInterval")?;
@@ -368,6 +370,7 @@ pub(super) fn new_interval(
             return Err(thrown);
         }
     };
+    let date_string = date_string.map(|s| Owner::take(req, s));
     if let Some(payload) = object.native_mut::<IntervalObj>(req) {
         payload.civil_or_wall = civil_or_wall;
         payload.from_string = date_string.is_some();
@@ -572,15 +575,12 @@ pub(super) fn tz_fields(req: &mut Request, kind: &TzKind) -> Result<Fields, Thro
 pub(super) fn interval_fields(
     req: &mut Request,
     diff: &RelFields,
-    date_string: Option<&[u8]>,
-) -> Result<Fields, Thrown> {
+    date_string: Option<PhpString>,
+) -> Fields {
     if let Some(text) = date_string {
-        let text = PhpString::new(req, text)?.into_value();
+        let text = Owner::take(req, text).into_value();
         let from_string = Owner::bool(true);
-        return Ok(vec![
-            (&b"from_string"[..], from_string),
-            (b"date_string", text),
-        ]);
+        return vec![(&b"from_string"[..], from_string), (b"date_string", text)];
     }
     #[allow(clippy::cast_precision_loss)]
     let f = diff.us as f64 / 1_000_000.0;
@@ -603,10 +603,10 @@ pub(super) fn interval_fields(
         ),
         (b"from_string", Value::bool(false)),
     ];
-    Ok(scalars
+    scalars
         .into_iter()
         .map(|(name, value)| (name, Owner::take(req, value)))
-        .collect())
+        .collect()
 }
 
 /// `create_date_period_datetime`: a date of the period's class over a
@@ -977,11 +977,18 @@ impl IntervalHandlers {
 }
 
 impl ObjectHandlers for IntervalHandlers {
-    /// `date_object_free_storage_interval`: `timelib_rel_time_dtor`.
+    /// `date_object_free_storage_interval`: the `date_string` released,
+    /// then `timelib_rel_time_dtor`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let diff = object
+        let Some((text, diff)) = object
             .native_mut::<IntervalObj>(req)
-            .and_then(|i| i.diff.take());
+            .map(|i| (i.date_string.take(), i.diff.take()))
+        else {
+            return;
+        };
+        if let Some(text) = text {
+            text.give_up(req);
+        }
         // Freeing allocates nothing, so the limit refuses nothing.
         let _freed = release(req, diff);
     }
@@ -1208,7 +1215,7 @@ impl ObjectHandlers for IntervalHandlers {
 /// new one appended, so the table's internal pointer stays where it
 /// stood.
 fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    let mut fields = interval_rows(req, object)?.into_iter();
+    let mut fields = interval_rows(req, object).into_iter();
     while let Some((name, value)) = fields.next() {
         let written = match PhpString::new(req, name) {
             Ok(name) => {
@@ -1230,13 +1237,15 @@ fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 }
 
 /// The interval's fields, none for one no constructor set.
-fn interval_rows(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
-    let state = object
-        .native::<IntervalObj>(req)
-        .and_then(|i| i.diff.as_deref().map(|d| (*d, i.date_string.clone())));
+fn interval_rows(req: &mut Request, object: PhpObject) -> Fields {
+    let state = object.native::<IntervalObj>(req).and_then(|i| {
+        i.diff
+            .as_deref()
+            .map(|d| (*d, i.date_string.as_deref().copied()))
+    });
     match state {
-        Some((diff, date_string)) => interval_fields(req, &diff, date_string.as_deref()),
-        None => Ok(Vec::new()),
+        Some((diff, date_string)) => interval_fields(req, &diff, date_string),
+        None => Vec::new(),
     }
 }
 
@@ -1248,9 +1257,14 @@ fn clone_interval(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObjec
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
     let copy = object.clone_with(req, IntervalObj::default())?;
-    let state = object
-        .native::<IntervalObj>(req)
-        .map(|i| (i.civil_or_wall, i.from_string, i.date_string.clone()));
+    let state = object.native::<IntervalObj>(req).map(|i| {
+        (
+            i.civil_or_wall,
+            i.from_string,
+            i.date_string.as_deref().copied(),
+        )
+    });
+    let state = state.map(|(civil, from, text)| (civil, from, text.map(|s| Owner::take(req, s))));
     if let (Some((civil, from, text)), Some(payload)) = (state, copy.native_mut::<IntervalObj>(req))
     {
         payload.civil_or_wall = civil;
