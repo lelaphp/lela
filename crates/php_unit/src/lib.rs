@@ -25,7 +25,7 @@ mod unit;
 
 mod opcode {
     //! The generated enums and their tables (`build.rs`).
-    use crate::op::{Effects, Fused, OperandKind, Opline};
+    use crate::op::{Effects, Fused, OperandKind, Opline, data_kind};
     include!(concat!(env!("OUT_DIR"), "/opcode.rs"));
 }
 

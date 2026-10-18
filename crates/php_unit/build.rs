@@ -296,6 +296,23 @@ fn dimensions(op: &Op) -> Result<(Vec<Dimension>, bool), String> {
             dimensions.push((scrutinee, values));
         }
     }
+    // `SPEC(OP_DATA=...)` on an opcode the hot list specialises: the
+    // kind of the `OP_DATA` opline's `op1` after it, as php's
+    // `_OP_DATA_CV` handlers are.
+    if op.kinds.is_some()
+        && let Some(listed) = op
+            .spec
+            .iter()
+            .find_map(|word| word.strip_prefix("OP_DATA="))
+    {
+        let values = listed
+            .split('|')
+            .map(|k| {
+                kind(&op.name, k).map(|k| (format!("Some(OperandKind::{k})"), format!("OpData{k}")))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        dimensions.push(("data_kind(next)", values));
+    }
     let listed = !dimensions.is_empty();
     if op.says("SMART_BRANCH") {
         dimensions.push((

@@ -228,6 +228,13 @@ impl Fused {
     }
 }
 
+/// The kind of the value an assignment's `OP_DATA` carries, `next` the
+/// opline after the assignment; none where `next` is no `OP_DATA`.
+pub(crate) fn data_kind(next: Option<&Opline>) -> Option<OperandKind> {
+    next.filter(|data| data.opcode == Opcode::OpData)
+        .map(|data| data.op1_type)
+}
+
 impl Opline {
     /// Whether `jump`, the opline after this comparison, is the `JMPZ` or
     /// `JMPNZ` that branches on the comparison's temporary, which makes
@@ -527,22 +534,48 @@ mod tests {
         assert!(!Opcode::IsSmaller.is_commutative());
     }
 
-    /// The handlers publication resolves: a comparison whose line says
-    /// `SMART_BRANCH` takes the variant of the jump after it where the
-    /// jump branches on its temporary and the plain one otherwise, a
-    /// specialised opcode the variant of its operands' kinds, one over a
-    /// `JMP_ADDR` operand none for it, and an opline of a unit never
-    /// published none at all.
-    #[test]
-    fn publication_resolves_each_oplines_handler_from_it_and_the_jump_after_it() {
-        let compare = |opcode, op1_type, op2_type| Opline {
+    /// An opline of `opcode` over operands of these kinds into the
+    /// temporary 3.
+    fn over(opcode: Opcode, op1_type: OperandKind, op2_type: OperandKind) -> Opline {
+        Opline {
             opcode,
             op1_type,
             op2_type,
             out_type: OperandKind::Tmp,
             out: 3,
             ..Opline::default()
+        }
+    }
+
+    /// The handlers of `oplines` as a unit of them resolves them where it
+    /// is published, none resolved before.
+    fn resolved(oplines: Vec<Opline>) -> Vec<Handler> {
+        let unit = crate::Unit {
+            main: OpArray {
+                oplines,
+                ..OpArray::default()
+            },
+            ..crate::Unit::default()
         };
+        assert!(
+            unit.main
+                .oplines
+                .iter()
+                .all(|op| op.handler == Handler::Unresolved),
+            "the compiler leaves every opline unresolved"
+        );
+        let unit = unit.published();
+        unit.main.oplines.iter().map(|op| op.handler).collect()
+    }
+
+    /// The handlers publication resolves: a comparison whose line says
+    /// `SMART_BRANCH` takes the variant of the jump after it where the
+    /// jump branches on its temporary and the plain one otherwise, a
+    /// specialised opcode the variant of its operands' kinds, one over a
+    /// `JMP_ADDR` operand none for it, and the kinds a row does not list
+    /// a variant of their own.
+    #[test]
+    fn publication_resolves_each_oplines_handler_from_it_and_the_jump_after_it() {
         let jump = |opcode, op1| Opline {
             opcode,
             op1_type: OperandKind::Tmp,
@@ -550,72 +583,72 @@ mod tests {
             ..Opline::default()
         };
         let (cv, konst, tmp) = (OperandKind::Cv, OperandKind::Const, OperandKind::Tmp);
-        let resolved = |oplines: Vec<Opline>| {
-            let unit = crate::Unit {
-                main: OpArray {
-                    oplines,
-                    ..OpArray::default()
-                },
-                ..crate::Unit::default()
-            };
-            assert!(
-                unit.main
-                    .oplines
-                    .iter()
-                    .all(|op| op.handler == Handler::Unresolved),
-                "the compiler leaves every opline unresolved"
-            );
-            let unit = unit.published();
-            unit.main
-                .oplines
-                .iter()
-                .map(|op| op.handler)
-                .collect::<Vec<_>>()
-        };
         assert_eq!(
             resolved(vec![
-                compare(Opcode::IsSmaller, cv, konst),
+                over(Opcode::IsSmaller, cv, konst),
                 jump(Opcode::Jmpz, 3)
             ]),
             [Handler::IsSmallerCvConstJmpz, Handler::JmpzTmp]
         );
         assert_eq!(
-            resolved(vec![
-                compare(Opcode::IsEqual, cv, cv),
-                jump(Opcode::Jmpnz, 3)
-            ]),
+            resolved(vec![over(Opcode::IsEqual, cv, cv), jump(Opcode::Jmpnz, 3)]),
             [Handler::IsEqualCvCvJmpnz, Handler::JmpnzTmp]
         );
         assert_eq!(
             resolved(vec![
-                compare(Opcode::IsSmallerOrEqual, cv, tmp),
+                over(Opcode::IsSmallerOrEqual, cv, tmp),
                 jump(Opcode::Jmpz, 3)
             ]),
             [Handler::IsSmallerOrEqualJmpz, Handler::JmpzTmp]
         );
         assert_eq!(
-            resolved(vec![
-                compare(Opcode::IsSmaller, cv, cv),
-                jump(Opcode::Jmpz, 4)
-            ]),
+            resolved(vec![over(Opcode::IsSmaller, cv, cv), jump(Opcode::Jmpz, 4)]),
             [Handler::IsSmallerCvCv, Handler::JmpzTmp],
             "a jump over another temporary is no fused jump"
         );
         assert_eq!(
             resolved(vec![
-                compare(Opcode::IsNotEqual, cv, cv),
-                compare(Opcode::Add, tmp, konst)
+                over(Opcode::IsNotEqual, cv, cv),
+                over(Opcode::Add, tmp, konst)
             ]),
             [Handler::IsNotEqual, Handler::AddTmpConst]
         );
         assert_eq!(
-            resolved(vec![compare(Opcode::IsSmaller, cv, cv)]),
+            resolved(vec![over(Opcode::IsSmaller, cv, cv)]),
             [Handler::IsSmallerCvCv],
             "the last opline has no jump after it"
         );
         assert_eq!(
-            resolved(vec![compare(Opcode::Add, OperandKind::Unused, cv)]),
+            resolved(vec![over(Opcode::Add, OperandKind::Unused, cv)]),
             [Handler::AddUnlisted]
+        );
+    }
+
+    /// An assignment whose line says `SPEC(OP_DATA=...)` is resolved over
+    /// the kind of the `OP_DATA` after it.
+    #[test]
+    fn publication_resolves_an_assignment_over_its_op_datas_kind() {
+        let (cv, konst) = (OperandKind::Cv, OperandKind::Const);
+        let data = |op1_type| Opline {
+            opcode: Opcode::OpData,
+            op1_type,
+            ..Opline::default()
+        };
+        for (kind, handler) in [
+            (konst, Handler::AssignDimCvConstOpDataConst),
+            (OperandKind::Tmp, Handler::AssignDimCvConstOpDataTmp),
+            (OperandKind::Var, Handler::AssignDimCvConstOpDataVar),
+            (cv, Handler::AssignDimCvConstOpDataCv),
+        ] {
+            assert_eq!(
+                resolved(vec![over(Opcode::AssignDim, cv, konst), data(kind)]),
+                [handler, Handler::OpData]
+            );
+        }
+        assert_eq!(
+            resolved(vec![over(Opcode::AssignObj, OperandKind::Unused, konst)]),
+            [Handler::AssignObjUnlisted],
+            "an assignment with no OP_DATA after it is no unit the compiler writes"
         );
     }
 }

@@ -263,12 +263,13 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
 }
 
 /// One `php_unit::Handler`: its name, the kinds of `op1` and `op2` it is
-/// served at, `None` for the variant of the kinds a row does not list,
+/// served at, and of the `OP_DATA` after it where the row specialises
+/// that, `None` for the variant of the kinds a row does not list,
 /// and the branch of a comparison whose line says `SMART_BRANCH`, the
 /// type in `crate::handlers::branch`.
 struct Variant {
     name: String,
-    kinds: Option<[String; 2]>,
+    kinds: Option<Vec<String>>,
     branch: Option<&'static str>,
 }
 
@@ -290,7 +291,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         _ => None,
     };
     let ways: &[(&str, &str)] = if spec.smart { &BRANCHES } else { &[("", "")] };
-    let branched = |name: String, kinds: Option<[String; 2]>| {
+    let branched = |name: String, kinds: Option<Vec<String>>| {
         ways.iter().map(move |(part, ty)| Variant {
             name: format!("{name}{part}"),
             kinds: kinds.clone(),
@@ -299,7 +300,9 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
     };
     let [spec1, spec2] = spec.zval_shaped.map(|bit| spec.specialise && bit);
     if !spec1 && !spec2 {
-        let kinds = lone(&spec.op1).zip(lone(&spec.op2)).map(|(a, b)| [a, b]);
+        let kinds = lone(&spec.op1)
+            .zip(lone(&spec.op2))
+            .map(|(a, b)| vec![a, b]);
         return Ok(branched(spec.variant.clone(), kinds).collect());
     }
     let side = |listed: bool, kinds: &[String]| -> Result<Vec<(String, String)>, String> {
@@ -317,13 +320,23 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         }
         Ok(vec![(String::new(), lone(kinds).unwrap_or_default())])
     };
+    // The `OP_DATA` after the opline, where the row's `SPEC(OP_DATA=...)`
+    // specialises it: each kind, and its part of the name.
+    let data = match &spec.op_data {
+        Some(kinds) => side(true, kinds)?
+            .into_iter()
+            .map(|(name, kind)| (format!("OpData{name}"), Some(kind)))
+            .collect(),
+        None => vec![(String::new(), None)],
+    };
     let mut out = Vec::new();
     for (a, ka) in side(spec1, &spec.op1)? {
         for (b, kb) in side(spec2, &spec.op2)? {
-            out.extend(branched(
-                format!("{}{a}{b}", spec.variant),
-                Some([ka.clone(), kb]),
-            ));
+            for (d, kd) in &data {
+                let mut kinds = vec![ka.clone(), kb.clone()];
+                kinds.extend(kd.clone());
+                out.extend(branched(format!("{}{a}{b}{d}", spec.variant), Some(kinds)));
+            }
         }
     }
     out.push(Variant {
@@ -381,9 +394,10 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
             handler.ident
         ));
     }
-    if handler.operands > 2 {
+    let operands = 2 + usize::from(spec.op_data.is_some());
+    if handler.operands > operands {
         return Err(format!(
-            "`fn {}` is generic over {} operands; an opline has two",
+            "`fn {}` is generic over {} operands; an opline of its opcode has {operands}, `OP_DATA`'s counted where ops.toml specialises it",
             handler.ident, handler.operands
         ));
     }
@@ -477,6 +491,9 @@ struct Spec {
     /// `SMART_BRANCH` in the handler line's `SPEC(...)`, over which
     /// `php_unit` resolves three handlers per kind.
     smart: bool,
+    /// The kinds of `SPEC(OP_DATA=...)` on an opcode the hot list
+    /// specialises, which `php_unit` resolves the handler over too.
+    op_data: Option<Vec<String>>,
 }
 
 /// php's opcode names against what the dispatch reads of their rows.
@@ -517,21 +534,29 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                     )
                 })
         };
+        let words: Vec<&str> = row
+            .get("spec")
+            .and_then(toml::Value::as_str)
+            .map(|spec| spec.split(',').collect())
+            .unwrap_or_default();
+        let specialise = row
+            .get("specialise")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false);
         out.insert(
             snake(name),
             Spec {
                 variant: camel(name),
-                specialise: row
-                    .get("specialise")
-                    .and_then(toml::Value::as_bool)
-                    .unwrap_or(false),
+                specialise,
                 op1: kinds("op1"),
                 op2: kinds("op2"),
                 zval_shaped: [specialised("op1_raw"), specialised("op2_raw")],
-                smart: row
-                    .get("spec")
-                    .and_then(toml::Value::as_str)
-                    .is_some_and(|spec| spec.split(',').any(|word| word == "SMART_BRANCH")),
+                smart: words.contains(&"SMART_BRANCH"),
+                op_data: words
+                    .iter()
+                    .find_map(|word| word.strip_prefix("OP_DATA="))
+                    .filter(|_| specialise)
+                    .map(|kinds| kinds.split('|').map(str::to_owned).collect()),
             },
         );
     }
@@ -552,11 +577,13 @@ struct Handler {
 }
 
 /// The handlers `src/handlers.rs` declares, each read off the line that
-/// opens it, whose generic parameters stand on it.
+/// opens it and its generic parameters, on that line or the lines down to
+/// the one that closes them.
 fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let mut out = Vec::new();
-    for line in text.lines() {
+    let lines: Vec<&str> = text.lines().collect();
+    for (at, line) in lines.iter().enumerate() {
         let Some(rest) = line.strip_prefix("pub(crate) fn ") else {
             continue;
         };
@@ -564,7 +591,16 @@ fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
         if ident.is_empty() {
             continue;
         }
-        let generics = rest
+        // The generic parameters, on the opening line or, where rustfmt
+        // wraps them, on the lines down to the one that closes them.
+        let mut opening = (*rest).to_owned();
+        for next in lines.iter().skip(at + 1) {
+            if opening.contains(">(") || !opening.contains('<') || opening.contains('(') {
+                break;
+            }
+            opening.push_str(next.trim());
+        }
+        let generics = opening
             .strip_prefix(ident)
             .and_then(|rest| rest.strip_prefix('<'))
             .and_then(|rest| rest.split_once(">("))

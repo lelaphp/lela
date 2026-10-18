@@ -815,7 +815,7 @@ enum E: string { case X = 'x'; const Y = self::X; }
 class B extends A { function g(): static { return $this; } }
 $x = new class { public $q = [1, 2]; };
 try { echo "{$x->q[0]}", __LINE__, E::X->value; } finally { echo 1 <=> 2; }
-foreach ([1, 2] as $k => $v) { echo $k, $v; }
+$d = []; foreach ([1, 2] as $k => $v) { if ($k < 1) { $d[$k] = $v; } echo $k, $v; }
 echo (string) 0.1, PHP_EOL;
 __halt_compiler(); data"#;
         let mut strings = php_heap::Strings::new();
@@ -845,5 +845,19 @@ __halt_compiler(); data"#;
             decode(&longer, &mut strings).is_none(),
             "nor is one with bytes after it"
         );
+        // The file keeps no handler: the unit read back resolves, where
+        // it is published, the handlers the unit compiled resolves.
+        let handlers = |unit: Unit| {
+            let unit = unit.published();
+            unit.main
+                .oplines
+                .iter()
+                .map(|op| op.handler)
+                .collect::<Vec<_>>()
+        };
+        let compiled = handlers(unit);
+        assert!(compiled.contains(&Handler::IsSmallerCvConstJmpz));
+        assert!(compiled.contains(&Handler::AssignDimCvCvOpDataCv));
+        assert_eq!(handlers(decoded), compiled);
     }
 }

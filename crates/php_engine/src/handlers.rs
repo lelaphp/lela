@@ -12602,14 +12602,26 @@ pub(crate) fn assign_obj_ref<T: Tier>(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign_obj<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn assign_obj<
+    T: Tier,
+    A: Operand + Default,
+    B: Operand + Default,
+    D: Operand + Default,
+>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_assign_obj(req, frame, code, op, at, (A::default(), B::default())) {
+    if let Some(edge) = inline_assign_obj(
+        req,
+        frame,
+        code,
+        op,
+        at,
+        (A::default(), B::default(), D::default()),
+    ) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -12657,7 +12669,7 @@ fn inline_assign_obj(
     code: &OpArray,
     op: &Opline,
     at: u32,
-    (a, b): (impl Operand, impl Operand),
+    (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
     let (slot, typed) = req.cached_property(
@@ -12669,13 +12681,17 @@ fn inline_assign_obj(
         let held = place.read();
         !typed && !held.is_undef() && !held.is_refcounted()
     })?;
-    let z = data_value(req, frame, code, op, at)?;
+    let z = data_value(req, frame, code, op, at, data)?;
     place.write(z);
     Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
 /// The `OP_DATA` value the inline path of `ASSIGN_OBJ` or `ASSIGN_DIM`
-/// takes, by [`taken_value`]'s rule.
+/// takes, by [`taken_value`]'s rule: the `OP_DATA` opline after `at`,
+/// whose `op1` is of the kind `data` is, as the assignment's handler was
+/// resolved over it where its unit was published (`php_unit::Handler`),
+/// php's `_OP_DATA_CV` and the rest, so neither its opcode nor its kind
+/// is tested here.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn data_value(
@@ -12684,10 +12700,10 @@ fn data_value(
     code: &OpArray,
     op: &Opline,
     at: u32,
+    data: impl Operand,
 ) -> Option<Zval> {
-    let data =
-        exec::opline_at(code, at.saturating_add(1)).filter(|data| data.opcode == Opcode::OpData)?;
-    taken_value(req, frame, code, op, ByKind(data.op1_type), data.op1)
+    let field = exec::opline_at(code, at.saturating_add(1))?.op1;
+    taken_value(req, frame, code, op, data, field)
 }
 
 /// The value an assignment's inline path takes, one rule for `ASSIGN`'s
@@ -14207,14 +14223,26 @@ fn assign_text_dim(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign_dim<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn assign_dim<
+    T: Tier,
+    A: Operand + Default,
+    B: Operand + Default,
+    D: Operand + Default,
+>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_assign_dim(req, frame, code, op, at, (A::default(), B::default())) {
+    if let Some(edge) = inline_assign_dim(
+        req,
+        frame,
+        code,
+        op,
+        at,
+        (A::default(), B::default(), D::default()),
+    ) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -14263,7 +14291,7 @@ fn inline_assign_dim(
     code: &OpArray,
     op: &Opline,
     at: u32,
-    (a, b): (impl Operand, impl Operand),
+    (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
         Ok(placed) => placed,
@@ -14272,7 +14300,7 @@ fn inline_assign_dim(
     if placed.entry.read().is_refcounted() {
         return None;
     }
-    let z = data_value(req, frame, code, op, at)?;
+    let z = data_value(req, frame, code, op, at, data)?;
     placed.entry.write(z);
     free_dim_operands(req, frame, code, op, (a, placed.free_dim));
     Some(Ok(Next::jump(at.saturating_add(2))))
