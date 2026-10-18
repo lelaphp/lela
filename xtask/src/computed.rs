@@ -218,13 +218,7 @@ fn unstaged_reads(root: &Path, files: &[String]) -> Result<Vec<String>> {
             "--directory",
         ],
     ] {
-        let listed = git(root, args, None)?;
-        unstaged.extend(
-            listed
-                .split('\0')
-                .filter(|p| !p.is_empty())
-                .map(str::to_owned),
-        );
+        unstaged.extend(crate::git::listed(root, args)?);
     }
     if unstaged.is_empty() {
         return Ok(Vec::new());

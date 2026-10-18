@@ -611,13 +611,10 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
     args.push("--".to_owned());
     args.extend(scope.iter().map(|s| format!(":(glob){s}")));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let listing = git::git(checkout, &args, None)?;
     let mut blobs = BTreeMap::new();
     let mut unstaged = Vec::new();
-    for entry in listing.split('\0').filter(|e| !e.is_empty()) {
-        let (head, path) = entry
-            .split_once('\t')
-            .with_context(|| format!("git ls-files wrote {entry:?}"))?;
+    for (head, path) in git::entries(checkout, &args)? {
+        let path = path.as_str();
         let [mode, staged, stage] = head.split(' ').collect::<Vec<_>>()[..] else {
             continue;
         };

@@ -136,10 +136,7 @@ impl Snapshot {
         }
         let mut files = BTreeMap::new();
         let mut tracked = BTreeMap::new();
-        for entry in git::git(root, &args, None)?
-            .split('\0')
-            .filter(|e| !e.is_empty())
-        {
+        for entry in git::listed(root, &args)? {
             // `<tag> <path>`: `?` for an untracked file, a letter for one
             // the index holds.
             let (tag, path) = entry
@@ -185,39 +182,21 @@ impl Snapshot {
         let commit = git::head_commit(root)?;
         let mut staged = BTreeMap::new();
         let mut tracked = BTreeSet::new();
-        for entry in git::git(root, &["ls-files", "--stage", "-z"], None)?
-            .split('\0')
-            .filter(|e| !e.is_empty())
-        {
-            let (head, path) = entry
-                .split_once('\t')
-                .with_context(|| format!("git ls-files wrote {entry:?}"))?;
-            tracked.insert(path.to_owned());
-            // `<mode> <id> <stage>`: a submodule is no file of a scope's,
-            // and a conflicted path has no stage 0.
-            if let [mode, id, "0"] = head.split(' ').collect::<Vec<_>>()[..]
-                && mode != "160000"
-            {
-                staged.insert(path.to_owned(), id.to_owned());
+        for (path, id) in git::stage(root)? {
+            if let Some(id) = id {
+                staged.insert(path.clone(), id);
             }
+            tracked.insert(path);
         }
-        let mut differs = listed(&git::git(root, &["ls-files", "-z", "--modified"], None)?);
-        for entry in git::git(root, &["ls-files", "-z", "--eol"], None)?
-            .split('\0')
-            .filter(|e| !e.is_empty())
-        {
-            let (head, path) = entry
-                .split_once('\t')
-                .with_context(|| format!("git ls-files --eol wrote {entry:?}"))?;
+        let mut differs =
+            BTreeSet::from_iter(git::listed(root, &["ls-files", "-z", "--modified"])?);
+        for (head, path) in git::entries(root, &["ls-files", "-z", "--eol"])? {
             if head.contains("w/crlf") || head.contains("w/mixed") {
-                differs.insert(path.to_owned());
+                differs.insert(path);
             }
         }
-        let untracked = listed(&git::git(
-            root,
-            &["ls-files", "-z", "--others", "--exclude-standard"],
-            None,
-        )?);
+        let untracked = ["ls-files", "-z", "--others", "--exclude-standard"];
+        let untracked = BTreeSet::from_iter(git::listed(root, &untracked)?);
         // A file's id, or `None` for one that is not a file on disk.
         let id = |path: &str| -> Option<Result<String>> {
             match staged.get(path) {
@@ -271,18 +250,7 @@ impl Snapshot {
         if let Some(snapshot) = read.lock().ok().and_then(|held| held.get(&at).cloned()) {
             return Ok(snapshot);
         }
-        let mut files = Vec::new();
-        for entry in git::git(root, &["ls-tree", "-r", "-z", "--full-tree", commit], None)?
-            .split('\0')
-            .filter(|e| !e.is_empty())
-        {
-            let (head, path) = entry
-                .split_once('\t')
-                .with_context(|| format!("git ls-tree wrote {entry:?}"))?;
-            if let [_, "blob", id] = head.split(' ').collect::<Vec<_>>()[..] {
-                files.push((path.to_owned(), id.to_owned()));
-            }
-        }
+        let mut files = git::blobs(root, commit, &[])?;
         files.sort_unstable();
         let short = commit.chars().take(7).collect();
         let snapshot = Arc::new(Snapshot::new(root, short, files.clone(), files));
@@ -387,15 +355,6 @@ fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
 fn clean(path: &Path) -> PathBuf {
     path.components()
         .filter(|c| !matches!(c, Component::CurDir))
-        .collect()
-}
-
-/// What `git ls-files -z` wrote, as a set of paths.
-fn listed(written: &str) -> BTreeSet<String> {
-    written
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned)
         .collect()
 }
 
