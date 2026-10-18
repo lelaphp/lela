@@ -300,19 +300,19 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
 /// server, writes in its error log (#2767).
 #[derive(Debug)]
 enum Refusal<'a> {
-    /// The path names no script: no `path_translated`.
+    /// The path names no program: no `path_translated`.
     Unknown,
-    /// The script's name does not end in `.php`, the default of
+    /// The program's name does not end in `.php`, the default of
     /// `security.limit_extensions` (`fpm_php_limit_extensions`).
     Extension(&'a [u8]),
-    /// The script does not open as a regular file, with the error php's
+    /// The program does not open as a regular file, with the error php's
     /// `errno` holds after `php_fopen_primary_script` fails.
     Unopened(&'a [u8], std::io::Error),
 }
 
 impl Refusal<'_> {
     /// php-fpm's page: `File not found.` with a 404, `Access denied.` with
-    /// a 403 past `security.limit_extensions` or where the script may not
+    /// a 403 past `security.limit_extensions` or where the program may not
     /// be read (`EACCES`), and `No input file specified.` with a 404
     /// for one that does not open otherwise.
     fn page(&self) -> HostPage {
@@ -368,14 +368,14 @@ const ZLOG_BUFFER: usize = 2048;
 
 /// Whether the request is refused once it has started, in php-fpm's
 /// order (`Z/sapi/fpm/fpm/fpm_main.c:1854-1888`): where the path names no
-/// script; for a script whose name does not end in `.php`, so no file of
+/// program; for one whose name does not end in `.php`, so no file of
 /// another kind runs as a program, `T.PHP` among them; and for one that
 /// does not open, a directory among them, which php's plain-files opener
-/// refuses for a script as no regular file
+/// refuses for a program as no regular file
 /// (`Z/main/streams/plain_wrapper.c:1225-1230`) with `errno` left
 /// `ENOENT`, as the pinned php-fpm logs it. Else the program is served.
 ///
-/// A path that names no script is php-fpm's 404, and its line in the
+/// A path that names no program is php-fpm's 404, and its line in the
 /// error log, under both:
 ///
 /// ```php
