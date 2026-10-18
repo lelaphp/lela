@@ -414,9 +414,10 @@ impl Successors {
     }
 
     /// Each successor exists at the tracker, is open, and shares one of
-    /// `tracks`, the closed ticket's, where those are not `main`'s; the
-    /// first that is not is the refusal.
-    fn held(&self, gh: &Gh, root: &Path, tracks: &[&str]) -> Result<()> {
+    /// the tracks of `closed`, the ticket that opens it, where those are
+    /// not `main`'s; the first that is not is the refusal.
+    fn held(&self, gh: &Gh, root: &Path, closed: &Issue) -> Result<()> {
+        let tracks = &tracks_of(closed.labels.iter().map(|l| l.name.as_str()))[..];
         if let Successors::Tickets(tickets) = self
             && tickets.is_empty()
         {
@@ -1770,11 +1771,7 @@ fn ready(
     let session_id = (!reading.session.is_empty()).then_some(reading.session.as_str());
     let opened = successors.describe(session_id);
     successors
-        .held(
-            gh,
-            root,
-            &tracks_of(issue.labels.iter().map(|l| l.name.as_str())),
-        )
+        .held(gh, root, issue)
         .map_err(|err| format!("{err:#}; not ready, nothing recorded"))?;
     let branch = crate::track::head_branch(root)
         .ok_or("HEAD is detached, and a ready record is a branch's; not ready, nothing recorded")?;
@@ -1813,11 +1810,7 @@ fn close(
         .filter(|t| !issue.blocking.nodes.iter().any(|n| n.number == t.number()))
         .collect::<Vec<_>>();
     successors
-        .held(
-            gh,
-            root,
-            &tracks_of(issue.labels.iter().map(|l| l.name.as_str())),
-        )
+        .held(gh, root, issue)
         .and_then(|()| gh.blocking(root, ticket, &missing))
         .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))?;
     // The edge is set by now; a close the tracker refuses leaves it
