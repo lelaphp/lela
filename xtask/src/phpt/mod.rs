@@ -687,7 +687,7 @@ impl tally::Judgement for Judgement {
 pub(crate) type Judged = tally::Judged<Judgement>;
 
 /// A bork of the test `id`, named `name`, for `why`, which its miss keeps.
-pub(super) fn borked(id: &str, name: &str, why: impl Into<String>) -> Judged {
+fn borked(id: &str, name: &str, why: impl Into<String>) -> Judged {
     let why = why.into();
     let miss = miss::Miss::bork(&why);
     Judged::new(id, name, Judgement::Bork, why).keeping(miss)
