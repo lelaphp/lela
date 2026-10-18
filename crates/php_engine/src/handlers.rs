@@ -4468,7 +4468,7 @@ fn return_mask_missed(req: &mut Request, frame: FrameRef, code: &OpArray, op: &O
         return Ok(advance(req, frame));
     };
     if op.op1_type == OperandKind::Unused {
-        let thrown = return_type_error(req, frame, None);
+        let thrown = return_type_error(req, frame, None)?;
         return threw(req, frame, &thrown);
     }
     // A `VAR` a by-reference return fetched is the place it found, read
@@ -4494,9 +4494,7 @@ fn return_mask_missed(req: &mut Request, frame: FrameRef, code: &OpArray, op: &O
     // The declared type is read where the request holds it and let go
     // before the one test that takes the request whole.
     let scopes = req.frame_scopes(frame);
-    let held = declared_return(req, frame).map_or(crate::api::coerce::Holding::Yes, |(ty, _)| {
-        crate::api::coerce::holding(req, &returned, ty, scopes)
-    });
+    let held = crate::api::coerce::holding(req, &returned, declared_again(req, frame)?, scopes);
     if held.resolve(req, &returned, scopes) {
         return Ok(advance(req, frame));
     }
@@ -4507,7 +4505,7 @@ fn return_mask_missed(req: &mut Request, frame: FrameRef, code: &OpArray, op: &O
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let Some(coerced) = coerced else {
-        let thrown = return_type_error(req, frame, Some(&returned));
+        let thrown = return_type_error(req, frame, Some(&returned))?;
         return threw(req, frame, &thrown);
     };
     if let Some(place) = indirect {
@@ -4552,21 +4550,33 @@ fn declared_return(req: &Request, frame: FrameRef) -> Option<(&php_unit::decl::T
     Some((decl.return_type.as_ref()?, decl.returns_by_ref))
 }
 
+/// [`declared_return`]'s type read again after the slow path's first
+/// read found it, once the request has been let go of: none there is
+/// this engine's error, never a type that holds or a nameless one.
+fn declared_again(req: &Request, frame: FrameRef) -> Result<&php_unit::decl::Type, Fatal> {
+    declared_return(req, frame).map(|(ty, _)| ty).ok_or_else(|| {
+        Fatal::error("InternalError: a VERIFY_RETURN_TYPE whose function no longer declares its return type")
+    })
+}
+
 /// `zend_verify_return_error` (`Z/Zend/zend_execute.c:1421`): the
 /// `TypeError` over a return, `{fn}(): Return value must be of type
 /// {declared}, {given} returned`, with `none` for the end of a body that
 /// returned nothing. Its site is the function's own, where the loop
 /// stands, as an argument's is.
-fn return_type_error(req: &mut Request, frame: FrameRef, returned: Option<&Value>) -> Thrown {
+fn return_type_error(
+    req: &mut Request,
+    frame: FrameRef,
+    returned: Option<&Value>,
+) -> Result<Thrown, Fatal> {
     let name = req.frame_function_name(frame);
-    let declared = declared_return(req, frame)
-        .map_or_else(String::new, |(ty, _)| resolved_type_name(req, frame, ty));
+    let declared = resolved_type_name(req, frame, declared_again(req, frame)?);
     let given = match returned {
         Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
         None => String::from("none"),
     };
     let message = format!("{name}(): Return value must be of type {declared}, {given} returned");
-    crate::api::raising::throw_error(req, "TypeError", &message)
+    Ok(crate::api::raising::throw_error(req, "TypeError", &message))
 }
 
 /// `zend_verify_type_error_common`'s `need_msg`: the type resolved
