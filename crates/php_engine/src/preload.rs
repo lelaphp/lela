@@ -113,20 +113,31 @@ impl Engine {
             PostStartup::Preload {
                 script,
                 thread: Some(thread),
-            } => self.preload_on(thread, description(), req.release_sink(), script),
+            } => {
+                // The chain's request ends here: the preload's is made on
+                // its thread, and only one stands at a time.
+                let sink = req.release_sink();
+                drop(req);
+                self.preload_on(thread, description(), sink, script)
+            }
         }
     }
 
     /// `accel_finish_startup`'s parent and its child
     /// (`Z/ext/opcache/ZendAccelerator.c:5079-5106`): the preload served
-    /// in a request of its own on a thread of its own, with the stack
-    /// this thread has, as a forked child has its parent's, once that
-    /// thread took what `thread` takes, and this thread waiting for it
-    /// as the parent `waitpid`s. Where the take fails the file is never
-    /// served and the startup fails with status 1, as the child's
-    /// `exit(1)` fails it; where the system refuses the thread it fails
-    /// as php's refused `fork()` does, a fatal of the engine's own with
-    /// the status `ACCEL_LOG_FATAL` ends the process with.
+    /// in a request of its own on a thread apart ([`crate::fork::run_apart`]),
+    /// with the stack this thread has, as a forked child has its
+    /// parent's, once that thread took what `thread` takes, and this
+    /// thread waiting for it as the parent `waitpid`s. The engine's timer
+    /// thread, the one thread a request starts, is started first, with
+    /// the process's ids, so the thread apart starts none that would keep
+    /// what it took, and a deadline the preload arms is served by it.
+    /// Where the take fails the file is never served and the startup
+    /// fails with status 1, as the child's `exit(1)` fails it; where the
+    /// system refuses the thread it fails as php's refused `fork()` does,
+    /// a fatal of the engine's own with the status `ACCEL_LOG_FATAL`
+    /// ends the process with. A `pcntl_fork` in the preload is
+    /// refused there, two things standing inside the engine (ADR-0010).
     fn preload_on(
         &self,
         thread: PreloadThread,
@@ -136,8 +147,9 @@ impl Engine {
     ) -> (Started, Lent) {
         let stack = php_heap::call_stack_bounds()
             .map_or_else(php_heap::call_stack_default_size, |stack| stack.max_size);
+        self.shared.timer.stand();
         let engine = self.clone();
-        let ran = crate::fork::run_joined(
+        let ran = crate::fork::run_apart(
             "php-preload",
             stack,
             (description, sink),
@@ -465,5 +477,27 @@ mod tests {
             "{stdout}"
         );
         assert_eq!(served.exit_code, i32::from(!root));
+    }
+
+    /// A deadline the preload arms on its thread apart is served by the
+    /// engine's timer, started before the thread: the file runs out of
+    /// time as php's child does, and the startup fails with status 1.
+    #[test]
+    fn a_deadline_armed_on_the_preload_thread_is_served() {
+        let base =
+            std::env::temp_dir().join(format!("engine-preload-deadline-{}", std::process::id()));
+        let served = served(
+            &base,
+            "1",
+            "<?php set_time_limit(1); while (true) {}",
+            "<?php echo 1;",
+        );
+        assert!(
+            String::from_utf8_lossy(&served[0].stdout)
+                .contains("Maximum execution time of 1 second exceeded"),
+            "{}",
+            String::from_utf8_lossy(&served[0].stdout)
+        );
+        assert_eq!(served[0].exit_code, 1);
     }
 }

@@ -107,13 +107,18 @@ pub(crate) fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Option<
     start(thread::Builder::new().name(name.to_owned()), body).ok()
 }
 
-/// `body` over `input` on a thread of its own named `name` with a stack
-/// of `stack_size` bytes, counted inside the engine while it stands, and
+/// `body` over `input` on a thread apart named `name`, with a stack of
+/// `stack_size` bytes, counted inside the engine while it stands, and
 /// joined before this returns: what `body` answered, or the panic it
-/// ended in, for the caller to resume. `input` is handed over once the
+/// ended in, for the caller to resume. A thread apart may take ids other
+/// than the process's, and a thread inherits its creator's on Linux and
+/// on macOS (xnu's `thread_create` copies the creating thread's
+/// credential), so the caller starts what a request on it could start
+/// before it, the engine's timer thread ([`crate::interrupt::Timer::stand`]),
+/// and the thread's ids end with it. `input` is handed over once the
 /// thread stands, so where the system refuses the thread it comes back
 /// with the error, and `body` never runs.
-pub(crate) fn run_joined<I: Send + 'static, T: Send + 'static>(
+pub(crate) fn run_apart<I: Send + 'static, T: Send + 'static>(
     name: &str,
     stack_size: usize,
     input: I,
@@ -375,7 +380,7 @@ pub(crate) fn forks_held() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EBUSY, FORKING, INSIDE, Inside, fork, forks_held, host_thread, spawn};
+    use super::{EBUSY, FORKING, INSIDE, Inside, fork, forks_held, host_thread, run_apart, spawn};
     use std::sync::atomic::Ordering;
 
     /// A thread started through the home is inside the engine while it
@@ -427,5 +432,13 @@ mod tests {
         drop(inside);
         assert_eq!(refused, Some(EBUSY));
         assert_eq!(INSIDE.load(Ordering::Relaxed) & FORKING, 0);
+    }
+
+    /// A thread apart answers its body over the input it was handed,
+    /// joined before the call returns.
+    #[test]
+    fn a_thread_apart_answers_its_body_joined() {
+        let ran = run_apart("php-test-apart", 1 << 20, 20, |input: u32| input + 1);
+        assert!(matches!(ran, Ok(Ok(21))));
     }
 }
