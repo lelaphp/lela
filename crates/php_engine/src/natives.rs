@@ -2512,7 +2512,7 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 340112 is the compiler's arena, the object store's table, the VM
+    /// 340048 is the compiler's arena, the object store's table, the VM
     /// stack's first page,
     /// `EG(symbol_table)`'s data, the variables `php_hash_environment`
     /// and the CLI lay down, and what this source's interning costs, and
@@ -2542,7 +2542,7 @@ mod tests {
     /// array on the first string a request interns. `STDIN`, `STDOUT` and
     /// `STDERR`, which `do_cli` opens before a line runs, are the stream
     /// layer's, and an engine with none, as this test's, opens none of
-    /// them; under the bundle they cost 1200 more. The 1632 is `$argv`
+    /// them; under the bundle they cost 1648 more. The 1568 is `$argv`
     /// with its one word, the four empty arrays of
     /// `$_GET`, `$_POST`, `$_COOKIE` and `$_FILES`, and `$_SERVER` with
     /// the CLI's nine rows, laid into `EG(symbol_table)` before a line
@@ -2565,8 +2565,8 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(340112)\n",
-            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the one string the request interns, the file's name's 48; an engine with no stream layer opens no standard streams"
+            unflagged, "int(340048)\n",
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
@@ -2629,11 +2629,11 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 340112 is the compiler's arena's
+    /// 2097152 is php's one 2 MiB chunk. 340048 is the compiler's arena's
     /// first block of 65536, the object store's 8192, the VM stack's
     /// first page of 262144, `EG(symbol_table)`'s data of 2560 (an engine with no
     /// stream layer opens none of the three standard streams `do_cli`
-    /// opens, which cost 1200 under the bundle), the 1632 of the variables
+    /// opens, which cost 1648 under the bundle), the 1568 of the variables
     /// `php_hash_environment` and the CLI lay down, and what this source's
     /// interning costs the request: the file's name, 48 bytes; the three function names are
     /// php's startup names and cost nothing. php counts its own interning the same
@@ -2648,8 +2648,8 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(340112)\nint(2097152)\n",
-            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the one string the request interns, the file's name's 48; an engine with no stream layer opens no standard streams"
+            body, "int(340048)\nint(2097152)\n",
+            "the compiler's arena's 65536, the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1568, the one string the request interns, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
     }
 }
