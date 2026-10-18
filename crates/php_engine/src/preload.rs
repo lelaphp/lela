@@ -435,4 +435,35 @@ mod tests {
         );
         assert_eq!(exited[1].exit_code, 1);
     }
+
+    /// A preload file the thread may not open is php's warning with the
+    /// open's own error, as `php_stream_open_for_zend` renders it, then
+    /// the `require`'s fatal: a directory no one but root may enter
+    /// refuses any other user with "Permission denied".
+    #[test]
+    fn a_preload_file_the_thread_may_not_open_names_why() {
+        let dir = std::env::temp_dir().join(format!("engine-preload-shut-{}", std::process::id()));
+        let shut = dir.join("shut");
+        std::fs::create_dir_all(&shut).ok();
+        std::fs::write(shut.join("preload.inc"), "<?php echo 1;").ok();
+        std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o000)).ok();
+        let engine = Engine::cli_builder()
+            .extensions(&[preloading_on_a_thread(&dir.to_string_lossy())])
+            .ini(
+                "t.preload",
+                shut.join("preload.inc").as_os_str().as_encoded_bytes(),
+            )
+            .ini("t.take", "1")
+            .build();
+        let served = engine.serve_capture("<?php echo 1;", Capture::default());
+        std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o755)).ok();
+        std::fs::remove_dir_all(&dir).ok();
+        let root = php_process::process::euid() == 0;
+        let stdout = String::from_utf8_lossy(&served.stdout);
+        assert!(
+            root || stdout.starts_with("\nWarning: PHP Startup: Failed to open stream: Permission denied in Unknown on line 0\n"),
+            "{stdout}"
+        );
+        assert_eq!(served.exit_code, i32::from(!root));
+    }
 }

@@ -923,15 +923,28 @@ impl Tables {
 
 impl Request {
     /// The preload's file opened nothing: `php_stream_open_for_zend`'s
-    /// warning with no function to name, and the `require`'s fatal, at
-    /// no file and no line, as php's startup raises them.
+    /// warning with no function to name, the `strerror` of the plain
+    /// files wrapper's `open` of the path as written, which php tries
+    /// once `zend_resolve_path` found nothing (a file the preload's user
+    /// may not reach is "Permission denied"), and the `require`'s fatal,
+    /// at no file and no line, as php's startup raises them.
     pub(crate) fn preload_unopened(&mut self, script: &[u8]) {
         let include_path =
             String::from_utf8_lossy(self.ini_get(b"include_path").unwrap_or_default()).into_owned();
+        let path = self
+            .cwd()
+            .join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(script));
+        let reason = std::fs::File::open(path)
+            .err()
+            .and_then(|error| error.raw_os_error())
+            .map_or_else(
+                || String::from("No such file or directory"),
+                |code| self.os_error_text(code),
+            );
         crate::api::raising::raise_at(
             self,
             Level::Warning,
-            "PHP Startup: Failed to open stream: No such file or directory",
+            &format!("PHP Startup: Failed to open stream: {reason}"),
             UNKNOWN,
             0,
         );
