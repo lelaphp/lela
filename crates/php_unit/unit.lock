@@ -37,6 +37,7 @@ Opcode::num
 Opcode::out_used
 OperandKind
 Opline
+Opline::fuses
 Opline::jump_target
 OplineIdx
 TopLevel

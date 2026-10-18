@@ -45,9 +45,11 @@ struct Op {
     effects: Vec<String>,
     result_used: bool,
     safepoint: bool,
-    /// `COMMUTATIVE` in the handler line's `SPEC(...)`, the
-    /// `ZEND_VM_COMMUTATIVE` bit of `zend_vm_opcodes_flags`.
-    commutative: bool,
+    /// The words of the handler line's `SPEC(...)`: `COMMUTATIVE`, the
+    /// `ZEND_VM_COMMUTATIVE` bit of `zend_vm_opcodes_flags`, and
+    /// `SMART_BRANCH`, a comparison's handler one over it and the `JMPZ`
+    /// or `JMPNZ` after it ([`Op::says`]).
+    spec: Vec<String>,
     /// php's `zend_vm_opcodes_flags` word for the opcode, without its
     /// two top bits.
     flags: u32,
@@ -57,6 +59,13 @@ struct Op {
     /// with php's `SPEC` bit, `ANY` or a field such as `JMP_ADDR`, which
     /// `zend_vm_gen.php` does not specialise over.
     kinds: Option<[Option<Vec<String>>; 2]>,
+}
+
+impl Op {
+    /// Whether the handler line's `SPEC(...)` says `word`.
+    fn says(&self, word: &str) -> bool {
+        self.spec.iter().any(|said| said == word)
+    }
 }
 
 fn generate(path: &Path) -> Result<String, String> {
@@ -98,10 +107,16 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             .unwrap_or_default();
         let result_used = row.get("result").and_then(toml::Value::as_str) == Some("used");
         let safepoint = row.get("safepoint").is_some();
-        let commutative = row
+        let spec_words = row
             .get("spec")
             .and_then(toml::Value::as_str)
-            .is_some_and(|spec| spec.split(',').any(|word| word == "COMMUTATIVE"));
+            .map(|spec| {
+                spec.split(',')
+                    .filter(|word| !word.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         let spec = |key: &str| row.get(key).and_then(toml::Value::as_str).unwrap_or("ANY");
         let flags = operand_flags(&name, spec("op1_raw"))?
             | (operand_flags(&name, spec("op2_raw"))? << 8)
@@ -118,7 +133,7 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             effects,
             result_used,
             safepoint,
-            commutative,
+            spec: spec_words,
             flags,
             kinds,
         });
@@ -216,7 +231,7 @@ fn render(ops: &[Op]) -> Result<String, String> {
     writeln!(
         out,
         "pub(crate) static COMMUTATIVE: [bool; LAST + 1] = [{}];",
-        by_num(&|op| op.commutative.to_string(), "false")
+        by_num(&|op| op.says("COMMUTATIVE").to_string(), "false")
     )
     .ok();
     // php's `zend_vm_opcodes_flags` without its two top bits, which
@@ -262,29 +277,69 @@ fn specialised(row: &toml::Value, field: &str) -> Option<Vec<String>> {
         })
 }
 
+/// Each dimension one opcode's handler is resolved over, what the
+/// `match` reads with each value's pattern and the part of the variant's
+/// name it gives, and whether a kind is among them, which leaves the
+/// kinds a row does not list to a variant of their own.
+fn dimensions(op: &Op) -> Result<(Vec<Dimension>, bool), String> {
+    let (op1, op2) = match &op.kinds {
+        Some([op1, op2]) => (op1.as_ref(), op2.as_ref()),
+        None => (None, None),
+    };
+    let mut dimensions: Vec<Dimension> = Vec::new();
+    for (scrutinee, kinds) in [("op.op1_type", op1), ("op.op2_type", op2)] {
+        if let Some(kinds) = kinds {
+            let values = kinds
+                .iter()
+                .map(|k| kind(&op.name, k).map(|k| (format!("OperandKind::{k}"), k.to_owned())))
+                .collect::<Result<Vec<_>, String>>()?;
+            dimensions.push((scrutinee, values));
+        }
+    }
+    let listed = !dimensions.is_empty();
+    if op.says("SMART_BRANCH") {
+        dimensions.push((
+            "Fused::of(op, next)",
+            ["No", "Jmpz", "Jmpnz"]
+                .iter()
+                .map(|way| {
+                    let name = if *way == "No" { "" } else { way };
+                    (format!("Fused::{way}"), name.to_owned())
+                })
+                .collect(),
+        ));
+    }
+    Ok((dimensions, listed))
+}
+
+/// What a `match` reads, and each value's pattern with the part of the
+/// variant's name it gives.
+type Dimension = (&'static str, Vec<(String, String)>);
+
 /// The handler enum and its resolution: one variant for an opcode
 /// `ops.toml` does not specialise, and for one it does a variant for
 /// every pair of the kinds it lists for the operands it specialises,
 /// `op1`'s then `op2`'s, and one for the kinds it does not list, as
 /// `zend_vm_gen.php` emits a handler per `SPEC` pair and
-/// `ZEND_NULL_HANDLER` for the rest. `Unresolved`, the default, is what
-/// an opline holds until its unit is published.
+/// `ZEND_NULL_HANDLER` for the rest; for an opcode whose handler line
+/// says `SMART_BRANCH`, each of those three times over, unfused and fused
+/// to the `JMPZ` or the `JMPNZ` after it, as php's `_JMPZ` and `_JMPNZ`
+/// handlers are. `Unresolved`, the default, is what an opline holds
+/// until its unit is published.
 fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
     let mut variants = vec!["Unresolved".to_owned()];
     let mut arms = String::new();
     for op in ops {
-        let (op1, op2) = match &op.kinds {
-            Some([op1, op2]) if op1.is_some() || op2.is_some() => (op1, op2),
-            _ => {
-                variants.push(op.variant.clone());
-                writeln!(arms, "            Opcode::{0} => Handler::{0},", op.variant).ok();
-                continue;
-            }
-        };
-        let scrutinee = match (op1, op2) {
-            (Some(_), Some(_)) => "(op.op1_type, op.op2_type)",
-            (Some(_), None) => "op.op1_type",
-            _ => "op.op2_type",
+        let (dimensions, listed) = dimensions(op)?;
+        if dimensions.is_empty() {
+            variants.push(op.variant.clone());
+            writeln!(arms, "            Opcode::{0} => Handler::{0},", op.variant).ok();
+            continue;
+        }
+        let scrutinee = dimensions.iter().map(|(read, _)| *read).collect::<Vec<_>>();
+        let scrutinee = match scrutinee.as_slice() {
+            [one] => (*one).to_owned(),
+            many => format!("({})", many.join(", ")),
         };
         writeln!(
             arms,
@@ -292,31 +347,33 @@ fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
             op.variant
         )
         .ok();
-        let names = |kinds: &Option<Vec<String>>| -> Result<Vec<&'static str>, String> {
-            match kinds {
-                Some(kinds) => kinds.iter().map(|k| kind(&op.name, k)).collect(),
-                None => Ok(vec![""]),
-            }
-        };
-        for a in names(op1)? {
-            for b in names(op2)? {
-                let variant = format!("{}{a}{b}", op.variant);
-                let pattern = match (a, b) {
-                    ("", b) => format!("OperandKind::{b}"),
-                    (a, "") => format!("OperandKind::{a}"),
-                    (a, b) => format!("(OperandKind::{a}, OperandKind::{b})"),
-                };
-                writeln!(arms, "                {pattern} => Handler::{variant},").ok();
-                variants.push(variant);
-            }
+        let mut rows: Vec<(Vec<String>, String)> = vec![(Vec::new(), op.variant.clone())];
+        for (_, values) in &dimensions {
+            rows = rows
+                .iter()
+                .flat_map(|(patterns, name)| {
+                    values.iter().map(move |(pattern, part)| {
+                        let mut patterns = patterns.clone();
+                        patterns.push(pattern.clone());
+                        (patterns, format!("{name}{part}"))
+                    })
+                })
+                .collect();
         }
-        let unlisted = format!("{}Unlisted", op.variant);
-        writeln!(
-            arms,
-            "                _ => Handler::{unlisted},\n            }},"
-        )
-        .ok();
-        variants.push(unlisted);
+        for (patterns, variant) in rows {
+            let pattern = match patterns.as_slice() {
+                [one] => one.clone(),
+                many => format!("({})", many.join(", ")),
+            };
+            writeln!(arms, "                {pattern} => Handler::{variant},").ok();
+            variants.push(variant);
+        }
+        if listed {
+            let unlisted = format!("{}Unlisted", op.variant);
+            writeln!(arms, "                _ => Handler::{unlisted},").ok();
+            variants.push(unlisted);
+        }
+        writeln!(arms, "            }},").ok();
     }
     if variants.len() > usize::from(u16::MAX) {
         return Err(format!(
@@ -355,7 +412,7 @@ fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
          \x20   // `_` is the kinds the row does not list, however few are left.\n\
          \x20   #[allow(clippy::too_many_lines, clippy::match_wildcard_for_single_variants)]\n\
          \x20   #[must_use]\n\
-         \x20   pub(crate) fn of(op: &Opline) -> Handler {{\n\
+         \x20   pub(crate) fn of(op: &Opline, next: Option<&Opline>) -> Handler {{\n\
          \x20       match op.opcode {{\n\
          {arms}\
          \x20       }}\n\

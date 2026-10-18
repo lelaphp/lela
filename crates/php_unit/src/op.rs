@@ -208,7 +208,40 @@ impl Default for Opline {
     }
 }
 
+/// Whether a comparison whose handler line says `SMART_BRANCH` is fused
+/// to the opline after it, and to which jump ([`Opline::fuses`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fused {
+    No,
+    Jmpz,
+    Jmpnz,
+}
+
+impl Fused {
+    /// What `op` is fused to, `next` the opline after it.
+    pub(crate) fn of(op: &Opline, next: Option<&Opline>) -> Fused {
+        match next {
+            Some(jump) if op.fuses(jump) && jump.opcode == Opcode::Jmpz => Fused::Jmpz,
+            Some(jump) if op.fuses(jump) => Fused::Jmpnz,
+            _ => Fused::No,
+        }
+    }
+}
+
 impl Opline {
+    /// Whether `jump`, the opline after this comparison, is the `JMPZ` or
+    /// `JMPNZ` that branches on the comparison's temporary, which makes
+    /// the comparison's handler one over both oplines: php's
+    /// `ZEND_VM_SMART_BRANCH`, which `pass_two` marks where the jump's
+    /// `op1` is the comparison's `result` (`Z/Zend/zend_opcode.c`,
+    /// design §5.8).
+    #[must_use]
+    pub fn fuses(&self, jump: &Opline) -> bool {
+        matches!(jump.opcode, Opcode::Jmpz | Opcode::Jmpnz)
+            && self.out_type == OperandKind::Tmp
+            && jump.op1_type == OperandKind::Tmp
+            && jump.op1 == self.out
+    }
     /// The opline the jump lands on, read from the one field whose shape
     /// is `JMP_ADDR` in `zend_vm_opcodes_flags`: `op1` for a `JMP`, `op2`
     /// for a conditional jump, a `FE_RESET_*` or a `CATCH`, and
@@ -376,8 +409,14 @@ impl OpArray {
     /// its operands, as php's `pass_two` calls `zend_vm_set_opcode_handler`
     /// on every opline it finishes ([`crate::Unit::published`]).
     pub(crate) fn resolve(&mut self) {
-        for op in &mut self.oplines {
-            op.handler = Handler::of(op);
+        for at in 0..self.oplines.len() {
+            let handler = match self.oplines.get(at) {
+                Some(op) => Handler::of(op, self.oplines.get(at + 1)),
+                None => continue,
+            };
+            if let Some(op) = self.oplines.get_mut(at) {
+                op.handler = handler;
+            }
         }
     }
 
@@ -486,5 +525,97 @@ mod tests {
         assert!(Opcode::IsNotIdentical.is_commutative());
         assert!(!Opcode::Add.is_commutative(), "two arrays add in order");
         assert!(!Opcode::IsSmaller.is_commutative());
+    }
+
+    /// The handlers publication resolves: a comparison whose line says
+    /// `SMART_BRANCH` takes the variant of the jump after it where the
+    /// jump branches on its temporary and the plain one otherwise, a
+    /// specialised opcode the variant of its operands' kinds, one over a
+    /// `JMP_ADDR` operand none for it, and an opline of a unit never
+    /// published none at all.
+    #[test]
+    fn publication_resolves_each_oplines_handler_from_it_and_the_jump_after_it() {
+        let compare = |opcode, op1_type, op2_type| Opline {
+            opcode,
+            op1_type,
+            op2_type,
+            out_type: OperandKind::Tmp,
+            out: 3,
+            ..Opline::default()
+        };
+        let jump = |opcode, op1| Opline {
+            opcode,
+            op1_type: OperandKind::Tmp,
+            op1,
+            ..Opline::default()
+        };
+        let (cv, konst, tmp) = (OperandKind::Cv, OperandKind::Const, OperandKind::Tmp);
+        let resolved = |oplines: Vec<Opline>| {
+            let unit = crate::Unit {
+                main: OpArray {
+                    oplines,
+                    ..OpArray::default()
+                },
+                ..crate::Unit::default()
+            };
+            assert!(
+                unit.main
+                    .oplines
+                    .iter()
+                    .all(|op| op.handler == Handler::Unresolved),
+                "the compiler leaves every opline unresolved"
+            );
+            let unit = unit.published();
+            unit.main
+                .oplines
+                .iter()
+                .map(|op| op.handler)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            resolved(vec![
+                compare(Opcode::IsSmaller, cv, konst),
+                jump(Opcode::Jmpz, 3)
+            ]),
+            [Handler::IsSmallerCvConstJmpz, Handler::JmpzTmp]
+        );
+        assert_eq!(
+            resolved(vec![
+                compare(Opcode::IsEqual, cv, cv),
+                jump(Opcode::Jmpnz, 3)
+            ]),
+            [Handler::IsEqualCvCvJmpnz, Handler::JmpnzTmp]
+        );
+        assert_eq!(
+            resolved(vec![
+                compare(Opcode::IsSmallerOrEqual, cv, tmp),
+                jump(Opcode::Jmpz, 3)
+            ]),
+            [Handler::IsSmallerOrEqualJmpz, Handler::JmpzTmp]
+        );
+        assert_eq!(
+            resolved(vec![
+                compare(Opcode::IsSmaller, cv, cv),
+                jump(Opcode::Jmpz, 4)
+            ]),
+            [Handler::IsSmallerCvCv, Handler::JmpzTmp],
+            "a jump over another temporary is no fused jump"
+        );
+        assert_eq!(
+            resolved(vec![
+                compare(Opcode::IsNotEqual, cv, cv),
+                compare(Opcode::Add, tmp, konst)
+            ]),
+            [Handler::IsNotEqual, Handler::AddTmpConst]
+        );
+        assert_eq!(
+            resolved(vec![compare(Opcode::IsSmaller, cv, cv)]),
+            [Handler::IsSmallerCvCv],
+            "the last opline has no jump after it"
+        );
+        assert_eq!(
+            resolved(vec![compare(Opcode::Add, OperandKind::Unused, cv)]),
+            [Handler::AddUnlisted]
+        );
     }
 }

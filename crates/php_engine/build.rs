@@ -199,7 +199,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
         .filter(|(name, _)| !handlers.iter().any(|handler| &handler.name == *name))
         .map(|(_, spec)| spec)
     {
-        for (variant, _) in variants(spec)? {
+        for Variant { name: variant, .. } in variants(spec)? {
             serve(
                 variant,
                 "Err(Fatal::error(format!(\n\
@@ -262,9 +262,20 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     ))
 }
 
-/// One `php_unit::Handler`'s name, and the kinds of `op1` and `op2` it
-/// is served at; `None` for the variant of the kinds a row does not list.
-type Variant = (String, Option<[String; 2]>);
+/// One `php_unit::Handler`: its name, the kinds of `op1` and `op2` it is
+/// served at, `None` for the variant of the kinds a row does not list,
+/// and the branch of a comparison whose line says `SMART_BRANCH`, the
+/// type in `crate::handlers::branch`.
+struct Variant {
+    name: String,
+    kinds: Option<[String; 2]>,
+    branch: Option<&'static str>,
+}
+
+/// The branches of a `SMART_BRANCH` comparison, each the part of the
+/// variant's name `php_unit` gives it and the type the handler is served
+/// at.
+const BRANCHES: [(&str, &str); 3] = [("", "Unfused"), ("Jmpz", "OnJmpz"), ("Jmpnz", "OnJmpnz")];
 
 /// Every `php_unit::Handler` of one opcode, as `php_unit`'s `build.rs`
 /// names them from the same row, each with the kinds of `op1` and `op2`
@@ -278,10 +289,18 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         [kind] => Some(kind.clone()),
         _ => None,
     };
-    let (spec1, spec2) = (spec.specialise && spec.spec1, spec.specialise && spec.spec2);
+    let ways: &[(&str, &str)] = if spec.smart { &BRANCHES } else { &[("", "")] };
+    let branched = |name: String, kinds: Option<[String; 2]>| {
+        ways.iter().map(move |(part, ty)| Variant {
+            name: format!("{name}{part}"),
+            kinds: kinds.clone(),
+            branch: (!ty.is_empty()).then_some(*ty),
+        })
+    };
+    let [spec1, spec2] = spec.zval_shaped.map(|bit| spec.specialise && bit);
     if !spec1 && !spec2 {
         let kinds = lone(&spec.op1).zip(lone(&spec.op2)).map(|(a, b)| [a, b]);
-        return Ok(vec![(spec.variant.clone(), kinds)]);
+        return Ok(branched(spec.variant.clone(), kinds).collect());
     }
     let side = |listed: bool, kinds: &[String]| -> Result<Vec<(String, String)>, String> {
         if listed {
@@ -301,10 +320,17 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
     let mut out = Vec::new();
     for (a, ka) in side(spec1, &spec.op1)? {
         for (b, kb) in side(spec2, &spec.op2)? {
-            out.push((format!("{}{a}{b}", spec.variant), Some([ka.clone(), kb])));
+            out.extend(branched(
+                format!("{}{a}{b}", spec.variant),
+                Some([ka.clone(), kb]),
+            ));
         }
     }
-    out.push((format!("{}Unlisted", spec.variant), None));
+    out.push(Variant {
+        name: format!("{}Unlisted", spec.variant),
+        kinds: None,
+        branch: None,
+    });
     Ok(out)
 }
 
@@ -315,18 +341,39 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
 /// fatal for the kinds the spec does not list, which no unit the
 /// compiler wrote has.
 fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String> {
+    let unlisted = "Err(Fatal::error(format!(\n\
+                    \x20           \"InternalError: {} over operand kinds ops.toml does not list\",\n\
+                    \x20           op.opcode.name()\n\
+                    \x20       )))";
+    // The branch a handler generic over it is served at, after its kinds.
+    let branch = |variant: &Variant| -> Result<String, String> {
+        match (handler.branched, variant.branch) {
+            (false, _) => Ok(String::new()),
+            (true, Some(ty)) => Ok(format!(", crate::handlers::branch::{ty}")),
+            (true, None) => Err(format!(
+                "`fn {}` is generic over a comparison's branch and ops.toml does not say `SMART_BRANCH` for the opcode",
+                handler.ident
+            )),
+        }
+    };
     if handler.operands == 0 {
-        let call = format!(
-            "{{\n\
-             \x20           req.vm_mut().stand(frame, at);\n\
-             \x20           crate::handlers::{}::<T>(req, frame, code, op)\n\
-             \x20       }}",
-            handler.ident
-        );
-        return Ok(variants(spec)?
-            .into_iter()
-            .map(|(variant, _)| (variant, call.clone()))
-            .collect());
+        let mut out = Vec::new();
+        for variant in variants(spec)? {
+            if variant.kinds.is_none() && spec.specialise {
+                out.push((variant.name, unlisted.to_owned()));
+                continue;
+            }
+            let call = format!(
+                "{{\n\
+                 \x20           req.vm_mut().stand(frame, at);\n\
+                 \x20           crate::handlers::{}::<T{}>(req, frame, code, op)\n\
+                 \x20       }}",
+                handler.ident,
+                branch(&variant)?
+            );
+            out.push((variant.name, call));
+        }
+        return Ok(out);
     }
     if !spec.specialise {
         return Err(format!(
@@ -340,14 +387,10 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
             handler.ident, handler.operands
         ));
     }
-    let unlisted = "Err(Fatal::error(format!(\n\
-                    \x20           \"InternalError: {} over operand kinds ops.toml does not list\",\n\
-                    \x20           op.opcode.name()\n\
-                    \x20       )))";
     let mut out = Vec::new();
-    for (variant, kinds) in variants(spec)? {
-        let Some(kinds) = kinds else {
-            out.push((variant, unlisted.to_owned()));
+    for variant in variants(spec)? {
+        let Some(kinds) = &variant.kinds else {
+            out.push((variant.name, unlisted.to_owned()));
             continue;
         };
         let mut params = String::new();
@@ -360,8 +403,9 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
             };
             write!(params, ", crate::operand::{ty}").ok();
         }
+        params.push_str(&branch(&variant)?);
         out.push((
-            variant,
+            variant.name,
             format!(
                 "crate::handlers::{}::<T{params}>(req, frame, code, op, at)",
                 handler.ident
@@ -426,11 +470,13 @@ struct Spec {
     specialise: bool,
     op1: Vec<String>,
     op2: Vec<String>,
-    /// Whether each operand's shape carries a zval kind with php's `SPEC`
-    /// bit, which is what `php_unit` specialises a handler over: not for
-    /// `ANY`, nor for a field such as `JMP_ADDR`.
-    spec1: bool,
-    spec2: bool,
+    /// Whether each operand's shape, `op1`'s then `op2`'s, carries a zval
+    /// kind with php's `SPEC` bit, which is what `php_unit` specialises a
+    /// handler over: not for `ANY`, nor for a field such as `JMP_ADDR`.
+    zval_shaped: [bool; 2],
+    /// `SMART_BRANCH` in the handler line's `SPEC(...)`, over which
+    /// `php_unit` resolves three handlers per kind.
+    smart: bool,
 }
 
 /// php's opcode names against what the dispatch reads of their rows.
@@ -481,8 +527,11 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                     .unwrap_or(false),
                 op1: kinds("op1"),
                 op2: kinds("op2"),
-                spec1: specialised("op1_raw"),
-                spec2: specialised("op2_raw"),
+                zval_shaped: [specialised("op1_raw"), specialised("op2_raw")],
+                smart: row
+                    .get("spec")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|spec| spec.split(',').any(|word| word == "SMART_BRANCH")),
             },
         );
     }
@@ -497,6 +546,9 @@ struct Handler {
     name: String,
     ident: String,
     operands: usize,
+    /// Whether the handler is generic over its comparison's branch, the
+    /// `S: Branch` after its kinds (`crate::handlers::branch`).
+    branched: bool,
 }
 
 /// The handlers `src/handlers.rs` declares, each read off the line that
@@ -521,6 +573,7 @@ fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
             name: ident.trim_start_matches("r#").to_owned(),
             ident: ident.to_owned(),
             operands: generics.matches(": Operand").count(),
+            branched: generics.contains(": Branch"),
         });
     }
     Ok(out)
