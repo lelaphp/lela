@@ -644,26 +644,15 @@ impl Primary {
 }
 
 /// `php_fopen_primary_script` failing over `path`, as `main` answers it
-/// once the request has started (`Z/sapi/cgi/cgi_main.c:2478-2487`):
-/// `Access denied.` under a 403 where the open met `EACCES`, and `No
-/// input file specified.` under a 404 otherwise, a request with no path
+/// once the request has started (`Z/sapi/cgi/cgi_main.c:2478-2487`),
+/// php-fpm's page ([`php_sapi::cgi::unopened`]), a request with no path
 /// among them; `None` where the file opens.
 fn refusal(path: Option<&[u8]>) -> Option<HostPage> {
-    let denied = match path.map(|path| std::fs::File::open(path_of(path))) {
-        Some(Ok(_)) => return None,
-        Some(Err(error)) => error.kind() == std::io::ErrorKind::PermissionDenied,
-        None => false,
-    };
-    let (code, body): (i64, &[u8]) = if denied {
-        (403, b"Access denied.\n")
-    } else {
-        (404, b"No input file specified.\n")
-    };
-    Some(HostPage {
-        code,
-        headers: Vec::new(),
-        body: body.to_vec(),
-    })
+    match path.map(|path| std::fs::File::open(path_of(path))) {
+        Some(Ok(_)) => None,
+        Some(Err(error)) => Some(php_sapi::cgi::unopened(Some(&error))),
+        None => Some(php_sapi::cgi::unopened(None)),
+    }
 }
 
 /// The process's environment, `environ`.
@@ -739,7 +728,7 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
     let sink = Box::new(Process);
     let mut refused = false;
     let (served, _): (Observables, _) = match (&primary, invocation.behavior) {
-        (Primary::Path(path), Behavior::Standard) => engine.serve(description, sink, || {
+        (Primary::Path(path), Behavior::Standard) => engine.serve(description, sink, |_| {
             refusal(path.as_deref()).map_or(HostServes::Program, |page| {
                 refused = true;
                 HostServes::Page(page)
@@ -747,11 +736,11 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
         }),
         (Primary::Path(path), _) if let Some(page) = refusal(path.as_deref()) => {
             refused = true;
-            engine.serve(description, sink, || HostServes::Page(page))
+            engine.serve(description, sink, |_| HostServes::Page(page))
         }
         (_, Behavior::Highlight) => engine.highlight(description, sink),
         (_, Behavior::Strip) => engine.strip(description, sink),
-        _ => engine.serve(description, sink, || HostServes::Program),
+        _ => engine.serve(description, sink, |_| HostServes::Program),
     };
     // `main` returns `FAILURE` where `php_request_startup` failed, an
     // extension's `rinit` having raised (#1775), and php-cgi ends there
@@ -782,7 +771,7 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
         if let Primary::Path(path) = &primary
             && let Some(page) = refusal(path.as_deref())
         {
-            engine.serve(description, Box::new(Process), || HostServes::Page(page));
+            engine.serve(description, Box::new(Process), |_| HostServes::Page(page));
             return 255;
         }
         let name = description.script_name.clone().unwrap_or_default();

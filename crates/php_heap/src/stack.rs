@@ -40,10 +40,26 @@
 //! An unobserved frameless call's frame, which php lays down nowhere,
 //! stands off the pages and off the heap ([`VmStack::push_frameless`]),
 //! so it takes no room php's call does not.
+//!
+//! **A chain another process can read** (design §5.6, revision 59). The
+//! room's first word is the stack's, not the header's: the address of
+//! the room of the record pushed before it, php's `prev_execute_data`,
+//! and the stack keeps the innermost room's address in one word
+//! ([`VmStack::link_word`]) that a push moves only once the room below
+//! it is whole. So a process stopped between any two instructions holds
+//! a chain of rooms another one can walk from that word, reading bytes
+//! as `fpm_php_trace_dump` walks `EG(current_execute_data)`: the header
+//! after the link says what each room serves. Every push links its
+//! room, a call being built and a native's call as a user frame, and a
+//! pop moves the word back to the room's link, so the chain is the
+//! stack's records whichever tier the engine is bound to; the one room never linked
+//! is an unobserved frameless call's, which php's chain does not hold
+//! either (#2553, #2665).
 
 use std::marker::PhantomData;
 use std::mem::{MaybeUninit, align_of, needs_drop, size_of};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering, compiler_fence};
 
 use crate::hooks::Fatal;
 use crate::{Heap, Zval, ZvalRef};
@@ -61,6 +77,13 @@ const PAGE_HEADER_SLOTS: usize = (3 * size_of::<usize>()).div_ceil(SLOT);
 /// `ZEND_CALL_FRAME_SLOT`: `sizeof(zend_execute_data)`, eighty bytes on
 /// a 64-bit build, rounded up to slots.
 const FRAME_HEADER_SLOTS: usize = 80usize.div_ceil(SLOT);
+/// The bytes of a frame's room before its first CV, php's
+/// `zend_execute_data`: the link and then the header. What a reader of
+/// the chain reads at each room's address.
+pub const ROOM_BYTES: usize = FRAME_HEADER_SLOTS * SLOT;
+/// Where in the room the engine's header starts: past the link, the
+/// address of the room linked before this one (the room's first word).
+pub const HEADER_AT: usize = size_of::<usize>();
 /// The operands a frameless call passes at most, a
 /// `ZEND_FRAMELESS_ICALL_3`'s.
 const LOOSE_OPERANDS: usize = 3;
@@ -243,24 +266,57 @@ unsafe impl<H: Send> Send for Frame<H> {}
 unsafe impl Send for Page {}
 
 impl<H> Frame<H> {
-    /// What the room holds: the header no larger than php's
-    /// `zend_execute_data` and aligned no more strictly than a zval, so
-    /// it sits in the slots before the frame's first CV, and owning
-    /// nothing a drop would give back, since a pop frees the room
-    /// without reading it.
+    /// What the room holds past its link: the header no larger than
+    /// what php's `zend_execute_data` leaves after the link's word and
+    /// aligned no more strictly than that word, so it sits in the slots
+    /// before the frame's first CV, and owning nothing a drop would
+    /// give back, since a pop frees the room without reading it.
     const FITS: () = assert!(
-        size_of::<H>() <= FRAME_HEADER_SLOTS * SLOT
-            && align_of::<H>() <= align_of::<Zval>()
+        size_of::<H>() <= ROOM_BYTES - HEADER_AT
+            && align_of::<H>() <= align_of::<usize>()
             && !needs_drop::<H>(),
-        "a frame header must fit php's zend_execute_data room and own nothing"
+        "a frame header must fit php's zend_execute_data room past its link and own nothing"
     );
 
-    /// The header's place, the room before the first CV.
-    fn header_at(&self) -> NonNull<H> {
+    /// The room, the `FRAME_HEADER_SLOTS` slots before the first CV:
+    /// its link, then its header.
+    fn room(&self) -> NonNull<Zval> {
         // SAFETY: every frame's `at` is `FRAME_HEADER_SLOTS` slots past
         // the start of its room, inside the page, the block or the room
         // off the pages it was laid in.
-        unsafe { self.at.sub(FRAME_HEADER_SLOTS) }.cast::<H>()
+        unsafe { self.at.sub(FRAME_HEADER_SLOTS) }
+    }
+
+    /// The room's address, which the link of the room above names and
+    /// the stack's word names while this is the innermost.
+    fn room_address(&self) -> usize {
+        self.room().as_ptr().expose_provenance()
+    }
+
+    /// The link's place, the room's first word.
+    fn link_at(&self) -> NonNull<usize> {
+        self.room().cast::<usize>()
+    }
+
+    /// The header's place, past the link.
+    fn header_at(&self) -> NonNull<H> {
+        // SAFETY: the room is `ROOM_BYTES` long and the header starts
+        // `HEADER_AT` bytes in, inside it.
+        unsafe { self.room().cast::<u8>().add(HEADER_AT) }.cast::<H>()
+    }
+
+    /// The address of the room linked before this one, which the push
+    /// wrote.
+    fn linked_below(&self) -> usize {
+        // SAFETY: the push wrote the link before it linked the room, and
+        // the room is the frame's until it pops.
+        unsafe { self.link_at().read() }
+    }
+
+    /// Whether the frame's room is on the chain another process reads:
+    /// every room but an unobserved frameless call's.
+    fn linked(&self) -> bool {
+        !matches!(self.placed, Placed::Loose(_))
     }
 
     /// The frame's header, php's `execute_data` fields.
@@ -373,6 +429,45 @@ impl<H> Frame<H> {
     }
 }
 
+/// A room no frame stands in, held where its owner holds it and not on
+/// the stack's pages: php's `execute_fake`, the `zend_execute_data` a
+/// generator object carries as a field, which a resumption through a
+/// `yield from` links between the frame it runs and the resumer's
+/// ([`VmStack::link_room`]). Its link and its header are laid as a
+/// frame's room's are, `ROOM_BYTES` in all, so another process reads it
+/// as it reads any room on the chain.
+#[derive(Debug)]
+#[repr(C)]
+pub struct FakeRoom<H> {
+    link: usize,
+    header: H,
+}
+
+impl<H> FakeRoom<H> {
+    /// The header fills the room past its link exactly, so a reader that
+    /// reads `ROOM_BYTES` reads this room and nothing past it, and owns
+    /// nothing, as a frame's header owns nothing.
+    const FITS: () = assert!(
+        size_of::<H>() == ROOM_BYTES - HEADER_AT
+            && align_of::<H>() <= align_of::<usize>()
+            && !needs_drop::<H>(),
+        "a fake room's header must fill php's zend_execute_data room past its link and own nothing"
+    );
+
+    /// A room of `header`, linked to nothing until the stack links it.
+    #[must_use]
+    pub const fn new(header: H) -> FakeRoom<H> {
+        let () = Self::FITS;
+        FakeRoom { link: 0, header }
+    }
+
+    /// The room's address, which the link of the room above it names and
+    /// the stack's word names while it is the innermost.
+    fn address(&self) -> usize {
+        std::ptr::from_ref(self).expose_provenance()
+    }
+}
+
 /// The stack of one request, or of one fiber: pages of slots and the
 /// entry slot.
 #[derive(Debug)]
@@ -386,6 +481,13 @@ pub struct VmStack<H> {
     /// The room off the pages the last frameless call's frame gave
     /// back, the next one's.
     spare: Option<Loose>,
+    /// `EG(current_execute_data)` as another process reads it: the
+    /// address of the innermost linked room, zero where none stands
+    /// ([`VmStack::link_word`]). An atomic for its one store of a whole
+    /// word: only this thread writes it, and a reader reads it with the
+    /// thread stopped, so `Relaxed` with the compiler fence before each
+    /// move ([`VmStack::link`]) is the order it needs.
+    innermost: AtomicUsize,
 }
 
 impl<H> Default for VmStack<H> {
@@ -396,6 +498,7 @@ impl<H> Default for VmStack<H> {
             frames: Vec::new(),
             entries: Vec::new(),
             spare: None,
+            innermost: AtomicUsize::new(0),
         }
     }
 }
@@ -444,6 +547,7 @@ impl<H> VmStack<H> {
             .rev()
             .map(|frame| frame.header_copied())
             .collect();
+        self.innermost.store(0, Ordering::Relaxed);
         for page in self.pages.drain(..).rev() {
             page.give_back(heap);
         }
@@ -581,11 +685,98 @@ impl<H> VmStack<H> {
         self.stand(frame)
     }
 
-    /// `frame` on top of the stack, its position the one it is named by.
+    /// `frame` on top of the stack, its position the one it is named by,
+    /// and its room linked above the innermost one, unless it is an
+    /// unobserved frameless call's.
     fn stand(&mut self, frame: Frame<H>) -> FrameRef {
+        if frame.linked() {
+            self.link(&frame);
+        }
         let at = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
         self.frames.push(frame);
         FrameRef(at)
+    }
+
+    /// `frame`'s room made the innermost: its link the room the word
+    /// names, then the word moved to it, php's
+    /// `call->prev_execute_data = EG(current_execute_data)` and then
+    /// `EG(current_execute_data) = call`, the fence keeping the compiler from moving the
+    /// room's bytes past the word, so a stopped process whose word
+    /// names a room holds that room whole.
+    #[inline]
+    fn link(&self, frame: &Frame<H>) {
+        let below = self.innermost.load(Ordering::Relaxed);
+        // SAFETY: the room is the frame's, laid by its push or its move,
+        // and its first word is the link's, which nothing else writes.
+        unsafe { frame.link_at().write(below) };
+        compiler_fence(Ordering::Release);
+        self.innermost
+            .store(frame.room_address(), Ordering::Relaxed);
+    }
+
+    /// The word moved back to the room `frame` links, as it leaves the
+    /// stack: `EG(current_execute_data) = EX(prev_execute_data)`. Read
+    /// before the room is given back.
+    #[inline]
+    fn unlink(&self, frame: &Frame<H>) {
+        if frame.linked() {
+            self.innermost
+                .store(frame.linked_below(), Ordering::Relaxed);
+        }
+    }
+
+    /// The address of the stack's word, which names the innermost linked
+    /// room, `&EG(current_execute_data)`: what a host publishes once per
+    /// request for another process to read the chain from. A request's
+    /// stack stands in one place for its life, and a fiber's stack
+    /// changes places with it at a switch, so the word at this address is
+    /// the running stack's.
+    #[must_use]
+    pub fn link_word(&self) -> usize {
+        std::ptr::from_ref(&self.innermost).expose_provenance()
+    }
+
+    /// The address the word holds: the innermost linked room's, or zero.
+    #[must_use]
+    pub fn innermost(&self) -> usize {
+        self.innermost.load(Ordering::Relaxed)
+    }
+
+    /// The bottom of this stack's chain linked to `below`, the innermost
+    /// room of the stack that resumed it, as `zend_fiber_resume` writes
+    /// `fiber->stack_bottom->prev_execute_data`: the link of its first
+    /// linked room, or, where none stands yet, the word, so the first
+    /// push links there.
+    pub fn link_below(&mut self, below: usize) {
+        match self.frames.iter().find(|frame| frame.linked()) {
+            // SAFETY: the room is the standing frame's and its first word
+            // the link's.
+            Some(bottom) => unsafe { bottom.link_at().write(below) },
+            None => self.innermost.store(below, Ordering::Relaxed),
+        }
+    }
+
+    /// `room` made the innermost, off the pages: its link the room the
+    /// word names, then the word moved to it, as `zend_generator_resume`
+    /// writes the placeholder's link,
+    /// `orig_generator->execute_fake.prev_execute_data`, before the frame
+    /// it resumes links to the placeholder
+    /// (`Z/Zend/zend_generators.c:807`), so the next push links above it. The room is on the chain until
+    /// [`VmStack::unlink_room`], and stands where it is until then; it
+    /// takes nothing from the pages.
+    #[inline]
+    pub fn link_room(&self, room: &mut FakeRoom<H>) {
+        room.link = self.innermost.load(Ordering::Relaxed);
+        compiler_fence(Ordering::Release);
+        self.innermost.store(room.address(), Ordering::Relaxed);
+    }
+
+    /// The word moved back to the room `room` links, as php's resumption
+    /// moves `EG(current_execute_data)` back to the resumer's once the
+    /// frame it linked above the placeholder has left.
+    #[inline]
+    pub fn unlink_room(&self, room: &FakeRoom<H>) {
+        self.innermost.store(room.link, Ordering::Relaxed);
     }
 
     /// Push the frame of a call php lays down nowhere, an unobserved
@@ -623,13 +814,17 @@ impl<H> VmStack<H> {
             return;
         };
         // `zend_vm_stack_free_call_frame_ex` over a frame on the top page,
-        // `EG(vm_stack_top) = call`: every return of a call in a loop.
+        // `EG(vm_stack_top) = call`: every return of a call in a loop, its
+        // room linked as every room on a page is.
         if let Placed::On { from } = frame.placed
             && let Some(page) = self.pages.last_mut()
         {
+            self.innermost
+                .store(frame.linked_below(), Ordering::Relaxed);
             page.top = from;
             return;
         }
+        self.unlink(&frame);
         self.leave(heap, frame);
     }
 
@@ -713,6 +908,13 @@ impl<H> VmStack<H> {
                 );
             }
             let at = page.slot(start + FRAME_HEADER_SLOTS);
+            // The copy carried the link; the word follows the room before
+            // the old one can go back with its page.
+            compiler_fence(Ordering::Release);
+            self.innermost.store(
+                page.slot(start).as_ptr().expose_provenance(),
+                Ordering::Relaxed,
+            );
             let bottom = if self.pages.len() == 1 {
                 self.kind.bottom()
             } else {
@@ -787,6 +989,7 @@ impl<H> VmStack<H> {
         let Some(frame) = self.frames.pop() else {
             return Ok(None);
         };
+        self.unlink(&frame);
         let start = match frame.placed {
             Placed::Heap { .. } => return Ok(Some(frame)),
             Placed::On { from } => from,
@@ -807,7 +1010,7 @@ impl<H> VmStack<H> {
         let block = match heap.mm.alloc(used * SLOT) {
             Ok(block) => block.cast::<Zval>(),
             Err(fatal) => {
-                self.frames.push(frame);
+                self.stand(frame);
                 return Err(fatal);
             }
         };
@@ -964,6 +1167,8 @@ impl Page {
 pub struct FramesAside<H> {
     frames: Vec<Frame<H>>,
     entries: Vec<FrameRef>,
+    /// The word as it stood, the innermost of the frames set aside.
+    innermost: usize,
 }
 
 impl<H> VmStack<H> {
@@ -975,6 +1180,7 @@ impl<H> VmStack<H> {
         FramesAside {
             frames: std::mem::take(&mut self.frames),
             entries: std::mem::take(&mut self.entries),
+            innermost: self.innermost.swap(0, Ordering::Relaxed),
         }
     }
 
@@ -989,11 +1195,13 @@ impl<H> VmStack<H> {
     pub fn put_back(&mut self, heap: &mut Heap, aside: FramesAside<H>) -> Vec<H> {
         let mut dropped = Vec::new();
         while let Some(frame) = self.frames.pop() {
+            self.unlink(&frame);
             dropped.push(frame.header_copied());
             self.leave(heap, frame);
         }
         self.frames = aside.frames;
         self.entries = aside.entries;
+        self.innermost.store(aside.innermost, Ordering::Relaxed);
         dropped
     }
 }
@@ -1386,5 +1594,140 @@ mod tests {
         stack.pop_frame(&mut heap);
         drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
+    }
+
+    /// The rooms the word reaches, innermost first, read as another
+    /// process reads them: the word's address, then each room's link.
+    fn chain<H>(stack: &VmStack<H>) -> Vec<usize> {
+        // SAFETY: the word's address is the live stack's field, exposed.
+        let mut at =
+            unsafe { std::ptr::with_exposed_provenance::<usize>(stack.link_word()).read() };
+        let mut rooms = Vec::new();
+        while at != 0 && rooms.len() < 64 {
+            rooms.push(at);
+            // SAFETY: a linked room stands while its frame does, and its
+            // address was exposed by the push.
+            at = unsafe { std::ptr::with_exposed_provenance::<usize>(at).read() };
+        }
+        rooms
+    }
+
+    /// The rooms of the frames standing, innermost first, an unobserved
+    /// frameless call's left out.
+    fn rooms(stack: &VmStack<Head>) -> Vec<usize> {
+        stack
+            .frames
+            .iter()
+            .rev()
+            .filter(|frame| frame.linked())
+            .map(Frame::room_address)
+            .collect()
+    }
+
+    /// Every push links its room above the innermost one and every pop
+    /// moves the word back, a frameless call's room never on the chain,
+    /// a frame moved to the heap off it and back on where it resumes, a
+    /// frame grown onto a page of its own followed there, and frames set
+    /// aside off it until they are put back (design §5.6, revision 59).
+    #[test]
+    fn the_word_names_a_chain_of_rooms_as_the_stack_stands() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let mut stack = VmStack::<Head>::new();
+        assert_eq!(stack.innermost(), 0);
+        assert!(chain(&stack).is_empty());
+        for _ in 0..3 {
+            assert!(stack.push_frame(&mut heap, 2, 0, Head::default()).is_ok());
+        }
+        assert_eq!(chain(&stack), rooms(&stack));
+        assert_eq!(chain(&stack).len(), 3);
+        assert!(stack.push_frameless(2, Head::default()).is_ok());
+        assert_eq!(chain(&stack).len(), 3, "a frameless call is on no chain");
+        assert!(stack.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        assert_eq!(chain(&stack), rooms(&stack));
+        assert_eq!(chain(&stack).len(), 4);
+        stack.pop_frame(&mut heap);
+        stack.pop_frame(&mut heap);
+        assert_eq!(chain(&stack), rooms(&stack));
+        let moved = stack.move_to_heap(&mut heap);
+        let Ok(Some(moved)) = moved else {
+            return;
+        };
+        assert_eq!(chain(&stack).len(), 2);
+        stack.resume_frame(moved);
+        assert_eq!(chain(&stack), rooms(&stack));
+        let grown = stack.push_frame(&mut heap, 1, 0, Head::default());
+        let Ok(grown) = grown else {
+            return;
+        };
+        assert_eq!(stack.grow_top(&mut heap, grown, PAGE_SIZE / SLOT), Ok(()));
+        assert_eq!(chain(&stack), rooms(&stack));
+        stack.pop_frame(&mut heap);
+        let aside = stack.set_aside();
+        assert!(chain(&stack).is_empty());
+        assert!(stack.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        assert_eq!(chain(&stack).len(), 1);
+        drop(stack.put_back(&mut heap, aside));
+        assert_eq!(chain(&stack), rooms(&stack));
+        assert_eq!(chain(&stack).len(), 3);
+        drop(stack.close(&mut heap));
+        assert_eq!(stack.innermost(), 0);
+    }
+
+    /// A header that fills the room past its link, as the engine's does,
+    /// which a [`FakeRoom`] asks of its header.
+    #[derive(Debug, Default)]
+    #[expect(
+        dead_code,
+        reason = "a room's bytes are read as another process reads them"
+    )]
+    struct Wide([u64; 9]);
+
+    /// A room off the pages linked as php links `execute_fake`: the next
+    /// push links above it and it links the resumer's room, and the word
+    /// is back on the resumer's once the frame above it has left and it
+    /// is unlinked.
+    #[test]
+    fn a_fake_room_stands_between_the_frame_above_it_and_the_resumer() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let mut stack = VmStack::<Wide>::new();
+        assert!(stack.push_frame(&mut heap, 1, 0, Wide::default()).is_ok());
+        let resumer = stack.innermost();
+        let mut room = FakeRoom::new(Wide::default());
+        stack.link_room(&mut room);
+        assert_eq!(stack.innermost(), room.address());
+        assert!(stack.push_frame(&mut heap, 1, 0, Wide::default()).is_ok());
+        let walked = chain(&stack);
+        assert_eq!(walked.len(), 3);
+        assert_eq!(walked.get(1..), Some(&[room.address(), resumer][..]));
+        stack.pop_frame(&mut heap);
+        assert_eq!(stack.innermost(), room.address());
+        stack.unlink_room(&room);
+        assert_eq!(stack.innermost(), resumer);
+        assert_eq!(chain(&stack), [resumer]);
+        drop(stack.close(&mut heap));
+    }
+
+    /// A fiber's stack linked below the stack that resumed it: its first
+    /// room's link, or, before its first push, the word itself.
+    #[test]
+    fn a_fiber_s_bottom_links_to_its_resumer() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let mut stack = VmStack::<Head>::new();
+        assert!(stack.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        let resumer = stack.innermost();
+        let mut fiber = VmStack::<Head>::fiber();
+        fiber.link_below(resumer);
+        assert!(fiber.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        assert!(fiber.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        let walked = chain(&fiber);
+        assert_eq!(walked.len(), 3);
+        assert_eq!(walked.last(), Some(&resumer));
+        fiber.link_below(0);
+        assert_eq!(chain(&fiber).len(), 2);
+        drop(fiber.close(&mut heap));
+        drop(stack.close(&mut heap));
     }
 }

@@ -269,10 +269,13 @@ fn command_line() -> Result<()> {
             record(&store, &test::run_staged(&root, &manifest, &store)?)
         }
         Command::Test { crates, .. } => record(&store, &test::run(&root, &manifest, &crates)?),
-        Command::Miri { crates } => miri::command(&root, &manifest, &store, &crates),
+        Command::Miri { crates } => record(&store, &miri::run(&root, &manifest, &crates)?),
         Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
-        Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
+        Command::CompileIdentity(ask) => record(
+            &store,
+            &compile_identity::run(&root, &manifest, &Registry::load(&root)?, &ask)?,
+        ),
         Command::Crosscheck { ext, staged } => {
             crosscheck_command(&root, &manifest, &store, ext, staged)
         }
@@ -288,13 +291,9 @@ fn command_line() -> Result<()> {
             api_check::run(&manifest, &root, &store, write, staged)
         }
         Command::DivergenceReason => divergence_command(&root, &manifest, &store),
-        Command::NewExt { name } => {
-            said(&new_ext::run(&root, &manifest, &name)?);
-            Ok(())
-        }
+        Command::NewExt { name } => said(new_ext::run(&root, &manifest, &name)),
         Command::NewSapi { name, binary } => {
-            said(&new_sapi::run(&root, &manifest, &name, binary.as_deref())?);
-            Ok(())
+            said(new_sapi::run(&root, &manifest, &name, binary.as_deref()))
         }
         Command::Witness(ask) => witness::command(&root, &manifest, &store, ask),
         Command::Vocab { crates, staged } => {
@@ -312,13 +311,15 @@ fn command_line() -> Result<()> {
 }
 
 /// What `new-ext` or `new-sapi` laid down, a file a line, and its notes.
-fn said(laid: &new_ext::Laid) {
+fn said(laid: Result<new_ext::Laid>) -> Result<()> {
+    let laid = laid?;
     for path in &laid.written {
         println!("wrote {path}");
     }
     for note in &laid.notes {
         println!("{note}");
     }
+    Ok(())
 }
 
 /// `steer`: one proposal judged against the harness's own file and
@@ -353,23 +354,15 @@ fn vocab_command(
     } else {
         crates
     };
-    match vocab::run(root, manifest, store, &crates)? {
-        Outcome::Met => Ok(()),
-        Outcome::Unmet { .. } => bail!("vocab: an avoided word is in use; the findings are above"),
-    }
+    vocab::run(root, manifest, store, &crates)?
+        .exit_saying(|| "vocab: an avoided word is in use; the findings are above".to_owned())
 }
 
 /// [`record`] without the exit: every reading printed and written, and
 /// what they owe, for an instrument whose exit answers something else.
 fn recorded(store: &Store, readings: &[Reading]) -> Result<Outcome> {
     for reading in readings {
-        println!(
-            "{} {} {}: {}",
-            reading.status.as_str(),
-            reading.instrument,
-            reading.scope,
-            reading.message
-        );
+        println!("{reading}");
     }
     store.record(readings)
 }
@@ -501,28 +494,6 @@ fn bench_command(root: &Path, store: &Store, ask: &cli::Bench) -> Result<()> {
     )
 }
 
-/// `xtask compile-identity`: the corpus asked for, dumped twice and
-/// written; or one file, whose verdict is the exit and which records
-/// nothing.
-fn identity_command(
-    root: &Path,
-    manifest: &Manifest,
-    store: &Store,
-    ask: cli::Identity,
-) -> Result<()> {
-    let registry = Registry::load(root)?;
-    let ask = compile_identity::Ask {
-        file: ask.file,
-        corpus: ask.corpus,
-        engine: ask.engine,
-        regime: ask.regime,
-    };
-    record(
-        store,
-        &compile_identity::run(root, manifest, &registry, &ask)?,
-    )
-}
-
 /// `xtask crosscheck`: the extensions asked for, each rendered by the
 /// oracle and held against the engine's rendering, each written.
 fn crosscheck_command(
@@ -570,13 +541,11 @@ fn crosscheck_command(
 fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result<()> {
     let registry = Registry::load(root)?;
     let reading = divergence::reason(&registry, manifest, root)?;
-    match store.record(std::slice::from_ref(&reading))? {
-        Outcome::Met => {
-            println!("{}", reading.message);
-            Ok(())
-        }
-        Outcome::Unmet { .. } => bail!("{}", reading.message),
-    }
+    store
+        .record(std::slice::from_ref(&reading))?
+        .exit_saying(|| reading.message.clone())?;
+    println!("{}", reading.message);
+    Ok(())
 }
 
 /// The commands that measure nothing and read no manifest, answered

@@ -28,7 +28,7 @@ use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
     Type,
 };
-use php_unit::{FramelessEntry, Unit, frameless_table};
+use php_unit::{FramelessEntry, PublishedUnit, Unit, frameless_table};
 
 use crate::api::abi::{
     Declarations, DependencyKind, EndFunction, Entry, Extension, ExtensionEntry, IniHandler,
@@ -713,6 +713,11 @@ pub(crate) struct Shared {
     /// declarations alone, which the compiler reads as they stand on
     /// every compile ([`Declared`]).
     pub(crate) functions: Vec<FunctionDecl>,
+    /// Each native and then each native method as another process reads
+    /// it ([`crate::readable`]), one row per number a `Function` below
+    /// the arena's takes: the name its declaration holds, which stands
+    /// as long as the engine does.
+    pub(crate) callees: Box<[crate::readable::Record]>,
     /// `functions` by name, any case, `CG(function_table)`'s keys.
     function_names: Names<Folded>,
     /// Each native's entry, one row per row of `functions`, the
@@ -989,6 +994,38 @@ pub(crate) struct NativeMethod {
     /// Its `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, decoded from
     /// the declaration's attributes where the method is linked.
     pub(crate) flags: crate::attributes::Flags,
+}
+
+/// The callees of the natives and then of the native methods, in the
+/// numbers their `Function`s take ([`Shared::callees`]): each under
+/// the name its declaration holds, php's `common.function_name`, which
+/// for a method is the method's alone.
+fn native_callees(
+    functions: &[FunctionDecl],
+    methods: &[NativeMethod],
+    classes: &[ClassDecl],
+    trampolines: &[MethodDecl],
+) -> Box<[crate::readable::Record]> {
+    let method_name = |method: &NativeMethod| -> &[u8] {
+        let decl = match method.at {
+            MethodAt::Declared { class, at } => classes
+                .get(class.0 as usize)
+                .and_then(|class| class.methods.get(at as usize)),
+            MethodAt::Trampoline { at, .. }
+            | MethodAt::ParentHook { at, .. }
+            | MethodAt::Unlisted { at } => trampolines.get(at as usize),
+        };
+        decl.map_or(&[][..], |decl| &decl.function.name.0)
+    };
+    functions
+        .iter()
+        .map(|decl| crate::readable::Record::native(&decl.name.0))
+        .chain(
+            methods
+                .iter()
+                .map(|method| crate::readable::Record::native(method_name(method))),
+        )
+        .collect()
 }
 
 /// Where a native method's declaration stands: among its class's own,
@@ -1507,6 +1544,17 @@ pub(crate) struct Declared<'a> {
 }
 
 impl Shared {
+    /// Where the record of a native or a native method stands
+    /// ([`Shared::callees`]); none for every other function.
+    #[inline]
+    pub(crate) fn native_callee(
+        &self,
+        function: crate::api::call::Function,
+    ) -> Option<crate::readable::CalleeAt> {
+        let at = usize::try_from(function.0).ok()?;
+        self.callees.get(at).map(crate::readable::Record::at)
+    }
+
     /// `zend_flf_functions` by name, in the frameless table's order
     /// ([`Engine::frameless`]).
     pub(crate) fn frameless_names(&self) -> Vec<Name> {
@@ -1555,7 +1603,7 @@ impl Shared {
         source: &[u8],
         origin: Origin<'_>,
         stack: StackLimit,
-    ) -> Result<Arc<Unit>, CompileError> {
+    ) -> Result<PublishedUnit, CompileError> {
         self.compile_shared(source, origin, stack)
             .map(|unit| self.publish_compiled(unit))
     }
@@ -1598,7 +1646,7 @@ impl Shared {
     /// for more than one request takes, as only what opcache persists
     /// moves `CG(map_ptr_last)`, and its tables shrunk to what they hold
     /// ([`Unit::compact`]).
-    pub(crate) fn publish_compiled(&self, mut unit: Unit) -> Arc<Unit> {
+    pub(crate) fn publish_compiled(&self, mut unit: Unit) -> PublishedUnit {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
         unit.compact();
         unit.published()
@@ -1633,7 +1681,7 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
-    ) -> Result<Arc<Unit>, CompileError> {
+    ) -> Result<PublishedUnit, CompileError> {
         let ini = CompileIni {
             precision: req.precision(),
             short_open_tag: req.short_open_tag(),
@@ -1781,7 +1829,7 @@ impl Shared {
         stack: StackLimit,
         request_classes: RequestClasses<'_>,
         multibyte: Option<Multibyte<'_>>,
-    ) -> Result<Arc<Unit>, CompileError> {
+    ) -> Result<PublishedUnit, CompileError> {
         self.compile_file(source, path, cwd, stack, request_classes, multibyte)
             .map(|unit| self.publish_compiled(unit))
     }
@@ -3446,6 +3494,7 @@ impl EngineBuilder {
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
+        let callees = native_callees(&functions, &methods, &classes, &trampolines);
         let parents: Vec<Option<ClassId>> = classes
             .iter()
             .map(|decl| class_at(&decl.parent.as_ref()?.0))
@@ -3480,6 +3529,7 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                callees,
                 function_names,
                 entries,
                 replaced,
@@ -4607,7 +4657,7 @@ impl Engine {
     /// constant strings interned into this engine's table, so two units
     /// carrying one constant carry the one `zend_string` (design §5.2).
     #[must_use]
-    pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<Arc<Unit>> {
+    pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<PublishedUnit> {
         let stack = self.shared.stack_limit();
         let cwd = std::env::current_dir().unwrap_or_default();
         let origin = Origin {
@@ -4748,7 +4798,7 @@ impl Engine {
         &self,
         description: RequestDescription,
         sink: Box<dyn OutputSink + Send>,
-        look: impl FnOnce() -> HostServes,
+        look: impl FnOnce(crate::readable::Innermost) -> HostServes,
     ) -> (Observables, Box<dyn OutputSink + Send>) {
         let (observed, _, sink) = self.serve_looked(description, sink, look, false);
         (observed, sink)
@@ -4760,7 +4810,7 @@ impl Engine {
         &self,
         description: RequestDescription,
         sink: Lent,
-        look: impl FnOnce() -> HostServes,
+        look: impl FnOnce(crate::readable::Innermost) -> HostServes,
         traced: bool,
     ) -> (Observables, Trace, Lent) {
         let source = description.source.clone();
@@ -4768,7 +4818,10 @@ impl Engine {
             Ok(req) => req,
             Err((refused, sink)) => return (refused, Trace::default(), sink),
         };
-        self.serve_in(&mut req, source.as_deref(), look());
+        // The request stands here until its shutdown, and so does the
+        // word its frames' chain starts at.
+        let innermost = req.innermost();
+        self.serve_in(&mut req, source.as_deref(), look(innermost));
         self.shutdown(&mut req)
     }
 
@@ -5134,7 +5187,7 @@ impl Engine {
         req: &mut Request,
         source: Option<&[u8]>,
         written: Option<&[u8]>,
-    ) -> Option<Result<Arc<Unit>, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileError>> {
         let laid = req.heap_mut().lay_interned_table();
         if let Err(thrown) = req.fatal_of(laid) {
             req.leave_pending(&thrown);
@@ -5171,7 +5224,7 @@ impl Engine {
         path: &[u8],
         written: &[u8],
         handle: HandlePath,
-    ) -> Option<Result<Arc<Unit>, CompileError>> {
+    ) -> Option<Result<PublishedUnit, CompileError>> {
         req.compile_file(path, Some(written), handle)
             .unwrap_or_else(|thrown| {
                 req.leave_pending(&thrown);
@@ -5454,7 +5507,7 @@ impl Engine {
         description: RequestDescription,
         sink: Lent,
     ) -> (Observables, Trace, Lent) {
-        self.serve_looked(description, sink, || HostServes::Program, true)
+        self.serve_looked(description, sink, |_| HostServes::Program, true)
     }
 }
 
@@ -5652,7 +5705,7 @@ fn compile(
 /// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
-pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKind) -> bool {
+pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: SourceKind) -> bool {
     // A request-only unit's names, which php's compile made as strings
     // of the request; the memory limit refusing them ends the request.
     if matches!(kind, SourceKind::Eval(_)) && req.hold_unit_names(unit).is_err() {
@@ -5802,12 +5855,12 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
 /// Whether the program ran to its end: not a fatal, a refused
 /// declaration or an `exit`, each of which php leaves by `zend_bailout`,
 /// and not a throwable no handler took.
-pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bool {
+pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -> bool {
     if !note_compiled(req, unit, SourceKind::File) {
         return false;
     }
     let standing = req.vm().depth();
-    let frame = match req.push_frame(Arc::clone(unit)) {
+    let frame = match req.push_frame(PublishedUnit::clone(unit)) {
         Ok(frame) => frame,
         Err(fatal) => {
             req.end_in(&fatal);
@@ -7370,8 +7423,8 @@ mod tests {
         ) else {
             return;
         };
-        assert!(Arc::ptr_eq(&one, &again), "one published unit");
-        let named = |unit: &Arc<Unit>| {
+        assert!(PublishedUnit::ptr_eq(&one, &again), "one published unit");
+        let named = |unit: &PublishedUnit| {
             unit.main
                 .literals
                 .first()
@@ -7961,8 +8014,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), description(""));
         let unit = engine
             .unit(b"<?php echo 1;", b"witness.php")
-            .unwrap_or_default();
-        let unit = Unit::clone(&unit);
+            .map_or_else(Unit::default, |unit| Unit::clone(&unit));
         let frame = req.pushed(unit.published());
         assert_eq!(
             crate::tier::execute::<Probe, Untold>(&mut req, frame),
@@ -7989,7 +8041,7 @@ mod tests {
                 b"<?php function f($a, $b = 1) { return $a; } f(1); f(2, 3); f();",
                 b"witness.php",
             )
-            .unwrap_or_default();
+            .unwrap_or_else(|| Unit::default().published());
         req.declare_functions(&unit);
         let frame = req.pushed(unit);
         let outcome = crate::tier::execute::<Probe, Untold>(&mut req, frame);

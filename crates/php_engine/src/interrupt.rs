@@ -1013,7 +1013,7 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
-    use php_unit::{OpArray, Opcode, Opline, OplineIdx, Unit};
+    use php_unit::{OpArray, Opcode, Opline, OplineIdx, PublishedUnit, Unit};
 
     use super::*;
     use crate::engine::{Engine, RequestDescription};
@@ -1028,7 +1028,7 @@ mod tests {
     /// A unit whose main op array is one `JMP` to itself: the back-edge
     /// of `for (;;) {}`, safepoint number one, which runs until the
     /// interrupt stops it.
-    fn looping() -> Arc<Unit> {
+    fn looping() -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![Opline {

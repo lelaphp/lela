@@ -232,6 +232,12 @@ impl Sapi {
         .find_map(|(each, pinned)| (each == kind).then_some(pinned.as_ref()))
         .flatten()
     }
+
+    /// [`Sapi::of`], and the failure where the pin names none.
+    pub(crate) fn named(&self, kind: hosts::EngineHost) -> Result<&Host> {
+        self.of(kind)
+            .ok_or_else(|| anyhow::anyhow!("oracle.toml's [sapi] names no {}", kind.binary))
+    }
 }
 
 /// One of `[sapi]`'s binaries: its path on this machine and its digest.
@@ -1704,6 +1710,19 @@ impl<'a> Oracle<'a> {
     pub(crate) fn host_asserted(&self, host: &Host) -> Result<()> {
         self.asserted()?;
         host.assert_digest()
+    }
+
+    /// The pinned host of `kind`'s kind, its digest asserted, `[oracle]`
+    /// itself for the CLI: the failure where the pin names none, none is
+    /// at its path, or its digest is not the pin's.
+    pub(crate) fn pinned_host(&self, kind: hosts::EngineHost) -> Result<PathBuf> {
+        if kind == hosts::CLI {
+            self.asserted()?;
+            return Ok(self.pin.oracle.path.clone());
+        }
+        let host = self.pin.sapi.named(kind)?;
+        self.host_asserted(host)?;
+        Ok(host.path.clone())
     }
 
     /// Assert the digest now rather than at the first program: what a

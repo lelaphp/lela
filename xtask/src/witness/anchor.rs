@@ -574,19 +574,18 @@ impl<'a> Scanner<'a> {
         })
     }
 
-    /// The offset past the bracket that closes the one opening at `from`.
-    fn closing(text: &str, from: usize) -> usize {
+    /// The offset past the bracket that closes the one opening at `from`,
+    /// each of `opens` opening one and each of `closes` closing one.
+    fn closing(text: &str, from: usize, (opens, closes): (&[char], &[char])) -> usize {
         let mut depth = 0usize;
         for (i, c) in text[from..].char_indices() {
-            match c {
-                '[' | '(' => depth += 1,
-                ']' | ')' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return from + i + 1;
-                    }
+            if opens.contains(&c) {
+                depth += 1;
+            } else if closes.contains(&c) {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return from + i + 1;
                 }
-                _ => {}
             }
         }
         text.len()
@@ -617,7 +616,7 @@ impl<'a> Scanner<'a> {
         let head = &rest[..rest.find('{').unwrap_or(rest.len())];
         let head = head.trim_start();
         let head = if head.starts_with('<') {
-            &head[Self::angle_close(head)..]
+            &head[Self::closing(head, 0, (&['<'], &['>']))..]
         } else {
             head
         };
@@ -629,24 +628,6 @@ impl<'a> Scanner<'a> {
             .next()
             .unwrap_or_default()
             .to_owned()
-    }
-
-    /// The offset past the `>` that closes the `<` at the start of `text`.
-    fn angle_close(text: &str) -> usize {
-        let mut depth = 0usize;
-        for (i, c) in text.char_indices() {
-            match c {
-                '<' => depth += 1,
-                '>' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return i + 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-        text.len()
     }
 }
 
@@ -660,7 +641,7 @@ impl<'a> Iterator for Scanner<'a> {
             let c = rest.chars().next()?;
             if rest.starts_with("#[") || rest.starts_with("#![") {
                 let open = rest.find('[').unwrap_or_default();
-                let end = Self::closing(rest, open);
+                let end = Self::closing(rest, open, (&['[', '('], &[']', ')']));
                 let inner = rest.starts_with("#!");
                 let at = self.at + open + 1..self.at + end.saturating_sub(1).max(open + 1);
                 self.advance(end);

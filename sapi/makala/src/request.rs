@@ -276,7 +276,7 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
     // A program whose path holds a NUL is never run, as
     // `php_cli_server_dispatch_script` refuses it: the request ends with
     // the head it has (`vpath::holds_nul`, #2695).
-    let (_, sink) = engine.serve(description, Box::new(sink), || {
+    let (_, sink) = engine.serve(description, Box::new(sink), |_| {
         if php_proto::vpath::holds_nul(&program.path_translated) {
             return HostServes::Nothing;
         }
@@ -312,17 +312,14 @@ enum Refusal<'a> {
 
 impl Refusal<'_> {
     /// php-fpm's page: `File not found.` with a 404, `Access denied.` with
-    /// a 403 past `security.limit_extensions` or where the program may not
-    /// be read (`EACCES`), and `No input file specified.` with a 404
-    /// for one that does not open otherwise.
+    /// a 403 past `security.limit_extensions`, and for a program that
+    /// does not open the page php-cgi and php-fpm share
+    /// ([`php_sapi::cgi::unopened`]).
     fn page(&self) -> HostPage {
         let (code, body): (i64, &[u8]) = match self {
             Refusal::Unknown => (404, b"File not found.\n"),
             Refusal::Extension(_) => (403, b"Access denied.\n"),
-            Refusal::Unopened(_, error) if error.raw_os_error() == Some(libc::EACCES) => {
-                (403, b"Access denied.\n")
-            }
-            Refusal::Unopened(..) => (404, b"No input file specified.\n"),
+            Refusal::Unopened(_, error) => return php_sapi::cgi::unopened(Some(error)),
         };
         HostPage {
             code,
@@ -911,6 +908,23 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&short),
             "Access to the script '/r/x.PHP' has been denied (see security.limit_extensions)"
+        );
+    }
+
+    /// A program that does not open is denied for `EACCES` alone, as
+    /// php-fpm denies it: `EPERM`, which macOS answers under a directory
+    /// the process may not read, is no input file (#2876, #2909).
+    #[test]
+    fn a_program_that_does_not_open_is_denied_for_eacces_alone() {
+        let page = |errno: i32| {
+            let page =
+                Refusal::Unopened(b"/x.php", std::io::Error::from_raw_os_error(errno)).page();
+            (page.code, page.body)
+        };
+        assert_eq!(page(libc::EACCES), (403, b"Access denied.\n".to_vec()));
+        assert_eq!(
+            page(libc::EPERM),
+            (404, b"No input file specified.\n".to_vec())
         );
     }
 

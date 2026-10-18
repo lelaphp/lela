@@ -60,9 +60,7 @@ pub(super) fn record(checkout: &Path, call: &Call, admission: &Admission) -> Res
         tool: &call.tool_name,
         call: &call.tool_use_id,
         time: reading::now()?.to_string(),
-        head: git::git(checkout, &["rev-parse", "HEAD"], None)
-            .map(|head| head.trim().to_owned())
-            .unwrap_or_default(),
+        head: git::rev_parse(checkout, &["HEAD"]).unwrap_or_default(),
     };
     let text = serde_json::to_string_pretty(&entry).context("rendering the approval's entry")?;
     reading::replace(&file, format!("{text}\n").as_bytes())

@@ -12,10 +12,8 @@
 //! share of the unit the op array stands in, one share per unit entered
 //! and none per call.
 
-use std::sync::Arc;
-
 use php_heap::FrameRef;
-use php_unit::{OpArray, Unit};
+use php_unit::{OpArray, PublishedUnit};
 
 use crate::api::call::Function;
 use crate::api::request::Request;
@@ -45,7 +43,7 @@ pub(super) struct Code {
 /// enters a frame afresh.
 #[derive(Default)]
 pub(super) struct Units {
-    units: [Option<Arc<Unit>>; HELD],
+    units: [Option<PublishedUnit>; HELD],
     oldest: usize,
 }
 
@@ -72,16 +70,16 @@ impl Units {
     ) -> Option<Code> {
         let header = req.vm().at(frame)?;
         let (unit, body) = req.unit_of(header)?;
-        let found = self
-            .units
-            .iter()
-            .position(|held| held.as_ref().is_some_and(|held| Arc::ptr_eq(held, unit)));
+        let found = self.units.iter().position(|held| {
+            held.as_ref()
+                .is_some_and(|held| PublishedUnit::ptr_eq(held, unit))
+        });
         let place = if let Some(place) = found {
             place
         } else {
             let place = self.oldest;
             self.oldest = (self.oldest + 1) % HELD;
-            *self.units.get_mut(place)? = Some(Arc::clone(unit));
+            *self.units.get_mut(place)? = Some(PublishedUnit::clone(unit));
             kept.lost(place);
             place
         };

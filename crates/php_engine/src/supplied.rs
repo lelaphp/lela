@@ -36,7 +36,7 @@ use std::any::{Any, TypeId};
 use std::sync::Arc;
 
 use php_compile::CompileError;
-use php_unit::Unit;
+use php_unit::PublishedUnit;
 use php_unit::decl::Name;
 
 use crate::api::abi::{
@@ -403,7 +403,7 @@ impl<H: Copy> Chain<H> {
 /// file was to compile. A link of `zend_compile_string` or
 /// `zend_compile_file` answers what the one beneath answered, and reads
 /// what it compiled to.
-pub struct Compiled(pub(crate) Result<Arc<Unit>, CompileError>);
+pub struct Compiled(pub(crate) Result<PublishedUnit, CompileError>);
 
 impl Compiled {
     /// The main op array of what compiled, `op_array` as php's

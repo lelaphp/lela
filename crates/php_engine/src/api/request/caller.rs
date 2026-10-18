@@ -364,8 +364,10 @@ impl Request {
                 return;
             }
         }
+        let callee = self.callee_at(function);
         if let Some(frame) = self.vm.stack.frame_mut(call) {
             frame.header_mut().function = Some(function);
+            frame.header_mut().callee = callee;
             frame.header_mut().num_args = u32::try_from(arguments.len()).unwrap_or(u32::MAX);
             for (slot, argument) in frame.slots_mut().iter_mut().zip(arguments) {
                 *slot = argument.to_zval();
@@ -972,7 +974,7 @@ impl Request {
         let Some(state) = self.vm.at(frame) else {
             return false;
         };
-        match state.caller.frame() {
+        match state.caller().frame() {
             Some(caller) => self.frame_strict_types(caller),
             None => self.site_below(frame).is_some_and(|site| site.strict),
         }

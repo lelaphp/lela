@@ -35,7 +35,7 @@ use super::{cgi, http};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{
-    self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Stdin, Streams,
+    self, Ended, Invocation, Observation, Oracle, PastLimit, Pin, Program, Stdin, Streams,
     Verdict as Compared,
 };
 use crate::tally::{Apart, Within};
@@ -176,6 +176,7 @@ impl<'a> Adapter<'a> {
             ini,
             env,
             expected_to_fail,
+            warned,
         } = match self.admit(subset, test, &phpt, (&id, &name))? {
             Ok(admitted) => admitted,
             Err(stopped) => return Ok(stopped),
@@ -245,7 +246,8 @@ impl<'a> Adapter<'a> {
                 &name,
                 Judgement::Fail,
                 format!(
-                    "{trouble}the {} section is not what ran:\n{difference}",
+                    "{trouble}{}the {} section is not what ran:\n{difference}",
+                    warned.map_or_else(String::new, |why| format!("warn: {why}\n")),
                     expectation.section()
                 ),
             )
@@ -281,11 +283,12 @@ impl<'a> Adapter<'a> {
         ini.extend(self.lane.map(Lane::ini));
         let env = self.environment(phpt, test, &ini, &subset.root)?;
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
+        let mut warned = None;
         if let Some(body) = phpt.filled("SKIPIF") {
             let shown = SKIPIF_SHOWS.map(String::from);
             let section = ("skip", body, &shown[..]);
             let out = self.run_section(subset, test, &env, section, phpt.has("PHPDBG"))?;
-            match Said::of(&String::from_utf8_lossy(&out.stdout)) {
+            match Said::of(&Said::written(&out)) {
                 Said::Skip(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
                 Said::Bork(said) => {
                     return Ok(Err(borked(
@@ -295,6 +298,7 @@ impl<'a> Adapter<'a> {
                     )));
                 }
                 Said::XFail(why) => expected_to_fail = Some(why),
+                Said::Warn(why) => warned = Some(why),
                 Said::Run => {}
             }
         }
@@ -302,6 +306,7 @@ impl<'a> Adapter<'a> {
             ini,
             env,
             expected_to_fail,
+            warned,
         }))
     }
 
@@ -519,6 +524,9 @@ struct Admitted {
     ini: Vec<String>,
     env: Environment,
     expected_to_fail: Option<String>,
+    /// The reason a `warn` of the `SKIPIF` gave, which a failure is
+    /// reported under, as upstream's `WARN&FAIL` (run-tests.php:2677).
+    warned: Option<String>,
 }
 
 /// Why a test's program gave nothing to hold to its expectation, each
@@ -663,20 +671,13 @@ struct Capture {
 
 impl Capture {
     fn of(phpt: &Phpt) -> Capture {
-        match phpt.text("CAPTURE_STDIO") {
-            Some(named) => {
-                let named = named.to_uppercase();
-                Capture {
-                    stdin: named.contains("STDIN"),
-                    stdout: named.contains("STDOUT"),
-                    stderr: named.contains("STDERR"),
-                }
-            }
-            None => Capture {
-                stdin: true,
-                stdout: true,
-                stderr: true,
-            },
+        let named = phpt.text("CAPTURE_STDIO").map(|named| named.to_uppercase());
+        // A test that names no stream captures every one.
+        let captures = |stream: &str| named.as_ref().is_none_or(|n| n.contains(stream));
+        Capture {
+            stdin: captures("STDIN"),
+            stdout: captures("STDOUT"),
+            stderr: captures("STDERR"),
         }
     }
 
@@ -826,17 +827,20 @@ fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) 
 /// (run-tests.php:2134).
 const SKIPIF_SHOWS: [&str; 2] = ["display_errors=1", "display_startup_errors=0"];
 
-/// What a `SKIPIF` wrote on stdout, trimmed and read as upstream reads it
-/// (run-tests.php:2154-2190, 3595-3597).
+/// What a `SKIPIF` wrote on stdout, with upstream's `Termsig=` line,
+/// trimmed as php's `trim` trims and read as upstream reads it (run-tests.php:2154-2190, 3595-3597).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Said {
     /// It begins with `skip`, any case: the first line after the word.
     Skip(String),
     /// It begins with `xfail`: why the test is expected to fail.
     XFail(String),
-    /// The test runs: nothing; `nocache` and anything after it; `info` or
-    /// `warn` with a reason; `xleak` or `flaky`, sections this runner does
-    /// not act on.
+    /// `warn` and a reason: the test runs, and a failure of it is
+    /// reported under the reason, as upstream's `WARN&FAIL` is.
+    Warn(String),
+    /// The test runs: nothing; `nocache` and anything after it; `info`
+    /// with a reason; `xleak` or `flaky`, sections this runner does not
+    /// act on.
     Run,
     /// Anything else, which upstream borks as no answer a `SKIPIF` may
     /// give: a warning before a `skip` among it (#2857).
@@ -844,25 +848,60 @@ pub(crate) enum Said {
 }
 
 impl Said {
-    pub(crate) fn of(stdout: &str) -> Said {
-        let said = stdout.trim();
+    /// What `written` says: what a `SKIPIF` wrote, as [`Said::written`]
+    /// hands it back.
+    pub(crate) fn of(written: &str) -> Said {
+        let said = written.trim_matches(TRIM);
         let after = |word: &str| {
             let head = said.get(..word.len())?;
             head.eq_ignore_ascii_case(word).then(|| &said[word.len()..])
         };
         let runs = said.is_empty()
             || said.starts_with("nocache")
-            || after("info").is_some_and(|rest| !rest.is_empty())
-            || after("warn").is_some_and(|rest| rest.starts_with(char::is_whitespace))
+            || reason(said, r"(?i)^info\s*(.+)").is_some()
             || after("xleak").or(after("flaky")).is_some();
-        match (after("skip"), after("xfail")) {
-            (Some(rest), _) => Said::Skip(rest.trim_start().lines().next().unwrap_or("").into()),
-            (_, Some(rest)) => Said::XFail(rest.trim_start().to_owned()),
+        match (
+            after("skip"),
+            after("xfail"),
+            reason(said, r"(?i)^warn\s+(.+)"),
+        ) {
+            (Some(_), _, _) => Said::Skip(reason(said, r"(?i)^skip\s*(.+)").unwrap_or_default()),
+            (_, Some(rest), _) => Said::XFail(rest.trim_start_matches(TRIM).to_owned()),
+            (_, _, Some(why)) => Said::Warn(why),
             _ if runs => Said::Run,
             _ => Said::Bork(said.to_owned()),
         }
     }
+
+    /// What upstream's `system_with_timeout` hands back of a `SKIPIF`'s
+    /// run: its stdout, and a `Termsig=` line where it exited 129 to 159
+    /// (run-tests.php:1227-1233), which borks a test whose `SKIPIF`
+    /// crashed having written nothing. Upstream's command line opens with
+    /// `unset`s (run-tests.php:2123), so the shell forks php and exits
+    /// with 128 and the signal that ended it: the oracle's
+    /// `proc_get_status` over that shape with a php that killed itself
+    /// with 11 answers `signaled` false and an exit of 139, and the line
+    /// reads `Termsig=11`, as it does here for a php a signal ended.
+    pub(crate) fn written(out: &Observation) -> String {
+        let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
+        if let Ended::Signal(n) | Ended::Status(n @ 129..=159) = out.exit {
+            // The signal, or the shell's 128 over it.
+            write!(said, "\nTermsig={}\n", n % 128).ok();
+        }
+        said
+    }
 }
+
+/// The reason upstream's `pattern` reads out of what a `SKIPIF` said, its
+/// one group, none where it does not match: `regex_lite`'s `\s` and `.`
+/// are PCRE's, the ASCII spaces and anything but a newline.
+fn reason(said: &str, pattern: &str) -> Option<String> {
+    let found = Regex::new(pattern).ok()?.captures(said)?;
+    Some(found.get(1)?.as_str().to_owned())
+}
+
+/// What php's `trim` and `ltrim` take off: `" \t\n\r\0\x0B"`.
+const TRIM: [char; 6] = [' ', '\t', '\n', '\r', '\0', '\x0B'];
 
 /// A command line's words, split on whitespace: a test's `--ARGS--`.
 fn words(text: &str) -> Vec<String> {
@@ -909,7 +948,6 @@ mod tests {
             "nocache",
             "nocache junk",
             "info x",
-            "warn x",
             "xleak",
             "flaky y",
         ] {
@@ -918,13 +956,57 @@ mod tests {
         // mcast_ipv6_recv.phpt's SKIPIF where the group joins and the
         // send fails: its unsilenced warning stands before the skip.
         let warned = "\nWarning: socket_sendto(): Unable to write to socket [65]: No route to host in /t/skip.php on line 24\nskip unable to send multicast packet.";
-        for borks in [warned, "info", "warn", "Warning: x", "nothing", "NOCACHE"] {
+        assert_eq!(
+            Said::of("warn\n  slow\nhere"),
+            Said::Warn("slow".to_owned())
+        );
+        // php's `trim` takes a NUL off and leaves a form feed.
+        assert_eq!(Said::of("\0skip x\0\x0B"), skip("x"));
+        // PCRE's `\s+(.+)` gives back a space for the group, and `.` takes
+        // a carriage return.
+        assert_eq!(Said::of("warn \x0C"), Said::Warn("\x0C".to_owned()));
+        assert_eq!(Said::of("skip a\rb\nc"), skip("a\rb"));
+        for borks in [
+            warned,
+            "info",
+            "warn",
+            "warnx",
+            "warn\x0C",
+            "Warning: x",
+            "nothing",
+            "NOCACHE",
+            "\x0Cskip",
+        ] {
             assert_eq!(
                 Said::of(borks),
-                Said::Bork(borks.trim().to_owned()),
+                Said::Bork(borks.trim_matches(TRIM).to_owned()),
                 "{borks:?}"
             );
         }
+    }
+
+    /// A `SKIPIF` a signal ended, or one that exited as a shell says a
+    /// signal ended its child, reads as upstream's `Termsig=` line after
+    /// what it wrote, and borks where it wrote nothing (run-tests.php:1227).
+    #[test]
+    fn a_skipif_a_signal_ended_is_read_with_upstreams_termsig_line() {
+        let written = |stdout: &str, exit| {
+            Said::written(&Observation {
+                stdout: stdout.into(),
+                stderr: Vec::new(),
+                exit,
+                wall: std::time::Duration::ZERO,
+            })
+        };
+        assert_eq!(written("", Ended::Signal(11)), "\nTermsig=11\n");
+        assert_eq!(
+            written("skip x", Ended::Status(139)),
+            "skip x\nTermsig=11\n"
+        );
+        assert_eq!(written("skip x", Ended::Status(1)), "skip x");
+        assert_eq!(written("", Ended::Status(160)), "");
+        let said = Said::of(&written("", Ended::Signal(9)));
+        assert_eq!(said, Said::Bork("Termsig=9".to_owned()));
     }
 
     #[test]

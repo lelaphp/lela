@@ -282,7 +282,8 @@ fn log_line(state: &State, level: Level, site: Site, message: &[u8], errno: Opti
         truncated = buf.len() >= MAX_BUF_LENGTH;
     }
     if !truncated && let Some(errno) = errno {
-        buf.extend_from_slice(format!(": {} ({})", errno.desc(), errno as i32).as_bytes());
+        let text = php_sapi::strerror(&std::io::Error::from_raw_os_error(errno as i32));
+        buf.extend_from_slice(format!(": {text} ({})", errno as i32).as_bytes());
         truncated = buf.len() >= state.limit;
     }
     if truncated {

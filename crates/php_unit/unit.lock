@@ -40,6 +40,10 @@ Opline
 Opline::fuses
 Opline::jump_target
 OplineIdx
+PublishedUnit
+PublishedUnit::as_ptr
+PublishedUnit::downgrade
+PublishedUnit::ptr_eq
 Safepoints
 Safepoints::INLINE
 Safepoints::new
@@ -53,6 +57,9 @@ Unit::published
 UnitCell
 UnitCell::share
 UnitCell::unit
+WeakUnit
+WeakUnit::as_ptr
+WeakUnit::strong_count
 decl::AliasModifier
 decl::Attribute
 decl::AttributeArgument

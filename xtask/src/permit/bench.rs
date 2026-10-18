@@ -200,32 +200,16 @@ pub(crate) fn run_bench(
         println!("  {}", line(name, q));
     }
     let mut reading = Reading::for_scope(INSTRUMENT, crate::done::HARNESS, manifest, &snapshot)?;
-    reading.status = if measured.meets_the_bar(bar_ms) {
-        Status::Pass
-    } else {
-        Status::Fail
-    };
-    reading
-        .numbers
-        .insert("runs".into(), i64::try_from(measured.runs)?.into());
-    reading.numbers.insert("bar_ms".into(), bar_ms.into());
-    reading
-        .numbers
-        .insert("p50_ms".into(), measured.all.p50.into());
-    reading
-        .numbers
-        .insert("p99_ms".into(), measured.all.p99.into());
-    reading
-        .numbers
-        .insert("max_ms".into(), measured.all.max.into());
+    reading.status = Status::of(measured.meets_the_bar(bar_ms));
+    reading.set("runs", i64::try_from(measured.runs)?);
+    reading.set("bar_ms", bar_ms);
+    reading.set("p50_ms", measured.all.p50);
+    reading.set("p99_ms", measured.all.p99);
+    reading.set("max_ms", measured.all.max);
     for (name, q) in &measured.shapes {
         let key = name.replace('-', "_");
-        reading
-            .numbers
-            .insert(format!("{key}_p50_ms"), q.p50.into());
-        reading
-            .numbers
-            .insert(format!("{key}_p99_ms"), q.p99.into());
+        reading.set(format!("{key}_p50_ms"), q.p50);
+        reading.set(format!("{key}_p99_ms"), q.p99);
     }
     reading.message = format!(
         "permit at the tool call: p99 {:.1} ms against the bar of {bar_ms:.0} ms (harness-design.md §4.4)",

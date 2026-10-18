@@ -6,12 +6,10 @@
 //! by name and number that read them all. Which classes a load bound
 //! early is [`Classes`]'s, whose field no file but this one reads.
 
-use std::sync::Arc;
-
 use php_heap::{FrameRef, Intern};
 use php_link::LinkedClass;
 use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
-use php_unit::{Opcode, TopLevel, Unit};
+use php_unit::{Opcode, PublishedUnit, TopLevel, Unit};
 
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::{Level, Thrown, none_pending};
@@ -130,7 +128,7 @@ pub(super) struct Classes {
     /// once `zend_accel_do_delayed_early_binding` has bound the class
     /// under its name. A load that bound nothing leaves nothing here, so
     /// the opline of a file loaded again declares, and is refused.
-    bound_at_load: Vec<(Arc<Unit>, u32)>,
+    bound_at_load: Vec<(PublishedUnit, u32)>,
 }
 
 /// How opcache served a unit, `zend_accel_load_script`'s: from what it
@@ -302,7 +300,7 @@ impl Request {
     /// compiler tells no observer of it. This lays down the load's state
     /// over `unit`'s classes, for [`Request::declare_classes_through`]
     /// and [`Request::declare_delayed`].
-    pub(crate) fn class_load(&mut self, unit: &Arc<Unit>) -> ClassLoad {
+    pub(crate) fn class_load(&mut self, unit: &PublishedUnit) -> ClassLoad {
         let delayed: Vec<Vec<u8>> = unit
             .main
             .oplines
@@ -318,11 +316,11 @@ impl Request {
             })
             .collect();
         let loaded = (self.accel_loaded.take())
-            .filter(|(loaded, _)| Arc::ptr_eq(loaded, unit))
+            .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
             .map(|(_, served)| served);
         let served = loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit));
         let early = (self.early_bound.take())
-            .filter(|(loaded, _)| Arc::ptr_eq(loaded, unit))
+            .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
             .map(|(_, early)| early);
         ClassLoad {
             served,
@@ -338,7 +336,7 @@ impl Request {
     /// each linked told as it is: false where the request ended.
     pub(crate) fn declare_classes_through(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         load: &mut ClassLoad,
         through: Option<usize>,
     ) -> bool {
@@ -364,7 +362,7 @@ impl Request {
     /// [`Request::declare_delayed`].
     fn declare_class_at(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         load: &mut ClassLoad,
         at: usize,
         decl: &ClassDecl,
@@ -411,7 +409,7 @@ impl Request {
     /// The delayed early bindings opcache's load makes once the unit's
     /// classes are declared, `zend_accel_do_delayed_early_binding`, each
     /// bound told: false where the request ended.
-    pub(crate) fn declare_delayed(&mut self, unit: &Arc<Unit>, load: &mut ClassLoad) -> bool {
+    pub(crate) fn declare_delayed(&mut self, unit: &PublishedUnit, load: &mut ClassLoad) -> bool {
         for at in std::mem::take(&mut load.tried) {
             let Some(decl) = unit.classes.get(at) else {
                 continue;
@@ -477,7 +475,7 @@ impl Request {
     ///
     /// Fatal error: Type of parameter $v of hook class@anonymous::$p::set must be compatible with property type in %s on line 3
     /// ```
-    fn bind_at_load(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
+    fn bind_at_load(&mut self, unit: &PublishedUnit, at: usize, decl: &ClassDecl) -> Option<bool> {
         if self.class_named((&decl.name).into()).is_some() {
             return Some(false);
         }
@@ -489,7 +487,9 @@ impl Request {
         match self.link_declared(unit, at, decl, true) {
             Ok(true) => {
                 let at = u32::try_from(at).unwrap_or(u32::MAX);
-                self.classes.bound_at_load.push((Arc::clone(unit), at));
+                self.classes
+                    .bound_at_load
+                    .push((PublishedUnit::clone(unit), at));
                 Some(true)
             }
             Ok(false) => Some(false),
@@ -523,7 +523,7 @@ impl Request {
     ///   string(1) "Q"
     /// }
     /// ```
-    fn link_unbound(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> Option<bool> {
+    fn link_unbound(&mut self, unit: &PublishedUnit, at: usize, decl: &ClassDecl) -> Option<bool> {
         let unbound = decl.parent.is_none()
             && decl.interfaces.is_empty()
             && decl.traits.is_empty()
@@ -538,7 +538,7 @@ impl Request {
     /// nothing where the unit's load bound the class under the opline's
     /// runtime definition key ([`Request::bind_at_load`]), and
     /// [`Request::bind_class`] where it did not, the key still standing.
-    pub(crate) fn bind_delayed(&mut self, unit: &Arc<Unit>, key: &[u8]) -> Result<(), Thrown> {
+    pub(crate) fn bind_delayed(&mut self, unit: &PublishedUnit, key: &[u8]) -> Result<(), Thrown> {
         let at = unit
             .runtime_keys
             .iter()
@@ -548,7 +548,7 @@ impl Request {
             .classes
             .bound_at_load
             .iter()
-            .position(|(held, class)| Arc::ptr_eq(held, unit) && Some(*class) == at)
+            .position(|(held, class)| PublishedUnit::ptr_eq(held, unit) && Some(*class) == at)
         {
             self.classes.bound_at_load.swap_remove(bound);
             return Ok(());
@@ -563,7 +563,7 @@ impl Request {
     /// `DECLARE_ANON_CLASS`'s own bind does not tell.
     pub(crate) fn bind_class_in_slot(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         key: &[u8],
     ) -> Result<(), Thrown> {
         self.bind_class(unit, key)?;
@@ -628,7 +628,7 @@ impl Request {
     /// ```
     pub(super) fn bind_declared(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         composed: Option<php_link::Composed>,
         record: Option<LinkedClass<ClassId>>,
@@ -638,7 +638,7 @@ impl Request {
         };
         let place = self.buckets.claim(unit, at);
         let row = Declared {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             at,
             composed: composed.map(Box::new),
             bound: Bound::default(),
@@ -684,7 +684,7 @@ impl Request {
     /// ```
     pub(super) fn declare_published(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         class: ClassId,
         decl: &ClassDecl,
@@ -811,6 +811,7 @@ impl Request {
             });
             let flags = crate::attributes::Flags::of(&decl.function.attributes);
             let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body));
+            let record = UserFunction::record(&unit, body, &decl.function.name.0);
             rows.push(MemberRow {
                 method: Some(method),
                 user: UserFunction {
@@ -819,6 +820,7 @@ impl Request {
                     member,
                     flags,
                     shape,
+                    record,
                 },
                 cache,
             });
@@ -839,6 +841,7 @@ impl Request {
                 });
                 let flags = crate::attributes::Flags::of(&hook.function.attributes);
                 let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body));
+                let record = UserFunction::record(&unit, body, &hook.function.name.0);
                 rows.push(MemberRow {
                     method: None,
                     user: UserFunction {
@@ -847,6 +850,7 @@ impl Request {
                         member,
                         flags,
                         shape,
+                        record,
                     },
                     cache,
                 });
@@ -945,7 +949,7 @@ impl Request {
         declared: &'r Declared,
         property: u32,
         kind: HookKind,
-    ) -> Option<(Arc<Unit>, exec::Body, CacheOf)> {
+    ) -> Option<(PublishedUnit, exec::Body, CacheOf)> {
         let decl = declared.decl()?;
         let name = &decl.properties.get(usize::try_from(property).ok()?)?.name;
         let own = declared
@@ -966,7 +970,7 @@ impl Request {
             })?,
         };
         let body = exec::Body::hook(&from.unit, from.at, u32::try_from(at).ok()?, kind)?;
-        Some((Arc::clone(&from.unit), body, cache))
+        Some((PublishedUnit::clone(&from.unit), body, cache))
     }
 
     /// Where the op array of the method at `method` of a class the
@@ -1020,10 +1024,10 @@ impl Request {
         &'r self,
         declared: &'r Declared,
         method: u32,
-    ) -> Option<(Arc<Unit>, exec::Body, CacheOf)> {
+    ) -> Option<(PublishedUnit, exec::Body, CacheOf)> {
         let Some(composed) = &declared.composed else {
             let body = exec::Body::method(&declared.unit, declared.at, method)?;
-            return Some((Arc::clone(&declared.unit), body, CacheOf::OpArray));
+            return Some((PublishedUnit::clone(&declared.unit), body, CacheOf::OpArray));
         };
         let body = composed.bodies.get(usize::try_from(method).ok()?)?;
         let own = composed.decl.name.0.eq_ignore_ascii_case(&body.class.0);
@@ -1034,7 +1038,7 @@ impl Request {
             (self.declared_row(holder)?, CacheOf::Copy)
         };
         let body = exec::Body::method(&from.unit, from.at, body.method)?;
-        Some((Arc::clone(&from.unit), body, cache))
+        Some((PublishedUnit::clone(&from.unit), body, cache))
     }
 
     /// `do_bind_class` at a `ZEND_DECLARE_CLASS`: the declaration the
@@ -1298,7 +1302,7 @@ impl Request {
     /// ```expect exit=255
     /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
     /// ```
-    pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, key: &[u8]) -> Result<(), Thrown> {
+    pub(crate) fn bind_class(&mut self, unit: &PublishedUnit, key: &[u8]) -> Result<(), Thrown> {
         let Some(at) = unit
             .runtime_keys
             .iter()
@@ -1387,7 +1391,7 @@ impl Request {
     /// is reached.
     pub(crate) fn declare_anonymous(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         key: &[u8],
     ) -> Result<ClassId, Thrown> {
         let name = unit
@@ -1426,7 +1430,7 @@ impl Request {
     /// otherwise the refusal it names.
     fn link_declared(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: usize,
         decl: &ClassDecl,
         early: bool,
@@ -1618,7 +1622,7 @@ impl Request {
     /// function with a body, its file and its first line.
     pub(crate) fn bind_function(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         lowered: &[u8],
     ) -> Result<(), Thrown> {
@@ -1652,11 +1656,12 @@ impl Request {
         let declared = Function::local(self.user_functions.len());
         let (flags, shape) = dynamic_traits(unit, at);
         self.user_functions.push(UserFunction {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             body: exec::Body::Dynamic(at),
             member: None,
             flags,
             shape,
+            record: UserFunction::record(unit, exec::Body::Dynamic(at), &decl.name.0),
         });
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
@@ -1676,24 +1681,29 @@ impl Request {
     /// scope and the bound variables — is the object's payload. The
     /// name is no entry of the function table under a callable name: a
     /// closure is reached through its object and never by name.
-    pub(crate) fn closure_function(&mut self, unit: &Arc<Unit>, at: u32) -> Option<Function> {
+    pub(crate) fn closure_function(&mut self, unit: &PublishedUnit, at: u32) -> Option<Function> {
         unit.dynamic.get(usize::try_from(at).ok()?)?;
         let body = exec::Body::Dynamic(at);
         if let Some(position) = self
             .user_functions
             .iter()
-            .position(|user| user.body == body && Arc::ptr_eq(&user.unit, unit))
+            .position(|user| user.body == body && PublishedUnit::ptr_eq(&user.unit, unit))
         {
             return Function::local(position);
         }
         let function = Function::local(self.user_functions.len())?;
         let (flags, shape) = dynamic_traits(unit, at);
+        let name = unit
+            .dynamic
+            .get(usize::try_from(at).ok()?)
+            .map_or(&[][..], |(decl, _)| &decl.name.0);
         self.user_functions.push(UserFunction {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             body,
             member: None,
             flags,
             shape,
+            record: UserFunction::record(unit, body, name),
         });
         Some(function)
     }
@@ -1727,7 +1737,10 @@ impl Request {
     /// argument's `RECV` and for a return.
     pub(crate) fn frame_scopes(&self, frame: FrameRef) -> crate::api::coerce::Scopes {
         let own = self.frame_scope(frame);
-        let called = self.vm.at(frame).and_then(|state| state.called_scope);
+        let called = self
+            .vm
+            .at(frame)
+            .and_then(crate::exec::Header::called_scope);
         crate::api::coerce::Scopes {
             own,
             called: called.or(own),
@@ -1748,7 +1761,7 @@ impl Request {
     /// declaration that ends the request ends the load there, so what
     /// php declared before it was declared and told, and nothing after
     /// it: false says so.
-    pub(crate) fn declare_unit(&mut self, unit: &Arc<Unit>, load: &mut ClassLoad) -> bool {
+    pub(crate) fn declare_unit(&mut self, unit: &PublishedUnit, load: &mut ClassLoad) -> bool {
         if load.served == Some(AccelServed::Compiled)
             && let Some(at) = (0..unit.functions.len()).find(|&at| self.redeclares(unit, at))
         {
@@ -1783,7 +1796,7 @@ impl Request {
 
     /// Whether the function at `at` of `unit` names one the request
     /// declared already, which [`Request::declare_function`] refuses.
-    fn redeclares(&self, unit: &Arc<Unit>, at: usize) -> bool {
+    fn redeclares(&self, unit: &PublishedUnit, at: usize) -> bool {
         let body = exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
         unit.functions.get(at).is_some_and(|(decl, _)| {
             !self.preloaded_function(unit, body)
@@ -1794,7 +1807,7 @@ impl Request {
     /// [`Request::declare_function`] for the function at `at` of `unit`,
     /// told to the observers where it was declared: false where the
     /// request ended.
-    fn declare_function_told(&mut self, unit: &Arc<Unit>, at: usize) -> bool {
+    fn declare_function_told(&mut self, unit: &PublishedUnit, at: usize) -> bool {
         match self.declare_function(unit, at) {
             Some(true) => {
                 crate::observer::function_declared_at_load(self, unit, at);
@@ -1809,7 +1822,7 @@ impl Request {
     /// [`Request::declare_function`] declares each, for a test that
     /// serves a unit's frame by hand: false where the request ended.
     #[cfg(test)]
-    pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) -> bool {
+    pub(crate) fn declare_functions(&mut self, unit: &PublishedUnit) -> bool {
         (0..unit.functions.len()).all(|at| self.declare_function(unit, at).is_some())
     }
 
@@ -1825,7 +1838,7 @@ impl Request {
     /// none says so, and otherwise whether the function was declared,
     /// which one the preload holds, or a place the unit has no function
     /// at, is not.
-    fn declare_function(&mut self, unit: &Arc<Unit>, at: usize) -> Option<bool> {
+    fn declare_function(&mut self, unit: &PublishedUnit, at: usize) -> Option<bool> {
         let Some((decl, _)) = unit.functions.get(at) else {
             return Some(false);
         };
@@ -1857,11 +1870,12 @@ impl Request {
             return Some(false);
         };
         self.user_functions.push(UserFunction {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             body,
             member: None,
             flags: crate::attributes::Flags::of(&decl.attributes),
             shape: FrameShape::of(decl, exec::body_of(unit, body)),
+            record: UserFunction::record(unit, body, &decl.name.0),
         });
         self.functions.push(&decl.name.0, declared);
         Some(true)

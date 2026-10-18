@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use php_link::{Composed, Held, Linked, Linking, Obligation, Refused};
 use php_unit::Level;
-use php_unit::Unit;
+use php_unit::PublishedUnit;
 use php_unit::decl::{Bare, ClassDecl, ClassKind, ConstExpr, Name};
 
 use super::Request;
@@ -39,7 +39,7 @@ use crate::api::values::{ClassId, Key, Value, ValueRef, walk};
 pub(crate) struct Links {
     unlinked: Vec<Unlinked>,
     autoloads: Vec<Vec<u8>>,
-    held: Vec<Arc<Unit>>,
+    held: Vec<PublishedUnit>,
 }
 
 /// What a link read of the table beside what it linked: each class a
@@ -60,7 +60,7 @@ pub(super) struct Read {
 /// `ZEND_ACC_LINKED`: its declaration's unit and index, and how far its
 /// link has come.
 struct Unlinked {
-    unit: Arc<Unit>,
+    unit: PublishedUnit,
     at: u32,
     stage: Stage,
 }
@@ -121,9 +121,9 @@ impl Request {
 
     /// The class at `at` of `unit` into the table under its name before
     /// its link fetches what it names (`zend_bind_class_in_slot`).
-    pub(super) fn link_begun(&mut self, unit: &Arc<Unit>, at: u32) {
+    pub(super) fn link_begun(&mut self, unit: &PublishedUnit, at: u32) {
         self.links.unlinked.push(Unlinked {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             at,
             stage: Stage::Fetching { used: false },
         });
@@ -398,7 +398,7 @@ impl Request {
     /// ```
     pub(super) fn link_settled(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         linking: Linking<ClassId>,
     ) -> Result<(), Thrown> {
@@ -515,7 +515,7 @@ impl Request {
         let Some(unlinked) = self.links.unlinked.get(at) else {
             return Ok(());
         };
-        let (unit, at) = (Arc::clone(&unlinked.unit), unlinked.at);
+        let (unit, at) = (PublishedUnit::clone(&unlinked.unit), unlinked.at);
         let Some(decl) = unit.classes.get(usize::try_from(at).unwrap_or(usize::MAX)) else {
             return Ok(());
         };
@@ -602,9 +602,14 @@ pub(super) struct Fetched {
 
 impl Request {
     /// A unit the cache served this request from what it holds.
-    pub(super) fn note_held(&mut self, unit: &Arc<Unit>) {
-        if !self.links.held.iter().any(|held| Arc::ptr_eq(held, unit)) {
-            self.links.held.push(Arc::clone(unit));
+    pub(super) fn note_held(&mut self, unit: &PublishedUnit) {
+        if !self
+            .links
+            .held
+            .iter()
+            .any(|held| PublishedUnit::ptr_eq(held, unit))
+        {
+            self.links.held.push(PublishedUnit::clone(unit));
         }
     }
 
@@ -613,9 +618,13 @@ impl Request {
     /// cached link can be keyed by (`UPDATE_IS_CACHEABLE`), or where the
     /// declaration is no held unit's, which php's is not immutable, or is
     /// an enum's, whose internal methods php will not cache.
-    pub(super) fn fetched(&self, unit: &Arc<Unit>, decl: &ClassDecl) -> Option<Fetched> {
+    pub(super) fn fetched(&self, unit: &PublishedUnit, decl: &ClassDecl) -> Option<Fetched> {
         if decl.kind == ClassKind::Enum
-            || !self.links.held.iter().any(|held| Arc::ptr_eq(held, unit))
+            || !self
+                .links
+                .held
+                .iter()
+                .any(|held| PublishedUnit::ptr_eq(held, unit))
         {
             return None;
         }
@@ -731,7 +740,7 @@ impl Request {
     /// ```
     pub(super) fn cached_link(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         fetched: &Fetched,
     ) -> Result<Option<Arc<crate::inheritance_cache::Entry>>, Thrown> {
@@ -816,7 +825,7 @@ impl Request {
     /// ```
     pub(super) fn publish_link(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         fetched: Fetched,
         linking: &Linking<ClassId>,
@@ -883,7 +892,7 @@ impl Request {
     /// ```
     pub(super) fn declare_cached(
         &mut self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         decl: &ClassDecl,
         entry: &crate::inheritance_cache::Entry,

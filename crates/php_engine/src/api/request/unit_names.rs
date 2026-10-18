@@ -12,10 +12,9 @@
 //! held to the request's end.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Weak};
 
 use php_link::NameHasher;
-use php_unit::Unit;
+use php_unit::{PublishedUnit, Unit, WeakUnit};
 
 use super::Request;
 use crate::api::raising::Thrown;
@@ -29,7 +28,7 @@ use crate::api::values::{PhpString, Value};
 /// vectors a unit's names stood in are kept for the next unit's.
 #[derive(Default)]
 pub(crate) struct UnitNames {
-    units: Vec<(Weak<Unit>, Vec<PhpString>)>,
+    units: Vec<(WeakUnit, Vec<PhpString>)>,
     by_bytes: HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
     spare: Vec<Vec<PhpString>>,
     dead: Vec<PhpString>,
@@ -81,18 +80,20 @@ impl Request {
     /// and each name [`php_compile::op_array_names`] lists, made as
     /// strings of the request and held while the unit lives. The `Err`
     /// is the memory limit.
-    pub(crate) fn hold_unit_names(&mut self, unit: &Arc<Unit>) -> Result<(), Thrown> {
+    pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
         if self
             .unit_names
             .units
             .iter()
-            .any(|(held, _)| std::ptr::eq(held.as_ptr(), Arc::as_ptr(unit)))
+            .any(|(held, _)| std::ptr::eq(held.as_ptr(), PublishedUnit::as_ptr(unit)))
         {
             return Ok(());
         }
         let at = self.unit_names.units.len();
         let names = self.unit_names.spare.pop().unwrap_or_default();
-        self.unit_names.units.push((Arc::downgrade(unit), names));
+        self.unit_names
+            .units
+            .push((PublishedUnit::downgrade(unit), names));
         let mut seen = HashSet::with_hasher(NameHasher);
         for name in php_compile::op_array_names(unit) {
             let held = self
@@ -172,7 +173,7 @@ impl Request {
     /// frame was just popped, where it declared no function, closure or
     /// class (one that did is held by what it declared), and every unit
     /// nothing holds any longer.
-    pub(crate) fn release_unit_names(&mut self, ended: Option<&Arc<Unit>>) {
+    pub(crate) fn release_unit_names(&mut self, ended: Option<&PublishedUnit>) {
         if self.unit_names.units.is_empty() {
             return;
         }
@@ -180,7 +181,7 @@ impl Request {
             .filter(|unit| {
                 unit.functions.is_empty() && unit.dynamic.is_empty() && unit.classes.is_empty()
             })
-            .map(Arc::as_ptr);
+            .map(PublishedUnit::as_ptr);
         let mut dead = self.unit_names.take(ended);
         for name in dead.drain(..) {
             self.release(Value::string(name));

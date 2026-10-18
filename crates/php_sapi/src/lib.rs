@@ -56,6 +56,14 @@ pub mod c_number {
     pub use php_engine::c_number::{atoi, strtol};
 }
 
+/// The frames another process reads (design §5.6, revision 59): where a
+/// request's chain starts, which [`Engine::serve`] hands the host's look,
+/// and the decoding of a room and of what it serves, which php-fpm's
+/// master walks out of a stopped child as `fpm_php_trace_dump` does.
+pub mod readable {
+    pub use php_engine::readable::{Callee, Code, Innermost, Room, Span, Standing};
+}
+
 /// `strerror(errno)`'s text for an error the system raised, as a host's
 /// `%s` of it prints it: the system's sentence alone, without the
 /// ` (os error N)` Rust's rendering puts after it. One the system did not

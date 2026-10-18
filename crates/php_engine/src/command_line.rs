@@ -208,7 +208,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
             return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
         }
         let standing = req.vm().depth();
-        let frame = match req.push_frame(Arc::clone(&unit)) {
+        let frame = match req.push_frame(php_unit::PublishedUnit::clone(&unit)) {
             Ok(frame) => frame,
             Err(fatal) => {
                 req.end_in(&fatal);

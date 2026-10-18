@@ -48,8 +48,8 @@ pub struct RelFields {
 
 /// `timelib_time`. The two pointers are timelib's to manage, so they are
 /// private: [`TimeFields::tz_abbr`] and [`TimeFields::tz_info`] read them,
-/// and [`TimeFields::set_tz_info`], an `unsafe fn`, is the one door that
-/// writes one. Every other field is a number any code may read and write.
+/// and [`TimeFields::set_tz_info`] and [`TimeFields::set_tz_abbr`], each
+/// an `unsafe fn`, are the doors that write them. Every other field is a number any code may read and write.
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeFields {
@@ -99,6 +99,18 @@ impl TimeFields {
     /// reads it and never frees it.
     pub unsafe fn set_tz_info(&mut self, tz: *mut TzInfo) {
         self.tz_info = tz;
+    }
+
+    /// `t->tz_abbr = abbr`, as php's `php_date_initialize` hands `now` the
+    /// copy it made, `now->tz_abbr = new_abbr`.
+    ///
+    /// # Safety
+    ///
+    /// `abbr` is null or a NUL-terminated block of timelib's allocator
+    /// that the time owns from here, its `timelib_time_dtor` the one that
+    /// frees it, and the block the time held is freed or null.
+    pub unsafe fn set_tz_abbr(&mut self, abbr: *mut c_char) {
+        self.tz_abbr = abbr;
     }
 }
 
@@ -315,6 +327,11 @@ unsafe extern "C" {
     /// on the request's heap beside timelib's, `DATEG(tzcache)`'s table.
     #[link_name = "emalloc"]
     pub fn timelib_malloc(size: usize) -> *mut c_void;
+    /// `timelib_strdup`, which `include/timelib_config.h` points at
+    /// `estrdup`, as php's does: the copy php's code makes of an
+    /// abbreviation, `offset->abbr = timelib_strdup(t->tz_abbr)`.
+    #[link_name = "estrdup"]
+    pub fn timelib_strdup(s: *const c_char) -> *mut c_char;
     pub fn timelib_unixtime2local(tm: *mut TimeFields, ts: i64);
     pub fn timelib_update_from_sse(tm: *mut TimeFields);
     pub fn timelib_set_timezone_from_offset(t: *mut TimeFields, utc_offset: i64);
@@ -349,6 +366,7 @@ unsafe extern "C" {
     pub fn timelib_time_dtor(t: *mut TimeFields);
     pub fn timelib_time_clone(orig: *mut TimeFields) -> *mut TimeFields;
     pub fn timelib_time_compare(t1: *mut TimeFields, t2: *mut TimeFields) -> c_int;
+    pub fn timelib_time_offset_ctor() -> *mut TimeOffset;
     pub fn timelib_time_offset_dtor(t: *mut TimeOffset);
     pub fn timelib_error_container_dtor(errors: *mut ErrorContainer);
     pub fn timelib_date_to_int(d: *mut TimeFields, error: *mut c_int) -> i64;

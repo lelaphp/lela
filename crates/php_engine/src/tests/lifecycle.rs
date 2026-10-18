@@ -542,7 +542,7 @@ fn a_host_looks_at_its_request_after_every_rinit() {
         .build();
     let sink = Box::new(Capture::default());
     rec.mark("built");
-    let (observed, sink) = engine.serve(fetched("<?php echo 'ran';"), sink, || {
+    let (observed, sink) = engine.serve(fetched("<?php echo 'ran';"), sink, |_| {
         rec.mark("looked");
         HostServes::Page(HostPage {
             code: 404,
@@ -578,7 +578,7 @@ fn a_request_whose_start_failed_is_not_looked_at() {
         .build();
     let sink = Box::new(Capture::default());
     let mut looked = false;
-    let (observed, _) = engine.serve(fetched("<?php echo 'ran';"), sink, || {
+    let (observed, _) = engine.serve(fetched("<?php echo 'ran';"), sink, |_| {
         looked = true;
         HostServes::Nothing
     });

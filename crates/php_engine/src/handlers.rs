@@ -764,7 +764,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     // is an object, else `Z_CE(EX(This))`, the frame's called scope.
     let called_scope = receiver
         .map(|object| object.class())
-        .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+        .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
     let closure = ClosureInfo {
         function,
         this,
@@ -1697,8 +1697,10 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
     let Cached::Function(function) = req.cached(frame, CacheSlot(op.out)) else {
         return None;
     };
-    let room = req.user_function(function)?.shape.room(op.extended_value);
-    let header = exec::Header::call(function, op.extended_value);
+    let user = req.user_function(function)?;
+    let room = user.shape.room(op.extended_value);
+    let mut header = exec::Header::call(function, op.extended_value);
+    header.callee = user.callee_at();
     Some(match req.push_room(room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
@@ -2655,7 +2657,7 @@ fn push_dynamic(
     };
     let mut header = exec::Header::call(target.function, op.extended_value);
     header.set_receiver(target.this.map(exec::Receiver::Owned));
-    header.called_scope = target.called_scope;
+    header.set_called_scope(target.called_scope);
     header.closure = target.closure;
     header.info.set_dynamic(true);
     if let Some(name) = target.name {
@@ -4686,7 +4688,7 @@ fn arg_type_error(
 /// where this is nothing. A frame a native pushed from an attribute's
 /// site ([`exec::Site`]) names the site.
 fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
-    let Some(caller) = req.vm().at(frame)?.caller.frame() else {
+    let Some(caller) = req.vm().at(frame)?.caller().frame() else {
         // A call a native served from an attribute's site, which is
         // user code (`zend_get_attribute_object`'s dummy frame).
         return req
@@ -4985,7 +4987,7 @@ pub(crate) fn new<T: Tier>(
     });
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this.map(exec::Receiver::Owned));
-    header.called_scope = constructor.map(|_| class);
+    header.set_called_scope(constructor.map(|_| class));
     pushed(req, frame, header)
 }
 
@@ -5374,14 +5376,14 @@ fn static_call_frame(
     {
         let forwarded = receiver
             .map(|this| this.class())
-            .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+            .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
         (None, forwarded.unwrap_or(class))
     } else {
         (None, class)
     };
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this);
-    header.called_scope = Some(called);
+    header.set_called_scope(Some(called));
     pushed(req, frame, header)
 }
 
@@ -5485,10 +5487,10 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     };
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(receiver);
-    header.called_scope = Some(match this {
+    header.set_called_scope(Some(match this {
         Some(this) if !trampoline => this.class(),
         _ => declaring,
-    });
+    }));
     let call = req.push_call(header)?;
     // The trampoline reads the property off the name it was built
     // under, php's `internal_function.reserved[0]`; a hook's own body
@@ -5728,9 +5730,10 @@ fn inline_init_method_call(
     if !instance {
         return None;
     }
-    let room = req.call_room(function, op.extended_value);
+    let (room, callee) = req.call_room(function, op.extended_value);
     let mut header = exec::Header::call(function, op.extended_value);
-    header.called_scope = Some(class);
+    header.callee = callee;
+    header.set_called_scope(Some(class));
     header.set_receiver(Some(match at {
         None => exec::Receiver::lent(object),
         Some(_) => exec::Receiver::Owned(object),
@@ -5833,7 +5836,7 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     };
     let mut header = exec::Header::call(function, op.extended_value);
     header.set_receiver(this);
-    header.called_scope = Some(called);
+    header.set_called_scope(Some(called));
     pushed(req, frame, header)
 }
 
@@ -11037,7 +11040,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
                 .vm()
                 .this(frame)
                 .map(|this| this.class())
-                .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope))
+                .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope))
                 .unwrap_or(scope),
         }
     } else {
@@ -20735,7 +20738,7 @@ pub(crate) fn get_called_class<T: Tier>(
         .vm()
         .this(frame)
         .map(|this| this.class())
-        .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+        .or_else(|| req.vm().at(frame).and_then(exec::Header::called_scope));
     let Some(class) = called else {
         let thrown = crate::api::raising::throw_error(
             req,
@@ -23470,7 +23473,7 @@ mod tests {
     use std::sync::Arc;
 
     use php_heap::Intern as _;
-    use php_unit::{Opcode, OperandKind, Unit};
+    use php_unit::{Opcode, OperandKind, PublishedUnit, Unit};
 
     use super::*;
     use crate::api::request::Leaving;
@@ -23481,7 +23484,7 @@ mod tests {
 
     /// A unit whose main op array is one `JMP` to `target`, its
     /// safepoint number `number`.
-    fn jumping(target: u32, number: u32) -> Arc<Unit> {
+    fn jumping(target: u32, number: u32) -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![
@@ -23509,7 +23512,7 @@ mod tests {
         let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().stand(frame, 1);
@@ -23545,7 +23548,7 @@ mod tests {
         let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().stand(frame, 1);
@@ -23561,7 +23564,7 @@ mod tests {
     /// A unit whose main op array is `NOP` then a `JMPNZ` over the
     /// constant at slot zero, aimed at the `NOP`, with safepoint number
     /// one: the shape of `for (;;)` after a body of one opline.
-    fn conditional(literal: php_heap::Zval) -> Arc<Unit> {
+    fn conditional(literal: php_heap::Zval) -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![
@@ -23591,7 +23594,7 @@ mod tests {
         let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let taken = conditional(php_heap::Zval::bool(true));
-        let frame = req.pushed(Arc::clone(&taken));
+        let frame = req.pushed(PublishedUnit::clone(&taken));
         let code = crate::exec::code_of(&taken);
         let op = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().stand(frame, 1);
@@ -23607,7 +23610,7 @@ mod tests {
         );
 
         let not_taken = conditional(php_heap::Zval::long(0));
-        let frame = req.pushed(Arc::clone(&not_taken));
+        let frame = req.pushed(PublishedUnit::clone(&not_taken));
         let code = crate::exec::code_of(&not_taken);
         req.vm_mut().stand(frame, 1);
         assert_eq!(
@@ -23626,7 +23629,7 @@ mod tests {
     /// constants `left` and one into temporary zero, and a `JMPNZ` over
     /// that temporary aimed at the `NOP` with safepoint number seven:
     /// `do {} while ($i < 1)` over a constant.
-    fn compared_loop(left: i64) -> Arc<Unit> {
+    fn compared_loop(left: i64) -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![
@@ -23669,7 +23672,7 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let taken = compared_loop(0);
-        let frame = req.pushed(Arc::clone(&taken));
+        let frame = req.pushed(PublishedUnit::clone(&taken));
         let code = crate::exec::code_of(&taken);
         let op = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().stand(frame, 1);
@@ -23687,7 +23690,7 @@ mod tests {
         );
 
         let not_taken = compared_loop(1);
-        let frame = req.pushed(Arc::clone(&not_taken));
+        let frame = req.pushed(PublishedUnit::clone(&not_taken));
         req.vm_mut().stand(frame, 1);
         assert_eq!(crate::tier::step(&mut req, frame), Ok(Stepped::Same(frame)));
         assert_eq!(req.vm().opline(frame), 3, "past the jump in one step");
@@ -23696,7 +23699,7 @@ mod tests {
 
     /// A unit whose main op array is one `RETURN null`, its safepoint
     /// number `number`, as the compiler writes it into `result`.
-    fn returning(number: u32) -> Arc<Unit> {
+    fn returning(number: u32) -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![Opline {
@@ -23722,9 +23725,9 @@ mod tests {
         let engine = Engine::cli_builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = returning(1);
-        let outer = req.pushed(Arc::clone(&unit));
+        let outer = req.pushed(PublishedUnit::clone(&unit));
         let guard = req.stack_mut().push_entry(outer);
-        let inner = req.pushed(Arc::clone(&unit));
+        let inner = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
 
@@ -23751,7 +23754,7 @@ mod tests {
     /// `DO_FCALL_BY_NAME` into `V0`: the shape php's compiler emits for
     /// `StrLen("abc")` where its function table has not the name at
     /// compile time and the program declares it before the call runs.
-    fn by_name(strings: &mut php_heap::Strings) -> Arc<Unit> {
+    fn by_name(strings: &mut php_heap::Strings) -> PublishedUnit {
         let text = |strings: &mut php_heap::Strings, bytes: &[u8]| {
             strings
                 .intern(bytes)
@@ -23816,7 +23819,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         let send = code.oplines.get(1).copied().unwrap_or_default();
@@ -23850,7 +23853,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
@@ -23954,8 +23957,8 @@ mod tests {
     /// `f` of `unit` called twice from its main op array: one lookup of
     /// the table across both calls, each call's slot primed with the
     /// callee, and the main op array's own slot not what they primed.
-    fn called_twice(mut req: Request, unit: &Arc<Unit>) {
-        let main = req.pushed(Arc::clone(unit));
+    fn called_twice(mut req: Request, unit: &PublishedUnit) {
+        let main = req.pushed(PublishedUnit::clone(unit));
         req.declare_functions(unit);
         let f = req
             .function_named(Bare::resolved(b"f"))
@@ -24040,7 +24043,7 @@ mod tests {
             ..Unit::default()
         }
         .published();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         let strlen = req.function_named(Bare::resolved(b"strlen"));
@@ -24092,7 +24095,7 @@ mod tests {
             ..Unit::default()
         }
         .published();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         for pass in 1..=2 {
@@ -24113,7 +24116,7 @@ mod tests {
     /// `written`/`lowered` names, the last clause of its `try`
     /// (`ZEND_LAST_CATCH`), naming no variable, its cache slot at byte
     /// zero and its jump to the `NOP` after it.
-    fn catching(strings: &mut php_heap::Strings, written: &[u8], lowered: &[u8]) -> Arc<Unit> {
+    fn catching(strings: &mut php_heap::Strings, written: &[u8], lowered: &[u8]) -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![
@@ -24150,7 +24153,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"Error", b"error");
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let clause = code.oplines.first().copied().unwrap_or_default();
         let error = req.class_named(Bare::resolved(b"error"));
@@ -24187,7 +24190,7 @@ mod tests {
         strings: &mut php_heap::Strings,
         class: (&[u8], &[u8]),
         method: Option<(&[u8], &[u8])>,
-    ) -> Arc<Unit> {
+    ) -> PublishedUnit {
         let (op2_type, op2) = match method {
             Some(_) => (OperandKind::Const, 2),
             None => (OperandKind::Unused, 0),
@@ -24233,7 +24236,7 @@ mod tests {
             (b"Closure", b"closure"),
             Some((b"fromCallable", b"fromcallable")),
         );
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
         let closure = req.class_named(Bare::resolved(b"closure"));
@@ -24273,7 +24276,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = static_method_call(&mut strings, (b"Exception", b"exception"), None);
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
         let exception = req.class_named(Bare::resolved(b"exception"));
@@ -24299,7 +24302,7 @@ mod tests {
     /// A unit whose main op array is one `INIT_METHOD_CALL` over the CV
     /// `$o` and the pair `GetMessage`, `getmessage`, with the two cache
     /// slots the compiler reserves in `result` at byte zero: `$o->GetMessage()`.
-    fn method_call(strings: &mut php_heap::Strings) -> Arc<Unit> {
+    fn method_call(strings: &mut php_heap::Strings) -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![Opline {
@@ -24340,7 +24343,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = method_call(&mut strings);
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
         let exception = req.class_named(Bare::resolved(b"exception"));
@@ -24401,7 +24404,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"NoPe", b"nope");
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let clause = code.oplines.first().copied().unwrap_or_default();
         let thrown = crate::api::raising::throw_error(&mut req, "Error", "e");
@@ -24483,7 +24486,7 @@ mod tests {
             ..Unit::default()
         }
         .published();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let named = req.class_named(Bare::resolved(b"stdclass"));
         assert!(named.is_some(), "the engine declares stdClass");
@@ -24529,7 +24532,7 @@ mod tests {
 
     /// A unit whose main op array is `JMP_FRAMELESS` over `name`, its
     /// jump to opline 2, its cache slot at byte 0, then two `NOP`s.
-    fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> Arc<Unit> {
+    fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![
@@ -24564,7 +24567,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"foo\\substr");
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let jmp = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
@@ -24593,7 +24596,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"strlen");
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let jmp = code.oplines.first().copied().unwrap_or_default();
 
@@ -24677,7 +24680,7 @@ mod tests {
             ..Unit::default()
         }
         .published();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(
@@ -24713,7 +24716,7 @@ mod tests {
             ..Unit::default()
         }
         .published();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert!(matches!(
@@ -24758,7 +24761,7 @@ mod tests {
             ..Unit::default()
         }
         .published();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
 
@@ -24781,7 +24784,7 @@ mod tests {
     /// A unit whose main op array has one CV, one temporary and one
     /// `ASSIGN` of the constant `1` into the CV, its value unused:
     /// `$a = 1;`.
-    fn assigning() -> Arc<Unit> {
+    fn assigning() -> PublishedUnit {
         Unit {
             main: OpArray {
                 oplines: vec![Opline {
@@ -24815,7 +24818,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = assigning();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let mut op = code.oplines.first().copied().unwrap_or_default();
         op.out_type = OperandKind::Tmp;
@@ -24963,7 +24966,7 @@ mod tests {
             ..Unit::default()
         }
         .published();
-        let frame = req.pushed(Arc::clone(&unit));
+        let frame = req.pushed(PublishedUnit::clone(&unit));
         let Ok(left) = req.string(b"an owner left behind") else {
             return;
         };

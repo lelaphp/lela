@@ -183,7 +183,7 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
         }
         Program::File(_) | Program::Stdin => {
             dump(engine, &description, sink.as_mut());
-            engine.serve(description, sink, || HostServes::Program)
+            engine.serve(description, sink, |_| HostServes::Program)
         }
     };
     ended(&served, sink.as_mut())

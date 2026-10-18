@@ -50,3 +50,9 @@ getopt::OptError
 getopt::Stopped
 getopt::Taken
 host_thread
+readable::Callee
+readable::Code
+readable::Innermost
+readable::Room
+readable::Span
+readable::Standing

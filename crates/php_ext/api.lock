@@ -1349,6 +1349,7 @@ values::PhpObject::set_class
 values::PhpObject::set_prop
 values::PhpObject::set_row
 values::PhpObject::set_slot
+values::PhpObject::set_str
 values::PhpObject::slot
 values::PhpObject::slots_without_table
 values::PhpObject::table_from_symtable

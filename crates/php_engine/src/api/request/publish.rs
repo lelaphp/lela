@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use php_link::{Composed, LinkedClass};
-use php_unit::Unit;
+use php_unit::PublishedUnit;
 
 use super::{Bound, Declared, Request};
 use crate::api::values::ClassId;
@@ -29,14 +29,14 @@ impl Request {
     /// the request that asked.
     pub(crate) fn publish(
         &self,
-        unit: &Arc<Unit>,
+        unit: &PublishedUnit,
         at: u32,
         composed: Option<Composed>,
         record: LinkedClass<ClassId>,
         parent: Option<ClassId>,
     ) -> Option<ClassId> {
         let row = Declared {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             at,
             composed: composed.map(Box::new),
             bound: Bound::default(),
@@ -73,7 +73,7 @@ impl Request {
     /// published before it, and never over the request's. By declaration
     /// index, none for a class the unit does not bind early and for one
     /// the arena could not take, which the request binds as its own.
-    pub(crate) fn publish_unit(&self, unit: &Arc<Unit>) -> Arc<[Option<ClassId>]> {
+    pub(crate) fn publish_unit(&self, unit: &PublishedUnit) -> Arc<[Option<ClassId>]> {
         let mut published: Vec<Option<ClassId>> = vec![None; unit.classes.len()];
         let mut own: Vec<(Vec<u8>, ClassId)> = Vec::new();
         for (at, decl) in (0u32..).zip(&unit.classes) {
@@ -96,7 +96,7 @@ impl Request {
                 None => None,
             };
             let row = Declared {
-                unit: Arc::clone(unit),
+                unit: PublishedUnit::clone(unit),
                 at,
                 composed: None,
                 bound: Bound::default(),

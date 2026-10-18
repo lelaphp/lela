@@ -424,7 +424,7 @@ impl Request {
         let mut header =
             exec::Header::call(function, u32::try_from(sent.len()).unwrap_or(u32::MAX));
         header.set_receiver(receiver);
-        header.called_scope = called_scope;
+        header.set_called_scope(called_scope);
         header.closure = closure;
         header.info.set_serving();
         let call = match self.push_call(header) {

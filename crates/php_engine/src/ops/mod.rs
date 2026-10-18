@@ -2526,6 +2526,24 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
 /// Warning: unexpected NAN value was coerced to string in %s on line 3
 /// NANz
 /// ```
+///
+/// The joined string is the request's, one allocation of both sides'
+/// bytes, and `memory_get_usage()` moves by that allocation's bin, a
+/// constant string on one side as much as a string a native made
+/// (#2661).
+///
+/// ```php
+/// echo "joined, moved\n"; $a = str_repeat('a', 10); $b = str_repeat('b', 20); $c = $e = $g = null;
+/// $m = memory_get_usage(); $c = $a . $b; echo 'strings ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $e = $a . 'literal'; echo 'literal ', memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $g = $b . str_repeat($a, 400); echo 'pages ', memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect capture
+/// joined, moved
+/// strings 56
+/// literal 48
+/// pages 4096
+/// ```
 pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
     let a = concat_operand(req, left)?;
     let b = match concat_operand(req, right) {
@@ -2678,6 +2696,52 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// int(10100)
 /// int(12128)
 /// int(12128)
+/// ```
+///
+/// One byte at a time from empty, `memory_get_usage()` steps where the
+/// string's allocation crosses into the next bin, then the next `run`
+/// of pages, each step php's (#2661); a string another variable holds is
+/// copied, its new allocation counted whole. The program writes its
+/// first line before it measures, since the first byte a request writes
+/// holds the thirty-two of the default mimetype.
+///
+/// ```php
+/// echo "appended, moved\n"; $s = ''; $d = $p = 0; $m = memory_get_usage();
+/// for ($i = 1; $i <= 5000; $i++) { $s .= 'x'; $d = memory_get_usage() - $m; if ($d !== $p) echo $i, ' ', $d, "\n"; $p = $d; }
+/// $t = $s; $m = memory_get_usage(); $t .= 'y'; echo 'shared ', memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect capture
+/// appended, moved
+/// 2 32
+/// 8 40
+/// 16 48
+/// 24 56
+/// 32 64
+/// 40 80
+/// 56 96
+/// 72 112
+/// 88 128
+/// 104 160
+/// 136 192
+/// 168 224
+/// 200 256
+/// 232 320
+/// 296 384
+/// 360 448
+/// 424 512
+/// 488 640
+/// 616 768
+/// 744 896
+/// 872 1024
+/// 1000 1280
+/// 1256 1536
+/// 1512 1792
+/// 1768 2048
+/// 2024 2560
+/// 2536 3072
+/// 3048 4096
+/// 4072 8192
+/// shared 8192
 /// ```
 ///
 /// A declared property, a typed one over a string, a class's property

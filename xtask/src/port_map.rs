@@ -908,13 +908,7 @@ pub fn command(root: &Path, manifest: &Manifest, store: &Store, tree: Option<&Pa
     let join = join(&map, &lock, &ported, source, &counted);
     let reading = reading(&join, &ported, krate, &snapshot)?;
     print!("{}", render(&join));
-    println!(
-        "{} {INSTRUMENT} {}: {}",
-        reading.status.as_str(),
-        reading.scope,
-        reading.message
-    );
-    store.record(std::slice::from_ref(&reading))?.exit()
+    crate::recorded(store, std::slice::from_ref(&reading))?.exit()
 }
 
 #[cfg(test)]

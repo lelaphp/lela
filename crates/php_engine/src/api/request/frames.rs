@@ -5,10 +5,8 @@
 //! them, and the chain of frames and calls a backtrace walks. The stack
 //! and the VM stay on the request, since every area reaches them.
 
-use std::sync::Arc;
-
 use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef, ZvalType};
-use php_unit::{CacheSlot, Unit};
+use php_unit::{CacheSlot, PublishedUnit, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -251,7 +249,7 @@ impl Request {
     /// The unit `header`'s frame serves and which of its op arrays: a
     /// function's through the function table, which holds the unit, a
     /// file's through the frame's [`exec::Annex`].
-    pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&Arc<Unit>, exec::Body)> {
+    pub(crate) fn unit_of(&self, header: &exec::Header) -> Option<(&PublishedUnit, exec::Body)> {
         if let Some(function) = header.function {
             let user = self.user_function(function)?;
             Some((&user.unit, user.body))
@@ -267,7 +265,7 @@ impl Request {
     pub(crate) fn serving(&self, frame: FrameRef) -> Option<exec::Serving> {
         let (unit, body) = self.unit_of(self.vm.at(frame)?)?;
         Some(exec::Serving {
-            unit: Arc::clone(unit),
+            unit: PublishedUnit::clone(unit),
             body,
         })
     }
@@ -313,6 +311,34 @@ impl Request {
         self.vm.resume(&mut self.heap, frame, calls)
     }
 
+    /// The room `room` finds in the payload `object` carries as `T`
+    /// linked as the innermost on the running stack, so the next frame
+    /// pushed links to it ([`php_heap::VmStack::link_room`]); nothing
+    /// where the object carries no such payload. The room stays linked
+    /// until [`Request::unlink_room`].
+    pub(crate) fn link_room<T: std::any::Any + Send>(
+        &mut self,
+        object: PhpObject,
+        room: fn(&mut T) -> &mut exec::FakeRoom,
+    ) {
+        if let Some(payload) = self.heap.native_mut::<T>(object.heap()) {
+            self.vm.stack.link_room(room(payload));
+        }
+    }
+
+    /// The running stack's word moved back to what the room `room` finds
+    /// in `object`'s payload links, once the frame linked above it has
+    /// left ([`php_heap::VmStack::unlink_room`]).
+    pub(crate) fn unlink_room<T: std::any::Any + Send>(
+        &mut self,
+        object: PhpObject,
+        room: fn(&T) -> Option<&exec::FakeRoom>,
+    ) {
+        if let Some(room) = self.heap.native::<T>(object.heap()).and_then(room) {
+            self.vm.stack.unlink_room(room);
+        }
+    }
+
     /// A call a generator froze, given up as `cleanup_unfinished_calls`
     /// gives up one standing: back on the stack and popped.
     pub(crate) fn release_frozen_call(&mut self, call: crate::exec::HeapFrame) {
@@ -334,6 +360,14 @@ impl Request {
     /// fiber's stack before the fiber's function is called.
     pub(crate) fn open_stack(&mut self) -> Result<(), Fatal> {
         self.vm.stack.open(&mut self.heap)
+    }
+
+    /// Where the chain of the frames another process reads starts, the
+    /// address of the running stack's word (design §5.6, revision 59): a
+    /// fiber's stack changes places with the request's at a switch, so
+    /// the word at this address is always the running one's.
+    pub(crate) fn innermost(&self) -> crate::readable::Innermost {
+        crate::readable::Innermost::of(self.vm.stack.link_word())
     }
 
     /// The engine's half of the frames: what the loop and the handlers
@@ -486,7 +520,7 @@ impl Request {
     /// here on: its op arrays take runtime caches of the request's own,
     /// as php gives them caches on the heap, and none of the engine's
     /// offsets ([`exec::RuntimeCaches::take`]).
-    pub(crate) fn take_unit(&mut self, unit: Unit) -> Arc<Unit> {
+    pub(crate) fn take_unit(&mut self, unit: Unit) -> PublishedUnit {
         self.map.take(unit)
     }
 
@@ -496,10 +530,12 @@ impl Request {
     /// the fatal php raises there, and nothing is pushed. The frame is
     /// not begun: its observer begin is the caller's, which `execute`
     /// raises as `zend_execute` does.
-    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
+    pub(crate) fn push_frame(&mut self, unit: PublishedUnit) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        let header = exec::Header::of(None, code);
+        let mut header = exec::Header::of(None, code);
+        // `zend_execute`'s `ZEND_CALL_TOP_CODE`.
+        header.info.set_top_code(true);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
@@ -526,6 +562,12 @@ impl Request {
         mut header: exec::Header,
         extra: exec::Annex,
     ) -> Result<FrameRef, Fatal> {
+        let mut extra = extra;
+        if let Some(unit) = &extra.unit {
+            let record = Box::new(exec::code_record(unit));
+            header.callee = record.at();
+            extra.record = Some(record);
+        }
         let id = self.annexes.insert(extra);
         header.annex = Some(id);
         let pushed = self.vm.push(&mut self.heap, slots, 0, header);
@@ -552,28 +594,31 @@ impl Request {
     /// memory limit refuses is the fatal and nothing else is touched.
     pub(crate) fn push_code_frame(
         &mut self,
-        unit: Arc<Unit>,
+        unit: PublishedUnit,
         caller: FrameRef,
         returns_to: Option<(FrameRef, u32)>,
     ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let mut header = exec::Header::of(None, code);
+        let record = Box::new(exec::code_record(&unit));
+        header.callee = record.at();
         let reserved = self.vm.push(&mut self.heap, slots, 0, header.clone())?;
         let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
-            (state.this(), state.called_scope, self.frame_scope(caller))
+            (state.this(), state.called_scope(), self.frame_scope(caller))
         });
         // `ZEND_CALL_HAS_THIS` carried from the including frame, whose
         // `$this` that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
         header.set_receiver(this.map(exec::Receiver::lent));
-        header.called_scope = called_scope;
-        header.returns_to = returns_to.map(|(_, slot)| slot);
-        header.caller = exec::Caller::Opline(caller);
+        header.set_called_scope(called_scope);
+        header.set_returns_to(returns_to.map(|(_, slot)| slot));
+        header.set_caller(exec::Caller::Opline(caller));
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         self.forget_main_statics(code.runtime_cache);
         header.annex = Some(self.annexes.insert(exec::Annex {
             unit: Some(unit),
+            record: Some(record),
             scope,
             symbol_table: Some(table),
             ..exec::Annex::default()
@@ -653,7 +698,7 @@ impl Request {
             .vm
             .at(frame)
             .filter(|state| state.function.is_none())
-            .map(|state| state.caller.frame());
+            .map(|state| state.caller().frame());
         if code_frame.is_some() {
             self.detach_symbol_table(frame);
         }
@@ -700,8 +745,8 @@ impl Request {
             && header.closure.is_none()
             && !header.info.call()
             && !header.info.extra_args();
-        let caller = header.caller.frame().filter(|_| plain)?;
-        let returns_to = header.returns_to;
+        let caller = header.caller().frame().filter(|_| plain)?;
+        let returns_to = header.returns_to();
         // Every slot's refcounted bit folded with no branch per slot,
         // where php's `i_free_compiled_variables` tests each CV: a frame
         // none of whose slots owns anything, nearly every one, is
@@ -948,10 +993,20 @@ impl Request {
     /// arguments and the magic method's CVs and temporaries, at least
     /// two, as `zend_get_call_trampoline_func` sizes the frame it
     /// reuses.
+    /// With the room, where the callee's record stands, which the
+    /// call's header names ([`Request::callee_at`]); none for a callee
+    /// no table holds one for, whose push makes it.
     #[inline]
-    pub(crate) fn call_room(&self, function: Function, count: u32) -> usize {
+    pub(crate) fn call_room(
+        &self,
+        function: Function,
+        count: u32,
+    ) -> (usize, crate::readable::CalleeAt) {
         match self.user_function(function) {
-            Some(user) => usize::try_from(user.shape.room(count)).unwrap_or(usize::MAX),
+            Some(user) => (
+                usize::try_from(user.shape.room(count)).unwrap_or(usize::MAX),
+                user.callee_at(),
+            ),
             None => self.call_room_past_user(function, count),
         }
     }
@@ -959,7 +1014,12 @@ impl Request {
     /// [`Request::call_room`] of a callee that is no user function: a
     /// native's or a trampoline's.
     #[inline(never)]
-    fn call_room_past_user(&self, function: Function, count: u32) -> usize {
+    fn call_room_past_user(
+        &self,
+        function: Function,
+        count: u32,
+    ) -> (usize, crate::readable::CalleeAt) {
+        let callee = self.shared.native_callee(function).unwrap_or_default();
         let shape = |function: Function| Some(self.user_function(function)?.shape);
         let room = if let Some(magic) = self
             .trampoline_of(function)
@@ -970,15 +1030,16 @@ impl Request {
         } else {
             count
         };
-        usize::try_from(room).unwrap_or(usize::MAX)
+        (usize::try_from(room).unwrap_or(usize::MAX), callee)
     }
 
     /// `zend_vm_stack_push_call_frame`: a call to `function` pushed with
     /// its room ([`Request::call_room`]) for the `SEND_*` oplines to
     /// write its arguments into, `header` laid down whole; a page the
     /// memory limit refuses is the fatal php raises there.
-    pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
-        let (_, room) = self.callee_room(&header)?;
+    pub(crate) fn push_call(&mut self, mut header: exec::Header) -> Result<FrameRef, Fatal> {
+        let (_, room, callee) = self.callee_room(&header)?;
+        header.callee = callee;
         self.push_room(room, header)
     }
 
@@ -1035,11 +1096,15 @@ impl Request {
     /// The callee `header` names and the room its call takes
     /// ([`Request::call_room`]); a header with no callee is the engine's
     /// error.
-    fn callee_room(&self, header: &exec::Header) -> Result<(Function, usize), Fatal> {
+    fn callee_room(
+        &self,
+        header: &exec::Header,
+    ) -> Result<(Function, usize, crate::readable::CalleeAt), Fatal> {
         let Some(function) = header.function else {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
-        Ok((function, self.call_room(function, header.num_args)))
+        let (room, callee) = self.call_room(function, header.num_args);
+        Ok((function, room, callee))
     }
 
     /// A call pushed with `room` slots past its header, which the caller
@@ -1049,9 +1114,57 @@ impl Request {
     pub(crate) fn push_room(
         &mut self,
         room: usize,
-        header: exec::Header,
+        mut header: exec::Header,
     ) -> Result<FrameRef, Fatal> {
+        if header.callee.is_none() {
+            self.lay_callee(&mut header);
+        }
         self.vm.push(&mut self.heap, room, 0, header)
+    }
+
+    /// The record of the call `header` lays down written into it,
+    /// where its push was handed none ([`Request::callee_at`]).
+    #[cold]
+    #[inline(never)]
+    fn lay_callee(&mut self, header: &mut exec::Header) {
+        if let Some(function) = header.function {
+            header.callee = self.callee_at(function);
+        }
+    }
+
+    /// Where the record of `function` stands, which a frame serving
+    /// it names (design §5.6, revision 59): a native's or a native
+    /// method's in the engine's table, a user function's on its row, and
+    /// anything else's, a class's native, a trampoline, made the first
+    /// time a frame serves it and held for the request. `zend_pass_function`
+    /// has none, as php's has no name.
+    pub(crate) fn callee_at(&mut self, function: Function) -> crate::readable::CalleeAt {
+        if let Some(native) = self.shared.native_callee(function) {
+            return native;
+        }
+        if let Some(user) = self.user_function(function) {
+            return user.callee_at();
+        }
+        self.callee_past_tables(function)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn callee_past_tables(&mut self, function: Function) -> crate::readable::CalleeAt {
+        if function == Function::PASS {
+            return crate::readable::CalleeAt::default();
+        }
+        if let Some(named) = self.named_callees.get(&function) {
+            return named.at();
+        }
+        let name = self
+            .function_decl(function)
+            .map(|decl| decl.name.0.to_vec())
+            .unwrap_or_default();
+        let named = Box::new(crate::readable::Named::native(name));
+        let at = named.at();
+        self.named_callees.insert(function, named);
+        at
     }
 
     /// The call `call`, on top of the stack, grown by `more` slots
@@ -1078,7 +1191,7 @@ impl Request {
         let named = self
             .vm
             .at(frame)
-            .map(|header| (header.caller.frame(), header.returns_to));
+            .map(|header| (header.caller().frame(), header.returns_to()));
         match named {
             Some((Some(caller), returns_to)) => (caller, returns_to.map(|slot| (caller, slot))),
             _ => (self.returns_into(frame), None),
@@ -1090,7 +1203,7 @@ impl Request {
     pub(crate) fn returns_into(&self, frame: FrameRef) -> FrameRef {
         self.vm
             .at(frame)
-            .and_then(|header| header.caller.frame())
+            .and_then(|header| header.caller().frame())
             .or_else(|| {
                 let below = self.vm.below(frame.0 as usize)?;
                 Some(FrameRef(u32::try_from(below).ok()?))
@@ -1183,8 +1296,8 @@ impl Request {
         laid.info.set_serving();
         laid.info.set_return_used(returns_to.is_some());
         laid.activate(cache, opline, false);
-        laid.returns_to = returns_to;
-        laid.caller = exec::Caller::Opline(caller);
+        laid.set_returns_to(returns_to);
+        laid.set_caller(exec::Caller::Opline(caller));
         crate::observer::call(self, call);
         Some(call)
     }
@@ -1230,8 +1343,8 @@ impl Request {
         if let Some(frame) = self.vm.stack.frame_mut(call) {
             let laid = frame.header_mut();
             laid.activate(cache, opline, extra > 0);
-            laid.returns_to = returns_to;
-            laid.caller = caller;
+            laid.set_returns_to(returns_to);
+            laid.set_caller(caller);
             let slots = frame.slots_mut();
             if extra > 0 && passed <= slots.len() && own + extra <= slots.len() {
                 slots.copy_within(parameters..passed, own);
