@@ -240,9 +240,10 @@ impl Opline {
     /// Whether `jump`, the opline after this comparison, is the `JMPZ` or
     /// `JMPNZ` that branches on the comparison's temporary, which makes
     /// the comparison's handler one over both oplines: php's
-    /// `ZEND_VM_SMART_BRANCH`, which `pass_two` marks where the jump's
-    /// `op1` is the comparison's `result` (`Z/Zend/zend_opcode.c`,
-    /// design §5.8).
+    /// `ZEND_VM_SMART_BRANCH`, which `zend_emit_cond_jump` marks in the
+    /// comparison's `result_type` where the jump's `op1` is its `result`
+    /// (`Z/Zend/zend_compile.c:2399`), and from whose mark `pass_two`'s
+    /// `zend_vm_set_opcode_handler` picks the handler (design §5.8).
     #[must_use]
     pub fn fuses(&self, jump: &Opline) -> bool {
         matches!(jump.opcode, Opcode::Jmpz | Opcode::Jmpnz)
