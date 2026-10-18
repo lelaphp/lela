@@ -30,7 +30,7 @@ use anyhow::{Context, Result, bail};
 use crate::glossary::{self, Avoided, Glossary};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::reading::{self, Outcome, Reading, Status, Store};
+use crate::reading::{Outcome, Reading, Status, Store};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "vocab";
@@ -445,7 +445,7 @@ fn matches(pattern: &str, path: &Path) -> bool {
 /// so is `fixtures/`, whose files are other crates' sources.
 fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    reading::walk(dir, &mut files)?;
+    crate::tally::files_under(dir, &mut files)?;
     files.retain(|p| {
         p.extension().is_some_and(|e| e == "rs")
             && !p

@@ -905,22 +905,11 @@ impl Store {
 
     /// Each entry of the index of one scope: its key and its file.
     fn keys_of(&self, instrument: &str, scope: &str) -> Result<Vec<(String, PathBuf)>> {
-        let dir = self.dir_of(instrument, scope)?;
-        let listing = match fs::read_dir(&dir) {
-            Ok(listing) => listing,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
-        };
-        let mut keys = Vec::new();
-        for entry in listing {
-            let path = entry
-                .with_context(|| format!("listing {}", dir.display()))?
-                .path();
-            if let Some(key) = index_key(&path) {
-                keys.push((key.to_owned(), path));
-            }
-        }
-        Ok(keys)
+        let listed = crate::entries(&self.dir_of(instrument, scope)?)?;
+        Ok(listed
+            .into_iter()
+            .filter_map(|path| Some((index_key(&path)?.to_owned(), path)))
+            .collect())
     }
 
     /// Which of `keys` a reading of `instrument` over `scope` was taken
@@ -1051,9 +1040,7 @@ impl Store {
     /// it again.
     pub fn readings(&self) -> Result<Files> {
         let mut paths = Vec::new();
-        if self.root.is_dir() {
-            walk(&self.root, &mut paths)?;
-        }
+        crate::tally::files_under(&self.root, &mut paths)?;
         paths.sort();
         let mut files = Files::default();
         for path in paths
@@ -1116,26 +1103,15 @@ fn prune(dir: &Path) -> Result<()> {
     }
     entries.sort_by_key(|(written, _)| std::cmp::Reverse(*written));
     for (_, path) in entries.into_iter().skip(KEPT) {
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("removing {}", path.display())),
-        }
+        crate::remove(&path)?;
     }
     Ok(())
 }
 
 /// The files of the log under `dir`, in name order; none where it is not.
 fn shards(dir: &Path) -> Result<Vec<PathBuf>> {
-    let listing = match fs::read_dir(dir) {
-        Ok(listing) => listing,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
-    };
-    let mut paths: Vec<PathBuf> = listing
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .collect();
+    let mut paths = crate::entries(dir)?;
+    paths.retain(|p| p.extension().is_some_and(|e| e == "jsonl"));
     paths.sort();
     Ok(paths)
 }
@@ -1457,19 +1433,6 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d)
-}
-
-/// Every file under `dir`, recursively, in directory order.
-pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// At most five names, and how many more there are: how a reading's

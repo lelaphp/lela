@@ -36,11 +36,7 @@ pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
     if let Some(dir) = link.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    match std::fs::remove_file(&link) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("removing {}", link.display())),
-    }
+    crate::remove(&link)?;
     std::os::unix::fs::symlink(binary, &link)
         .with_context(|| format!("linking {} to {}", link.display(), binary.display()))?;
     Ok(link)

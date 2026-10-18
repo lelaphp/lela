@@ -553,13 +553,9 @@ impl Queue {
 /// corpus with, whether the corpus is the pinned tree's subsets or a
 /// directory of files. A directory that is not there has none, since
 /// whether the corpus is where it should be is the lane's sentence and
-/// not this walk's.
+/// not this walk's; one that cannot be listed is the error.
 pub fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries {
-        let path = entry?.path();
+    for path in crate::entries(dir)? {
         if path.is_dir() {
             files_under(&path, out)?;
         } else {
