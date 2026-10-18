@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::{Oracle, Pin};
+use super::{ClosureDigest, Oracle, Pin};
 
 /// One platform an oracle build is pinned for, by the key its table
 /// carries in `oracle.toml`: the maintainer's macOS arm64, and the two
@@ -148,7 +148,8 @@ impl Variant {
 /// that platform, the binary's md5, which is its identity as `[oracle]`'s
 /// md5 is the main oracle's, and for a Linux build the base image's
 /// manifest digest, which the recipe pins and rebuilds from, the md5
-/// holding the binary it rebuilt (#1948). The path is where a machine
+/// holding the binary it rebuilt (#1948); for the macOS build, the digest
+/// of the `[closure]` it was made against (#2935). The path is where a machine
 /// finds the binary: on Linux, the install prefix the recipe builds it to;
 /// a relative path is the pin's directory's.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -158,6 +159,8 @@ pub struct Build {
     pub md5: String,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub closure: Option<ClosureDigest>,
 }
 
 /// The oracles one run holds: the main oracle's, and one for each variant

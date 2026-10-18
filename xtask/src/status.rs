@@ -1580,8 +1580,9 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// variable's or the pin's, or the absence it named; and the pinned php,
 /// its version, keg path and md5. An eighth, `closure`, names the kegs
 /// `[closure]` records php loading, each at its version, where the pin
-/// records them (#2657), and a `variant` row per `[variant.<name>]` that
-/// pins a build for this machine's platform, its path and md5 (#2298).
+/// records them (#2657), with the record's digest, and a `variant` row
+/// per `[variant.<name>]` that pins a build for this machine's platform,
+/// its path and md5 (#2298), and the macOS build's closure digest (#2935).
 /// CI reads the two names off the JSON, `tree.variable` and
 /// `promise.variable`, and sets them under those names, so the workflow
 /// spells neither; the oracle runner pours the keg `binary` names and
@@ -1634,10 +1635,12 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "md5": php.md5,
             },
             "closure": pin.closure.as_ref().map(Closure::kegs),
+            "closure_digest": pin.closure.as_ref().map(|c| c.digest().to_string()),
             "variants": builds.iter().map(|(name, build)| ((*name).clone(), json!({
                 "platform": platform.map(Platform::key),
                 "path": build.path.display().to_string(),
                 "md5": build.md5,
+                "closure": build.closure.as_ref().map(ToString::to_string),
             }))).collect::<serde_json::Map<_, _>>(),
         }))?,
         Table::Md => {
@@ -1676,7 +1679,9 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             row(o, "binary", "", &php.path.display().to_string(), &binary);
             closure_row(o, pin.closure.as_ref());
             for (name, build) in &builds {
-                let (fact, md5) = (format!("variant {name}"), format!("md5 {}", build.md5));
+                let fact = format!("variant {name}");
+                let closure = build.closure.as_ref().map(|c| format!(", closure {c}"));
+                let md5 = format!("md5 {}{}", build.md5, closure.unwrap_or_default());
                 row(o, &fact, "", &build.path.display().to_string(), &md5);
             }
             out
@@ -1685,7 +1690,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
 }
 
 /// The oracle section's `closure` row: each keg `[closure]` records and its
-/// version, none where the pin records no closure.
+/// version, and the record's digest, none where the pin records no closure.
 fn closure_row(out: &mut String, closure: Option<&Closure>) {
     let Some(closure) = closure else { return };
     let kegs: Vec<String> = closure
@@ -1693,7 +1698,8 @@ fn closure_row(out: &mut String, closure: Option<&Closure>) {
         .iter()
         .map(|(k, v)| format!("{k} {v}"))
         .collect();
-    let count = format!("{} kegs, the pin's", kegs.len());
+    let (count, digest) = (kegs.len(), closure.digest());
+    let count = format!("{count} kegs, the pin's, digest {digest}");
     oracle_row(out, "closure", "", &kegs.join(", "), &count);
 }
 

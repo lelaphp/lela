@@ -37,6 +37,7 @@ nix = { workspace = true, features = ["signal", "user"] }
 regex-lite.workspace = true
 sha1_smol.workspace = true
 md5.workspace = true
+sha2.workspace = true               # a variant's macOS build names the digest of the [closure] it was made against (#2935)
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

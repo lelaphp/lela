@@ -31,6 +31,7 @@ pub(crate) mod profile;
 mod variant;
 
 pub(crate) use closure::Closure;
+pub use closure::ClosureDigest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Variant};
 
