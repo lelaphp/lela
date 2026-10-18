@@ -54,6 +54,22 @@ pub mod c_number {
     pub use php_engine::c_number::{atoi, strtol};
 }
 
+/// `strerror(errno)`'s text for an error the system raised, as a host's
+/// `%s` of it prints it: the system's sentence alone, without the
+/// ` (os error N)` Rust's rendering puts after it. One the system did not
+/// raise is its rendering whole.
+#[must_use]
+pub fn strerror(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    let Some(code) = error.raw_os_error() else {
+        return text;
+    };
+    match text.strip_suffix(&format!(" (os error {code})")) {
+        Some(sentence) => sentence.to_owned(),
+        None => text,
+    }
+}
+
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
 /// that binds a tier of its own, the debugging host, implements `Tier`
 /// with, the stack it steps and what it writes between the steps,
@@ -260,6 +276,24 @@ pub fn version(name: &str, engine: &Engine) -> String {
 #[must_use]
 pub fn exit_code(status: i32) -> ExitCode {
     ExitCode::from(u8::try_from(status & 0xff).unwrap_or(255))
+}
+
+#[cfg(test)]
+mod system {
+    use super::strerror;
+
+    /// An error the system raised is its sentence alone, as `%s` of
+    /// `strerror(errno)` prints it; one it did not raise is as Rust
+    /// renders it.
+    #[test]
+    fn strerror_is_the_systems_sentence_alone() {
+        let raised = std::fs::File::open("/no-such-directory/x").err();
+        assert_eq!(
+            raised.as_ref().map(strerror).as_deref(),
+            Some("No such file or directory")
+        );
+        assert_eq!(strerror(&std::io::Error::other("a reason")), "a reason");
+    }
 }
 
 #[cfg(all(test, debug_assertions))]
