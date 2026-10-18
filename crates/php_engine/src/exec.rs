@@ -1958,6 +1958,21 @@ pub(crate) fn owned_deref(req: &mut Request, value: Value) -> Value {
     held
 }
 
+/// A hash key as a value of its own, what a fetch writes to its
+/// `result` (`RETURN_VALUE_USED`) and a generator delegating to an
+/// array takes as its key: an integer as it stands, and a string with
+/// one more owner (`ZVAL_STR_COPY`).
+pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
+    match key {
+        php_heap::Key::Long(n) => Value::int(n),
+        php_heap::Key::Str(s) => {
+            let s = Value::string(PhpString::of(s));
+            req.addref(&s);
+            s
+        }
+    }
+}
+
 /// `GET_OP*_ZVAL_PTR_DEREF(BP_VAR_R)` as a frameless call reads its
 /// operand into its record (`ZEND_FRAMELESS_ICALL_*`,
 /// `Z/Zend/zend_vm_def.h:9786`): the zval as it stands, with an owner

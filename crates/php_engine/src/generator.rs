@@ -1059,14 +1059,7 @@ fn next_delegated(req: &mut Request, generator: PhpObject) -> bool {
             };
             let value = exec::value_of(value);
             req.addref(&value);
-            let key = match key {
-                php_heap::Key::Long(n) => Value::int(n),
-                php_heap::Key::Str(s) => {
-                    let s = Value::string(PhpString::of(s));
-                    req.addref(&s);
-                    s
-                }
-            };
+            let key = exec::key_value(req, key);
             let old = with(req, generator, |g| {
                 g.values = Delegated::Array {
                     array,

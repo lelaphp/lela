@@ -18182,11 +18182,7 @@ fn fetched_element(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             ));
         }
     };
-    if op.out_type != OperandKind::Unused {
-        let key = match fe_key(req, key) {
-            Ok(key) => key,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
+    if let Some(key) = fe_key_kept(req, op, key) {
         set_out(req, frame, code, op, key);
     }
     let assigned = fe_assign(req, frame, code, op, value);
@@ -18233,20 +18229,6 @@ fn fe_fetch_iterator(
     let assigned = fe_assign(req, frame, code, op, current);
     req.release(current);
     assigned
-}
-
-/// The key a fetch writes to its `result` (`RETURN_VALUE_USED`): an
-/// integer as it stands, and a string with one more owner
-/// (`ZVAL_STR_COPY`).
-fn fe_key(req: &mut Request, key: php_heap::Key) -> Result<Value, Thrown> {
-    Ok(match key {
-        php_heap::Key::Long(n) => Value::int(n),
-        php_heap::Key::Str(s) => {
-            let s = Value::string(PhpString::of(s));
-            req.addref(&s);
-            s
-        }
-    })
 }
 
 /// The value a by-value fetch hands its CV, `zend_assign_to_variable`
@@ -18720,13 +18702,12 @@ fn fe_walk_array_rw(
         }
         element
     };
-    Ok(fe_key_kept(req, op, key).map(|key| {
-        Some(BoundRw {
-            key,
-            cell: element,
-            owned: false,
-        })
-    }))
+    let key = fe_key_kept(req, op, key);
+    Ok(Ok(Some(BoundRw {
+        key,
+        cell: element,
+        owned: false,
+    })))
 }
 
 /// `FE_FETCH_RW` over an object walked by its properties: the next one
@@ -18763,7 +18744,8 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
         Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
-    Ok(fe_key_kept(req, op, key).map(|key| Some(BoundRw { key, cell, owned })))
+    let key = fe_key_kept(req, op, key);
+    Ok(Ok(Some(BoundRw { key, cell, owned })))
 }
 
 /// `FE_FETCH_RW`'s iterator arm (`Z/Zend/zend_vm_def.h:7358`): the
@@ -18815,16 +18797,9 @@ fn fe_iterator_rw(req: &mut Request, iterator: PhpObject, op: &Opline) -> FoundR
 }
 
 /// The key a fetch writes to its `result` where the opline keeps one
-/// (`RETURN_VALUE_USED`), [`fe_key`]'s value, and none otherwise.
-fn fe_key_kept(
-    req: &mut Request,
-    op: &Opline,
-    key: php_heap::Key,
-) -> Result<Option<Value>, Thrown> {
-    if op.out_type == OperandKind::Unused {
-        return Ok(None);
-    }
-    fe_key(req, key).map(Some)
+/// (`RETURN_VALUE_USED`), [`exec::key_value`]'s value, and none otherwise.
+fn fe_key_kept(req: &mut Request, op: &Opline, key: php_heap::Key) -> Option<Value> {
+    (op.out_type != OperandKind::Unused).then(|| exec::key_value(req, key))
 }
 
 /// `ZEND_FE_FREE` (`Z/Zend/zend_vm_def.h:3260`): the `VAR` the reset
