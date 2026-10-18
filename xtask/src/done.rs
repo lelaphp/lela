@@ -252,20 +252,10 @@ impl Verdict {
             out.push_str(&self.did_not_run());
             out.push('\n');
         } else {
-            out.push_str("unmet:\n");
-            for line in &self.unmet {
-                out.push_str("- ");
-                out.push_str(line);
-                out.push('\n');
-            }
+            bullets(&mut out, "unmet", &self.unmet);
         }
         if !self.notes.is_empty() {
-            out.push_str("notes:\n");
-            for line in &self.notes {
-                out.push_str("- ");
-                out.push_str(line);
-                out.push('\n');
-            }
+            bullets(&mut out, "notes", &self.notes);
         }
         out
     }
@@ -274,11 +264,7 @@ impl Verdict {
     /// as the snapshot the verdict was judged over holds it.
     pub(crate) fn reading(&self, manifest: &Manifest, snapshot: &Snapshot) -> Result<Reading> {
         let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
-        reading.status = if self.met() {
-            Status::Pass
-        } else {
-            Status::Fail
-        };
+        reading.status = Status::of(self.met());
         reading.count("changed", self.changed.len() as u64)?;
         reading.count("crates", self.crates.len() as u64)?;
         reading.count("unmet", self.unmet.len() as u64)?;
@@ -1102,6 +1088,17 @@ fn over_the_diff(
         ));
     }
     Ok(())
+}
+
+/// `head` and a colon on a line, then each of `lines` as a bullet.
+fn bullets(out: &mut String, head: &str, lines: &[String]) {
+    out.push_str(head);
+    out.push_str(":\n");
+    for line in lines {
+        out.push_str("- ");
+        out.push_str(line);
+        out.push('\n');
+    }
 }
 
 /// The command: judge, write the reading, print the list, fail while

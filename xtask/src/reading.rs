@@ -272,8 +272,13 @@ impl Reading {
     /// Record one count under `key`.
     pub fn count(&mut self, key: &str, n: u64) -> Result<()> {
         let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;
-        self.numbers.insert(key.to_owned(), n.into());
+        self.set(key, n);
         Ok(())
+    }
+
+    /// Record one number under `key`, a measurement or a count that fits.
+    pub(crate) fn set(&mut self, key: impl Into<String>, n: impl Into<Number>) {
+        self.numbers.insert(key.into(), n.into());
     }
 
     /// One group of the reading's fold: a count under a key the run
@@ -466,6 +471,11 @@ pub enum Status {
 }
 
 impl Status {
+    /// A pass where `met`, a fail where not.
+    pub(crate) fn of(met: bool) -> Status {
+        if met { Status::Pass } else { Status::Fail }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Pass => "pass",
