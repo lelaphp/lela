@@ -204,19 +204,17 @@ enum Offset<'a> {
 /// or the class's name, php's `ZEND_AST_CLASS_CONST`,
 /// `ZEND_AST_STATIC_PROP` and `ZEND_AST_CLASS_NAME`, which the grammar
 /// tells apart by the `$` and the keyword.
-enum Scoped {
+enum Scoped<'a> {
     Constant {
         class: ClassSpec,
-        name: ScopedName,
+        name: ScopedName<'a>,
     },
     Property {
         class: ClassSpec,
-        name: ScopedName,
+        name: ScopedName<'a>,
     },
     /// `C::class`, php's `ZEND_AST_CLASS_NAME`.
-    ClassName {
-        class: ClassSpec,
-    },
+    ClassName { class: ClassSpec },
 }
 
 /// The operands of an opline over a class's property, as
@@ -236,9 +234,9 @@ struct StaticOperands {
 /// other operand. One `$` of `A::$$n` is the property's own, so the
 /// name is the value of `$n`, php's `ZEND_AST_VAR` under
 /// `ZEND_AST_STATIC_PROP`.
-#[derive(Clone)]
-enum ScopedName {
-    Written(Vec<u8>),
+#[derive(Clone, Copy)]
+enum ScopedName<'a> {
+    Written(&'a [u8]),
     Computed(tree::Expr),
 }
 
@@ -317,8 +315,8 @@ enum ClassOperand {
 /// (`IS_CONST`); `self`, `parent` or `static`, the fetch type and its
 /// flags in the operand's number (`IS_UNUSED`); or the `VAR` a
 /// `FETCH_CLASS` wrote the class into.
-enum ClassRef {
-    Named(Vec<u8>),
+enum ClassRef<'a> {
+    Named(&'a [u8]),
     Scope(u32),
     Fetched(u32),
 }
@@ -2561,10 +2559,10 @@ impl<'a> Emit<'a> {
     /// string(2) "xx"
     /// string(1) "x"
     /// ```
-    fn constant_class(&mut self, operand: ClassOperand) -> Result<Option<Vec<u8>>, CompileError> {
+    fn constant_class(&mut self, operand: ClassOperand) -> Result<Option<&'a [u8]>, CompileError> {
         match operand {
-            ClassOperand::Name(token) => Ok(Some(self.class_name(self.text(token)).to_vec())),
-            ClassOperand::Value(value) => self.fq_class_name(value).map(Some),
+            ClassOperand::Name(token) => Ok(Some(self.class_name(self.text(token)))),
+            ClassOperand::Value(value) => Ok(Some(self.arena.copy(&self.fq_class_name(value)?))),
             ClassOperand::Expr(_) => Ok(None),
         }
     }
@@ -2682,7 +2680,7 @@ impl<'a> Emit<'a> {
         &self,
         id: NodeId<tree::ScopedAccessExpr>,
         line: u32,
-    ) -> Result<Scoped, CompileError> {
+    ) -> Result<Scoped<'a>, CompileError> {
         let node = &self.parsed.tree[id];
         let class = ClassSpec::of(node.scope);
         let tree = &self.parsed.tree;
@@ -2698,7 +2696,7 @@ impl<'a> Emit<'a> {
                 };
                 Ok(Scoped::Constant {
                     class,
-                    name: ScopedName::Written(self.text(name).to_vec()),
+                    name: ScopedName::Written(self.text(name)),
                 })
             }
             Some(tree::ScopedSelector::BracedMember(braced)) => Ok(Scoped::Constant {
@@ -2711,7 +2709,7 @@ impl<'a> Emit<'a> {
                 };
                 Ok(Scoped::Property {
                     class,
-                    name: ScopedName::Written(self.variable_name(var).to_vec()),
+                    name: ScopedName::Written(self.variable_name(var)),
                 })
             }
             Some(tree::ScopedSelector::VarVarExpr(var)) => Ok(Scoped::Property {
@@ -7597,13 +7595,13 @@ impl<'a> Emit<'a> {
                     // `zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST`
                     // arm: a constant of the class being declared is
                     // its value ([`Self::active_class_constant`]).
-                    if let Some(value) = self.active_class_constant(&class, &name)? {
+                    if let Some(value) = self.active_class_constant(&class, name)? {
                         return self.folded(value);
                     }
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
                         class_kind,
-                        name: Name(name.into_boxed_slice()),
+                        name: Name(name.into()),
                         line,
                     })
                 }
@@ -15535,7 +15533,7 @@ impl<'a> Emit<'a> {
                 let operand = self.evaluated_class(class)?;
                 let folded = match self.folded_name(&name)? {
                     Some(name) => match self.constant_class(operand)? {
-                        Some(class) => self.active_class_constant(&class, &name)?,
+                        Some(class) => self.active_class_constant(class, name)?,
                         None => None,
                     },
                     None => None,
@@ -16598,7 +16596,7 @@ impl<'a> Emit<'a> {
                 return self.call_common(&plan, arguments, None, Opcode::DoFcall, line);
             }
         };
-        let method = method.as_slice();
+        let method: &[u8] = method;
         let constructor = method.eq_ignore_ascii_case(b"__construct");
         let known = match &class {
             _ if constructor => None,
@@ -16699,8 +16697,8 @@ impl<'a> Emit<'a> {
         }
         let (op2_type, op2, out, known) = match self.method_name(method)? {
             MethodName::Constant(method) => {
-                let at = self.func_name_literal(&method)?;
-                let known = self.known_on_this(op1_type, &method);
+                let at = self.func_name_literal(method)?;
+                let known = self.known_on_this(op1_type, method);
                 (OperandKind::Const, at, self.cache_slots(2), known)
             }
             MethodName::Computed((kind, at)) => (kind, at, 0, None),
@@ -16972,13 +16970,17 @@ impl<'a> Emit<'a> {
     /// ```expect exit=255
     /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
     /// ```
-    fn class_const(&mut self, class: ClassSpec, name: &ScopedName) -> Result<Where, CompileError> {
+    fn class_const(
+        &mut self,
+        class: ClassSpec,
+        name: &ScopedName<'a>,
+    ) -> Result<Where, CompileError> {
         // Both children evaluated, the class first; the class resolved
         // only where the name folded to a string.
         let operand = self.evaluated_class(class)?;
         if let Some(written) = self.folded_name(name)?
             && let Some(resolved) = self.constant_class(operand)?
-            && let Some(value) = self.active_class_constant(&resolved, &written)?
+            && let Some(value) = self.active_class_constant(resolved, written)?
         {
             return Ok(Where::Constant(value));
         }
@@ -17013,12 +17015,12 @@ impl<'a> Emit<'a> {
     /// out, or the string a computed one folds to, so `C::{'X'}` and
     /// `C::{'X' . ''}` are `C::X`; nothing where it folds to no string or
     /// does not fold.
-    fn folded_name(&mut self, name: &ScopedName) -> Result<Option<Vec<u8>>, CompileError> {
+    fn folded_name(&mut self, name: &ScopedName<'a>) -> Result<Option<&'a [u8]>, CompileError> {
         Ok(match name {
-            ScopedName::Written(bytes) => Some(bytes.clone()),
+            ScopedName::Written(bytes) => Some(*bytes),
             ScopedName::Computed(expr) => self
                 .eval_const(*expr)?
-                .and_then(|value| value.as_str().map(|s| s.bytes().to_vec())),
+                .and_then(|value| value.as_str().map(|s| self.arena.copy(s.bytes()))),
         })
     }
 
@@ -17391,7 +17393,7 @@ impl<'a> Emit<'a> {
     /// the class goes is the class it names as `ZEND_NAME_FQ`
     /// ([`Self::fq_class_name`]); any other expression is
     /// [`Self::computed_class_ref`]'s.
-    fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef, CompileError> {
+    fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef<'a>, CompileError> {
         let operand = self.decoded_class(class)?;
         self.class_ref_of(operand, flags)
     }
@@ -17401,17 +17403,21 @@ impl<'a> Emit<'a> {
         &mut self,
         operand: ClassOperand,
         flags: u32,
-    ) -> Result<ClassRef, CompileError> {
+    ) -> Result<ClassRef<'a>, CompileError> {
         let written = match operand {
             ClassOperand::Name(token) => self.text(token),
-            ClassOperand::Value(value) => return Ok(ClassRef::Named(self.fq_class_name(value)?)),
+            ClassOperand::Value(value) => {
+                return Ok(ClassRef::Named(
+                    self.arena.copy(&self.fq_class_name(value)?),
+                ));
+            }
             ClassOperand::Expr(expr) => return self.computed_class_ref(expr, flags),
         };
         if written.starts_with(b"\\") {
-            return Ok(ClassRef::Named(self.class_name(written).to_vec()));
+            return Ok(ClassRef::Named(self.class_name(written)));
         }
         match class_fetch_type(written) {
-            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.class_name(written).to_vec())),
+            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.class_name(written))),
             fetch => {
                 self.ensure_valid_class_fetch_type(fetch)?;
                 Ok(ClassRef::Scope(fetch | flags))
@@ -17429,7 +17435,7 @@ impl<'a> Emit<'a> {
         &mut self,
         expr: tree::Expr,
         flags: u32,
-    ) -> Result<ClassRef, CompileError> {
+    ) -> Result<ClassRef<'a>, CompileError> {
         let value = match self.expr(expr)? {
             Where::Constant(value) => value,
             value => {
@@ -17451,7 +17457,9 @@ impl<'a> Emit<'a> {
             return Err(self.compile_error("Illegal class name"));
         };
         match class_fetch_type(name.bytes()) {
-            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.fq_name(name.bytes())?)),
+            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(
+                self.arena.copy(&self.fq_name(name.bytes())?),
+            )),
             fetch => {
                 self.ensure_valid_class_fetch_type(fetch)?;
                 Ok(ClassRef::Scope(fetch | flags))
@@ -17472,7 +17480,7 @@ impl<'a> Emit<'a> {
     /// NULL
     /// NULL
     /// ```
-    fn class_link(&mut self, class: ClassSpec) -> Result<ClassRef, CompileError> {
+    fn class_link(&mut self, class: ClassSpec) -> Result<ClassRef<'a>, CompileError> {
         if let ClassSpec::Expr(expr) = class {
             self.chain_inner = Some(self.peel(expr));
         }

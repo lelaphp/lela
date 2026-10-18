@@ -25,7 +25,10 @@ pub(super) enum Target<'a> {
     /// `$o->name` or `$o->$name`, `ZEND_AST_PROP`.
     Prop { object: tree::Expr, name: Member },
     /// `C::$name`, `ZEND_AST_STATIC_PROP`.
-    StaticProp { class: ClassSpec, name: ScopedName },
+    StaticProp {
+        class: ClassSpec,
+        name: ScopedName<'a>,
+    },
     /// `list(…)` or `[…]`, `ZEND_AST_ARRAY` as a target.
     List(List<'a>),
     /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`,
