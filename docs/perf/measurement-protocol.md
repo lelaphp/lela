@@ -202,6 +202,7 @@ says which ticket first read each.
 |---|---|---|
 | `bench_quiet.php` | #1808 | php-src's `Zend/bench.php` with `end_test` and `total` printing names only, so its bytes are deterministic |
 | `calls.php` | #2011 | #1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows |
+| `frame_chain.php` | #1301 | recursive user calls, then a loop of native calls: the bar #1384 holds the readable frame header to |
 | `natives.php` | #2209 | a loop of native calls, each return kind #2209 names |
 | `ucall.php` | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |
 
