@@ -61,6 +61,12 @@ struct ConstantRow {
     /// the engine's own shape; none where the memory limit refused it,
     /// whose fatal ends the request.
     room: Option<Emalloc>,
+    /// `c->name` where the registration made it, a host's or an
+    /// extension's name through `zend_string_init_interned`
+    /// ([`Request::interned`]), released with the row; none for
+    /// `define()`'s and `const`'s, which is the program's own string, or
+    /// where the memory limit refused it.
+    named: Option<Owner<PhpString>>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
     /// its namespace lowered, which every lookup compares against.
@@ -75,12 +81,14 @@ struct ConstantRow {
 impl ConstantRow {
     fn new(
         room: Option<Emalloc>,
+        named: Option<Owner<PhpString>>,
         owner: ConstantOwner,
         name: Vec<u8>,
         value: Value,
     ) -> ConstantRow {
         ConstantRow {
             room,
+            named,
             owner,
             given: name.clone(),
             name,
@@ -186,6 +194,9 @@ impl Request {
         if let Some(room) = row.room {
             room.free(self);
         }
+        if let Some(named) = row.named {
+            named.give_up(self);
+        }
     }
 
     /// `zend_register_constant`'s `pemalloc(sizeof(zend_constant))` for a
@@ -204,12 +215,13 @@ impl Request {
     }
 
     /// The name of a constant a host or an extension registers while the
-    /// request runs, `zend_string_init_interned`: the engine's string
-    /// where its table holds the name, as opcache's interned buffer
-    /// answers, else one of the request's own. The memory limit's fatal
-    /// is recorded and ends the request.
-    fn constant_name(&mut self, name: &[u8]) {
-        self.interned(name).ok();
+    /// request runs, `zend_string_init_interned` ([`Request::interned`]):
+    /// a string of the request's own before its first file compiles, as
+    /// `do_cli` and `cli_register_file_handles` register theirs, and the
+    /// engine's where its table holds the name after. The memory limit's
+    /// fatal is recorded and ends the request.
+    fn constant_name(&mut self, name: &[u8]) -> Option<Owner<PhpString>> {
+        self.interned(name).ok()
     }
 
     /// `PHP_SAPI` as `php_module_startup` registers it: the engine's
@@ -359,6 +371,7 @@ impl Request {
         let room = self.constant_room();
         self.constants.push(ConstantRow {
             room,
+            named: None,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -415,10 +428,11 @@ impl Request {
     /// `Core`'s group and before what the program defines. A sink: the
     /// row takes the value's owner.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
-        self.constant_name(name);
+        let named = self.constant_name(name);
         let room = self.constant_room();
         self.constants.push(ConstantRow::new(
             room,
+            named,
             ConstantOwner::Core,
             name.to_vec(),
             value.hand_on(),
@@ -455,10 +469,11 @@ impl Request {
             return false;
         }
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
-        self.constant_name(name);
+        let named = self.constant_name(name);
         let room = self.constant_room();
         self.constants.push(ConstantRow {
             room,
+            named,
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
             given: name.to_vec(),

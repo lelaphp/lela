@@ -2644,7 +2644,7 @@ pub(crate) fn starting_statics(
         } else {
             value_of(var.value)
         };
-        let set = req.interned(&var.name.0).and_then(|name| {
+        let set = req.declared_string(&var.name.0).and_then(|name| {
             let name = Owner::take(req, crate::api::values::Key::Str(name));
             table.set(req, name, Owner::take(req, value))
         });

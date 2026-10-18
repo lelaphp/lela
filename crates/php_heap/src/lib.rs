@@ -117,10 +117,11 @@ pub struct Heap {
     /// anything else of the request's ([`Heap::new`]), carved and never
     /// freed a piece at a time ([`Heap::carve`]).
     arena: zend_arena::ZendArena,
-    /// The strings this request interned, live until the request ends
-    /// (`Z/Zend/zend_string.c:346-353`): the request's own memory and
-    /// counted as such, in a table of the system allocator's, which
-    /// nothing counts, as opcache keeps php's ([`string::Table`]).
+    /// The strings the units this request compiled for itself hold and
+    /// the names its declarations are read by, each once and live until
+    /// the request ends ([`Heap`]'s [`Intern`]): the request's own memory
+    /// and counted as such, in a table of the system allocator's, which
+    /// nothing counts ([`string::Table`]).
     interned: string::Table,
     /// php's `EG(ht_iterators)`: the positions the walks of this
     /// request's tables are registered at.
@@ -388,22 +389,11 @@ impl Heap {
         Ok(unsafe { Str::init_with(at, size - header + l, 0, fill) })
     }
 
-    /// How many strings this request has interned, php's
-    /// `zend_hash_num_elements(&CG(interned_strings))`.
+    /// How many strings this request's own table holds ([`Heap`]'s
+    /// [`Intern`]).
     #[must_use]
     pub fn interned(&self) -> usize {
         self.interned.count()
-    }
-
-    /// The string for `bytes` the frozen table or this request's
-    /// interned table already holds, php's `zend_interned_string_ht_lookup`
-    /// over `CG(interned_strings)`; nothing is interned.
-    #[must_use]
-    pub fn interned_find(&self, bytes: &[u8]) -> Option<Str> {
-        if let Some(frozen) = string::frozen_string(bytes) {
-            return Some(frozen);
-        }
-        self.interned.find(string::hash_func(bytes), bytes)
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed
@@ -849,17 +839,22 @@ pub(crate) enum Last {
 }
 
 impl Intern for Heap {
-    /// php's `zend_string_init_interned_request`
-    /// (`Z/Zend/zend_string.c:297-327`): the frozen table, then this
-    /// request's own, then a short-living interned string out of this
-    /// request's memory, which the request's end takes with everything
-    /// else. It is flagged interned and never persistent, so no release
-    /// frees it and no thread but this one can name it.
+    /// The home of the strings a declaration of this request holds: the
+    /// constants and names of a unit compiled for this request alone, an
+    /// `eval` or an uncached include, as its compile's
+    /// `zend_new_interned_string` keeps them in its op arrays and class
+    /// entries, and a name read off a declaration that its unit made no
+    /// string for. The frozen table, then this request's own, then a
+    /// string out of this request's memory at the size `zend_string_init`
+    /// takes, which the request's end takes with everything else. It is
+    /// flagged interned and never persistent, so no release frees it and
+    /// no thread but this one can name it, and the table that finds it
+    /// again costs nothing ([`string::Table`]).
     ///
-    /// The string costs the request its own bytes, the size
-    /// `accel_init_interned_string_for_php`'s `zend_string_init` takes
-    /// under opcache, and the table that finds it again nothing
-    /// ([`string::Table`]).
+    /// It is not php's `zend_string_init_interned`: under opcache that is
+    /// `accel_init_interned_string_for_php`, a string of its caller's own
+    /// where opcache's buffer has none, which a request makes with
+    /// [`Heap::string`] and never finds again.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
         if let Some(frozen) = string::frozen_string(bytes) {
             return Ok(frozen);
