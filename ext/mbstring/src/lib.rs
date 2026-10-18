@@ -44,7 +44,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::Request;
+use php_ext::request::{InfoRow, Request};
 use php_ext::values::{Owner, PhpArray, PhpString};
 use settings::{Mode, State, Substitute, named_or_pass, settings};
 use tables::{MBFL_VERSION_MAJOR, MBFL_VERSION_MINOR, MBFL_VERSION_TEENY};
@@ -225,16 +225,53 @@ fn info(req: &mut Request) {
         &["HTTP input encoding translation", translation],
         &["libmbfl version", &version],
     ]);
-    req.info_table(&[&[
+    req.info_rows(&[InfoRow::Header(&[
         "mbstring extension makes use of \"streamable kanji code filter and converter\", which is distributed under the GNU Lesser General Public License version 2.1.",
-    ]]);
+    ])]);
     regex::info(req);
     display_ini_entries(req);
 }
 
 /// `DISPLAY_INI_ENTRIES()`: each entry's local and master value, a
 /// `STD_PHP_INI_BOOLEAN` one through `zend_ini_boolean_displayer_cb` as
-/// `On` or `Off`, an empty one `no value`.
+/// `On` or `Off`, in `display_ini_entries`' table, an empty one `no
+/// value`. In HTML the table is php's directive table and the licence
+/// line above it a header, `php_info_print_table_header(1, ..)`, as
+/// `phpinfo()`'s page shows them (#2337):
+///
+/// ```php
+/// ob_start(); (new ReflectionExtension('mbstring'))->info(); $page = ob_get_clean();
+/// echo strstr($page, '<tr class="h"><th>mbstring');
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// <tr class="h"><th>mbstring extension makes use of "streamable kanji code filter and converter", which is distributed under the GNU Lesser General Public License version 2.1.</th></tr>
+/// </table>
+/// <table>
+/// <tr><td class="e">Multibyte (japanese) regex support </td><td class="v">enabled </td></tr>
+/// <tr><td class="e">Multibyte regex (oniguruma) version </td><td class="v">6.9.10 </td></tr>
+/// </table>
+/// <table>
+/// <tr class="h"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>
+/// <tr><td class="e">mbstring.language</td><td class="v">neutral</td><td class="v">neutral</td></tr>
+/// <tr><td class="e">mbstring.detect_order</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// <tr><td class="e">mbstring.http_input</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// <tr><td class="e">mbstring.http_output</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// <tr><td class="e">mbstring.internal_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// <tr><td class="e">mbstring.substitute_character</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
+/// <tr><td class="e">mbstring.encoding_translation</td><td class="v">Off</td><td class="v">Off</td></tr>
+/// <tr><td class="e">mbstring.http_output_conv_mimetypes</td><td class="v">^(text/|application/xhtml\+xml)</td><td class="v">^(text/|application/xhtml\+xml)</td></tr>
+/// <tr><td class="e">mbstring.strict_detection</td><td class="v">Off</td><td class="v">Off</td></tr>
+/// <tr><td class="e">mbstring.regex_stack_limit</td><td class="v">100000</td><td class="v">100000</td></tr>
+/// <tr><td class="e">mbstring.regex_retry_limit</td><td class="v">1000000</td><td class="v">1000000</td></tr>
+/// </table>
+/// ```
 fn display_ini_entries(req: &mut Request) {
     let Some(me) = req.extension_named(b"mbstring") else {
         return;
@@ -248,11 +285,7 @@ fn display_ini_entries(req: &mut Request) {
             })
             .to_owned();
         }
-        if value.is_empty() {
-            "no value".to_owned()
-        } else {
-            String::from_utf8_lossy(value).into_owned()
-        }
+        String::from_utf8_lossy(value).into_owned()
     };
     let rows: Vec<[String; 3]> = req
         .extension_ini(me)
@@ -266,13 +299,10 @@ fn display_ini_entries(req: &mut Request) {
             ]
         })
         .collect();
-    let mut table: Vec<[&str; 3]> = vec![["Directive", "Local Value", "Master Value"]];
-    table.extend(
-        rows.iter()
-            .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()]),
-    );
-    let table: Vec<&[&str]> = table.iter().map(<[&str; 3]>::as_slice).collect();
-    req.info_table(&table);
+    let rows: Vec<[&str; 3]> = (rows.iter())
+        .map(|[n, l, m]| [n.as_str(), l.as_str(), m.as_str()])
+        .collect();
+    req.info_ini_table(&rows);
 }
 
 /// `mb_language(?string $language = null): string|bool`.
