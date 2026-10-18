@@ -80,6 +80,7 @@ use crate::operand::{ByKind, Operand};
 use crate::ops::inline::{self, Arith};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
 use crate::tier::{Next, SafepointIdx, Site, Stepped, Tier, continued};
+use branch::Branch;
 use php_unit::Opcode;
 
 /// What one handler did to the frame chain, and the fatal that ends the
@@ -6459,7 +6460,7 @@ pub(crate) fn isset_isempty_var<T: Tier>(
             Err(thrown) => return threw(req, frame, &thrown),
         },
     };
-    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, Ok(Value::bool(answer)))
 }
 
 /// The name an `ISSET_ISEMPTY_VAR` asks after,
@@ -10901,7 +10902,7 @@ pub(crate) fn instanceof<T: Tier>(
         (None, _) => false,
     };
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    smart_branch::<T>(req, frame, code, op, Ok(Value::bool(answer)))
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, Ok(Value::bool(answer)))
 }
 
 /// `zend_fetch_class_by_name` with `ZEND_FETCH_CLASS_EXCEPTION` over a
@@ -12601,14 +12602,26 @@ pub(crate) fn assign_obj_ref<T: Tier>(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign_obj<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn assign_obj<
+    T: Tier,
+    A: Operand + Default,
+    B: Operand + Default,
+    D: Operand + Default,
+>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_assign_obj(req, frame, code, op, at, (A::default(), B::default())) {
+    if let Some(edge) = inline_assign_obj(
+        req,
+        frame,
+        code,
+        op,
+        at,
+        (A::default(), B::default(), D::default()),
+    ) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -12656,7 +12669,7 @@ fn inline_assign_obj(
     code: &OpArray,
     op: &Opline,
     at: u32,
-    (a, b): (impl Operand, impl Operand),
+    (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let object = inline_receiver(req, frame, code, op, a, b)?;
     let (slot, typed) = req.cached_property(
@@ -12668,13 +12681,17 @@ fn inline_assign_obj(
         let held = place.read();
         !typed && !held.is_undef() && !held.is_refcounted()
     })?;
-    let z = data_value(req, frame, code, op, at)?;
+    let z = data_value(req, frame, code, op, at, data)?;
     place.write(z);
     Some(Ok(Next::jump(at.saturating_add(2))))
 }
 
 /// The `OP_DATA` value the inline path of `ASSIGN_OBJ` or `ASSIGN_DIM`
-/// takes, by [`taken_value`]'s rule.
+/// takes, by [`taken_value`]'s rule: the `OP_DATA` opline after `at`,
+/// whose `op1` is of the kind `data` is, as the assignment's handler was
+/// resolved over it where its unit was published (`php_unit::Handler`),
+/// php's `_OP_DATA_CV` and the rest, so neither its opcode nor its kind
+/// is tested here.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn data_value(
@@ -12683,10 +12700,10 @@ fn data_value(
     code: &OpArray,
     op: &Opline,
     at: u32,
+    data: impl Operand,
 ) -> Option<Zval> {
-    let data =
-        exec::opline_at(code, at.saturating_add(1)).filter(|data| data.opcode == Opcode::OpData)?;
-    taken_value(req, frame, code, op, ByKind(data.op1_type), data.op1)
+    let field = exec::opline_at(code, at.saturating_add(1))?.op1;
+    taken_value(req, frame, code, op, data, field)
 }
 
 /// The value an assignment's inline path takes, one rule for `ASSIGN`'s
@@ -14206,14 +14223,26 @@ fn assign_text_dim(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign_dim<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn assign_dim<
+    T: Tier,
+    A: Operand + Default,
+    B: Operand + Default,
+    D: Operand + Default,
+>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_assign_dim(req, frame, code, op, at, (A::default(), B::default())) {
+    if let Some(edge) = inline_assign_dim(
+        req,
+        frame,
+        code,
+        op,
+        at,
+        (A::default(), B::default(), D::default()),
+    ) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -14262,7 +14291,7 @@ fn inline_assign_dim(
     code: &OpArray,
     op: &Opline,
     at: u32,
-    (a, b): (impl Operand, impl Operand),
+    (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let placed = match owned_entry(req, frame, (code, op, at), a, b)? {
         Ok(placed) => placed,
@@ -14271,7 +14300,7 @@ fn inline_assign_dim(
     if placed.entry.read().is_refcounted() {
         return None;
     }
-    let z = data_value(req, frame, code, op, at)?;
+    let z = data_value(req, frame, code, op, at, data)?;
     placed.entry.write(z);
     free_dim_operands(req, frame, code, op, (a, placed.free_dim));
     Some(Ok(Next::jump(at.saturating_add(2))))
@@ -19578,14 +19607,14 @@ fn rope_piece(
 /// `zend_compare`, and those are the kernel's first arms.
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default, S: Branch>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_compare::<T>(
+    if let Some(edge) = inline_compare::<T, S>(
         req,
         frame,
         code,
@@ -19597,19 +19626,19 @@ pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    compared_branch::<T>(req, frame, code, op, crate::ops::is_smaller)
+    compared_branch::<T, S>(req, frame, code, op, crate::ops::is_smaller)
 }
 
 /// `ZEND_IS_SMALLER_OR_EQUAL`: [`crate::ops::is_smaller_or_equal`], the
 /// same way, and the opcode `>=` is with its operands swapped.
-pub(crate) fn is_smaller_or_equal<T: Tier>(
+pub(crate) fn is_smaller_or_equal<T: Tier, S: Branch>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
     let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_compare::<T>(
+    if let Some(edge) = inline_compare::<T, S>(
         req,
         frame,
         code,
@@ -19620,7 +19649,7 @@ pub(crate) fn is_smaller_or_equal<T: Tier>(
     ) {
         return edge;
     }
-    compared_branch::<T>(req, frame, code, op, crate::ops::is_smaller_or_equal)
+    compared_branch::<T, S>(req, frame, code, op, crate::ops::is_smaller_or_equal)
 }
 
 /// `ZEND_IS_EQUAL`: [`crate::ops::is_equal`], the same way. Each
@@ -19628,14 +19657,14 @@ pub(crate) fn is_smaller_or_equal<T: Tier>(
 /// ([`smart_branch`]).
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default, S: Branch>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_compare::<T>(
+    if let Some(edge) = inline_compare::<T, S>(
         req,
         frame,
         code,
@@ -19647,18 +19676,18 @@ pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    compared_branch::<T>(req, frame, code, op, crate::ops::is_equal)
+    compared_branch::<T, S>(req, frame, code, op, crate::ops::is_equal)
 }
 
 /// `ZEND_IS_NOT_EQUAL`: [`crate::ops::is_not_equal`], the same way.
-pub(crate) fn is_not_equal<T: Tier>(
+pub(crate) fn is_not_equal<T: Tier, S: Branch>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
     let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_compare::<T>(
+    if let Some(edge) = inline_compare::<T, S>(
         req,
         frame,
         code,
@@ -19669,7 +19698,7 @@ pub(crate) fn is_not_equal<T: Tier>(
     ) {
         return edge;
     }
-    compared_branch::<T>(req, frame, code, op, crate::ops::is_not_equal)
+    compared_branch::<T, S>(req, frame, code, op, crate::ops::is_not_equal)
 }
 
 /// `ZEND_IS_IDENTICAL`: [`crate::ops::is_identical`], the same way, both
@@ -19690,14 +19719,14 @@ pub(crate) fn is_identical<T: Tier, A: Operand + Default, B: Operand + Default>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
-    compared_branch::<T>(req, frame, code, op, crate::ops::is_identical)
+    compared_branch::<T, branch::Peeked>(req, frame, code, op, crate::ops::is_identical)
 }
 
 /// The inline path of `ZEND_IS_IDENTICAL` (`ZEND_IS_IDENTICAL_SPEC_*`,
 /// `Z/Zend/zend_vm_def.h:477-497`): both operands, a reference followed
 /// (`GET_OP*_ZVAL_PTR_DEREF`), compared as [`inline::identical`]
 /// compares them, the answer branched on where a `JMPZ` or a `JMPNZ`
-/// is fused to it ([`fused_jump`]) and written into the temporary
+/// is fused to it ([`branch::Peeked`]) and written into the temporary
 /// otherwise. `None`, with nothing touched, for a pair the kernel
 /// compares, a temporary operand that holds an owner, which the opcode
 /// would give up (`FREE_OP1`, `FREE_OP2`), and a temporary for the answer
@@ -19739,7 +19768,7 @@ fn inline_identical<T: Tier>(
     let x = side(a.kind(), a.read(slots, code, op.op1))?;
     let y = side(b.kind(), b.read(slots, code, op.op2))?;
     let answer = inline::identical(x, y)?;
-    if let Some(jump) = fused_jump(code, op, at) {
+    if let Some(jump) = branch::Peeked::fused(code, op, at) {
         return Some(branch_fused::<T>(
             req,
             frame,
@@ -19760,7 +19789,7 @@ pub(crate) fn is_not_identical<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    compared_branch::<T>(req, frame, code, op, crate::ops::is_not_identical)
+    compared_branch::<T, branch::Peeked>(req, frame, code, op, crate::ops::is_not_identical)
 }
 
 /// `ZEND_SPACESHIP`: [`crate::ops::spaceship`], the same way, the long
@@ -19940,7 +19969,7 @@ pub(crate) fn type_check<T: Tier>(
     let computed = unary_kernel(req, frame, code, op, |_, value| {
         Ok(Value::bool(crate::ops::type_check(value, mask)))
     });
-    smart_branch::<T>(req, frame, code, op, computed)
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
 /// `ZEND_CAST`: [`crate::ops::cast`] over the operand to the type
@@ -20168,7 +20197,7 @@ pub(crate) fn isset_isempty_cv<T: Tier>(
     } else {
         crate::ops::is_true(req, &value).map(|truth| !truth)
     };
-    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `ZEND_ISSET_ISEMPTY_THIS` (`Z/Zend/zend_vm_def.h:9239`),
@@ -20248,7 +20277,7 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
         crate::ops::is_true(req, &held).map(|truth| !truth)
     };
     req.release(held);
-    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `ZEND_ISSET_ISEMPTY_DIM_OBJ` (`Z/Zend/zend_vm_def.h:7546`), what
@@ -20374,7 +20403,7 @@ pub(crate) fn isset_isempty_dim_obj<T: Tier, A: Operand + Default, B: Operand + 
 /// as `empty` reads it, its truth as [`inline::truth`] reads a scalar;
 /// a key the array has not got is unset and empty. The answer is
 /// branched on where a `JMPZ` or a `JMPNZ` is fused to it
-/// ([`fused_jump`]) and written into the temporary otherwise. `None`,
+/// ([`branch::Peeked`]) and written into the temporary otherwise. `None`,
 /// with nothing touched, as [`inline_fetch_dim_r`]'s, for an `empty` of
 /// an element whose truth is the kernel's, and a temporary holding an
 /// owner.
@@ -20413,7 +20442,7 @@ fn inline_isset_dim<T: Tier>(
         }
     };
     let out = exec::temporary_slot(code, op.out) as usize;
-    let fused = fused_jump(code, op, at);
+    let fused = branch::Peeked::fused(code, op, at);
     if fused.is_none() && slots.get(out)?.is_refcounted() {
         return None;
     }
@@ -20462,7 +20491,7 @@ fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `ZEND_ISSET_ISEMPTY_PROP_OBJ` (`Z/Zend/zend_vm_def.h:7625`), what
@@ -20532,7 +20561,7 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
     };
     member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    smart_branch::<T>(req, frame, code, op, answer.map(Value::bool))
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
 /// `zend_isset_dim_slow` and `zend_isempty_dim_slow`
@@ -20634,7 +20663,7 @@ pub(crate) fn defined<T: Tier>(
         let name = value.as_str_bytes().unwrap_or_default();
         Ok(Value::bool(crate::ops::defined(req, name)))
     });
-    smart_branch::<T>(req, frame, code, op, computed)
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
 /// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9639`), what php's
@@ -20994,7 +21023,7 @@ pub(crate) fn array_key_exists<T: Tier>(
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    smart_branch::<T>(req, frame, code, op, answered.map(Value::bool))
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, answered.map(Value::bool))
 }
 
 /// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
@@ -21530,7 +21559,7 @@ pub(crate) fn in_array<T: Tier>(
     let computed = unary_kernel(req, frame, code, op, |req, needle| {
         crate::ops::in_array(req, needle, table, strict).map(Value::bool)
     });
-    smart_branch::<T>(req, frame, code, op, computed)
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
 /// `ZEND_MATCH_ERROR`: [`crate::ops::match_unhandled_error`] over the
@@ -21571,7 +21600,7 @@ pub(crate) fn case<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let computed = compared(req, frame, code, op, crate::ops::is_equal);
-    smart_branch::<T>(req, frame, code, op, computed)
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
 /// `ZEND_CASE_STRICT`: [`crate::ops::is_identical`], the same way, for
@@ -21583,7 +21612,7 @@ pub(crate) fn case_strict<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let computed = compared(req, frame, code, op, crate::ops::is_identical);
-    smart_branch::<T>(req, frame, code, op, computed)
+    smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
 /// `ZEND_QM_ASSIGN`: the operand into the temporary `result` names, a
@@ -21896,7 +21925,7 @@ fn computed_into(
 /// A obj x 02
 /// Undefined variable $u
 /// ```
-fn smart_branch<T: Tier>(
+fn smart_branch<T: Tier, S: Branch>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
@@ -21904,7 +21933,7 @@ fn smart_branch<T: Tier>(
     computed: Result<Value, Thrown>,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    let (Some(jump), Ok(answer)) = (fused_jump(code, op, at), &computed) else {
+    let (Some(jump), Ok(answer)) = (S::fused(code, op, at), &computed) else {
         return computed_into(req, frame, code, op, computed);
     };
     if req.is_pending() {
@@ -21923,7 +21952,7 @@ fn smart_branch<T: Tier>(
 /// [`smart_branch`] over what it computed. A call of its own, so that
 /// the inline path before it keeps to the registers it needs.
 #[inline(never)]
-fn compared_branch<T: Tier>(
+fn compared_branch<T: Tier, S: Branch>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
@@ -21931,40 +21960,103 @@ fn compared_branch<T: Tier>(
     kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
 ) -> Edge {
     let computed = binary_kernel(req, frame, code, op, kernel);
-    smart_branch::<T>(req, frame, code, op, computed)
+    smart_branch::<T, S>(req, frame, code, op, computed)
 }
 
-/// The `JMPZ` or `JMPNZ` after the comparison at `at` that branches on
-/// the comparison's temporary, which is what makes the comparison's
-/// handler one over both oplines (`ZEND_VM_SMART_BRANCH`, design §5.8).
-#[inline(always)] // the comparison's inline path, which is in the loop
-#[allow(clippy::inline_always)]
-fn fused_jump<'c>(code: &'c OpArray, op: &Opline, at: u32) -> Option<&'c Opline> {
-    exec::opline_at(code, at.saturating_add(1)).filter(|jump| {
-        matches!(jump.opcode, Opcode::Jmpz | Opcode::Jmpnz)
-            && op.out_type == OperandKind::Tmp
-            && jump.op1_type == OperandKind::Tmp
-            && jump.op1 == op.out
-    })
+/// Where a comparison's answer goes (`ZEND_VM_SMART_BRANCH`, design
+/// §5.8): into its temporary, or into the `JMPZ` or `JMPNZ` after it
+/// that branches on the temporary, which makes the comparison's handler
+/// one over both oplines. A comparison whose handler line says
+/// `SMART_BRANCH` is resolved to one of three handlers where its unit is
+/// published (`php_unit::Handler`), as php's `_JMPZ` and `_JMPNZ`
+/// handlers are, so the handler knows which and reads the jump for its
+/// target alone; every other comparison peeks at the opline after it, as
+/// php's `ZEND_VM_SMART_BRANCH` reads what `pass_two` marked.
+pub(crate) mod branch {
+    use php_unit::{OpArray, Opcode, Opline};
+
+    use crate::exec;
+
+    /// The jump a comparison is fused to, and the truth that takes it:
+    /// `false` for a `JMPZ`, `true` for a `JMPNZ`.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Fused<'c> {
+        pub(crate) jump: &'c Opline,
+        pub(crate) on: bool,
+    }
+
+    /// Which of a comparison's handlers serves it.
+    pub(crate) trait Branch {
+        /// The jump fused to the comparison `op` at `at`, if any.
+        fn fused<'c>(code: &'c OpArray, op: &Opline, at: u32) -> Option<Fused<'c>>;
+    }
+
+    /// The handler with no jump fused: the answer is written.
+    pub(crate) struct Unfused;
+    /// The handler fused to the `JMPZ` after it, php's `_JMPZ`.
+    pub(crate) struct OnJmpz;
+    /// The handler fused to the `JMPNZ` after it, php's `_JMPNZ`.
+    pub(crate) struct OnJmpnz;
+    /// A comparison whose handler line says no `SMART_BRANCH`, which
+    /// tests the opline after it on every execution
+    /// ([`Opline::fuses`]).
+    pub(crate) struct Peeked;
+
+    impl Branch for Unfused {
+        #[inline(always)] // a constant, so the fused path folds away
+        #[allow(clippy::inline_always)]
+        fn fused<'c>(_: &'c OpArray, _: &Opline, _: u32) -> Option<Fused<'c>> {
+            None
+        }
+    }
+
+    impl Branch for OnJmpz {
+        #[inline(always)] // the jump's one read, in the loop
+        #[allow(clippy::inline_always)]
+        fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
+            exec::opline_at(code, at.saturating_add(1)).map(|jump| Fused { jump, on: false })
+        }
+    }
+
+    impl Branch for OnJmpnz {
+        #[inline(always)] // the jump's one read, in the loop
+        #[allow(clippy::inline_always)]
+        fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
+            exec::opline_at(code, at.saturating_add(1)).map(|jump| Fused { jump, on: true })
+        }
+    }
+
+    impl Branch for Peeked {
+        #[inline(always)] // the comparison's inline path, which is in the loop
+        #[allow(clippy::inline_always)]
+        fn fused<'c>(code: &'c OpArray, op: &Opline, at: u32) -> Option<Fused<'c>> {
+            exec::opline_at(code, at.saturating_add(1))
+                .filter(|jump| op.fuses(jump))
+                .map(|jump| Fused {
+                    jump,
+                    on: jump.opcode == Opcode::Jmpnz,
+                })
+        }
+    }
 }
 
 /// The fused jump at `at` over the comparison's `answer`: on past the
 /// jump where it is not taken, and taken as [`jumped`] takes it from the
 /// jump's own opline, a backward one raising the loop safepoint with
 /// the jump's number.
-#[inline(always)] // as `fused_jump`
+#[inline(always)] // as `branch::Branch::fused`
 #[allow(clippy::inline_always)]
 fn branch_fused<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     at: u32,
-    jump: &Opline,
+    fused: branch::Fused<'_>,
     answer: bool,
 ) -> Edge {
-    if answer != (jump.opcode == Opcode::Jmpnz) {
+    if answer != fused.on {
         return jump_to(at.saturating_add(1));
     }
-    jumped::<T>(req, frame, at, jump.op2, jump.out)
+    jumped::<T>(req, frame, at, fused.jump.op2, fused.jump.out)
 }
 
 /// The inline path of `ZEND_ADD`, `ZEND_SUB` and `ZEND_MUL` (design
@@ -22000,13 +22092,13 @@ fn inline_arith(
 /// `ZEND_IS_SMALLER_OR_EQUAL`, `ZEND_IS_EQUAL`, `ZEND_IS_NOT_EQUAL`):
 /// two numbers as they stand ordered by [`inline::order`], and the
 /// answer `holds` reads off the order branched on where a `JMPZ` or a
-/// `JMPNZ` is fused to the comparison ([`fused_jump`]), or written into
+/// `JMPNZ` is fused to the comparison ([`branch::Branch`]), or written into
 /// the temporary as a bool where none is. `None`, with nothing touched,
 /// where the operands are not two numbers, or the temporary holds an
 /// owner.
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_compare<T: Tier>(
+fn inline_compare<T: Tier, S: Branch>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
@@ -22020,7 +22112,7 @@ fn inline_compare<T: Tier>(
         a.read(slots, code, op.op1),
         b.read(slots, code, op.op2),
     )?);
-    if let Some(jump) = fused_jump(code, op, at) {
+    if let Some(jump) = S::fused(code, op, at) {
         return Some(branch_fused::<T>(
             req,
             frame,
@@ -23571,7 +23663,7 @@ mod tests {
     /// A unit whose main op array is one `JMP` to `target`, its
     /// safepoint number `number`.
     fn jumping(target: u32, number: u32) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline::default(),
@@ -23585,7 +23677,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §5.7, §5.8: a `JMP` to an earlier opline is a back-edge and
@@ -23650,7 +23743,7 @@ mod tests {
     /// constant at slot zero, aimed at the `NOP`, with safepoint number
     /// one: the shape of `for (;;)` after a body of one opline.
     fn conditional(literal: php_heap::Zval) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline::default(),
@@ -23667,7 +23760,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §5.7, §5.8: a `JMPNZ` taken to an earlier opline is the
@@ -23714,7 +23808,7 @@ mod tests {
     /// that temporary aimed at the `NOP` with safepoint number seven:
     /// `do {} while ($i < 1)` over a constant.
     fn compared_loop(left: i64) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline::default(),
@@ -23742,7 +23836,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §5.8: a comparison with a `JMPNZ` over its temporary after
@@ -23761,7 +23856,7 @@ mod tests {
         req.vm_mut().stand(frame, 1);
 
         assert_eq!(
-            served!(req, frame, at => is_smaller::<Probe, crate::operand::Const, crate::operand::Const>(
+            served!(req, frame, at => is_smaller::<Probe, crate::operand::Const, crate::operand::Const, branch::OnJmpnz>(
                 &mut req, frame, code, &op, at
             )),
             Ok(Stepped::Same(frame))
@@ -23783,7 +23878,7 @@ mod tests {
     /// A unit whose main op array is one `RETURN null`, its safepoint
     /// number `number`, as the compiler writes it into `result`.
     fn returning(number: u32) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::Return,
@@ -23796,7 +23891,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Design §4.3 seam 8: `RETURN` raises the return safepoint, with the
@@ -23845,7 +23941,7 @@ mod tests {
         let written = text(strings, b"StrLen");
         let lowered = text(strings, b"strlen");
         let argument = text(strings, b"abc");
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -23877,7 +23973,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// Interned `bytes` as a constant, `UNDEF` where the table is full.
@@ -24103,7 +24200,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitNsFcallByName,
@@ -24122,7 +24219,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -24156,7 +24254,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitFcallByName,
@@ -24173,7 +24271,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -24196,7 +24295,7 @@ mod tests {
     /// (`ZEND_LAST_CATCH`), naming no variable, its cache slot at byte
     /// zero and its jump to the `NOP` after it.
     fn catching(strings: &mut php_heap::Strings, written: &[u8], lowered: &[u8]) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -24215,7 +24314,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_CATCH` over two passes of one opline, which is what a
@@ -24278,7 +24378,7 @@ mod tests {
             literals.push(interned(strings, written));
             literals.push(interned(strings, lowered));
         }
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitStaticMethodCall,
@@ -24294,7 +24394,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_INIT_STATIC_METHOD_CALL` over two constants, twice, which
@@ -24380,7 +24481,7 @@ mod tests {
     /// `$o` and the pair `GetMessage`, `getmessage`, with the two cache
     /// slots the compiler reserves in `result` at byte zero: `$o->GetMessage()`.
     fn method_call(strings: &mut php_heap::Strings) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::InitMethodCall,
@@ -24402,7 +24503,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_INIT_METHOD_CALL` over a constant name, twice on an
@@ -24511,7 +24613,7 @@ mod tests {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -24560,7 +24662,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let named = req.class_named(Bare::resolved(b"stdclass"));
@@ -24608,7 +24711,7 @@ mod tests {
     /// A unit whose main op array is `JMP_FRAMELESS` over `name`, its
     /// jump to opline 2, its cache slot at byte 0, then two `NOP`s.
     fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![
                     Opline {
@@ -24627,7 +24730,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `ZEND_JMP_FRAMELESS` over two passes of one opline: the first
@@ -24739,7 +24843,7 @@ mod tests {
             Some(&b"seven"[..])
         );
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::FramelessIcall0,
@@ -24752,7 +24856,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
@@ -24774,7 +24879,7 @@ mod tests {
     fn a_row_the_table_has_not_is_an_internal_error() {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::FramelessIcall0,
@@ -24787,7 +24892,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
@@ -24818,7 +24924,7 @@ mod tests {
         if let Some(init) = oplines.first_mut() {
             init.op2 = 3;
         }
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines,
                 literals: unit
@@ -24831,7 +24937,8 @@ mod tests {
                 ..unit.main.clone()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
@@ -24856,7 +24963,7 @@ mod tests {
     /// `ASSIGN` of the constant `1` into the CV, its value unused:
     /// `$a = 1;`.
     fn assigning() -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::Assign,
@@ -24873,7 +24980,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// `zend_assign_to_variable`'s first test (`Z/Zend/zend_execute.h:171`):
@@ -25017,7 +25125,7 @@ mod tests {
     fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
         let engine = Engine::cli_builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let unit = Arc::new(Unit {
+        let unit = Unit {
             main: OpArray {
                 oplines: vec![Opline {
                     opcode: Opcode::QmAssign,
@@ -25034,7 +25142,8 @@ mod tests {
                 ..OpArray::default()
             },
             ..Unit::default()
-        });
+        }
+        .published();
         let frame = req.pushed(Arc::clone(&unit));
         let Ok(left) = req.string(b"an owner left behind") else {
             return;
