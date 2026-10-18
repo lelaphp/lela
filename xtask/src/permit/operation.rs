@@ -606,13 +606,7 @@ mod tests {
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
-            .args(["-c", "user.name=x", "-c", "user.email=x@x"])
-            .args([
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/var/empty",
-            ])
+            .args(crate::scratch::UNHOOKED)
             .args(args)
             .current_dir(dir)
             .output()

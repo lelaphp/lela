@@ -259,25 +259,7 @@ mod tests {
         git(&tree, &["init", "-q", "-b", "main"], None).unwrap();
         std::fs::write(tree.join("a.txt"), "a\n").unwrap();
         git(&tree, &["add", "--", "a.txt"], None).unwrap();
-        git(
-            &tree,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/var/empty",
-                "-c",
-                "user.name=x",
-                "-c",
-                "user.email=x@x",
-                "commit",
-                "-q",
-                "-m",
-                "scratch",
-            ],
-            None,
-        )
-        .unwrap();
+        crate::scratch::committing(&tree, &["commit", "-q", "-m", "scratch"]);
         tree
     }
 

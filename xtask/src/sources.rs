@@ -425,10 +425,7 @@ mod tests {
         fs::write(tree.join("xtask/src/lib.rs"), "a\n").unwrap();
         git(&tree, &["init", "-q", "-b", "main"], None).unwrap();
         git(&tree, &["add", "--", "xtask"], None).unwrap();
-        let commit = ["-c", "user.name=x", "-c", "user.email=x@x", "-c"];
-        let rest = ["commit.gpgsign=false", "-c", "core.hooksPath=/var/empty"];
-        let args = [&commit[..], &rest[..], &["commit", "-q", "-m", "scratch"]].concat();
-        git(&tree, &args, None).unwrap();
+        committing(&tree, &["commit", "-q", "-m", "scratch"]);
         let store = Store::at(tree.join("target/harness"));
         (tree, Manifest::load(&built_root()).unwrap(), store)
     }

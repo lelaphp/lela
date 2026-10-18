@@ -515,25 +515,10 @@ mod tests {
         std::fs::write(root.join("docs/one.md"), "one\n").unwrap();
         std::fs::write(root.join("docs/deeper/two.toml"), "two = 2\n").unwrap();
         std::fs::write(root.join("elsewhere.md"), "not under docs\n").unwrap();
-        let named = ["-c", "user.name=x", "-c", "user.email=x@x"];
-        let unhooked = [
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-        ];
-        for args in [
-            &["init", "-q", "-b", "main"][..],
-            &["add", "-A"],
-            &[
-                &named[..],
-                &unhooked[..],
-                &["commit", "-q", "-m", "scratch"],
-            ]
-            .concat(),
-        ] {
+        for args in [&["init", "-q", "-b", "main"][..], &["add", "-A"]] {
             super::git(&root, args, None).unwrap();
         }
+        crate::scratch::committing(&root, &["commit", "-q", "-m", "scratch"]);
         let root = root.path();
         let out = |args: &[&str], stdin: Option<&str>| {
             let mut child = std::process::Command::new("git")

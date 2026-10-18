@@ -472,41 +472,31 @@ pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
     git(to, &["add", "-A"], None)?;
     git(
         to,
-        &[
-            "-c",
-            "user.name=xtask",
-            "-c",
-            "user.email=xtask@scratch",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/var/empty",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
+        &[&UNHOOKED[..], &["commit", "-q", "-m", "scratch"]].concat(),
         None,
     )?;
     Ok(())
 }
 
-/// `git` in `dir` as a person commits there: named, unsigned and
-/// unhooked, since the real pre-commit measuring a scratch is not the
-/// test.
+/// The options before a `git` call that commits in a scratch repository,
+/// as a person commits there: named, unsigned and unhooked, since a
+/// person's `commit.gpgsign` is not the scratch's and the real pre-commit
+/// measuring a scratch is not what a test holds.
+pub(crate) const UNHOOKED: [&str; 8] = [
+    "-c",
+    "user.name=x",
+    "-c",
+    "user.email=x@x",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "core.hooksPath=/var/empty",
+];
+
+/// `git` in `dir` under [`UNHOOKED`], a failure the test's.
 #[cfg(test)]
 pub(crate) fn committing(dir: &Path, args: &[&str]) {
-    let unhooked = [
-        "-c",
-        "user.name=x",
-        "-c",
-        "user.email=x@x",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=/var/empty",
-    ];
-    if let Err(err) = git(dir, &[&unhooked[..], args].concat(), None) {
+    if let Err(err) = git(dir, &[&UNHOOKED[..], args].concat(), None) {
         panic!("git {args:?} in {}: {err:#}", dir.display());
     }
 }

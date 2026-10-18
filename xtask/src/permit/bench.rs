@@ -157,22 +157,12 @@ pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
     }
     git(dir, &["init", "-q"], None)?;
     git(dir, &["add", "."], None)?;
-    git(
-        dir,
-        &[
-            "-c",
-            "user.name=xtask",
-            "-c",
-            "user.email=xtask@scratch",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-        None,
-    )?;
+    let commit = [
+        &crate::scratch::UNHOOKED[..],
+        &["commit", "-q", "-m", "scratch"],
+    ]
+    .concat();
+    git(dir, &commit, None)?;
     Ok(())
 }
 
