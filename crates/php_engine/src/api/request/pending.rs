@@ -79,11 +79,21 @@ impl Request {
             return Some(step(self));
         }
         self.raised = Some(Raised::Throwable(object));
+        let outer = self.stepping_past.replace(object);
         let answer = step(self);
+        self.stepping_past = outer;
         if self.raised == Some(Raised::Throwable(object)) {
             self.raised = None;
         }
         Some(answer)
+    }
+
+    /// Whether `object`, standing in `EG(exception)`, is the throwable a
+    /// [`Request::while_pending`] step stands it in for, which the slot
+    /// names with no owner of its own: what the step answers naming it
+    /// takes none either.
+    pub(crate) fn stepping_past(&self, object: PhpObject) -> bool {
+        self.stepping_past == Some(object)
     }
 
     /// `zend_throw_exception_internal`'s chain

@@ -182,18 +182,19 @@ pub fn raise_while_pending(req: &mut Request, pending: &Thrown, level: Level, me
 /// hashes its file after `zend_fetch_resource_ex` threw over its
 /// `$stream_context`, is the witness, in `ext/hash`.
 ///
-/// A call the step makes into the program, a `__toString`, a user
-/// stream wrapper's method, serves nothing, as php's `zend_call_function`
-/// returns at once while a throwable is pending
-/// (`Z/Zend/zend_execute_API.c:822`), and its `Err` is the pending
-/// throwable itself: a second `Thrown` naming the same object and no
-/// second owner, which the caller neither chains under `pending` nor
-/// releases, and tells from a throwable the step raised anew by
+/// What the step answers naming the pending throwable is that throwable
+/// itself, a second `Thrown` naming the same object with no owner of its
+/// own, which the caller neither chains under `pending` nor releases,
+/// and tells from a throwable the step raised anew by
 /// `answered.exception() == pending.exception()`, as ext/intl's message
-/// formatter does. A write the engine refuses while the throwable is
-/// pending, a typed property's `TypeError` among them, answers the same
-/// object with an owner of its own, which [`Thrown::chain`] gives up, as
-/// ext/pdo's fetch into a class chains it.
+/// formatter does. Two steps answer so: a call the step makes into the
+/// program, a `__toString`, a user stream wrapper's method, which serves
+/// nothing, as php's `zend_call_function` returns at once while a
+/// throwable is pending (`Z/Zend/zend_execute_API.c:822`); and a write
+/// the engine refuses while the throwable is pending, a typed property's
+/// `TypeError`, which raises nothing over it
+/// (`zend_verify_property_type_error`), as ext/pdo's fetch into a class
+/// meets it.
 pub fn while_pending<R>(
     req: &mut Request,
     pending: &Thrown,
