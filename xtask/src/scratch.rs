@@ -63,7 +63,7 @@ const PREFIX: &str = "xtask-";
 
 /// Where [`Tree::short`] lays a tree, whatever `TMPDIR` says: one
 /// directory every session's runs share.
-const SHORT: &str = "/tmp";
+pub(crate) const SHORT: &str = "/tmp";
 
 /// What a tree's lock is named: the tree's own name and this, so the two
 /// are siblings and neither is inside the other. The lock is not in the

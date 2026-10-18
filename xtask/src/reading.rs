@@ -130,6 +130,21 @@ pub struct Reading {
     pub recipe: Option<String>,
 }
 
+/// The line an instrument prints for a reading: its status, instrument,
+/// scope and message.
+impl std::fmt::Display for Reading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Reading {
+            status,
+            instrument,
+            scope,
+            message,
+            ..
+        } = self;
+        write!(f, "{} {instrument} {scope}: {message}", status.as_str())
+    }
+}
+
 /// The instruments whose runs are taken under the oracle's recipe: a
 /// reading of one is fresh only under the pin it records (#1387).
 pub const UNDER_RECIPE: [&str; 4] = ["witness", "phpt", "crosscheck", "fpm-compare"];

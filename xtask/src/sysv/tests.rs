@@ -3,7 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
     Claim, Claims, Clock, Ctime, ENDED, Held, Journal, Kind, Namespace, Object, Runner, STARTED,
-    Standing, Swept, abandoned, alive, claimed, left, offset, second_of_day, unnamed_left, window,
+    Standing, Swept, abandoned, alive, claimed, left, machine, offset, second_of_day, unnamed_left,
+    window,
 };
 use crate::oracle::{Process, Ran};
 use crate::scratch::Tree;
@@ -788,4 +789,23 @@ fn what_a_held_claims_processes_are_named_on_is_no_other_runs_to_take() {
         !path.exists(),
         "a claim of its processes alone goes once let go"
     );
+}
+
+/// A run whose claims a test lays apart reads the claims held in the
+/// machine's directory too (#2902): a phpt subset's claim of its processes
+/// alone, held there, keeps a run laid apart from the segment its test's
+/// process left, which such a run's reclaim took as [`abandoned`] between
+/// the test ending and the subset's own sweep. Only this test's claim and
+/// pid are read; other runs' claims on the machine may stand beside it.
+#[test]
+fn a_run_laid_apart_holds_back_from_what_the_machines_held_claims_name() {
+    use std::io::Write as _;
+
+    let apart = Tree::new("sysv-apart").unwrap();
+    let own = Claim::own("phpt").unwrap();
+    assert_eq!(own.path().parent(), Some(machine().as_path()));
+    writeln!(own.journal().unwrap(), "{STARTED} 0 4294967295").unwrap();
+    assert!(!Claims::read(&apart, None).held.started.contains(&u32::MAX));
+    assert!(Claims::seen(&apart, None).held.started.contains(&u32::MAX));
+    std::fs::remove_file(own.path()).ok();
 }

@@ -363,13 +363,7 @@ fn vocab_command(
 /// what they owe, for an instrument whose exit answers something else.
 fn recorded(store: &Store, readings: &[Reading]) -> Result<Outcome> {
     for reading in readings {
-        println!(
-            "{} {} {}: {}",
-            reading.status.as_str(),
-            reading.instrument,
-            reading.scope,
-            reading.message
-        );
+        println!("{reading}");
     }
     store.record(readings)
 }

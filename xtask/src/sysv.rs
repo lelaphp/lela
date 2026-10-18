@@ -95,7 +95,12 @@
 //! of them is named on. Without that, a reclaim took a phpt subset's
 //! segment as [`abandoned`], dead creator and all, between the test that
 //! made it ending and the subset's own sweep, which then counted two of
-//! the three objects its test left (#2750).
+//! the three objects its test left (#2750). The claims are the machine's
+//! as its tables are, in one directory under `/tmp` whatever `TMPDIR`
+//! says: a run under a `TMPDIR` of its own read the claims there alone,
+//! and its reclaim took the same segment (#2902). A run a test lays apart
+//! in a directory of its own still holds back from what the machine's
+//! held claims cover.
 //!
 //! **On Linux.** The System V subsets run in a private IPC namespace where
 //! `unshare` permits, so nothing they make outlives its program, and the
@@ -125,7 +130,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -235,20 +240,20 @@ impl Standing {
         Ok(standing)
     }
 
+    /// The objects here that do not stand in `before`, by kind and id.
+    fn since(&self, before: &Standing) -> impl Iterator<Item = &Object> {
+        let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
+        self.0
+            .iter()
+            .filter(move |o| !stood.contains(&(o.kind, o.id)))
+    }
+
     /// The machine's objects as `ipcs -a` lists them.
     fn ipcs() -> Result<Standing> {
-        let listed = Command::new("ipcs")
-            .arg("-a")
-            .output()
-            .context("running ipcs -a")?;
-        if !listed.status.success() {
-            bail!(
-                "ipcs -a exited {}: {}",
-                listed.status,
-                String::from_utf8_lossy(&listed.stderr).trim()
-            );
-        }
-        Ok(Standing::parse(&String::from_utf8_lossy(&listed.stdout)))
+        Ok(Standing::parse(&printed(
+            Command::new("ipcs").arg("-a").output(),
+            "ipcs -a",
+        )?))
     }
 
     /// What `ipcs -a` printed, read by each section's header line: an
@@ -268,35 +273,28 @@ impl Standing {
                     let Some(kind) = Kind::of(letter) else {
                         continue;
                     };
-                    let text = |name: &str| {
-                        header
-                            .iter()
-                            .position(|h| *h == name)
-                            .and_then(|at| fields.get(at))
-                            .copied()
-                    };
-                    let column = |name: &str| text(name).and_then(|v| v.parse::<u64>().ok());
-                    let Some(id) = column("ID") else {
+                    let row = Row(&header, &fields);
+                    let Some(id) = row.column("ID") else {
                         continue;
                     };
-                    let key = text("KEY")
+                    let key = row
+                        .text("KEY")
                         .and_then(|k| u64::from_str_radix(k.trim_start_matches("0x"), 16).ok())
                         .unwrap_or(u64::MAX);
-                    let creator = text("CREATOR").unwrap_or_default().to_owned();
+                    let creator = row.text("CREATOR").unwrap_or_default().to_owned();
                     // `CTIME` is the last column, and a time `ipcs` leaves
                     // unset is the one word `no-entry`, so the field is the
                     // line's last.
                     let ctime = fields.last().and_then(|t| second_of_day(t)).map(Ctime::Day);
                     let (named, attached): (&[&str], _) = match kind {
-                        Kind::Memory => (&["CPID", "LPID"], column("NATTCH").unwrap_or(0)),
+                        Kind::Memory => (&["CPID", "LPID"], row.column("NATTCH").unwrap_or(0)),
                         Kind::Queue => (&["LSPID", "LRPID"], 0),
                         Kind::Semaphores => (&[], 0),
                     };
-                    let named = pids(named, column);
                     objects.push(Object {
                         kind,
                         id,
-                        named,
+                        named: row.pids(named),
                         attached,
                         key,
                         creator,
@@ -343,34 +341,28 @@ impl Standing {
                 .unwrap_or_default();
             for line in lines {
                 let fields: Vec<&str> = line.split_whitespace().collect();
-                let text = |name: &str| {
-                    header
-                        .iter()
-                        .position(|h| *h == name)
-                        .and_then(|at| fields.get(at))
-                        .copied()
-                };
-                let column = |name: &str| text(name).and_then(|v| v.parse::<u64>().ok());
-                let Some(id) = column(id) else {
+                let row = Row(&header, &fields);
+                let Some(id) = row.column(id) else {
                     continue;
                 };
                 // A `key_t` is an `int`, which the kernel prints signed.
-                let key = text("key")
+                let key = row
+                    .text("key")
                     .and_then(|k| k.parse::<i32>().ok())
                     .map_or(u64::MAX, |k| u64::from(u32::from_ne_bytes(k.to_ne_bytes())));
-                let named = pids(named, column);
                 objects.push(Object {
                     kind,
                     id,
-                    named,
+                    named: row.pids(named),
                     attached: if kind == Kind::Memory {
-                        column("nattch").unwrap_or(0)
+                        row.column("nattch").unwrap_or(0)
                     } else {
                         0
                     },
                     key,
-                    creator: text("cuid").unwrap_or_default().to_owned(),
-                    ctime: text("ctime")
+                    creator: row.text("cuid").unwrap_or_default().to_owned(),
+                    ctime: row
+                        .text("ctime")
                         .and_then(|t| t.parse::<i64>().ok())
                         .map(Ctime::Epoch),
                 });
@@ -380,15 +372,38 @@ impl Standing {
     }
 }
 
-/// The processes a listed object names, by the columns `names` its line
-/// carries them in: the nonzero ones.
-fn pids(names: &[&str], column: impl Fn(&str) -> Option<u64>) -> BTreeSet<u32> {
-    names
-        .iter()
-        .filter_map(|name| column(name))
-        .filter(|pid| *pid != 0)
-        .filter_map(|pid| u32::try_from(pid).ok())
-        .collect()
+/// One line of a listing, its fields beside the header line naming them.
+struct Row<'a>(&'a [&'a str], &'a [&'a str]);
+
+impl<'a> Row<'a> {
+    /// The field under the header's `name`.
+    fn text(&self, name: &str) -> Option<&'a str> {
+        let at = self.0.iter().position(|h| *h == name)?;
+        self.1.get(at).copied()
+    }
+
+    fn column(&self, name: &str) -> Option<u64> {
+        self.text(name)?.parse().ok()
+    }
+
+    /// The processes the line names in the columns `names`: the nonzero ones.
+    fn pids(&self, names: &[&str]) -> BTreeSet<u32> {
+        let pids = names.iter().filter_map(|name| self.column(name));
+        pids.filter(|pid| *pid != 0)
+            .filter_map(|pid| u32::try_from(pid).ok())
+            .collect()
+    }
+}
+
+/// What a command named `what` printed on its first stream, where it ran
+/// and exited 0.
+fn printed(out: std::io::Result<Output>, what: &str) -> Result<String> {
+    let out = out.with_context(|| format!("running {what}"))?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        bail!("{what} exited {}: {}", out.status, said.trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Each semaphore set's processes, by `perl`'s `semctl(GETPID)` over its
@@ -396,21 +411,10 @@ fn pids(names: &[&str], column: impl Fn(&str) -> Option<u64>) -> BTreeSet<u32> {
 /// are the ids. A set this user may not read names none.
 fn semaphore_pids(sets: &[String]) -> Result<BTreeMap<u64, BTreeSet<u32>>> {
     const READ: &str = "use IPC::SysV qw(GETPID); for my $id (@ARGV) { for (my $i = 0; defined(my $pid = semctl($id, $i, GETPID, 0)); $i++) { print \"$id $pid\\n\" if $pid + 0 > 0; } }";
-    let read = Command::new("perl")
-        .arg("-e")
-        .arg(READ)
-        .args(sets)
-        .output()
-        .context("running perl for the semaphores' processes")?;
-    if !read.status.success() {
-        bail!(
-            "perl reading the semaphores' processes exited {}: {}",
-            read.status,
-            String::from_utf8_lossy(&read.stderr).trim()
-        );
-    }
+    let perl = Command::new("perl").arg("-e").arg(READ).args(sets).output();
+    let read = printed(perl, "perl reading the semaphores' processes")?;
     let mut pids: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
-    for line in String::from_utf8_lossy(&read.stdout).lines() {
+    for line in read.lines() {
         if let Some((id, pid)) = line.split_once(' ')
             && let (Ok(id), Ok(pid)) = (id.parse(), pid.parse())
         {
@@ -429,11 +433,9 @@ pub(crate) fn left<'a>(
     spawned: &BTreeSet<u32>,
     alive: impl Fn(u32) -> bool,
 ) -> Vec<&'a Object> {
-    let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
     after
-        .0
-        .iter()
-        .filter(|o| !stood.contains(&(o.kind, o.id)) && spawned_left(o, spawned, &alive))
+        .since(before)
+        .filter(|o| spawned_left(o, spawned, &alive))
         .collect()
 }
 
@@ -498,11 +500,7 @@ impl Clock {
     /// Now, in the zone `date +%z` names, which is the one `ipcs` prints
     /// in: both read this process's environment.
     pub(crate) fn now() -> Result<Clock> {
-        let zone = Command::new("date")
-            .arg("+%z")
-            .output()
-            .context("running date +%z")?;
-        let zone = String::from_utf8_lossy(&zone.stdout);
+        let zone = printed(Command::new("date").arg("+%z").output(), "date +%z")?;
         let east =
             offset(zone.trim()).with_context(|| format!("date +%z printed {:?}", zone.trim()))?;
         Ok(Clock {
@@ -598,15 +596,12 @@ pub(crate) fn unnamed_left<'a>(
     runs: &[Ran],
     (runner, clock): (&Runner, &Clock),
 ) -> Vec<&'a Object> {
-    let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
     let windows: Vec<(i64, i64)> = runs
         .iter()
         .map(|ran| window(ran.from, ran.to, clock))
         .collect();
     after
-        .0
-        .iter()
-        .filter(|o| !stood.contains(&(o.kind, o.id)))
+        .since(before)
         .filter(|o| o.named.is_empty() && forsaken(o, runner, |_| false))
         .filter(|o| made_within(o, &windows, clock))
         .collect()
@@ -778,11 +773,22 @@ fn remove(objects: Vec<&Object>, swept: &mut Swept) -> Result<()> {
     Ok(())
 }
 
-/// Where the user's claims stand: one directory under the temporary one,
-/// read by every run that shares it.
+/// Where a run's claims stand: the machine's ([`machine`]), or the
+/// directory a test lays a run's apart in, named under [`CLAIMS`].
 fn claims() -> PathBuf {
-    std::env::temp_dir().join("xtask-sysv-claims")
+    std::env::var_os(CLAIMS).map_or_else(machine, PathBuf::from)
 }
+
+/// The directory every run of the user's on the machine meets in, under
+/// `/tmp` whatever `TMPDIR` says (#2902).
+fn machine() -> PathBuf {
+    Path::new(crate::scratch::SHORT).join(format!("xtask-sysv-claims-{}", nix::unistd::getuid()))
+}
+
+/// What names a claims directory a test lays a run's apart in; such a run
+/// still holds back from what the machine's held claims cover
+/// ([`Claims::seen`]).
+const CLAIMS: &str = "XTASK_SYSV_CLAIMS";
 
 /// What the claims other runs still hold keep from a sweep: the second
 /// from which a claim with a window covers the machine (#2563), the
@@ -887,6 +893,20 @@ impl Claims {
                 path,
                 _lock: file,
             });
+        }
+        claims
+    }
+
+    /// The claims of `dir` but `own`, as [`Claims::read`] reads them, and
+    /// those held in the machine's directory where `dir` is not it (#2902).
+    fn seen(dir: &Path, own: Option<&Path>) -> Claims {
+        let mut claims = Claims::read(dir, own);
+        if dir != machine() {
+            let held = Claims::read(&machine(), None).held;
+            if let Some(at) = held.since {
+                claims.held.since(at);
+            }
+            claims.held.started.extend(held.started);
         }
         claims
     }
@@ -1158,10 +1178,8 @@ impl Claim {
             let runs = (&Runner::now(), &clock);
             let mut unnamed = unnamed_left(before, &after, &spawned.runs, runs);
             unnamed.retain(|o| !held.covers(o, &clock));
-            let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
-            let new = after.0.iter().filter(|o| !stood.contains(&(o.kind, o.id)));
             let mut swept = Swept {
-                unnamed: new.filter(|o| o.named.is_empty()).count() - unnamed.len(),
+                unnamed: after.since(before).filter(|o| o.named.is_empty()).count() - unnamed.len(),
                 ..Swept::default()
             };
             gone.extend(unnamed);
@@ -1176,7 +1194,7 @@ impl Claim {
     /// run's [`reclaim`] where one does or the sweep failed (#2563).
     fn settled(self, sweep: impl FnOnce(Held) -> Result<Swept>) -> Result<Swept> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
-        let held = Claims::read(dir, Some(&self.path)).held;
+        let held = Claims::seen(dir, Some(&self.path)).held;
         let alone = held.since.is_none();
         let swept = sweep(held)?;
         if alone {
@@ -1239,7 +1257,7 @@ impl Removed {
 /// claims go with it but those whose windows reach a second another run's
 /// claim covers; a claim whose lock will not come is a run still going.
 pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
-    let mut claims = Claims::read(&claims(), None);
+    let mut claims = Claims::seen(&claims(), None);
     claims.stop();
     let clock = Clock::now()?;
     let standing = Standing::now()?;
