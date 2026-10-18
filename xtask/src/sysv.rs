@@ -167,14 +167,11 @@ impl Kind {
         }
     }
 
-    fn noun(self, n: usize) -> &'static str {
-        match (self, n) {
-            (Kind::Memory, 1) => "shared memory segment",
-            (Kind::Memory, _) => "shared memory segments",
-            (Kind::Semaphores, 1) => "semaphore set",
-            (Kind::Semaphores, _) => "semaphore sets",
-            (Kind::Queue, 1) => "message queue",
-            (Kind::Queue, _) => "message queues",
+    fn noun(self) -> &'static str {
+        match self {
+            Kind::Memory => "shared memory segment",
+            Kind::Semaphores => "semaphore set",
+            Kind::Queue => "message queue",
         }
     }
 }
@@ -679,7 +676,8 @@ impl fmt::Display for Swept {
             .filter_map(|kind| {
                 let ids = self.removed.get(kind)?;
                 let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
-                Some(format!("{} {}", kind.noun(ids.len()), ids.join(" ")))
+                let s = crate::reading::plural(ids.len());
+                Some(format!("{}{s} {}", kind.noun(), ids.join(" ")))
             })
             .collect();
         write!(
