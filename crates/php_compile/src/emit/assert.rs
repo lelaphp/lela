@@ -98,8 +98,10 @@ impl Emit<'_> {
             opcode: Opcode::AssertCheck,
             ..Opline::default()
         });
-        let mut list = arguments.list().to_vec();
-        if let [only] = list.as_slice() {
+        let written = arguments.list();
+        let mut list = self.arena.vec(written.len() + 1);
+        list.extend_from_slice(written);
+        if let [only] = written {
             let text = self.assertion_text(only)?;
             let description = self.string(&text)?;
             // "If the original argument was named, add the new argument
@@ -107,12 +109,15 @@ impl Emit<'_> {
             // allowed."
             let description = Source::Node(Where::Constant(description));
             list.push(match only {
-                Arg::Named(..) => Arg::Named(b"description"[..].into(), description),
+                Arg::Named(..) => Arg::Named(b"description", description),
                 Arg::Positional(_) | Arg::Unpack(_) => Arg::Positional(description),
             });
         }
         let arguments = match arguments {
-            Args::Written { line, .. } => Args::Written { list, line: *line },
+            Args::Written { line, .. } => Args::Written {
+                list: list.into_slice(),
+                line: *line,
+            },
             Args::CallableConvert => Args::CallableConvert,
         };
         let served = if let Some(index) = native {
@@ -123,7 +128,7 @@ impl Emit<'_> {
                 .map(|decl| decl.parameters.as_slice())
                 .unwrap_or_default();
             let callee = Callee::of(parameters);
-            let plan = Plan::of(&arguments, Some(&callee));
+            let plan = Plan::of(self.arena, &arguments, Some(&callee));
             let name = self.string(b"assert")?;
             let op2 = self.literal(name);
             let out = self.cache_slot();
@@ -140,7 +145,7 @@ impl Emit<'_> {
             self.extended_call(self.get_call_op(Fbc::Native, false), line, plan.extra_named)
         } else {
             let pair = self.ns_func_name_literal(resolved)?;
-            let plan = Plan::of(&arguments, None);
+            let plan = Plan::of(self.arena, &arguments, None);
             let out = self.cache_slot();
             self.push(Opline {
                 opcode: Opcode::InitNsFcallByName,

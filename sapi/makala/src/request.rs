@@ -278,45 +278,137 @@ fn serve(engine: &Engine, root: &[u8], started_in: &Path, job: Job) {
     // the head it has (`vpath::holds_nul`, #2695).
     let (_, sink) = engine.serve(description, Box::new(sink), |_| {
         if php_proto::vpath::holds_nul(&program.path_translated) {
-            HostServes::Nothing
-        } else {
-            look(&info)
+            return HostServes::Nothing;
+        }
+        match refusal(&info) {
+            None => HostServes::Program,
+            Some(refused) => {
+                crate::log::error(&refused.logged());
+                HostServes::Page(refused.page())
+            }
         }
     });
     // Dropped here, the sink says the body is whole.
     drop(sink);
 }
 
-/// What the request serves once it has started, in php-fpm's order
-/// (`Z/sapi/fpm/fpm/fpm_main.c:1854-1888`): `File not found.` with a 404
-/// where the path names no script; `Access denied.` with a 403 for a
-/// script whose name does not end in `.php`, the default of its
-/// `security.limit_extensions`, so no file of another kind runs as a
-/// program, `T.PHP` among them; for one that does not open,
-/// `Access denied.` with a 403 where it may not be read and `No input
-/// file specified.` with a 404 otherwise, a directory among them, which
-/// php's plain-files opener refuses for a script as no regular file
-/// (`Z/main/streams/plain_wrapper.c:1225-1230`); and else the program.
-fn look(info: &RequestInfo) -> HostServes {
-    let refused = |code, body: &[u8]| {
-        HostServes::Page(HostPage {
+/// Why php-fpm's loop refuses a request once it has started, before it
+/// runs a program (`Z/sapi/fpm/fpm/fpm_main.c:1854-1888`): each is
+/// answered with php-fpm's page and logged with the line its `zlog`
+/// beside the refusal writes, which `sapi_cgi_log_fastcgi` hands the web
+/// server on `FCGI_STDERR` whatever its level, and which makala, the
+/// server, writes in its error log (#2767).
+#[derive(Debug)]
+enum Refusal<'a> {
+    /// The path names no program: no `path_translated`.
+    Unknown,
+    /// The program's name does not end in `.php`, the default of
+    /// `security.limit_extensions` (`fpm_php_limit_extensions`).
+    Extension(&'a [u8]),
+    /// The program does not open as a regular file, with the error php's
+    /// `errno` holds after `php_fopen_primary_script` fails.
+    Unopened(&'a [u8], std::io::Error),
+}
+
+impl Refusal<'_> {
+    /// php-fpm's page: `File not found.` with a 404, `Access denied.` with
+    /// a 403 past `security.limit_extensions` or where the program may not
+    /// be read (`EACCES`), and `No input file specified.` with a 404
+    /// for one that does not open otherwise.
+    fn page(&self) -> HostPage {
+        let (code, body): (i64, &[u8]) = match self {
+            Refusal::Unknown => (404, b"File not found.\n"),
+            Refusal::Extension(_) => (403, b"Access denied.\n"),
+            Refusal::Unopened(_, error) if error.raw_os_error() == Some(libc::EACCES) => {
+                (403, b"Access denied.\n")
+            }
+            Refusal::Unopened(..) => (404, b"No input file specified.\n"),
+        };
+        HostPage {
             code,
             headers: Vec::new(),
             body: body.to_vec(),
-        })
-    };
-    let Some(path) = &info.path_translated else {
-        return refused(404, b"File not found.\n");
+        }
+    }
+
+    /// The line php-fpm logs for it, worded as its `zlog` words it, the
+    /// path's bytes as they came, and cut as `zlog_external` cuts a line
+    /// its buffer of [`ZLOG_BUFFER`] bytes does not hold: the bytes before
+    /// the last three it has room for, then `...`.
+    fn logged(&self) -> Vec<u8> {
+        let mut line = match self {
+            Refusal::Unknown => b"Primary script unknown".to_vec(),
+            Refusal::Extension(path) => [
+                &b"Access to the script '"[..],
+                path,
+                b"' has been denied (see security.limit_extensions)",
+            ]
+            .concat(),
+            Refusal::Unopened(path, error) => [
+                &b"Unable to open primary script: "[..],
+                path,
+                b" (",
+                php_sapi::strerror(error).as_bytes(),
+                b")",
+            ]
+            .concat(),
+        };
+        if line.len() >= ZLOG_BUFFER {
+            line.truncate(ZLOG_BUFFER - b"...".len());
+            line.extend_from_slice(b"...");
+        }
+        line
+    }
+}
+
+/// `MAX_BUF_LENGTH`, the buffer php-fpm formats a line into before it
+/// hands it to `sapi_cgi_log_fastcgi` (`Z/sapi/fpm/fpm/zlog.c:20`,
+/// `zlog_external`).
+const ZLOG_BUFFER: usize = 2048;
+
+/// Whether the request is refused once it has started, in php-fpm's
+/// order (`Z/sapi/fpm/fpm/fpm_main.c:1854-1888`): where the path names no
+/// program; for one whose name does not end in `.php`, so no file of
+/// another kind runs as a program, `T.PHP` among them; and for one that
+/// does not open, a directory among them, which php's plain-files opener
+/// refuses for a program as no regular file
+/// (`Z/main/streams/plain_wrapper.c:1225-1230`) with `errno` left
+/// `ENOENT`, as the pinned php-fpm logs it. Else the program is served.
+///
+/// A path that names no program is php-fpm's 404, and its line in the
+/// error log, under both:
+///
+/// ```php
+/// echo "ran\n";
+/// ```
+/// ```request makala
+/// --ENV--
+/// REQUEST_URI=/nothing.php/witness.php
+/// ```
+/// ```expect capture
+/// 404
+/// x-powered-by: PHP/8.5.9
+/// content-type: text/html; charset=UTF-8
+///
+/// File not found.
+/// ```
+/// ```stderr
+/// Primary script unknown
+/// ```
+fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
+    let Some(path) = info.path_translated.as_deref() else {
+        return Some(Refusal::Unknown);
     };
     if !(path.len() > b".php".len() && path.ends_with(b".php")) {
-        return refused(403, b"Access denied.\n");
+        return Some(Refusal::Extension(path));
     }
     match std::fs::File::open(php_sapi::cgi::path_of(path)).and_then(|file| file.metadata()) {
-        Ok(opened) if opened.is_file() => HostServes::Program,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            refused(403, b"Access denied.\n")
-        }
-        _ => refused(404, b"No input file specified.\n"),
+        Ok(opened) if opened.is_file() => None,
+        Ok(_) => Some(Refusal::Unopened(
+            path,
+            std::io::Error::from_raw_os_error(libc::ENOENT),
+        )),
+        Err(error) => Some(Refusal::Unopened(path, error)),
     }
 }
 
@@ -801,6 +893,25 @@ mod tests {
             (path, thread)
         });
         path
+    }
+
+    /// A refusal's line is cut as `zlog_external` cuts one its buffer of
+    /// 2048 bytes does not hold, to 2045 bytes and `...`, and a line it
+    /// holds is whole.
+    #[test]
+    fn a_refusals_line_is_cut_where_php_fpms_buffer_ends() {
+        let long = [b"/".as_slice(), &[b'a'; 3000], b".php"].concat();
+        let unopened =
+            Refusal::Unopened(&long, std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        let line = unopened.logged();
+        assert_eq!(line.len(), ZLOG_BUFFER);
+        assert!(line.starts_with(b"Unable to open primary script: /aaa"));
+        assert!(line.ends_with(b"aaa..."));
+        let short = Refusal::Extension(b"/r/x.PHP").logged();
+        assert_eq!(
+            String::from_utf8_lossy(&short),
+            "Access to the script '/r/x.PHP' has been denied (see security.limit_extensions)"
+        );
     }
 
     /// A request that panics is answered 500, its thread serves the next,

@@ -24,7 +24,6 @@
 //! (`avoid_from = { file, section }`): the harness is held to `### Harness`,
 //! whose terms mean `lock`, `region` and `registry` as the harness does.
 
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -85,8 +84,7 @@ pub struct Avoided {
 impl Glossary {
     /// Read the glossary file.
     pub fn load(path: &Path) -> Result<Glossary> {
-        let text =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(path)?;
         Glossary::parse(&text).with_context(|| format!("{}", path.display()))
     }
 

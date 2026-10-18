@@ -55,9 +55,10 @@ pub(crate) fn lent<R>(
 /// `value` dropped under a lend, so what it holds of timelib's goes back
 /// to the request's heap: php's `timelib_time_dtor`,
 /// `timelib_tzinfo_dtor` and `timelib_error_container_dtor` where php
-/// calls them.
+/// calls them. A drop reads nothing of the date state, so the state
+/// stays where it is.
 pub(crate) fn release<T>(req: &mut Request, value: T) -> Result<(), Thrown> {
-    lent(req, |_| drop(value))
+    req.lend_heap(|| drop(value))
 }
 
 /// `call` served with `value` standing, then `value` released whatever

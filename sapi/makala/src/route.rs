@@ -69,7 +69,7 @@ impl Router {
     /// routes is the walk that splits, so `/upload/x.jpg/y.php` serves no
     /// program the walk finds; split at `y.php`, `cgi.fix_pathinfo`'s walk
     /// in php-fpm's checks finds `x.jpg`, the exploit's shape, and
-    /// `security.limit_extensions`' default refuses it (`request::look`),
+    /// `security.limit_extensions`' default refuses it (`request::refusal`),
     /// so no file whose name does not end in `.php` runs, and a directory
     /// named `d.php` is answered 404, as php-fpm under the recipe answers.
     /// `php -S` sends `x.jpg` for `/upload/x.jpg/`, and so does

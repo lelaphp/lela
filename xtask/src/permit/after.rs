@@ -46,7 +46,10 @@
 //!   checkout has staged, its index entry other than `HEAD`'s
 //!   ([`operation::staged`]): the operation's commit carries it, so even a
 //!   line that can write it does not put it back. It is kept and named,
-//!   and the commit that ends the operation settles the record.
+//!   and the commit that ends the operation settles the record. A path
+//!   the operation left conflicted, unmerged in the index, is not staged:
+//!   its markers are guarded as any file is, so the one hand that resolves
+//!   it is `steer`'s ([`crate::steer::Ground`], #2880).
 //! - What the call wrote: it goes into the object database before the file
 //!   is put back, and the denial names its blob, so a person's edit made
 //!   in an editor while a long call ran is a `git cat-file` away, not gone.
@@ -69,10 +72,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::INSTRUMENT;
@@ -522,7 +525,9 @@ fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) ->
 /// steer (asked by the caller), the file is one steer writes, and steer's
 /// reading of the file was taken since the record, passed, wrote, is
 /// stamped over the file as it stands now, and names the additions the
-/// file now carries over the content the record kept, every one. A write
+/// file now carries over the content the record kept, every one, judged on
+/// the ground steer judged it on: while a merge stands with the file
+/// conflicted, the merge's blobs and not the markers ([`steer::Ground`]). A write
 /// after steer's moves the stamp; a value written before it is an addition
 /// the reading does not name, or a change that is none, and the file is
 /// put back. What neither can see is a comment written before steer in the
@@ -553,14 +558,13 @@ fn steered(checkout: &Path, path: &str, was: Option<&str>, since: i64) -> bool {
     let Ok(now) = fs::read_to_string(checkout.join(path)) else {
         return false;
     };
-    match steer::judge(&before, &now) {
-        Ok(steer::Verdict::Additive(added)) => {
-            !added.is_empty()
-                && reading.numbers.get("added") == Some(&Number::count(added.len()))
-                && reading.message.ends_with(&added.join(", "))
-        }
-        _ => false,
-    }
+    let Ok(verdict) = steer::Ground::of(checkout, path, before).and_then(|g| g.judge(&now)) else {
+        return false;
+    };
+    let added = verdict.additions();
+    !added.is_empty()
+        && reading.numbers.get("added") == Some(&Number::count(added.len()))
+        && reading.message.ends_with(&added.join(", "))
 }
 
 /// Whether one of the command's simple commands runs `xtask steer`,
@@ -614,18 +618,24 @@ fn guard(checkout: &Path) -> Result<Option<Guarded>> {
         let (head, path) = entry
             .split_once('\t')
             .with_context(|| format!("git ls-files wrote {entry:?}"))?;
-        let [mode, staged, "0"] = head.split(' ').collect::<Vec<_>>()[..] else {
+        let [mode, staged, stage] = head.split(' ').collect::<Vec<_>>()[..] else {
             continue;
         };
         if mode == "160000"
+            || blobs.contains_key(path)
             || exempt
                 .iter()
                 .any(|pattern| manifest::scope_matches(pattern, Path::new(path)))
         {
             continue;
         }
+        // A conflict's path is listed once per stage and has no staged
+        // blob; its markers on disk are what a write is put back to (#2880).
         let blob = on_disk(&checkout.join(path));
-        if blob.as_deref().is_some_and(|id| id != staged) {
+        if blob
+            .as_deref()
+            .is_some_and(|id| stage != "0" || id != staged)
+        {
             unstaged.push(path.to_owned());
         }
         blobs.insert(path.to_owned(), blob);
@@ -767,20 +777,12 @@ fn hash_objects(checkout: &Path, paths: &[&str]) -> Result<Vec<String>> {
 
 /// The bytes of the blob `id`, which need not be text.
 fn cat_blob(checkout: &Path, id: &str) -> Result<Vec<u8>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(checkout)
-        .args(["cat-file", "blob", id])
-        .stdin(Stdio::null())
-        .output()
-        .context("running git cat-file")?;
-    if !out.status.success() {
-        bail!(
-            "git cat-file blob {id}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(out.stdout)
+    git::run(
+        Command::new("git"),
+        checkout,
+        &["cat-file", "blob", id],
+        None,
+    )
 }
 
 #[cfg(test)]

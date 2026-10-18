@@ -21,9 +21,9 @@ use php_unit::decl::{
     Visibility,
 };
 use php_unit::{
-    AutoGlobal, BoundVar, ConstIdx, Diagnostic, HookBody, Level, LiveKind, LiveRange, MapPtrOffset,
-    MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, TopLevel, TryCatch, Unit,
-    UnitCell,
+    AutoGlobal, BoundVar, ConstIdx, Diagnostic, Handler, HookBody, Level, LiveKind, LiveRange,
+    MapPtrOffset, MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx, Safepoints,
+    TopLevel, TryCatch, Unit, UnitCell,
 };
 
 /// The unit's bytes; none where a constant of an op array is of a kind
@@ -172,6 +172,18 @@ impl<T: Wire> Wire for Vec<T> {
     fn take(r: &mut Reader<'_>) -> Option<Self> {
         let n = r.len()?;
         (0..n).map(|_| T::take(r)).collect()
+    }
+}
+
+/// Written as the vector it reads as, so a file the cache wrote before
+/// the table stood inline reads back the same.
+impl Wire for Safepoints {
+    fn put(&self, out: &mut Vec<u8>) -> Option<()> {
+        put_len(self.len(), out)?;
+        self.iter().try_for_each(|item| item.put(out))
+    }
+    fn take(r: &mut Reader<'_>) -> Option<Self> {
+        Vec::<OplineIdx>::take(r).map(Safepoints::from)
     }
 }
 
@@ -363,6 +375,18 @@ tags! {
     HookKind { Get, Set }
 }
 
+/// An opline's handler, of which the file keeps nothing: the unit read
+/// back is published as one compiled is, which resolves it from the
+/// opline's other fields ([`Unit::published`]).
+impl Wire for Handler {
+    fn put(&self, _: &mut Vec<u8>) -> Option<()> {
+        Some(())
+    }
+    fn take(_: &mut Reader<'_>) -> Option<Self> {
+        Some(Handler::Unresolved)
+    }
+}
+
 impl Wire for Opcode {
     fn put(&self, out: &mut Vec<u8>) -> Option<()> {
         self.num().put(out)
@@ -373,7 +397,7 @@ impl Wire for Opcode {
 }
 
 record! {
-    Opline { opcode, op1_type, op2_type, out_type, op1, op2, out, extended_value, lineno }
+    Opline { opcode, op1_type, op2_type, out_type, op1, op2, out, extended_value, lineno, handler }
     TryCatch { try_op, catch_op, finally_op, finally_end }
     LiveRange { var, kind, start, end }
     BoundVar { name, value, lexical }
@@ -803,7 +827,7 @@ enum E: string { case X = 'x'; const Y = self::X; }
 class B extends A { function g(): static { return $this; } }
 $x = new class { public $q = [1, 2]; };
 try { echo "{$x->q[0]}", __LINE__, E::X->value; } finally { echo 1 <=> 2; }
-foreach ([1, 2] as $k => $v) { echo $k, $v; }
+$d = []; foreach ([1, 2] as $k => $v) { if ($k < 1) { $d[$k] = $v; } echo $k, $v; }
 echo (string) 0.1, PHP_EOL;
 __halt_compiler(); data"#;
         let mut strings = php_heap::Strings::new();
@@ -811,7 +835,12 @@ __halt_compiler(); data"#;
             filename: b"/srv/n.php",
             ..php_compile::Options::default()
         };
-        let unit = php_compile::compile_source(source, &options, &mut strings);
+        let unit = php_compile::compile_source(
+            &mut php_compile::syntax::Arena::new(),
+            source,
+            &options,
+            &mut strings,
+        );
         assert!(unit.is_ok(), "the source compiles: {unit:?}");
         let Ok(unit) = unit else { return };
         let bytes = encode(&unit);
@@ -833,5 +862,19 @@ __halt_compiler(); data"#;
             decode(&longer, &mut strings).is_none(),
             "nor is one with bytes after it"
         );
+        // The file keeps no handler: the unit read back resolves, where
+        // it is published, the handlers the unit compiled resolves.
+        let handlers = |unit: Unit| {
+            let unit = unit.published();
+            unit.main
+                .oplines
+                .iter()
+                .map(|op| op.handler)
+                .collect::<Vec<_>>()
+        };
+        let compiled = handlers(unit);
+        assert!(compiled.contains(&Handler::IsSmallerCvConstJmpz));
+        assert!(compiled.contains(&Handler::AssignDimCvCvOpDataCv));
+        assert_eq!(handlers(decoded), compiled);
     }
 }

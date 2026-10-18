@@ -3113,13 +3113,14 @@ mod tests {
     /// A unit whose main op array has no oplines and `cache_size` bytes
     /// of runtime cache.
     fn with_cache(cache_size: u32) -> Arc<Unit> {
-        Arc::new(Unit {
+        Unit {
             main: OpArray {
                 cache_size,
                 ..OpArray::default()
             },
             ..Unit::default()
-        })
+        }
+        .published()
     }
 
     /// The main op array's activation lays its cache down with

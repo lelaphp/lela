@@ -155,10 +155,14 @@ pub enum TopLevel {
 
 impl Unit {
     /// The unit shared, as the engine publishes every unit it compiles,
-    /// with its [`UnitCell`] bound to the shared copy, so a closure its
-    /// constant expressions hold can be made where they are evaluated.
+    /// with every opline's handler resolved ([`crate::Handler`]) and its
+    /// [`UnitCell`] bound to the shared copy, so a closure its constant
+    /// expressions hold can be made where they are evaluated.
     #[must_use]
-    pub fn published(self) -> Arc<Unit> {
+    pub fn published(mut self) -> Arc<Unit> {
+        for code in self.op_arrays_mut() {
+            code.resolve();
+        }
         let shared = Arc::new(self);
         // A unit is published once; a clone published again keeps the
         // first binding, the cell being the clone's too.
@@ -174,6 +178,14 @@ impl Unit {
     /// request pays once, where the engine publishes it, and a unit one
     /// request compiles for itself, an `eval`'s, never pays.
     pub fn compact(&mut self) {
+        for code in self.op_arrays_mut() {
+            code.compact();
+        }
+    }
+
+    /// Every op array of the unit: its main one, its functions', the
+    /// ones no name binds, its methods' and its property hooks'.
+    fn op_arrays_mut(&mut self) -> impl Iterator<Item = &mut OpArray> {
         let Unit {
             main,
             functions,
@@ -182,16 +194,11 @@ impl Unit {
             dynamic,
             ..
         } = self;
-        main.compact();
-        for (_, body) in functions.iter_mut().chain(dynamic.iter_mut()) {
-            body.compact();
-        }
-        for method in methods {
-            method.body.compact();
-        }
-        for hook in hooks {
-            hook.body.compact();
-        }
+        std::iter::once(main)
+            .chain(functions.iter_mut().map(|(_, body)| body))
+            .chain(dynamic.iter_mut().map(|(_, body)| body))
+            .chain(methods.iter_mut().map(|method| &mut method.body))
+            .chain(hooks.iter_mut().map(|hook| &mut hook.body))
     }
 }
 

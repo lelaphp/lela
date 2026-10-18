@@ -64,7 +64,7 @@ use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Invocation, Oracle, Program, Promise, diff, normalise_in};
-use crate::phpt::adapter::reason_after;
+use crate::phpt::adapter::Said;
 use crate::reading::{Reading, Status};
 use crate::witness::makala::{self, Ports};
 
@@ -134,7 +134,8 @@ fn narrowed(entries: &mut Vec<Entry>, left: &mut Vec<String>, only: &[String]) {
 }
 
 /// Why the pinned php's run of the entry's `--SKIPIF--` says to skip it,
-/// its words read by the phpt lane's rule (`adapter::reason_after`); none
+/// or what it wrote where upstream borks the test and runs nothing, its
+/// words read by the phpt lane's rule (`adapter::Said`); none
 /// for an entry with no section or one the section does not skip. The
 /// section is written to a directory of its own, so the pinned tree at
 /// `tree` is never written to, and runs in the test's directory there, so
@@ -154,7 +155,11 @@ fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<Str
         cwd: beside.parent(),
         ..Invocation::new(php, Program::Beside(&program))
     })?;
-    Ok(reason_after("skip", &String::from_utf8_lossy(&ran.stdout)))
+    Ok(match Said::of(&String::from_utf8_lossy(&ran.stdout)) {
+        Said::Skip(why) => Some(why),
+        Said::Bork(said) => Some(format!("invalid output from SKIPIF: {said}")),
+        Said::XFail(_) | Said::Run => None,
+    })
 }
 
 /// One entry served by both and held: the same, a difference, unstable.

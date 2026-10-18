@@ -12,10 +12,9 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 #[derive(Debug, Clone, Default)]
 pub struct Lock {
@@ -53,8 +52,7 @@ impl Block {
 
 impl Lock {
     pub fn read(path: &Path) -> Result<Lock> {
-        let text =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(path)?;
         Ok(Lock::parse(&text))
     }
 

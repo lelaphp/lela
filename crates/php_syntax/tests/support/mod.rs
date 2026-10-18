@@ -16,10 +16,14 @@ use std::fmt::Write as _;
 /// Parse `src` through the real entry and hold the token stream
 /// lossless on the way: the token texts concatenate to the source, on
 /// every recovery path included.
-pub fn parse_lossless(src: &str) -> php_syntax::Parsed {
-    let parsed = php_syntax::parse(src.as_bytes(), &php_syntax::Options::default());
+pub fn parse_lossless(src: &str) -> php_syntax::Parsed<'static> {
+    // The parse is the fixture's for the rest of the test: its arena,
+    // and the source in it, are kept.
+    let arena: &'static php_syntax::Arena = Box::leak(Box::new(php_syntax::Arena::new()));
+    let source: &'static [u8] = Box::leak(src.as_bytes().into());
+    let parsed = php_syntax::parse(arena, source, &php_syntax::Options::default());
     let mut text = Vec::new();
-    for token in &parsed.tokens {
+    for token in parsed.tokens {
         text.extend_from_slice(
             &parsed.source[token.offset as usize..(token.offset + token.len) as usize],
         );

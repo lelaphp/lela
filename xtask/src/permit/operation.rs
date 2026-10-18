@@ -457,7 +457,7 @@ fn tend<'a>(
                 }
             };
             match standing {
-                _ if stale => remove(&file)?,
+                _ if stale => crate::remove(&file)?,
                 Some(operation) if starter.identity.is_none() && !starter.contested => {
                     let identity = operation.identity(&git_dir);
                     write(
@@ -525,15 +525,6 @@ fn write(file: &Path, starter: &Starter) -> Result<()> {
     reading::replace(file, format!("{text}\n").as_bytes())
 }
 
-fn remove(file: &Path) -> Result<()> {
-    match fs::remove_file(file) {
-        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("removing {}", file.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
 /// The checkout a call runs in: where it acts ([`acts_in`]), its
 /// `workspace` moved by the line's leading `cd`, `pushd` and `popd`, or
 /// the one directory git's `-C` names where every command past them is
@@ -554,17 +545,18 @@ pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The operation standing in `checkout` that has staged `path`, its index
-/// entry other than `HEAD`'s: the operation's commit carries it, so
-/// `permit --after` never puts it back (#2597). An index git cannot read
-/// is read as staged, the side that puts nothing back. What the index
-/// cannot say is whose hand staged the entry, so a call's own `git add`
-/// while the operation stands is read as the operation's and rides its
-/// commit; another session's staging there is what a `where =
+/// entry other than `HEAD`'s and not a conflict's: the operation's commit
+/// carries it, so `permit --after` never puts it back (#2597), where a
+/// conflicted path it leaves to the hand that resolves it (#2880). An
+/// index git cannot read is read as staged, the side that puts nothing
+/// back. What the index cannot say is whose hand staged the entry, so a
+/// call's own `git add` while the operation stands is read as the
+/// operation's and rides its commit; another session's staging there is what a `where =
 /// "operating"` rule refuses at the call ([`foreign`]).
 pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
     let operation = Operation::in_progress(&git_dir(checkout)?)?;
-    let args = ["diff", "--cached", "--name-only", "-z", "--", path];
-    let differs = git::git(checkout, &args, None).map_or(true, |d| !d.is_empty());
+    let args = ["diff", "--cached", "--quiet", "--diff-filter=u", "--", path];
+    let differs = git::git(checkout, &args, None).is_err();
     differs.then_some(operation)
 }
 
@@ -614,13 +606,7 @@ mod tests {
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
-            .args(["-c", "user.name=x", "-c", "user.email=x@x"])
-            .args([
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/var/empty",
-            ])
+            .args(crate::scratch::UNHOOKED)
             .args(args)
             .current_dir(dir)
             .output()

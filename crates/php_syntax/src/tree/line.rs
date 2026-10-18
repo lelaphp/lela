@@ -48,7 +48,7 @@ use super::Element;
 /// What the builder knows around one node as it closes it.
 pub(super) struct Site<'a> {
     pub(super) tokens: &'a [Token],
-    pub(super) lines: &'a LineIndex,
+    pub(super) lines: &'a LineIndex<'a>,
     /// The last significant token consumed before the node opened.
     pub(super) before: Option<usize>,
     /// The last significant token consumed: the node's last, or `before`

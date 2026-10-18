@@ -155,8 +155,7 @@ fn markers(krate: &Present) -> Result<Vec<Marker>> {
     let src = krate.dir.join("src");
     let mut found = Found::default();
     for file in krate.sources()?.into_iter().filter(|f| f.starts_with(&src)) {
-        let text =
-            fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+        let text = crate::read(&file)?;
         if !text.contains("mirrors") {
             continue;
         }

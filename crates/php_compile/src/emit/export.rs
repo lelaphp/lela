@@ -170,7 +170,7 @@ enum Named<'t> {
 
 /// The text of one token, as the scanner handed it over
 /// ([`php_syntax::token_text`]).
-fn text(parsed: &Parsed, id: TokenId) -> &[u8] {
+fn text<'p>(parsed: &'p Parsed<'_>, id: TokenId) -> &'p [u8] {
     php_syntax::token_text(parsed, id)
 }
 
@@ -449,7 +449,7 @@ impl<'a> Emit<'a> {
                 self.export_encaps(
                     out,
                     b'"',
-                    &tree[id].parts,
+                    tree.list(tree[id].parts),
                     Holder::DoubleQuoted(&tree[id]),
                     indent,
                 )?;
@@ -464,7 +464,7 @@ impl<'a> Emit<'a> {
                 self.export_encaps(
                     out,
                     b'"',
-                    &tree[id].parts,
+                    tree.list(tree[id].parts),
                     Holder::Heredoc(&tree[id]),
                     indent,
                 )?;
@@ -476,7 +476,7 @@ impl<'a> Emit<'a> {
                 self.export_encaps(
                     out,
                     b'`',
-                    &tree[id].parts,
+                    tree.list(tree[id].parts),
                     Holder::ShellExec(&tree[id]),
                     indent,
                 )?;
@@ -513,8 +513,12 @@ impl<'a> Emit<'a> {
                 out.extend(text(parsed, token));
                 Ok(())
             }
-            tree::Expr::ArrayExpr(id) => self.export_array(out, &tree[id].array_elements, indent),
-            tree::Expr::ListExpr(id) => self.export_array(out, &tree[id].array_elements, indent),
+            tree::Expr::ArrayExpr(id) => {
+                self.export_array(out, tree.list(tree[id].array_elements), indent)
+            }
+            tree::Expr::ListExpr(id) => {
+                self.export_array(out, tree.list(tree[id].array_elements), indent)
+            }
             tree::Expr::UnaryExpr(id) => {
                 let node = &tree[id];
                 let op = match node.op.map(|op| kind(parsed, op)) {
@@ -616,7 +620,7 @@ impl<'a> Emit<'a> {
             // `isset_variables`: one `ZEND_AST_ISSET` a variable, joined
             // by `ZEND_AST_AND` from the left.
             tree::Expr::IssetExpr(id) => {
-                let targets = &tree[id].targets;
+                let targets = tree.list(tree[id].targets);
                 let joined = targets.len() > 1;
                 if joined && priority > 130 {
                     out.push(b'(');
@@ -697,12 +701,12 @@ impl<'a> Emit<'a> {
                     self.export(out, subject, 0, indent)?;
                 }
                 out.extend(b") {\n");
-                for arm in &node.match_arms {
+                for arm in self.parsed.tree.list(node.match_arms) {
                     let arm = &tree[*arm];
                     indent_to(out, indent + 1);
                     match arm.conds {
                         Some(conds) => {
-                            self.export_list(out, &tree[conds].exprs, 0, indent + 1)?;
+                            self.export_list(out, tree.list(tree[conds].exprs), 0, indent + 1)?;
                             out.extend(b" => ");
                         }
                         None => out.extend(b"default => "),
@@ -740,7 +744,7 @@ impl<'a> Emit<'a> {
                 out.extend(b"new ");
                 if let Some(anon) = node.anon {
                     let class = &tree[anon];
-                    self.export_attributes(out, &class.attrs, indent, false)?;
+                    self.export_attributes(out, self.parsed.tree.list(class.attrs), indent, false)?;
                     out.extend(b"class");
                     if let Some(args) = class.args
                         && !tree[args].args.is_empty()
@@ -749,8 +753,8 @@ impl<'a> Emit<'a> {
                         self.export_args(out, args, indent)?;
                         out.push(b')');
                     }
-                    let extends = class.extends.map(|e| &*tree[e].types);
-                    let implements = class.implements.map(|i| &*tree[i].types);
+                    let extends = class.extends.map(|e| tree.list(tree[e].types));
+                    let implements = class.implements.map(|i| tree.list(tree[i].types));
                     return self
                         .export_class_no_header(out, extends, implements, class.body, indent);
                 }
@@ -871,10 +875,10 @@ impl<'a> Emit<'a> {
             }
             tree::Expr::ClosureExpr(id) => {
                 let node = &tree[id];
-                let is_static = self.written_static(node.range, &node.attrs);
+                let is_static = self.written_static(node.range, self.parsed.tree.list(node.attrs));
                 let decl = Decl {
                     kind: DeclKind::Closure,
-                    attrs: &node.attrs,
+                    attrs: self.parsed.tree.list(node.attrs),
                     flags: Flags {
                         is_static,
                         ..Flags::default()
@@ -890,10 +894,10 @@ impl<'a> Emit<'a> {
             }
             tree::Expr::ArrowFnExpr(id) => {
                 let node = &tree[id];
-                let is_static = self.written_static(node.range, &node.attrs);
+                let is_static = self.written_static(node.range, self.parsed.tree.list(node.attrs));
                 let decl = Decl {
                     kind: DeclKind::Arrow,
-                    attrs: &node.attrs,
+                    attrs: self.parsed.tree.list(node.attrs),
                     flags: Flags {
                         is_static,
                         ..Flags::default()
@@ -1173,7 +1177,7 @@ impl<'a> Emit<'a> {
     ) -> Result<(), CompileError> {
         let parsed: &'a Parsed = self.parsed;
         let tree = &parsed.tree;
-        for (at, arg) in tree[args].args.iter().enumerate() {
+        for (at, arg) in tree.list(tree[args].args).iter().enumerate() {
             if at > 0 {
                 out.extend(b", ");
             }
@@ -1438,7 +1442,7 @@ impl<'a> Emit<'a> {
         let tree = &parsed.tree;
         for group in groups {
             out.extend(b"#[");
-            for (at, attribute) in tree[*group].attributes.iter().enumerate() {
+            for (at, attribute) in tree.list(tree[*group].attributes).iter().enumerate() {
                 if at > 0 {
                     out.extend(b", ");
                 }
@@ -1483,7 +1487,7 @@ impl<'a> Emit<'a> {
                 }
             }
             tree::TypeExpr::UnionType(id) => {
-                for (at, inner) in tree[id].types.iter().enumerate() {
+                for (at, inner) in tree.list(tree[id].types).iter().enumerate() {
                     if at > 0 {
                         out.push(b'|');
                     }
@@ -1491,7 +1495,7 @@ impl<'a> Emit<'a> {
                 }
             }
             tree::TypeExpr::IntersectionType(id) => {
-                for (at, inner) in tree[id].types.iter().enumerate() {
+                for (at, inner) in tree.list(tree[id].types).iter().enumerate() {
                     if at > 0 {
                         out.push(b'&');
                     }
@@ -1545,7 +1549,7 @@ impl<'a> Emit<'a> {
         out.push(b')');
         if let Some(uses) = decl.uses {
             out.extend(b" use(");
-            for (at, used) in tree[uses].closure_use_vars.iter().enumerate() {
+            for (at, used) in tree.list(tree[uses].closure_use_vars).iter().enumerate() {
                 if at > 0 {
                     out.extend(b", ");
                 }
@@ -1571,7 +1575,7 @@ impl<'a> Emit<'a> {
             }
             DeclBody::Block(block) => {
                 out.extend(b" {\n");
-                self.export_stmts(out, &tree[block].stmts, indent + 1)?;
+                self.export_stmts(out, tree.list(tree[block].stmts), indent + 1)?;
                 indent_to(out, indent);
                 out.push(b'}');
                 if !inline {
@@ -1592,13 +1596,13 @@ impl<'a> Emit<'a> {
     ) -> Result<(), CompileError> {
         let parsed: &'a Parsed = self.parsed;
         let tree = &parsed.tree;
-        for (at, param) in tree[params].params.iter().enumerate() {
+        for (at, param) in tree.list(tree[params].params).iter().enumerate() {
             if at > 0 {
                 out.extend(b", ");
             }
             let param = &tree[*param];
-            self.export_attributes(out, &param.attrs, indent, false)?;
-            let flags = Flags::of(parsed, &param.modifiers, false);
+            self.export_attributes(out, self.parsed.tree.list(param.attrs), indent, false)?;
+            let flags = Flags::of(parsed, self.parsed.tree.list(param.modifiers), false);
             flags.visibility(out, true);
             if flags.is_final {
                 out.extend(b"final ");
@@ -1637,10 +1641,10 @@ impl<'a> Emit<'a> {
         out.extend(b" {\n");
         let indent = indent + 1;
         indent_to(out, indent);
-        let list = &tree[hooks].property_hooks;
+        let list = tree.list(tree[hooks].property_hooks);
         for (at, hook) in list.iter().enumerate() {
             let hook = &tree[*hook];
-            let flags = Flags::of(parsed, &hook.modifiers, false);
+            let flags = Flags::of(parsed, self.parsed.tree.list(hook.modifiers), false);
             flags.visibility(out, true);
             if flags.is_final {
                 out.extend(b"final ");
@@ -1654,7 +1658,7 @@ impl<'a> Emit<'a> {
                 out.push(b';');
             } else if let Some(body) = hook.body {
                 out.extend(b" {\n");
-                self.export_stmts(out, &tree[body].stmts, indent + 1)?;
+                self.export_stmts(out, tree.list(tree[body].stmts), indent + 1)?;
                 indent_to(out, indent);
                 out.push(b'}');
             } else {
@@ -1703,7 +1707,7 @@ impl<'a> Emit<'a> {
         match node.body {
             Some(body) => {
                 out.extend(b" {\n");
-                self.export_stmts(out, &parsed.tree[body].stmts, indent + 1)?;
+                self.export_stmts(out, parsed.tree.list(parsed.tree[body].stmts), indent + 1)?;
                 indent_to(out, indent);
                 out.extend(b"}\n");
             }
@@ -1729,7 +1733,7 @@ impl<'a> Emit<'a> {
             .map(|group| unprefixed(text(parsed, tree[group].prefix)));
         match node.use_group {
             Some(group) => {
-                for item in &tree[group].use_group_items {
+                for item in tree.list(tree[group].use_group_items) {
                     let item = &tree[*item];
                     items.push((
                         text(parsed, item.name),
@@ -1738,7 +1742,7 @@ impl<'a> Emit<'a> {
                 }
             }
             None => {
-                for clause in &node.use_clauses {
+                for clause in self.parsed.tree.list(node.use_clauses) {
                     let clause = &tree[*clause];
                     let alias = clause.alias.map(|a| text(parsed, tree[a].name));
                     items.push((unprefixed(text(parsed, clause.name)), alias));
@@ -1794,7 +1798,7 @@ impl<'a> Emit<'a> {
         let parsed: &'a Parsed = self.parsed;
         let tree = &parsed.tree;
         match stmt {
-            Stmt::Block(id) => self.export_stmts(out, &tree[id].stmts, indent),
+            Stmt::Block(id) => self.export_stmts(out, tree.list(tree[id].stmts), indent),
             // An empty statement is no node of php's.
             Stmt::EmptyStmt(_) => Ok(()),
             Stmt::NamespaceDef(id) => self.export_namespace(out, id, indent),
@@ -1819,7 +1823,7 @@ impl<'a> Emit<'a> {
                 Ok(())
             }),
             Stmt::EchoStmt(id) => {
-                for expr in &tree[id].exprs {
+                for expr in tree.list(tree[id].exprs) {
                     self.line(out, indent, true, |s, out| {
                         out.extend(b"echo ");
                         s.export(out, *expr, 0, indent)
@@ -1828,7 +1832,7 @@ impl<'a> Emit<'a> {
                 Ok(())
             }
             Stmt::GlobalStmt(id) => {
-                for var in &tree[id].vars {
+                for var in tree.list(tree[id].vars) {
                     self.line(out, indent, true, |s, out| {
                         out.extend(b"global ");
                         s.export(out, *var, 0, indent)
@@ -1837,7 +1841,7 @@ impl<'a> Emit<'a> {
                 Ok(())
             }
             Stmt::StaticVarStmt(id) => {
-                for declarator in &tree[id].static_var_declarators {
+                for declarator in tree.list(tree[id].static_var_declarators) {
                     let declarator = &tree[*declarator];
                     self.line(out, indent, true, |s, out| {
                         out.extend(b"static ");
@@ -1852,7 +1856,7 @@ impl<'a> Emit<'a> {
                 Ok(())
             }
             Stmt::UnsetStmt(id) => {
-                for target in &tree[id].targets {
+                for target in tree.list(tree[id].targets) {
                     self.line(out, indent, true, |s, out| {
                         s.func_op(out, "unset", Some(*target), indent)
                     })?;
@@ -1895,17 +1899,17 @@ impl<'a> Emit<'a> {
                 self.line(out, indent, false, |s, out| {
                     out.extend(b"for (");
                     if let Some(init) = node.init {
-                        s.export_list(out, &tree[init].exprs, 20, indent)?;
+                        s.export_list(out, tree.list(tree[init].exprs), 20, indent)?;
                     }
                     out.push(b';');
                     if let Some(cond) = node.cond.filter(|c| !tree[*c].exprs.is_empty()) {
                         out.push(b' ');
-                        s.export_list(out, &tree[cond].exprs, 20, indent)?;
+                        s.export_list(out, tree.list(tree[cond].exprs), 20, indent)?;
                     }
                     out.push(b';');
                     if let Some(step) = node.step.filter(|c| !tree[*c].exprs.is_empty()) {
                         out.push(b' ');
-                        s.export_list(out, &tree[step].exprs, 20, indent)?;
+                        s.export_list(out, tree.list(tree[step].exprs), 20, indent)?;
                     }
                     out.extend(b") {\n");
                     s.export_body(out, node.body, node.stmt_list, indent + 1)?;
@@ -1950,7 +1954,7 @@ impl<'a> Emit<'a> {
                         s.export(out, subject, 0, indent)?;
                     }
                     out.extend(b") {\n");
-                    for arm in &node.switch_arms {
+                    for arm in self.parsed.tree.list(node.switch_arms) {
                         let arm = &tree[*arm];
                         indent_to(out, indent + 1);
                         match arm.value {
@@ -1962,7 +1966,7 @@ impl<'a> Emit<'a> {
                             None => out.extend(b"default:\n"),
                         }
                         if let Some(list) = arm.stmt_list {
-                            s.export_stmts(out, &tree[list].stmts, indent + 2)?;
+                            s.export_stmts(out, tree.list(tree[list].stmts), indent + 2)?;
                         }
                     }
                     indent_to(out, indent);
@@ -2010,13 +2014,13 @@ impl<'a> Emit<'a> {
                 let node = &tree[id];
                 self.line(out, indent, false, |s, out| {
                     out.extend(b"try {\n");
-                    s.export_stmts(out, &tree[node.body].stmts, indent + 1)?;
+                    s.export_stmts(out, tree.list(tree[node.body].stmts), indent + 1)?;
                     indent_to(out, indent);
-                    for clause in &node.catch_clauses {
+                    for clause in self.parsed.tree.list(node.catch_clauses) {
                         let clause = &tree[*clause];
                         out.extend(b"} catch (");
                         if let Some(types) = clause.types {
-                            for (at, ty) in tree[types].types.iter().enumerate() {
+                            for (at, ty) in tree.list(tree[types].types).iter().enumerate() {
                                 if at > 0 {
                                     out.push(b'|');
                                 }
@@ -2029,14 +2033,14 @@ impl<'a> Emit<'a> {
                         }
                         out.extend(b") {\n");
                         if let Some(body) = clause.body {
-                            s.export_stmts(out, &tree[body].stmts, indent + 1)?;
+                            s.export_stmts(out, tree.list(tree[body].stmts), indent + 1)?;
                         }
                         indent_to(out, indent);
                     }
                     if let Some(finally) = node.finally_clause {
                         out.extend(b"} finally {\n");
                         if let Some(body) = tree[finally].body {
-                            s.export_stmts(out, &tree[body].stmts, indent + 1)?;
+                            s.export_stmts(out, tree.list(tree[body].stmts), indent + 1)?;
                         }
                         indent_to(out, indent);
                     }
@@ -2048,7 +2052,13 @@ impl<'a> Emit<'a> {
                 let node = &tree[id];
                 self.line(out, indent, false, |s, out| {
                     out.extend(b"declare(");
-                    for (at, directive) in node.declare_directives.iter().enumerate() {
+                    for (at, directive) in self
+                        .parsed
+                        .tree
+                        .list(node.declare_directives)
+                        .iter()
+                        .enumerate()
+                    {
                         if at > 0 {
                             out.extend(b", ");
                         }
@@ -2074,16 +2084,20 @@ impl<'a> Emit<'a> {
             Stmt::ConstStmt(id) => {
                 let node = &tree[id];
                 self.line(out, indent, true, |s, out| {
-                    s.export_attributes(out, &node.attrs, indent, true)?;
+                    s.export_attributes(out, self.parsed.tree.list(node.attrs), indent, true)?;
                     out.extend(b"const ");
-                    s.export_const_declarators(out, &node.const_declarators, indent)
+                    s.export_const_declarators(
+                        out,
+                        self.parsed.tree.list(node.const_declarators),
+                        indent,
+                    )
                 })
             }
             Stmt::FunctionDecl(id) => {
                 let node = &tree[id];
                 let decl = Decl {
                     kind: DeclKind::Function,
-                    attrs: &node.attrs,
+                    attrs: self.parsed.tree.list(node.attrs),
                     flags: Flags::default(),
                     by_ref: node.byref.is_some(),
                     name: text(parsed, node.name),
@@ -2099,13 +2113,13 @@ impl<'a> Emit<'a> {
             Stmt::ClassDecl(id) => {
                 let node = &tree[id];
                 let class = ClassLike {
-                    attrs: &node.attrs,
+                    attrs: self.parsed.tree.list(node.attrs),
                     keyword: "class ",
-                    modifiers: Flags::of(parsed, &node.modifiers, false),
+                    modifiers: Flags::of(parsed, self.parsed.tree.list(node.modifiers), false),
                     name: node.name.map_or(&[][..], |name| text(parsed, name)),
                     backing: None,
-                    extends: node.extends.map(|e| &*tree[e].types),
-                    implements: node.implements.map(|i| &*tree[i].types),
+                    extends: node.extends.map(|e| tree.list(tree[e].types)),
+                    implements: node.implements.map(|i| tree.list(tree[i].types)),
                     body: node.body,
                 };
                 self.line(out, indent, false, |s, out| {
@@ -2117,13 +2131,13 @@ impl<'a> Emit<'a> {
                 // `interface_extends_list` stands where a class's
                 // `implements` does, and is printed as one.
                 let class = ClassLike {
-                    attrs: &node.attrs,
+                    attrs: self.parsed.tree.list(node.attrs),
                     keyword: "interface ",
                     modifiers: Flags::default(),
                     name: node.name.map_or(&[][..], |name| text(parsed, name)),
                     backing: None,
                     extends: None,
-                    implements: node.extends.map(|e| &*tree[e].types),
+                    implements: node.extends.map(|e| tree.list(tree[e].types)),
                     body: node.body,
                 };
                 self.line(out, indent, false, |s, out| {
@@ -2133,7 +2147,7 @@ impl<'a> Emit<'a> {
             Stmt::TraitDecl(id) => {
                 let node = &tree[id];
                 let class = ClassLike {
-                    attrs: &node.attrs,
+                    attrs: self.parsed.tree.list(node.attrs),
                     keyword: "trait ",
                     modifiers: Flags::default(),
                     name: node.name.map_or(&[][..], |name| text(parsed, name)),
@@ -2149,13 +2163,13 @@ impl<'a> Emit<'a> {
             Stmt::EnumDecl(id) => {
                 let node = &tree[id];
                 let class = ClassLike {
-                    attrs: &node.attrs,
+                    attrs: self.parsed.tree.list(node.attrs),
                     keyword: "enum ",
                     modifiers: Flags::default(),
                     name: node.name.map_or(&[][..], |name| text(parsed, name)),
                     backing: node.backing.and_then(|b| tree[b].ty),
                     extends: None,
-                    implements: node.implements.map(|i| &*tree[i].types),
+                    implements: node.implements.map(|i| tree.list(tree[i].types)),
                     body: node.body,
                 };
                 self.line(out, indent, false, |s, out| {
@@ -2195,7 +2209,7 @@ impl<'a> Emit<'a> {
         }
         if let Some(list) = list {
             let parsed: &'a Parsed = self.parsed;
-            self.export_stmts(out, &parsed.tree[list].stmts, indent)?;
+            self.export_stmts(out, parsed.tree.list(parsed.tree[list].stmts), indent)?;
         }
         Ok(())
     }
@@ -2214,11 +2228,11 @@ impl<'a> Emit<'a> {
         while let Some(id) = chain.take() {
             let node = &tree[id];
             let mut arms: Vec<IfArm> = vec![(node.cond, node.then, node.stmt_list)];
-            for clause in &node.elseif_clauses {
+            for clause in self.parsed.tree.list(node.elseif_clauses) {
                 let clause = &tree[*clause];
                 arms.push((clause.cond, clause.body, None));
             }
-            for clause in &node.alt_elseif_clauses {
+            for clause in self.parsed.tree.list(node.alt_elseif_clauses) {
                 let clause = &tree[*clause];
                 arms.push((clause.cond, None, clause.stmt_list));
             }
@@ -2306,7 +2320,7 @@ impl<'a> Emit<'a> {
             self.export_names(out, implements);
         }
         out.extend(b" {\n");
-        for member in &tree[body].class_members {
+        for member in tree.list(tree[body].class_members) {
             self.export_member_decl(out, *member, indent + 1)?;
         }
         indent_to(out, indent);
@@ -2363,21 +2377,26 @@ impl<'a> Emit<'a> {
             tree::ClassMember::ClassConstDecl(id) => {
                 let node = &tree[id];
                 self.line(out, indent, true, |s, out| {
-                    s.export_attributes(out, &node.attrs, indent, true)?;
-                    Flags::of(parsed, &node.modifiers, true).visibility(out, false);
+                    s.export_attributes(out, self.parsed.tree.list(node.attrs), indent, true)?;
+                    Flags::of(parsed, self.parsed.tree.list(node.modifiers), true)
+                        .visibility(out, false);
                     out.extend(b"const ");
                     if let Some(ty) = node.ty {
                         s.export_type(out, ty);
                         out.push(b' ');
                     }
-                    s.export_const_declarators(out, &node.const_declarators, indent)
+                    s.export_const_declarators(
+                        out,
+                        self.parsed.tree.list(node.const_declarators),
+                        indent,
+                    )
                 })
             }
             tree::ClassMember::PropertyDecl(id) => {
                 let node = &tree[id];
                 self.line(out, indent, node.hooks.is_none(), |s, out| {
-                    s.export_attributes(out, &node.attrs, indent, true)?;
-                    let flags = Flags::of(parsed, &node.modifiers, true);
+                    s.export_attributes(out, self.parsed.tree.list(node.attrs), indent, true)?;
+                    let flags = Flags::of(parsed, self.parsed.tree.list(node.modifiers), true);
                     flags.visibility(out, true);
                     if flags.is_static {
                         out.extend(b"static ");
@@ -2389,7 +2408,13 @@ impl<'a> Emit<'a> {
                         s.export_type(out, ty);
                         out.push(b' ');
                     }
-                    for (at, declarator) in node.property_declarators.iter().enumerate() {
+                    for (at, declarator) in self
+                        .parsed
+                        .tree
+                        .list(node.property_declarators)
+                        .iter()
+                        .enumerate()
+                    {
                         if at > 0 {
                             out.extend(b", ");
                         }
@@ -2410,8 +2435,8 @@ impl<'a> Emit<'a> {
                 let node = &tree[id];
                 let decl = Decl {
                     kind: DeclKind::Method,
-                    attrs: &node.attrs,
-                    flags: Flags::of(parsed, &node.modifiers, true),
+                    attrs: self.parsed.tree.list(node.attrs),
+                    flags: Flags::of(parsed, self.parsed.tree.list(node.modifiers), true),
                     by_ref: node.byref.is_some(),
                     name: node
                         .name
@@ -2430,13 +2455,13 @@ impl<'a> Emit<'a> {
                 let node = &tree[id];
                 self.line(out, indent, false, |s, out| {
                     out.extend(b"use ");
-                    s.export_names(out, &node.traits);
+                    s.export_names(out, self.parsed.tree.list(node.traits));
                     let Some(adaptations) = node.adaptations else {
                         out.push(b';');
                         return Ok(());
                     };
                     out.extend(b" {\n");
-                    for adaptation in &tree[adaptations].trait_adaptations {
+                    for adaptation in tree.list(tree[adaptations].trait_adaptations) {
                         s.line(out, indent + 1, true, |s, out| {
                             s.export_adaptation(out, *adaptation);
                             Ok(())
@@ -2450,7 +2475,7 @@ impl<'a> Emit<'a> {
             tree::ClassMember::EnumCaseDecl(id) => {
                 let node = &tree[id];
                 self.line(out, indent, true, |s, out| {
-                    s.export_attributes(out, &node.attrs, indent, true)?;
+                    s.export_attributes(out, self.parsed.tree.list(node.attrs), indent, true)?;
                     out.extend(b"case ");
                     if let Some(name) = node.name.and_then(|name| tree[name].name) {
                         out.extend(text(parsed, name));
@@ -2484,7 +2509,7 @@ impl<'a> Emit<'a> {
                 let node = &tree[id];
                 method_ref(out, node.r#ref);
                 out.extend(b" insteadof ");
-                self.export_names(out, &node.excluded);
+                self.export_names(out, self.parsed.tree.list(node.excluded));
             }
             tree::TraitAdaptation::AsAdaptation(id) => {
                 let node = &tree[id];

@@ -299,16 +299,10 @@ mod tests {
         for args in [
             &["init", "-q", "-b", "main"][..],
             &[
-                "-c",
-                "user.name=x",
-                "-c",
-                "user.email=x@x",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "one",
-            ],
+                &crate::scratch::UNHOOKED[..],
+                &["commit", "-q", "--allow-empty", "-m", "one"],
+            ]
+            .concat(),
         ] {
             assert!(
                 Command::new("git")

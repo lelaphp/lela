@@ -11,9 +11,15 @@ description = "The opcache extension, php-src/ext/opcache"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, the one workspace dependency. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# `opcache.preload_user`'s account through `nix` (the user database and,
+# on Linux, its group list), and `libc` in `src/ffi/` alone for the
+# per-thread credential calls `nix` wraps only as the per-process ones
+# (#1258, as ext/posix binds what `nix` lacks, design §7.2).
+nix = { workspace = true, features = ["user"] }
+libc = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

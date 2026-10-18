@@ -1172,6 +1172,8 @@ dependencies = [
 name = "php_ext_opcache"
 version = "0.0.0"
 dependencies = [
+ "libc",
+ "nix",
  "php_ext",
  "php_ext_lexbor",
  "php_ext_standard",
@@ -1631,6 +1633,7 @@ dependencies = [
  "httpdate",
  "hyper",
  "hyper-util",
+ "libc",
  "php_bundle",
  "php_ext",
  "php_proto",
@@ -1660,6 +1663,7 @@ dependencies = [
 name = "php_syntax"
 version = "0.0.0"
 dependencies = [
+ "bumpalo",
  "expect-test",
  "nix",
 ]

@@ -487,8 +487,7 @@ fn lay(line: &Line, dir: &Path, port: u16) -> Result<()> {
         };
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         if !name.ends_with('/') {
-            fs::write(&path, fill(text, dir, port))
-                .with_context(|| format!("writing {}", path.display()))?;
+            crate::write(&path, fill(text, dir, port))?;
         }
     }
     for (name, mode) in &line.modes {

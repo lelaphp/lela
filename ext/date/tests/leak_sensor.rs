@@ -64,3 +64,35 @@ var_dump(DateInterval::createFromDateString('3 days')->d, (array) $d === (array)
         "{stdout}"
     );
 }
+
+/// An interval's and a period's `timelib_rel_time` and an interval's
+/// date string are freed on every path that replaces or drops them
+/// (#2855): a constructor called again, a clone whose `__clone` throws, an
+/// `__unserialize` whose error handler throws mid-read, of a date string
+/// over another and of fields over a date string, a refused date
+/// string, `__wakeup`, `__set_state`, and a period's clone, reads and
+/// ISO form. What it prints is the oracle's.
+#[test]
+fn an_interval_s_relative_time_and_date_string_are_freed_on_every_path() {
+    let stdout = armed(
+        r#"<?php
+class I extends DateInterval { public $n = 0; function __clone() { if ($this->n++ > 0) throw new Exception('clone'); } }
+$i = new I('P1D'); $i->__construct('P2D'); $i->__construct('2008-05-11T15:30:00Z/2008-06-12T16:31:01Z');
+$c = clone $i; try { $c->n = 1; $d = clone $c; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+set_error_handler(function ($n, $s) { throw new Exception($s); });
+try { $i->__unserialize(['y' => 7, 'f' => new stdClass, 'invert' => 1]); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+restore_error_handler();
+$s = DateInterval::createFromDateString('+1 day +1 day +1 day');
+$s->__unserialize(['date_string' => '+2 days']); $s->__unserialize(['date_string' => '+3 days']); $s->__unserialize(['d' => 4]);
+try { $s->__unserialize(['date_string' => 'foo bar']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+@$s->__wakeup(); $u = new DateInterval('P1D'); $u->__unserialize($s->__serialize()); $v = DateInterval::__set_state((array) $i);
+$p = new DatePeriod(new DateTime('2020-01-01'), $i, 2); $q = clone $p; $q->__unserialize($p->__serialize());
+$x = [$p->interval, $p->start, $q->getDateInterval(), DatePeriod::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D')->interval];
+var_dump($i->y, $i->invert, $s->d, $s->date_string, $u->d, $v->days, $x[0]->d);
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "clone\nObject of class stdClass could not be converted to float\nUnknown or bad format (foo bar) at position 0 (f) while unserializing: The timezone could not be found in the database\nint(7)\nint(1)\nint(3)\nstring(7) \"+3 days\"\nint(3)\nint(-1)\nint(-1)\n"
+    );
+}

@@ -15,7 +15,7 @@
 //! request's `accelerator_enabled`, and the blacklist. The compiled tier
 //! is not behind it: the tier's entries are registered as php registers
 //! them, and the tier they configure reports itself disabled.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -29,8 +29,11 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod blacklist;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod ffi;
 mod file_override;
 mod ini;
+mod preload_user;
 mod startup;
 
 use php_ext::abi::{

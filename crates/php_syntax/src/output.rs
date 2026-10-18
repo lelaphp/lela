@@ -57,7 +57,7 @@ fn copied_from(kind: SyntaxKind) -> Option<usize> {
 /// made of a name ([`filter_tokens`]), and the source's bytes for every
 /// other token and where no filter stands.
 #[must_use]
-pub fn token_text(parsed: &Parsed, id: TokenId) -> &[u8] {
+pub fn token_text<'p>(parsed: &'p Parsed<'_>, id: TokenId) -> &'p [u8] {
     if let Some(filtered) = parsed.filtered.get(id) {
         return filtered;
     }
@@ -70,7 +70,7 @@ pub fn token_text(parsed: &Parsed, id: TokenId) -> &[u8] {
         .unwrap_or_default()
 }
 
-impl Parsed {
+impl Parsed<'_> {
     /// Pass the token filter over the parse, once per token php's scanner
     /// hands through it, and keep what it made ([`Filtered`]).
     fn filter_tokens(&mut self, filter: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
@@ -100,13 +100,28 @@ impl Parsed {
             }
         }
         for node in tree.nodes::<InterpolatedStringExpr>() {
-            parts(tree, Holder::DoubleQuoted(node), &node.parts, &mut strings);
+            parts(
+                tree,
+                Holder::DoubleQuoted(node),
+                tree.list(node.parts),
+                &mut strings,
+            );
         }
         for node in tree.nodes::<HeredocExpr>() {
-            parts(tree, Holder::Heredoc(node), &node.parts, &mut strings);
+            parts(
+                tree,
+                Holder::Heredoc(node),
+                tree.list(node.parts),
+                &mut strings,
+            );
         }
         for node in tree.nodes::<ShellExecExpr>() {
-            parts(tree, Holder::ShellExec(node), &node.parts, &mut strings);
+            parts(
+                tree,
+                Holder::ShellExec(node),
+                tree.list(node.parts),
+                &mut strings,
+            );
         }
         for (holder, token) in strings {
             if let Some(TokenValue::Bytes(bytes)) = TokenValue::of(self, holder, token) {
@@ -119,7 +134,7 @@ impl Parsed {
 
 /// Each written part of a string `holder` holds, with the holder.
 fn parts<'a>(
-    tree: &Tree,
+    tree: &Tree<'_>,
     holder: Holder<'a>,
     parts: &[StringPart],
     into: &mut Vec<(Holder<'a>, TokenId)>,
@@ -135,6 +150,6 @@ fn parts<'a>(
 
 /// Pass the token filter over `parsed`, once per token php's scanner
 /// hands through it, and keep what it made ([`Filtered`]).
-pub fn filter_tokens(parsed: &mut Parsed, filter: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
+pub fn filter_tokens(parsed: &mut Parsed<'_>, filter: &mut dyn FnMut(&[u8]) -> Vec<u8>) {
     parsed.filter_tokens(filter);
 }

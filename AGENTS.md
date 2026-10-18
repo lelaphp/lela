@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=1f06a6d43eff5a2a3a631abfd175c8add8afc6f9dfe5bcffb6fbd2093aefd892 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=ba0c5313bcd53fcbfb9ea43c1642567ab6ece35c46cccf5841d53901045a2df8 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -116,23 +116,23 @@ third-engine-design.md
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 - ADR-0014 (accepted, 2026-10-09): A request's heap is lent to C for the length of one call
 
-<!-- /computed in=1783c270cbaa14d511bb59dd0b2653187b94a0bbfe68bff527a17ecf7c0ce468 out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
+<!-- /computed in=424b00fa8b3e34724d7eed4bda514d1801d3c581734f711441e40fbd29157ae3 out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
 | heap | heap.lock | 418 |  |
 | process | process.lock | 39 |  |
-| unit | unit.lock | 106 |  |
+| unit | unit.lock | 112 |  |
 | link | link.lock | 57 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1432 | 1500 |
+| api | api.lock | 1445 | 1500 |
 | sapi | sapi.lock | 57 |  |
 | tier | tier.lock | 32 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 412 |  |
 
-<!-- /computed in=e2da4b3837dde0dd49df2f78ea5d3c0c98ac3848f396bb1ae2ceefb9544a81d8 out=8bd899425bcc7d5f9e9fd91e5736c549167bc4e4537e83e4a13bcbdc2b25eda7 -->
+<!-- /computed in=aeb30012cc155ab16cb102e8d9ad8727f2b8378a25fa18feebee9b6f887c466e out=944dc7886dbfaa48387ad9cde9fb9192181dde99729e44ac5a571792c6be184e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

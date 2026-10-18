@@ -201,9 +201,16 @@ says which ticket first read each.
 | workload | first read by | what it is |
 |---|---|---|
 | `bench_quiet.php` | #1808 | php-src's `Zend/bench.php` with `end_test` and `total` printing names only, so its bytes are deterministic |
+| `binary_trees.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/binary_trees.php` with `$N` at the size `third-engine-design.md` §9.2 names |
 | `calls.php` | #2011 | #1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows |
+| `fannkuch.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/fannkuch.php` with `$N` at §9.2's size |
+| `fib.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/fib.php` with `$N` at §9.2's size |
 | `frame_chain.php` | #1301 | recursive user calls, then a loop of native calls: the bar #1384 holds the readable frame header to |
+| `mandelbrot.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/mandelbrot.php` with `$N` at §9.2's size |
 | `natives.php` | #2209 | a loop of native calls, each return kind #2209 names |
+| `nbody.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/nbody.php` with `$N` at §9.2's size |
+| `spectralnorm.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/spectralnorm.php` with `$N` at §9.2's size |
+| `string_munge.php` | #2740 | one of the seven kernels, Mahout's `benchmarks/src/string_munge.php` with `$N` at §9.2's size |
 | `ucall.php` | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |
 
 ## 12. The tolerance a nightly bar is held to

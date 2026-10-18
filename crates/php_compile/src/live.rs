@@ -236,6 +236,10 @@ fn constructor_call(oplines: &[Opline], def: u32, use_at: u32) -> u32 {
 /// distance to the loop's end written into its `op2`, which is why the
 /// oplines are taken mutably.
 pub(crate) fn live_ranges(oplines: &mut [Opline], num_tmps: u32) -> Vec<LiveRange> {
+    // An op array with no temporary has no range to find.
+    if num_tmps == 0 {
+        return Vec::new();
+    }
     let mut ranges = Ranges {
         table: Vec::new(),
         last_use: vec![None; num_tmps as usize],

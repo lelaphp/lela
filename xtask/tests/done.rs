@@ -464,7 +464,7 @@ fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_cr
 #[test]
 fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     let root = Tree::new("done-closure").unwrap();
-    xtask::scratch::repository(&fixtures().join("closure"), &root).unwrap();
+    xtask::scratch::repository(&fixtures().join("closure"), &root, &["."]).unwrap();
     std::fs::create_dir_all(root.join("docs")).unwrap();
     for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
         std::fs::copy(workspace().join(file), root.join(file)).unwrap();

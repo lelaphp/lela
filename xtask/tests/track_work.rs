@@ -58,6 +58,20 @@ fn has_ref(root: &Path, name: &str) -> bool {
         .success()
 }
 
+/// What `track work` reads of the checkout, and the worktree it lays
+/// down of it: the harness's own files, the map `status --session` renders,
+/// the tracked settings and what git ignores there. Each test laid the
+/// whole tree, some 4,400 files, and checked a worktree of it out, until
+/// #2882.
+const READ: [&str; 6] = [
+    "seams.toml",
+    "oracle.toml",
+    "docs/divergence.toml",
+    "AGENTS.md",
+    ".claude",
+    ".gitignore",
+];
+
 /// The scratch: main's checkout at `repo`, its bare `origin.git`, the
 /// two stand-ins under `bin`, the tracker's transcripts and what the
 /// session wrote down.
@@ -68,9 +82,9 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// Main's checkout of this working tree's files, laid by
-    /// [`scratch::repository`]: one commit on `main`, pushed to `origin`,
-    /// and the checkout on `main`. `origin` is a bare clone borrowing the
+    /// Main's checkout of the files of this working tree [`READ`] names,
+    /// laid by [`scratch::repository`]: one commit on `main`, pushed to
+    /// `origin`, and the checkout on `main`. `origin` is a bare clone borrowing the
     /// checkout's objects, as the checkout borrows the workspace's, so the
     /// push writes no pack and each scratch holds no copy of the tree's
     /// objects (#644).
@@ -78,7 +92,7 @@ impl Scratch {
         let dir = Tree::new(&format!("track-work-{name}")).unwrap();
         let root = dir.join("repo");
         let origin = dir.join("origin.git");
-        scratch::repository(workspace(), &root).unwrap();
+        scratch::repository(workspace(), &root, &READ).unwrap();
         fs::create_dir_all(dir.join("bin")).unwrap();
         sh(
             &dir,

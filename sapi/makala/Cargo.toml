@@ -46,6 +46,9 @@ tokio = { workspace = true, features = ["fs"] }
 # aws-lc-rs provider (#2333); the tests' client is the same rustls.
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+# `EACCES` and `ENOENT`, the errno values php-fpm's refusal of a script
+# reads and leaves (#2767); no package is added.
+libc = { workspace = true }
 
 [dev-dependencies]
 # pcntl and posix turned on for the tests' build, as one build of the

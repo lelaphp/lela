@@ -308,7 +308,7 @@ fn read(site: &Arc<Site>, mut client: Client) -> Connection {
         Err(error) if error.kind() == ErrorKind::WouldBlock => {
             return Connection::Reading(client);
         }
-        Err(error) => super::strerror(&error),
+        Err(error) => php_sapi::strerror(&error),
         Ok(read) => {
             client.building.root.clone_from(&site.document_root);
             let taken = client.parser.execute(&mut client.building, &buf[..read]);
@@ -383,7 +383,7 @@ fn dispatch(site: &Arc<Site>, client: Client) -> Connection {
         // `php_request_shutdown`'s head and the connection's close leave
         // unsent.
         Some(ProgramServed::NulInPath) => {
-            let errno = super::strerror(&std::io::Error::last_os_error());
+            let errno = php_sapi::strerror(&std::io::Error::last_os_error());
             log_response(site, &client, 400, Some(&errno), None);
         }
         None => {}
@@ -733,7 +733,7 @@ fn send_static(site: &Site, client: Client) -> Connection {
 /// for `HEAD`, under the server's own head, and the line logged with
 /// `strerror(errno)` as it stands.
 fn error_page(site: &Site, client: Client, status: i64) -> Connection {
-    let errno = super::strerror(&std::io::Error::last_os_error());
+    let errno = php_sapi::strerror(&std::io::Error::last_os_error());
     let request = &client.building.request;
     let reason = http::reason(status).unwrap_or("Unknown Status Code");
     let mut body = Vec::new();
@@ -905,7 +905,7 @@ fn send(site: &Site, mut client: Client, mut pending: Pending) -> Connection {
                 }
             }
             Err(error) => {
-                site.log.write(Type::Error, &super::strerror(&error));
+                site.log.write(Type::Error, &php_sapi::strerror(&error));
                 return close(site, &client);
             }
         }

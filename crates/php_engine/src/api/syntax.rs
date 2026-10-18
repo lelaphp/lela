@@ -11,8 +11,8 @@
 //! one walk every host reads its own command line with (`main/getopt.c`).
 
 pub use php_compile::syntax::{
-    Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, Position, ScannedToken,
-    SyntaxKind, Token, TokenId, Tree, lex, parse, scanned,
+    Arena, Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, Position,
+    ScannedToken, SyntaxKind, Token, TokenId, Tree, lex, parse, scanned,
 };
 
 pub use crate::getopt::{Getopt, Need, Opt, Taken};

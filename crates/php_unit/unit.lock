@@ -14,6 +14,7 @@ Effects::NONE
 Effects::THROW
 Effects::contains
 FramelessEntry
+Handler
 HookBody
 Level
 Level::bit
@@ -36,8 +37,13 @@ Opcode::num
 Opcode::out_used
 OperandKind
 Opline
+Opline::fuses
 Opline::jump_target
 OplineIdx
+Safepoints
+Safepoints::INLINE
+Safepoints::new
+Safepoints::push
 TopLevel
 TryCatch
 Unit

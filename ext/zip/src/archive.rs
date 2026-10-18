@@ -802,7 +802,9 @@ impl Archive {
     }
 
     /// `_zip_file_replace`: `idx` given new data, or with `None` a new
-    /// entry, or the one named `name` under `ZIP_FL_OVERWRITE`.
+    /// entry, or the one named `name` under `ZIP_FL_OVERWRITE`. Its extra
+    /// fields are cleared while torrentzip is wanted too, as 1.11.4 and
+    /// 1.12.1 clear them and 1.12 alone refuses (#2667).
     pub(crate) fn file_replace(
         &mut self,
         idx: Option<usize>,

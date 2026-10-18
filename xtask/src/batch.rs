@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::manifest::Crate;
@@ -104,6 +104,7 @@ impl Built {
                     {
                         self.executables.push(Executable {
                             path,
+                            name: target.name.clone(),
                             kind: target.kind.first().cloned().unwrap_or_default(),
                         });
                     }
@@ -137,6 +138,9 @@ pub(crate) struct Message {
 #[derive(Debug, Clone)]
 pub(crate) struct Executable {
     pub(crate) path: PathBuf,
+    /// The target's name: `worktree` for `tests/worktree.rs`, the
+    /// library's for its unit tests.
+    pub(crate) name: String,
     /// The target's kind, `lib`, `bin` or `test`: an integration test's
     /// executable runs with `CARGO_TARGET_TMPDIR` set.
     pub(crate) kind: String,
@@ -165,6 +169,9 @@ pub(crate) struct Package {
     pub(crate) rust_version: Option<String>,
     #[serde(default)]
     pub(crate) readme: Option<String>,
+    /// The manifest's `[package.metadata]`, as cargo hands it on unread.
+    #[serde(default)]
+    pub(crate) metadata: Option<serde_json::Value>,
     #[serde(default)]
     targets: Vec<Target>,
 }
@@ -388,25 +395,8 @@ struct Metadata {
 
 impl Metadata {
     fn read(root: &Path) -> Result<Metadata> {
-        let out = Command::new("cargo")
-            .args([
-                "metadata",
-                "--format-version",
-                "1",
-                "--no-deps",
-                "--offline",
-            ])
-            .current_dir(root)
-            .output()
-            .context("running cargo metadata")?;
-        if !out.status.success() {
-            bail!(
-                "cargo metadata at {}: {}",
-                root.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        serde_json::from_slice(&out.stdout).context("cargo metadata wrote no metadata")
+        serde_json::from_str(&crate::key::cargo_metadata(root)?)
+            .context("cargo metadata wrote no metadata")
     }
 
     /// The package of `krate` and its directory, as cargo names it: a root

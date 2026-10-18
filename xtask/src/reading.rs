@@ -905,22 +905,11 @@ impl Store {
 
     /// Each entry of the index of one scope: its key and its file.
     fn keys_of(&self, instrument: &str, scope: &str) -> Result<Vec<(String, PathBuf)>> {
-        let dir = self.dir_of(instrument, scope)?;
-        let listing = match fs::read_dir(&dir) {
-            Ok(listing) => listing,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
-        };
-        let mut keys = Vec::new();
-        for entry in listing {
-            let path = entry
-                .with_context(|| format!("listing {}", dir.display()))?
-                .path();
-            if let Some(key) = index_key(&path) {
-                keys.push((key.to_owned(), path));
-            }
-        }
-        Ok(keys)
+        let listed = crate::entries(&self.dir_of(instrument, scope)?)?;
+        Ok(listed
+            .into_iter()
+            .filter_map(|path| Some((index_key(&path)?.to_owned(), path)))
+            .collect())
     }
 
     /// Which of `keys` a reading of `instrument` over `scope` was taken
@@ -992,8 +981,7 @@ impl Store {
         if !path.exists() {
             return Ok(Log::default());
         }
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(&path)?;
         Ok(Log::of(&text, Reading::from_json))
     }
 
@@ -1004,8 +992,7 @@ impl Store {
         self.migrate()?;
         let mut all = Log::default();
         for path in shards(&self.root.join(LOG))? {
-            let text =
-                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let text = crate::read(&path)?;
             let log = Log::of(&text, Reading::from_json);
             all.readings.extend(log.readings);
             all.unreadable.extend(log.unreadable);
@@ -1032,8 +1019,7 @@ impl Store {
             if name == UNREAD {
                 continue;
             }
-            let text =
-                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let text = crate::read(&path)?;
             let lines: Vec<(Status, String)> = text
                 .lines()
                 .filter_map(|l| serde_json::from_str::<Brief>(l).ok())
@@ -1054,9 +1040,7 @@ impl Store {
     /// it again.
     pub fn readings(&self) -> Result<Files> {
         let mut paths = Vec::new();
-        if self.root.is_dir() {
-            walk(&self.root, &mut paths)?;
-        }
+        crate::tally::files_under(&self.root, &mut paths)?;
         paths.sort();
         let mut files = Files::default();
         for path in paths
@@ -1072,8 +1056,7 @@ impl Store {
     }
 
     fn read_file(path: &Path) -> Result<Reading> {
-        let text =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text = crate::read(path)?;
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
     }
 }
@@ -1120,26 +1103,15 @@ fn prune(dir: &Path) -> Result<()> {
     }
     entries.sort_by_key(|(written, _)| std::cmp::Reverse(*written));
     for (_, path) in entries.into_iter().skip(KEPT) {
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("removing {}", path.display())),
-        }
+        crate::remove(&path)?;
     }
     Ok(())
 }
 
 /// The files of the log under `dir`, in name order; none where it is not.
 fn shards(dir: &Path) -> Result<Vec<PathBuf>> {
-    let listing = match fs::read_dir(dir) {
-        Ok(listing) => listing,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
-    };
-    let mut paths: Vec<PathBuf> = listing
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .collect();
+    let mut paths = crate::entries(dir)?;
+    paths.retain(|p| p.extension().is_some_and(|e| e == "jsonl"));
     paths.sort();
     Ok(paths)
 }
@@ -1206,12 +1178,10 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let written = fs::write(&beside, bytes)
-        .with_context(|| format!("writing {}", beside.display()))
-        .and_then(|()| {
-            fs::rename(&beside, path)
-                .with_context(|| format!("renaming {} to {}", beside.display(), path.display()))
-        });
+    let written = crate::write(&beside, bytes).and_then(|()| {
+        fs::rename(&beside, path)
+            .with_context(|| format!("renaming {} to {}", beside.display(), path.display()))
+    });
     if written.is_err() {
         fs::remove_file(&beside).ok();
     }
@@ -1381,6 +1351,12 @@ pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+/// A span in whole milliseconds, as every reading that times something
+/// counts it under a key ending `_ms`, or `ms` alone.
+pub(crate) fn millis(span: std::time::Duration) -> u64 {
+    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// The current time in UTC as a TOML datetime, to the second: what a
 /// reading's `at` is, in one format, so its text orders as its instant
 /// does.
@@ -1457,19 +1433,6 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d)
-}
-
-/// Every file under `dir`, recursively, in directory order.
-pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// At most five names, and how many more there are: how a reading's

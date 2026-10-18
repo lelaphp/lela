@@ -191,7 +191,7 @@ fn concat(first: &[u8], second: &[u8]) -> Vec<u8> {
     name
 }
 
-impl Emit<'_> {
+impl<'a> Emit<'a> {
     /// `zend_compile_namespace` (`Z/Zend/zend_compile.c:9741`): the form
     /// held to the file's earlier `namespace` statements, a first one
     /// held to `zend_is_first_statement`, the name to `namespace`, then
@@ -395,7 +395,7 @@ impl Emit<'_> {
                 Written::Relative(_) => return Err(self.unexpected_name(&prefix)),
                 Written::FullyQualified(rest) | Written::NotQualified(rest) => rest.to_vec(),
             };
-            for item in group.use_group_items.clone() {
+            for item in self.list(group.use_group_items).iter().copied() {
                 let item = &self.parsed.tree[item];
                 let name = self.text(item.name).to_vec();
                 if !matches!(Written::of(&name), Written::NotQualified(_)) {
@@ -414,7 +414,7 @@ impl Emit<'_> {
             return Ok(());
         }
         let kind = Symbol::of(statement_kind);
-        for clause in node.use_clauses.clone() {
+        for clause in self.list(node.use_clauses).iter().copied() {
             let clause = &self.parsed.tree[clause];
             self.line = clause.line;
             let written = self.text(clause.name).to_vec();
@@ -584,7 +584,7 @@ impl Emit<'_> {
     /// string(1) "A"
     /// bool(true)
     /// ```
-    pub(super) fn resolve_class(&self, name: &[u8]) -> Vec<u8> {
+    pub(super) fn resolve_class(&self, name: &[u8]) -> &'a [u8] {
         self.resolve_class_marked(name).0
     }
 
@@ -606,32 +606,32 @@ impl Emit<'_> {
     /// Parameter #1 [ <optional> $b = \Other\Baz::Y ]
     /// Parameter #2 [ <optional> $c = \Q::X ]
     /// ```
-    pub(super) fn resolve_class_marked(&self, name: &[u8]) -> (Vec<u8>, NameKind) {
-        let rewritten = |resolved: Vec<u8>| (resolved, NameKind::FullyQualified);
+    pub(super) fn resolve_class_marked(&self, name: &[u8]) -> (&'a [u8], NameKind) {
+        let rewritten = |resolved: &'a [u8]| (resolved, NameKind::FullyQualified);
         let name = match Written::of(name) {
-            Written::FullyQualified(rest) => return rewritten(rest.to_vec()),
+            Written::FullyQualified(rest) => return rewritten(self.arena.copy(rest)),
             Written::Relative(rest) if self.namespace.is_some() => {
                 return rewritten(self.prefix_with_ns(rest));
             }
-            Written::Relative(rest) => return (rest.to_vec(), NameKind::Relative),
+            Written::Relative(rest) => return (self.arena.copy(rest), NameKind::Relative),
             Written::NotQualified(name) => name,
         };
         match name.iter().position(|byte| *byte == b'\\') {
             Some(slash) => {
                 if let Some(import) = self.imports.class(&name[..slash]) {
-                    return rewritten(concat(import, &name[slash + 1..]));
+                    return rewritten(self.arena.concat(&[import, b"\\", &name[slash + 1..]]));
                 }
             }
             None => {
                 if let Some(import) = self.imports.class(name) {
-                    return rewritten(import.to_vec());
+                    return rewritten(self.arena.copy(import));
                 }
             }
         }
         if self.namespace.is_some() {
             return rewritten(self.prefix_with_ns(name));
         }
-        (name.to_vec(), NameKind::NotFullyQualified)
+        (self.arena.copy(name), NameKind::NotFullyQualified)
     }
 
     /// `zend_resolve_non_class_name` over the function imports or the
@@ -654,9 +654,9 @@ impl Emit<'_> {
     /// bool(true)
     /// string(21) "Random\Engine\Mt19937"
     /// ```
-    pub(super) fn resolve_non_class(&self, name: &[u8], kind: Symbol) -> (Vec<u8>, bool) {
+    pub(super) fn resolve_non_class(&self, name: &[u8], kind: Symbol) -> (&'a [u8], bool) {
         let name = match Written::of(name) {
-            Written::FullyQualified(rest) => return (rest.to_vec(), true),
+            Written::FullyQualified(rest) => return (self.arena.copy(rest), true),
             Written::Relative(rest) => return (self.prefix_with_ns(rest), true),
             Written::NotQualified(name) => name,
         };
@@ -666,13 +666,16 @@ impl Emit<'_> {
             Symbol::Class => None,
         };
         if let Some(import) = imported {
-            return (import.to_vec(), true);
+            return (self.arena.copy(import), true);
         }
         let Some(slash) = name.iter().position(|byte| *byte == b'\\') else {
             return (self.prefix_with_ns(name), false);
         };
         if let Some(import) = self.imports.class(&name[..slash]) {
-            return (concat(import, &name[slash + 1..]), true);
+            return (
+                self.arena.concat(&[import, b"\\", &name[slash + 1..]]),
+                true,
+            );
         }
         (self.prefix_with_ns(name), true)
     }
@@ -730,8 +733,7 @@ impl Emit<'_> {
         kind: Symbol,
         unqualified: &[u8],
     ) -> Result<Vec<u8>, CompileError> {
-        let full = self.prefix_with_ns(unqualified);
-        let name = full.as_slice();
+        let name = self.prefix_with_ns(unqualified);
         let shown = String::from_utf8_lossy(name);
         match kind {
             Symbol::Class => {
@@ -771,6 +773,6 @@ impl Emit<'_> {
                 self.imports.see(name.to_vec(), kind);
             }
         }
-        Ok(full)
+        Ok(name.to_vec())
     }
 }

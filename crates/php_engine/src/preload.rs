@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::api::abi::{Beneath, PostStartup, chain};
+use crate::api::abi::{Beneath, PostStartup, PreloadThread, chain};
 use crate::api::request::{Phase, Request};
 use crate::engine::{Engine, Lent, OutputSink, RequestDescription, refused_program, serve_unit};
 use crate::unit_cache::PRELOAD_SCRIPT;
@@ -95,18 +95,88 @@ impl Engine {
         // `accel_finish_startup_preload`'s request: the host's, with no
         // program, no arguments and no server variables of its own
         // (`sapi_module.register_server_variables` is `NULL` for it).
-        let description = RequestDescription {
+        let description = || RequestDescription {
             env: first.env.clone(),
             cwd: first.cwd.clone(),
             sapi_name: first.sapi_name.clone(),
             ..RequestDescription::default()
         };
-        let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
+        let mut req = Request::lent(Arc::clone(&self.shared), description(), sink);
         let answer = Beneath::<chain::PostStartup>::top(links, ()).serve(&mut req);
         match answer {
             PostStartup::Serve => (Started::Serving, req.release_sink()),
             PostStartup::Refuse { status } => (Started::Refused(status), req.release_sink()),
-            PostStartup::Preload(script) => self.preload(req, &script),
+            PostStartup::Preload {
+                script,
+                thread: None,
+            } => self.preload(req, &script, false),
+            PostStartup::Preload {
+                script,
+                thread: Some(thread),
+            } => {
+                // The chain's request ends here: the preload's is made on
+                // its thread, and only one stands at a time.
+                let sink = req.release_sink();
+                drop(req);
+                self.preload_on(thread, description(), sink, script)
+            }
+        }
+    }
+
+    /// `accel_finish_startup`'s parent and its child
+    /// (`Z/ext/opcache/ZendAccelerator.c:5079-5106`): the preload served
+    /// in a request of its own on a thread apart ([`crate::fork::run_apart`]),
+    /// with the stack this thread has, as a forked child has its
+    /// parent's, once that thread took what `thread` takes, and this
+    /// thread waiting for it as the parent `waitpid`s. The engine's timer
+    /// thread, the one thread a request starts, is started first, with
+    /// the process's ids, so the thread apart starts none that would keep
+    /// what it took, and a deadline the preload arms is served by it.
+    /// Where the take fails the file is never served and the startup
+    /// fails with status 1, as the child's `exit(1)` fails it; where the
+    /// system refuses the thread, `thread`'s `unstarted` answers, as
+    /// php's refused `fork()` does. What `thread` hands to be done once
+    /// it has ended is done here, after the join. A `pcntl_fork` in the preload is
+    /// refused there, two things standing inside the engine (ADR-0010).
+    fn preload_on(
+        &self,
+        mut thread: PreloadThread,
+        description: RequestDescription,
+        sink: Lent,
+        script: Vec<u8>,
+    ) -> (Started, Lent) {
+        let stack = php_heap::call_stack_bounds()
+            .map_or_else(php_heap::call_stack_default_size, |stack| stack.max_size);
+        self.shared.timer.stand();
+        let unstarted = thread.unstarted();
+        let joined = thread.after_join();
+        let engine = self.clone();
+        let ran = crate::fork::run_apart(
+            "php-preload",
+            stack,
+            (description, sink),
+            move |(description, sink)| {
+                let mut req = Request::lent(Arc::clone(&engine.shared), description, sink);
+                if thread.take(&mut req) {
+                    engine.preload(req, &script, true)
+                } else {
+                    (Started::Refused(1), req.release_sink())
+                }
+            },
+        );
+        if ran.is_ok()
+            && let Some(joined) = joined
+        {
+            joined();
+        }
+        match ran {
+            Ok(Ok(finished)) => finished,
+            Ok(Err(panicked)) => std::panic::resume_unwind(panicked),
+            Err((_, (description, sink))) => {
+                let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
+                let status = unstarted(&mut req);
+                (Started::Refused(status), req.release_sink())
+            }
         }
     }
 
@@ -117,7 +187,10 @@ impl Engine {
     /// left published for every request, each file it compiled told as
     /// cached; then the request shut down. A file that fails fails the
     /// startup, and the process ends with status 1, as php's does.
-    fn preload(&self, mut req: Request, script: &[u8]) -> (Started, Lent) {
+    /// `in_child` is php's `ZEND_COMPILE_PRELOAD_IN_CHILD`: the request
+    /// is served on the thread that took `opcache.preload_user`'s
+    /// credentials.
+    fn preload(&self, mut req: Request, script: &[u8], in_child: bool) -> (Started, Lent) {
         req.hash_environment().ok();
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
@@ -128,7 +201,7 @@ impl Engine {
         // `SG(request_info).no_headers` set once the request started, so
         // the host is handed no head (`Z/ext/opcache/ZendAccelerator.c:4917`).
         req.output_mut().quiet();
-        req.begin_preload();
+        req.begin_preload(in_child);
         req.enter_phase(Phase::Running);
         // `zend_compile_file(ZEND_REQUIRE)`: the script opened as a
         // `require` opens it, so it is filed under the path it resolves
@@ -191,5 +264,260 @@ impl Engine {
         } else {
             (Started::Serving, sink)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    use php_unit::decl::{IniDecl, Name};
+
+    use crate::api::abi::{
+        Admission, Extension, ExtensionBuilder, Lookup, PostStartup, PreloadThread, Validation,
+    };
+    use crate::engine::Engine;
+    use crate::test::Capture;
+
+    /// Where each step stood: the thread a take ran on, and the thread
+    /// each diagnostic was raised on, with whether its request was the
+    /// preload's and the child's, each under the preload file its engine
+    /// names.
+    static SEEN: Mutex<Vec<(String, ThreadId, bool, bool)>> = Mutex::new(Vec::new());
+
+    fn seen(req: &crate::api::request::Request, what: &str) {
+        let script = String::from_utf8_lossy(req.ini_get(b"t.preload").unwrap_or_default());
+        let mut seen = SEEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        seen.push((
+            format!("{what} {script}"),
+            std::thread::current().id(),
+            req.preloading(),
+            req.preloading_in_child(),
+        ));
+    }
+
+    /// An extension that preloads the file its `t.preload` names on a
+    /// thread of its own whose take answers `t.take`, noting where it
+    /// took it and where each diagnostic was raised.
+    fn preloading_on_a_thread(tag: &str) -> Extension {
+        let entry = |name: &'static [u8]| IniDecl {
+            name: Name(name.into()),
+            default: Some(b""[..].into()),
+            user: false,
+            per_dir: false,
+            system: true,
+        };
+        ExtensionBuilder::default()
+            .ini(vec![entry(b"t.preload"), entry(b"t.take")])
+            .admission(|_, _| Admission::Held {
+                validation: Validation::Never,
+                lookup: Lookup::Resolved,
+                protection: 0,
+                file_cache: None,
+            })
+            .error(|req, beneath| {
+                seen(req, "raised");
+                beneath.serve(req);
+            })
+            .post_startup(|req, _| {
+                let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
+                let joined = format!("joined {}", String::from_utf8_lossy(&script));
+                PostStartup::Preload {
+                    script,
+                    thread: Some(
+                        PreloadThread::new(
+                            |req| {
+                                seen(req, "take");
+                                req.write_stderr(b"taken\n");
+                                req.ini_get(b"t.take") == Some(&b"1"[..])
+                            },
+                            |_| -2,
+                        )
+                        .joined(move || {
+                            let mut seen = SEEN
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            seen.push((joined, std::thread::current().id(), false, false));
+                        }),
+                    ),
+                }
+            })
+            .build(tag)
+    }
+
+    fn served(dir: &Path, take: &str, preload: &str, program: &str) -> Vec<crate::test::Served> {
+        std::fs::create_dir_all(dir).ok();
+        let script = dir.join("preload.inc");
+        std::fs::write(&script, preload).ok();
+        std::fs::write(dir.join("after.inc"), "<?php echo \"after\\n\";").ok();
+        let engine = Engine::cli_builder()
+            .extensions(&[preloading_on_a_thread(&dir.to_string_lossy())])
+            .ini("t.preload", script.as_os_str().as_encoded_bytes())
+            .ini("t.take", take)
+            .build();
+        let program = program.replace("DIR", &dir.to_string_lossy());
+        let first = engine.serve_capture(&program, Capture::default());
+        let second = engine.serve_capture(&program, Capture::default());
+        std::fs::remove_dir_all(dir).ok();
+        vec![first, second]
+    }
+
+    /// The take runs on a thread of its own before the preload's file is
+    /// compiled there, in the request php's child serves it in; the
+    /// requests after are served on the host's thread, outside it.
+    #[test]
+    fn a_preload_that_takes_its_thread_is_served_on_it_and_no_request_after_is() {
+        let dir =
+            std::env::temp_dir().join(format!("engine-preload-thread-{}", std::process::id()));
+        let preload = std::env::temp_dir().canonicalize().unwrap_or_default();
+        let preload = preload
+            .join(dir.file_name().unwrap_or_default())
+            .join("preload.inc");
+        let preload = preload.display();
+        let served = served(
+            &dir,
+            "1",
+            "<?php echo \"preloading\\n\", $u; function on_thread() { return 'f'; }",
+            "<?php echo on_thread(), \"\\n\", $v; include 'DIR/after.inc';",
+        );
+        let here = std::thread::current().id();
+        let seen: Vec<_> = SEEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(what, ..)| what.contains(&*dir.to_string_lossy()))
+            .map(|(what, thread, preload, child)| {
+                (
+                    what.split(' ').next().unwrap_or("").to_owned(),
+                    *thread == here,
+                    *preload,
+                    *child,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("take".to_owned(), false, false, false),
+                ("raised".to_owned(), false, true, true),
+                ("joined".to_owned(), true, false, false),
+                ("raised".to_owned(), true, false, false),
+                ("raised".to_owned(), true, false, false),
+            ],
+            "the take and the preload on a thread of their own, as the child; each request after on the host's"
+        );
+        let after = "f\n\nWarning: Undefined variable $v in Standard input code on line 1\nafter\n";
+        assert_eq!(
+            served
+                .iter()
+                .map(|s| String::from_utf8_lossy(&s.stdout).into_owned())
+                .collect::<Vec<_>>(),
+            [
+                format!(
+                    "preloading\n\nWarning: Undefined variable $u in {preload} on line 1\n{after}"
+                ),
+                after.to_owned()
+            ]
+        );
+        assert_eq!(
+            (served[0].stderr.as_slice(), served[0].exit_code),
+            (&b"taken\n"[..], 0)
+        );
+    }
+
+    /// A take that fails ends the startup as the child's `exit(1)` does:
+    /// the file is never served, and every request ends with status 1;
+    /// a file that exits on the thread fails it the same way.
+    #[test]
+    fn a_failed_take_or_an_exit_on_the_thread_fails_the_startup_with_status_one() {
+        let base =
+            std::env::temp_dir().join(format!("engine-preload-refused-{}", std::process::id()));
+        let refused = served(
+            &base.join("take"),
+            "0",
+            "<?php echo \"preloading\\n\";",
+            "<?php echo 1;",
+        );
+        let exited = served(
+            &base.join("exit"),
+            "1",
+            "<?php echo \"preloading\\n\"; exit(0);",
+            "<?php echo 1;",
+        );
+        std::fs::remove_dir_all(&base).ok();
+        assert_eq!(
+            (
+                refused[0].stdout.as_slice(),
+                refused[0].stderr.as_slice(),
+                refused[0].exit_code
+            ),
+            (&b""[..], &b"taken\n"[..], 1)
+        );
+        assert_eq!(
+            (refused[1].stdout.as_slice(), refused[1].exit_code),
+            (&b""[..], 1)
+        );
+        assert_eq!(
+            (exited[0].stdout.as_slice(), exited[0].exit_code),
+            (&b"preloading\n"[..], 1)
+        );
+        assert_eq!(exited[1].exit_code, 1);
+    }
+
+    /// A preload file the thread may not open is php's warning with the
+    /// open's own error, as `php_stream_open_for_zend` renders it, then
+    /// the `require`'s fatal: a directory no one but root may enter
+    /// refuses any other user with "Permission denied".
+    #[test]
+    fn a_preload_file_the_thread_may_not_open_names_why() {
+        let dir = std::env::temp_dir().join(format!("engine-preload-shut-{}", std::process::id()));
+        let shut = dir.join("shut");
+        std::fs::create_dir_all(&shut).ok();
+        std::fs::write(shut.join("preload.inc"), "<?php echo 1;").ok();
+        std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o000)).ok();
+        let engine = Engine::cli_builder()
+            .extensions(&[preloading_on_a_thread(&dir.to_string_lossy())])
+            .ini(
+                "t.preload",
+                shut.join("preload.inc").as_os_str().as_encoded_bytes(),
+            )
+            .ini("t.take", "1")
+            .build();
+        let served = engine.serve_capture("<?php echo 1;", Capture::default());
+        std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o755)).ok();
+        std::fs::remove_dir_all(&dir).ok();
+        let root = php_process::process::euid() == 0;
+        let stdout = String::from_utf8_lossy(&served.stdout);
+        assert!(
+            root || stdout.starts_with("\nWarning: PHP Startup: Failed to open stream: Permission denied in Unknown on line 0\n"),
+            "{stdout}"
+        );
+        assert_eq!(served.exit_code, i32::from(!root));
+    }
+
+    /// A deadline the preload arms on its thread apart is served by the
+    /// engine's timer, started before the thread: the file runs out of
+    /// time as php's child does, and the startup fails with status 1.
+    #[test]
+    fn a_deadline_armed_on_the_preload_thread_is_served() {
+        let base =
+            std::env::temp_dir().join(format!("engine-preload-deadline-{}", std::process::id()));
+        let served = served(
+            &base,
+            "1",
+            "<?php set_time_limit(1); while (true) {}",
+            "<?php echo 1;",
+        );
+        assert!(
+            String::from_utf8_lossy(&served[0].stdout)
+                .contains("Maximum execution time of 1 second exceeded"),
+            "{}",
+            String::from_utf8_lossy(&served[0].stdout)
+        );
+        assert_eq!(served[0].exit_code, 1);
     }
 }
