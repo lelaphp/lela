@@ -376,13 +376,12 @@ impl TimeOffset {
         let text = &text.as_bytes()[..text.len().min(8)];
         // SAFETY: nine bytes of timelib's allocator under the lend.
         let block = unsafe { sys::timelib_malloc(9) }.cast::<u8>();
-        if let Some(block) = NonNull::new(block) {
-            let mut bytes = [0u8; 9];
-            bytes[..text.len()].copy_from_slice(text);
-            // SAFETY: the nine bytes just allocated, written once.
-            unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), block.as_ptr(), 9) };
-        }
-        made.write(offset, false, block.cast());
+        let block = NonNull::new(block).unwrap_or_else(|| std::process::abort());
+        let mut bytes = [0u8; 9];
+        bytes[..text.len()].copy_from_slice(text);
+        // SAFETY: the nine bytes just allocated, written once.
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), block.as_ptr(), 9) };
+        made.write(offset, false, block.as_ptr().cast());
         made
     }
 
@@ -1042,12 +1041,9 @@ impl Time {
     /// the time owns from here, its dtor's to free, the one it held freed
     /// first.
     pub(crate) fn take_abbr(&mut self, _: &Lent<'_>, abbr: Abbr) {
-        let held = TimeFields::tz_abbr(self).cast_mut();
-        if !held.is_null() {
-            // SAFETY: the time's own copy, made by timelib's allocator,
-            // which nothing reads once it is replaced below.
-            unsafe { sys::timelib_free(held.cast()) };
-        }
+        // The time's own copy, which nothing reads once it is replaced
+        // below, freed by its drop.
+        drop(Abbr::adopt(TimeFields::tz_abbr(self).cast_mut()));
         // SAFETY: a copy of timelib's allocator the time owns from here,
         // the one it held freed above.
         unsafe { self.set_tz_abbr(abbr.into_raw()) };
