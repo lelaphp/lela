@@ -284,13 +284,9 @@ impl Request {
         value: Owner<Value>,
         attributes: Vec<Attribute>,
     ) -> bool {
-        // `zend_register_constant`'s key: the namespace lowered and the
-        // name itself as written, which the row keeps as given.
+        // The row keeps the name as given.
         let given = name;
-        let mut key = given.to_vec();
-        if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
-            key[..slash].make_ascii_lowercase();
-        }
+        let key = Request::constant_key(given);
         let name = key.as_slice();
         let special = name == HALT_OFFSET
             || name.eq_ignore_ascii_case(b"true")
@@ -604,6 +600,17 @@ impl Request {
             let file = self.current_file().filter(|_| name == HALT_OFFSET)?;
             self.constant_named(&halt_offset_key(file))
         })
+    }
+
+    /// `zend_register_constant`'s key for `name`, which every lookup of
+    /// a namespaced constant compares against: the namespace, the bytes
+    /// before the last `\`, lowered, and the name itself as written.
+    pub(crate) fn constant_key(name: &[u8]) -> Vec<u8> {
+        let mut key = name.to_vec();
+        if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
+            key[..slash].make_ascii_lowercase();
+        }
+        key
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {

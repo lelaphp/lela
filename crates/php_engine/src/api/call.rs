@@ -2043,16 +2043,13 @@ fn global_constant(
     name: &[u8],
     fallback: Option<&[u8]>,
 ) -> Result<Value, Thrown> {
-    let found = match name.iter().rposition(|b| *b == b'\\') {
-        Some(separator) => {
-            let (namespace, constant_name) = name.split_at(separator);
-            let mut lowered = namespace.to_ascii_lowercase();
-            lowered.extend_from_slice(constant_name);
-            req.constant_named(&lowered)
-                .map(|value| (lowered, value))
-                .or_else(|| fallback.and_then(|global| unqualified_constant(req, global)))
-        }
-        None => unqualified_constant(req, name),
+    let found = if name.contains(&b'\\') {
+        let key = Request::constant_key(name);
+        req.constant_named(&key)
+            .map(|value| (key, value))
+            .or_else(|| fallback.and_then(|global| unqualified_constant(req, global)))
+    } else {
+        unqualified_constant(req, name)
     };
     let Some((key, value)) = found else {
         return Err(throw_error(
