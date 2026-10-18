@@ -4,6 +4,7 @@
 //! `generator->execute_data` and `fiber->execute_data`, and the trace
 //! `zend_fetch_debug_backtrace` makes over that execution alone.
 
+use super::traces::Rows;
 use super::{Expand, Link, Request, Slots, links_of};
 use crate::api::abi::Callable;
 use crate::api::call::Function;
@@ -199,7 +200,7 @@ impl Request {
         if generator::is_generator(self, object) {
             return self.generator_trace(object, options);
         }
-        let rows = {
+        let mut rows = {
             let Some((_, Some(standing))) = crate::fiber::view(self, object) else {
                 return Ok(None);
             };
@@ -213,7 +214,7 @@ impl Request {
             };
             self.trace_rows(&links)
         };
-        self.render_trace(rows, options).map(Some)
+        self.render_trace(&mut rows, options).map(Some)
     }
 
     fn generator_execution(&mut self, object: PhpObject) -> Execution {
@@ -257,7 +258,7 @@ impl Request {
         }
         let root = generator::current(self, object);
         if generator::is_running(self, object) {
-            let rows = match self.running_frame(object) {
+            let mut rows = match self.running_frame(object) {
                 Some((vm, at)) => {
                     let top = self
                         .running_frame(root)
@@ -266,9 +267,9 @@ impl Request {
                     let links = frames_between(self, vm, at, top);
                     self.trace_rows(&links)
                 }
-                None => Vec::new(),
+                None => Rows::default(),
             };
-            return self.render_trace(rows, options).map(Some);
+            return self.render_trace(&mut rows, options).map(Some);
         }
         // The root runs, and `object` delegates to it: php links the
         // root's frame to `object`'s `execute_fake`, which the walk
@@ -282,18 +283,18 @@ impl Request {
                     .into_iter()
                     .map(|state| Link::Frame(Slots::Kept, state)),
             );
-            let rows = self.trace_rows(&links);
-            return self.render_trace(rows, options).map(Some);
+            let mut rows = self.trace_rows(&links);
+            return self.render_trace(&mut rows, options).map(Some);
         }
         generator::with_frames(self, object, |req, floor| {
             let top = req.vm.depth().saturating_sub(1);
-            let rows = if top < floor {
-                Vec::new()
+            let mut rows = if top < floor {
+                Rows::default()
             } else {
                 let links = frames_between(req, &req.vm, floor, top);
                 req.trace_rows(&links)
             };
-            req.render_trace(rows, options)
+            req.render_trace(&mut rows, options)
         })
         .map(Some)
     }

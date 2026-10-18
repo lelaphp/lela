@@ -1815,6 +1815,13 @@ impl Shared {
         self.names.find(bytes)
     }
 
+    /// `ZSTR_KNOWN(known)`: the permanent string startup interned for
+    /// it, read by its position with no hash; `None` where the table
+    /// refused it.
+    pub(crate) fn known(&self, known: Known) -> Option<php_heap::Str> {
+        self.names.known(known as usize)
+    }
+
     /// The string a native's parameter defaults to where its stub writes
     /// the string `bytes`, made at startup; `None` for bytes no default
     /// writes.
@@ -3548,6 +3555,35 @@ impl EngineBuilder {
     }
 }
 
+/// A name of [`KNOWN_STRINGS`], php's `zend_known_string_id`: its
+/// discriminant is the name's position there, which
+/// [`Shared::known`] reads the string at.
+#[derive(Clone, Copy)]
+pub(crate) enum Known {
+    File = 0,
+    Line = 1,
+    Function = 2,
+    Class = 3,
+    Object = 4,
+    Type = 5,
+    ObjectOperator = 6,
+    PaamayimNekudotayim = 7,
+    Args = 8,
+    Eval = 13,
+    Include = 14,
+    Require = 15,
+    IncludeOnce = 16,
+    RequireOnce = 17,
+    Trace = 30,
+}
+
+impl Known {
+    /// The name's bytes.
+    pub(crate) fn bytes(self) -> &'static [u8] {
+        KNOWN_STRINGS[self as usize].as_bytes()
+    }
+}
+
 /// `ZEND_KNOWN_STRINGS` (`Z/Zend/zend_string.h`): what
 /// `zend_interned_strings_init` interns before any extension starts, the
 /// keys of a backtrace's rows and of a `Throwable`'s properties, `->` and
@@ -3716,9 +3752,7 @@ fn permanent_names(
     ini: &[(Vec<u8>, Option<Vec<u8>>)],
 ) -> Strings {
     let mut names = Strings::new();
-    for known in KNOWN_STRINGS {
-        names.intern(known.as_bytes()).ok();
-    }
+    names.intern_known(&KNOWN_STRINGS.map(str::as_bytes));
     for extension in extensions {
         names.intern(&lowered(extension.name.as_bytes())).ok();
     }
@@ -5895,6 +5929,35 @@ mod tests {
                 }
             }
             text
+        }
+    }
+
+    /// Each known name stands at php's `zend_known_string_id` for it,
+    /// and the engine's table answers it by position.
+    #[test]
+    fn known_names_stand_at_their_ids() {
+        let names: [(Known, &[u8]); 15] = [
+            (Known::File, b"file"),
+            (Known::Line, b"line"),
+            (Known::Function, b"function"),
+            (Known::Class, b"class"),
+            (Known::Object, b"object"),
+            (Known::Type, b"type"),
+            (Known::ObjectOperator, b"->"),
+            (Known::PaamayimNekudotayim, b"::"),
+            (Known::Args, b"args"),
+            (Known::Eval, b"eval"),
+            (Known::Include, b"include"),
+            (Known::Require, b"require"),
+            (Known::IncludeOnce, b"include_once"),
+            (Known::RequireOnce, b"require_once"),
+            (Known::Trace, b"trace"),
+        ];
+        let engine = Engine::builder().build();
+        for (known, bytes) in names {
+            assert_eq!(known.bytes(), bytes);
+            let held = engine.shared.known(known).map(|s| s.bytes().to_vec());
+            assert_eq!(held.as_deref(), Some(bytes));
         }
     }
 

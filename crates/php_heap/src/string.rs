@@ -690,6 +690,9 @@ pub struct Strings {
     /// The constant arrays the units published into this engine hold,
     /// freed with the table.
     arrays: Vec<Arr>,
+    /// The strings [`Strings::intern_known`] interned, by position:
+    /// php's `zend_known_strings`, which `ZSTR_KNOWN(id)` indexes.
+    known: Vec<Str>,
 }
 
 impl Default for Strings {
@@ -705,7 +708,29 @@ impl Strings {
         Strings {
             table: Permanent::default(),
             arrays: Vec::new(),
+            known: Vec::new(),
         }
+    }
+
+    /// Intern each of `known` and keep it at its position for
+    /// [`Strings::known`], `zend_interned_strings_init`'s loop over
+    /// `known_strings` into `zend_known_strings`. A string the table
+    /// refuses ends the list there, and asking for it or a later one
+    /// answers `None`.
+    pub fn intern_known(&mut self, known: &[&[u8]]) {
+        for bytes in known {
+            match self.intern(bytes) {
+                Ok(s) => self.known.push(s),
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// `ZSTR_KNOWN(at)`: the string [`Strings::intern_known`] interned at
+    /// position `at`, read by index with no hash and no compare.
+    #[must_use]
+    pub fn known(&self, at: usize) -> Option<Str> {
+        self.known.get(at).copied()
     }
 
     /// How many strings the table holds, which is what says the constant
@@ -780,8 +805,9 @@ impl Drop for Strings {
 // never written; moving the table moves that sole ownership.
 unsafe impl Send for Strings {}
 
-// SAFETY: a shared table is only read: `find` and `count` take `&self`
-// and read the slots and the strings' bytes, each string hashed before
+// SAFETY: a shared table is only read: `find`, `count` and `known` take
+// `&self` and read the slots, the known list and the strings' bytes, each
+// string hashed before
 // `Permanent::add` published it, so no read writes; growing the table
 // takes `&mut self`, which excludes every reader.
 unsafe impl Sync for Strings {}

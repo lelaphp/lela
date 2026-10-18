@@ -321,6 +321,8 @@ Str::refcount
 Strings
 Strings::count
 Strings::find
+Strings::intern_known
+Strings::known
 Strings::new
 Suspensions
 Switched

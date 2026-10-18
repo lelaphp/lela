@@ -120,6 +120,19 @@ impl IncludeKind {
         }
     }
 
+    /// The keyword as php's known string, `zend_fetch_debug_backtrace`'s
+    /// `pseudo_function_name`.
+    pub(crate) fn known(self) -> crate::engine::Known {
+        use crate::engine::Known;
+        match self {
+            IncludeKind::Eval => Known::Eval,
+            IncludeKind::Include => Known::Include,
+            IncludeKind::IncludeOnce => Known::IncludeOnce,
+            IncludeKind::Require => Known::Require,
+            IncludeKind::RequireOnce => Known::RequireOnce,
+        }
+    }
+
     /// Whether the construct is `include_once` or `require_once`, the
     /// two that read the included-files table before they open a file.
     pub(crate) fn once(self) -> bool {

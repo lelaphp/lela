@@ -391,6 +391,9 @@ pub struct Request {
     sensing: sensing::Sensing,
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
     hold: hold::Holding,
+    /// The buffers a backtrace's walk lays its links and rows in, kept
+    /// between walks ([`traces::Scratch`]).
+    traces: traces::Scratch,
     /// The objects of foreign libraries the request keeps for the
     /// extensions, dropped with it where no owner gave them up before
     /// ([`foreign::Table`]).
@@ -898,6 +901,7 @@ impl Request {
             #[cfg(debug_assertions)]
             sensing: sensing::Sensing::default(),
             hold: hold::Holding::default(),
+            traces: traces::Scratch::default(),
             foreign: foreign::Table::default(),
         };
         req.activate();
