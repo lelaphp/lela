@@ -9,9 +9,12 @@ description = "The harness: instruments, readings and the one renderer (harness-
 
 # `xtask test` runs these test executables side by side (#2869): each lays
 # what it writes down in trees of its own (`scratch::Tree`), so none shares
-# a path, a store, a port or a System V key with another.
+# a store, a port or a System V key with another. One path is shared: the
+# workspace's own `target/debug`, which compile_identity builds `php` into
+# and worktree and permit copy whole, so the three hold one key.
 [package.metadata.xtask.test]
 executables = "side-by-side"
+apart = { compile_identity = ["target"], worktree = ["target"], permit = ["target"] }
 
 [lints]
 workspace = true
