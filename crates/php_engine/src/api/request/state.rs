@@ -224,7 +224,7 @@ impl Request {
             .supplied
             .registered
             .under(TypeId::of::<T>())
-            .filter_map(|value| value.downcast_ref::<T>())
+            .filter_map(|(_, value)| value.downcast_ref::<T>())
     }
 }
 

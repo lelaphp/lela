@@ -1679,7 +1679,7 @@ pub fn internal_iterator(
 /// bool(false)
 /// ```
 pub fn passthrough(req: &mut Request, first: Option<Owner<Value>>) -> Result<Owner<Value>, Thrown> {
-    let Some((entry, beneath)) = req.replaced_entry() else {
+    let Some((entry, beneath, by)) = req.replaced_entry() else {
         if let Some(first) = first {
             first.give_up(req);
         }
@@ -1691,7 +1691,12 @@ pub fn passthrough(req: &mut Request, first: Option<Owner<Value>>) -> Result<Own
     }
     let above = beneath.saturating_sub(1);
     req.serve_beneath(beneath);
-    let served = entry(req);
+    // The replaced entry served as the extension that supplied it, the
+    // interception before or the native's own (#2627).
+    let served = match by {
+        Some(by) => req.serve_for(by, entry),
+        None => entry(req),
+    };
     req.serve_beneath(above);
     served
 }

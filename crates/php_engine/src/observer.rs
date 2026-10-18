@@ -718,8 +718,8 @@ fn resolve(req: &mut Request, at: Observable) -> Slot {
     let shared = Arc::clone(&req.shared);
     let mut begin = Vec::new();
     let mut end = Vec::new();
-    for init in shared.supplied.observers.iter() {
-        let handlers = init(&mut Observed::standing(req, at));
+    for (by, init) in shared.supplied.observers.iter() {
+        let handlers = req.serve_for(by, |req| init(&mut Observed::standing(req, at)));
         begin.extend(handlers.begin);
         end.extend(handlers.end);
     }
@@ -990,8 +990,8 @@ pub(crate) fn uncaught(req: &mut Request, level: Level, file: &[u8], line: u32, 
 #[inline(never)]
 fn notify_error(req: &mut Request, notice: ErrorNotice<'_>) {
     let shared = Arc::clone(&req.shared);
-    for observer in shared.supplied.error_observers.iter() {
-        observer(req, &notice);
+    for (by, observer) in shared.supplied.error_observers.iter() {
+        req.serve_for(by, |req| observer(req, &notice));
     }
 }
 
@@ -1007,8 +1007,8 @@ pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: 
         return;
     }
     let shared = Arc::clone(&req.shared);
-    for observer in shared.supplied.functions_declared.iter() {
-        observer(req, function, lowered);
+    for (by, observer) in shared.supplied.functions_declared.iter() {
+        req.serve_for(by, |req| observer(req, function, lowered));
     }
 }
 
@@ -1025,8 +1025,8 @@ pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
         return;
     }
     let shared = Arc::clone(&req.shared);
-    for observer in shared.supplied.classes_linked.iter() {
-        observer(req, class, lowered);
+    for (by, observer) in shared.supplied.classes_linked.iter() {
+        req.serve_for(by, |req| observer(req, class, lowered));
     }
 }
 
@@ -1244,8 +1244,8 @@ pub(crate) fn fiber_initialized(req: &mut Request, fiber: ObservedFiber) {
         return;
     }
     let shared = Arc::clone(&req.shared);
-    for handler in shared.supplied.fiber_init.iter() {
-        handler(req, fiber);
+    for (by, handler) in shared.supplied.fiber_init.iter() {
+        req.serve_for(by, |req| handler(req, fiber));
     }
 }
 
@@ -1264,8 +1264,8 @@ pub(crate) fn fiber_switched(req: &mut Request, from: ObservedFiber, to: Observe
         return;
     }
     let shared = Arc::clone(&req.shared);
-    for handler in shared.supplied.fiber_switch.iter() {
-        handler(req, from, to);
+    for (by, handler) in shared.supplied.fiber_switch.iter() {
+        req.serve_for(by, |req| handler(req, from, to));
     }
 }
 
@@ -1278,7 +1278,7 @@ pub(crate) fn fiber_destroyed(req: &mut Request, fiber: ObservedFiber) {
         return;
     }
     let shared = Arc::clone(&req.shared);
-    for handler in shared.supplied.fiber_destroy.iter() {
-        handler(req, fiber);
+    for (by, handler) in shared.supplied.fiber_destroy.iter() {
+        req.serve_for(by, |req| handler(req, fiber));
     }
 }

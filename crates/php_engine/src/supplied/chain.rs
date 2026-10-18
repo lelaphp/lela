@@ -20,6 +20,7 @@ use crate::api::abi::{
     PostStartupHook, ResolvePathHook, ThrownHook, UploadHook,
 };
 use crate::api::raising::{Level, Thrown};
+use crate::api::request::ExtensionId;
 use crate::api::request::{HandlePath, Request, Unresolved};
 use crate::api::values::{PhpObject, PhpString};
 use crate::observer::Opcodes;
@@ -73,7 +74,7 @@ pub(crate) mod sealed {
 /// link was handed. [`Beneath::serve`] serves the one beneath; a link
 /// that never does has answered in place of every one under it.
 pub struct Beneath<'a, K: ChainKind> {
-    links: &'a [K::Link],
+    links: &'a [(ExtensionId, K::Link)],
     args: K::Args<'a>,
 }
 
@@ -88,22 +89,20 @@ impl<K: ChainKind> Copy for Beneath<'_, K> {}
 impl<'a, K: ChainKind> Beneath<'a, K> {
     /// The chain of `links`, the first supplier's first, entered from
     /// the top with `args`.
-    pub(crate) fn top(links: &'a [K::Link], args: K::Args<'a>) -> Beneath<'a, K> {
+    pub(crate) fn top(links: &'a [(ExtensionId, K::Link)], args: K::Args<'a>) -> Beneath<'a, K> {
         Beneath { links, args }
     }
 
     /// The one beneath served: the next link down, handed the ones
-    /// beneath it, or php's own function of the kind.
+    /// beneath it and served as the extension that supplied it, so what
+    /// it allocates is that extension's in a debug build (#2627), or
+    /// php's own function of the kind.
     pub fn serve(self, req: &mut Request) -> K::Answer {
         match self.links.split_last() {
-            Some((link, links)) => K::link(
-                *link,
-                req,
-                Beneath {
-                    links,
-                    args: self.args,
-                },
-            ),
+            Some((&(by, link), links)) => {
+                let args = self.args;
+                req.serve_for(by, |req| K::link(link, req, Beneath { links, args }))
+            }
             None => K::own(req, self.args),
         }
     }

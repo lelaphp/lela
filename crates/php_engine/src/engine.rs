@@ -722,7 +722,13 @@ pub(crate) struct Shared {
     /// row of `functions`, the nearest first and the native's own last,
     /// empty where nothing intercepts the native
     /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
-    pub(crate) replaced: Vec<Vec<Entry>>,
+    pub(crate) replaced: Vec<Vec<(Option<ExtensionId>, Entry)>>,
+    /// The extension whose interception serves each row of `functions`,
+    /// the last to intercept it, as which the native's call is served;
+    /// none for a native nothing intercepts (#2627). Read where a debug
+    /// build tags what a call allocates.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub(crate) intercepted_by: Vec<Option<ExtensionId>>,
     /// Each native's `internal_function.module`, one row per row of
     /// `functions`: the extension that declared it, `Core` for Zend's
     /// own, and none for the natives of php's `standard` the engine
@@ -2979,22 +2985,40 @@ fn at_stub_places(
 /// phar's.
 fn intercept(
     functions: &[FunctionDecl],
+    modules: &[Option<ExtensionId>],
     entries: &mut [Entry],
     intercepts: &Keyed<Name, Entry>,
-) -> Vec<Vec<Entry>> {
+) -> Intercepted {
     let mut replaced = vec![Vec::new(); functions.len()];
-    for (name, entry) in intercepts.iter() {
+    let mut by_row: Vec<Option<ExtensionId>> = vec![None; functions.len()];
+    for &(by, ref name, entry) in intercepts.iter() {
         let found = functions
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&name.0));
         if let Some(at) = found
             && let Some(row) = entries.get_mut(at)
             && let Some(chain) = replaced.get_mut(at)
+            && let Some(top) = by_row.get_mut(at)
         {
-            chain.insert(0, std::mem::replace(row, *entry));
+            // What it replaced is served as the one that supplied it: the
+            // interception before, or the native's own extension.
+            let beneath = top.or_else(|| modules.get(at).copied().flatten());
+            chain.insert(0, (beneath, std::mem::replace(row, entry)));
+            *top = Some(by);
         }
     }
-    replaced
+    Intercepted {
+        replaced,
+        by: by_row,
+    }
+}
+
+/// What [`intercept`] answers: each native's replaced entries, the
+/// nearest first, each beside the extension it is served as, and the
+/// extension whose interception stands over each.
+struct Intercepted {
+    replaced: Vec<Vec<(Option<ExtensionId>, Entry)>>,
+    by: Vec<Option<ExtensionId>>,
 }
 
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
@@ -3375,7 +3399,15 @@ impl EngineBuilder {
             &ini,
         );
         let (functions, mut entries): (Vec<FunctionDecl>, Vec<Entry>) = natives.into_iter().unzip();
-        let replaced = intercept(&functions, &mut entries, &supplied.intercepts);
+        let Intercepted {
+            replaced,
+            by: intercepted_by,
+        } = intercept(
+            &functions,
+            &function_modules,
+            &mut entries,
+            &supplied.intercepts,
+        );
         let function_flags = functions
             .iter()
             .map(|decl| crate::attributes::Flags::of(&decl.attributes))
@@ -3433,6 +3465,7 @@ impl EngineBuilder {
                 function_names,
                 entries,
                 replaced,
+                intercepted_by,
                 function_modules,
                 function_flags,
                 frameless,

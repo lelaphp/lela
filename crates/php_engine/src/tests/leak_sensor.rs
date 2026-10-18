@@ -349,3 +349,68 @@ fn a_leak_from_an_extension_class_s_handler_names_its_extension() {
         );
     }
 }
+
+/// An error link of `zend_error_cb`'s chain, faulty as [`dropped_owner`]
+/// is: a string made and its owner dropped, then the one beneath served.
+fn error_dropping_an_owner(
+    req: &mut Request,
+    beneath: crate::api::abi::Beneath<'_, crate::api::abi::chain::Error>,
+) {
+    if let Ok(made) = PhpString::new(req, b"in link") {
+        let _leaked = made.hand_on();
+    }
+    beneath.serve(req);
+}
+
+/// An extension's hook served at each `ZEND_TICKS`, faulty the same way.
+#[allow(clippy::unnecessary_wraps)] // `TicksHook`'s signature
+fn tick_dropping_an_owner(req: &mut Request) -> Result<(), Thrown> {
+    if let Ok(made) = PhpString::new(req, b"in tick") {
+        let _leaked = made.hand_on();
+    }
+    Ok(())
+}
+
+/// A block an extension's link of a chained kind allocated and dropped
+/// is named with that extension, as the chain serves each link as the
+/// extension that supplied it, not the native or the compile the
+/// diagnostic was raised in (#2627).
+#[test]
+fn a_leak_from_an_error_link_names_its_extension() {
+    let linked = ExtensionBuilder::default()
+        .error(error_dropping_an_owner)
+        .build("leak_error");
+    let engine = Engine::cli_builder()
+        .extensions(&[linked])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(
+        "<?php trigger_error('x', E_USER_NOTICE);\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.contains(", allocated by leak_error in Unknown on line 0\n"),
+        "{stdout}"
+    );
+}
+
+/// A block an extension's `ZEND_TICKS` hook allocated and dropped is
+/// named with that extension, as each listed hook is served as its own
+/// (#2627).
+#[test]
+fn a_leak_from_a_tick_function_names_its_extension() {
+    let ticking = ExtensionBuilder::default()
+        .ticks(tick_dropping_an_owner)
+        .build("leak_tick");
+    let engine = Engine::cli_builder()
+        .extensions(&[ticking])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture("<?php declare(ticks=1); $a = 1;\n", Capture::default());
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.contains(", allocated by leak_tick in Unknown on line 0\n"),
+        "{stdout}"
+    );
+}

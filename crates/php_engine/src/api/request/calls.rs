@@ -805,12 +805,14 @@ impl Request {
     /// The entry the one serving the call replaced, the next down its
     /// native's chain of interceptions, and how far down that one
     /// stands; none where the entry serving is the native's own.
-    pub(crate) fn replaced_entry(&self) -> Option<(crate::api::abi::Entry, usize)> {
+    pub(crate) fn replaced_entry(
+        &self,
+    ) -> Option<(crate::api::abi::Entry, usize, Option<ExtensionId>)> {
         let call = self.serving_call()?;
         let at = usize::try_from(call.function()?.0).ok()?;
         let beneath = call.annex().map_or(0, |annex| annex.beneath);
-        let entry = self.shared.replaced.get(at)?.get(beneath)?;
-        Some((*entry, beneath.saturating_add(1)))
+        let &(by, entry) = self.shared.replaced.get(at)?.get(beneath)?;
+        Some((entry, beneath.saturating_add(1), by))
     }
 
     /// The call being served, served from `beneath` down its native's
@@ -1199,7 +1201,10 @@ impl Request {
     /// declares, which allocates as its caller.
     #[cfg(debug_assertions)]
     fn function_origin(&self, function: Function) -> Option<ExtensionId> {
-        self.function_extension(function)
+        let intercepted = usize::try_from(function.0)
+            .ok()
+            .and_then(|at| self.shared.intercepted_by.get(at).copied().flatten());
+        intercepted.or_else(|| self.function_extension(function))
     }
 
     /// Record the natives this request enters from here on, for the

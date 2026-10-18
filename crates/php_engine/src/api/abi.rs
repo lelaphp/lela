@@ -1801,7 +1801,7 @@ impl ExtensionBuilder {
         self.constants_link = Some(Arc::new(move |declared, registered| {
             let values: Vec<&T> = registered
                 .under(TypeId::of::<T>())
-                .filter_map(|value| value.downcast_ref::<T>())
+                .filter_map(|(_, value)| value.downcast_ref::<T>())
                 .collect();
             link(declared, &values)
         }));

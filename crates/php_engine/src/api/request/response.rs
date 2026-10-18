@@ -392,10 +392,10 @@ impl Request {
     /// write first, as `sapi_cli_ub_write` calls `cli_shell_ub_write`
     /// and `cli_shell_write` for every write that is not empty.
     pub(crate) fn ub_write(&mut self, bytes: &[u8]) {
-        if let Some(shell) = self.shared.supplied.shell.get()
+        if let Some((by, shell)) = self.shared.supplied.shell.entry()
             && !bytes.is_empty()
         {
-            (shell.write)(self, bytes);
+            self.serve_for(by, |req| (shell.write)(req, bytes));
         }
         if let Err(aborted) = self.response.sink.write(bytes) {
             self.handle_aborted_connection(aborted);

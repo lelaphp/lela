@@ -121,8 +121,8 @@ impl Request {
     /// [`Request::tick`]'s round, while fiber switching is blocked.
     fn serve_ticks(&mut self) -> Result<(), Thrown> {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.supplied.ticks.iter() {
-            hook(self)?;
+        for (by, hook) in shared.supplied.ticks.iter() {
+            self.serve_for(by, hook)?;
         }
         let mut at = 0;
         while let Some(entry) = self.ticks.tick_functions.get_mut(at) {
