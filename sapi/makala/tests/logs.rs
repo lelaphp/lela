@@ -153,3 +153,84 @@ fn a_blocked_log_destination_does_not_delay_responses() {
     );
     assert!(matches!(dropped(), Some(17 | 18)), "{}", said());
 }
+
+/// Each request php-fpm's loop refuses before it runs a program logs, in
+/// the error log, the line the pinned php-fpm writes for it on
+/// `FCGI_STDERR`, worded as its `zlog` words it (#2767): a path that names
+/// no script, a script past `security.limit_extensions`, a directory named
+/// `*.php`, which php's opener leaves `ENOENT`, and a script that may not
+/// be read, where the test's user is one the mode refuses.
+#[test]
+fn each_refused_request_logs_php_fpms_line_for_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = common::root(
+        "refusals",
+        &[
+            ("x.PHP", "<?php echo 'ran';"),
+            ("secret.php", "<?php echo 'ran';"),
+        ],
+    );
+    for dir in ["upload", "d.php"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap_or_else(|e| panic!("{e}"));
+    }
+    for file in ["upload/x.jpg", "d.php/index.php"] {
+        std::fs::write(root.join(file), "<?php echo 'ran';").unwrap_or_else(|e| panic!("{e}"));
+    }
+    let secret = root.join("secret.php");
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let refused_to_us = std::fs::File::open(&secret).is_err();
+    let root = root.canonicalize().unwrap_or_else(|e| panic!("{e}"));
+    let errors = root.join("error.log");
+    let errors_arg = errors.to_string_lossy().into_owned();
+    let server = Server::with_args(&root, &["--threads", "2", "--error-log", &errors_arg]);
+    let shown = root.display();
+    let mut refusals = vec![
+        ("/nothing.php", "Primary script unknown".to_owned()),
+        (
+            "/nothing.php/witness.php",
+            "Primary script unknown".to_owned(),
+        ),
+        (
+            "/d.php/",
+            format!("Unable to open primary script: {shown}/d.php (No such file or directory)"),
+        ),
+        (
+            "/upload/x.jpg/y.php",
+            format!(
+                "Access to the script '{shown}/upload/x.jpg' has been denied (see security.limit_extensions)"
+            ),
+        ),
+        (
+            "/x.PHP",
+            format!(
+                "Access to the script '{shown}/x.PHP' has been denied (see security.limit_extensions)"
+            ),
+        ),
+    ];
+    if refused_to_us {
+        refusals.push((
+            "/secret.php",
+            format!("Unable to open primary script: {shown}/secret.php (Permission denied)"),
+        ));
+    }
+    let logged = || {
+        let text = std::fs::read_to_string(&errors).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| line.split_once(' ').map(|(_, entry)| entry.to_owned()))
+            .filter(|entry| !entry.starts_with("makala: "))
+            .collect::<Vec<_>>()
+    };
+    for (n, (target, line)) in refusals.iter().enumerate() {
+        let request =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        server.exchange(request.as_bytes(), Duration::from_secs(30));
+        assert!(
+            eventually(Duration::from_secs(10), || logged().len() > n),
+            "{target}: {:?}",
+            logged()
+        );
+        assert_eq!(logged().get(n), Some(line), "{target}");
+    }
+}
