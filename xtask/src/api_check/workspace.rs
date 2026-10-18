@@ -70,7 +70,7 @@ impl Present {
         for sub in ["src", "tests", "benches", "examples"] {
             let dir = self.dir.join(sub);
             if dir.is_dir() {
-                walk(&dir, &mut out)?;
+                crate::reading::walk(&dir, &mut out)?;
             }
         }
         let build = self.dir.join("build.rs");
@@ -223,16 +223,4 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }

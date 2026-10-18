@@ -1152,6 +1152,20 @@ impl Manifest {
         self.crates.iter().find(|c| c.name == name)
     }
 
+    /// The rows `only` names, in the manifest's order, or every row where
+    /// it names none: an instrument's `--crate`, refused for a name no row
+    /// carries.
+    pub(crate) fn crates_named(&self, only: &[String]) -> Result<Vec<&Crate>> {
+        if let Some(name) = only.iter().find(|n| self.crate_named(n).is_none()) {
+            bail!("the manifest has no crate named {name:?}");
+        }
+        Ok(self
+            .crates
+            .iter()
+            .filter(|k| only.is_empty() || only.contains(&k.name))
+            .collect())
+    }
+
     /// The crate whose sources a path lies under: one function over the
     /// `[[crate]]` rows (harness-design.md §4.4).
     pub fn crate_of(&self, path: &Path) -> Option<&Crate> {

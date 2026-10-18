@@ -213,12 +213,15 @@ fn command_line() -> Result<()> {
         Command::Budget { staged } => {
             record(&store, &budget::measure(&root, &manifest, &store, staged)?)
         }
-        Command::Clippy { crates, staged } => {
-            clippy::command(&root, &manifest, &store, &crates, staged)
+        // The crates named, or with `--staged` the ones with a staged change.
+        Command::Clippy { staged: true, .. } => {
+            record(&store, &clippy::run_staged(&root, &manifest, &store)?)
         }
-        Command::Test { crates, staged } => {
-            test::command(&root, &manifest, &store, &crates, staged)
+        Command::Clippy { crates, .. } => record(&store, &clippy::run(&root, &manifest, &crates)?),
+        Command::Test { staged: true, .. } => {
+            record(&store, &test::run_staged(&root, &manifest, &store)?)
         }
+        Command::Test { crates, .. } => record(&store, &test::run(&root, &manifest, &crates)?),
         Command::Miri { crates } => miri::command(&root, &manifest, &store, &crates),
         Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
