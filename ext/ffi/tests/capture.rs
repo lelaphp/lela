@@ -60,3 +60,45 @@ fn a_failed_preload_refuses_startup() {
         assert_eq!(served.exit_code, -2);
     }
 }
+
+/// `FFI::load` in the preload served as `opcache.preload_user`, php's
+/// child under `ZEND_COMPILE_PRELOAD_IN_CHILD`, which would publish a
+/// scope the parent never sees: it throws before it reads the header
+/// (`Z/ext/ffi/ffi.c:3628`). The thread here takes nothing, as a test
+/// that is not root cannot; what it takes is opcache's.
+#[test]
+fn ffi_load_refuses_in_the_preload_served_as_the_preload_user() {
+    use php_ext::abi::{ExtensionBuilder, PostStartup, PreloadThread};
+    use php_ext::decl::{IniDecl, Name};
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ffi-preload-as-user");
+    std::fs::create_dir_all(&dir).ok();
+    let script = dir.join("preload.php");
+    std::fs::write(
+        &script,
+        "<?php try { FFI::load(__DIR__ . '/missing.h'); } catch (FFI\\Exception $e) { echo $e->getMessage(), \"\\n\"; }",
+    )
+    .ok();
+    let preloading = ExtensionBuilder::default()
+        .ini(vec![IniDecl {
+            name: Name(b"t.preload"[..].into()),
+            default: Some(b""[..].into()),
+            user: false,
+            per_dir: false,
+            system: true,
+        }])
+        .post_startup(|req, _| PostStartup::Preload {
+            script: req.ini_get(b"t.preload").unwrap_or_default().to_vec(),
+            thread: Some(PreloadThread::new(|_| true)),
+        })
+        .build("t");
+    let engine = Engine::builder()
+        .extensions(&[php_ext_ffi::extension(), preloading])
+        .ini("ffi.enable", "1")
+        .ini("t.preload", script.display().to_string())
+        .build();
+    let served = engine.serve_capture("<?php echo 'served';", Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "FFI::load() doesn't work in conjunction with \"opcache.preload_user\". Use \"ffi.preload\" instead.\nserved"
+    );
+}
