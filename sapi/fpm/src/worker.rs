@@ -201,7 +201,8 @@ impl OutputSink for Response {
     /// `fpm_status_export_to_zval`.
     fn status(&mut self) -> Option<HostValue> {
         self.board
-            .map(|board| crate::status::export(&board.copy(true)))
+            .and_then(|board| board.copy(true))
+            .map(|board| crate::status::export(&board))
     }
 }
 
@@ -738,7 +739,7 @@ impl Worker {
             },
             Action::Set,
         );
-        let board = self.scoreboard.copy(false);
+        let board = self.scoreboard.header();
         let proc = self
             .proc()
             .map(crate::scoreboard::Proc::view)
@@ -876,7 +877,7 @@ impl Worker {
         let keys = get_keys(query.unwrap_or_default(), &separators);
         let full = keys.iter().any(|k| k.as_slice() == b"full");
         let board = self.board().copy(full);
-        Some(crate::status::status(&board, &keys, head_only))
+        Some(crate::status::status(board.as_ref(), &keys, head_only))
     }
 
     /// `PHP_VALUE` and `PHP_ADMIN_VALUE`, read as `fastcgi_ini_parser`

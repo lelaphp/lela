@@ -104,28 +104,42 @@ fn when(form: Form, epoch: i64) -> String {
     }
 }
 
+/// The page `fpm_status_handle_request` answers where it cannot read the
+/// scoreboard.
+fn internal_error() -> HostPage {
+    HostPage {
+        code: 500,
+        headers: vec![
+            b"Content-Type: text/plain".to_vec(),
+            EXPIRES.to_vec(),
+            CACHE_CONTROL.to_vec(),
+        ],
+        body: b"Internal error. Please review log file for errors.".to_vec(),
+    }
+}
+
 /// `fpm_status_handle_request`'s status half over `board`, a copy taken
-/// with its slots where `$_GET` names `full`; `keys` are `$_GET`'s.
+/// with its slots where `$_GET` names `full`, none where the copy failed;
+/// `keys` are `$_GET`'s.
 #[allow(clippy::too_many_lines)] // php's one function, kept as one
-pub(crate) fn status(board: &BoardView, keys: &[Vec<u8>], head_only: bool) -> HostPage {
+pub(crate) fn status(board: Option<&BoardView>, keys: &[Vec<u8>], head_only: bool) -> HostPage {
     let has = |key: &str| keys.iter().any(|k| k.as_slice() == key.as_bytes());
     let full = has("full");
     let mut headers = vec![EXPIRES.to_vec(), CACHE_CONTROL.to_vec()];
+    let Some(board) = board else {
+        crate::zlog!(
+            Error @ fpm_status_handle_request:177,
+            "status: unable to find or access status shared memory"
+        );
+        return internal_error();
+    };
     if board.idle < 0 || board.active < 0 {
         crate::zlog!(
             Error @ fpm_status_handle_request:188,
             "[pool {}] invalid status values",
             String::from_utf8_lossy(&board.pool)
         );
-        return HostPage {
-            code: 500,
-            headers: vec![
-                b"Content-Type: text/plain".to_vec(),
-                EXPIRES.to_vec(),
-                CACHE_CONTROL.to_vec(),
-            ],
-            body: b"Internal error. Please review log file for errors.".to_vec(),
-        };
+        return internal_error();
     }
     if head_only {
         return HostPage {

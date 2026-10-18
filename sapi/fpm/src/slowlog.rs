@@ -39,7 +39,7 @@ pub(crate) fn check_timed_out(
     let child = &fpm.pools[p].children[c];
     let Some(proc) = scoreboard
         .proc(child.scoreboard_i)
-        .map(crate::scoreboard::Proc::view)
+        .and_then(crate::scoreboard::Proc::view_once)
     else {
         zlog!(Notice @ fpm_request_check_timed_out:232, "failed to acquire scoreboard");
         return;
@@ -141,7 +141,8 @@ fn dump(fpm: &Fpm, p: usize, c: usize) -> Vec<u8> {
     let script = fpm.pools[p]
         .scoreboard
         .and_then(|scoreboard| scoreboard.proc(child.scoreboard_i))
-        .map(|proc| proc.view().script_filename)
+        .and_then(crate::scoreboard::Proc::view_once)
+        .map(|proc| proc.script_filename)
         .unwrap_or_default();
     let mut entry = b"\n".to_vec();
     entry.extend_from_slice(&crate::zlog::time_now());
