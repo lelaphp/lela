@@ -52,3 +52,20 @@ unlink($f);
     );
     assert_eq!(stdout, "file\nbool(false)\nnamed\n");
 }
+
+/// A persistent stream's filter keeps zlib's state on the system
+/// allocator, not the request's heap, since it outlives the request with
+/// the stream: the request ends with nothing of zlib's held.
+#[test]
+fn a_persistent_streams_filter_holds_nothing_of_the_request() {
+    let stdout = armed(
+        r#"<?php
+$s = stream_socket_server('tcp://127.0.0.1:0');
+$a = pfsockopen(...explode(':', stream_socket_get_name($s, false)));
+stream_filter_append($a, 'zlib.deflate', STREAM_FILTER_WRITE);
+fwrite($a, str_repeat('x', 100));
+echo "end\n";
+"#,
+    );
+    assert_eq!(stdout, "end\n");
+}

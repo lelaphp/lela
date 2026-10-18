@@ -501,6 +501,42 @@ impl PhpStream {
     /// The filters of both chains taken off at the stream's free
     /// (`Z/main/streams/streams.c:510`): each one's resource closed and
     /// the chain's owner of it given up, then its `dtor` served.
+    /// The filters of both chains taken off and kept, as a persistent
+    /// stream keeps them past its resource: each one's resource closed and
+    /// the chain's owner of it given up, its `fops` kept, its `dtor` not
+    /// served ([`super::persistent::Kept`]).
+    pub(super) fn keep_filters(&mut self, req: &mut Request) -> super::persistent::Kept {
+        let mut kept = super::persistent::Kept::default();
+        for (chain, into) in [
+            (&mut self.readfilters, &mut kept.read),
+            (&mut self.writefilters, &mut kept.write),
+        ] {
+            for Attached { ops, header, res } in chain.drain(..) {
+                if let Some(res) = res {
+                    res.close(req);
+                    res.give_up(req);
+                }
+                if let Some(header) = header {
+                    header.free(req);
+                }
+                into.push(ops);
+            }
+        }
+        kept
+    }
+
+    /// Kept filters attached again, each chain in its order, with no
+    /// resource, as the stream php's list kept still has them.
+    pub(super) fn attach_kept(&mut self, kept: super::persistent::Kept) {
+        let attach = |ops| Attached {
+            ops,
+            header: None,
+            res: None,
+        };
+        self.readfilters.extend(kept.read.into_iter().map(attach));
+        self.writefilters.extend(kept.write.into_iter().map(attach));
+    }
+
     pub(super) fn free_filters(&mut self, req: &mut Request) {
         let filters: Vec<Attached> = self
             .readfilters

@@ -45,7 +45,11 @@ fn encode(
     encoding: i64,
     level: i64,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let status = match Deflate::new(req, level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY)? {
+    let status = match Deflate::new(
+        req,
+        (level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY),
+        false,
+    )? {
         Ok(mut stream) => {
             let mut out = match FreshString::new(req, size_guess(input.len())) {
                 Ok(out) => out,
@@ -366,7 +370,7 @@ fn decode(
         input.extend_from_slice(data);
         input.push(0);
         loop {
-            let mut stream = match Inflate::new(req, encoding)? {
+            let mut stream = match Inflate::new(req, encoding, false)? {
                 Ok(stream) => stream,
                 Err(refused) => {
                     status = refused;

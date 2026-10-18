@@ -49,11 +49,14 @@ enum State {
 
 /// What the persistent list keeps of a stream across its resources and
 /// across requests: the socket, with its `transport`'s and crypto layer's
-/// state, and `stream->orig_path`, which php allocates persistent beside
+/// state, `stream->orig_path`, which php allocates persistent beside it,
+/// and the filters of its chains, which stay on the stream as php's
+/// `php_stream` keeps them, their resources the request's and gone with
 /// it. Nothing of a request's.
 pub(crate) struct Entry {
     socket: Socket,
     orig_path: Option<Box<[u8]>>,
+    filters: Kept,
 }
 
 pub(crate) trait Persistent {
@@ -199,6 +202,7 @@ fn reopen(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
     let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
     stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
     stream.flags.no_seek = true;
+    stream.attach_kept(entry.filters);
     req.stream_alloc_as(stream, true)
 }
 
@@ -267,7 +271,11 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
         socket.forget_request();
         let orig_path = taken.orig_path.take().map(|path| path.into_persistent(req));
         req.streams().pclose_ret = taken.release(req);
-        Some(Entry { socket, orig_path })
+        Some(Entry {
+            socket,
+            orig_path,
+            filters: Kept::default(),
+        })
     });
     stream.give_up(req);
     kept
@@ -278,7 +286,24 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
 /// last owner let go, or which the request's shutdown closed, leaves its
 /// socket open and held idle under its key. One held under none, which
 /// its owner took off the lists ([`unlist`]), is closed, as
-/// `php_stream_free` closes the stream it reaches with no resource.
+/// `php_stream_free` closes the stream it reaches with no resource. The
+/// held one keeps its filters, so the next ask by the key writes through
+/// them:
+///
+/// ```php
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// [$host, $port] = explode(':', stream_socket_get_name($s, false));
+/// $a = pfsockopen($host, $port);
+/// $peer = stream_socket_accept($s, 1);
+/// stream_filter_append($a, 'string.toupper', STREAM_FILTER_WRITE);
+/// $a = null;
+/// $b = pfsockopen($host, $port);
+/// fwrite($b, "abc"); usleep(50000);
+/// var_dump(fread($peer, 10));
+/// ```
+/// ```expect
+/// string(3) "ABC"
+/// ```
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the resource destructor's shape, which a destructor that throws needs"
@@ -290,27 +315,68 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
     else {
         return Ok(());
     };
-    stream.flush_owed(req);
     let held = req
         .streams()
         .persistent
         .iter()
         .position(|held| matches!(held.state, State::InResource(res) if res == r));
-    if let Some(at) = held {
+    if let Some(at) = held
+        && stream.ops.as_socket().is_some()
+    {
+        // php's destructor is `NULL`: nothing is flushed and the filters
+        // stay on the stream, to end with it at the engine's end
+        // ([`engine_end`]) or travel with it to the request that asks
+        // the key next.
+        let filters = stream.keep_filters(req);
         let entry = stream.ops.as_socket().map(|socket| Entry {
             socket: socket.detach(),
             orig_path: stream
                 .orig_path
                 .take()
                 .map(|path| path.into_persistent(req)),
+            filters,
         });
-        match entry {
-            Some(entry) => req.streams().persistent[at].state = State::Idle(entry),
-            None => {
-                req.streams().persistent.remove(at);
-            }
+        if let Some(entry) = entry {
+            req.streams().persistent[at].state = State::Idle(entry);
+        }
+    } else {
+        stream.flush_owed(req);
+        if let Some(at) = held {
+            req.streams().persistent.remove(at);
         }
     }
     req.streams().pclose_ret = stream.release(req);
     Ok(())
+}
+
+/// `zend_destroy_rsrc_list(&EG(persistent_list))`'s free of an entry
+/// that kept filters: the stream opened again in the engine's end and
+/// freed, `php_stream_free(PHP_STREAM_FREE_CLOSE)`, so its write chain
+/// is flushed closing and each filter's `dtor` served where php serves
+/// them, labelled `PHP Shutdown`. An entry with none is closed as it is
+/// dropped. What it raises is written past the request, so the CLI's
+/// own test holds it (`sapi/cli/tests/persistent_filters.rs`).
+pub(crate) fn end_entry(req: &mut Request, entry: Entry) {
+    if entry.filters.is_empty() {
+        return;
+    }
+    if let Ok(stream) = reopen(req, entry) {
+        PhpStream::close_open(req, *stream);
+        stream.give_up(req);
+    }
+}
+
+/// The filters a persistent stream keeps between its resources and
+/// across requests: each chain's `fops`, in order, with no resource and
+/// on no heap of a request's.
+#[derive(Default)]
+pub(crate) struct Kept {
+    pub(super) read: Vec<Box<dyn crate::api::request::StreamFilter>>,
+    pub(super) write: Vec<Box<dyn crate::api::request::StreamFilter>>,
+}
+
+impl Kept {
+    fn is_empty(&self) -> bool {
+        self.read.is_empty() && self.write.is_empty()
+    }
 }

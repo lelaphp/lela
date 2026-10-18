@@ -183,11 +183,64 @@ extern "C" fn free(_opaque: z::voidpf, address: z::voidpf) {
     unsafe { efree(address) }
 }
 
+/// The bytes a [`palloc`] block carries before zlib's: the block's whole
+/// size, which [`pfree`] gives back the layout of, at zlib's alignment.
+const PHEADER: usize = 16;
+
+/// zlib's `zalloc` for a persistent stream's filter: `items * size`
+/// bytes of the system allocator, which no request's heap counts or
+/// frees, since the stream outlives the request that opened it.
+#[allow(
+    clippy::cast_ptr_alignment,
+    reason = "the block's layout is `PHEADER`-aligned, past `usize`'s"
+)]
+extern "C" fn palloc(_opaque: z::voidpf, items: z::uInt, size: z::uInt) -> z::voidpf {
+    let total = (items as usize * size as usize).saturating_add(PHEADER);
+    let Ok(layout) = std::alloc::Layout::from_size_align(total, PHEADER) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: the layout is at least `PHEADER` bytes, never zero-sized.
+    let at = unsafe { std::alloc::alloc(layout) };
+    if at.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the block is `PHEADER`-aligned and holds `PHEADER` bytes.
+    unsafe { at.cast::<usize>().write(total) };
+    // SAFETY: `PHEADER` bytes into the block, which is longer.
+    unsafe { at.add(PHEADER) }.cast()
+}
+
+/// zlib's `zfree` for what [`palloc`] answered.
+#[allow(
+    clippy::cast_ptr_alignment,
+    reason = "the block's layout is `PHEADER`-aligned, past `usize`'s"
+)]
+extern "C" fn pfree(_opaque: z::voidpf, address: z::voidpf) {
+    if address.is_null() {
+        return;
+    }
+    // SAFETY: zlib frees only what `palloc` answered, `PHEADER` bytes past
+    // the start of its block.
+    let at = unsafe { address.cast::<u8>().sub(PHEADER) };
+    // SAFETY: `palloc` wrote the block's size at its start.
+    let total = unsafe { at.cast::<usize>().read() };
+    // SAFETY: the layout `palloc` allocated the block under.
+    let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(total, PHEADER) };
+    // SAFETY: the block is live, zlib freeing it once.
+    unsafe { std::alloc::dealloc(at, layout) };
+}
+
 /// A `z_stream` before its init, with the allocator set and nothing
 /// else, as `memset` then `Z.zalloc = php_zlib_alloc` leaves one; boxed,
-/// since zlib's state keeps the stream's address.
+/// since zlib's state keeps the stream's address. A persistent stream's
+/// filter allocates on the system's ([`palloc`]).
 #[allow(clippy::unnecessary_box_returns)]
-fn fresh() -> Box<z::z_stream> {
+fn fresh(persistent: bool) -> Box<z::z_stream> {
+    let (zalloc, zfree): (z::alloc_func, z::free_func) = if persistent {
+        (palloc, pfree)
+    } else {
+        (alloc, free)
+    };
     Box::new(z::z_stream {
         next_in: std::ptr::null_mut(),
         avail_in: 0,
@@ -197,8 +250,8 @@ fn fresh() -> Box<z::z_stream> {
         total_out: 0,
         msg: std::ptr::null_mut(),
         state: std::ptr::null_mut(),
-        zalloc: alloc,
-        zfree: free,
+        zalloc,
+        zfree,
         opaque: std::ptr::null_mut(),
         data_type: 0,
         adler: 0,
@@ -268,6 +321,9 @@ fn avail(len: usize) -> c_uint {
 /// ```
 struct Stream {
     z: Box<z::z_stream>,
+    /// Whether zlib allocates on the system's ([`palloc`]), so no call
+    /// lends it the request's heap.
+    persistent: bool,
 }
 
 impl Stream {
@@ -281,6 +337,9 @@ impl Stream {
         call: impl FnOnce(*mut z::z_stream) -> c_int,
     ) -> Result<c_int, Thrown> {
         let stream = &raw mut *self.z;
+        if self.persistent {
+            return Ok(call(stream));
+        }
         req.lend_heap(|| call(stream))
     }
 
@@ -330,10 +389,8 @@ impl Deflate {
     /// loaded is of another major than the header compiled against.
     pub(crate) fn new(
         req: &mut Request,
-        level: i64,
-        window: i64,
-        memory: i64,
-        strategy: i64,
+        (level, window, memory, strategy): (i64, i64, i64, i64),
+        persistent: bool,
     ) -> Result<Result<Deflate, Status>, Thrown> {
         let int = |n: i64| c_int::try_from(n).map_err(|_| Status::StreamError);
         let (Ok(level), Ok(window), Ok(memory), Ok(strategy)) =
@@ -341,7 +398,10 @@ impl Deflate {
         else {
             return Ok(Err(Status::StreamError));
         };
-        let mut stream = Stream { z: fresh() };
+        let mut stream = Stream {
+            z: fresh(persistent),
+            persistent,
+        };
         let code = stream.call(req, |z| {
             // SAFETY: the stream is fresh with its allocator set, the
             // version is the header's static C string and the size the
@@ -422,11 +482,18 @@ impl Inflate {
     /// header's `ZLIB_VERSION` ([`header_version`]) as the macro hands it
     /// `inflateInit2_`, and answers `Z_VERSION_ERROR` where the library
     /// loaded is of another major.
-    pub(crate) fn new(req: &mut Request, window: i64) -> Result<Result<Inflate, Status>, Thrown> {
+    pub(crate) fn new(
+        req: &mut Request,
+        window: i64,
+        persistent: bool,
+    ) -> Result<Result<Inflate, Status>, Thrown> {
         let Ok(window) = c_int::try_from(window) else {
             return Ok(Err(Status::StreamError));
         };
-        let mut stream = Stream { z: fresh() };
+        let mut stream = Stream {
+            z: fresh(persistent),
+            persistent,
+        };
         // SAFETY: the stream is fresh with its allocator set, the version
         // is the header's static C string and the size the struct's.
         let code = stream.call(req, |z| unsafe {

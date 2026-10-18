@@ -127,7 +127,9 @@ pub(crate) fn engine_state() -> Arc<dyn Any + Send + Sync> {
 /// end.
 pub(crate) fn engine_end(req: &mut Request) {
     if let Some(engine) = req.layer_state::<EngineState>() {
-        drop(engine.persistent.drain());
+        for (_, entry) in engine.persistent.drain() {
+            crate::streams::persistent::end_entry(req, entry);
+        }
     }
 }
 

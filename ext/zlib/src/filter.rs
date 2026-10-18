@@ -333,7 +333,7 @@ pub(crate) fn factory(
                 docref(req, Level::Warning, &text);
             }
         }
-        let Ok(stream) = Inflate::new(req, window)? else {
+        let Ok(stream) = Inflate::new(req, window, persistent)? else {
             buffers.free(req);
             return Ok(None);
         };
@@ -388,7 +388,7 @@ pub(crate) fn factory(
             }
         }
     }
-    let Ok(stream) = Deflate::new(req, level, window, memory, 0)? else {
+    let Ok(stream) = Deflate::new(req, (level, window, memory, 0), persistent)? else {
         buffers.free(req);
         return Ok(None);
     };
