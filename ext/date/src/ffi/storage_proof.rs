@@ -129,7 +129,6 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
     // Larger payloads silently enlarge allocation_size, so they are rejected.
     for (name, size, alignment, room) in [
         ("date", size_of::<DateState>(), align_of::<DateState>(), 8),
-        ("timezone", size_of::<TzState>(), align_of::<TzState>(), 32),
         (
             "interval",
             size_of::<IntervalState>(),
@@ -150,6 +149,8 @@ fn existing_owned_states_and_safe_block_payloads_do_not_fit_php_objects() {
         assert!(size > room);
         assert!(alignment <= 8);
     }
+    // A `DateTimeZone`'s state lies inside its object since #2630.
+    assert!(size_of::<TzState>() <= 32 && align_of::<TzState>() <= 8);
     println!(
         "time={} relative={} zone={} diagnostic={} message={} block={} optional-block={}",
         size_of::<TimeFields>(),
