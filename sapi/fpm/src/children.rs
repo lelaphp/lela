@@ -290,7 +290,7 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
                 lived.subsec_micros()
             );
         }
-        close(fpm, &mut child);
+        close(fpm, p, &mut child);
         fpm.child_exited()?;
         if matches!(signal, Some(Signal::SIGSEGV | Signal::SIGBUS))
             && fpm.fault(crate::scoreboard::epoch())
@@ -309,20 +309,22 @@ pub(crate) fn bury(fpm: &mut Fpm) -> Step {
     }
 }
 
-/// `fpm_child_close` in the loop: what the child still had in its pipes
-/// read and logged, and the pipes closed.
-fn close(fpm: &mut Fpm, child: &mut Child) {
+/// `fpm_child_close` in the loop for the child that ran in the pool at
+/// `pool`: each pipe read to its end as its event would be
+/// (`fpm_event_fire`), then out of the loop and closed, as the pipe that
+/// ended is; one still open, where something the child started holds its
+/// writing end, out of the loop before it closes too.
+fn close(fpm: &mut Fpm, pool: usize, child: &mut Child) {
     for stdout in [true, false] {
-        let fd = if stdout {
-            child.stdout.take()
-        } else {
-            child.stderr.take()
-        };
-        let Some(fd) = fd else {
+        let Some(fd) = crate::stdio::pipe(child, stdout).take() else {
             continue;
         };
-        fpm.unwatch(fd.as_fd());
-        crate::stdio::drain(fpm, child, &fd, stdout);
+        let mut stream = child.log_stream.take();
+        let open = crate::stdio::pipe_said(fpm, pool, child.pid, &mut stream, fd, stdout);
+        child.log_stream = stream;
+        if let Some(fd) = open {
+            fpm.unwatch(fd.as_fd());
+        }
     }
     if let Some(stream) = &mut child.log_stream {
         stream.finish();
