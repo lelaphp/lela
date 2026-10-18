@@ -610,20 +610,28 @@ pub(super) fn interval_fields(
 }
 
 /// `create_date_period_datetime`: a date of the period's class over a
-/// copy of one of its times, or `null`.
-pub(super) fn period_date(
-    req: &mut Request,
-    copy: Option<Time>,
-    class: Option<ClassId>,
-) -> Result<Owner<Value>, Thrown> {
+/// `timelib_time_clone` of its start, current or end (`at` in
+/// [`PeriodState::times`]' order), the object made first, or
+/// `null` where the period has none.
+fn period_date(req: &mut Request, object: PhpObject, at: usize) -> Result<Owner<Value>, Thrown> {
+    let class = object
+        .native::<PeriodObj>(req)
+        .and_then(|p| p.start_ce.filter(|_| p.times()[at].is_some()));
     let Some(class) = class else {
-        release(req, copy)?;
         return Ok(Owner::null());
     };
-    let Some(copy) = copy else {
-        return Ok(Owner::null());
-    };
-    Ok(new_date(req, class, copy)?.into_value())
+    let date = new_object(req, class)?;
+    let copy = with_period(req, object, |req, p| {
+        lent(req, |l| p.times()[at].as_ref().map(|t| t.copy(l)))
+    });
+    if let Err(thrown) = copy
+        .transpose()
+        .and_then(|copy| set_time(req, *date, copy.flatten()))
+    {
+        date.give_up(req);
+        return Err(thrown);
+    }
+    Ok(date.into_value())
 }
 
 /// The period's state, taken out of its payload for the length of
@@ -642,42 +650,49 @@ pub(super) fn with_period<R>(
     Some(answered)
 }
 
-/// `date_period_object_to_hash`.
-pub(super) fn period_fields(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
+/// The value of one of the seven names php's `date_period_read_property`
+/// answers, made as `date_period_object_to_hash` makes its row: a date
+/// over a clone of a time, an interval over a clone of the relative
+/// time, the object made first and `null` for none, or a scalar.
+pub(super) fn period_field(
+    req: &mut Request,
+    object: PhpObject,
+    name: &[u8],
+) -> Result<Owner<Value>, Thrown> {
     let Some(p) = object.native::<PeriodObj>(req) else {
-        return Ok(Vec::new());
+        return Ok(Owner::null());
     };
-    let (class, interval) = (p.start_ce, p.interval.as_deref().copied());
-    let (recurrences, include_start, include_end) =
-        (p.recurrences, p.include_start_date, p.include_end_date);
-    let copies = with_period(req, object, |req, p| {
-        lent(req, |l| {
-            p.times_mut().map(|t| t.as_ref().map(|t| t.copy(l)))
-        })
-    })
-    .transpose()?
-    .unwrap_or_default();
-    let mut copies = copies.into_iter();
-    let mut fields = Vec::with_capacity(7);
-    for name in [&b"start"[..], b"current", b"end"] {
-        let date = period_date(req, copies.next().flatten(), class);
-        if let Err(thrown) = push_field(req, &mut fields, name, date) {
-            release(req, copies.collect::<Vec<_>>())?;
-            return Err(thrown);
+    let (interval, recurrences, include_start, include_end) = (
+        p.interval.as_deref().copied(),
+        p.recurrences,
+        p.include_start_date,
+        p.include_end_date,
+    );
+    let scalar = match name {
+        b"start" => return period_date(req, object, 0),
+        b"current" => return period_date(req, object, 1),
+        b"end" => return period_date(req, object, 2),
+        b"interval" => {
+            let Some(diff) = interval else {
+                return Ok(Owner::null());
+            };
+            return new_interval(req, 0, None, |req| lent(req, |l| RelTime::of(l, &diff)))
+                .map(Owner::into_value);
         }
-    }
-    let interval = match interval {
-        Some(diff) => new_interval(req, 0, None, |req| lent(req, |l| RelTime::of(l, &diff)))
-            .map(Owner::into_value),
-        None => Ok(Owner::null()),
+        b"recurrences" => Value::int(recurrences),
+        b"include_start_date" => Value::bool(include_start),
+        b"include_end_date" => Value::bool(include_end),
+        _ => Value::null(),
     };
-    push_field(req, &mut fields, b"interval", interval)?;
-    for (name, value) in [
-        (&b"recurrences"[..], Value::int(recurrences)),
-        (b"include_start_date", Value::bool(include_start)),
-        (b"include_end_date", Value::bool(include_end)),
-    ] {
-        fields.push((name, Owner::take(req, value)));
+    Ok(Owner::take(req, scalar))
+}
+
+/// `date_period_object_to_hash`: the seven rows, each made in its turn.
+pub(super) fn period_fields(req: &mut Request, object: PhpObject) -> Result<Fields, Thrown> {
+    let mut fields = Vec::with_capacity(PERIOD_FIELDS.len());
+    for name in PERIOD_FIELDS {
+        let made = period_field(req, object, name);
+        push_field(req, &mut fields, name, made)?;
     }
     Ok(fields)
 }
@@ -1325,6 +1340,18 @@ impl ObjectHandlers for PeriodHandlers {
         Some(clone_period)
     }
 
+    /// `date_period_read_property`: the one field read, made alone, so a
+    /// read of `interval` makes one interval and nothing beside it.
+    ///
+    /// ```php
+    /// $p = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 2);
+    /// $m = memory_get_usage(); $x = $p->interval->d; echo memory_get_usage() - $m, ' ', spl_object_id(new stdClass), "\n";
+    /// $m = memory_get_usage(); $x = $p->start; echo memory_get_usage() - $m, ' ', spl_object_id(new stdClass), "\n";
+    /// ```
+    /// ```expect
+    /// 0 3
+    /// 320 2
+    /// ```
     fn read_property(
         &self,
         req: &mut Request,
@@ -1338,15 +1365,7 @@ impl ObjectHandlers for PeriodHandlers {
         if read == PropertyRead::Write {
             return Err(readonly(req, name));
         }
-        let mut found = None;
-        for (field, value) in period_fields(req, object)? {
-            if field == name {
-                found = Some(value);
-            } else {
-                value.give_up(req);
-            }
-        }
-        Ok(found.unwrap_or_else(Owner::null))
+        period_field(req, object, name)
     }
 
     fn write_property(
@@ -1500,8 +1519,8 @@ impl PeriodState {
     }
 
     /// `start`, `current` and `end`, in that order.
-    pub(super) fn times_mut(&mut self) -> [&mut Option<Time>; 3] {
-        [&mut self.start, &mut self.current, &mut self.end]
+    pub(super) fn times(&self) -> [&Option<Time>; 3] {
+        [&self.start, &self.current, &self.end]
     }
 }
 
