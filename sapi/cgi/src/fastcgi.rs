@@ -541,7 +541,7 @@ fn serve_one(engine: &Engine, params: Environment, wire: &Arc<Mutex<Wire>>) -> O
         wire: Arc::clone(wire),
         logging,
     });
-    let (served, _) = engine.serve(description, sink, || {
+    let (served, _) = engine.serve(description, sink, |_| {
         refusal(path.as_deref()).map_or(HostServes::Program, HostServes::Page)
     });
     (!served.start_failed).then_some(served.exit_code)

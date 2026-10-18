@@ -184,7 +184,7 @@ fn plain(dir: &Path) -> Vec<Vec<String>> {
             ..RequestDescription::default()
         },
         Box::new(Kept::default()),
-        || HostServes::Program,
+        |_| HostServes::Program,
     );
     drop(engine);
     requests(&rec.events())

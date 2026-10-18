@@ -168,7 +168,7 @@ impl Engine {
         let (observables, entered, sink) = if traced {
             self.serve_traced(description, sink)
         } else {
-            let (observables, sink) = self.serve(description, sink, || HostServes::Program);
+            let (observables, sink) = self.serve(description, sink, |_| HostServes::Program);
             (observables, Vec::new(), sink)
         };
         let sink: Capture = handed_back(sink).unwrap_or_default();
@@ -194,7 +194,7 @@ impl Engine {
         sink: &mut S,
     ) -> crate::engine::Observables {
         let lent = Box::new(std::mem::take(sink));
-        let (observed, back) = self.serve(description, lent, || HostServes::Program);
+        let (observed, back) = self.serve(description, lent, |_| HostServes::Program);
         if let Some(back) = handed_back(back) {
             *sink = back;
         }

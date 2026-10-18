@@ -81,6 +81,7 @@ FreshStr::len
 FreshStr::set_len
 GcStatus
 GcTable
+HEADER_AT
 Heap
 Heap::addref
 Heap::array
@@ -283,6 +284,7 @@ PropertyTable::row_at
 PropertyTable::seek
 PropertyTable::table
 PropertyTable::used
+ROOM_BYTES
 Ref
 Ref::addref
 Ref::is_same
@@ -337,8 +339,11 @@ VmStack::frame_mut
 VmStack::grow_top
 VmStack::header
 VmStack::header_mut
+VmStack::innermost
 VmStack::is_empty
 VmStack::len
+VmStack::link_below
+VmStack::link_word
 VmStack::move_to_heap
 VmStack::new
 VmStack::open

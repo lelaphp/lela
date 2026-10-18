@@ -57,6 +57,7 @@ mod preload;
 #[cfg(test)]
 mod probe;
 mod process_scope;
+pub mod readable;
 mod rfc1867;
 #[cfg(debug_assertions)]
 mod served;

@@ -576,3 +576,194 @@ echo listed();
         "{bodies:?}"
     );
 }
+
+/// The binary under test, where the master can read its child's memory:
+/// on macOS a copy into `dir` signed ad hoc with
+/// `com.apple.security.get-task-allow`, which lets a process of the same
+/// user take the task port of a child that runs it (`task_for_pid`, as
+/// php-fpm's master asks for it), since the build's own signature carries
+/// no entitlement and the kernel refuses the port, as it refuses the
+/// pinned php-fpm's; elsewhere the binary itself, whose master attaches
+/// to its own child with `ptrace`.
+fn readable_php_fpm(dir: &Path) -> Command {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_php-fpm"));
+    if !cfg!(target_os = "macos") {
+        let mut command = Command::new(binary);
+        command.arg("-R");
+        return command;
+    }
+    let copy = dir.join("php-fpm");
+    std::fs::copy(&binary, &copy).unwrap();
+    let entitlements = dir.join("readable.plist");
+    std::fs::write(
+        &entitlements,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict><key>com.apple.security.get-task-allow</key><true/></dict></plist>\n",
+    )
+    .unwrap();
+    let signed = Command::new("codesign")
+        .args(["-s", "-", "-f", "--entitlements"])
+        .arg(&entitlements)
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(signed.status.success(), "{signed:?}");
+    let mut command = Command::new(copy);
+    command.arg("-R");
+    command
+}
+
+/// The request [`slow_frames`] serves unless told otherwise: a sleep two
+/// calls under a method of a class an included file declares.
+const NESTED: &[(&str, &str)] = &[
+    (
+        "slow.php",
+        "<?php\nfunction f($n) { usleep(3000000); }\nfunction g() { f(1); }\ninclude __DIR__ . '/inc.php';\necho 'done';\n",
+    ),
+    (
+        "inc.php",
+        "<?php\nclass K { function m() { g(); } }\n(new K)->m();\n",
+    ),
+];
+
+/// The frame lines of the slow log entry of one request past
+/// `request_slowlog_timeout` for `slow.php` of `files`, which ends by
+/// echoing `done`, served by a pool of `name` whose configuration ends in
+/// `more`, each past its sixteen-digit room address, and the test
+/// directory as the engine resolved it; the entry's head is held here.
+fn slow_frames(name: &str, more: &str, files: &[(&str, &str)]) -> (Vec<String>, PathBuf) {
+    let dir = tree(name);
+    let socket = socket(&dir);
+    let path = dir.join("php-fpm.conf");
+    let slowlog = dir.join("slow.log");
+    std::fs::write(
+        &path,
+        format!(
+            "[global]\nerror_log = {}\n[www]\nlisten = {}\npm = static\npm.max_children = 1\n\
+             slowlog = {}\nrequest_slowlog_timeout = 1\n{more}",
+            dir.join("fpm.log").display(),
+            socket.display(),
+            slowlog.display()
+        ),
+    )
+    .unwrap();
+    for (file, text) in files {
+        std::fs::write(dir.join(file), text).unwrap();
+    }
+    let script = dir.join("slow.php");
+    let mut master = readable_php_fpm(&dir)
+        .args(["-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let shown = script.display().to_string();
+    let pairs = [
+        ("SCRIPT_FILENAME", shown.as_str()),
+        ("REQUEST_METHOD", "GET"),
+    ];
+    let body = connect(&socket, started)
+        .map(|s| request_within(s, &pairs, Duration::from_secs(20)))
+        .unwrap_or_default();
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status()
+        .ok();
+    master.wait().ok();
+    let logged = std::fs::read_to_string(&slowlog).unwrap_or_default();
+    let log = std::fs::read_to_string(dir.join("fpm.log")).unwrap_or_default();
+    // The op arrays' files are the paths the engine opened, resolved.
+    let real = std::fs::canonicalize(&dir).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(String::from_utf8_lossy(&body).ends_with("done"), "{body:?}");
+    let mut lines = logged.lines();
+    assert_eq!(lines.next(), Some(""), "{logged}\n{log}");
+    let head = lines.next().unwrap_or_default();
+    assert!(head.contains("] [pool www] pid "), "{logged}\n{log}");
+    assert_eq!(
+        lines.next(),
+        Some(format!("script_filename = {shown}").as_str()),
+        "{logged}"
+    );
+    let frames = lines
+        .map(|line| {
+            let address = line.get(3..19).unwrap_or_default();
+            assert!(
+                line.starts_with("[0x")
+                    && line.get(19..21) == Some("] ")
+                    && address.chars().all(|c| c.is_ascii_hexdigit()),
+                "{logged}"
+            );
+            line[21..].to_string()
+        })
+        .collect();
+    (frames, real)
+}
+
+/// A request past `request_slowlog_timeout` whose child the master can
+/// read is logged with its frames after the head, as php's
+/// `fpm_php_trace_dump` writes them (#1301): one line per frame from the
+/// innermost, its address, the name of what it serves, a method's alone,
+/// `[INCLUDE_OR_EVAL]` for an included file, and the file and line it
+/// was called from; the main script's frame ends the walk. The engine
+/// lays the chain the master reads in its frames' rooms (design §5.6,
+/// revision 59), and the child publishes where it starts in its
+/// scoreboard slot.
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_s_frames_follow_the_head_where_the_child_is_readable() {
+    let (frames, real) = slow_frames("slowlog", "", NESTED);
+    let file = real.join("slow.php").display().to_string();
+    let inc = real.join("inc.php").display().to_string();
+    assert_eq!(
+        frames,
+        [
+            format!("usleep() {file}:2"),
+            format!("f() {file}:3"),
+            format!("g() {inc}:2"),
+            format!("m() {inc}:3"),
+            format!("[INCLUDE_OR_EVAL]() {file}:4"),
+        ]
+    );
+}
+
+/// `request_slowlog_trace_depth` cuts the walk at that many frames, the
+/// innermost first, as php's `--callers_limit` does.
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_s_frames_stop_at_the_trace_depth() {
+    let (frames, real) = slow_frames("slowlog-depth", "request_slowlog_trace_depth = 2\n", NESTED);
+    let file = real.join("slow.php").display().to_string();
+    assert_eq!(
+        frames,
+        [format!("usleep() {file}:2"), format!("f() {file}:3")]
+    );
+}
+
+/// A request asleep in a fiber: the fiber's first frame is linked to the
+/// frame of the native that resumed it, as `zend_fiber_resume` writes
+/// `fiber->stack_bottom->prev_execute_data`, so the walk runs from the
+/// sleep through the fiber's callable into `Fiber::start` and the main
+/// script. php's own walk meets the fiber's zeroed bottom frame there,
+/// whose `function_name` is NULL and whose call kind is no kind it names
+/// (`ZEND_UNREACHABLE`), so this line has no oracle (#2897).
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+fn a_slow_request_s_frames_run_through_a_fiber_into_its_resumer() {
+    let script = "<?php\n$fiber = new Fiber(function () {\n    usleep(3000000);\n});\n$fiber->start();\necho 'done';\n";
+    let (frames, real) = slow_frames("slowlog-fiber", "", &[("slow.php", script)]);
+    let file = real.join("slow.php").display().to_string();
+    assert_eq!(
+        frames,
+        [
+            format!("usleep() {file}:3"),
+            format!("{{closure:{file}:2}}() {file}:5"),
+            format!("start() {file}:5"),
+        ]
+    );
+}
