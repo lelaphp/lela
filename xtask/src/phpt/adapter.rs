@@ -671,20 +671,13 @@ struct Capture {
 
 impl Capture {
     fn of(phpt: &Phpt) -> Capture {
-        match phpt.text("CAPTURE_STDIO") {
-            Some(named) => {
-                let named = named.to_uppercase();
-                Capture {
-                    stdin: named.contains("STDIN"),
-                    stdout: named.contains("STDOUT"),
-                    stderr: named.contains("STDERR"),
-                }
-            }
-            None => Capture {
-                stdin: true,
-                stdout: true,
-                stderr: true,
-            },
+        let named = phpt.text("CAPTURE_STDIO").map(|named| named.to_uppercase());
+        // A test that names no stream captures every one.
+        let captures = |stream: &str| named.as_ref().is_none_or(|n| n.contains(stream));
+        Capture {
+            stdin: captures("STDIN"),
+            stdout: captures("STDOUT"),
+            stderr: captures("STDERR"),
         }
     }
 
