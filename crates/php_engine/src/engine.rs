@@ -7583,6 +7583,26 @@ mod tests {
         }
     }
 
+    /// A `realpath_cache_ttl` of zero leaves the time unread, `*t` at
+    /// php's `-1` (`Z/Zend/zend_virtual_cwd.c:1140`), which each bucket
+    /// is entered as expiring at, as the oracle's
+    /// `php -n -d realpath_cache_ttl=0` lists it in `realpath_cache_get()`;
+    /// no entry expires.
+    #[test]
+    fn a_time_to_live_of_zero_enters_each_bucket_expiring_at_minus_one() {
+        let files = Files::new("realpath-ttl0", &[("main.php", "<?php\n")]);
+        let engine = Engine::cli_builder()
+            .ini_default("realpath_cache_ttl", "0")
+            .build();
+        for _ in 0..2 {
+            let (_, observables) = files.serve(&engine, "main.php");
+            assert_eq!(observables.exit_code, 0);
+        }
+        let expires = engine.shared.realpath_cache.listed(|bucket| bucket.expires);
+        assert!(!expires.is_empty(), "the program's path was entered");
+        assert!(expires.iter().all(|&at| at == -1), "{expires:?}");
+    }
+
     /// The once forms over a second file (#396): the file is served the
     /// first time and answers what it returned, and `true` every time
     /// after, from either once form, as the oracle prints for these

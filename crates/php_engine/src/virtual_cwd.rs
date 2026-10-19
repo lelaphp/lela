@@ -252,13 +252,21 @@ impl RealpathCache {
     }
 }
 
-/// `*t` of `tsrm_realpath_r`: the time read once, where the cache has a
-/// time to live, on the first lookup.
+/// `*t` of `tsrm_realpath_r`: the time, read once on the first lookup,
+/// or `-1` where the cache has no time to live, which php never reads the
+/// time for and enters as each bucket's `expires`
+/// (`Z/Zend/zend_virtual_cwd.c:1140`).
 struct Now {
     at: Option<i64>,
 }
 
 impl Now {
+    fn new(ttl: i64) -> Now {
+        Now {
+            at: (ttl == 0).then_some(-1),
+        }
+    }
+
     fn get(&mut self) -> i64 {
         *self.at.get_or_insert_with(|| {
             std::time::SystemTime::now()
@@ -523,7 +531,7 @@ pub(crate) fn virtual_file_ex(
     let mut buf = Buf(resolved);
     let mut walk = Walk {
         links: 0,
-        now: Now { at: None },
+        now: Now::new(cache.ttl),
         cache,
     };
     let mut len = realpath_r(&mut walk, &mut buf, start, length, how, false, None)?;

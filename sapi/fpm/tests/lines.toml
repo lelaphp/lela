@@ -437,3 +437,20 @@ stop = "SIGTERM"
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "first=1"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# A `realpath_cache_ttl` of zero leaves the child's time unread, `*t` at
+# `-1` (`Z/Zend/zend_virtual_cwd.c:1140`), so each entry expires at -1 and
+# none expires: the second request lists what the first entered as the
+# first entered it.
+[[line]]
+name = "a-time-to-live-of-zero-enters-the-realpath-cache-expiring-at-minus-one"
+args = ["-R", "-n", "-F", "-d", "realpath_cache_ttl=0", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "index.php" = '<?php $c = realpath_cache_get(); ksort($c); foreach ($c as $k => $v) if (str_starts_with($k, __DIR__)) echo substr($k, strlen(__DIR__)) ?: ".", $v["is_dir"] ? " dir " : " file ", $v["expires"], "\n";' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
