@@ -353,5 +353,23 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
         "{}",
         dump::render(&ir)
     );
+    // Freeing the array may run a destructor once the fetch is done: an
+    // exit of its own, at the fetch, past it.
+    let fetch = ir
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::FetchDimR && line.form == Form::Inline => {
+                Some(line)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("no inline fetch:\n{}", dump::render(&ir)))?;
+    let freed = fetch
+        .freed
+        .ok_or("the free of the fetched array leaves nowhere")?;
+    let exit = &ir.exits[usize::from(freed.0)];
+    assert_eq!(exit.opline, Some(fetch.opline));
+    assert_ne!(Some(freed), fetch.exit);
     Ok(())
 }

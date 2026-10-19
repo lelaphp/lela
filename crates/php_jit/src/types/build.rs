@@ -16,9 +16,9 @@ use super::opcodes::{
     reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
 };
 use super::{
-    Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Guard, GuardAt, Home,
-    Landing, Layout, Line, LoopHeader, Op, OpId, Operand, Place, Repeat, Slot, Store, Stored,
-    TraceIr, Value, ValueId,
+    Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Fused, Guard, GuardAt,
+    Home, Imm, Landing, Layout, Line, LoopHeader, Op, OpId, Operand, Place, Repeat, Slot, Store,
+    Stored, TraceIr, Value, ValueId,
 };
 use crate::record::{self, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -160,7 +160,7 @@ struct Builder<'a> {
     ops: Vec<Op>,
     snapshots: Vec<Snapshot>,
     guards: Vec<Placed>,
-    leaves: Vec<(OpId, Draft)>,
+    leaves: Vec<(OpId, Leaves, Draft)>,
     calls: Vec<Call>,
     map_ptrs: Vec<MapPtrRaw>,
     phis: Vec<ValueId>,
@@ -421,7 +421,7 @@ impl<'a> Builder<'a> {
             .get(at.0 as usize)
             .ok_or_else(|| mismatch("an opline past its op array"))?;
         let after = code.oplines.get(at.0 as usize + 1).copied();
-        let fused = branch.is_some() && !record::conditional(&op);
+        let fused = fused(&op, after.as_ref(), branch);
         let data_line = after.filter(|data| data.opcode == Opcode::OpData);
         let idx = self.begin();
         let op1 = self.read(frame, op.op1_type, op.op1)?;
@@ -458,7 +458,7 @@ impl<'a> Builder<'a> {
             seen,
             samples[0],
             form,
-            fused,
+            fused.is_some(),
         );
         if is_call(op.opcode) {
             self.call_at = Some(at);
@@ -479,20 +479,17 @@ impl<'a> Builder<'a> {
             op1_def: written.op1,
             op2_def: written.op2,
             fused,
+            imm: imm(&op),
             form,
             map_ptr,
             exit: None,
+            freed: None,
         }));
+        let fused = fused.is_some();
         let len = if fused || data_line.is_some() { 2 } else { 1 };
         let jump = if fused { after } else { Some(op) };
         let target = jump.and_then(|jump| jump.jump_target());
-        let jumps = op.opcode == Opcode::Jmp;
-        self.successor = match (branch, jumps, op.jump_target().is_some()) {
-            (Some(true), ..) | (None, true, _) => target,
-            // A table's jump the record does not say.
-            (None, false, true) => None,
-            _ => Some(OplineIdx(at.0 + len)),
-        };
+        self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
         if let Some(taken) = branch {
             let jump = if fused { after } else { None };
@@ -644,13 +641,15 @@ impl<'a> Builder<'a> {
 
     /// The exit an opline itself takes where it cannot finish: an inline
     /// one before it does anything, which the interpreter runs again, a
-    /// stepped one that threw, at its opline with what it threw pending.
+    /// stepped one that threw, at its opline with what it threw pending;
+    /// and an inline fetch's from a temporary array, where freeing the
+    /// array threw once the fetch was done.
     fn own_exit(&mut self, idx: OpId, frame: Frame, op: &Opline, form: Form, old: Types) {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
         };
-        let at = line.opline;
-        let draft = match form {
+        let (at, op1) = (line.opline, line.op1);
+        let unfinished = match form {
             Form::Inline if inline_may_leave(op.opcode) => {
                 draft(Point::Before(idx), frame, At::Opline(at))
             }
@@ -664,7 +663,13 @@ impl<'a> Builder<'a> {
             }
             _ => return,
         };
-        self.leaves.push((idx, draft));
+        self.leaves.push((idx, Leaves::Unfinished, unfinished));
+        if form == Form::Inline && op.opcode == Opcode::FetchDimR && self.is_temp(op1) {
+            // The temporary array the fetch read is freed once its element
+            // is read, and freeing it may run a destructor that throws.
+            let freed = draft(Point::After(idx), frame, At::Opline(at));
+            self.leaves.push((idx, Leaves::Freed, freed));
+        }
     }
 
     /// A call an `INIT_*` began.
@@ -1339,7 +1344,7 @@ impl<'a> Builder<'a> {
             };
             order.push((key, Source::Guard(at)));
         }
-        for (at, (op, _)) in self.leaves.iter().enumerate() {
+        for (at, (op, ..)) in self.leaves.iter().enumerate() {
             order.push((Order::At(*op, Stage::Leaves), Source::Leave(at)));
         }
         order.push(if loops {
@@ -1374,9 +1379,12 @@ impl<'a> Builder<'a> {
                     placed.exit
                 }
                 Source::Leave(at) => {
-                    let (op, draft) = self.leaves[at];
+                    let (op, leaves, draft) = self.leaves[at];
                     if let Some(Op::Line(line)) = self.ops.get_mut(op.index()) {
-                        line.exit = Some(id);
+                        match leaves {
+                            Leaves::Unfinished => line.exit = Some(id),
+                            Leaves::Freed => line.freed = Some(id),
+                        }
                     }
                     draft
                 }
@@ -1565,6 +1573,48 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// Where the trace goes on after `op` at `at`, `len` oplines long, where
+/// the record says: its jump's `target` where the jump was taken or
+/// always jumps, the opline past it where it went on.
+fn went(
+    at: OplineIdx,
+    op: &Opline,
+    target: Option<OplineIdx>,
+    len: u32,
+    branch: Option<bool>,
+) -> Option<OplineIdx> {
+    match (branch, op.opcode == Opcode::Jmp, op.jump_target().is_some()) {
+        (Some(true), ..) | (None, true, _) => target,
+        // A table's jump the record does not say.
+        (None, false, true) => None,
+        _ => Some(OplineIdx(at.0 + len)),
+    }
+}
+
+/// The jump after `op` it is fused to, where it is a comparison whose
+/// direction the record keeps.
+fn fused(op: &Opline, after: Option<&Opline>, branch: Option<bool>) -> Option<Fused> {
+    let jump = after.filter(|_| branch.is_some() && !record::conditional(op))?;
+    Some(if jump.opcode == Opcode::Jmpz {
+        Fused::Jmpz
+    } else {
+        Fused::Jmpnz
+    })
+}
+
+/// What `op` names beside its operands that its inline form reads.
+fn imm(op: &Opline) -> Imm {
+    match op.opcode {
+        Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx
+            if op.op2_type == OperandKind::Unused =>
+        {
+            Imm::Arg(op.op2)
+        }
+        Opcode::AssignOp => lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary),
+        _ => Imm::None,
+    }
+}
+
 /// An exit with nothing to store beside the trace's registers and no
 /// trace to link to.
 fn draft(point: Point, frame: Frame, at: At) -> Draft {
@@ -1606,6 +1656,15 @@ enum Stage {
     Before,
     Within,
     Leaves,
+}
+
+/// Why an opline leaves through an exit of its own.
+#[derive(Clone, Copy)]
+enum Leaves {
+    /// It cannot finish, or what it ran threw.
+    Unfinished,
+    /// It finished, and freeing a temporary it read threw.
+    Freed,
 }
 
 /// Where an exit's draft is kept until it is numbered.

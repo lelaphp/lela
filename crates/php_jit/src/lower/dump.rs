@@ -160,7 +160,7 @@ impl<'a> Dump<'a> {
                 if !operands.is_empty() {
                     write!(text, " {}", operands.join(", "))?;
                 }
-                if line.fused {
+                if line.fused.is_some() {
                     write!(text, " fused")?;
                 }
                 let form = match line.form {
@@ -173,6 +173,9 @@ impl<'a> Dump<'a> {
                 }
                 if let Some(exit) = line.exit {
                     write!(text, " leaves -> exit {}", exit.0)?;
+                }
+                if let Some(exit) = line.freed {
+                    write!(text, " frees -> exit {}", exit.0)?;
                 }
                 writeln!(text)
             }
