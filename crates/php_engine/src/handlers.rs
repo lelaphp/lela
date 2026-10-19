@@ -1352,7 +1352,12 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
+    if let Some(edge) = inline_init_closure(req, frame, code, op, at) {
+        return edge;
+    }
+    req.vm_mut().stand(frame, at);
     let callee = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
     let resolved = if let Some(object) = callee.as_object().copied() {
         dynamic_call_object(req, object)
@@ -1368,6 +1373,58 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         ))
     };
     push_dynamic(req, frame, code, op, resolved)
+}
+
+/// The inline path of `INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3938`)
+/// over a CV that holds a `Closure`, `$f(...)`:
+/// `zend_init_dynamic_call_object`'s first arm, the payload read once
+/// ([`closure_target`]) and the call pushed with the closure and its
+/// receiver held, as php reads `get_closure` and `fbc` directly. Nothing
+/// here raises but the memory limit on a page the push takes, reported
+/// at this opline; `None`, with nothing touched, for every other
+/// callee, which the handler resolves. A closure bound to a receiver
+/// reads it and its called scope, one bound into another scope reads
+/// that scope's members, and each call gives back the owners it took:
+///
+/// ```php
+/// class P { public $n = 'p'; function get() { return function ($s) { return $this->n . $s . static::class; }; } }
+/// class Q extends P { public $n = 'q'; }
+/// $f = (new Q)->get();
+/// $g = Closure::bind(function () { return $this->n; }, new P, P::class);
+/// $r = $f("-") . " " . $g();
+/// $m = memory_get_usage();
+/// for ($i = 0; $i < 3; $i++) { $r = $f('-') . ' ' . $g(); }
+/// echo $r, ' ', memory_get_usage() - $m, "\n";
+/// unset($f);
+/// var_dump($g());
+/// ```
+/// ```expect
+/// q-Q p 32
+/// string(1) "p"
+/// ```
+#[inline(always)] // as `inline_init_fcall`
+#[allow(clippy::inline_always)]
+fn inline_init_closure(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    at: u32,
+) -> Option<Edge> {
+    if op.op2_type != OperandKind::Cv {
+        return None;
+    }
+    let held = ByKind(op.op2_type).read(req.slots_mut(frame), code, op.op2);
+    let target = closure_target(req, PhpObject::of(held.as_obj()?))?;
+    Some(
+        match req.push_call(dynamic_header(&target, op.extended_value)) {
+            Ok(_) => Ok(advanced()),
+            Err(fatal) => {
+                req.vm_mut().stand(frame, at);
+                Err(fatal)
+            }
+        },
+    )
 }
 
 /// What a dynamic call resolved to: the callee, the name the call frame
@@ -1388,27 +1445,8 @@ struct DynamicTarget {
 /// object where its class declares one, and php's `Error` naming the
 /// class otherwise.
 fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTarget, Thrown> {
-    // The payload read once for all the call takes of it, its own cache
-    // among it, as php's `get_closure` hands `fbc` and the object over
-    // in one call.
-    if let Some(closure) = object.native::<crate::classes::ClosureObject>(req) {
-        let (function, this, called_scope) = (
-            closure.info.function,
-            closure.info.this,
-            closure.info.called_scope,
-        );
-        let own_cache = matches!(closure.cache, crate::classes::ClosureCache::Own(_));
-        req.addref(&object.as_value());
-        if let Some(this) = this {
-            req.addref(&this.as_value());
-        }
-        return Ok(DynamicTarget {
-            function,
-            name: None,
-            this,
-            called_scope,
-            closure: Some((object, own_cache)),
-        });
+    if let Some(target) = closure_target(req, object) {
+        return Ok(target);
     }
     let class = object.class();
     if let Some(made) = req.handler_closure(object) {
@@ -1444,6 +1482,33 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         this,
         called_scope: Some(class),
         closure: None,
+    })
+}
+
+/// `zend_closure_get_closure` with `GC_ADDREF` of the closure and its
+/// receiver: what a call through `object`, a `Closure`, takes, the
+/// payload read once for the function, the receiver, the called scope
+/// and whether it reads a runtime cache of its own, as php's
+/// `get_closure` hands `fbc` and the object over in one call. None for
+/// an object that is no closure, with nothing touched.
+fn closure_target(req: &Request, object: PhpObject) -> Option<DynamicTarget> {
+    let closure = object.native::<crate::classes::ClosureObject>(req)?;
+    let (function, this, called_scope) = (
+        closure.info.function,
+        closure.info.this,
+        closure.info.called_scope,
+    );
+    let own_cache = matches!(closure.cache, crate::classes::ClosureCache::Own(_));
+    req.addref(&object.as_value());
+    if let Some(this) = this {
+        req.addref(&this.as_value());
+    }
+    Some(DynamicTarget {
+        function,
+        name: None,
+        this,
+        called_scope,
+        closure: Some((object, own_cache)),
     })
 }
 
@@ -2714,14 +2779,26 @@ fn push_dynamic(
     op: &Opline,
     resolved: Result<DynamicTarget, Thrown>,
 ) -> Edge {
-    let target = match resolved {
+    let mut target = match resolved {
         Ok(target) => target,
         Err(thrown) => {
             exec::free_operand(req, frame, code, op.op2_type, op.op2);
             return threw(req, frame, &thrown);
         }
     };
-    let mut header = exec::Header::call(target.function, op.extended_value);
+    if let Some(name) = target.name.take() {
+        req.release(Value::string(name));
+    }
+    req.push_call(dynamic_header(&target, op.extended_value))?;
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    Ok(advance(req, frame))
+}
+
+/// The header of the call a dynamic call resolved to, `ZEND_CALL_DYNAMIC`
+/// with `count` arguments: its receiver and closure held, its called
+/// scope, and whether the closure reads a cache of its own.
+fn dynamic_header(target: &DynamicTarget, count: u32) -> exec::Header {
+    let mut header = exec::Header::call(target.function, count);
     header.set_receiver(target.this.map(exec::Receiver::Owned));
     header.set_called_scope(target.called_scope);
     header.closure = target.closure.map(|(closure, _)| closure);
@@ -2729,12 +2806,7 @@ fn push_dynamic(
     header
         .info
         .set_own_cache(target.closure.is_some_and(|(_, own)| own));
-    if let Some(name) = target.name {
-        req.release(Value::string(name));
-    }
-    req.push_call(header)?;
-    exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    Ok(advance(req, frame))
+    header
 }
 
 /// The call frame a resolved callback takes, `zend_fcall_info_cache` as
