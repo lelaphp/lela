@@ -344,10 +344,13 @@ fn a_publish_that_panics_leaves_the_counts_as_they_were() {
 #[test]
 fn a_dropped_table_returns_its_chunks() -> Result<(), String> {
     let table = table(&[("opcache.jit_buffer_size", "128K")]);
-    assert_eq!(
-        table.publish(compiled(&vec![0; CHUNK], vec![]), Start::Loop),
-        Ok(trace(1))
-    );
+    // A whole chunk fits only from the chunk's first byte, which the heap
+    // adapter's allocation under Miri need not place at any alignment.
+    let whole = Compiled {
+        align: 1,
+        ..compiled(&vec![0; CHUNK], vec![])
+    };
+    assert_eq!(table.publish(whole, Start::Loop), Ok(trace(1)));
     assert_eq!(
         table.publish(compiled(&[0; 8], vec![]), Start::Loop),
         Ok(trace(2))
