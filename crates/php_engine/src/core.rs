@@ -6,6 +6,7 @@
 //! `get_defined_constants()` list them in.
 
 use crate::api::abi::{Extension, ExtensionBuilder};
+use crate::api::request::Request;
 use crate::attributes::{
     AllowDynamicProperties, Attribute, DelayedTargetValidation, Deprecated, NoDiscard, Override,
     ReturnTypeWillChange, SensitiveParameter, SensitiveParameterValue,
@@ -77,5 +78,45 @@ pub(crate) fn extension() -> Extension {
         .class::<FiberError>()
         .class::<stdClass>()
         .constants(crate::constants::startup::declared())
+        .info(info)
         .build("Core")
+}
+
+/// `PHP_MINFO_FUNCTION(php_core)` (`Z/main/main.c:2113-2118`), which
+/// `php_module_startup` makes Core's `info_func` (`Z/main/main.c:2374`):
+/// the `PHP Version` row, then `DISPLAY_INI_ENTRIES()`, the engine's own
+/// entries ([`Request::core_ini_info`]). What `phpinfo()`,
+/// `ReflectionExtension('Core')->info()` and `php --ri Core` print under
+/// Core's heading ([`Request::extension_info`]), in the table's order:
+/// registration order before `phpinfo()` sorts it, the same block as
+/// `phpinfo()`'s after.
+///
+/// ```php
+/// $info = function () { ob_start(); (new ReflectionExtension('Core'))->info(); return ob_get_clean(); };
+/// $before = $info();
+/// echo implode("\n", array_slice(explode("\n", $before), 0, 12)), "\n";
+/// ob_start(); phpinfo(INFO_MODULES); $page = ob_get_clean(); $after = $info();
+/// var_dump(substr_count($before, "\n"), substr_count($after, "\n"), str_contains($page, $after), $before === $after);
+/// ```
+/// ```expect
+///
+/// Core
+///
+/// PHP Version => 8.5.9
+///
+/// Directive => Local Value => Master Value
+/// highlight.comment => <span style="color: #FF8000">#FF8000</span> => <span style="color: #FF8000">#FF8000</span>
+/// highlight.default => <span style="color: #0000BB">#0000BB</span> => <span style="color: #0000BB">#0000BB</span>
+/// highlight.html => <span style="color: #000000">#000000</span> => <span style="color: #000000">#000000</span>
+/// highlight.keyword => <span style="color: #007700">#007700</span> => <span style="color: #007700">#007700</span>
+/// highlight.string => <span style="color: #DD0000">#DD0000</span> => <span style="color: #DD0000">#DD0000</span>
+/// display_errors => STDOUT => STDOUT
+/// int(103)
+/// int(103)
+/// bool(true)
+/// bool(false)
+/// ```
+fn info(req: &mut Request) {
+    req.info_table(&[&["PHP Version", crate::api::request::PHP_VERSION]]);
+    req.core_ini_info();
 }

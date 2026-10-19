@@ -622,7 +622,7 @@ impl Request {
         let mut snapshot = Vec::with_capacity(o.slots() as usize);
         for (i, default) in (0..o.slots()).zip(defaults) {
             let held = o.slot(i);
-            self.heap.addref(held);
+            held.addref();
             snapshot.push(held);
             let waiting = lazy.get(i as usize).copied().unwrap_or(false);
             match (waiting, default) {

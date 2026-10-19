@@ -78,7 +78,7 @@ fn block(z: Zval) -> Option<NonNull<u8>> {
     {
         return None;
     }
-    let at = z.counted()?;
+    let at = z.counted()?.block();
     (at.as_ptr().addr() & (CHUNK_SIZE - 1) != 0).then_some(at)
 }
 

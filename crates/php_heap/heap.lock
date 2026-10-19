@@ -380,6 +380,7 @@ Zval::FLAGS_AT
 Zval::TYPE_AT
 Zval::TYPE_REFCOUNTED
 Zval::UNDEF
+Zval::addref
 Zval::array
 Zval::as_arr
 Zval::as_bool

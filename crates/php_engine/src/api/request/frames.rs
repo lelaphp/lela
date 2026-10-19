@@ -762,15 +762,14 @@ impl Request {
             && !header.info.extra_args();
         let caller = header.caller().frame().filter(|_| plain)?;
         let returns_to = header.returns_to();
-        // Every slot's refcounted bit folded with no branch per slot,
-        // where php's `i_free_compiled_variables` tests each CV: a frame
-        // none of whose slots owns anything, nearly every one, is
-        // answered there, and only one that owns something is walked
-        // for what.
-        let owners = laid
-            .slots()
-            .iter()
-            .fold(false, |any, z| any | z.is_refcounted());
+        // Every slot's refcounted bit tested in turn, as php's
+        // `i_free_compiled_variables` tests each CV: a frame none of whose
+        // slots owns anything, nearly every one, is answered there, and
+        // only one that owns something is walked for what. A walk that
+        // stops at the first owner, since a fold over the slots' type
+        // words is vectorised, which costs a frame of a few slots more
+        // than it saves.
+        let owners = laid.slots().iter().any(|z| z.is_refcounted());
         let strings = owners && owns_strings_alone(laid.slots(), moved)?;
         let taken = match returns_to {
             Some(slot) => self

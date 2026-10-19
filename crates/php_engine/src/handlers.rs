@@ -1981,9 +1981,7 @@ fn inline_send(
         OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => {
             *slots.get_mut(a.slot(code, op.op1)?)? = Zval::UNDEF;
         }
-        OperandKind::Cv if crate::operand::movable(z) => {
-            req.heap_mut().addref(z);
-        }
+        OperandKind::Cv if crate::operand::movable(z) => z.addref(),
         _ => return None,
     }
     let placed = req
@@ -7818,12 +7816,14 @@ fn inline_fetch_obj_r(
     if z.is_undef() {
         return None;
     }
-    let out = exec::temporary_slot(code, op.out) as usize;
-    if req.slots_mut(frame).get(out)?.is_refcounted() {
+    let out = req
+        .slots_mut(frame)
+        .get_mut(exec::temporary_slot(code, op.out) as usize)?;
+    if out.is_refcounted() {
         return None;
     }
-    req.heap_mut().addref(z);
-    *req.slots_mut(frame).get_mut(out)? = z;
+    z.addref();
+    *out = z;
     Some(Ok(advanced()))
 }
 
@@ -9066,7 +9066,7 @@ fn inline_fetch_dim_r(
         return None;
     }
     *slots.get_mut(out)? = z;
-    req.heap_mut().addref(z);
+    z.addref();
     if free_dim {
         exec::free_operand(req, frame, code, op.op2_type, op.op2);
     }
@@ -12962,7 +12962,7 @@ fn data_value(
     data: impl Operand,
 ) -> Option<Zval> {
     let field = exec::opline_at(code, at.saturating_add(1))?.op1;
-    taken_value(req, frame, code, op, data, field)
+    taken_value(req.slots_mut(frame), code, op, data, field)
 }
 
 /// What [`taken_value`] takes, found with nothing touched: the zval,
@@ -13014,15 +13014,15 @@ impl Taking {
     /// it taken, and one more for the temporary that takes it too.
     #[inline(always)] // as `inline_fetch_dim_r`
     #[allow(clippy::inline_always)]
-    fn take(self, req: &mut Request, frame: FrameRef) -> Option<Zval> {
+    fn take(self, slots: &mut [Zval]) -> Option<Zval> {
         let Taking { z, moved, out } = self;
         match moved {
-            Some(at) => *req.slots_mut(frame).get_mut(at)? = Zval::UNDEF,
-            None => req.heap_mut().addref(z),
+            Some(at) => *slots.get_mut(at)? = Zval::UNDEF,
+            None => z.addref(),
         }
         if let Some(out) = out {
-            req.heap_mut().addref(z);
-            *req.slots_mut(frame).get_mut(out)? = z;
+            z.addref();
+            *slots.get_mut(out)? = z;
         }
         Some(z)
     }
@@ -13052,14 +13052,13 @@ impl Taking {
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn taken_value(
-    req: &mut Request,
-    frame: FrameRef,
+    slots: &mut [Zval],
     code: &OpArray,
     op: &Opline,
     value: impl Operand,
     field: u32,
 ) -> Option<Zval> {
-    taking(req.slots_mut(frame), code, op, value, field)?.take(req, frame)
+    taking(slots, code, op, value, field)?.take(slots)
 }
 
 /// `ASSIGN_OBJ` past its inline path: the value, the receiver and the
@@ -14692,7 +14691,7 @@ fn inline_assign_dim(
         Err(edge) => return Some(edge),
     };
     let garbage = placed.entry.read();
-    let z = taking.take(req, frame)?;
+    let z = taking.take(req.slots_mut(frame))?;
     placed.entry.write(z);
     free_dim_operands(req, frame, code, op, (a, placed.free_dim));
     if !garbage.is_refcounted() {
@@ -16946,8 +16945,13 @@ pub(crate) fn unset_cv<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let garbage = req.take_slot(frame, op.op1);
-    req.release(garbage);
+    // The zval taken and given up as it stands, no `Value` made of it, so
+    // the release is `i_zval_ptr_dtor`'s decrement with no kind asked.
+    let garbage = req
+        .slots_mut(frame)
+        .get_mut(op.op1 as usize)
+        .map_or(Zval::UNDEF, |slot| std::mem::replace(slot, Zval::UNDEF));
+    req.release_zval(garbage);
     Ok(advance(req, frame))
 }
 
@@ -18726,11 +18730,10 @@ fn inline_fe_fetch_r(
         *slots.get_mut(out)? = key;
     }
     *slots.get_mut(target)? = value;
-    let heap = req.heap_mut();
     if keyed {
-        heap.addref(key);
+        key.addref();
     }
-    heap.addref(value);
+    value.addref();
     // What the CV held, a string at most, which serves no code as it goes.
     if old.is_refcounted() {
         req.release_nogc(Value::of_zval(old));
@@ -22821,7 +22824,7 @@ fn inline_truth<const NOT: bool>(
 /// (`Z/Zend/zend_vm_def.h:1490-1683`): a CV, or the element a `VAR`
 /// names through the `IS_INDIRECT` a `FETCH_DIM_RW` left there, as
 /// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it. `+ 1` or `- 1` as
-/// [`inline::arith`] computes it, into the variable and, under
+/// [`inline::step`] computes it, into the variable and, under
 /// `RETURN_VALUE_USED`, the temporary, which takes what the variable
 /// held before the step for a `POST_*`; the `VAR` is given up as
 /// `FREE_OP1` gives up an `IS_INDIRECT`, which owns nothing. `None`, with
@@ -22869,7 +22872,7 @@ fn inline_incdec(
     match a.kind() {
         OperandKind::Cv => {
             let held = *slots.get(at)?;
-            let stepped = inline::arith(arith, held, Zval::long(1))?;
+            let stepped = inline::step(arith, held)?;
             if op.out_type != OperandKind::Unused {
                 write_owning_nothing(slots, code, op, if post { held } else { stepped })?;
             }
@@ -22878,7 +22881,7 @@ fn inline_incdec(
         OperandKind::Var => {
             let entry = slots.get(at)?.as_indirect()?;
             let held = entry.read();
-            let stepped = inline::arith(arith, held, Zval::long(1))?;
+            let stepped = inline::step(arith, held)?;
             if op.out_type != OperandKind::Unused {
                 write_owning_nothing(slots, code, op, if post { held } else { stepped })?;
             }
@@ -22922,13 +22925,14 @@ fn inline_assign(
         return None;
     }
     let at = a.slot(code, op.op1)?;
-    let held = *req.slots_mut(frame).get(at)?;
+    let slots = req.slots_mut(frame);
+    let held = *slots.get(at)?;
     let garbage = held.is_refcounted().then(|| held.as_str()).flatten();
     if held.is_refcounted() && garbage.is_none() {
         return None;
     }
-    let value = taken_value(req, frame, code, op, b, op.op2)?;
-    *req.slots_mut(frame).get_mut(at)? = value;
+    let value = taken_value(slots, code, op, b, op.op2)?;
+    *slots.get_mut(at)? = value;
     if let Some(garbage) = garbage {
         req.heap_mut().release_string(garbage);
     }

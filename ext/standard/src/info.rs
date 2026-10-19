@@ -95,12 +95,6 @@ fn esc(req: &mut Request, text: &[u8]) -> Vec<u8> {
     crate::html::escape(req, text, false, crate::html::QUOTES, Some(b"utf-8"), true)
 }
 
-/// A table of plain rows, `php_info_print_table_start`, one
-/// `php_info_print_table_row` each and `php_info_print_table_end`.
-fn table(req: &mut Request, rows: &[&[&str]]) {
-    req.info_table(rows);
-}
-
 /// `SECTION(name)`: an `<h2>` in HTML, a one-column table's header in
 /// text.
 fn section(req: &mut Request, name: &str) {
@@ -340,36 +334,14 @@ fn general(req: &mut Request) {
     plain_box(req, &contents);
 }
 
-/// `php_info_print_module` of `Core`, whose `MINFO` is the version and
-/// the engine's own entries: the engine keeps no `Core` extension, so
-/// its heading is written here as the others' are written by
-/// [`Request::extension_info`].
-fn core_module(req: &mut Request) {
-    if html(req) {
-        print(
-            req,
-            "<h2><a name=\"module_core\" href=\"#module_core\">Core</a></h2>\n",
-        );
-    } else {
-        req.info_rows(&[InfoRow::Header(&["Core"])]);
-    }
-    table(req, &[&["PHP Version", PHP_VERSION]]);
-    req.core_ini_info();
-}
-
 /// The modules, sorted by `module_name_cmp` (`strcasecmp`), each as
 /// `php_info_print_module` prints it, then `Additional Modules`, which
 /// lists none since every bundled extension has a version.
 fn modules(req: &mut Request) {
     let mut names = req.loaded_extensions();
-    if !names.iter().any(|n| n.eq_ignore_ascii_case("core")) {
-        names.push(String::from("Core"));
-    }
     names.sort_by_key(|n| n.to_ascii_lowercase());
     for name in names {
-        if name.eq_ignore_ascii_case("core") {
-            core_module(req);
-        } else if let Some(id) = req.extension_named(name.as_bytes()) {
+        if let Some(id) = req.extension_named(name.as_bytes()) {
             req.extension_info(id);
         }
     }

@@ -85,6 +85,10 @@ pub(crate) struct ResHeader {
     ptr: Cell<Option<NonNull<PayloadBox>>>,
 }
 
+// The header at the block's start, where `Zval::counted` reads it for
+// every counted kind without asking which.
+const _: () = assert!(std::mem::offset_of!(ResHeader, gc) == 0);
+
 /// Where a resource stands with `EG(regular_list)` and with its free,
 /// which is what the release that reaches zero reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
