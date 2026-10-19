@@ -16,6 +16,7 @@ tier::Aside
 tier::Building
 tier::Called
 tier::ClassId
+tier::Compiled
 tier::Epoch
 tier::Epoch::fixture
 tier::Epoch::tier_state
@@ -64,6 +65,7 @@ tier::building
 tier::call
 tier::catches
 tier::class_number
+tier::compile
 tier::entry
 tier::epoch
 tier::epoch_state

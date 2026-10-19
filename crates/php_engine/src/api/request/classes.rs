@@ -1816,6 +1816,36 @@ impl Request {
         }
     }
 
+    /// What a file's compile had added to `CG(function_table)` when it
+    /// refused, none of which its `zend_bailout` takes back
+    /// ([`php_compile::Declared`]): each function declared in its turn,
+    /// what was raised before it noted first, so one the request holds
+    /// already is `Cannot redeclare` after what php had raised by then
+    /// and before the rest. How many of `refused`'s raised it noted, or
+    /// none where a redeclaration ended the request. The unit is the
+    /// request's own, compiled for it alone.
+    pub(crate) fn declare_refused(
+        &mut self,
+        refused: &php_compile::CompileError,
+        unit: Option<&PublishedUnit>,
+        file: &[u8],
+    ) -> Option<usize> {
+        let (Some(declared), Some(unit)) = (&refused.declared, unit) else {
+            return Some(0);
+        };
+        let mut noted = 0;
+        for (at, before) in declared.raised_before.iter().copied().enumerate() {
+            for raised in refused.raised.get(noted..before).unwrap_or_default() {
+                self.note_error_in(raised.level, &raised.message, file, raised.line);
+            }
+            noted = noted.max(before);
+            if !self.declare_function_told(unit, at) {
+                return None;
+            }
+        }
+        Some(noted)
+    }
+
     /// Every function `unit` declares at its top level, as
     /// [`Request::declare_function`] declares each, for a test that
     /// serves a unit's frame by hand: false where the request ended.

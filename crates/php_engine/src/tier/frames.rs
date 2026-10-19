@@ -167,6 +167,28 @@ pub enum Evaluated {
     BailedOut,
 }
 
+/// How a compile a tier asked for ended ([`compile`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compiled {
+    /// It compiled; what the file declares is the request's.
+    Compiled,
+    /// The compiler refused it, what it raised rendered and the jump its
+    /// fatal took caught.
+    Refused,
+    /// The file did not open, and nothing was compiled.
+    Unopened,
+}
+
+/// The file at `path`, or `source` under that name where the host read
+/// it, compiled as phpdbg's `phpdbg_compile` compiles the program it
+/// debugs, `zend_compile_file` with nothing executing, and dropped: what
+/// the compiler raised rendered as php raises it, and a refusal's fatal
+/// caught as the `zend_try` around phpdbg's compile catches it, the
+/// request standing with what php leaves after it.
+pub fn compile(req: &mut Request, path: &[u8], source: Option<&[u8]>) -> Compiled {
+    req.compile_context(path, source)
+}
+
 /// What code a tier has the engine serve on its own account stands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Under {

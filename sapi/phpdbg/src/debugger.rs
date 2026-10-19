@@ -149,11 +149,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 // nowhere, each diagnostic displayed. php is fully started
                 // after it, before its startup run asks anything.
                 out::discarded(&mut session, |session| {
-                    prompt::refused_again(session, Some(&mut Here::Idle { req }));
+                    prompt::refused_again(session, &mut Here::Idle { req });
                 });
                 session.started = true;
             }
             if session.stopped.is_some() {
+            } else if runs && let Some(line) = session.first_command.take() {
+                resubmitted(&mut session, req, line, quits);
             } else if runs && session.execution == Execution::BailedOut {
                 // The run they come before finds `in_execution` set, and
                 // asks before it compiles.
@@ -165,18 +167,16 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             } else if quits {
                 // `-rr`'s run compiles it under `PHPDBG_PREVENT_INTERACTIVE`:
                 // what the compiler says alone, and the session ends.
-                let refused = session.refused.clone();
-                let _ = out::replay(&mut session, &refused, |_| AfterLog::Returned);
-                session.status = Some(255);
+                prompt::refused_again(&mut session, &mut Here::Idle { req });
                 session.stopped = Some(session::Stop::Quit);
             } else if runs {
                 // `-r`'s run compiles the context once the session is
                 // fully started, so its log stands at a prompt.
                 session.started = true;
-                prompt::refused_again(&mut session, Some(&mut Here::Idle { req }));
+                prompt::refused_again(&mut session, &mut Here::Idle { req });
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });
             } else {
-                refused(&mut session);
+                refused(&mut session, req);
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });
             }
             session::put(req, session);
@@ -199,7 +199,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 crate::init::run(&mut session, &mut Here::Idle { req });
                 if compiles && session.stopped.is_none() {
                     out::discarded(&mut session, |session| {
-                        prompt::refused_again(session, Some(&mut Here::Idle { req }));
+                        prompt::refused_again(session, &mut Here::Idle { req });
                     });
                 }
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });
@@ -260,6 +260,10 @@ fn initialized(req: &mut Request) -> bool {
         // A `run` among them runs the program now.
         let frame = tier::entry(req);
         inline(&mut session, req, frame);
+    } else if session.stopped.is_none()
+        && let Some(line) = session.first_command.take()
+    {
+        resubmitted(&mut session, req, line, quits);
     } else if session.stopped.is_none() && session.execution == Execution::BailedOut {
         if prompt::restart_permitted(&mut session) && !quits {
             session.stopped = Some(session::Stop::Restart(None));
@@ -294,7 +298,6 @@ pub fn announce(session: &mut Session) {
         return;
     }
     session.context = Context::Announced;
-    session.refused.clear();
     if let Some(exec) = &session.exec {
         let message = if session.stdin_code.is_some() {
             b"Successful compilation of stdin input".to_vec()
@@ -309,8 +312,8 @@ pub fn announce(session: &mut Session) {
 /// refused: its log as `php_sapi_phpdbg_log_message` writes it, the
 /// listing where nothing executes, and the status 255; the first cycle
 /// is fully started after it, so a later fatal's log stops at a prompt.
-fn refused(session: &mut Session) {
-    prompt::refused_again(session, None);
+fn refused(session: &mut Session, req: &mut Request) {
+    prompt::refused_again(session, &mut Here::Idle { req });
     session.started = true;
 }
 
@@ -318,12 +321,35 @@ fn refused(session: &mut Session) {
 /// run's clean up, and its `phpdbg_clean` after it, which lets go of the
 /// compiled context, so a `print exec` after it compiles it again.
 fn inline(session: &mut Session, req: &mut Request, frame: FrameRef) {
+    // The run's `phpdbg_clean(1, 0)` lets the line go.
+    session.command_line = None;
     session.execution = Execution::Run;
     session.seek = None;
     session.handled = None;
     session.breaks.reset_hits();
     session.ran_code = read::frame_code(req, frame);
     session.init_compiled = false;
+}
+
+/// A cycle a yes to its startup run's question restarted: its own startup
+/// run is `phpdbg_interactive(1, first_command)`, the line the cycle
+/// before parsed last read at a prompt in place of `run`
+/// (`Z/sapi/phpdbg/phpdbg.c:1588-1592`), and the prompt after it, where
+/// nothing executes. An init file whose `ev` bailed out has it bail out
+/// again, after the record a refused compile left emitted ahead of its
+/// fatal, so the question is not asked again.
+fn resubmitted(session: &mut Session, req: &mut Request, line: Vec<u8>, quits: bool) {
+    let mut parsed = line.clone();
+    session.command_line = Some(line);
+    match crate::cmd::parse(&mut parsed) {
+        Ok(commands) => session.queued = commands,
+        Err(crate::cmd::Malformed(message)) => {
+            session
+                .out
+                .error(format!("Parse Error: {message}").as_bytes());
+        }
+    }
+    idle_prompt(session, req, quits);
 }
 
 /// Where `-rr` quits once `run` has come back, which it does here

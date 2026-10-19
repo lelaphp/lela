@@ -50,8 +50,8 @@ mod sampled;
 mod tail;
 mod view;
 pub use frames::{
-    Argument, Aside, Called, Evaluated, Under, begin, below, call, catches, entry, evaluate,
-    evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
+    Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
+    entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Kept, Units};
 pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
