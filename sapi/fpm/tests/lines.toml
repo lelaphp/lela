@@ -398,3 +398,77 @@ params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
 [[line.serve.request]]
 params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# A child's request starts on what its heap kept of the last (#2940):
+# `zend_mm_shutdown(full=0)` keeps the main chunk and caches the others
+# against an average it halves towards each request's peak, and
+# `memory_get_usage(true)` counts the cached chunks, so after a request that
+# peaked at five chunks the next three start at three, two and one.
+[[line]]
+name = "a-request-starts-on-the-chunks-the-child-kept-of-the-last"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "index.php" = '<?php echo memory_get_usage(true), " ", memory_get_peak_usage(true), " ", ini_get("memory_limit"), "\n"; if (isset($_GET["big"])) { $s = []; for ($i = 0; $i < 3000; $i++) $s[] = str_repeat("x", 3000); echo memory_get_peak_usage(true), "\n"; }' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "big=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# The realpath cache is the child's, `CWDG(realpath_cache)` a process
+# global (#2941): the second request lists what the first entered, each
+# entry's time to live counting from the first request, a second earlier,
+# and resolves its program's path from it.
+[[line]]
+name = "a-second-request-lists-the-realpath-cache-the-first-entered"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "index.php" = '<?php if (isset($_GET["first"])) { sleep(1); return; } $c = realpath_cache_get(); ksort($c); foreach ($c as $k => $v) if (str_starts_with($k, __DIR__)) echo substr($k, strlen(__DIR__)) ?: ".", $v["is_dir"] ? " dir " : " file ", $v["expires"] - time() < 120 ? "entered earlier" : "entered now", "\n"; echo realpath_cache_size(), "\n";' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "first=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# The child's `init_request_info` asks `tsrm_realpath` whether the
+# program's path resolves (`Z/sapi/fpm/fpm/fpm_main.c:1124`), through the
+# realpath cache, before `php_request_startup` turns the cache off for the
+# pool's `open_basedir` (`Z/main/main.c:1918`): each request lists what that
+# first resolution entered, and its own resolutions enter nothing.
+[[line]]
+name = "the-child-enters-its-program-s-path-in-the-realpath-cache-before-an-open-basedir-turns-it-off"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nphp_admin_value[open_basedir] = {dir}\n", "index.php" = '<?php include __DIR__ . "/b.php"; $c = realpath_cache_get(); ksort($c); foreach ($c as $k => $v) if (str_starts_with($k, __DIR__)) echo substr($k, strlen(__DIR__)) ?: ".", $v["is_dir"] ? " dir" : " file", "\n"; echo realpath_cache_size() > 0 ? "entered" : "empty", "\n";', "b.php" = "<?php\n" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# A `realpath_cache_ttl` of zero leaves the child's time unread, `*t` at
+# `-1` (`Z/Zend/zend_virtual_cwd.c:1140`), so each entry expires at -1 and
+# none expires: the second request lists what the first entered as the
+# first entered it.
+[[line]]
+name = "a-time-to-live-of-zero-enters-the-realpath-cache-expiring-at-minus-one"
+args = ["-R", "-n", "-F", "-d", "realpath_cache_ttl=0", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "index.php" = '<?php $c = realpath_cache_get(); ksort($c); foreach ($c as $k => $v) if (str_starts_with($k, __DIR__)) echo substr($k, strlen(__DIR__)) ?: ".", $v["is_dir"] ? " dir " : " file ", $v["expires"], "\n";' }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]

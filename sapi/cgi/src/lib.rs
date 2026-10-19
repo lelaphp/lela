@@ -45,7 +45,7 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 
 use php_proto::cgi::{Environment, RequestInfo};
-use php_sapi::cgi::{C_NUMBER, Disk, path_of};
+use php_sapi::cgi::{C_NUMBER, CachedDisk, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{Search, define, enabled};
 use php_sapi::{
@@ -519,8 +519,13 @@ fn describe(
         }
     }
     let doc_root = engine.ini_get(b"doc_root").filter(|root| !root.is_empty());
-    let info: RequestInfo =
-        php_proto::cgi::request_info(&mut env, settings, doc_root.as_deref(), &Disk, C_NUMBER);
+    let info: RequestInfo = php_proto::cgi::request_info(
+        &mut env,
+        settings,
+        doc_root.as_deref(),
+        &CachedDisk(engine),
+        C_NUMBER,
+    );
     let (path, argv, query) = if server {
         (info.path_translated.clone(), Vec::new(), info.query.clone())
     } else {

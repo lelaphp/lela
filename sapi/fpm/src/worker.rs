@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
-use php_sapi::cgi::{C_NUMBER, Disk, ini_text};
+use php_sapi::cgi::{C_NUMBER, CachedDisk, ini_text};
 use php_sapi::fcgi::{Conn, allowed, client_ip};
 use php_sapi::{
     Aborted, Body, Chdir, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
@@ -692,8 +692,13 @@ impl Worker {
             },
         };
         let doc_root = self.engine.ini_get(b"doc_root").filter(|r| !r.is_empty());
-        let info =
-            php_proto::cgi::request_info(&mut env, settings, doc_root.as_deref(), &Disk, C_NUMBER);
+        let info = php_proto::cgi::request_info(
+            &mut env,
+            settings,
+            doc_root.as_deref(),
+            &CachedDisk(&self.engine),
+            C_NUMBER,
+        );
         self.request_values(&env);
         let now = crate::master::clock_us();
         if let Some(proc) = self.proc() {
