@@ -1,15 +1,11 @@
 //! The paths area of a request: a path made absolute against the
 //! request's working directory, `realpath()` through `CWDG(realpath_cache)`
 //! and the cache's listing and clearing, and how a path names a stream
-//! wrapper. The cache is the engine's, which every request reads under
-//! the settings it started with, [`Paths`]'s, whose field no file but
-//! this one reads.
+//! wrapper. The cache is the engine's (`crate::virtual_cwd`), which every
+//! request reads and enters.
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-
-use crate::engine::Shared;
-use crate::virtual_cwd::Settings;
 
 use super::{Request, Resolve};
 
@@ -24,24 +20,6 @@ pub struct RealpathEntry {
     pub is_dir: bool,
     pub expires: i64,
     pub size: i64,
-}
-
-/// How the request reads `CWDG(realpath_cache)`, whose field no file but
-/// this one reads.
-pub(super) struct Paths {
-    /// The limit and time to live every absolute path resolved through
-    /// [`Request::virtual_file_ex`] is entered in the engine's cache under
-    /// (`crate::virtual_cwd`).
-    realpath_cache: Settings,
-}
-
-impl Paths {
-    /// The settings as the request starts, from the engine's entries.
-    pub(super) fn startup(shared: &Shared) -> Paths {
-        Paths {
-            realpath_cache: Settings::startup(shared),
-        }
-    }
 }
 
 impl Request {
@@ -91,8 +69,7 @@ impl Request {
     /// }
     /// ```
     pub fn virtual_file_ex(&mut self, cwd: &[u8], path: &[u8], how: Resolve) -> Option<Vec<u8>> {
-        let settings = self.paths.realpath_cache;
-        crate::virtual_cwd::virtual_file_ex(&self.shared.realpath_cache, settings, cwd, path, how)
+        crate::virtual_cwd::virtual_file_ex(&self.shared.realpath_cache, cwd, path, how)
     }
 
     /// `php_request_startup`'s `Disable realpath cache if an open_basedir
@@ -106,7 +83,6 @@ impl Request {
             .is_some_and(|list| !list.is_empty())
         {
             self.shared.realpath_cache.turn_off();
-            self.paths.realpath_cache = self.paths.realpath_cache.turned_off();
         }
     }
 

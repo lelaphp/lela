@@ -1950,9 +1950,11 @@ impl Shared {
     }
 
     /// The master value of the entry `name` set to `value`, the entry
-    /// moved last, and the typed entries with it.
+    /// moved last, and the typed entries and the realpath cache's
+    /// `CWDG` values with it.
     fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
         self.typed_ini.update(&name, value.as_deref());
+        self.realpath_cache.update(&name, value.as_deref());
         self.ini.retain(|(n, _)| *n != name);
         self.ini.push((name, value));
     }
@@ -3536,6 +3538,7 @@ impl EngineBuilder {
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
         ));
         let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
+        let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| master_of(&ini, name));
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -3597,7 +3600,7 @@ impl EngineBuilder {
                 layer,
                 timer: crate::interrupt::Timer::default(),
                 chunks: Arc::default(),
-                realpath_cache: crate::virtual_cwd::RealpathCache::default(),
+                realpath_cache,
                 strings: Mutex::new(strings),
                 names,
                 default_strings,
