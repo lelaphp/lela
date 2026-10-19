@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use php_unit::Opcode;
 
 use super::{
-    Check, Def, End, Form, Frame, Landing, Op, Operand, Repeat, Slot, TraceIr, ValueId, build,
+    Check, Def, End, Form, Frame, Landing, Op, OpId, Operand, Repeat, Slot, TraceIr, ValueId, build,
 };
 use crate::lower::dump;
 use crate::record::{Stop, TraceRecord};
@@ -142,17 +142,19 @@ fn built(plan: &[(&str, &str)], program: &str) -> Result<TraceIr, String> {
 }
 
 /// The place of the first stepped opline of `opcode`.
-fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<usize, String> {
+fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
     ir.ops
         .iter()
         .position(
             |op| matches!(op, Op::Line(line) if line.opcode == opcode && line.form == Form::Step),
         )
+        .and_then(|at| u32::try_from(at).ok())
+        .map(OpId)
         .ok_or_else(|| format!("no stepped {opcode:?} in\n{}", dump::render(ir)))
 }
 
 /// The variables of the root's frame read again after the op at `at`.
-fn reloaded(ir: &TraceIr, at: usize) -> Vec<u32> {
+fn reloaded(ir: &TraceIr, at: OpId) -> Vec<u32> {
     ir.values
         .iter()
         .filter(|value| value.def == Def::Reload(at) && value.slot.frame == Frame::ROOT)
@@ -161,8 +163,8 @@ fn reloaded(ir: &TraceIr, at: usize) -> Vec<u32> {
 }
 
 /// What the first opline past `at` that reads variable `var` reads it as.
-fn next_read(ir: &TraceIr, at: usize, var: u32) -> Option<ValueId> {
-    ir.ops.iter().skip(at + 1).find_map(|op| {
+fn next_read(ir: &TraceIr, at: OpId, var: u32) -> Option<ValueId> {
+    ir.ops.iter().skip(at.index() + 1).find_map(|op| {
         let Op::Line(line) = op else { return None };
         [line.op1, line.op2, line.data]
             .into_iter()
@@ -270,7 +272,23 @@ fn a_frameless_call_reloads_every_variable_of_a_files_code() -> Result<(), Strin
         echo $s, \"\\n\";",
     )?;
     // `$o` is CV0, `$s` CV1, `$i` CV2.
-    clobbers(&ir, Opcode::FramelessIcall2, &[1, 2], &[])
+    clobbers(&ir, Opcode::FramelessIcall2, &[0, 1, 2], &[])
+}
+
+/// A dynamic call to a native, `DO_FCALL`.
+#[test]
+fn a_dynamic_call_to_a_native_reloads_what_a_reference_holds() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f(array &$a, int $n) {
+            $s = 0; $cmp = 'strcmp';
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $cmp('a', 'b'); $s += $a[0]; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    // `$a` is CV0, `$n` CV1, `$s` CV2, `$cmp` CV3, `$i` CV4.
+    clobbers(&ir, Opcode::DoFcall, &[0], &[1, 2, 4])
 }
 
 /// A `TICKS` opline, which calls what `register_tick_function` registered:
@@ -305,7 +323,7 @@ fn a_throwing_kernel_reloads_nothing_but_may_leave() -> Result<(), String> {
     )?;
     let at = stepped(&ir, Opcode::Cast)?;
     assert_eq!(reloaded(&ir, at), Vec::<u32>::new());
-    let Some(Op::Line(line)) = ir.ops.get(at) else {
+    let Some(Op::Line(line)) = ir.ops.get(at.index()) else {
         return Err("no cast".to_owned());
     };
     let exit = line.exit.ok_or("a throwing kernel leaves")?;
@@ -357,5 +375,32 @@ fn a_link_leaves_through_the_exit_that_names_its_trace() -> Result<(), String> {
     );
     assert_eq!((exit.opline, exit.link.is_some()), (None, true), "{exit:?}");
     assert_ne!(exit.frame, Frame::ROOT, "the callee's frame");
+    Ok(())
+}
+
+/// A fetched element's guard leaves past the fetch with the element
+/// stored, and frees the temporary array the fetch read, which compiled
+/// code has not freed: `Landing::FreeTemps`.
+#[test]
+fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function g() { $a = []; $a[] = 1.5; return $a; }
+        function f(int $n) {
+            $s = 0.0;
+            for ($i = 0; $i < $n; $i++) { $s += g()[0]; }
+            return $s;
+        }
+        echo f(3), \"\\n\";",
+    )?;
+    assert!(
+        ir.exits.iter().any(|exit| exit.landing
+            == Landing::FreeTemps {
+                op1: true,
+                op2: false
+            }),
+        "{}",
+        dump::render(&ir)
+    );
     Ok(())
 }

@@ -75,6 +75,26 @@ impl Start {
     }
 }
 
+impl Start {
+    /// The start as a record's text form and a trace's dump write it:
+    /// its word, a side trace's as `side <parent>/<exit>`.
+    pub(crate) fn written(self) -> String {
+        match self {
+            Start::Side { parent, exit } => format!("side {}/{}", parent.get(), exit.0),
+            other => other.describe().to_owned(),
+        }
+    }
+}
+
+/// An op array as a record's text form and a trace's dump name it: its
+/// map-pointer offset, `e` for the engine's and `r` for a request's.
+pub(crate) fn func_name(f: FuncRef) -> String {
+    match f.offset() {
+        php_unit::MapPtrOffset::Engine(n) => format!("e{n}"),
+        php_unit::MapPtrOffset::Request(n) => format!("r{n}"),
+    }
+}
+
 /// Why a recording or a compile stopped: php's `ZEND_JIT_TRACE_STOP`
 /// list (`Z/ext/opcache/jit/zend_jit_internal.h:261-293`) with the two of
 /// this engine's own, `MovedFrame` and `RequestUnit` (`jit-design.md`
@@ -144,6 +164,15 @@ impl Stop {
             Stop::TooManyTraces => "too many traces",
             Stop::TooManyChildren => "too many side traces",
             Stop::TooManyExits => "too many side exits",
+        }
+    }
+
+    /// The stop as a record's text form and a trace's dump write it: its
+    /// words, a link's as `link <trace>`.
+    pub(crate) fn written(self) -> String {
+        match self {
+            Stop::Link(to) => format!("link {}", to.get()),
+            other => other.describe().to_owned(),
         }
     }
 

@@ -21,14 +21,12 @@
 
 use std::fmt::{self, Write as _};
 
-use php_engine::tier::FuncRef;
 use php_heap::ZvalType;
-use php_unit::MapPtrOffset;
 
-use crate::record::{Start, Stop};
+use crate::record::func_name as func;
 use crate::types::{
-    Check, Constant, Def, End, ExitSpec, Form, Guard, GuardAt, Home, Landing, Op, Operand, Place,
-    Repeat, Slot, Stored, TraceIr, Types, ValueId,
+    Check, Constant, Def, End, ExitSpec, Form, Guard, GuardAt, Home, Landing, Layout, Op, OpId,
+    Operand, Place, Repeat, Slot, Stored, TraceIr, Types, ValueId,
 };
 
 /// The text of `ir`.
@@ -53,8 +51,8 @@ impl<'a> Dump<'a> {
         let mut reloaded = vec![Vec::new(); ir.ops.len()];
         for (id, value) in ids(ir) {
             match value.def {
-                Def::Op(at) => written.get_mut(at).map(|list| list.push(id)),
-                Def::Reload(at) => reloaded.get_mut(at).map(|list| list.push(id)),
+                Def::Op(at) => written.get_mut(at.index()).map(|list| list.push(id)),
+                Def::Reload(at) => reloaded.get_mut(at.index()).map(|list| list.push(id)),
                 Def::Entry | Def::Phi { .. } => None,
             };
         }
@@ -71,7 +69,7 @@ impl<'a> Dump<'a> {
             End::Loop(header) => Some(header),
             End::Leave(_) => None,
         };
-        for (at, op) in self.ir.ops.iter().enumerate() {
+        for (at, op) in (0u32..).map(OpId).zip(&self.ir.ops) {
             if let Some(header) = header.filter(|header| header.at == at) {
                 let repeat = match header.repeat {
                     Repeat::Loop => "loop",
@@ -79,7 +77,11 @@ impl<'a> Dump<'a> {
                     Repeat::Return => "recursive return",
                 };
                 let interrupt = header.interrupt.0;
-                writeln!(text, "loop at {at}, {repeat}, interrupt exit {interrupt}")?;
+                writeln!(
+                    text,
+                    "loop at {}, {repeat}, interrupt exit {interrupt}",
+                    at.0
+                )?;
                 for (id, value) in ids(self.ir) {
                     if let Def::Phi { entry, back } = value.def {
                         let phi = self.value(id);
@@ -89,16 +91,16 @@ impl<'a> Dump<'a> {
             }
             self.guards(text, GuardAt::Before(at), "guard")?;
             self.op(text, op)?;
-            for id in self.written.get(at).into_iter().flatten() {
+            for id in self.written.get(at.index()).into_iter().flatten() {
                 writeln!(text, "  -> {}", self.value(*id))?;
             }
-            for id in self.reloaded.get(at).into_iter().flatten() {
+            for id in self.reloaded.get(at.index()).into_iter().flatten() {
                 writeln!(text, "  reload {}", self.value(*id))?;
             }
             self.guards(text, GuardAt::Within(at), "checks")?;
         }
         match self.ir.end {
-            End::Loop(header) => writeln!(text, "end: back to {}", header.at)?,
+            End::Loop(header) => writeln!(text, "end: back to {}", header.at.0)?,
             End::Leave(exit) => writeln!(text, "end: exit {}", exit.0)?,
         }
         for (at, exit) in self.ir.exits.iter().enumerate() {
@@ -113,14 +115,7 @@ impl<'a> Dump<'a> {
     /// The trace's start and stop, its frames, and what it enters with.
     fn head(&self, text: &mut String) -> fmt::Result {
         let entry = self.ir.entry;
-        let start = match entry.start {
-            Start::Side { parent, exit } => format!("side {}/{}", parent.get(), exit.0),
-            other => other.describe().to_owned(),
-        };
-        let stop = match entry.stop {
-            Stop::Link(to) => format!("link {}", to.get()),
-            other => other.describe().to_owned(),
-        };
+        let (start, stop) = (entry.start.written(), entry.stop.written());
         writeln!(text, "trace {start} {}, stop {stop}", func(entry.root))?;
         for (at, frame) in self.ir.frames.iter().enumerate() {
             let place = match frame.place {
@@ -286,20 +281,17 @@ fn check(check: Check) -> String {
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
-        Check::Packed { value, packed } => {
-            format!("#{} {}", value.0, if packed { "packed" } else { "hash" })
-        }
+        Check::Layout { value, layout } => format!(
+            "#{} {}",
+            value.0,
+            match layout {
+                Layout::Packed => "packed",
+                Layout::Hash => "hash",
+            }
+        ),
         Check::Direction { taken } => {
             format!("direction {}", if taken { "taken" } else { "fell" })
         }
         Check::Caller { func: f, opline } => format!("caller {} {:04}", func(f), opline.0),
-    }
-}
-
-/// An op array as the record's text form names it.
-fn func(f: FuncRef) -> String {
-    match f.offset() {
-        MapPtrOffset::Engine(n) => format!("e{n}"),
-        MapPtrOffset::Request(n) => format!("r{n}"),
     }
 }

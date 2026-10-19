@@ -11,14 +11,14 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, Within, constant, constant_types, guard_sites, inline_may_leave, is_call, op1_types,
-    out_types, packed_guard, param_types, params, reads, reads_by_name, referenced, slot_of,
-    within, writes, written, written_after_entry,
+    Declared, Within, arith, assigned, constant, constant_types, guard_sites, inline_may_leave,
+    is_call, keeps_temporaries, op1_types, out_types, packed_guard, param_types, params, reads,
+    reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
 };
 use super::{
     Abort, Check, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Guard, GuardAt, Home,
-    Landing, Line, LoopHeader, Op, Operand, Place, Repeat, Slot, Store, Stored, TraceIr, Value,
-    ValueId,
+    Landing, Layout, Line, LoopHeader, Op, OpId, Operand, Place, Repeat, Slot, Store, Stored,
+    TraceIr, Value, ValueId,
 };
 use crate::record::{self, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -80,9 +80,9 @@ enum Point {
     /// The trace's entry, before its first op: everything is in memory.
     Start,
     /// Before the op at that place.
-    Before(usize),
+    Before(OpId),
     /// After the op at that place.
-    After(usize),
+    After(OpId),
     /// Where the trace ends.
     End,
 }
@@ -112,6 +112,14 @@ struct Draft {
     at: At,
     extra: Option<Store>,
     link: Option<TraceId>,
+}
+
+/// What an opline sees of its three operands once its guards held, and
+/// which it sees through a reference.
+#[derive(Clone, Copy)]
+struct Seen {
+    types: [Types; 3],
+    referenced: [bool; 3],
 }
 
 /// What one opline wrote: its `out` slot, and the values it wrote there
@@ -152,7 +160,7 @@ struct Builder<'a> {
     ops: Vec<Op>,
     snapshots: Vec<Snapshot>,
     guards: Vec<Placed>,
-    leaves: Vec<(usize, Draft)>,
+    leaves: Vec<(OpId, Draft)>,
     calls: Vec<Call>,
     map_ptrs: Vec<MapPtrRaw>,
     phis: Vec<ValueId>,
@@ -164,9 +172,11 @@ struct Builder<'a> {
     /// Where the last opline went on, where the record says.
     successor: Option<OplineIdx>,
     /// The place in `ops` a loop goes back to.
-    header: usize,
+    header: OpId,
     /// The exit a trace that does not loop leaves through.
     end_draft: Option<Draft>,
+    /// What the trace repeats, where its stop makes it loop.
+    repeat: Option<Repeat>,
 }
 
 impl<'a> Builder<'a> {
@@ -189,8 +199,14 @@ impl<'a> Builder<'a> {
             returned: Types::NULL,
             call_at: None,
             successor: None,
-            header: 0,
+            header: OpId(0),
             end_draft: None,
+            repeat: match rec.stop {
+                Stop::Loop => Some(Repeat::Loop),
+                Stop::RecursiveCall => Some(Repeat::Call),
+                Stop::RecursiveRet => Some(Repeat::Return),
+                _ => None,
+            },
         };
         let root = builder.frame(rec.root, Place::Root, None)?;
         builder.stack.push(root);
@@ -268,10 +284,10 @@ impl<'a> Builder<'a> {
             _ => 0,
         };
         let body = &events[..events.len() - unexecuted];
-        match rec.stop {
-            Stop::Loop => self.loop_phis(body)?,
-            Stop::RecursiveCall => self.call_phis(),
-            _ => {}
+        match self.repeat {
+            Some(Repeat::Loop) => self.loop_phis(body)?,
+            Some(Repeat::Call) => self.call_phis(),
+            Some(Repeat::Return) | None => {}
         }
         for (at, event) in body.iter().enumerate() {
             let next = events.get(at + 1);
@@ -295,7 +311,7 @@ impl<'a> Builder<'a> {
                     )?;
                     if root_return {
                         self.back(next)?;
-                        if rec.stop == Stop::RecursiveRet {
+                        if self.repeat == Some(Repeat::Return) {
                             self.ret_phi();
                         }
                     }
@@ -369,9 +385,9 @@ impl<'a> Builder<'a> {
     /// The phi of a recursive return: the slot the call the root returned
     /// to writes, php's `zend_jit_trace_add_ret_phis`.
     fn ret_phi(&mut self) {
-        self.header = self.ops.len();
+        self.header = OpId(u32::try_from(self.ops.len()).unwrap_or(u32::MAX));
         if let Some(Op::Back { out: Some(out), .. }) = self.ops.last() {
-            let slot = self.values[out.0 as usize].slot;
+            let slot = self.val(*out).slot;
             self.phi(slot);
         }
     }
@@ -379,7 +395,7 @@ impl<'a> Builder<'a> {
     /// A phi at the header for `slot`, entered with what it holds now.
     fn phi(&mut self, slot: Slot) {
         let entry = self.current(slot);
-        let types = self.values[entry.0 as usize].types;
+        let types = self.val(entry).types;
         let phi = self.value(slot, types, Def::Phi { entry, back: entry }, Home::Memory);
         self.set(slot, phi);
         self.phis.push(phi);
@@ -426,15 +442,14 @@ impl<'a> Builder<'a> {
         let form = self.form(frame, &op, seen, next, root_return);
         let map_ptr = self.map_ptr(func, &op, form);
         self.record_send(frame, &op, op1);
-        if form == Form::Inline {
-            // An inline opline of the scalar core frees every temporary
-            // it reads, as its handler does: the slot holds nothing an
-            // exit stores after it.
+        if !keeps_temporaries(op.opcode) {
+            // The opline frees every temporary it reads, as its handler
+            // does: the slot holds nothing an exit stores after it.
             for operand in [op1, op2, data] {
                 self.consume(operand);
             }
         }
-        let [t1, ..] = seen;
+        let [t1, ..] = seen.types;
         let written = self.write(
             idx,
             frame,
@@ -447,6 +462,11 @@ impl<'a> Builder<'a> {
         );
         if is_call(op.opcode) {
             self.call_at = Some(at);
+            if !matches!(next, Some(Event::Enter { .. })) {
+                // A native's call is made here; a user function's is
+                // made where its frame is entered.
+                self.calls.pop();
+            }
         }
         self.ops.push(Op::Line(Line {
             frame,
@@ -508,17 +528,17 @@ impl<'a> Builder<'a> {
     )]
     fn write(
         &mut self,
-        idx: usize,
+        idx: OpId,
         frame: Frame,
         op: &Opline,
         data_line: Option<&Opline>,
-        seen: [Types; 3],
+        seen: Seen,
         sample1: Option<Sample>,
         form: Form,
         fused: bool,
     ) -> Written {
         let code = self.meta(frame).code;
-        let [t1, t2, td] = seen;
+        let [t1, t2, td] = seen.types;
         let writes = writes(op, data_line);
         let slot = slot_of(frame, code, op.out_type, op.out);
         let pushes = form == Form::Inline && is_call(op.opcode);
@@ -531,6 +551,12 @@ impl<'a> Builder<'a> {
         let op1 = match slot_of(frame, code, op.op1_type, op.op1) {
             Some(slot) if writes.op1 => {
                 let types = op1_types(op, t1, t2, sample1, code);
+                // A write through a reference leaves the slot one.
+                let types = if seen.referenced[0] {
+                    types.or(Types::REF)
+                } else {
+                    types
+                };
                 Some(self.define(slot, types, idx, form))
             }
             _ => None,
@@ -545,10 +571,11 @@ impl<'a> Builder<'a> {
             self.define(slot, Types::UNKNOWN, idx, form);
         }
         if op.opcode == Opcode::Return {
-            self.returned = lattice::deref(t1).without(Types::UNDEF);
-            if t1.meets(Types::UNDEF) || op.op1_type == OperandKind::Unused {
-                self.returned = self.returned.or(Types::NULL);
-            }
+            self.returned = if op.op1_type == OperandKind::Unused {
+                Types::NULL
+            } else {
+                assigned(t1)
+            };
         }
         Written {
             slot,
@@ -565,7 +592,7 @@ impl<'a> Builder<'a> {
     )]
     fn direction(
         &mut self,
-        idx: usize,
+        idx: OpId,
         frame: Frame,
         at: OplineIdx,
         op1: Operand,
@@ -618,8 +645,8 @@ impl<'a> Builder<'a> {
     /// The exit an opline itself takes where it cannot finish: an inline
     /// one before it does anything, which the interpreter runs again, a
     /// stepped one that threw, at its opline with what it threw pending.
-    fn own_exit(&mut self, idx: usize, frame: Frame, op: &Opline, form: Form, old: Types) {
-        let Some(Op::Line(line)) = self.ops.get(idx) else {
+    fn own_exit(&mut self, idx: OpId, frame: Frame, op: &Opline, form: Form, old: Types) {
+        let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
         };
         let at = line.opline;
@@ -675,14 +702,7 @@ impl<'a> Builder<'a> {
         if !sends || op.op2_type != OperandKind::Unused {
             return;
         }
-        let types = by_value.then(|| {
-            let types = lattice::deref(self.types_of(frame, op1));
-            if types.meets(Types::UNDEF) {
-                types.without(Types::UNDEF).or(Types::NULL)
-            } else {
-                types
-            }
-        });
+        let types = by_value.then(|| assigned(self.types_of(frame, op1)));
         let Some(call) = self.calls.last_mut() else {
             return;
         };
@@ -768,7 +788,7 @@ impl<'a> Builder<'a> {
     /// The clobber rule (`jit-design.md` §4.2): after a call-effect
     /// kernel, every value of a live frame that a symbol table reaches or
     /// that may be a reference is read again.
-    fn clobber(&mut self, idx: usize) {
+    fn clobber(&mut self, idx: OpId) {
         let live: Vec<Frame> = self.stack.clone();
         for frame in live {
             let held: Vec<(u32, ValueId)> = self.slots[usize::from(frame.0)]
@@ -778,7 +798,7 @@ impl<'a> Builder<'a> {
                 .collect();
             for (var, value) in held {
                 let slot = Slot { frame, var };
-                if self.aliased(slot) || self.values[value.0 as usize].types.meets(Types::REF) {
+                if self.aliased(slot) || self.val(value).types.meets(Types::REF) {
                     let types = if var < self.meta(frame).code.num_cvs {
                         Types::UNKNOWN
                     } else {
@@ -794,10 +814,18 @@ impl<'a> Builder<'a> {
     // ------------------------------------------------------------ values
 
     /// The place of the next op, its snapshot taken.
-    fn begin(&mut self) -> usize {
+    fn begin(&mut self) -> OpId {
         let snapshot = self.snapshot();
         self.snapshots.push(snapshot);
-        self.ops.len()
+        OpId(u32::try_from(self.ops.len()).unwrap_or(u32::MAX))
+    }
+
+    fn val(&self, value: ValueId) -> &Value {
+        &self.values[value.0 as usize]
+    }
+
+    fn val_mut(&mut self, value: ValueId) -> &mut Value {
+        &mut self.values[value.0 as usize]
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -837,7 +865,7 @@ impl<'a> Builder<'a> {
         let Operand::Value(value) = operand else {
             return;
         };
-        let slot = self.values[value.0 as usize].slot;
+        let slot = self.val(value).slot;
         let current = self.slots[usize::from(slot.frame.0)].get(slot.var as usize);
         if slot.var >= self.meta(slot.frame).code.num_cvs && current == Some(&Some(value)) {
             self.kill(slot);
@@ -853,7 +881,7 @@ impl<'a> Builder<'a> {
     /// A value op `idx` writes to `slot`: anything where a symbol table
     /// reaches the slot, as php types an aliased variable's every write;
     /// in a register where the op is inline and the value one scalar.
-    fn define(&mut self, slot: Slot, types: Types, idx: usize, form: Form) -> ValueId {
+    fn define(&mut self, slot: Slot, types: Types, idx: OpId, form: Form) -> ValueId {
         let aliased = self.aliased(slot);
         let types = if aliased { Types::UNKNOWN } else { types };
         let home = if form == Form::Inline && !aliased && types.scalar() {
@@ -938,7 +966,7 @@ impl<'a> Builder<'a> {
     fn types_of(&self, frame: Frame, operand: Operand) -> Types {
         match operand {
             Operand::Unused => Types::NONE,
-            Operand::Value(value) => self.values[value.0 as usize].types,
+            Operand::Value(value) => self.val(value).types,
             Operand::Constant(constant) => constant_types(constant, self.meta(frame).code),
         }
     }
@@ -948,7 +976,7 @@ impl<'a> Builder<'a> {
     fn is_temp(&self, operand: Operand) -> bool {
         match operand {
             Operand::Value(value) => {
-                let slot = self.values[value.0 as usize].slot;
+                let slot = self.val(value).slot;
                 slot.var >= self.meta(slot.frame).code.num_cvs
             }
             _ => false,
@@ -970,29 +998,34 @@ impl<'a> Builder<'a> {
     )]
     fn op_guards(
         &mut self,
-        idx: usize,
+        idx: OpId,
         frame: Frame,
         here: OplineIdx,
         op: &Opline,
         data_line: Option<&Opline>,
         operands: [Operand; 3],
         samples: [Option<Sample>; 3],
-    ) -> [Types; 3] {
-        let mut seen = operands.map(|operand| self.types_of(frame, operand));
-        for site in guard_sites(op, data_line, samples, seen[0], self.meta(frame).code) {
+    ) -> Seen {
+        let mut seen = Seen {
+            types: operands.map(|operand| self.types_of(frame, operand)),
+            referenced: [false; 3],
+        };
+        for site in guard_sites(op, data_line, samples, seen.types[0], self.meta(frame).code) {
             let at = site as usize;
-            if let Some(types) = self.guard_use(idx, here, operands[at], samples[at]) {
-                seen[at] = types;
+            if let Some((types, referenced)) = self.guard_use(idx, here, operands[at], samples[at])
+            {
+                seen.types[at] = types;
+                seen.referenced[at] = referenced;
             }
         }
-        if let Some(packed) = packed_guard(op, samples, self.meta(frame).code)
+        if let Some(layout) = packed_guard(op, samples, self.meta(frame).code)
             && let Operand::Value(value) = operands[0]
         {
-            let types = self.values[value.0 as usize].types;
-            if types.either_layout() && !self.aliased(self.values[value.0 as usize].slot) {
-                self.values[value.0 as usize].types = types.laid_out(packed);
-                seen[0] = types.laid_out(packed);
-                self.place(idx, here, value, Check::Packed { value, packed }, None);
+            let types = self.val(value).types;
+            if types.either_layout() && !self.aliased(self.val(value).slot) {
+                self.val_mut(value).types = types.laid_out(layout);
+                seen.types[0] = types.laid_out(layout);
+                self.place(idx, here, value, Check::Layout { value, layout }, None);
             }
         }
         seen
@@ -1003,21 +1036,22 @@ impl<'a> Builder<'a> {
     /// narrowing the value unless a symbol table reaches it; a
     /// reference's inner type at every read, which php's code generator
     /// holds where its TSSA adds nothing. What the opline sees of the
-    /// operand after it, where a guard is held.
+    /// operand after it, where a guard is held, and whether it sees it
+    /// through a reference, which a write to the slot writes through.
     fn guard_use(
         &mut self,
-        idx: usize,
+        idx: OpId,
         here: OplineIdx,
         operand: Operand,
         sample: Option<Sample>,
-    ) -> Option<Types> {
+    ) -> Option<(Types, bool)> {
         let (Operand::Value(value), Some(sample)) = (operand, sample) else {
             return None;
         };
         if sample.indirect {
             return None;
         }
-        let slot = self.values[value.0 as usize].slot;
+        let slot = self.val(value).slot;
         let tag = sample.kind;
         let before = Placed {
             at: GuardAt::Before(idx),
@@ -1032,19 +1066,19 @@ impl<'a> Builder<'a> {
                 check: Check::Deref { value, tag },
                 ..before
             });
-            return Some(Types::of_tag(tag));
+            return Some((Types::of_tag(tag), true));
         }
-        let types = self.values[value.0 as usize].types;
+        let types = self.val(value).types;
         if types.tag() == Some(tag) {
             return None;
         }
         if self.aliased(slot) {
             self.guards.push(before);
-            return Some(types.narrowed(tag));
+            return Some((types.narrowed(tag), false));
         }
-        self.values[value.0 as usize].types = types.narrowed(tag);
+        self.val_mut(value).types = types.narrowed(tag);
         self.place(idx, here, value, Check::Type { value, tag }, Some(tag));
-        Some(types.narrowed(tag))
+        Some((types.narrowed(tag), false))
     }
 
     /// Where the guard on a value no symbol table reaches is held: once at
@@ -1054,15 +1088,15 @@ impl<'a> Builder<'a> {
     /// before the op that reads it otherwise.
     fn place(
         &mut self,
-        idx: usize,
+        idx: OpId,
         here: OplineIdx,
         value: ValueId,
         check: Check,
         tag: Option<ZvalType>,
     ) {
-        let held = self.values[value.0 as usize];
+        let held = *self.val(value);
         let computed = match (held.def, tag) {
-            (Def::Op(def), Some(tag)) => match self.ops.get(def) {
+            (Def::Op(def), Some(tag)) => match self.ops.get(def.index()) {
                 Some(Op::Line(line)) if line.form == Form::Inline => within(line.opcode, tag)
                     .map(|kind| (def, line.frame, line.opline, kind, line.op1, line.op2)),
                 _ => None,
@@ -1081,8 +1115,8 @@ impl<'a> Builder<'a> {
                         out: value,
                     },
                 };
-                if !self.aliased(held.slot) && self.values[value.0 as usize].types.scalar() {
-                    self.values[value.0 as usize].home = Home::Register;
+                if !self.aliased(held.slot) && self.val(value).types.scalar() {
+                    self.val_mut(value).home = Home::Register;
                 }
                 (GuardAt::Within(def), draft(Point::Before(def), frame, to))
             }
@@ -1119,16 +1153,18 @@ impl<'a> Builder<'a> {
         &self,
         frame: Frame,
         op: &Opline,
-        seen: [Types; 3],
+        seen: Seen,
         next: Option<&Event>,
         root_return: bool,
     ) -> Form {
-        let [t1, t2, td] = seen;
+        let [t1, t2, td] = seen.types;
+        // An opline that writes its variable `op1` writes through what it
+        // sees through a reference, which only its handler does.
+        let cv1 = op.op1_type == OperandKind::Cv && !seen.referenced[0];
         let number = |t: Types| t == Types::LONG || t == Types::DOUBLE;
         let long = |t: Types| t == Types::LONG;
         let scalar = |t: Types| t.scalar();
-        let packed = Types::ARRAY.laid_out(true);
-        let cv1 = op.op1_type == OperandKind::Cv;
+        let packed = Types::ARRAY.laid_out(Layout::Packed);
         let inline = match op.opcode {
             Opcode::Jmp => true,
             Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx | Opcode::QmAssign => {
@@ -1138,29 +1174,21 @@ impl<'a> Builder<'a> {
                 number(t1) && number(t2)
             }
             Opcode::IsIdentical | Opcode::IsNotIdentical => scalar(t1) && scalar(t2),
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => number(t1) && number(t2),
-            Opcode::Mod
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Div
+            | Opcode::Mod
             | Opcode::Sl
             | Opcode::Sr
             | Opcode::BwAnd
             | Opcode::BwOr
-            | Opcode::BwXor => long(t1) && long(t2),
+            | Opcode::BwXor => arith(op.opcode).is_some_and(|served| served.serves(t1, t2)),
             Opcode::AssignOp => {
                 cv1 && op.out_type == OperandKind::Unused
-                    && match lattice::binary_of(op.extended_value) {
-                        Some(Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div) => {
-                            number(t1) && number(t2)
-                        }
-                        Some(
-                            Opcode::Mod
-                            | Opcode::Sl
-                            | Opcode::Sr
-                            | Opcode::BwAnd
-                            | Opcode::BwOr
-                            | Opcode::BwXor,
-                        ) => long(t1) && long(t2),
-                        _ => false,
-                    }
+                    && lattice::binary_of(op.extended_value)
+                        .and_then(arith)
+                        .is_some_and(|served| served.serves(t1, t2))
             }
             Opcode::Assign => cv1 && scalar(t2) && !t1.meets(Types::REF),
             Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
@@ -1202,7 +1230,7 @@ impl<'a> Builder<'a> {
         (0..cvs).all(|var| {
             let slot = Slot { frame, var };
             let types = match self.slots[usize::from(frame.0)].get(var as usize) {
-                Some(Some(value)) => self.values[value.0 as usize].types,
+                Some(Some(value)) => self.val(*value).types,
                 _ => self.entry_types(slot),
             };
             types.within(UNCOUNTED)
@@ -1266,12 +1294,7 @@ impl<'a> Builder<'a> {
     }
 
     fn finish(mut self) -> Result<TraceIr, Abort> {
-        let repeat = match self.rec.stop {
-            Stop::Loop => Some(Repeat::Loop),
-            Stop::RecursiveCall => Some(Repeat::Call),
-            Stop::RecursiveRet => Some(Repeat::Return),
-            _ => None,
-        };
+        let repeat = self.repeat;
         if repeat.is_some() {
             self.close_phis()?;
         }
@@ -1307,23 +1330,24 @@ impl<'a> Builder<'a> {
     /// and last the exit a trace that does not loop ends through. Each
     /// guard and each opline that leaves names its exit.
     fn number(&mut self, loops: bool) -> Result<Numbered, Abort> {
-        let mut order: Vec<((u8, usize, u8, usize), Source)> = Vec::new();
+        let mut order: Vec<(Order, Source)> = Vec::new();
         for (at, guard) in self.guards.iter().enumerate() {
             let key = match guard.at {
-                GuardAt::Entry => (0, 0, 0, at),
-                GuardAt::Before(op) => (2, op, 0, at),
-                GuardAt::Within(op) => (2, op, 1, at),
+                GuardAt::Entry => Order::Entry,
+                GuardAt::Before(op) => Order::At(op, Stage::Before),
+                GuardAt::Within(op) => Order::At(op, Stage::Within),
             };
             order.push((key, Source::Guard(at)));
         }
         for (at, (op, _)) in self.leaves.iter().enumerate() {
-            order.push(((2, *op, 2, at), Source::Leave(at)));
+            order.push((Order::At(*op, Stage::Leaves), Source::Leave(at)));
         }
         order.push(if loops {
-            ((1, 0, 0, 0), Source::Interrupt)
+            (Order::Header, Source::Interrupt)
         } else {
-            ((3, 0, 0, 0), Source::End)
+            (Order::End, Source::End)
         });
+        // Stable: within one place, in the order they were placed.
         order.sort_by_key(|(key, _)| *key);
         if order.len() > MAX_EXITS {
             return Err(Abort {
@@ -1351,7 +1375,7 @@ impl<'a> Builder<'a> {
                 }
                 Source::Leave(at) => {
                     let (op, draft) = self.leaves[at];
-                    if let Some(Op::Line(line)) = self.ops.get_mut(op) {
+                    if let Some(Op::Line(line)) = self.ops.get_mut(op.index()) {
                         line.exit = Some(id);
                     }
                     draft
@@ -1373,7 +1397,7 @@ impl<'a> Builder<'a> {
     /// A loop's interrupt test: at its header, storing what the header's
     /// phis hold in registers.
     fn interrupt(&self) -> Draft {
-        let frame = match self.ops.get(self.header) {
+        let frame = match self.ops.get(self.header.index()) {
             Some(Op::Line(line)) => line.frame,
             _ => Frame::ROOT,
         };
@@ -1382,7 +1406,7 @@ impl<'a> Builder<'a> {
 
     /// The opline of a loop's header.
     fn at_header(&self) -> At {
-        match self.ops.get(self.header) {
+        match self.ops.get(self.header.index()) {
             Some(Op::Line(line)) => At::Opline(line.opline),
             _ => At::Stands,
         }
@@ -1396,23 +1420,25 @@ impl<'a> Builder<'a> {
         let last = self.running()?;
         for at in 0..self.phis.len() {
             let phi = self.phis[at];
-            let Value { slot, def, .. } = self.values[phi.0 as usize];
+            let Value { slot, def, .. } = *self.val(phi);
             let Def::Phi { entry, .. } = def else {
                 continue;
             };
-            let back_slot = match self.rec.stop {
-                Stop::RecursiveCall | Stop::RecursiveRet => Slot {
+            // A recursion's next turn is the frame its last call or
+            // return reached.
+            let back_slot = match self.repeat {
+                Some(Repeat::Call | Repeat::Return) => Slot {
                     frame: last,
                     var: slot.var,
                 },
-                _ => slot,
+                Some(Repeat::Loop) | None => slot,
             };
             let back = self.slots[usize::from(back_slot.frame.0)]
                 .get(back_slot.var as usize)
                 .copied()
                 .flatten()
                 .unwrap_or(phi);
-            self.values[phi.0 as usize].def = Def::Phi { entry, back };
+            self.val_mut(phi).def = Def::Phi { entry, back };
         }
         for at in 0..self.guards.len() {
             let Placed {
@@ -1425,21 +1451,21 @@ impl<'a> Builder<'a> {
             };
             let (value, narrowed) = match check {
                 Check::Type { value, tag } => (value, Narrowed::Tag(tag)),
-                Check::Packed { value, packed } => (value, Narrowed::Layout(packed)),
+                Check::Layout { value, layout } => (value, Narrowed::Layout(layout)),
                 _ => continue,
             };
-            let phi = self.values[value.0 as usize];
+            let phi = *self.val(value);
             let Def::Phi { entry, back } = phi.def else {
                 continue;
             };
-            let entered = self.values[entry.0 as usize];
+            let entered = *self.val(entry);
             if entered.def != Def::Entry
                 || entered.slot.frame != Frame::ROOT
                 || self.aliased(phi.slot)
             {
                 continue;
             }
-            let brought = self.values[back.0 as usize].types;
+            let brought = self.val(back).types;
             let carried = match narrowed {
                 Narrowed::Tag(_) => {
                     brought.kinds().within(phi.types.kinds()) && !brought.meets(Types::REF)
@@ -1449,17 +1475,17 @@ impl<'a> Builder<'a> {
             if !carried {
                 continue;
             }
-            self.values[entry.0 as usize].types = match narrowed {
+            self.val_mut(entry).types = match narrowed {
                 Narrowed::Tag(tag) => entered.types.narrowed(tag),
-                Narrowed::Layout(packed) => entered.types.laid_out(packed),
+                Narrowed::Layout(layout) => entered.types.laid_out(layout),
             };
             self.guards[at] = Placed {
                 at: GuardAt::Entry,
                 check: match check {
                     Check::Type { tag, .. } => Check::Type { value: entry, tag },
-                    Check::Packed { packed, .. } => Check::Packed {
+                    Check::Layout { layout, .. } => Check::Layout {
                         value: entry,
-                        packed,
+                        layout,
                     },
                     other => other,
                 },
@@ -1470,13 +1496,10 @@ impl<'a> Builder<'a> {
             let phi = self.phis[at];
             let Value {
                 slot, types, def, ..
-            } = self.values[phi.0 as usize];
+            } = *self.val(phi);
             let Def::Phi { back, .. } = def else { continue };
-            if !self.aliased(slot)
-                && types.scalar()
-                && self.values[back.0 as usize].home == Home::Register
-            {
-                self.values[phi.0 as usize].home = Home::Register;
+            if !self.aliased(slot) && types.scalar() && self.val(back).home == Home::Register {
+                self.val_mut(phi).home = Home::Register;
             }
         }
         Ok(())
@@ -1487,8 +1510,8 @@ impl<'a> Builder<'a> {
         let empty = Snapshot::default();
         let snapshot = match draft.point {
             Point::Start => &empty,
-            Point::Before(at) => self.snapshots.get(at).unwrap_or(&empty),
-            Point::After(at) => self.snapshots.get(at + 1).unwrap_or(&empty),
+            Point::Before(at) => self.snapshots.get(at.index()).unwrap_or(&empty),
+            Point::After(at) => self.snapshots.get(at.index() + 1).unwrap_or(&empty),
             Point::End => self.snapshots.last().unwrap_or(&empty),
         };
         let calls = snapshot.calls > 0;
@@ -1506,7 +1529,7 @@ impl<'a> Builder<'a> {
                     (Some(fetch), Landing::RestoreCall)
                 } else {
                     extra = Some(Store {
-                        slot: self.values[out.0 as usize].slot,
+                        slot: self.val(out).slot,
                         from: Stored::Value(out),
                     });
                     let landing = if op1 || op2 {
@@ -1521,7 +1544,7 @@ impl<'a> Builder<'a> {
         let mut stores: Vec<Store> = snapshot
             .values
             .iter()
-            .filter(|(_, value)| self.values[value.0 as usize].home == Home::Register)
+            .filter(|(_, value)| self.val(*value).home == Home::Register)
             .map(|(slot, value)| Store {
                 slot: *slot,
                 from: Stored::Value(*value),
@@ -1563,6 +1586,28 @@ struct Numbered {
     end: Option<ExitId>,
 }
 
+/// Where an exit falls in the order the trace meets them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Order {
+    /// A guard held as the trace enters.
+    Entry,
+    /// A loop's interrupt test, at its header.
+    Header,
+    /// At an op, in the order of the op's stages.
+    At(OpId, Stage),
+    /// The exit a trace that does not loop ends through.
+    End,
+}
+
+/// What happens at an op, in order: the guards before it, the guards it
+/// holds itself, then its own exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Stage {
+    Before,
+    Within,
+    Leaves,
+}
+
 /// Where an exit's draft is kept until it is numbered.
 #[derive(Clone, Copy)]
 enum Source {
@@ -1575,7 +1620,7 @@ enum Source {
 #[derive(Clone, Copy)]
 enum Narrowed {
     Tag(ZvalType),
-    Layout(bool),
+    Layout(Layout),
 }
 
 fn restored(calls: bool) -> Landing {

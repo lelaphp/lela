@@ -10,6 +10,8 @@
 use php_heap::{Zval, ZvalType};
 use php_unit::Opcode;
 
+use super::Layout;
+
 /// A set of the kinds a value may be, php's `MAY_BE_*` with one bit per
 /// `IS_*` from `IS_UNDEF` to `IS_RESOURCE` at php's places, `MAY_BE_REF`,
 /// and an array's two layouts, php's `MAY_BE_ARRAY_PACKED` and
@@ -105,6 +107,14 @@ impl Types {
         }
     }
 
+    /// The kinds of php's `IS_*` code `code`, as an opline names a type;
+    /// none for a code no value has.
+    pub(crate) fn of_code(code: u32) -> Option<Types> {
+        TAGS.iter()
+            .find(|(tag, _)| u32::from(*tag as u8) == code)
+            .map(|(tag, _)| Types::of_tag(*tag))
+    }
+
     /// These narrowed to `tag`, php's `zend_jit_trace_type_to_info_ex`:
     /// an array keeps the layouts it may have.
     #[must_use]
@@ -123,9 +133,11 @@ impl Types {
 
     /// An array of one layout, where these are an array of either.
     #[must_use]
-    pub(crate) fn laid_out(self, packed: bool) -> Types {
-        self.without(Types(Types::LAYOUTS))
-            .or(if packed { Types::PACKED } else { Types::HASH })
+    pub(crate) fn laid_out(self, layout: Layout) -> Types {
+        self.without(Types(Types::LAYOUTS)).or(match layout {
+            Layout::Packed => Types::PACKED,
+            Layout::Hash => Types::HASH,
+        })
     }
 
     /// Whether these are an array that may be either layout, php's
@@ -162,7 +174,11 @@ impl Types {
             ZvalType::Array => value
                 .as_arr()
                 .map_or(Types::of_tag(ZvalType::Array), |arr| {
-                    Types::ARRAY.laid_out(arr.is_packed())
+                    Types::ARRAY.laid_out(if arr.is_packed() {
+                        Layout::Packed
+                    } else {
+                        Layout::Hash
+                    })
                 }),
             tag => Types::of_tag(tag),
         }
@@ -343,6 +359,7 @@ mod tests {
     use php_unit::Opcode;
 
     use super::{Types, binary, stepped};
+    use crate::types::Layout;
 
     /// A tag is the one kind of a set, as php's guard compares it; an
     /// array's layouts and a reference are no tag of their own.
@@ -383,6 +400,9 @@ mod tests {
         assert_eq!(int, Types::LONG.or(Types::OBJECT).or(Types::REF));
         assert_eq!(format!("{int}"), "ref, long, object");
         assert_eq!(format!("{}", Types::UNKNOWN), "undef, ref, any");
-        assert_eq!(format!("{}", Types::ARRAY.laid_out(true)), "packed array");
+        assert_eq!(
+            format!("{}", Types::ARRAY.laid_out(Layout::Packed)),
+            "packed array"
+        );
     }
 }

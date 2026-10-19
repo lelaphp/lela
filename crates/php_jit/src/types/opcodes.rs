@@ -9,7 +9,7 @@ use php_unit::decl::{Parameter, Type};
 use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline};
 
 use super::lattice::{self, Types};
-use super::{Constant, Frame, Slot};
+use super::{Constant, Frame, Layout, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
 const MAX_ARG_FLAG_NUM: u32 = 12;
@@ -262,19 +262,17 @@ fn returned(code: &OpArray, t: Types) -> Types {
     }
 }
 
-/// What a `CAST` to php's type code `to` makes.
+/// php's `_IS_BOOL`, the type code a `(bool)` cast names, past the
+/// `IS_*` a zval carries.
+const IS_BOOL: u32 = 18;
+
+/// What a `CAST` to php's type code `to` makes: the `IS_*` it names, a
+/// boolean for `_IS_BOOL`.
 fn cast(to: u32) -> Types {
-    match to {
-        1 => Types::NULL,
-        4 => Types::LONG,
-        5 => Types::DOUBLE,
-        6 => Types::STRING,
-        7 => Types::of_tag(ZvalType::Array),
-        8 => Types::OBJECT,
-        // `_IS_BOOL`.
-        18 => Types::BOOL,
-        _ => Types::ANY,
+    if to == IS_BOOL {
+        return Types::BOOL;
     }
+    Types::of_code(to).unwrap_or(Types::ANY)
 }
 
 /// What an opline writes to its variable `op1`, where it writes it.
@@ -293,7 +291,7 @@ pub(super) fn op1_types(
         // A packed array whose element is written in place stays packed
         // (`zend_jit_trace.c:2357-2372`).
         Opcode::AssignDimOp
-            if sample1.is_some_and(|s| s.packed) && t1 == Types::ARRAY.laid_out(true) =>
+            if sample1.is_some_and(|s| s.packed) && t1 == Types::ARRAY.laid_out(Layout::Packed) =>
         {
             t1
         }
@@ -506,6 +504,61 @@ pub(super) fn constant_types(constant: Constant, code: &OpArray) -> Types {
             .literals
             .get(at.0 as usize)
             .map_or(Types::ANY, Types::of_constant),
+    }
+}
+
+/// The oplines whose handler leaves a temporary it reads alive: a
+/// `switch`'s or a `match`'s subject, a `foreach`'s iterator, a `list()`'s
+/// array, a copied temporary, a coalescing jump's value.
+pub(super) fn keeps_temporaries(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Case
+            | Opcode::CaseStrict
+            | Opcode::SwitchLong
+            | Opcode::SwitchString
+            | Opcode::Match
+            | Opcode::FeFetchR
+            | Opcode::FeFetchRw
+            | Opcode::FetchListR
+            | Opcode::FetchListW
+            | Opcode::CopyTmp
+            | Opcode::JmpSet
+            | Opcode::Coalesce
+            | Opcode::JmpNull
+    )
+}
+
+/// The operands an inline arithmetic serves: two numbers, long or
+/// double each, or two longs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Arith {
+    Numbers,
+    Longs,
+}
+
+impl Arith {
+    /// Whether operands of `a` and `b` are the ones served.
+    pub(super) fn serves(self, a: Types, b: Types) -> bool {
+        let one = |t: Types, of: Types| t == of;
+        match self {
+            Arith::Numbers => {
+                (one(a, Types::LONG) || one(a, Types::DOUBLE))
+                    && (one(b, Types::LONG) || one(b, Types::DOUBLE))
+            }
+            Arith::Longs => one(a, Types::LONG) && one(b, Types::LONG),
+        }
+    }
+}
+
+/// The arithmetic the scalar core serves inline, and over what.
+pub(super) fn arith(opcode: Opcode) -> Option<Arith> {
+    match opcode {
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => Some(Arith::Numbers),
+        Opcode::Mod | Opcode::Sl | Opcode::Sr | Opcode::BwAnd | Opcode::BwOr | Opcode::BwXor => {
+            Some(Arith::Longs)
+        }
+        _ => None,
     }
 }
 
@@ -748,8 +801,13 @@ pub(super) fn packed_guard(
     op: &Opline,
     samples: [Option<Sample>; 3],
     code: &OpArray,
-) -> Option<bool> {
+) -> Option<Layout> {
     let first = samples[0].filter(|s| !s.reference && !s.indirect && s.kind == ZvalType::Array)?;
+    let recorded = if first.packed {
+        Layout::Packed
+    } else {
+        Layout::Hash
+    };
     let long_key = if op.op2_type == OperandKind::Const {
         code.literals
             .get(op.op2 as usize)
@@ -757,21 +815,18 @@ pub(super) fn packed_guard(
     } else {
         kind_of(samples[1]) == Some(ZvalType::Long)
     };
+    let read = op.op1_type != OperandKind::Const && long_key;
     match op.opcode {
-        Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchListR => {
-            (op.op1_type != OperandKind::Const && long_key).then_some(first.packed)
-        }
-        Opcode::IssetIsemptyDimObj if op.extended_value & ISEMPTY == 0 => {
-            (op.op1_type != OperandKind::Const && long_key).then_some(first.packed)
-        }
+        Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchListR => read.then_some(recorded),
+        Opcode::IssetIsemptyDimObj if op.extended_value & ISEMPTY == 0 => read.then_some(recorded),
         Opcode::AssignDim | Opcode::FetchDimW | Opcode::FetchDimRw | Opcode::FetchListW => {
-            (long_key && !first.packed).then_some(false)
+            (long_key && recorded == Layout::Hash).then_some(Layout::Hash)
         }
-        Opcode::AssignDimOp if long_key && !first.packed => Some(false),
+        Opcode::AssignDimOp if long_key && recorded == Layout::Hash => Some(Layout::Hash),
         Opcode::AssignDimOp if long_key => samples[2]
             .filter(|s| s.kind != ZvalType::Undef)
-            .map(|_| true),
-        Opcode::FeFetchR => Some(first.packed),
+            .map(|_| Layout::Packed),
+        Opcode::FeFetchR => Some(recorded),
         _ => None,
     }
 }

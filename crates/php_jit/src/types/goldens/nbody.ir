@@ -109,32 +109,32 @@ loop at 0, loop, interrupt exit 4
   -> #56 f0.T33 [double] reg
   guard #1 ref to array -> exit 36
 0043 f0 ASSIGN_DIM_OP #1, #23, #56 step leaves -> exit 37
-  -> #57 f0.CV3 [array]
+  -> #57 f0.CV3 [ref, array]
 0045 f0 MUL #32, #52 inline
   -> #58 f0.T35 [double] reg
   guard #3 ref to array -> exit 38
 0046 f0 ASSIGN_DIM_OP #3, #23, #58 step leaves -> exit 39
-  -> #59 f0.CV4 [array]
+  -> #59 f0.CV4 [ref, array]
 0048 f0 MUL #37, #52 inline
   -> #60 f0.T37 [double] reg
   guard #5 ref to array -> exit 40
 0049 f0 ASSIGN_DIM_OP #5, #23, #60 step leaves -> exit 41
-  -> #61 f0.CV5 [array]
+  -> #61 f0.CV5 [ref, array]
 0051 f0 MUL #27, #55 inline
   -> #62 f0.T39 [double] reg
   guard #57 ref to array -> exit 42
 0052 f0 ASSIGN_DIM_OP #57, #7, #62 step leaves -> exit 43
-  -> #63 f0.CV3 [array]
+  -> #63 f0.CV3 [ref, array]
 0054 f0 MUL #32, #55 inline
   -> #64 f0.T41 [double] reg
   guard #59 ref to array -> exit 44
 0055 f0 ASSIGN_DIM_OP #59, #7, #64 step leaves -> exit 45
-  -> #65 f0.CV4 [array]
+  -> #65 f0.CV4 [ref, array]
 0057 f0 MUL #37, #55 inline
   -> #66 f0.T43 [double] reg
   guard #61 ref to array -> exit 46
 0058 f0 ASSIGN_DIM_OP #61, #7, #66 step leaves -> exit 47
-  -> #67 f0.CV5 [array]
+  -> #67 f0.CV5 [ref, array]
 0060 f0 PRE_INC #7 inline
   -> #68 f0.CV10 [long] reg
   checks #68 long -> exit 48
@@ -178,16 +178,16 @@ exit 33: f0 0040 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#4
 exit 34: f0 0039 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52
 exit 35: f0 0041 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
 exit 36: f0 0043 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56
-exit 37: f0 0043 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56
-exit 38: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58
-exit 39: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58
-exit 40: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60
-exit 41: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60
-exit 42: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62
-exit 43: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62
-exit 44: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62 f0.T41=#64
-exit 45: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62 f0.T41=#64
-exit 46: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62 f0.T41=#64 f0.T43=#66
-exit 47: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62 f0.T41=#64 f0.T43=#66
-exit 48: f0 0060 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62 f0.T41=#64 f0.T43=#66
-exit 49: f0 0062 plain f0.CV10=#68 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T33=#56 f0.T35=#58 f0.T37=#60 f0.T39=#62 f0.T41=#64 f0.T43=#66 f0.T45=false
+exit 37: f0 0043 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 38: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T35=#58
+exit 39: f0 0046 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 40: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T37=#60
+exit 41: f0 0049 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 42: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T39=#62
+exit 43: f0 0052 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 44: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T41=#64
+exit 45: f0 0055 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 46: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T43=#66
+exit 47: f0 0058 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 48: f0 0060 plain f0.CV10=#7 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55
+exit 49: f0 0062 plain f0.CV10=#68 f0.CV11=#27 f0.CV12=#32 f0.CV13=#37 f0.CV14=#43 f0.CV15=#48 f0.CV16=#52 f0.CV17=#55 f0.T45=false

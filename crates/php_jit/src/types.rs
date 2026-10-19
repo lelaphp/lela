@@ -44,9 +44,9 @@
 //!
 //! What it is not: php's ranges and reference counts. A long arithmetic is
 //! long or double here where php's range inference proves it stays long,
-//! so it carries a guard php's does not; a parameter is read from its
-//! `RECV`'s mask, which drops a class name and passing by reference, so
-//! an entry guard narrows it where php's `arg_info` already had.
+//! so it carries a guard php's does not; and what a loop variable written
+//! before its loop holds is guarded once at entry where php's static
+//! inference over the whole function already knew it.
 #![cfg_attr(
     not(test),
     expect(
@@ -137,6 +137,17 @@ pub(crate) struct Slot {
     pub(crate) var: u32,
 }
 
+/// An op of the trace, by its place in [`TraceIr::ops`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct OpId(pub(crate) u32);
+
+impl OpId {
+    /// The op's place in [`TraceIr::ops`].
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// A value of the trace, by its place in [`TraceIr::values`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ValueId(pub(crate) u32);
@@ -160,11 +171,11 @@ pub(crate) enum Def {
     /// A loop's header: the value entering it, and the value its back
     /// edge brings.
     Phi { entry: ValueId, back: ValueId },
-    /// Written by the op at that place in [`TraceIr::ops`].
-    Op(usize),
+    /// Written by the op.
+    Op(OpId),
     /// Read again after the call-effect kernel at that place, the clobber
     /// rule.
-    Reload(usize),
+    Reload(OpId),
 }
 
 /// Where a value lives between the ops that read it.
@@ -263,12 +274,12 @@ pub(crate) struct Guard {
 pub(crate) enum GuardAt {
     /// Once, as the trace enters, before a loop's header.
     Entry,
-    /// Before the op at that place reads the value.
-    Before(usize),
-    /// By the op at that place, on what it computes, before it writes
+    /// Before the op reads the value.
+    Before(OpId),
+    /// By the op, on what it computes, before it writes
     /// it: an arithmetic's overflow, a fetched element's type, a jump's
     /// direction, a return's caller.
-    Within(usize),
+    Within(OpId),
 }
 
 /// What a guard holds.
@@ -278,12 +289,19 @@ pub(crate) enum Check {
     Type { value: ValueId, tag: ZvalType },
     /// The slot holds a reference, and what it refers to is of this type.
     Deref { value: ValueId, tag: ZvalType },
-    /// The array is packed, or is not.
-    Packed { value: ValueId, packed: bool },
+    /// The array is laid out so: php's packed guard.
+    Layout { value: ValueId, layout: Layout },
     /// The jump goes the way it went.
     Direction { taken: bool },
     /// The return lands in this op array at this opline, php's IP guard.
     Caller { func: FuncRef, opline: OplineIdx },
+}
+
+/// How an array is laid out, php's `HASH_FLAG_PACKED` set or clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    Packed,
+    Hash,
 }
 
 /// What an exit does: where the interpreter goes on, what the trampoline
@@ -343,8 +361,8 @@ pub(crate) enum End {
 /// Where a looping trace goes back to, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LoopHeader {
-    /// The place in [`TraceIr::ops`] the back edge goes to.
-    pub(crate) at: usize,
+    /// The op the back edge goes to.
+    pub(crate) at: OpId,
     pub(crate) repeat: Repeat,
     /// Where the interrupt test leaves (`jit-design.md` §4.3).
     pub(crate) interrupt: ExitId,
