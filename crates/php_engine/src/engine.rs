@@ -5965,7 +5965,8 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
     let Ok(copy) = crate::api::values::Emalloc::new(req, crate::exec::OP_ARRAY_SIZE) else {
         return false;
     };
-    let frame = match req.push_frame(PublishedUnit::clone(unit)) {
+    let program = crate::api::request::CodeFrom::Top(None);
+    let frame = match req.push_code_frame(PublishedUnit::clone(unit), program) {
         Ok(frame) => frame,
         Err(fatal) => {
             copy.free(req);
@@ -5980,11 +5981,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
-    while req.vm().depth() > standing + 1 {
-        req.pop_frame();
-    }
-    req.detach_symbol_table(frame);
-    req.pop_frame();
+    req.leave_code(standing, frame);
     let exited = req.unwind_exit();
     // What the loop left pending for the user exception handler, served
     // with the main frame left (`zend_execute_scripts`).

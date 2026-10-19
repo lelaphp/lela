@@ -892,17 +892,12 @@ impl Request {
             return Err(Thrown::of(self.take_pending_view()));
         }
         let standing = self.vm.depth();
-        let callee = match self.caller_frame() {
-            Some(frame) => self.push_code_frame(unit, frame, None),
-            None => match self.push_frame(unit) {
-                Ok(frame) => {
-                    crate::observer::call(self, frame);
-                    Ok(frame)
-                }
-                refused => refused,
-            },
-        };
+        let from = (self.caller_frame()).map_or(super::CodeFrom::Top(None), |frame| {
+            super::CodeFrom::Nested(frame, None)
+        });
+        let callee = self.push_code_frame(unit, from);
         let callee = self.fatal_of(callee)?;
+        crate::observer::call(self, callee);
         let reenter = self.shared.loops.reenter;
         let served = reenter(self, callee);
         while self.vm.depth() > standing {

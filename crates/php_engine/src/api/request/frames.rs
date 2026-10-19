@@ -222,10 +222,6 @@ impl Request {
         &self.annexes
     }
 
-    pub(crate) fn annexes_mut(&mut self) -> &mut exec::Annexes {
-        &mut self.annexes
-    }
-
     /// `frame` of the running stack read where it stands; none where no
     /// frame stands there.
     pub(crate) fn frame_at(&self, frame: FrameRef) -> Option<exec::FrameAt<'_>> {
@@ -539,123 +535,108 @@ impl Request {
         self.map.take(unit)
     }
 
-    /// Push a frame for `unit`'s op array: its shape on the VM stack and
-    /// its engine state, which are pushed and popped together and share a
-    /// `FrameRef`. A VM stack whose page the memory limit refuses is
-    /// the fatal php raises there, and nothing is pushed. The frame is
-    /// not begun: its observer begin is the caller's, which `execute`
-    /// raises as `zend_execute` does.
-    pub(crate) fn push_frame(&mut self, unit: PublishedUnit) -> Result<FrameRef, Fatal> {
-        let code = exec::code_of(&unit);
-        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        let mut header = exec::Header::of(None, code);
-        // `zend_execute`'s `ZEND_CALL_TOP_CODE`.
-        header.info.set_top_code(true);
-        exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
-        self.forget_main_statics(code.runtime_cache);
-        // `zend_execute` gives the main op array's frame `EG(symbol_table)`
-        // and `i_init_code_execute_data` attaches it, so every CV name
-        // stands in the table, in the compiler's order, from the start.
-        let frame = self.push_code_record(
-            slots,
-            header,
-            exec::Annex {
-                unit: Some(unit),
-                symbol_table: Some(TableId::GLOBAL),
-                ..exec::Annex::default()
-            },
-        )?;
-        self.attach_symbol_table(frame);
-        Ok(frame)
-    }
-
-    /// A file's frame pushed with its header and its [`exec::Annex`],
-    /// the extra given back where the push is refused.
-    fn push_code_record(
-        &mut self,
-        slots: usize,
-        mut header: exec::Header,
-        extra: exec::Annex,
-    ) -> Result<FrameRef, Fatal> {
-        let id = self.annexes.insert(extra);
-        header.annex = Some(id);
-        header.callee = self.annexes.callee(id);
-        let pushed = self.vm.push(&mut self.heap, slots, 0, header);
-        if pushed.is_err() {
-            self.annexes.take(id);
-        }
-        pushed
-    }
-
-    /// The frame for the main op array of a file an `INCLUDE_OR_EVAL`
-    /// opened, `zend_vm_stack_push_call_frame` under
-    /// `ZEND_CALL_NESTED_CODE | ZEND_CALL_HAS_SYMBOL_TABLE` and
-    /// `i_init_code_execute_data` (`Z/Zend/zend_vm_def.h:6590`,
-    /// `Z/Zend/zend_execute.c:4504`): the includer's receiver and called
-    /// scope carried over, the receiver with one more owner since the pop
-    /// gives one up, the includer's scope written onto the op array
-    /// (`new_op_array->scope`), and the includer's symbol table shared,
-    /// rebuilt for it first where it is a function frame with none
-    /// ([`Request::rebuild_symbol_table`]); then the new frame attached
-    /// to it, so the included code reads the includer's variables.
-    /// `caller` is `prev_execute_data`, the frame whose opline is the
-    /// `INCLUDE_OR_EVAL`, and `returns_to` its `VAR` where the value is
-    /// read. The push comes first, as php's does, so a VM stack page the
-    /// memory limit refuses is the fatal and nothing else is touched.
+    /// The frame for `unit`'s main op array, `zend_vm_stack_push_call_frame`
+    /// and `i_init_code_execute_data` (`Z/Zend/zend_vm_def.h:6590`,
+    /// `Z/Zend/zend_execute.c:4504`), as `from` serves it
+    /// ([`CodeFrom`]): its shape on the VM stack and its engine state,
+    /// pushed and popped together and sharing a `FrameRef`, its table
+    /// shared and the frame attached to it, so the code reads the
+    /// variables it was served among. A nested frame carries over its
+    /// includer's receiver and called scope, the receiver lent (no
+    /// `ZEND_CALL_RELEASE_THIS`), and its scope, which `INCLUDE_OR_EVAL`
+    /// writes onto the op array (`new_op_array->scope`); an includer
+    /// with no table has one rebuilt ([`Request::rebuild_symbol_table`]).
+    /// The push comes before anything else the request holds is touched,
+    /// as php's does, so a VM stack page the memory limit refuses is the
+    /// fatal; only the frame's own annex and runtime cache are laid down
+    /// ahead of it, so its header is pushed whole. The frame is not
+    /// begun: its observer begin is the caller's, which `execute` raises
+    /// for the program as `zend_execute` does.
     pub(crate) fn push_code_frame(
         &mut self,
         unit: PublishedUnit,
-        caller: FrameRef,
-        returns_to: Option<(FrameRef, u32)>,
+        from: CodeFrom,
     ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let cvs = !code.vars.is_empty();
-        // The includer read once: its receiver, its scopes and the table
-        // it has, where it has one.
-        let (this, called_scope, scope, table) =
-            self.frame_at(caller)
-                .map_or((None, None, None, None), |state| {
-                    let header = state.header();
-                    let scope = self.scope_of(state);
-                    (
-                        header.this(),
-                        header.called_scope(),
-                        scope,
-                        state.symbol_table(),
-                    )
-                });
         let mut header = exec::Header::of(None, code);
-        // `ZEND_CALL_HAS_THIS` carried from the including frame, whose
-        // `$this` that frame keeps: no `ZEND_CALL_RELEASE_THIS`.
-        header.set_receiver(this.map(exec::Receiver::lent));
-        header.set_called_scope(called_scope);
-        header.set_returns_to(returns_to.map(|(_, slot)| slot));
-        header.set_caller(exec::Caller::Opline(caller));
-        let reserved = self.vm.push(&mut self.heap, slots, 0, header)?;
-        let table = match table {
-            Some(table) => table,
-            None => self.rebuild_symbol_table(caller),
+        let (caller, scope, table) = match from {
+            // `zend_execute`: `EG(symbol_table)` where nothing executes,
+            // else the executing frame's, rebuilt where it has none.
+            CodeFrom::Top(caller) => {
+                header.info.set_top_code(true);
+                header.set_caller(caller.map_or(exec::Caller::Outside, exec::Caller::Opline));
+                let table = match caller {
+                    Some(caller) => self.frame_at(caller).and_then(exec::FrameAt::symbol_table),
+                    None => Some(TableId::GLOBAL),
+                };
+                (caller, None, table)
+            }
+            CodeFrom::Nested(caller, returns_to) => {
+                // The includer read once: its receiver, its scopes and
+                // the table it has, where it has one.
+                let (this, called_scope, scope, table) =
+                    self.frame_at(caller)
+                        .map_or((None, None, None, None), |state| {
+                            let header = state.header();
+                            let scope = self.scope_of(state);
+                            (
+                                header.this(),
+                                header.called_scope(),
+                                scope,
+                                state.symbol_table(),
+                            )
+                        });
+                header.set_receiver(this.map(exec::Receiver::lent));
+                header.set_called_scope(called_scope);
+                header.set_returns_to(returns_to.map(|(_, slot)| slot));
+                header.set_caller(exec::Caller::Opline(caller));
+                (Some(caller), scope, table)
+            }
         };
         exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
-        self.forget_main_statics(code.runtime_cache);
+        let statics = code.runtime_cache;
         let annex = self.annexes.insert(exec::Annex {
             unit: Some(unit),
             scope,
-            symbol_table: Some(table),
+            symbol_table: table,
             ..exec::Annex::default()
         });
-        let record = self.annexes.callee(annex);
-        if let Some(laid) = self.vm.at_mut(reserved) {
-            laid.annex = Some(annex);
-            laid.callee = record;
+        header.annex = Some(annex);
+        header.callee = self.annexes.callee(annex);
+        let frame = match self.vm.push(&mut self.heap, slots, 0, header) {
+            Ok(frame) => frame,
+            Err(fatal) => {
+                self.annexes.take(annex);
+                return Err(fatal);
+            }
+        };
+        self.forget_main_statics(statics);
+        if table.is_none()
+            && let Some(caller) = caller
+        {
+            let rebuilt = self.rebuild_symbol_table(caller);
+            if let Some(extra) = self.annexes.get_mut(annex) {
+                extra.symbol_table = Some(rebuilt);
+            }
         }
-        let frame = reserved;
         if cvs {
             self.attach_symbol_table(frame);
         }
-        crate::observer::call(self, frame);
         Ok(frame)
+    }
+
+    /// The frames above `standing` a fatal left popped, and `frame`, the
+    /// code frame served there, left as `zend_leave_helper` leaves it
+    /// ([`Request::leave_frame`]).
+    pub(crate) fn leave_code(&mut self, standing: usize, frame: FrameRef) {
+        while self.vm.depth() > standing + 1 {
+            self.pop_frame();
+        }
+        if self.vm.depth() > standing {
+            self.leave_frame(frame);
+        }
     }
 
     /// The op array `frame` serves held on the request's heap as php's
@@ -733,6 +714,7 @@ impl Request {
         self.pop_frame();
         if let Some(includer) = code_frame
             && let Some(includer) = includer.or_else(|| self.innermost_user_frame())
+            && !self.still_attached(includer)
         {
             self.attach_symbol_table(includer);
         }
@@ -1567,17 +1549,13 @@ impl Request {
         // A generator's frame leaves its closure to the generator
         // (`ZendGenerator::closure`), which keeps it until it is freed.
         let mut generator = None;
-        if let Some(id) = annex {
-            if let Some(table) = self.annexes.get(id).and_then(|annex| annex.symbol_table) {
+        if let Some(annex) = annex.and_then(|id| self.annexes.get_mut(id)) {
+            generator = annex.generator;
+            let (table, named) = (annex.symbol_table, std::mem::take(&mut annex.extra_named));
+            if let Some(table) = table {
                 self.free_rebuilt_table(frame, table);
             }
-            let named = self.annexes.get_mut(id).map(|annex| {
-                generator = annex.generator;
-                std::mem::take(&mut annex.extra_named)
-            });
-            if let Some(named) = named {
-                self.release_named(named);
-            }
+            self.release_named(named);
         }
         // `zend_vm_stack_free_extra_args_ex`'s `i_zval_ptr_dtor`: an
         // extra argument, past the CVs and the temporaries, that keeps
@@ -2006,4 +1984,18 @@ impl Request {
         self.map.map(at).laid_for = scope;
         Ok(())
     }
+}
+
+/// What a code frame serves its unit's main op array for
+/// ([`Request::push_code_frame`]).
+#[derive(Clone, Copy)]
+pub(crate) enum CodeFrom {
+    /// `zend_execute`'s `ZEND_CALL_TOP_CODE`, the program's own or a
+    /// native's, over the table of the innermost user frame where one
+    /// stands, `EG(symbol_table)` where none does.
+    Top(Option<FrameRef>),
+    /// An `INCLUDE_OR_EVAL`'s, or code evaluated in a frame,
+    /// `ZEND_CALL_NESTED_CODE`: nested in the frame, its value read into
+    /// the temporary where one is.
+    Nested(FrameRef, Option<(FrameRef, u32)>),
 }

@@ -66,7 +66,7 @@ use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, non_static_method_call, none_pending, undefined_method};
 use crate::api::request::ropes::RopeAt;
-use crate::api::request::{Opened, Raised, Request};
+use crate::api::request::{CodeFrom, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
@@ -3627,7 +3627,8 @@ fn included(
         req.release_unit_strings(Some(&unit));
         return answered(req, frame, returns_to, value);
     }
-    let callee = req.push_code_frame(unit, frame, returns_to)?;
+    let callee = req.push_code_frame(unit, CodeFrom::Nested(frame, returns_to))?;
+    crate::observer::call(req, callee);
     if let Err(thrown) = req.hold_op_array(callee, copy) {
         return threw(req, callee, &thrown);
     }

@@ -50,22 +50,9 @@ impl Request {
     /// again when the code frame leaves, so a variable the included
     /// file wrote is the includer's.
     pub(crate) fn attach_symbol_table(&mut self, frame: FrameRef) {
-        let Some((table, cvs)) = self.cv_table(frame) else {
+        let Some((table, _)) = self.cv_table(frame) else {
             return;
         };
-        // Every CV's bucket names it already, as an includer's do when
-        // the file it included leaves them as it found them: what each
-        // would move is where it stands.
-        let attached = (self
-            .tables
-            .get(table.0 as usize)
-            .map_or(&[][..], |table| &table.entries[..])
-            .iter())
-        .filter(|(_, symbol)| matches!(*symbol, Symbol::Indirect(at, _) if at == frame))
-        .count();
-        if attached == cvs {
-            return;
-        }
         let Some((unit, body)) = self.frame_unit(frame) else {
             return;
         };
@@ -104,6 +91,58 @@ impl Request {
             // own value taken back, so the slot gives up nothing.
             self.replace_slot(frame, at, value);
         }
+        self.note_attached(frame, table);
+    }
+
+    /// `frame` attached to `table` with every CV's bucket naming the CV,
+    /// noted against the count of the table's writes
+    /// ([`exec::Annex::attached`]).
+    fn note_attached(&mut self, frame: FrameRef, table: TableId) {
+        let changes = self.tables.get(table.0 as usize).map(|table| table.changes);
+        if let Some(id) = self.vm.at(frame).and_then(|header| header.annex)
+            && let Some(annex) = self.annexes.get_mut(id)
+        {
+            annex.attached = changes;
+        }
+    }
+
+    /// Whether `frame`'s CVs are attached to its table as it left them:
+    /// nothing has reached the table to write since
+    /// ([`exec::Annex::attached`]). So an `eval` that writes nothing to
+    /// its includer's table leaves the includer's buckets unread, and one
+    /// that writes to it has the includer attached again:
+    ///
+    /// ```php
+    /// $a = 1; $b = 2;
+    /// eval('unset($GLOBALS["a"]); $GLOBALS["c"] = 3;');
+    /// var_dump(isset($a), $b, $c ?? null);
+    /// $a = 4;
+    /// eval('return 1;');
+    /// var_dump($GLOBALS["a"], array_slice(array_keys($GLOBALS), -3));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// int(2)
+    /// int(3)
+    /// int(4)
+    /// array(3) {
+    ///   [0]=>
+    ///   string(1) "a"
+    ///   [1]=>
+    ///   string(1) "b"
+    ///   [2]=>
+    ///   string(1) "c"
+    /// }
+    /// ```
+    pub(crate) fn still_attached(&self, frame: FrameRef) -> bool {
+        let Some(annex) = (self.vm.at(frame)).and_then(|header| self.annexes.get(header.annex?))
+        else {
+            return false;
+        };
+        let changes = (annex.symbol_table)
+            .and_then(|table| self.tables.get(table.0 as usize))
+            .map(|table| table.changes);
+        annex.attached.is_some() && annex.attached == changes
     }
 
     /// `zend_detach_symbol_table` (`Z/Zend/zend_execute_API.c:1892`),
@@ -208,6 +247,7 @@ impl Request {
             owner: Some(frame),
             entries,
             bytes,
+            changes: 0,
         });
         if let Some(extra) = self.annex_mut(frame) {
             extra.symbol_table = Some(table);
@@ -260,9 +300,10 @@ impl Request {
     }
 
     pub(super) fn table_mut(&mut self, table: TableId) -> Option<&mut Vec<(PhpString, Symbol)>> {
-        self.tables
-            .get_mut(table.0 as usize)
-            .map(|table| &mut table.entries)
+        self.tables.get_mut(table.0 as usize).map(|table| {
+            table.changes = table.changes.wrapping_add(1);
+            &mut table.entries
+        })
     }
 
     /// A name added to `table` holding `symbol`, `zend_hash_add_new`:
@@ -351,6 +392,7 @@ impl Request {
             return;
         };
         rebuilt.owner = Some(frame);
+        rebuilt.changes = rebuilt.changes.wrapping_add(1);
         for (_, symbol) in &mut rebuilt.entries {
             if let Symbol::Indirect(at, slot) = *symbol
                 && at == before
@@ -382,6 +424,7 @@ impl Request {
             owner: table.owner.take(),
             entries: std::mem::take(&mut table.entries),
             bytes: table.bytes.take(),
+            changes: 0,
         });
         // `EG(symbol_table)`, the first, is never one a frame rebuilt.
         while self.tables.len() > 1 && self.tables.last().is_some_and(|t| t.owner.is_none()) {
@@ -872,7 +915,9 @@ impl Request {
         if self.tables.is_empty() {
             self.tables.push(SymbolTable::global());
         }
-        &mut self.tables[0].entries
+        let global = &mut self.tables[0];
+        global.changes = global.changes.wrapping_add(1);
+        &mut global.entries
     }
 
     /// `zend_hash_graceful_reverse_destroy(&EG(symbol_table))` in

@@ -925,6 +925,12 @@ pub(crate) struct Annex {
     /// no owner, since the object owns the frame and not the other way
     /// round; none for every other frame.
     pub(crate) generator: Option<PhpObject>,
+    /// How many times the frame's table had been written when the frame
+    /// last attached to it ([`Request::attach_symbol_table`]), every CV's
+    /// bucket naming the CV from then on: an attach while the count
+    /// stands moves nothing, as an includer's when the file it included
+    /// wrote nothing to the table.
+    pub(crate) attached: Option<u32>,
     /// php's fast-call temporaries, one per `finally` block of the op
     /// array a `FAST_CALL` or an unwind has entered. php keeps two
     /// fields in the one zval at `EX_VAR(opline->result.var)`,
