@@ -1,23 +1,25 @@
 //! The debugging session: what phpdbg keeps across the requests it
 //! serves (`zend_phpdbg_globals`, `Z/sapi/phpdbg/phpdbg.h`), in one
-//! value the host owns. The tier's `safepoint` is a function with no
-//! receiver, so the value stands in a thread-local cell the tier takes it
-//! out of while it runs a prompt and puts back after. What the prompt
-//! itself serves, an `ev` or a registered function, runs with the session
-//! lent back to the cell ([`lend`]), so a native reads and writes it as
-//! php's read `PHPDBG_G` at any time, and the debugger drives it as it
-//! drives the program, by [`Session::origin`]'s rules where `ev` serves.
+//! value the host owns and lends each request it serves in the request's
+//! sink ([`Sink`]), which it takes back at the request's end, so the
+//! session is in no static (design §5.14 *Threads*). The tier's
+//! `safepoint` and the natives reach it through the request; the tier
+//! takes it out of the sink while it runs a prompt and puts it back
+//! after. What the prompt itself serves, an `ev` or a registered
+//! function, runs with the session lent back to the sink ([`lend`]), so a
+//! native reads and writes it as php's read `PHPDBG_G` at any time, and
+//! the debugger drives it as it drives the program, by
+//! [`Session::origin`]'s rules where `ev` serves.
 
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use php_ext::request::Opcode;
-use php_sapi::tier::FrameRef;
+use php_sapi::tier::{self, FrameRef, Request};
 
 use crate::bp::Breakpoints;
 use crate::cmd::Command;
-use crate::out::Colours;
+use crate::out::{Colours, Out, Sink};
 use crate::watch::Watches;
 
 /// Why the request being served was started.
@@ -291,6 +293,11 @@ pub struct Session {
     /// Whether the line has notices and errors coloured, `-b` not: what
     /// each cycle of php's main loop starts with.
     pub line_colours: Colours,
+    /// What phpdbg keeps of its own stream.
+    pub out: Out,
+    /// `PHPDBG_G(buffer)`, the last line read that held something
+    /// ([`crate::input::remembered`]).
+    pub buffer: Option<Vec<u8>>,
 }
 
 impl Session {
@@ -348,6 +355,8 @@ impl Session {
             refused: Vec::new(),
             init_runs: false,
             line_colours: Colours::On,
+            out: Out::default(),
+            buffer: None,
         }
     }
 }
@@ -358,42 +367,39 @@ impl Default for Session {
     }
 }
 
-thread_local! {
-    static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
+/// The session taken out of the request's sink, none while a prompt
+/// holds it or where the request writes to another sink.
+pub fn take(req: &mut Request) -> Option<Session> {
+    tier::sink::<Sink>(req)?.session.take()
 }
 
-/// The session put where the tier finds it.
-pub fn install(session: Session) {
-    SESSION.set(Some(session));
+/// The session put back in the request's sink.
+pub fn put(req: &mut Request, session: Session) {
+    if let Some(sink) = tier::sink::<Sink>(req) {
+        sink.session = Some(session);
+    }
 }
 
-/// The session taken out of its cell, none while a prompt holds it.
-pub fn take() -> Option<Session> {
-    SESSION.with(|cell| cell.try_borrow_mut().ok()?.take())
-}
-
-/// The session put back.
-pub fn put(session: Session) {
-    SESSION.set(Some(session));
-}
-
-/// `f` run with `s` lent back to its cell, for what the prompt serves;
-/// `s` is what the cell holds after, what `f` left of it.
-pub fn lend<R>(s: &mut Session, f: impl FnOnce() -> R) -> R {
-    put(std::mem::take(s));
-    let result = f();
-    if let Some(back) = take() {
+/// `f` run with `s` lent back to the request's sink, for what the prompt
+/// serves; `s` is what the sink holds after, what `f` left of it.
+pub fn lend<R>(req: &mut Request, s: &mut Session, f: impl FnOnce(&mut Request) -> R) -> R {
+    put(req, std::mem::take(s));
+    let result = f(req);
+    if let Some(back) = take(req) {
         *s = back;
     }
     result
 }
 
-/// `f` over the session where it stands in its cell; none where it is
-/// out of it or already being read, which is where a safepoint inside
-/// what the session itself is doing finds it.
-pub fn with<R>(f: impl FnOnce(&mut Session) -> R) -> Option<R> {
-    SESSION.with(|cell| {
-        let mut cell = cell.try_borrow_mut().ok()?;
-        cell.as_mut().map(f)
-    })
+/// `f` over the session where it stands in the request's sink; none
+/// where it is out of it, which is where a safepoint inside what the
+/// session itself is doing finds it.
+pub fn with<R>(req: &mut Request, f: impl FnOnce(&mut Session) -> R) -> Option<R> {
+    tier::sink::<Sink>(req)?.session.as_mut().map(f)
+}
+
+/// `f` over phpdbg's stream where the session stands in the request's
+/// sink: what the debugger writes while the program runs.
+pub fn say(req: &mut Request, f: impl FnOnce(&mut Out)) {
+    with(req, |s| f(&mut s.out));
 }

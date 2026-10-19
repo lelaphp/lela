@@ -5,7 +5,7 @@
 //! array, an opcode); printed as php prints them when hit and when
 //! listed.
 
-use crate::out;
+use crate::out::Out;
 
 /// What a breakpoint stops at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,23 +310,23 @@ impl Breakpoints {
     /// [Breakpoint already exists for f.php:0]
     /// prompt>
     /// ```
-    pub fn set_named_opline(&mut self, id: u32, kind: Kind, found: Resolution) {
+    pub fn set_named_opline(&mut self, out: &mut Out, id: u32, kind: Kind, found: Resolution) {
         let (Some(shown), Some(table)) = (kind.shown(), kind.table()) else {
             return;
         };
         let resolved = match found {
             Resolution::At(address) => {
                 self.keep(address, id, Some(table));
-                out::notice(format!("Breakpoint #{id} added at {shown}").as_bytes());
+                out.notice(format!("Breakpoint #{id} added at {shown}").as_bytes());
                 Some(address)
             }
             Resolution::Pending => {
-                out::notice(format!("Pending breakpoint #{id} at {shown}").as_bytes());
+                out.notice(format!("Pending breakpoint #{id} at {shown}").as_bytes());
                 None
             }
         };
         if self.has(|k| k.same_opline(&kind)) {
-            out::error(format!("Breakpoint already exists for {shown}").as_bytes());
+            out.error(format!("Breakpoint already exists for {shown}").as_bytes());
             self.count -= 1;
             return;
         }
@@ -401,7 +401,7 @@ impl Breakpoints {
     /// [Script ended normally]
     /// prompt>
     /// ```
-    pub fn resolve(&mut self, op: OpArray<'_>, last: u32) {
+    pub fn resolve(&mut self, out: &mut Out, op: OpArray<'_>, last: u32) {
         let table = Table::of(op);
         if self.resolving & table as u8 == 0 {
             return;
@@ -437,7 +437,7 @@ impl Breakpoints {
                 _ => continue,
             };
             if last <= opline {
-                out::error(
+                out.error(
                     format!(
                         "There are only {last} oplines in {what} {shown} (breaking at opline {opline} impossible)"
                     )
@@ -449,7 +449,7 @@ impl Breakpoints {
             let Some(Kept { address, id, .. }) = self.oplines.last() else {
                 continue;
             };
-            out::notice(
+            out.notice(
                 format!("Breakpoint #{id} resolved at {shown}#{opline} (opline #{address})")
                     .as_bytes(),
             );
@@ -463,7 +463,7 @@ impl Breakpoints {
     /// `phpdbg_set_breakpoint_file` past its path resolution: `file` the
     /// path a compiled file carries, or none where the path named no
     /// compiled file and is left pending under the name as given.
-    pub fn set_file(&mut self, file: Option<Vec<u8>>, named: &[u8], line: i64) {
+    pub fn set_file(&mut self, out: &mut Out, file: Option<Vec<u8>>, named: &[u8], line: i64) {
         let (kind, pending) = match file {
             Some(file) => (Kind::File { file, line }, false),
             None => (
@@ -485,7 +485,7 @@ impl Breakpoints {
             return;
         };
         if exists {
-            out::error(format!("Breakpoint at {}:{line} exists", lossy(file)).as_bytes());
+            out.error(format!("Breakpoint at {}:{line} exists", lossy(file)).as_bytes());
             return;
         }
         let id = self.next_id();
@@ -495,7 +495,7 @@ impl Breakpoints {
             format!("Breakpoint #{id} added at {}:{line}", lossy(file))
         };
         self.push(id, kind, None);
-        out::notice(message.as_bytes());
+        out.notice(message.as_bytes());
     }
 
     /// `phpdbg_resolve_pending_file_break`: every pending line whose name
@@ -519,10 +519,10 @@ impl Breakpoints {
     }
 
     /// `phpdbg_set_breakpoint_symbol`.
-    pub fn set_symbol(&mut self, name: &[u8]) {
+    pub fn set_symbol(&mut self, out: &mut Out, name: &[u8]) {
         let name = name.strip_prefix(b"\\").unwrap_or(name);
         if self.has(|k| matches!(k, Kind::Symbol { name: n } if n == name)) {
-            out::error(format!("Breakpoint exists at {}", lossy(name)).as_bytes());
+            out.error(format!("Breakpoint exists at {}", lossy(name)).as_bytes());
             return;
         }
         let id = self.next_id();
@@ -533,18 +533,16 @@ impl Breakpoints {
             },
             None,
         );
-        out::notice(format!("Breakpoint #{id} added at {}", lossy(name)).as_bytes());
+        out.notice(format!("Breakpoint #{id} added at {}", lossy(name)).as_bytes());
     }
 
     /// `phpdbg_set_breakpoint_method`.
-    pub fn set_method(&mut self, class: &[u8], name: &[u8]) {
+    pub fn set_method(&mut self, out: &mut Out, class: &[u8], name: &[u8]) {
         let class = class.strip_prefix(b"\\").unwrap_or(class);
         if self.has(
             |k| matches!(k, Kind::Method { class: c, name: n } if same(c, class) && same(n, name)),
         ) {
-            out::error(
-                format!("Breakpoint exists at {}::{}", lossy(class), lossy(name)).as_bytes(),
-            );
+            out.error(format!("Breakpoint exists at {}::{}", lossy(class), lossy(name)).as_bytes());
             return;
         }
         let id = self.next_id();
@@ -556,7 +554,7 @@ impl Breakpoints {
             },
             None,
         );
-        out::notice(
+        out.notice(
             format!(
                 "Breakpoint #{id} added at {}::{}",
                 lossy(class),
@@ -567,9 +565,9 @@ impl Breakpoints {
     }
 
     /// `phpdbg_set_breakpoint_opcode`.
-    pub fn set_opcode(&mut self, name: &[u8]) {
+    pub fn set_opcode(&mut self, out: &mut Out, name: &[u8]) {
         if self.has(|k| matches!(k, Kind::Opcode { name: n } if n == name)) {
-            out::error(format!("Breakpoint exists for {}", lossy(name)).as_bytes());
+            out.error(format!("Breakpoint exists for {}", lossy(name)).as_bytes());
             return;
         }
         let id = self.next_id();
@@ -580,16 +578,16 @@ impl Breakpoints {
             },
             None,
         );
-        out::notice(format!("Breakpoint #{id} added at {}", lossy(name)).as_bytes());
+        out.notice(format!("Breakpoint #{id} added at {}", lossy(name)).as_bytes());
     }
 
     /// `phpdbg_set_breakpoint_opline_ex`: the opline `opline` of the op
     /// array `at` names (its file, function and class), numbered as php
     /// numbers it by address.
-    pub fn set_opline(&mut self, at: &At<'_>, opline: u32) {
+    pub fn set_opline(&mut self, out: &mut Out, at: &At<'_>, opline: u32) {
         let address = address(at.op_array(), opline);
         if self.oplines.iter().any(|row| row.address == address) {
-            out::error(format!("Breakpoint exists for opline #{address}").as_bytes());
+            out.error(format!("Breakpoint exists for opline #{address}").as_bytes());
             return;
         }
         let id = self.next_id();
@@ -605,7 +603,7 @@ impl Breakpoints {
             },
             None,
         );
-        out::notice(format!("Breakpoint #{id} added at #{address}").as_bytes());
+        out.notice(format!("Breakpoint #{id} added at #{address}").as_bytes());
     }
 
     /// `phpdbg_clear()`'s `zend_hash_clean` of every table but the
@@ -621,9 +619,9 @@ impl Breakpoints {
     /// its name's table, every resolve flag where the opline table held
     /// one breakpoint, as php's `flags &= PHPDBG_HAS_OPLINE_BP` clears
     /// them, and its resolved opline.
-    pub fn delete(&mut self, id: i64) {
+    pub fn delete(&mut self, out: &mut Out, id: i64) {
         let Some(at) = self.list.iter().position(|brake| i64::from(brake.id) == id) else {
-            out::error(format!("Failed to find breakpoint #{id}").as_bytes());
+            out.error(format!("Failed to find breakpoint #{id}").as_bytes());
             return;
         };
         let brake = self.list.remove(at);
@@ -643,7 +641,7 @@ impl Breakpoints {
         if let Some(address) = kept {
             self.oplines.retain(|row| row.address != address);
         }
-        out::notice(format!("Deleted breakpoint #{id}").as_bytes());
+        out.notice(format!("Deleted breakpoint #{id}").as_bytes());
     }
 
     /// `phpdbg_enable_breakpoint` and `phpdbg_disable_breakpoint`: the
@@ -717,7 +715,7 @@ impl Breakpoints {
     }
 
     /// `phpdbg_hit_breakpoint` and `phpdbg_print_breakpoint`.
-    pub fn hit(&mut self, found: usize, at: &At<'_>) {
+    pub fn hit(&mut self, out: &mut Out, found: usize, at: &At<'_>) {
         let Some(brake) = self.list.get_mut(found) else {
             return;
         };
@@ -767,11 +765,11 @@ impl Breakpoints {
                 )
             }
         };
-        out::notice(message.as_bytes());
+        out.notice(message.as_bytes());
     }
 
     /// `phpdbg_clear_breakpoints`, after `clear`'s count of each table.
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self, out: &mut Out) {
         let count =
             |test: &dyn Fn(&Kind) -> bool| self.list.iter().filter(|b| test(&b.kind)).count();
         let distinct = |key: &dyn Fn(&Kind) -> Option<Vec<u8>>| {
@@ -804,7 +802,7 @@ impl Breakpoints {
         let file_oplines = count(&|k| matches!(k, Kind::FileOpline { .. }));
         let function_oplines = count(&|k| matches!(k, Kind::FunctionOpline { .. }));
         let method_oplines = count(&|k| matches!(k, Kind::MethodOpline { .. }));
-        out::out(b"Clearing Breakpoints\n");
+        out.out(b"Clearing Breakpoints\n");
         for (label, n) in [
             ("File              ", files),
             ("Functions         ", symbols),
@@ -815,7 +813,7 @@ impl Breakpoints {
             ("Method oplines    ", method_oplines),
             ("Conditionals      ", 0),
         ] {
-            out::writeln(format!("{label}{n}").as_bytes());
+            out.writeln(format!("{label}{n}").as_bytes());
         }
         self.list.clear();
         self.oplines.clear();
@@ -877,7 +875,7 @@ impl Breakpoints {
     /// #3%sZEND_ECHO
     /// prompt>
     /// ```
-    pub fn print(&self) {
+    pub fn print(&self, out: &mut Out) {
         const SEPARATE: &[u8] = b"------------------------------------------------\n";
         let tables: [(&str, Listed); 9] = [
             (
@@ -970,10 +968,10 @@ impl Breakpoints {
             if rows.is_empty() && !matches!(listed, Listed::Oplines) {
                 continue;
             }
-            out::out(SEPARATE);
-            out::out(format!("{title}:\n").as_bytes());
+            out.out(SEPARATE);
+            out.out(format!("{title}:\n").as_bytes());
             for line in rows {
-                out::writeln(line.as_bytes());
+                out.writeln(line.as_bytes());
             }
         }
     }

@@ -4,10 +4,9 @@
 //! before a newline being the end of the session, and a line of nothing
 //! but blanks standing for the last line that had something on it.
 
-use std::cell::RefCell;
 use std::io::BufRead;
 
-use crate::out;
+use crate::session::Session;
 
 /// What reading a line found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,16 +17,11 @@ pub enum Line {
     End,
 }
 
-thread_local! {
-    /// `PHPDBG_G(buffer)`, the last line that held something.
-    static LAST: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
-}
-
 /// `phpdbg_consume_stdin_line`: one line with its newline, the `^C`
 /// bytes a terminal sends dropped; the end of input where no newline
 /// comes.
-pub fn consume_line() -> Line {
-    out::line_read();
+pub fn consume_line(s: &mut Session) -> Line {
+    s.out.line_read();
     let mut line = Vec::new();
     let read = std::io::stdin().lock().read_until(b'\n', &mut line);
     match read {
@@ -41,26 +35,26 @@ pub fn consume_line() -> Line {
 
 /// `phpdbg_read_input(NULL)`: the prompt, then the line with its leading
 /// blanks taken off; a line left empty is the last one that was not.
-pub fn read_input(prompt: &[u8]) -> Line {
-    out::write(prompt);
-    let Line::Read(line) = consume_line() else {
+pub fn read_input(s: &mut Session, prompt: &[u8]) -> Line {
+    s.out.write(prompt);
+    let Line::Read(line) = consume_line(s) else {
         return Line::End;
     };
-    Line::Read(remembered(&line))
+    Line::Read(remembered(s, &line))
 }
 
 /// A line given rather than read (`phpdbg_read_input(buffered)`), held
-/// to the same rule.
-pub fn remembered(line: &[u8]) -> Vec<u8> {
+/// to the same rule, the session's `PHPDBG_G(buffer)` the line kept.
+pub fn remembered(s: &mut Session, line: &[u8]) -> Vec<u8> {
     let start = line
         .iter()
         .position(|b| !b.is_ascii_whitespace())
         .unwrap_or(line.len());
     let trimmed = line[start..].to_vec();
     if trimmed.is_empty() {
-        return LAST.with_borrow(Clone::clone).unwrap_or_default();
+        return s.buffer.clone().unwrap_or_default();
     }
-    LAST.set(Some(trimmed.clone()));
+    s.buffer = Some(trimmed.clone());
     trimmed
 }
 
@@ -76,11 +70,11 @@ pub enum Answer {
 
 /// `phpdbg_ask_user_permission`: the question, then lines until one is
 /// `y` or `n` alone, or the input ends.
-pub fn ask(question: &[u8]) -> Answer {
-    out::out(question);
-    out::out(b" (type y or n): ");
+pub fn ask(s: &mut Session, question: &[u8]) -> Answer {
+    s.out.out(question);
+    s.out.out(b" (type y or n): ");
     loop {
-        let Line::Read(line) = consume_line() else {
+        let Line::Read(line) = consume_line(s) else {
             return Answer::End;
         };
         let answer = line.strip_suffix(b"\n").unwrap_or(&line);
@@ -88,12 +82,12 @@ pub fn ask(question: &[u8]) -> Answer {
         match answer {
             b"y" => return Answer::Yes,
             b"n" => return Answer::No,
-            _ => out::out(b"Please enter either y (yes) or n (no): "),
+            _ => s.out.out(b"Please enter either y (yes) or n (no): "),
         }
     }
 }
 
 /// The last line forgotten, as php's restart forgets it.
-pub fn forget() {
-    LAST.set(None);
+pub fn forget(s: &mut Session) {
+    s.buffer = None;
 }

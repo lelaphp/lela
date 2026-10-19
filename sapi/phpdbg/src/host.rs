@@ -17,7 +17,7 @@ use php_sapi::{
 use crate::cmd::Command;
 use crate::out::{self, Sink};
 use crate::prompt;
-use crate::session::{self, AfterRun, Context, Execution, Plan, Session, Stop};
+use crate::session::{AfterRun, Context, Execution, Plan, Session, Stop};
 use crate::{NAME, input};
 
 /// The session's requests, until it quits; the status the last of them
@@ -42,19 +42,11 @@ use crate::{NAME, input};
 /// [Script ended normally]
 /// prompt>
 /// ```
-pub fn serve(engine: &Engine) -> i32 {
+pub fn serve(engine: &Engine, mut s: Session) -> i32 {
     let mut status = 0;
     loop {
-        let Some(mut s) = session::take() else {
-            return status;
-        };
         let plan = match s.stopped.take() {
-            Some(Stop::Quit) => {
-                s.stopped = Some(Stop::Quit);
-                let status = s.exit_status;
-                session::put(s);
-                return status;
-            }
+            Some(Stop::Quit) => return s.exit_status,
             Some(Stop::Restart(args) | Stop::RunWith(args)) => {
                 if let Some(args) = args {
                     set_arguments(&mut s, &args);
@@ -88,7 +80,7 @@ pub fn serve(engine: &Engine) -> i32 {
                     s.refused = refused;
                     s.context = Context::Refused;
                     s.status = Some(255);
-                    out::stick_log();
+                    s.out.stick_log();
                     Plan::Idle
                 } else if s.init_due
                     && let Some(refused) = refused(engine, &s)
@@ -108,22 +100,22 @@ pub fn serve(engine: &Engine) -> i32 {
         s.standing = None;
         s.thrown_into = None;
         let description = describe(&s, plan);
-        session::put(s);
-        let (observed, mut sink) =
-            engine.serve(description, Box::new(Sink), |_| HostServes::Program);
+        let sink = Box::new(Sink { session: Some(s) });
+        let (observed, mut sink) = engine.serve(description, sink, |_| HostServes::Program);
         if observed.start_failed {
             return start_failed(sink.as_mut());
         }
-        let Some(mut s) = session::take() else {
+        let sink: Box<dyn std::any::Any> = sink;
+        let Some(back) = sink.downcast::<Sink>().ok().and_then(|sink| sink.session) else {
             return status;
         };
+        s = back;
         s.exit_status = s.status.take().unwrap_or(observed.exit_code);
         status = s.exit_status;
         // `php_sapi_phpdbg_deactivate`: what the request compiled goes
         // with it.
         s.sources.clear();
         ended(&mut s, plan, &observed);
-        session::put(s);
     }
 }
 
@@ -201,12 +193,12 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     if cycle_ended {
         s.registered.clear();
         s.init_due = true;
-        out::unstick_log();
+        s.out.unstick_log();
     }
     let execution = std::mem::replace(&mut s.execution, Execution::Not);
     if execution != Execution::Not {
         if let Some(uncaught) = &observed.uncaught {
-            out::error(
+            s.out.error(
                 format!(
                     "Uncaught {} in {} on line {}",
                     String::from_utf8_lossy(&uncaught.class),
@@ -215,7 +207,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
                 )
                 .as_bytes(),
             );
-            out::writeln(&uncaught.text);
+            s.out.writeln(&uncaught.text);
         }
         crate::watch::removed_at_end(s);
     }
@@ -233,7 +225,7 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     // (`PHP_MINIT_FUNCTION(phpdbg)`, `php_phpdbg_globals_ctor`), its init
     // files numbering from there before the lines are run again.
     if cycle_ended {
-        out::set_colours(s.line_colours);
+        s.out.set_colours(s.line_colours);
         s.quiet = s.line_quiet;
         s.carried = s.breaks.export();
         s.breaks = crate::bp::Breakpoints::default();
@@ -252,7 +244,7 @@ fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
             if s.after_run == AfterRun::Quit {
                 s.stopped = Some(Stop::Quit);
             } else if s.stopped != Some(Stop::Quit) {
-                cycle_notice();
+                cycle_notice(s);
             }
         }
         // `clean`, or `exec` where php takes something to be executing,
@@ -260,7 +252,7 @@ fn stopped(s: &mut Session, execution: Execution, cycle_ended: bool) {
         // flag clear, so the module's shutdown writes its notice, which
         // a run that `clean` or `exec` stopped does not reach.
         Some(Stop::Clean | Stop::Exec) if cycle_ended && execution != Execution::Run => {
-            cycle_notice();
+            cycle_notice(s);
         }
         None
         | Some(
@@ -304,14 +296,14 @@ fn inline_ran(s: &mut Session, plan: Plan) {
         // after their run, where they read one, to a prompt the cleaned
         // cycle bails out of at once, so that cycle asks nothing and ends
         // as one with no startup run does; with none, it is `run` again.
-        let answer = input::ask(b"Do you really want to restart execution?");
+        let answer = input::ask(s, b"Do you really want to restart execution?");
         if s.after_run == AfterRun::Quit {
             s.stopped = Some(Stop::Quit);
             return;
         }
         match answer {
             input::Answer::Yes if !s.read_after_run => s.stopped = Some(Stop::Restart(None)),
-            input::Answer::No => cycle_notice(),
+            input::Answer::No => cycle_notice(s),
             input::Answer::Yes | input::Answer::End => {}
         }
         return;
@@ -319,7 +311,7 @@ fn inline_ran(s: &mut Session, plan: Plan) {
     if !counted {
         crate::debugger::announce(s);
     }
-    cycle_notice();
+    cycle_notice(s);
 }
 
 /// What `PHP_MSHUTDOWN_FUNCTION(phpdbg)` writes where the cycle ends and
@@ -351,13 +343,13 @@ fn inline_ran(s: &mut Session, plan: Plan) {
 /// prompt> [The command "intdiv" could not be found]
 /// prompt>
 /// ```
-fn cycle_notice() {
-    out::notice(b"Script ended normally");
-    input::forget();
+fn cycle_notice(s: &mut Session) {
+    s.out.notice(b"Script ended normally");
+    input::forget(s);
 }
 
 /// What the compiler says where the execution context does not compile,
-/// learned from a lint of it while the session is out of its cell, so
+/// learned from a lint of it, whose sink holds no session, so
 /// the log stops at no prompt: php runs the init files before its
 /// compile, so a context that will be refused has them run first and
 /// the log written after them, in a request of their own that the
@@ -520,13 +512,14 @@ pub fn real_path(path: &[u8]) -> Vec<u8> {
 pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
     let stdin = name == b"Standard input code" && s.stdin_code.is_some();
     if stdin || s.sources.iter().any(|kept| kept.file == name) {
-        s.breaks.set_file(Some(name.to_vec()), name, line);
+        s.breaks
+            .set_file(&mut s.out, Some(name.to_vec()), name, line);
         return;
     }
     let os = Path::new(std::ffi::OsStr::from_bytes(name));
     match std::fs::metadata(os) {
         Ok(meta) if !meta.is_file() => {
-            out::error(
+            s.out.error(
                 format!(
                     "Cannot set breakpoint in {}, it is not a regular file",
                     String::from_utf8_lossy(name)
@@ -539,10 +532,10 @@ pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
                 |_| name.to_vec(),
                 |path| path.as_os_str().as_bytes().to_vec(),
             );
-            s.breaks.set_file(Some(real), name, line);
+            s.breaks.set_file(&mut s.out, Some(real), name, line);
         }
         Err(_) if name.first() == Some(&b'/') => {
-            out::error(
+            s.out.error(
                 format!(
                     "Cannot stat {}, it does not exist",
                     String::from_utf8_lossy(name)
@@ -563,7 +556,8 @@ pub fn file_break(s: &mut Session, name: &[u8], line: i64) {
                 .into_iter()
                 .chain(kept)
                 .find(|file| tail(file));
-            s.breaks.set_file(compiled.map(<[u8]>::to_vec), name, line);
+            s.breaks
+                .set_file(&mut s.out, compiled.map(<[u8]>::to_vec), name, line);
         }
     }
 }
@@ -610,9 +604,8 @@ mod tests {
     #[test]
     fn a_failed_start_is_could_not_startup_and_status_one() {
         let engine = failing_start();
-        session::install(Session::new());
-        assert_eq!(serve(&engine), 1);
-        let s = session::take().unwrap_or_default();
+        assert_eq!(serve(&engine, Session::new()), 1);
+        let s = Session::new();
         let sink = Box::new(Capture::default());
         let (observed, mut sink) =
             engine.serve(describe(&s, Plan::Idle), sink, |_| HostServes::Program);

@@ -120,7 +120,7 @@ impl Tier for Debugger {
 /// prompt>
 /// ```
 fn entered(req: &mut Request, frame: FrameRef) -> Flow {
-    let Some(plan) = session::with(|s| {
+    let Some(plan) = session::with(req, |s| {
         // The init files' own request comes before the context's first
         // compile, as do the servings inside them.
         s.started |= !s.initializing && s.plan != Some(Plan::Init);
@@ -131,12 +131,12 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
     };
     match plan {
         Plan::Hold => {
-            session::with(|s| s.plan = Some(Plan::Run));
+            session::with(req, |s| s.plan = Some(Plan::Run));
             held(req, frame)
         }
         Plan::Init => {
-            session::with(|s| s.plan = Some(Plan::Run));
-            let Some(mut session) = session::take() else {
+            session::with(req, |s| s.plan = Some(Plan::Run));
+            let Some(mut session) = session::take(req) else {
                 return Flow::Continue;
             };
             crate::init::run(&mut session, &mut Here::Idle { req });
@@ -148,8 +148,8 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 // (`Z/sapi/phpdbg/phpdbg.c:1540-1553`): its log written
                 // nowhere, each diagnostic displayed. php is fully started
                 // after it, before its startup run asks anything.
-                out::discarded(|| {
-                    prompt::refused_again(&mut session, Some(&mut Here::Idle { req }));
+                out::discarded(&mut session, |session| {
+                    prompt::refused_again(session, Some(&mut Here::Idle { req }));
                 });
                 session.started = true;
             }
@@ -165,7 +165,8 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             } else if quits {
                 // `-rr`'s run compiles it under `PHPDBG_PREVENT_INTERACTIVE`:
                 // what the compiler says alone, and the session ends.
-                let _ = out::replay(&session.refused, || AfterLog::Returned);
+                let refused = session.refused.clone();
+                let _ = out::replay(&mut session, &refused, |_| AfterLog::Returned);
                 session.status = Some(255);
                 session.stopped = Some(session::Stop::Quit);
             } else if runs {
@@ -178,13 +179,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 refused(&mut session);
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });
             }
-            session::put(session);
+            session::put(req, session);
             tier::exit(req);
             Flow::Resume(frame)
         }
         Plan::Idle => {
-            session::with(|s| s.plan = Some(Plan::Run));
-            let Some(mut session) = session::take() else {
+            session::with(req, |s| s.plan = Some(Plan::Run));
+            let Some(mut session) = session::take(req) else {
                 return Flow::Continue;
             };
             if let Some(command) = session.job.take() {
@@ -197,13 +198,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                 let compiles = session.init_due && session.context == Context::Refused;
                 crate::init::run(&mut session, &mut Here::Idle { req });
                 if compiles && session.stopped.is_none() {
-                    out::discarded(|| {
-                        prompt::refused_again(&mut session, Some(&mut Here::Idle { req }));
+                    out::discarded(&mut session, |session| {
+                        prompt::refused_again(session, Some(&mut Here::Idle { req }));
                     });
                 }
                 let _ = prompted(&mut session, req, |req| Here::Idle { req });
             }
-            session::put(session);
+            session::put(req, session);
             tier::exit(req);
             Flow::Resume(frame)
         }
@@ -214,7 +215,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
             }
             // The run's own entry, not what the init files or the prompt
             // serve inside the request.
-            session::with(|s| {
+            session::with(req, |s| {
                 if !s.initializing && s.origin == Origin::Program && s.execution == Execution::Run {
                     announce(s);
                 }
@@ -238,10 +239,10 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
 /// the answer is no; where they left something pending, the context
 /// does not open; and the run cleans up after them.
 fn initialized(req: &mut Request) -> bool {
-    if session::with(|s| !s.init_due).unwrap_or(true) {
+    if session::with(req, |s| !s.init_due).unwrap_or(true) {
         return false;
     }
-    let Some(mut session) = session::take() else {
+    let Some(mut session) = session::take(req) else {
         return false;
     };
     let execution = std::mem::replace(&mut session.execution, Execution::Not);
@@ -266,7 +267,7 @@ fn initialized(req: &mut Request) -> bool {
             idle_prompt(&mut session, req, quits);
         }
     } else if session.stopped.is_none() && unopened(&mut session, req) {
-        out::error(
+        session.out.error(
             format!(
                 "Failed to compile {}, cannot run",
                 String::from_utf8_lossy(session.exec.as_deref().unwrap_or_default())
@@ -281,7 +282,7 @@ fn initialized(req: &mut Request) -> bool {
         session.execution = execution;
     }
     let stopped = session.stopped.is_some();
-    session::put(session);
+    session::put(req, session);
     stopped
 }
 
@@ -300,7 +301,7 @@ pub fn announce(session: &mut Session) {
         } else {
             [&b"Successful compilation of "[..], exec].concat()
         };
-        out::notice(&message);
+        session.out.notice(&message);
     }
 }
 
@@ -346,7 +347,7 @@ fn unopened(session: &mut Session, req: &mut Request) -> bool {
     }
     // `run` compiles it again, and writes the notice then.
     session.context = Context::Unannounced;
-    out::error(
+    session.out.error(
         format!(
             "Could not open file {}",
             String::from_utf8_lossy(session.exec.as_deref().unwrap_or_default())
@@ -362,7 +363,7 @@ fn unopened(session: &mut Session, req: &mut Request) -> bool {
 /// pending, php's compile after them fails, and the prompt stands with
 /// nothing compiled.
 fn held(req: &mut Request, frame: FrameRef) -> Flow {
-    let Some(mut session) = session::take() else {
+    let Some(mut session) = session::take(req) else {
         return Flow::Continue;
     };
     session.program_held = true;
@@ -372,14 +373,14 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
         // A `run` among them runs the program now, the loop stopping for
         // nothing but a throwable nothing catches.
         inline(&mut session, req, frame);
-        session::put(session);
+        session::put(req, session);
         return executed(req, frame);
     }
     if session.stopped.is_none() && unopened(&mut session, req) {
         idle_prompt(&mut session, req, false);
     }
     if session.stopped.is_some() {
-        session::put(session);
+        session::put(req, session);
         tier::exit(req);
         return Flow::Resume(frame);
     }
@@ -391,7 +392,7 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     }
     let outcome = prompted(&mut session, req, |req| Here::Held { req });
     let stopped = session.stopped.is_some();
-    session::put(session);
+    session::put(req, session);
     if stopped || outcome == Outcome::Stopped {
         tier::exit(req);
         return Flow::Resume(frame);
@@ -475,10 +476,10 @@ struct Standing {
 /// fatal is rendered, and so does the frame it was stepping, which the
 /// log's prompt stands in ([`fatal_logged`]).
 fn drive(req: &mut Request, frame: FrameRef) -> Flow {
-    let outer = session::with(|s| s.standing).flatten();
+    let outer = session::with(req, |s| s.standing).flatten();
     let flow = stepped(req, frame);
     if !matches!(flow, Flow::Bail(_)) {
-        session::with(|s| s.standing = outer);
+        session::with(req, |s| s.standing = outer);
     }
     flow
 }
@@ -517,18 +518,16 @@ fn drive(req: &mut Request, frame: FrameRef) -> Flow {
 /// prompt>
 /// ```
 pub fn fatal_logged(req: &mut Request) -> AfterLog {
-    if out::logging() {
-        return AfterLog::Returned;
-    }
-    let Some(mut session) = session::take() else {
+    let Some(mut session) = session::take(req) else {
         return AfterLog::Returned;
     };
     // `-rr`'s `PHPDBG_PREVENT_INTERACTIVE` is set when its run begins,
     // after the init files.
-    if session.origin == Origin::Eval
+    if session.out.logging()
+        || session.origin == Origin::Eval
         || (session.after_run == AfterRun::Quit && !session.initializing)
     {
-        session::put(session);
+        session::put(req, session);
         return AfterLog::Returned;
     }
     let standing = session
@@ -540,9 +539,9 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
         .map_or((prompt::NO_ACTIVE_FILE, 0), |(_, position)| {
             (position.file.as_slice(), position.line)
         });
-    crate::list::code(&session, file, line);
+    crate::list::code(&mut session, file, line);
     if !session.started {
-        session::put(session);
+        session::put(req, session);
         return AfterLog::Returned;
     }
     // The context's own compile refused it: nothing is held, and the
@@ -556,9 +555,9 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
         None if session.exec.is_some() && session.context != Context::Refused => Here::Held { req },
         None => Here::Idle { req },
     };
-    let outcome = out::in_log(|| prompt::interactive(&mut session, &mut here));
+    let outcome = out::in_log(&mut session, |s| prompt::interactive(s, &mut here));
     let after = outcome.after_log(session.stopped.is_some());
-    session::put(session);
+    session::put(req, session);
     if after == AfterLog::Returned {
         let _ = crate::watch::changed(req);
     }
@@ -624,8 +623,10 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         if let Some(stop) = checked(req, &at, &position) {
             return stop;
         }
-        if session::with(|s| s.thrown_into.take_if(|frame| *frame == at.frame).is_some())
-            .unwrap_or(false)
+        if session::with(req, |s| {
+            s.thrown_into.take_if(|frame| *frame == at.frame).is_some()
+        })
+        .unwrap_or(false)
         {
             at.unwinding = true;
             at.raised_line = position.line;
@@ -646,7 +647,7 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         } else {
             Next::Step
         };
-        session::with(|s| s.standing = Some(at.frame));
+        session::with(req, |s| s.standing = Some(at.frame));
         let stepped = match next {
             Next::HandBack => return Flow::Resume(at.frame),
             Next::Unwind => tier::unwind(req, at.frame),
@@ -654,7 +655,7 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         };
         if let Ok(edge) = &stepped {
             let vmret = vm_return(req, at.frame, *edge);
-            session::with(|s| s.vmret = vmret);
+            session::with(req, |s| s.vmret = vmret);
         }
         match stepped {
             Ok(
@@ -709,7 +710,7 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
     // `PHPDBG_BP_RESOLVE_MASK` (`phpdbg_prompt.c:1650-1653`), first,
     // whatever else the loop is under: the breakpoints set on this op
     // array's oplines resolved, and said so, before each of its oplines.
-    if session::with(|s| s.breaks.resolves()).unwrap_or(false) {
+    if session::with(req, |s| s.breaks.resolves()).unwrap_or(false) {
         let serves = read::serves(req, at.frame);
         let (function, class) = match &serves {
             read::Serves::Code => (None, None),
@@ -720,13 +721,13 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
             function,
             class,
         };
-        session::with(|s| s.breaks.resolve(op, position.oplines));
+        session::with(req, |s| s.breaks.resolve(&mut s.out, op, position.oplines));
     }
     // `PHPDBG_IS_INITIALIZING` (`phpdbg_prompt.c:1704-1708`): what the
     // init files serve runs uninterrupted, logged by no oplog, but for
     // the throwable nothing catches, which is checked first. php's `-rr`
     // flag is set when the startup run begins, after the init files.
-    if session::with(|s| s.initializing).unwrap_or(false) {
+    if session::with(req, |s| s.initializing).unwrap_or(false) {
         let pending = shown::pending(req);
         if !uncaught(req, at.frame, pending.as_ref()) {
             return None;
@@ -736,10 +737,11 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
     // `-rr`'s `PHPDBG_PREVENT_INTERACTIVE` (`phpdbg_prompt.c:1666-1669`):
     // the opline logged and nothing checked, so an uncaught throwable is
     // the run's end to report.
-    if session::with(|s| s.after_run == AfterRun::Quit).unwrap_or(false) {
+    if session::with(req, |s| s.after_run == AfterRun::Quit).unwrap_or(false) {
         if !at.unwinding {
             stepped_opline(req, at.frame);
-            logged(position, &read::serves(req, at.frame));
+            let serves = read::serves(req, at.frame);
+            logged(req, position, &serves);
         }
         return None;
     }
@@ -775,7 +777,7 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
         if !stop {
             stepped_opline(req, at.frame);
         }
-        logged(position, &serves);
+        logged(req, position, &serves);
     }
     let uncaught_here = pending.is_some() && !tier::catches(req, at.frame);
     let checks = Checks {
@@ -790,39 +792,39 @@ fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Optio
         return Some(Flow::Resume(at.frame));
     }
     if !stops {
-        session::with(|s| s.last_line = line);
+        session::with(req, |s| s.last_line = line);
         return None;
     }
     let flow = interactive(req, at.frame, &position.file, shown);
     // `next:`'s `PHPDBG_G(last_line)`, after the prompt, where what an
     // `ev` there ran has moved it.
-    session::with(|s| s.last_line = line);
+    session::with(req, |s| s.last_line = line);
     flow
 }
 
 /// The uncaught throwable, reported once per throwable, outside what
 /// `ev` serves: whether the loop stops for it.
 fn uncaught(req: &mut Request, frame: FrameRef, pending: Option<&shown::Pending>) -> bool {
-    let origin = session::with(|s| s.origin).unwrap_or(Origin::Program);
+    let origin = session::with(req, |s| s.origin).unwrap_or(Origin::Program);
     let Some(thrown) = pending.filter(|_| origin == Origin::Program) else {
         return false;
     };
-    let handled = session::with(|s| s.handled == Some(thrown.id)).unwrap_or(true);
+    let handled = session::with(req, |s| s.handled == Some(thrown.id)).unwrap_or(true);
     if handled || caught_anywhere(req, frame) {
         return false;
     }
-    session::with(|s| s.handled = Some(thrown.id));
     let message = thrown.message.get(..80).unwrap_or(&thrown.message);
-    out::error(
-        format!(
-            "Uncaught {} in {} on line {}: {}",
-            String::from_utf8_lossy(&thrown.class),
-            String::from_utf8_lossy(&thrown.file),
-            thrown.line,
-            String::from_utf8_lossy(message)
-        )
-        .as_bytes(),
+    let message = format!(
+        "Uncaught {} in {} on line {}: {}",
+        String::from_utf8_lossy(&thrown.class),
+        String::from_utf8_lossy(&thrown.file),
+        thrown.line,
+        String::from_utf8_lossy(message)
     );
+    session::with(req, |s| {
+        s.handled = Some(thrown.id);
+        s.out.error(message.as_bytes());
+    });
     true
 }
 
@@ -872,20 +874,20 @@ fn uncaught(req: &mut Request, frame: FrameRef, pending: Option<&shown::Pending>
 /// L0004 0003 RETURN CV1($y)
 /// L0006 0003 ECHO V0
 /// ```
-fn stepped_opline(req: &Request, frame: FrameRef) {
-    if session::with(|s| !s.quiet && s.stepping).unwrap_or(false) {
+fn stepped_opline(req: &mut Request, frame: FrameRef) {
+    if session::with(req, |s| !s.quiet && s.stepping).unwrap_or(false) {
         prompt::print_opline_ex(req, frame);
     }
 }
 
 /// `phpdbg_print_opline`'s oplog: the opline written to the oplog open
 /// last, where one is.
-fn logged(position: &read::Position, serves: &read::Serves) {
+fn logged(req: &mut Request, position: &read::Position, serves: &read::Serves) {
     let (function, class) = match serves {
         read::Serves::Code => (None, None),
         read::Serves::Function { name, class } => (Some(name.clone()), class.clone()),
     };
-    session::with(|s| {
+    session::with(req, |s| {
         if let Some(log) = s.oplogs.last_mut() {
             log.push(session::Logged {
                 file: position.file.clone(),
@@ -910,11 +912,11 @@ struct Checks {
 
 /// The seek, the step, the watchpoints and the breakpoints, in `phpdbg_execute_ex`'s
 /// order (`phpdbg_prompt.c:1713-1788`): whether the loop stops here. The
-/// watchpoints are checked with the session in its cell, since their
+/// watchpoints are checked with the session in the request's sink, since their
 /// report writes through the request's output and may run PHP code the
 /// debugger stops in.
 fn decide(req: &mut Request, here: &At<'_>, checks: &Checks) -> bool {
-    match session::with(|s| moved(s, here, checks)) {
+    match session::with(req, |s| moved(s, here, checks)) {
         Some(Some(stops)) => return stops,
         Some(None) => {}
         None => return false,
@@ -922,7 +924,7 @@ fn decide(req: &mut Request, here: &At<'_>, checks: &Checks) -> bool {
     if crate::watch::changed(req) {
         return true;
     }
-    session::with(|s| broken(s, here, checks)).unwrap_or(false)
+    session::with(req, |s| broken(s, here, checks)).unwrap_or(false)
 }
 
 /// The seek and the step: whether they stop the loop here or let it go
@@ -955,7 +957,7 @@ fn moved(s: &mut Session, here: &At<'_>, checks: &Checks) -> Option<bool> {
                     return Some(false);
                 }
                 s.seek = None;
-                out::notice(
+                s.out.notice(
                     format!(
                         "Breaking for leave at {}:{}",
                         String::from_utf8_lossy(here.file),
@@ -982,7 +984,7 @@ fn broken(s: &mut Session, here: &At<'_>, checks: &Checks) -> bool {
         && (!matches!(s.breaks.list[found].kind, crate::bp::Kind::File { .. })
             || checks.line != s.last_line)
     {
-        s.breaks.hit(found, here);
+        s.breaks.hit(&mut s.out, found, here);
         return true;
     }
     false
@@ -1079,9 +1081,9 @@ fn caught_anywhere(req: &mut Request, frame: FrameRef) -> bool {
 /// prompt>
 /// ```
 fn interactive(req: &mut Request, frame: FrameRef, file: &[u8], line: u32) -> Option<Flow> {
-    let mut session = session::take()?;
+    let mut session = session::take(req)?;
     if session.origin == Origin::Program {
-        crate::list::code(&session, file, line);
+        crate::list::code(&mut session, file, line);
     }
     let aside = tier::set_aside(req);
     let outcome = {
@@ -1089,7 +1091,7 @@ fn interactive(req: &mut Request, frame: FrameRef, file: &[u8], line: u32) -> Op
         prompt::interactive(&mut session, &mut here)
     };
     let stopped = session.stopped.is_some();
-    session::put(session);
+    session::put(req, session);
     if !stopped && outcome != Outcome::Stopped {
         let _ = crate::watch::changed(req);
     }
