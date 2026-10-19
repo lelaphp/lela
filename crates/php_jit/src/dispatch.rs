@@ -112,7 +112,7 @@ fn visited(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         // A table a hot root found full stopped its counters, as php's
         // `zend_jit_stop_counter_handlers` does: no word is claimed more.
         let holder = || {
-            let table = table::of(req, &engine.shared.policy)?;
+            let table = table::of(req, &engine.shared.policy, &engine.shared.perf)?;
             if table.stopped() {
                 return None;
             }
@@ -173,7 +173,7 @@ pub(crate) fn hot(
     let mut stepped = false;
     let flow = loop {
         let start = claim.start();
-        let epoch = table::held(req, &shared.policy);
+        let epoch = table::holding(req, &shared.policy, &shared.perf);
         let table = table::of_epoch(&epoch);
         if let Some(trace) = table.and_then(table::TraceTable::next) {
             started(req, shared, frame, trace, start);
@@ -255,7 +255,7 @@ fn rerooted(req: &mut Request, shared: &Shared, claim: Claim, ended: &Ended) -> 
         at: header,
     };
     let claimed = policy::claim(root, &shared.policy, Start::Loop)?;
-    let next = table::of(req, &shared.policy).and_then(table::TraceTable::next);
+    let next = table::of(req, &shared.policy, &shared.perf).and_then(table::TraceTable::next);
     if let Some(trace) = next {
         started(req, shared, ended.at, trace, Start::Loop);
     }

@@ -14,13 +14,18 @@
 //!   wrote and the mapping `perf inject` finds the file by
 //!   (`ir_perf_jitdump_open`).
 //!
-//! php opens each file once per process, truncating it; here the
-//! engine's start truncates them ([`start`]) and each epoch's table
-//! appends, one write per line or record.
+//! php opens each file once per process, truncating it, numbers its
+//! records from one per process and closes the jitdump at shutdown; here
+//! the engine's start truncates them ([`Outputs::start`]), each epoch's
+//! table appends, one write per line or record, counting on the engine's
+//! one `code_id`, and the engine's end writes the `JIT_CODE_CLOSE`
+//! record.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{TraceId, TraceName, code};
 use crate::policy::JitDebug;
@@ -31,6 +36,8 @@ const MAGIC: u32 = 0x4A69_5444;
 const VERSION: u32 = 1;
 /// `IR_PERF_JITDUMP_RECORD_LOAD`.
 const RECORD_LOAD: u32 = 0;
+/// `IR_PERF_JITDUMP_RECORD_CLOSE`.
+const RECORD_CLOSE: u32 = 3;
 /// The header's size, `sizeof(ir_perf_jitdump_header)`.
 const HEADER: u32 = 40;
 /// A load record's size before its name, `sizeof(ir_perf_jitdump_load_record)`.
@@ -51,10 +58,10 @@ pub(crate) struct Perf {
     dump: Option<Dump>,
 }
 
-/// The jitdump the records go to, and the next record's `code_id`.
+/// The jitdump the records go to, and the engine's next `code_id`.
 struct Dump {
     to: Box<dyn Write + Send>,
-    code_id: u64,
+    code_id: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Perf {
@@ -80,21 +87,60 @@ fn dump_path() -> String {
 /// an ELF file, which `ir_perf_jitdump_open` reads for its machine.
 const DUMPS: bool = cfg!(target_os = "linux");
 
-/// The engine's start, under `debug`: the map file emptied where either
-/// bit asks for lines, and the jitdump emptied, given php's header and
-/// mapped once, which is the event `perf inject` finds it by, where
-/// `PERF_DUMP` asks and php writes one. What fails is left unwritten, as
-/// php leaves it.
-pub(crate) fn start(debug: JitDebug) {
-    if debug.any(JitDebug::PERF | JitDebug::PERF_DUMP) {
-        drop(File::create(map_path()));
+/// The engine's `PERF` outputs, php's per-process ones: whether the
+/// map file and the jitdump were started, and the jitdump's next
+/// `code_id`, which every epoch's table counts on as php counts on its
+/// one static. Dropped at the engine's end, it closes the jitdump with
+/// php's `JIT_CODE_CLOSE` record (`ir_perf_jitdump_close`).
+#[derive(Debug)]
+pub(crate) struct Outputs {
+    map: bool,
+    dump: bool,
+    code_id: Arc<AtomicU64>,
+}
+
+impl Outputs {
+    /// None started.
+    pub(crate) fn none() -> Outputs {
+        Outputs {
+            map: false,
+            dump: false,
+            code_id: Arc::new(AtomicU64::new(1)),
+        }
     }
-    if DUMPS && debug.any(JitDebug::PERF_DUMP) {
-        let opened = File::create(dump_path()).and_then(|mut file| {
-            file.write_all(&header(std::process::id(), code::monotonic_ns()))?;
-            code::map_once(&file)
-        });
-        drop(opened);
+
+    /// The engine's start, under `debug`: the map file emptied where
+    /// either bit asks for lines, and the jitdump emptied, given php's
+    /// header and mapped once, which is the event `perf inject` finds it
+    /// by, where `PERF_DUMP` asks and php writes one. What does not open
+    /// is not started, as php leaves it.
+    pub(crate) fn start(debug: JitDebug) -> Outputs {
+        let map =
+            debug.any(JitDebug::PERF | JitDebug::PERF_DUMP) && File::create(map_path()).is_ok();
+        let dump = DUMPS
+            && debug.any(JitDebug::PERF_DUMP)
+            && File::create(dump_path())
+                .and_then(|mut file| {
+                    file.write_all(&header(std::process::id(), code::monotonic_ns()))?;
+                    code::map_once(&file)
+                })
+                .is_ok();
+        Outputs {
+            map,
+            dump,
+            code_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+}
+
+impl Drop for Outputs {
+    fn drop(&mut self) {
+        if self.dump
+            && let Ok(mut file) = OpenOptions::new().append(true).open(dump_path())
+        {
+            // A write that fails is dropped, as php's `ir_perf_jitdump_close` drops it.
+            drop(file.write_all(&close_record(code::monotonic_ns())));
+        }
     }
 }
 
@@ -107,34 +153,39 @@ impl Perf {
         }
     }
 
-    /// The writers `debug` asks for, appending to the files the engine's
-    /// start emptied; one that does not open writes nothing.
-    pub(crate) fn of(debug: JitDebug) -> Perf {
-        let append = |path: String| -> Option<Box<dyn Write + Send>> {
-            let file = OpenOptions::new().append(true).open(path).ok()?;
+    /// A table's writers, appending to the files `outputs` started;
+    /// one that does not open writes nothing.
+    pub(crate) fn of(outputs: &Outputs) -> Perf {
+        let append = |started: bool, path: String| -> Option<Box<dyn Write + Send>> {
+            let file = OpenOptions::new()
+                .append(true)
+                .open(path)
+                .ok()
+                .filter(|_| started)?;
             Some(Box::new(file))
         };
-        let map = if debug.any(JitDebug::PERF | JitDebug::PERF_DUMP) {
-            append(map_path())
-        } else {
-            None
-        };
-        let dump = if DUMPS && debug.any(JitDebug::PERF_DUMP) {
-            append(dump_path())
-        } else {
-            None
-        };
-        Perf::to(map, dump)
+        Perf {
+            map: append(outputs.map, map_path()),
+            dump: append(outputs.dump, dump_path()).map(|to| Dump {
+                to,
+                code_id: Arc::clone(&outputs.code_id),
+            }),
+        }
     }
 
-    /// Lines to `map` and records to `dump`, each where given.
+    /// Lines to `map` and records to `dump`, each where given, counting
+    /// `code_id`s from one.
+    #[cfg(test)]
     pub(crate) fn to(
         map: Option<Box<dyn Write + Send>>,
         dump: Option<Box<dyn Write + Send>>,
     ) -> Perf {
         Perf {
             map,
-            dump: dump.map(|to| Dump { to, code_id: 1 }),
+            dump: dump.map(|to| Dump {
+                to,
+                code_id: Arc::new(AtomicU64::new(1)),
+            }),
         }
     }
 
@@ -158,9 +209,8 @@ impl Perf {
                 pid: std::process::id(),
                 tid: code::thread_id(),
                 time: code::monotonic_ns(),
-                code_id: dump.code_id,
+                code_id: dump.code_id.fetch_add(1, Ordering::Relaxed),
             };
-            dump.code_id = dump.code_id.saturating_add(1);
             drop(dump.to.write_all(&load_record(&at, &symbol, start, bytes)));
         }
     }
@@ -202,6 +252,15 @@ pub(crate) struct Loaded {
     pub(crate) tid: u32,
     pub(crate) time: u64,
     pub(crate) code_id: u64,
+}
+
+/// `ir_perf_jitdump_close`'s `JIT_CODE_CLOSE` record: its header alone.
+pub(crate) fn close_record(time: u64) -> Vec<u8> {
+    let mut record = Vec::with_capacity(16);
+    record.extend_from_slice(&RECORD_CLOSE.to_ne_bytes());
+    record.extend_from_slice(&16_u32.to_ne_bytes());
+    record.extend_from_slice(&time.to_ne_bytes());
+    record
 }
 
 /// `ir_perf_jitdump_register`'s `JIT_CODE_LOAD` record: its header, the

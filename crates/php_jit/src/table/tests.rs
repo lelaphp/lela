@@ -431,7 +431,8 @@ fn a_traces_perf_line_is_phps() -> Result<(), String> {
 
 /// The jitdump's header and `JIT_CODE_LOAD` record as php's
 /// `ir_perf_jitdump_open` and `_register` lay them: the magic, the
-/// version, each size, and the name with its NUL before the bytes.
+/// version, each size, and the name with its NUL before the bytes; and
+/// `ir_perf_jitdump_close`'s `JIT_CODE_CLOSE`, a header alone.
 #[test]
 fn a_jitdump_record_is_laid_as_phps() {
     let word = |bytes: &[u8], at: usize| {
@@ -456,6 +457,8 @@ fn a_jitdump_record_is_laid_as_phps() {
     assert_eq!((word(&record, 16), word(&record, 20)), (42, 9));
     assert_eq!(&record[56..68], b"TRACE-1$f$3\0");
     assert_eq!(&record[68..], &[0xC3; 5]);
+    let close = perf::close_record(7);
+    assert_eq!((close.len(), word(&close, 0), word(&close, 4)), (16, 3, 16));
 }
 
 /// On the target itself (`jit-design.md` §4.5): `mov w0, #7; ret`
@@ -541,7 +544,7 @@ mod epoch {
                 return Flow::Continue;
             }
             let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
-            let (published, before) = match table::of(req, &policy) {
+            let (published, before) = match table::of(req, &policy, &table::Outputs::none()) {
                 Some(table) => {
                     let before = table.get(trace(1)).is_some();
                     (

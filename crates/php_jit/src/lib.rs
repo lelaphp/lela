@@ -103,6 +103,8 @@ pub(crate) struct Shared {
     started: Box<[policy::Note]>,
     /// Whether a request wrote the start's lines yet: once per engine.
     told: AtomicBool,
+    /// The engine's `PERF` outputs, which every epoch's table writes to.
+    perf: table::Outputs,
 }
 
 impl Shared {
@@ -129,14 +131,17 @@ impl JitEngine {
     fn of(ini: &StartupIni) -> JitEngine {
         let mut started = Vec::new();
         let policy = policy::Policy::from_ini(ini, &mut started);
-        if policy.mode() != policy::Mode::Off {
-            table::start_perf(policy.debug());
-        }
+        let perf = if policy.mode() == policy::Mode::Off {
+            table::Outputs::none()
+        } else {
+            table::Outputs::start(policy.debug())
+        };
         JitEngine {
             shared: Arc::new(Shared {
                 policy,
                 started: started.into_boxed_slice(),
                 told: AtomicBool::new(false),
+                perf,
             }),
         }
     }

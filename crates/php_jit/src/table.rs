@@ -61,7 +61,7 @@ mod perf;
 mod tests;
 
 use code::{Arena, Code, Pages};
-pub(crate) use perf::{Perf, start as start_perf};
+pub(crate) use perf::{Outputs, Perf};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
 /// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; under Miri the
@@ -357,10 +357,11 @@ impl<P: Pages> TraceTable<P> {
     /// An empty table under `policy`'s bounds, its arena mapped as
     /// `opcache.jit_buffer_size` asks, in whole chunks and at least one,
     /// its `PERF` lines and `PERF_DUMP` records written as
-    /// `opcache.jit_debug` asks. An arena that cannot be mapped is none:
-    /// the table numbers, and the first publish finds it full.
-    pub(crate) fn new(policy: &Policy) -> TraceTable<P> {
-        TraceTable::with_perf(policy, Perf::of(policy.debug()))
+    /// the engine's `outputs` started them. An arena that cannot be
+    /// mapped is none: the table numbers, and the first publish finds it
+    /// full.
+    pub(crate) fn new(policy: &Policy, outputs: &Outputs) -> TraceTable<P> {
+        TraceTable::with_perf(policy, Perf::of(outputs))
     }
 
     /// [`TraceTable::new`] with the writers given.
@@ -550,15 +551,15 @@ impl<P: Pages> TraceTable<P> {
 /// The trace table of the epoch `req` started in, made the first time a
 /// request of it asks, over `policy`'s bounds; none only where the
 /// epoch's slot holds another tier's value.
-pub(crate) fn of<'r>(req: &'r Request, policy: &Policy) -> Option<&'r Table> {
-    tier::epoch_state(req, || Table::new(policy))
+pub(crate) fn of<'r>(req: &'r Request, policy: &Policy, outputs: &Outputs) -> Option<&'r Table> {
+    tier::epoch_state(req, || Table::new(policy, outputs))
 }
 
-/// The epoch `req` started in, held, its trace table made as [`of`]
+/// A hold on the epoch `req` started in, its trace table made as [`of`]
 /// makes it: for a caller that reads the table while it goes on to serve
 /// the request, which a borrow of the request's own hold forbids.
-pub(crate) fn held(req: &Request, policy: &Policy) -> Epoch {
-    of(req, policy);
+pub(crate) fn holding(req: &Request, policy: &Policy, outputs: &Outputs) -> Epoch {
+    of(req, policy, outputs);
     tier::epoch(req)
 }
 
