@@ -949,7 +949,13 @@ impl Request {
         name: &[u8],
         position: php_compile::syntax::Position,
     ) -> Result<PublishedUnit, CompileError> {
-        Arc::clone(&self.shared).compile_for(self, source, name, SourceKind::Eval(position))
+        Arc::clone(&self.shared).compile_for(
+            self,
+            source,
+            name,
+            SourceKind::Eval(position),
+            super::ConstantHome::Unit,
+        )
     }
 
     /// [`Request::compile_string`] with the compiler's refusal raised as
