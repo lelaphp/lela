@@ -13,6 +13,7 @@
 use std::cmp::Ordering;
 
 use php_heap::{Arr, Key, Number, Zval, ZvalType};
+use php_unit::Opcode;
 
 use crate::api::values::Value;
 
@@ -22,6 +23,41 @@ pub(crate) enum Arith {
     Add,
     Sub,
     Mul,
+}
+
+/// The operator of a compound assignment, `ZEND_ASSIGN_OP`'s and
+/// `ZEND_ASSIGN_DIM_OP`'s `extended_value`, where it is one the binary
+/// opcodes compute inline over two numbers ([`arith`]); None for every
+/// other operator, which is the kernel's. An operator that gains an
+/// inline pair joins here, and every compound assignment's inline path
+/// takes it.
+///
+/// ```php
+/// $a = [3, 3, 3, 3, 3]; $a[0] += 2; $a[1] -= 2; $a[2] *= 2; $a[3] /= 2; $a[4] %= 2;
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(5) {
+///   [0]=>
+///   int(5)
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   int(6)
+///   [3]=>
+///   float(1.5)
+///   [4]=>
+///   int(1)
+/// }
+/// ```
+#[inline]
+pub(crate) fn compound(extended_value: u32) -> Option<Arith> {
+    match Opcode::from_u8(u8::try_from(extended_value).ok()?)? {
+        Opcode::Add => Some(Arith::Add),
+        Opcode::Sub => Some(Arith::Sub),
+        Opcode::Mul => Some(Arith::Mul),
+        _ => None,
+    }
 }
 
 /// A zval that is a number as it stands, nothing converted.

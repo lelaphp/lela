@@ -15078,6 +15078,141 @@ pub(crate) fn assign_dim_op<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_assign_dim_op(req, frame, code, op, kinds) {
+        return edge;
+    }
+    assigned_dim_op(req, frame, code, op)
+}
+
+/// The inline path of `ZEND_ASSIGN_DIM_OP` over a CV
+/// (`ZEND_ASSIGN_DIM_OP_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:1156-1200`,
+/// `assign_dim_op_array`): in the array the CV alone owns, or the one a
+/// reference it holds names ([`owned_array`]), the element at the key
+/// [`inline_key`] reads, where it holds a number, and an `OP_DATA` value
+/// that is a number as it stands, under an operator
+/// [`inline::compound`] names, computed by [`inline::arith`] as the
+/// binary opcode's own inline pair computes it, and written in place and,
+/// under `RETURN_VALUE_USED`, into the temporary. Nothing is converted,
+/// warned of or given up, so nothing runs. `None`, with nothing touched,
+/// for everything else, which is the kernel's: a key the array has not
+/// got and its `Undefined array key` warning, an append, an element that
+/// is a reference or no number, a value that is no number, another
+/// operator, `.=` among them, and a shared array, which the kernel
+/// separates.
+///
+/// ```php
+/// function f(array &$v) { $v[0] += 0.5; $v[1] -= 1; $v["k"] *= 3; return $v; }
+/// $a = [1, PHP_INT_MAX, 1.5, "k" => 2]; $b = $a; $i = 1; $one = 1;
+/// $a[0] += 2; $a[$i] += $one; $a[2] *= 2; $a["k"] -= 0.5;
+/// var_dump($a, $b[1]);
+/// $r = ($a[0] += 2); $t = ($a[0] -= $r);
+/// var_dump($r, $t);
+/// $c = [1, 2]; var_dump(f($c), $c);
+/// $d = [1]; $d[] = 2; $e = $d; $d[0] += 1; var_dump($d[0], $e[0]);
+/// $m = [1]; $m[1] += 1; $m[0] .= "x"; $m[] += 2; var_dump($m);
+/// $x = 5; $n = [1]; $n[0] = &$x; $n[0] += 1; var_dump($x);
+/// $s = ["3"]; $s[0] += 1; $u = [1]; $u[0] += "2"; $w = [2]; $w[0] /= 2; $p = [2]; $p[0] **= 3; var_dump($s, $u, $w, $p);
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(3)
+///   [1]=>
+///   float(9.223372036854776E+18)
+///   [2]=>
+///   float(3)
+///   ["k"]=>
+///   float(1.5)
+/// }
+/// int(9223372036854775807)
+/// int(5)
+/// int(0)
+///
+/// Warning: Undefined array key "k" in %s on line 2
+/// array(3) {
+///   [0]=>
+///   float(1.5)
+///   [1]=>
+///   int(1)
+///   ["k"]=>
+///   int(0)
+/// }
+/// array(3) {
+///   [0]=>
+///   float(1.5)
+///   [1]=>
+///   int(1)
+///   ["k"]=>
+///   int(0)
+/// }
+/// int(2)
+/// int(1)
+///
+/// Warning: Undefined array key 1 in %s on line 10
+/// array(3) {
+///   [0]=>
+///   string(2) "1x"
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+/// }
+/// int(6)
+/// array(1) {
+///   [0]=>
+///   int(4)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(3)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(8)
+/// }
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn inline_assign_dim_op(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (a, b): (impl Operand, impl Operand),
+) -> Option<Edge> {
+    let arith = inline::compound(op.extended_value)?;
+    if a.kind() != OperandKind::Cv {
+        return None;
+    }
+    let at = req.vm().opline(frame);
+    let data = *exec::opline_at(code, at.saturating_add(1))
+        .filter(|data| data.opcode == Opcode::OpData)?;
+    let slots = req.slots_mut(frame);
+    let (array, _) = owned_array(slots, code, op, a)?;
+    let (key, free_dim) = inline_key(slots, code, op, b)?;
+    let entry = array.value_ref(key)?;
+    let value = ByKind(data.op1_type).read(slots, code, data.op1);
+    let z = inline::arith(arith, entry.read(), value)?;
+    if op.out_type != OperandKind::Unused {
+        write_owning_nothing(slots, code, op, z)?;
+    }
+    entry.write(z);
+    if free_dim {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    Some(Ok(Next::jump(at.saturating_add(2))))
+}
+
+/// `ASSIGN_DIM_OP` past its inline path: the container walked, the
+/// entry found or laid down after its warning, and the kernel over it.
+/// A call of its own, as [`assigned_dim`] is.
+#[inline(never)]
+fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let Some(kernel) = binary_op_of(op.extended_value) else {
         return Err(Fatal::error(format!(
             "InternalError: ZEND_ASSIGN_DIM_OP over the operator {}, which is no binary operation",
