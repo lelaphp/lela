@@ -42,12 +42,14 @@
 //! **What a difference is.** Responses that differ after the first five
 //! are served once more by each side. A pair that then agrees is the
 //! same, the first having crossed a second's edge between the two runs;
-//! a side whose answer moves between its two runs (a time, a page that
-//! renders the build) makes the entry unstable, named in the message and
-//! counted apart, since no comparison of one run of each can hold it; and
-//! two runs that differ alike are a difference, named by its test and its
-//! first differing line. A request either side could not be served is a
-//! bork. A difference an accepted `makala:` row names is accepted,
+//! a pair that differs again is a difference, named by its test and the
+//! first line the second pair differs at, whether or not a side's answer
+//! moved between its two runs. A page that renders a time beside what
+//! the binary is (`phpinfo()`) moves on both sides and differs on both
+//! runs, and was once counted apart as unstable and passed; a side that
+//! moves is no reason to hold nothing, so it is a difference, and a
+//! by-design one is a row (#2337). A request either side could not be
+//! served is a bork. A difference an accepted `makala:` row names is accepted,
 //! counted apart and named under its row, and a row whose test agrees is
 //! named stale (`super::held`, #2629). The reading passes with no other
 //! difference and no bork, and is a skip where nothing was compared; a
@@ -80,7 +82,6 @@ enum Came {
     Same,
     /// The line diff, php-fpm's as `-` and makala's as `+`.
     Differs(String),
-    Unstable,
     Bork(String),
 }
 
@@ -162,7 +163,7 @@ fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<Str
     })
 }
 
-/// One entry served by both and held: the same, a difference, unstable.
+/// One entry served by both and held: the same or a difference.
 fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Result<Came> {
     let recipe = &oracle.pin().recipe;
     // Two directories of one length, so a `string(n)` of a path is the
@@ -195,19 +196,25 @@ fn compared(oracle: &Oracle<'_>, fpm: &Path, host: &Path, entry: &Entry) -> Resu
         let rendered = entry.randoms_named_alike(&names_folded(&makala::from_cgi(&stdout)));
         Ok(normalise_in(&recipe.normalise, &by_fpm, rendered))
     };
-    let (shown, ports) = by_makala()?;
-    let wanted = by_php_fpm(ports)?;
+    let pair = || -> Result<[Vec<u8>; 2]> {
+        let (shown, ports) = by_makala()?;
+        Ok([by_php_fpm(ports)?, shown])
+    };
+    held_twice(pair)
+}
+
+/// What an entry came to over `pair`, php-fpm's answer and makala's, asked
+/// once and again where the first two differ: the same where either pair
+/// agrees, and else a difference, the second pair's diff, whether or not
+/// a side's answer moved between its two runs.
+fn held_twice(mut pair: impl FnMut() -> Result<[Vec<u8>; 2]>) -> Result<Came> {
+    let [wanted, shown] = pair()?;
     if wanted == shown {
         return Ok(Came::Same);
     }
-    // Once more each: a pair that then agrees crossed a second's edge or
-    // the like between the two, and a side whose answer moves is unstable.
-    let (again, ports) = by_makala()?;
-    let wanted_again = by_php_fpm(ports)?;
-    Ok(if wanted_again == again {
+    let [wanted, shown] = pair()?;
+    Ok(if wanted == shown {
         Came::Same
-    } else if wanted_again != wanted || again != shown {
-        Came::Unstable
     } else {
         Came::Differs(diff(&wanted, &shown))
     })
@@ -260,7 +267,6 @@ fn word(came: &Came) -> &'static str {
     match came {
         Came::Same => "same",
         Came::Differs(_) => "differs",
-        Came::Unstable => "unstable",
         Came::Bork(_) => "bork",
     }
 }
@@ -272,7 +278,7 @@ struct Ledger<'r> {
     registry: &'r Registry,
     consulted: Consulted<'r>,
     /// Each entry, what it came to, and what the rows made of it: none
-    /// for an unstable or a borked entry, which no row touches.
+    /// for a borked entry, which no row touches.
     held: Vec<(String, Came, Option<Held<'r>>)>,
 }
 
@@ -294,7 +300,7 @@ impl<'r> Ledger<'r> {
         let held = match &came {
             Came::Same => Some(self.consulted.hold(self.registry, id, true)),
             Came::Differs(_) => Some(self.consulted.hold(self.registry, id, false)),
-            Came::Unstable | Came::Bork(_) => None,
+            Came::Bork(_) => None,
         };
         let mut line = match held {
             Some(Held::Accepted(row)) => format!("accepted {id} ({})", row.id),
@@ -318,22 +324,20 @@ impl<'r> Ledger<'r> {
         let came = &self.held;
         let same = came.iter().filter(|(_, c, _)| *c == Came::Same).count();
         // What stands once the rows are read: an unaccepted difference,
-        // and an unstable or a borked entry.
+        // and a borked entry.
         let standing: Vec<(&str, &Came)> = (came.iter())
             .filter(|(_, _, held)| held.is_none_or(|held| held == Held::Differs))
             .map(|(id, c, _)| (id.as_str(), c))
             .collect();
         let count = |kind: fn(&Came) -> bool| standing.iter().filter(|(_, c)| kind(c)).count();
-        let (differs, unstable, borked) = (
+        let (differs, borked) = (
             count(|c| matches!(c, Came::Differs(_))),
-            count(|c| matches!(c, Came::Unstable)),
             count(|c| matches!(c, Came::Bork(_))),
         );
         for (key, n) in [
             ("entries", came.len()),
             ("same", same),
             ("differs", differs),
-            ("unstable", unstable),
             ("borked", borked),
             ("left_out", left),
         ] {
@@ -346,14 +350,13 @@ impl<'r> Ledger<'r> {
             _ => Status::Fail,
         };
         let mut message = format!(
-            "{same} of {} requests answered alike by makala and the pinned php-fpm; {differs} differ, {unstable} unstable, {borked} borked; {left} CGI-shaped tests left out",
+            "{same} of {} requests answered alike by makala and the pinned php-fpm; {differs} differ, {borked} borked; {left} CGI-shaped tests left out",
             came.len()
         );
         let named: Vec<String> = (standing.iter())
             .filter_map(|(id, c)| match c {
                 Came::Differs(diff) => Some(format!("{id} ({})", first_line(diff))),
                 Came::Bork(why) => Some(format!("{id} ({why})")),
-                Came::Unstable => Some(format!("{id} (unstable)")),
                 Came::Same => None,
             })
             .collect();
@@ -466,14 +469,13 @@ mod tests {
     }
 
     /// The reading fails on a difference or a bork, names each with its
-    /// first differing line, and passes when every entry is the same or
-    /// unstable.
+    /// first differing line, and passes when every entry is the same.
     #[test]
     fn a_difference_or_a_bork_fails_the_reading_and_is_named() {
         let came = vec![
             ("a.phpt".to_owned(), Came::Same),
             ("b.phpt".to_owned(), Came::Differs("-x / +y".to_owned())),
-            ("c.phpt".to_owned(), Came::Unstable),
+            ("c.phpt".to_owned(), Came::Bork("refused".to_owned())),
         ];
         let reading = tallied(&came, 4, &Registry::default());
         assert_eq!(reading.status, Status::Fail);
@@ -483,11 +485,31 @@ mod tests {
             reading.message
         );
         assert!(reading.message.contains("4 CGI-shaped tests left out"));
+        assert!(reading.message.contains("1 differ, 1 borked"));
         let reading = tallied(&came[..1], 0, &Registry::default());
         assert_eq!(reading.status, Status::Pass);
         let reading = tallied(&[], 0, &Registry::default());
         assert_eq!(reading.status, Status::Skip, "nothing compared is no pass");
         assert_eq!(first_line(&diff(b"200\n\na\nb", b"200\n\na\nc")), "-b / +c");
+    }
+
+    /// A pair that agrees, first or once more, is the same; one that
+    /// differs twice is a difference named by its second diff, though a
+    /// side's answer moved between its runs, as `phpinfo()`'s page does
+    /// (`ext/standard/tests/general_functions/phpinfo2.phpt`, #2337).
+    #[test]
+    fn a_pair_that_differs_twice_is_a_difference_though_a_side_moved() {
+        let asked = |pairs: &[[&[u8]; 2]]| {
+            let mut pairs = pairs.iter().map(|pair| pair.map(<[u8]>::to_vec));
+            held_twice(|| pairs.next().ok_or_else(|| anyhow!("asked a third time"))).unwrap()
+        };
+        assert_eq!(asked(&[[b"a", b"a"]]), Came::Same);
+        assert_eq!(asked(&[[b"a", b"b"], [b"c", b"c"]]), Came::Same);
+        let moved = asked(&[
+            [b"200\n\nt=1", b"200\n\nt=2"],
+            [b"200\n\nt=3", b"200\n\nt=4"],
+        ]);
+        assert_eq!(moved, Came::Differs(diff(b"200\n\nt=3", b"200\n\nt=4")));
     }
 
     /// The negative control: a difference no `makala:` row names fails the

@@ -125,21 +125,6 @@ fn default_namespace(element: Node) -> Option<Vec<u8>> {
     }
 }
 
-/// `dom_mark_namespaces_as_attributes_too`: every declaration the parser
-/// put on an element of `doc` turned into an `xmlns` attribute.
-fn mark_namespaces(req: &mut Request, object: PhpObject, doc: Node) {
-    let Some(private) = dom_mut(req, object).and_then(|d| crate::private::of(&mut d.obj)) else {
-        return;
-    };
-    let mut at = doc.children();
-    while let Some(node) = at {
-        if node.kind() == Kind::Element {
-            private.mapper.mark_attribute_list(node);
-        }
-        at = crate::next_in_tree_order_from(node, None);
-    }
-}
-
 /// `dom_xml_fragment_parsing_algorithm`: `input` parsed by libxml inside
 /// an element named like `context` that declares every namespace in scope
 /// there, its children handed back as a fragment of `context`'s document;
@@ -153,10 +138,10 @@ fn xml_fragment(
     let Some(doc) = context.doc() else {
         return Err(dom_throw(req, Code::InvalidState));
     };
-    let in_scope: Vec<Ns> = dom_mut(req, object)
-        .and_then(|d| crate::private::of(&mut d.obj))
-        .map(|p| p.mapper.in_scope(context, true))
-        .unwrap_or_default();
+    let in_scope: Vec<Ns> = crate::private::with_mapper(req, object, |mapper, req| {
+        mapper.in_scope(req, context, true)
+    })?
+    .unwrap_or_default();
     let prefix = context.ns().and_then(Ns::prefix);
     let name = context.name();
     let mut chunks: Vec<Vec<u8>> = Vec::new();
@@ -219,9 +204,14 @@ fn xml_fragment(
         if let Some(first) = first {
             fragment.add_child_list(first);
         }
-        mark_namespaces(req, object, parsed);
+        let marked = crate::modern::convert_to_modern(req, object, parsed);
         root.set_children(None);
         root.set_last(None);
+        if let Err(thrown) = marked {
+            parsed.free_document();
+            fragment.free();
+            return Err(thrown);
+        }
     }
     parsed.free_document();
     Ok(fragment)
@@ -288,9 +278,8 @@ fn set_outer_html(req: &mut Request, object: PhpObject, value: &Value) -> Result
     let mut created = None;
     let context = if parent.kind() == Kind::Fragment {
         let doc = parent.doc();
-        let html = dom_mut(req, object)
-            .and_then(|d| crate::private::of(&mut d.obj))
-            .and_then(|p| p.mapper.html(doc));
+        let html = crate::private::with_mapper(req, object, |mapper, req| mapper.html(req, doc))?
+            .flatten();
         let Some(body) = Node::new_element(doc, html, b"body", None) else {
             return Err(dom_throw(req, Code::InvalidState));
         };
@@ -357,9 +346,8 @@ pub(crate) fn insert_adjacent_html(
         || (html_in_html_document(context) && context.name() == b"html")
     {
         let doc = element.doc();
-        let html = dom_mut(req, this)
-            .and_then(|d| crate::private::of(&mut d.obj))
-            .and_then(|p| p.mapper.html(doc));
+        let html =
+            crate::private::with_mapper(req, this, |mapper, req| mapper.html(req, doc))?.flatten();
         let Some(body) = Node::new_element(doc, html, b"body", None) else {
             return Err(dom_throw(req, Code::InvalidState));
         };

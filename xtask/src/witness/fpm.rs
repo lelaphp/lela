@@ -69,8 +69,9 @@ const PING: &str = "/witness-ping";
 /// named with.
 const TAIL: usize = 10;
 
-/// A php-fpm master over a pool of one child listening on the socket at
-/// `socket`, its log at `log`; ended with `SIGTERM` when dropped.
+/// A php-fpm master over a pool of static children, one for a fence,
+/// listening on the socket at `socket`, its log at `log`; ended with
+/// `SIGTERM` when dropped.
 pub(super) struct Pool {
     master: Child,
     socket: PathBuf,
@@ -107,6 +108,12 @@ impl Pool {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Where the pool listens: what many clients at once connect to
+    /// without [`Pool::connect`]'s `&mut`, once it listens.
+    pub(super) fn address(&self) -> SocketAddr {
+        self.address.clone()
     }
 
     /// Once the request whose response was read has ended, as well as its
@@ -187,7 +194,7 @@ pub(crate) fn served_as_fpm(
             None => given.push((name, value)),
         }
     }
-    let mut pool = Pool::start(oracle, host, &own, env, &[], false)?;
+    let mut pool = Pool::start(oracle, host, &own, env, &[], (false, 1))?;
     let started = Instant::now();
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
     let stream = pool.connect()?;
@@ -206,17 +213,17 @@ pub(crate) fn served_as_fpm(
 
 impl Pool {
     /// The php-fpm at `host`, its master in the foreground over a pool of
-    /// one child on a Unix socket in `own`, under the recipe's ini and
-    /// `ini` after it as `-d`, with `env` in the master's environment, which
-    /// its child keeps, or none of it where `clear_env` says, php-fpm's
-    /// default.
+    /// `children` children, `pm = static`, on a Unix socket in `own`, under
+    /// the recipe's ini and `ini` after it as `-d`, with `env` in the
+    /// master's environment, which its children keep, or none of it where
+    /// `clear_env` says, php-fpm's default.
     pub(super) fn start(
         oracle: &Oracle<'_>,
         host: &Path,
         own: &Tree,
         env: &[(String, OsString)],
         ini: &[String],
-        clear_env: bool,
+        (clear_env, children): (bool, usize),
     ) -> Result<Pool> {
         let recipe = &oracle.pin().recipe;
         // The address is a path in the fence's own tree, so no other process
@@ -232,15 +239,7 @@ impl Pool {
             )
         })?;
         let log = own.join("php-fpm.log");
-        let conf = own.write(
-            "php-fpm.conf",
-            format!(
-                "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = {}\nping.path = {PING}\n",
-                log.display(),
-                socket.display(),
-                if clear_env { "yes" } else { "no" }
-            ),
-        )?;
+        let conf = own.write("php-fpm.conf", conf(&log, &socket, (clear_env, children)))?;
         // `-O` keeps the master's log on its stderr, so the stderr is the log.
         let logged = fs::File::options()
             .create(true)
@@ -267,6 +266,18 @@ impl Pool {
             log,
         })
     }
+}
+
+/// The pool's configuration: its log at `log`, listening at `socket`,
+/// `children` static children, its environment cleared where `clear_env`
+/// says, and the ping page.
+fn conf(log: &Path, socket: &Path, (clear_env, children): (bool, usize)) -> String {
+    format!(
+        "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = {children}\nclear_env = {}\nping.path = {PING}\n",
+        log.display(),
+        socket.display(),
+        if clear_env { "yes" } else { "no" }
+    )
 }
 
 /// The last [`TAIL`] lines of the log at `log`, or what kept it unread.
@@ -351,6 +362,19 @@ pub(super) fn round<'a>(
 
 #[cfg(test)]
 mod tests {
+    /// A pool is `pm = static` with the children asked for: one for a
+    /// fence, eight for the throughput bar (#2660).
+    #[test]
+    fn a_pool_is_static_with_the_children_asked_for() {
+        let at = |children| super::conf("l".as_ref(), "s".as_ref(), (true, children));
+        assert!(
+            at(8).contains("pm = static\npm.max_children = 8\nclear_env = yes\n"),
+            "{}",
+            at(8)
+        );
+        assert!(at(1).contains("pm.max_children = 1\n"));
+    }
+
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;

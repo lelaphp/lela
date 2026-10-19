@@ -338,8 +338,9 @@ fn as_xtask_test_runs_a_map_test() {
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
 /// then `xtask regions --staged` over the six region files and not the
 /// gitignored local one, which reaches `computed run`, and `computed
-/// check` over the six; then `clippy` and `test`, then `witness` (#1252),
-/// and no `crosscheck`, whose exit the hook never read (revision 140). The region
+/// check` over the six; then `clippy` and `test` (#1252), and no
+/// `witness`, which `done` asks of a branch once (#2982), and no
+/// `crosscheck`, whose exit the hook never read (revision 140). The region
 /// file `computed` rewrote is re-staged before `test` runs, so the map
 /// tests read the map the commit carries from the index (#1416): a hook
 /// that renders after `test` hands it the map before the render and fails
@@ -363,7 +364,6 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         "xtask vocab --staged",
         "xtask permit --diff",
     ];
-    let building = ["xtask witness --staged"];
     let mut calls = scratch.calls("cargo");
     calls[1..6].sort_unstable();
     let rendering = format!("xtask regions --staged {regions}");
@@ -372,7 +372,6 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         .chain(reading)
         .chain([rendering.as_str()])
         .chain(["xtask clippy --staged", "xtask test --staged"])
-        .chain(building)
         .map(str::to_owned)
         .collect();
     expected[1..6].sort_unstable();
@@ -384,7 +383,8 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     );
     let printed: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("ran ")).collect();
     assert_eq!(printed[1..6], reading, "{out}");
-    assert_eq!(printed[8..], building, "{out}");
+    let building = ["xtask clippy --staged", "xtask test --staged"];
+    assert_eq!(printed[6..], building, "{out}");
     assert_eq!(
         scratch.calls("computed"),
         [
@@ -699,10 +699,9 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
 
 /// An instrument that fails past the first group refuses the commit by
 /// name: `test` still runs after a `clippy` refusal, so the commit says
-/// both, and `witness`, whose lanes' build takes minutes, is not started
-/// for a commit already refused (revision 140).
+/// both (revision 140).
 #[test]
-fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
+fn a_failing_instrument_refuses_the_commit_by_name() {
     let scratch = scratch("failing", &Computed::Rendered);
     scratch.refuse("xtask clippy");
     let before = scratch.head();
@@ -713,7 +712,6 @@ fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
         out.contains("pre-commit: cargo xtask clippy --staged failed"),
         "{out}"
     );
-    assert!(out.contains("refused before witness ran"), "{out}");
     let calls = scratch.calls("cargo");
     assert!(
         calls.iter().any(|c| c == "xtask test --staged"),
@@ -730,9 +728,9 @@ fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
 }
 
 /// A merge committed through `git commit` after `--no-commit`, the way
-/// /specs merges into `main`, runs `clippy` and `test` and no `witness`:
-/// the merge check's `witness --unmeasured` measures the merged tree
-/// (revision 140).
+/// /specs merges into `main`, runs `clippy` and `test` and no `witness`,
+/// as no commit does: the merge check's `witness --unmeasured` measures
+/// the merged tree (revision 140, #2982).
 #[test]
 fn a_merge_commit_runs_no_witness() {
     let scratch = scratch("merge-witness", &Computed::Rendered);
@@ -751,10 +749,6 @@ fn a_merge_commit_runs_no_witness() {
     scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t9"], false);
     let (code, out) = scratch.run(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
     assert_eq!(code, 0, "{out}");
-    assert!(
-        out.contains("a merge commit; witness is the merge check's"),
-        "{out}"
-    );
     let calls = scratch.calls("cargo");
     for ran in ["xtask clippy --staged", "xtask test --staged"] {
         assert!(calls.iter().any(|c| c == ran), "{ran}: {calls:?}");
@@ -797,7 +791,7 @@ fn a_missing_message_file_is_refused_before_anything_runs() {
 
 /// A refusal among the instruments that only read the tree ends the hook
 /// there (#1252): `vocab` refuses, the rest of its group still runs, and
-/// neither `clippy`, `test`, `witness` nor anything after them is started,
+/// neither `clippy`, `test` nor anything after them is started,
 /// so the commit is refused in the seconds the group takes and not after a
 /// build.
 #[test]
@@ -812,10 +806,7 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
         out.contains("pre-commit: cargo xtask vocab --staged failed"),
         "{out}"
     );
-    assert!(
-        out.contains("refused before clippy, test and witness ran"),
-        "{out}"
-    );
+    assert!(out.contains("refused before clippy and test ran"), "{out}");
     let mut calls = scratch.calls("cargo");
     calls[1..].sort_unstable();
     assert_eq!(
@@ -830,6 +821,28 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
         ]
     );
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
+}
+
+/// A ledger revision a branch adds is written `NEXT` and numbered by the
+/// merge into `main` (#2982): a commit on a branch carries one, and a
+/// commit on `main` that still does is refused before anything runs,
+/// naming the line.
+#[test]
+fn a_ledger_revision_still_next_is_refused_on_main_and_not_on_a_branch() {
+    let scratch = scratch("next", &Computed::Rendered);
+    scratch.git(&["checkout", "-q", "-B", "main"], false);
+    let ledger = "# a region file\n\n**NEXT. Revision NEXT (2026-10-19).** A change.\n";
+    write(&scratch.root, "harness-design.md", ledger);
+    scratch.git(&["add", "--", "harness-design.md"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("harness-design.md:3:"), "{out}");
+    assert!(out.contains("is still NEXT"), "{out}");
+    assert_eq!(scratch.calls("cargo"), Vec::<String>::new());
+
+    scratch.git(&["checkout", "-q", "-b", "t9"], false);
+    let (code, out) = scratch.run(&["commit", "-q", "-m", "a ledger row"], true);
+    assert_eq!(code, 0, "{out}");
 }
 
 // ---------------------------------------------------------- post-commit, post-merge
@@ -884,6 +897,50 @@ fn a_merge_reaches_ticket_merged_and_a_plain_commit_does_not() {
             "xtask ticket merged --since HEAD^1"
         ]
     );
+}
+
+/// A merge into the main checkout that changes the harness rebuilds
+/// `target/release/xtask`, the judge every tool call tries first, in the
+/// background (#2982); one that leaves the harness alone does not.
+#[test]
+fn a_merge_that_changes_the_harness_rebuilds_the_release_judge() {
+    let scratch = scratch("rebuild", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    let rebuilds = |scratch: &Scratch| {
+        let built = || {
+            scratch
+                .calls("cargo")
+                .iter()
+                .filter(|call| call.as_str() == "build -q --release -p xtask")
+                .count()
+        };
+        for _ in 0..50 {
+            if built() > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        built()
+    };
+    for (n, path) in [
+        ("7", "crates/php_heap/src/lib.rs"),
+        ("8", "xtask/src/lib.rs"),
+    ] {
+        scratch.git(&["checkout", "-q", "-b", &format!("t{n}"), &main], false);
+        write(&scratch.root, path, &format!("// the work of #{n}\n"));
+        scratch.git(&["add", "--", path], false);
+        scratch.git(&["commit", "-q", "-m", &format!("the work of #{n}")], false);
+    }
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t7"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t7: the work (#7)"], true);
+    assert_eq!(rebuilds(&scratch), 0, "{:?}", scratch.calls("cargo"));
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t8"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t8: the work (#8)"], true);
+    assert_eq!(rebuilds(&scratch), 1, "{:?}", scratch.calls("cargo"));
 }
 
 // ---------------------------------------------------------------- pre-merge-commit

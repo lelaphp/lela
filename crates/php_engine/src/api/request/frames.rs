@@ -259,6 +259,18 @@ impl Request {
         }
     }
 
+    /// The op array `frame` serves, read through what holds its unit and
+    /// taking no share of it.
+    pub(crate) fn served_op_array(&self, frame: FrameRef) -> Option<&php_unit::OpArray> {
+        let (unit, body) = self.unit_of(self.vm.at(frame)?)?;
+        exec::body_of(unit, body)
+    }
+
+    /// The arena of the epoch the request started in (design §5.14).
+    pub(crate) fn arena(&self) -> &std::sync::Arc<crate::arena::Arena> {
+        &self.arena
+    }
+
     /// The unit and the op array being served in `frame`, the unit
     /// shared rather than copied, so the loop can read its oplines while
     /// the request is borrowed.

@@ -473,9 +473,8 @@ pub(crate) fn kept_at(
 const STALE: &str = "oracle.toml changed since it was taken";
 
 /// Where a kept run or target is looked for from the workspace at `root`:
-/// `root`, then every worktree of its repository that stands on disk, as
-/// `git worktree list` names them, the main one first; each once, by its
-/// canonical path. The one rule for where a run lives: in the workspace
+/// its checkouts ([`track::checkouts`]), or `root` alone where git cannot
+/// list them. The one rule for where a run lives: in the workspace
 /// that took it ([`Runs::after`]), keyed by the tree its engine is built
 /// from, so a run taken in a worktree at a base, as the skip of
 /// [`Base::run`] asks, is found by the commit from every other worktree
@@ -483,17 +482,7 @@ const STALE: &str = "oracle.toml changed since it was taken";
 /// so `worktree retire` carries a branch worktree's runs into it
 /// ([`carry`]) before removing it.
 fn roots(root: &Path) -> Vec<PathBuf> {
-    let listed = track::worktrees(root).unwrap_or_default();
-    let mut roots: Vec<PathBuf> = Vec::new();
-    let standing = std::iter::once(root.to_path_buf())
-        .chain(listed.into_iter().map(|(tree, _)| tree))
-        .filter_map(|tree| fs::canonicalize(tree).ok());
-    for tree in standing {
-        if !roots.contains(&tree) {
-            roots.push(tree);
-        }
-    }
-    roots
+    track::checkouts(root).unwrap_or_else(|_| fs::canonicalize(root).into_iter().collect())
 }
 
 fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {

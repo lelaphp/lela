@@ -178,6 +178,10 @@ _Avoid_: config (php's `PHP_CONFIG_FILE_PATH`, `PHP_CONFIG_FILE_SCAN_DIR`), rule
 The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's key (§4.2), commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
 _Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
+**Seat**:
+One of the machine's few places a building instrument runs in, `XTASK_SEATS` of them (three unless set), each an exclusive lock on a file under `XTASK_SEAT_DIR` that the operating system gives back however its holder ends. `clippy`, `test`, `miri`, `phpt`, `compile-identity`, `crosscheck`, `fpm-compare`, `soak`, `witness` and `bench` take one before they build and wait while every one is held; what a seated instrument spawns sits in its seat (`seat`, #2982).
+_Avoid_: lease
+
 **Snapshot**:
 Each file of the workspace and its blob id, read once from the working tree, the index or a commit, and asked for the key of every scope a run stamps or holds: a reading's key is a lookup on one (`key::Snapshot`, #2163). An instrument takes its snapshot before it measures, so a reading carries the key of what it measured, and a file written while it ran leaves the reading stale rather than fresh; one that writes sources and then stamps them takes another after it writes. It lives as long as the run and is never kept between runs: git's index is what spares re-reading a file git knows to be unchanged.
 _Avoid_: blob cache, key cache (it is no store kept between runs)

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"caffeinate -i git commit --no-verify -m x","description":"Commit without the hook while the machine stays awake"}}
