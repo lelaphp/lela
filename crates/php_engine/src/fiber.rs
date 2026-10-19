@@ -274,7 +274,7 @@ pub(crate) struct Execution {
     pub(crate) vm: Vm,
     pub(crate) observing: ObservedChain,
     pub(crate) error_reporting: i64,
-    /// `EG(jit_trace_num)`, the tier's recording exclusion on this
+    /// `EG(jit_trace_num)`, the number of the trace executing on this
     /// execution ([`crate::tier::trace_num`]).
     pub(crate) trace_num: crate::tier::TraceNum,
     pub(crate) stack_limit: StackLimit,

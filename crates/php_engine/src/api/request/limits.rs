@@ -2,8 +2,8 @@
 //! on the engine's timer, which raises it for `max_execution_time` and
 //! for every periodic interrupt an extension started, `set_time_limit()`,
 //! the interrupt hooks the bundle supplied, the thread's stack limit,
-//! the running execution's trace number, which is the tier's recording
-//! exclusion, and `fork(2)`, which joins the timer's thread around it.
+//! the running execution's trace number, php's `EG(jit_trace_num)`, and
+//! `fork(2)`, which joins the timer's thread around it.
 //! The interrupt, the deadlines, the stack limit and the trace number
 //! are [`Limits`]'s, whose fields no file but this one reads.
 

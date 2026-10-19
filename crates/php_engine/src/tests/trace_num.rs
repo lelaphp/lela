@@ -1,11 +1,11 @@
 //! The running execution's trace number (#2738; `jit-design.md` §4.9,
-//! revision 9; design §5.11, revision 52): php's `EG(jit_trace_num)`,
-//! which the tier reads and writes through [`tier::trace_num`] and
-//! [`tier::set_trace_num`] and the engine keeps with the execution
-//! state. A program reaches it here through two natives of the test's
-//! own, `trace_num()` and `set_trace_num()`, as the tier's recording
-//! guard would, so each test reads the number on whichever execution the
-//! program stands on.
+//! revisions 23 and NEXT; design §5.11, revision 52): php's
+//! `EG(jit_trace_num)`, which the tier reads and writes through
+//! [`tier::trace_num`] and [`tier::set_trace_num`] and the engine keeps
+//! with the execution state. A program reaches it here through two
+//! natives of the test's own, `trace_num()` and `set_trace_num()`, as
+//! the tier around a trace it executes would, so each test reads the
+//! number on whichever execution the program stands on.
 //!
 //! What each expectation follows is php's code, since no PHP program
 //! reads the number: a fiber switch saves and restores it with the rest
@@ -33,7 +33,7 @@ fn trace_num(req: &mut Request) -> i64 {
 }
 
 /// `set_trace_num(int $n): void`: the running execution's trace number
-/// written, as the tier's recording guard writes it.
+/// written, as the tier writes it around a trace it executes.
 #[php_function]
 fn set_trace_num(req: &mut Request, n: i64) {
     tier::set_trace_num(
