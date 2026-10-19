@@ -2,8 +2,8 @@
 //! theirs. A file's unit has its constants and names interned into the
 //! engine's table as it is published ([`php_compile::intern_names`]), as
 //! opcache's persist interns them. A unit compiled for the request alone,
-//! an `eval` (`-r`'s among them) or an uncached include, is the
-//! request's: under opcache its compile's `zend_new_interned_string` is
+//! an `eval` (`-r`'s among them), an uncached include or a program the
+//! host handed over as its source, piped, is the request's: under opcache its compile's `zend_new_interned_string` is
 //! `accel_new_interned_string_for_php` (`Z/ext/opcache/ZendAccelerator.c:577`),
 //! which hands back the string it was given unless opcache's buffer holds
 //! the bytes, so each constant is a plain string its op array owns and

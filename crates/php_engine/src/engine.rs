@@ -37,8 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, ConstantHome, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo,
-    Request, TypedIni, placed_of,
+    BuildDefs, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request,
+    TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -1662,11 +1662,11 @@ impl Shared {
 
     /// One source compiled for one request alone, under the request's
     /// ini and working directory, its constant strings made in the
-    /// request's own memory and kept where `home` says (design §5.2): a
-    /// source the host handed over, its strings the request's to its
-    /// end, and the string an `eval` hands over ([`SourceKind::EVAL`]) or
-    /// an uncached include's bytes, their strings the unit's and gone
-    /// with it, as php holds what it compiles for `-r` and for `eval`. Such a unit is never published: nothing outside
+    /// request's own memory, the unit's and gone with it (design §5.2):
+    /// a source the host handed over, piped, the string an `eval` hands
+    /// over ([`SourceKind::EVAL`]) and an uncached include's bytes, as
+    /// php under opcache holds what it compiles for stdin, `-r` and
+    /// `eval` ([`crate::api::request::Request::hold_compiled`]). Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
     /// it or the functions and classes it declared.
     ///
@@ -1690,7 +1690,6 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
-        home: ConstantHome,
     ) -> Result<PublishedUnit, CompileError> {
         let ini = CompileIni {
             precision: req.precision(),
@@ -1707,7 +1706,7 @@ impl Shared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
-        let unit = req.compiling(home, |heap, request_classes, arena| {
+        let unit = req.compiling(|heap, request_classes, arena| {
             let origin = Origin {
                 filename,
                 cwd: &cwd,
@@ -1727,9 +1726,7 @@ impl Shared {
         };
         req.count_keys_made(unit.runtime_keys.len());
         let unit = req.take_unit(unit);
-        if home == ConstantHome::Unit {
-            req.hold_compiled(&unit);
-        }
+        req.hold_compiled(&unit);
         Ok(unit)
     }
 
@@ -5216,6 +5213,25 @@ impl Engine {
     /// 1 1
     /// 1 2
     /// ```
+    ///
+    /// A source the host handed over, piped, is compiled for the request
+    /// alone and never cached, so under opcache its constant strings are
+    /// its unit's and counted, where a file's are the engine's
+    /// ([`Shared::compile_for`]):
+    ///
+    /// ```php
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w']], $pipes);
+    /// fwrite($pipes[0], '<?php debug_zval_dump("abcdefgh");'); fclose($pipes[0]);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// $f = sys_get_temp_dir() . '/piped' . getmypid() . '.php';
+    /// file_put_contents($f, '<?php debug_zval_dump("abcdefgh");'); touch($f, time() - 60);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', $f], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
+    /// ```
+    /// ```expect process
+    /// string(8) "abcdefgh" refcount(2)
+    /// string(8) "abcdefgh" interned
+    /// ```
     fn primary(
         &self,
         req: &mut Request,
@@ -5228,13 +5244,10 @@ impl Engine {
             let script = req
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
-            return Some(self.shared.compile_for(
-                req,
-                source,
-                &script,
-                SourceKind::File,
-                ConstantHome::Request,
-            ));
+            return Some(
+                self.shared
+                    .compile_for(req, source, &script, SourceKind::File),
+            );
         }
         let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
         // A bare program is opened as phpdbg's `phpdbg_compile` opens it,

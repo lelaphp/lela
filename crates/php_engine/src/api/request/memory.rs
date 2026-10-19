@@ -52,36 +52,12 @@ pub(super) struct RequestStrings<'a> {
     pub(super) shared: &'a crate::engine::Shared,
     pub(super) hold: SharedHold,
     pub(super) heap: &'a mut Heap,
-    pub(super) keeper: Keeper<'a>,
-}
-
-/// Where a compile for one request alone keeps the constant strings it
-/// makes ([`RequestStrings`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ConstantHome {
-    /// The unit, which gives them up with its op arrays: an `eval`'s
-    /// and an uncached include's, as opcache leaves them.
-    Unit,
-    /// The request's own table, to its end: the program a host handed
-    /// over as its source, which stands where php reads the file its
-    /// cache interns, the witness lane's snippet among them.
-    Request,
-}
-
-/// [`ConstantHome`] with what the unit's home keeps the strings in.
-pub(super) enum Keeper<'a> {
-    Unit(&'a mut super::unit_strings::Compiling),
-    Request,
+    /// The strings the compile has made, which the unit takes.
+    pub(super) made: &'a mut super::unit_strings::Compiling,
 }
 
 impl Intern for RequestStrings<'_> {
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
-        let Keeper::Unit(made) = &mut self.keeper else {
-            return match self.shared.existing_interned(bytes) {
-                Some(held) => Ok(held),
-                None => self.heap.intern_marked(bytes, valid_utf8),
-            };
-        };
         if bytes.len() <= 1 {
             return self.heap.intern_marked(bytes, valid_utf8);
         }
@@ -94,7 +70,7 @@ impl Intern for RequestStrings<'_> {
         if valid_utf8 {
             s.mark_valid_utf8();
         }
-        made.add(s);
+        self.made.add(s);
         Ok(s)
     }
 
