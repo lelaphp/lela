@@ -27,11 +27,6 @@ pub const DIR: &str = "target/harness";
 /// The log's directory, inside the store: one append-only file per
 /// instrument (revision 83; #2164).
 pub const LOG: &str = "log";
-/// The one log a store kept before revision 83, split into [`LOG`] and the
-/// index by the first record or read that finds it ([`Store::migrate`]).
-pub const LEGACY: &str = "log.jsonl";
-/// What a split [`LEGACY`] log is kept as, inside the store.
-pub const MIGRATED: &str = "log.migrated.jsonl";
 /// The file of the log a line that is no reading is kept in, as it was.
 pub const UNREAD: &str = "unread";
 
@@ -362,7 +357,7 @@ struct Line {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Kept {
-    /// A reading whole, as `log.jsonl` writes it; a field this build does
+    /// A reading whole, as the log writes it; a field this build does
     /// not know is ignored, so a newer harness's line still reads.
     Whole {
         #[serde(default)]
@@ -549,10 +544,6 @@ impl std::fmt::Display for Number {
 ///   reading, one file per instrument, read by the renderings of history
 ///   (the permits section, usage, the dashboard) and by no instrument's
 ///   question about a key.
-///
-/// A store written before revision 83 kept one `log.jsonl`; the first
-/// record or read that finds one splits it into the log and the index and
-/// keeps it as [`MIGRATED`] ([`Store::migrate`]).
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
@@ -636,7 +627,6 @@ impl Store {
     /// decides (§4.4), and a measurement records through
     /// [`Store::record_measurement`], which owes none.
     pub fn record(&self, readings: &[Reading]) -> Result<Outcome> {
-        self.migrate()?;
         for reading in readings {
             self.write(reading)?;
         }
@@ -678,80 +668,27 @@ impl Store {
     /// stand at its merge, found by the key they were taken over (#1252).
     /// The other store's files of each scope stay where they are: each is
     /// a scope's last run over a tree the store landed in may not have
-    /// (#35). Its log is read whole, the one file a store kept before
-    /// revision 83 and the files of each instrument after it, and each is
-    /// emptied once landed, so a retire that refuses after this and the
+    /// (#35). Its log is read whole, the file of each instrument, and each
+    /// is emptied once landed, so a retire that refuses after this and the
     /// call that follows cannot land a reading twice. How many lines
     /// were landed.
     pub fn land(&self, from: &Store) -> Result<usize> {
-        self.migrate()?;
-        let mut sources = vec![from.root.join(LEGACY)];
-        sources.extend(shards(&from.root.join(LOG))?);
         let mut landed = 0;
-        for source in sources {
-            let bytes = match fs::read(&source) {
-                Ok(bytes) => bytes,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => {
-                    return Err(err).with_context(|| format!("reading {}", source.display()));
-                }
-            };
+        for source in shards(&from.root.join(LOG))? {
+            let bytes =
+                fs::read(&source).with_context(|| format!("reading {}", source.display()))?;
             landed += self.split(&bytes)?;
             fs::write(&source, "").with_context(|| format!("emptying {}", source.display()))?;
         }
         Ok(landed)
     }
 
-    /// The one log of a store written before revision 83, split into the
-    /// log and the index, and kept beside them as [`MIGRATED`]: done by the
-    /// first record or read that finds it, and done once, since the rename
-    /// that claims the file is what decides which process splits it. A
-    /// harness built before revision 83 that writes `log.jsonl` again
-    /// leaves one the next record splits the same way, its lines added to
-    /// [`MIGRATED`]. A line that is no reading, which a write the kernel
-    /// split leaves behind, is kept as it was in [`UNREAD`].
-    pub fn migrate(&self) -> Result<()> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let legacy = self.root.join(LEGACY);
-        if !legacy.exists() {
-            return Ok(());
-        }
-        let claimed = self.root.join(format!(
-            ".{LEGACY}.{}.{}.splitting",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        match fs::rename(&legacy, &claimed) {
-            Ok(()) => {}
-            // Another process claimed it between the look and the rename.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => {
-                return Err(err).with_context(|| format!("claiming {}", legacy.display()));
-            }
-        }
-        let bytes = fs::read(&claimed).with_context(|| format!("reading {}", claimed.display()))?;
-        self.split(&bytes)?;
-        let kept = self.root.join(MIGRATED);
-        // The first split's file becomes the kept one whole; a later one,
-        // a stale harness's, is added to it.
-        if fs::hard_link(&claimed, &kept).is_err() {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&kept)
-                .with_context(|| format!("opening {}", kept.display()))?;
-            file.write_all(&bytes)
-                .with_context(|| format!("appending to {}", kept.display()))?;
-        }
-        fs::remove_file(&claimed).with_context(|| format!("removing {}", claimed.display()))
-    }
-
     /// Every line of `lines` added to the log of its instrument as it is,
     /// and the latest reading of each scope over each key put in the
-    /// index unless the index holds a later one: what [`Store::migrate`]
-    /// and [`Store::land`] share. The index is written once per key, the
-    /// newest [`KEPT`] of each scope, after the lines. How many lines.
+    /// index unless the index holds a later one: what [`Store::land`] does
+    /// with each file of another store's log. The index is written once
+    /// per key, the newest [`KEPT`] of each scope, after the lines. How
+    /// many lines.
     fn split(&self, lines: &[u8]) -> Result<usize> {
         let mut latest: BTreeMap<PathBuf, Reading> = BTreeMap::new();
         let mut count = 0;
@@ -878,7 +815,6 @@ impl Store {
         sought: &[(String, String, String)],
         pin: &str,
     ) -> Result<BTreeMap<(String, String), Reading>> {
-        self.migrate()?;
         let mut found = BTreeMap::new();
         for (instrument, scope, key) in sought.iter().filter(|(_, _, key)| !key.is_empty()) {
             // A file that is no reading is no reading over the key, and
@@ -903,7 +839,6 @@ impl Store {
     /// worktree's later one was landed in the index and not the file, the
     /// index's latest entry. None where the store holds neither.
     pub(crate) fn last_of(&self, instrument: &str, scope: &str) -> Result<Option<Reading>> {
-        self.migrate()?;
         let mut last = self.read(instrument, scope).ok().flatten();
         for (_, path) in self.keys_of(instrument, scope)? {
             if let Ok(entry) = Self::read_file(&path)
@@ -953,7 +888,6 @@ impl Store {
     ) -> Result<BTreeSet<String>> {
         /// The key's field in a line of the log, as each version spells it.
         const SPELLED: [&str; 2] = ["\"key\":\"", "\"tree\":\""];
-        self.migrate()?;
         let mut found = BTreeSet::new();
         if let Some(reading) = self.read(instrument, scope).ok().flatten()
             && !reading.key.is_empty()
@@ -1001,7 +935,6 @@ impl Store {
     /// is counted by its number and skipped rather than failing the whole
     /// log, so a torn line degrades one section and never the session.
     pub fn history(&self, instrument: &str) -> Result<Log> {
-        self.migrate()?;
         let path = self.shard(instrument)?;
         if !path.exists() {
             return Ok(Log::default());
@@ -1014,7 +947,6 @@ impl Store {
     /// taken: what `status --every` renders. The one reader of the whole
     /// log; every other reads the instruments it renders.
     pub fn history_all(&self) -> Result<Log> {
-        self.migrate()?;
         let mut all = Log::default();
         for path in shards(&self.root.join(LOG))? {
             let text = crate::read(&path)?;
@@ -1035,7 +967,6 @@ impl Store {
             status: Status,
             at: String,
         }
-        self.migrate()?;
         let mut tallies = BTreeMap::new();
         for path in shards(&self.root.join(LOG))? {
             let Some(name) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {

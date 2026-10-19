@@ -3,12 +3,11 @@
 //! pin's grammar is the oracle module's.
 //!
 //! The grammar is `[oracle] [budget] [telemetry] [[crate]] [[seam]]
-//! [[edge]] [[rule]] [[week]] [[bench]]`, each rule carrying exactly one predicate
-//! and each week's read naming an instrument `xtask` has, as a status or
-//! a number against a bound. A manifest with a key outside the grammar is
-//! refused with the offending key named; so is a rule with zero or two
-//! predicates. The numbers live in the file; nothing here restates one,
-//! and an optional table that is absent is absent, never defaulted.
+//! [[edge]] [[rule]] [[bench]]`, each rule carrying exactly one predicate.
+//! A manifest with a key outside the grammar is refused with the offending
+//! key named; so is a rule with zero or two predicates. The numbers live
+//! in the file; nothing here restates one, and an optional table that is
+//! absent is absent, never defaulted.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,8 +46,6 @@ pub struct Manifest {
     pub edges: Vec<Edge>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
-    #[serde(rename = "week", default)]
-    pub weeks: Vec<Week>,
     /// `[lock_home]`: the crate a lock's file lives with, for a lock no
     /// `[[crate]]` row names. A seam whose producer is a file and not a
     /// crate (`ops`, generated from `ops.toml`) has no row to carry it,
@@ -891,36 +888,6 @@ impl<const N: usize> PartialEq<[&str; N]> for OneOrMany {
     }
 }
 
-/// `[[week]]`: one exit bar of the thirty days (design §11), measured by
-/// the readings it names and rendered by `status --section week` (§9).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct Week {
-    /// The days of the bar as the design's table writes them, `"3-7"`.
-    pub days: String,
-    /// The bar in the design's words.
-    pub text: String,
-    /// The readings the bar is measured by; the bar passes when every one
-    /// holds.
-    #[serde(default)]
-    pub reads: Vec<Measure>,
-}
-
-/// One reading a bar names: the latest of `instrument` over `scope`, which
-/// holds when its status is pass, or, with `number`, when that number lies
-/// within `min` and `max`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct Measure {
-    pub instrument: String,
-    pub scope: String,
-    pub number: Option<String>,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-}
-
 impl Manifest {
     /// A manifest of these `[[crate]]` rows and nothing else: the `[oracle]`
     /// row names `oracle.toml`, every ceiling is one, and the pin and the
@@ -979,37 +946,6 @@ impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest> {
         let manifest: Manifest = toml::from_str(text)
             .map_err(|err| generated_refusal(text).unwrap_or_else(|| err.into()))?;
-        let instruments = crate::cli::instruments();
-        for week in &manifest.weeks {
-            for read in &week.reads {
-                if !instruments.contains(&read.instrument) {
-                    bail!(
-                        "week \"{}\" reads {} {}, and {} is not an instrument xtask has; the instrument ships its row",
-                        week.days,
-                        read.instrument,
-                        read.scope,
-                        read.instrument
-                    );
-                }
-                let bounded = read.min.is_some() || read.max.is_some();
-                if read.number.is_some() && !bounded {
-                    bail!(
-                        "week \"{}\" reads {} {} by a number without a min or a max",
-                        week.days,
-                        read.instrument,
-                        read.scope
-                    );
-                }
-                if read.number.is_none() && bounded {
-                    bail!(
-                        "week \"{}\" bounds {} {} without naming the number",
-                        week.days,
-                        read.instrument,
-                        read.scope
-                    );
-                }
-            }
-        }
         for rule in &manifest.rules {
             let named = rule.predicate.named();
             if named.len() != 1 {

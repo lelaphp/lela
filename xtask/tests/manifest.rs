@@ -260,53 +260,6 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// `[[week]]` is a bar of the thirty days (design §11): the days, the text,
-/// and the readings it is measured by, each a status or a number against
-/// a bound. A bound without a number, or a number without a bound, is
-/// refused by name.
-#[test]
-fn a_week_row_names_the_readings_that_measure_its_bar() {
-    let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"budget\", scope = \"xtask\", number = \"lines\", max = 14000 }}, {{ instrument = \"clippy\", scope = \"xtask\" }}]\n"
-    );
-    let manifest = Manifest::parse(&text).unwrap();
-    assert_eq!(manifest.weeks.len(), 1);
-    assert_eq!(manifest.weeks[0].reads.len(), 2);
-
-    let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"budget\", scope = \"xtask\", min = 100 }}]\n"
-    );
-    let err = Manifest::parse(&text).unwrap_err().to_string();
-    assert!(err.contains("3-7") && err.contains("number"), "{err}");
-
-    let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"budget\", scope = \"xtask\", number = \"lines\" }}]\n"
-    );
-    let err = Manifest::parse(&text).unwrap_err().to_string();
-    assert!(err.contains("3-7") && err.contains("min"), "{err}");
-}
-
-/// A bar's read names an instrument `xtask` has, so a row cannot arrive
-/// before the instrument whose reading it reads; the instrument ships its
-/// row (AGENTS.md, "the instrument ships before the code it measures").
-#[test]
-fn a_week_read_names_an_instrument_xtask_has() {
-    let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt-nightly\", scope = \"tests/basic\" }}]\n"
-    );
-    let err = Manifest::parse(&text).unwrap_err().to_string();
-    assert!(
-        err.contains("3-7") && err.contains("phpt-nightly") && err.contains("instrument"),
-        "{err}"
-    );
-
-    // The same row naming the instrument that now exists parses.
-    let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"ext/pcre\" }}]\n"
-    );
-    assert!(Manifest::parse(&text).is_ok());
-}
-
 /// `[telemetry] silent_days` is the window of the silent query (harness
 /// §7); optional, and nothing in code stands in for it when it is absent.
 #[test]
