@@ -1,2 +1,8 @@
 *.md merge=computed
 *.markdown merge=computed
+# reStructuredText rules a section with a line of seven `=` or more,
+# which git, and so the commit hooks, read as a conflict marker left in
+# (#2996): its files take a marker size longer than any rule here. The one
+# place a file that holds such a line on purpose is exempted.
+*.rst conflict-marker-size=100
+*.rst.md conflict-marker-size=100

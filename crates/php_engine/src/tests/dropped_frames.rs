@@ -10,12 +10,9 @@
 //! whose `eval` raises a fatal, and across a serving that leaves a
 //! frame with an annex standing.
 
-use std::cell::Cell;
-
 use crate::api::abi::{ExtensionBuilder, Observed, ObserverHandlers};
 use crate::engine::Engine;
 use crate::exec::Header;
-use crate::test::Capture;
 use crate::tier::{self, Evaluated, Under};
 
 /// The evaluation: a fiber whose body stands in an `eval`'s frame, an
@@ -25,8 +22,9 @@ use crate::tier::{self, Evaluated, Under};
 const CODE: &[u8] =
     b"(new Fiber(function () { eval('trigger_error(\"x\", E_USER_ERROR);'); }))->start()";
 
-/// What the stop counted.
-#[derive(Debug, Clone, Copy)]
+/// What the stop counted, the debugger's request state, read back by
+/// the test once the request ended ([`tier::serve_kept`]).
+#[derive(Debug, Default, Clone, Copy)]
 struct Counted {
     /// Whether the evaluation bailed out.
     bailed_out: bool,
@@ -36,10 +34,6 @@ struct Counted {
     /// The annexes standing before the evaluation, after it, and after
     /// the serving that left its frame.
     annexes: [usize; 3],
-}
-
-thread_local! {
-    static COUNTED: Cell<Option<Counted>> = const { Cell::new(None) };
 }
 
 /// `pause()` begun: the annexes counted around the evaluation, and
@@ -57,11 +51,11 @@ fn stop(observed: &mut Observed<'_>) {
             .is_some_and(|call| req.annex_mut(call).is_some())
     });
     let after_left = observed.annexes().live();
-    COUNTED.set(Some(Counted {
+    *observed.state::<Counted>() = Counted {
         bailed_out: evaluated == Evaluated::BailedOut,
         left,
         annexes: [before, after, after_left],
-    }));
+    };
 }
 
 fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
@@ -81,14 +75,18 @@ fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
 #[test]
 fn frames_let_go_after_a_fatal_or_left_standing_leave_no_annex() {
     let engine = Engine::cli_builder()
-        .extensions(&[ExtensionBuilder::default().observer(init).build("debugger")])
+        .extensions(&[ExtensionBuilder::default()
+            .observer(init)
+            .request_state::<Counted>()
+            .build("debugger")])
         .build();
-    let served = engine.serve_capture(
+    let (served, counted) = tier::serve_kept::<Counted>(
+        &engine,
+        &std::env::current_dir().unwrap_or_default(),
+        b"Standard input code",
         "<?php\nfunction pause() {}\npause();\necho \"on\\n\";\n",
-        Capture::default(),
     );
     let out = String::from_utf8_lossy(&served.stdout);
-    let counted = COUNTED.take();
     assert!(
         counted.is_some_and(|counted| counted.bailed_out
             && counted.left

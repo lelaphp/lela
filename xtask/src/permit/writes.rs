@@ -13,14 +13,17 @@
 //!   (`python3 - <<EOF`);
 //! - a program run by its path whose bytes name it (`./tool.sh`).
 //!
-//! A word is the file when, read where the call stands or in a directory
-//! the line `cd`s or `pushd`s into or a git command's `-C` names, it is
-//! that path ([`Place::is`]); a program names it
+//! A word is the file when, read where the call stands or where the line
+//! runs a command, a `cd` or a git command's `-C` taking it there
+//! ([`placed`]), it is that path ([`Place::is`]); a program names it
 //! when the file's name stands in its text ([`names_file`]). What none of
 //! that shows, a binary that holds the path where no word or file spells
 //! it, the line cannot be read to write, and the sensor keeps the change.
 
+use std::path::{Path, PathBuf};
+
 use super::argv::{Argv, Line};
+use super::rules::placed;
 
 /// The file asked about, where the call stands: the sensor's side of the
 /// question, which touches the disk so that this module does not.
@@ -106,13 +109,19 @@ const INTERPRETERS: [&str; 15] = [
 
 /// Whether `line` can write the file at `place` (the module's list).
 pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
-    let dirs = directories(line);
+    // Each directory a command of the line runs or reaches in, read from
+    // where the call stands, as [`placed`] reads it.
+    let placed = placed(Path::new(""), line).into_iter();
+    let dirs: Vec<PathBuf> = placed.map(|(_, dir)| dir).collect();
     // The word as the shell would find it: where the call stands, and in
-    // each directory the line moves into.
+    // each of those.
     let spellings = |word: &str| -> Vec<String> {
         let mut all = vec![word.to_owned()];
         if !word.starts_with(['/', '~']) {
-            all.extend(dirs.iter().map(|dir| format!("{dir}/{word}")));
+            all.extend(
+                dirs.iter()
+                    .map(|dir| dir.join(word).to_string_lossy().into_owned()),
+            );
         }
         all
     };
@@ -188,22 +197,6 @@ fn in_place(word: &str) -> bool {
 fn interprets(argv: &Argv) -> bool {
     let program = argv.program();
     INTERPRETERS.contains(&program) || program.starts_with("python")
-}
-
-/// The directories the line's `cd`, `pushd` and git `-C` commands move
-/// into, as written, a variable the line assigned read as its value
-/// ([`Argv::directories`]); a git command's `-C`s joined, each read from
-/// the one before, as git reads them.
-fn directories(line: &Line) -> Vec<String> {
-    line.commands()
-        .iter()
-        .filter_map(|argv| {
-            let mut dirs = argv.directories();
-            let first = std::path::PathBuf::from(dirs.next()?);
-            let joined = dirs.fold(first, |dir, to| dir.join(to));
-            Some(joined.to_string_lossy().into_owned())
-        })
-        .collect()
 }
 
 /// Whether `text` names the file `name`: `name` standing in it with no

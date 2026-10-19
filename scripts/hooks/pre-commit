@@ -97,6 +97,18 @@ message_file() {
     return 1
 }
 message_file || exit 1
+# A line the commit adds that git's own check reads as a conflict
+# marker left in (`<<<<<<<`, `=======`, `>>>>>>>`, `|||||||`) refuses
+# it, naming file and line: d0e168554, a merge `git commit` concluded
+# through this hook, carried three into harness-design.md (#2996).
+# pre-merge-commit runs the same check. A file that holds such a line on
+# purpose is exempted in .gitattributes by `conflict-marker-size`, the
+# one place.
+if markers=$(git diff --cached --check | grep -E ': leftover conflict marker$'); then
+    printf '%s\n' "$markers" >&2
+    echo "pre-commit: the staged line above is a conflict marker left in; resolve it, or exempt a file that holds one on purpose by its conflict-marker-size in .gitattributes" >&2
+    exit 1
+fi
 # A branch writes a ledger revision it adds as `NEXT`, since two branches
 # that both take the next number conflict at their merges, and the merge
 # into `main` numbers it (#2982, the specs skill's merging.md); so a

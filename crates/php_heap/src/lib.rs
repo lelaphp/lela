@@ -118,11 +118,13 @@ pub struct Heap {
     /// anything else of the request's ([`Heap::new`]), carved and never
     /// freed a piece at a time ([`Heap::carve`]).
     arena: zend_arena::ZendArena,
-    /// The strings the units this request compiled for itself hold and
-    /// the names its declarations are read by, each once and live until
-    /// the request ends ([`Heap`]'s [`Intern`]): the request's own memory
-    /// and counted as such, in a table of the system allocator's, which
-    /// nothing counts ([`string::Table`]).
+    /// The strings this request holds to its end where the engine's
+    /// table holds none, the names its declarations are read by and the
+    /// strings of its own units' constant arrays, each once ([`Heap`]'s
+    /// [`Intern`]): the request's own memory and counted as such, in a
+    /// table of the system allocator's, which nothing counts
+    /// ([`string::Table`]). A unit compiled for this request alone keeps
+    /// its other constant strings itself, as plain strings it owns.
     interned: string::Table,
     /// php's `EG(ht_iterators)`: the positions the walks of this
     /// request's tables are registered at.
@@ -880,22 +882,26 @@ pub(crate) enum Last {
 }
 
 impl Intern for Heap {
-    /// The home of the strings a declaration of this request holds: the
-    /// constants and names of a unit compiled for this request alone, an
-    /// `eval` or an uncached include, as its compile's
-    /// `zend_new_interned_string` keeps them in its op arrays and class
-    /// entries, and a name read off a declaration that its unit made no
-    /// string for. The frozen table, then this request's own, then a
-    /// string out of this request's memory at the size `zend_string_init`
-    /// takes, which the request's end takes with everything else. It is
+    /// The home of the strings this request holds to its end where the
+    /// engine's table holds none: a name a declaration is read by, which
+    /// the engine's declarations keep as bytes and php reads off
+    /// `ce->name`, `function_name`, `prop_info->name` or a CV's name with
+    /// `ZVAL_STR_COPY`, and a string of a constant array of a unit
+    /// compiled for this request alone, which lives as long as the array
+    /// ([`Intern::constant_array`]). The frozen table, then this
+    /// request's own, then a string out of this request's memory at the
+    /// size `zend_string_init` takes, which the request's end takes with everything else. It is
     /// flagged interned and never persistent, so no release frees it and
     /// no thread but this one can name it, and the table that finds it
     /// again costs nothing ([`string::Table`]).
     ///
-    /// It is not php's `zend_string_init_interned`: under opcache that is
-    /// `accel_init_interned_string_for_php`, a string of its caller's own
-    /// where opcache's buffer has none, which a request makes with
-    /// [`Heap::string`] and never finds again.
+    /// It is neither php's `zend_string_init_interned` nor its compile's
+    /// `zend_new_interned_string`: under opcache both hand their caller a
+    /// string of its own where opcache's buffer has none
+    /// (`accel_init_interned_string_for_php`,
+    /// `accel_new_interned_string_for_php`), which a request makes with
+    /// [`Heap::string`], and which a unit compiled for this request alone
+    /// owns and gives up with its op arrays.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
         if let Some(frozen) = string::frozen_string(bytes) {
             return Ok(frozen);
@@ -916,9 +922,10 @@ impl Intern for Heap {
     }
 
     /// A constant array of a unit this request alone serves, an `eval`
-    /// or an uncached include: out of this heap and gone with it, as
-    /// its interned strings are, immutable as the published one is so
-    /// that the engine reads one kind of constant array.
+    /// or an uncached include: out of this heap and gone with it, written
+    /// with strings of this table's, which no release frees, and
+    /// immutable as the published one is so that the engine reads one
+    /// kind of constant array.
     fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
         let a = self.array_constant(entries)?;
         #[cfg(debug_assertions)]

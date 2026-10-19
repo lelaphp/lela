@@ -8,7 +8,6 @@
 //! frame of the user function that called it, as the tier reads the
 //! frame at a site.
 
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
@@ -23,11 +22,11 @@ use crate::engine::Engine;
 use crate::test::Capture;
 use crate::tier::{self, FuncRef, SafepointIdx, UnitView};
 
-thread_local! {
-    /// The views the natives built, with the op array each was asked to
-    /// hold, kept past the request for the test to read.
-    static VIEWS: RefCell<Vec<(UnitView, FuncRef)>> = const { RefCell::new(Vec::new()) };
-}
+/// The views the natives built, with the op array each was asked to
+/// hold, the extension's request state, kept past the request for the
+/// test to read ([`tier::serve_kept`]).
+#[derive(Default)]
+struct Views(Vec<(UnitView, FuncRef)>);
 
 /// The op array the calling user function serves.
 fn caller(req: &Request) -> Option<FuncRef> {
@@ -43,7 +42,7 @@ fn hold_caller(req: &mut Request) -> bool {
     };
     let mut view = UnitView::new(req);
     let held = view.hold(req, f);
-    VIEWS.with(|views| views.borrow_mut().push((view, f)));
+    req.state::<Views>().0.push((view, f));
     held
 }
 
@@ -93,6 +92,7 @@ fn viewing() -> Extension {
             hold_class_named::declared(),
             bump_entry::declared(),
         ])
+        .request_state::<Views>()
         .build("viewing")
 }
 
@@ -128,23 +128,27 @@ fn serve(engine: &Engine, dir: &std::path::Path, program: &str) -> String {
 /// refused one reads nothing.
 #[test]
 fn a_view_holds_a_held_units_function_refuses_an_evals_and_outlives_its_request() {
-    VIEWS.with(|views| views.borrow_mut().clear());
     let dir = scratch(
         "hold",
         "<?php function held() { for ($i = 0; $i < 2; $i++) {} return hold_caller(); }",
     );
     let engine = Engine::cli_builder().extensions(&[viewing()]).build();
-    let out = serve(
+    let main = dir.join("main.php");
+    let (served, views) = tier::serve_kept::<Views>(
         &engine,
         &dir,
+        main.to_string_lossy().as_bytes(),
         "<?php include __DIR__ . '/inc.php';\n\
          eval('function own() { return hold_caller(); }');\n\
          var_dump(held(), own());",
     );
-    assert_eq!(out, "bool(true)\nbool(false)\n");
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\nbool(false)\n"
+    );
     drop(engine);
     std::fs::remove_dir_all(&dir).ok();
-    let views = VIEWS.with(RefCell::take);
+    let views = views.map(|views| views.0).unwrap_or_default();
     assert_eq!(views.len(), 2, "two views were built");
     let mut views = views.into_iter();
     let (Some((held_view, held)), Some((own_view, own))) = (views.next(), views.next()) else {

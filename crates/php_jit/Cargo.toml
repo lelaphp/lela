@@ -17,7 +17,8 @@ workspace = true
 
 [dependencies]
 php_engine = { path = "../php_engine" }
-php_unit = { path = "../php_unit" }       # the ini entries the tier declares (decl::IniDecl), through unit.lock
+php_unit = { path = "../php_unit" }       # the ini entries the tier declares (decl::IniDecl) and the op arrays the recorder reads, through unit.lock
+php_heap = { path = "../php_heap" }       # the type a sampled operand holds (ZvalType), through heap.lock
 libc = { workspace = true }               # the code arena's mapping and its cache maintenance on macOS (jit-design.md §4.4), already in the lock
 
 [dev-dependencies]

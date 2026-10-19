@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=1aed82ac6849c33803cbbb666e6584e24efe4e0459f13f044537fbaeb2e6fd9b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=3763c70e8640999ff49f8a933a10a55e9cf2c90713da258eb1747377f716b7c6 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -128,11 +128,11 @@ third-engine-design.md
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1448 | 1500 |
 | sapi | sapi.lock | 57 |  |
-| tier | tier.lock | 62 |  |
+| tier | tier.lock | 81 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 409 |  |
 
-<!-- /computed in=a533574dd7ee85da80ac0c640ba960a870a2ec6ab2326a2593a2154cc2284e31 out=465eda2658c42d65a2b66ec98eb9d8b02f6194865d9c0bc9acfd33c9663df98a -->
+<!-- /computed in=45ed661d14fbfc420c161297fc899e2ef444f0a67299fc8c7d71aeb3e55b7431 out=d02ef4483a3986af16c4f36bab9fe98c72438ab2d5934dd1ac5ea079b6960b85 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
