@@ -938,11 +938,6 @@ pub(crate) struct Annex {
     /// for the frame's life: a function's frame has its unit through the
     /// function table, which holds it.
     pub(crate) unit: Option<PublishedUnit>,
-    /// The file's op array as another process reads it, php's
-    /// `EX(func)` of a code frame ([`crate::readable`]): no name, the
-    /// unit's file and oplines. The header names it from the push on,
-    /// and it stands, boxed, until the frame pops.
-    pub(crate) record: Option<Box<crate::readable::Record>>,
     /// `EX(func)->op_array.scope` where the frame serves no function of
     /// its own: the including frame's scope, which `INCLUDE_OR_EVAL`
     /// writes onto the op array it pushes (`new_op_array->scope =
@@ -971,6 +966,12 @@ pub(crate) struct Annex {
     /// no owner, since the object owns the frame and not the other way
     /// round; none for every other frame.
     pub(crate) generator: Option<PhpObject>,
+    /// How many times the frame's table had been written when the frame
+    /// last attached to it ([`Request::attach_symbol_table`]), every CV's
+    /// bucket naming the CV from then on: an attach while the count
+    /// stands moves nothing, as an includer's when the file it included
+    /// wrote nothing to the table.
+    pub(crate) attached: Option<u32>,
     /// php's fast-call temporaries, one per `finally` block of the op
     /// array a `FAST_CALL` or an unwind has entered. php keeps two
     /// fields in the one zval at `EX_VAR(opline->result.var)`,
@@ -1021,39 +1022,73 @@ pub(crate) struct AnnexId(std::num::NonZeroU32);
 /// Every frame's [`Annex`], the request's, so a frame keeps its own
 /// across a move off one stack and onto another, a generator's resumed
 /// on a fiber among them; a place given back is the next one taken.
+/// Each place stands at one address from the first annex laid there to
+/// the request's end, so a code frame's record is written where it
+/// stands, as php's `EX(func)` is the op array the frame holds
+/// ([`Annexes::callee`]), and laying an annex down where one stood
+/// allocates nothing.
 #[derive(Default)]
 pub(crate) struct Annexes {
-    rows: Vec<Option<Annex>>,
+    // Boxed so a row keeps its address as the vector grows.
+    #[allow(clippy::vec_box)]
+    rows: Vec<Box<AnnexRow>>,
     free: Vec<u32>,
 }
 
+/// One place among the [`Annexes`]: the annex laid there, and beside it
+/// the record another process reads of a code frame's op array
+/// ([`crate::readable`]), no name, the unit's file and oplines, written
+/// as the annex of a frame serving a unit's main op array is laid down.
+#[derive(Default)]
+struct AnnexRow {
+    annex: Option<Annex>,
+    record: crate::readable::Record,
+}
+
 impl Annexes {
-    /// `extra` given a place.
+    /// `extra` given a place, and the record of the op array it serves
+    /// written beside it where it serves a unit's main op array.
     pub(crate) fn insert(&mut self, extra: Annex) -> AnnexId {
+        let record = extra.unit.as_deref().map(code_record);
         let at = if let Some(at) = self.free.pop() {
-            if let Some(row) = self.rows.get_mut(at as usize) {
-                *row = Some(extra);
-            }
             at
         } else {
-            self.rows.push(Some(extra));
+            self.rows.push(Box::default());
             u32::try_from(self.rows.len() - 1).unwrap_or(u32::MAX - 1)
         };
+        if let Some(row) = self.rows.get_mut(at as usize) {
+            row.annex = Some(extra);
+            if let Some(record) = record {
+                row.record = record;
+            }
+        }
         AnnexId(std::num::NonZeroU32::MIN.saturating_add(at))
     }
 
+    /// Where the record of the code frame whose annex is `id` stands,
+    /// what its header names as `EX(func)`: it stands there until the
+    /// annex is taken, after the frame is popped. None for a frame that
+    /// serves no unit's main op array.
+    pub(crate) fn callee(&self, id: AnnexId) -> crate::readable::CalleeAt {
+        self.rows
+            .get(id.0.get() as usize - 1)
+            .filter(|row| row.annex.as_ref().is_some_and(|annex| annex.unit.is_some()))
+            .map(|row| row.record.at())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn get(&self, id: AnnexId) -> Option<&Annex> {
-        self.rows.get(id.0.get() as usize - 1)?.as_ref()
+        self.rows.get(id.0.get() as usize - 1)?.annex.as_ref()
     }
 
     pub(crate) fn get_mut(&mut self, id: AnnexId) -> Option<&mut Annex> {
-        self.rows.get_mut(id.0.get() as usize - 1)?.as_mut()
+        self.rows.get_mut(id.0.get() as usize - 1)?.annex.as_mut()
     }
 
     /// The extra at `id` taken out, its place given back.
     pub(crate) fn take(&mut self, id: AnnexId) -> Option<Annex> {
         let at = id.0.get() - 1;
-        let taken = self.rows.get_mut(at as usize)?.take();
+        let taken = self.rows.get_mut(at as usize)?.annex.take();
         if taken.is_some() {
             self.free.push(at);
         }
@@ -2062,7 +2097,7 @@ pub(crate) fn code_of(unit: &Unit) -> &OpArray {
 
 /// The record of `unit`'s main op array as another process reads
 /// it: a file's, no name, php's `NULL` `function_name`.
-pub(crate) fn code_record(unit: &Unit) -> crate::readable::Record {
+fn code_record(unit: &Unit) -> crate::readable::Record {
     crate::readable::Record::user(&[], code_of(unit))
 }
 

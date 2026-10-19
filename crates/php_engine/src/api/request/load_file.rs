@@ -70,43 +70,16 @@ impl Request {
     /// file left pending is the `Err`, and what it returned is given up.
     fn serve_top_code(&mut self, unit: php_unit::PublishedUnit) -> Result<(), Thrown> {
         let standing = self.vm.depth();
-        let code = exec::code_of(&unit);
-        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        let caller = self.innermost_user_frame();
-        let mut header = exec::Header::of(None, code);
-        // `zend_execute`'s `ZEND_CALL_TOP_CODE`.
-        header.info.set_top_code(true);
-        let record = Box::new(exec::code_record(&unit));
-        header.callee = record.at();
-        let pushed = self.vm.push(&mut self.heap, slots, 0, header.clone());
+        let from = super::CodeFrom::Top(self.innermost_user_frame());
+        let pushed = self.push_code_frame(unit, from);
         let frame = self.fatal_of(pushed)?;
-        let table = caller.map(|caller| self.rebuild_symbol_table(caller));
-        let laid = exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main);
-        self.fatal_of(laid)?;
-        self.forget_main_statics(code.runtime_cache);
-        header.set_caller(caller.map_or(exec::Caller::Outside, exec::Caller::Opline));
-        header.annex = Some(self.annexes_mut().insert(exec::Annex {
-            unit: Some(unit),
-            record: Some(record),
-            symbol_table: table,
-            ..exec::Annex::default()
-        }));
-        if let Some(laid) = self.vm.at_mut(frame) {
-            *laid = header;
-        }
-        self.attach_symbol_table(frame);
         crate::observer::call(self, frame);
         let reenter = self.shared.loops.reenter;
         let served = reenter(self, frame);
         let served = self.fatal_of(served);
-        while self.vm.depth() > standing + 1 {
-            self.pop_frame();
-        }
         // `zend_detach_symbol_table` on the way out, so what the file
         // wrote to a variable of the caller's is in the caller's CV.
-        if self.vm.depth() > standing {
-            self.leave_frame(frame);
-        }
+        self.leave_code(standing, frame);
         served?;
         let returned = std::mem::replace(&mut self.returned, Value::null());
         self.release(returned);

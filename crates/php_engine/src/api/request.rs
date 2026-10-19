@@ -78,6 +78,7 @@ mod frame_writes;
 pub(crate) use frame_reads::Identity;
 pub use frame_reads::{ChainFrame, FrameId, FrameView};
 mod frames;
+pub(crate) use frames::CodeFrom;
 use frames::{Expand, Link, Slots, links_of};
 mod hash_bytes;
 mod include;
@@ -553,6 +554,10 @@ pub(crate) struct SymbolTable {
     /// ([`Request::rebuilt_table_bytes`]), and `EG(symbol_table)`'s data,
     /// its `zend_array` being `EG`'s own ([`SymbolTable::global`]).
     bytes: Option<hash_bytes::HashBytes>,
+    /// How many times its buckets were reached to be written, so a frame
+    /// that attached to it knows whether they stand as it left them
+    /// ([`exec::Annex::attached`]).
+    changes: u32,
 }
 
 /// What `zend_include_or_eval` handed the handler: `ZEND_FAKE_OP_ARRAY`,
@@ -1497,10 +1502,10 @@ impl HeapHooks for Hooks<'_> {
 
 #[cfg(test)]
 impl Request {
-    /// [`Request::push_frame`] in a test, whose request no memory limit
-    /// holds, so the push is never refused.
+    /// [`Request::push_code_frame`] of a program in a test, whose request
+    /// no memory limit holds, so the push is never refused.
     pub(crate) fn pushed(&mut self, unit: PublishedUnit) -> FrameRef {
-        let pushed = self.push_frame(unit);
+        let pushed = self.push_code_frame(unit, CodeFrom::Top(None));
         assert_eq!(pushed.as_ref().err(), None, "a test's frame is pushed");
         pushed.unwrap_or(FrameRef(0))
     }

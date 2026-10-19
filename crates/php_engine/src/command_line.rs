@@ -208,7 +208,8 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
             return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
         }
         let standing = req.vm().depth();
-        let frame = match req.push_frame(php_unit::PublishedUnit::clone(&unit)) {
+        let program = crate::api::request::CodeFrom::Top(None);
+        let frame = match req.push_code_frame(php_unit::PublishedUnit::clone(&unit), program) {
             Ok(frame) => frame,
             Err(fatal) => {
                 req.end_in(&fatal);
@@ -218,11 +219,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
         let served = req.serve_host_string(|req| (shared.loops.entry)(req, frame));
         // What a fatal left standing above the main frame, as
         // `serve_unit` pops it.
-        while req.vm().depth() > standing + 1 {
-            req.pop_frame();
-        }
-        req.detach_symbol_table(frame);
-        req.pop_frame();
+        req.leave_code(standing, frame);
         if let Err(fatal) = served {
             req.end_in(&fatal);
             return false;

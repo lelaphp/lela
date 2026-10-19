@@ -129,22 +129,33 @@ fn foreach_calls(
 ) -> Result<Owner<PhpString>, Thrown> {
     let table = table(req, &array)?;
     let mut read = String::new();
-    let walked = walk::foreach_guarded(req, table, hold(owner), |req, row| -> walk::Step {
-        let key = match row.key() {
-            Key::Int(n) => Value::int(*n),
-            Key::Str(s) => Value::string(*s),
-        };
-        let answer = call(req, &f, &[key])?;
-        answer.give_up(req);
-        let bytes = row.value().as_str_bytes().unwrap_or_default();
-        read.push_str(&String::from_utf8_lossy(bytes));
-        read.push(' ');
-        Ok(ControlFlow::Continue(()))
+    let walked = walk::foreach_guarded(req, table, hold(owner), |req, row| {
+        call_then_read(req, &f, row, &mut read)
     })?;
     if walked == Guarded::Recursive {
         return Err(throw_error(req, "Exception", "recursive at the start"));
     }
     PhpString::new(req, read.as_bytes())
+}
+
+/// `$f` called with `row`'s key, then the row's value, as the walk
+/// reads it after the call, put in `read` before a space.
+fn call_then_read(
+    req: &mut Request,
+    f: &Callable,
+    row: &walk::Row,
+    read: &mut String,
+) -> walk::Step {
+    let key = match row.key() {
+        Key::Int(n) => Value::int(*n),
+        Key::Str(s) => Value::string(*s),
+    };
+    let answer = call(req, f, &[key])?;
+    answer.give_up(req);
+    let bytes = row.value().as_str_bytes().unwrap_or_default();
+    read.push_str(&String::from_utf8_lossy(bytes));
+    read.push(' ');
+    Ok(ControlFlow::Continue(()))
 }
 
 /// `live_reads(array &$array, callable $f): string`: a live walk that
@@ -160,17 +171,8 @@ fn live_reads(
         return Err(throw_error(req, "Exception", "no reference"));
     };
     let mut read = String::new();
-    walk::live(req, holder, |req, row| -> walk::Step {
-        let key = match row.key() {
-            Key::Int(n) => Value::int(*n),
-            Key::Str(s) => Value::string(*s),
-        };
-        let answer = call(req, &f, &[key])?;
-        answer.give_up(req);
-        let bytes = row.value().as_str_bytes().unwrap_or_default();
-        read.push_str(&String::from_utf8_lossy(bytes));
-        read.push(' ');
-        Ok(ControlFlow::Continue(()))
+    walk::live(req, holder, |req, row| {
+        call_then_read(req, &f, row, &mut read)
     })?;
     PhpString::new(req, read.as_bytes())
 }
