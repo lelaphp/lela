@@ -314,8 +314,43 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> S
         Where::Operating => operation::foreign(root, line, call, |argv| fires(rule, argv))
             .map_or(Standing::Outside, Standing::Foreign),
         Where::Main => judged(in_main(root, rule, line)),
+        Where::Checkout => judged(in_a_checkout(root, line)),
     }
 }
+
+/// Whether a shell line runs anything inside a checkout of `root`'s
+/// repository ([`crate::track::checkouts`]): where it stands
+/// ([`runs_in`]) or where [`placed`] puts any of its commands, each by its
+/// canonical path, so a scratch repository's `docs/divergence.toml` is not
+/// this repository's (#2887). It fails safe, reading each of these as
+/// inside one: a directory change the line does not say where it goes; a
+/// place not on disk, which a `cd` cannot enter and so leaves the shell
+/// where it stood; a program moved by its own option ([`MOVES_ITSELF`]);
+/// and a repository git cannot list.
+fn in_a_checkout(root: &Path, line: Option<&Line>) -> bool {
+    let (placed, lost) = line.map(|line| walk(root, line)).unwrap_or_default();
+    if lost || line.is_some_and(|line| regex(MOVES_ITSELF).is_match(line.text())) {
+        return true;
+    }
+    let Ok(checkouts) = crate::track::checkouts(root) else {
+        return true;
+    };
+    std::iter::once(runs_in(root, line))
+        .chain(placed.into_iter().map(|(_, at)| at))
+        .any(|dir| {
+            fs::canonicalize(dir).map_or(true, |dir| checkouts.iter().any(|c| dir.starts_with(c)))
+        })
+}
+
+/// A program the shell starts in one directory that writes in another,
+/// by an option of its own the argv does not place: `env -C`, `find
+/// -execdir`, `patch -d`, and a target directory of `cp`, `mv`, `ln` or
+/// `install`. git's `-C` is placed ([`moved`]).
+const MOVES_ITSELF: &str = r"(?x)
+  \benv\b[^|;&\n]*\s(?:-[a-zA-Z]*C|--chdir)
+| \bfind\b[^|;&\n]*\s-(?:execdir|okdir)\b
+| \bpatch\b[^|;&\n]*\s(?:-[a-zA-Z]*d|--directory)\b
+| \b(?:cp|mv|ln|install)\b[^|;&\n]*\s(?:-[a-zA-Z]*t|--target-directory)\b";
 
 /// Whether a command the rule fires on runs in a checkout whose branch
 /// records a ticket, or one the harness cannot tell does not
@@ -444,12 +479,18 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// stood before it ([`Line::shells`], #2764), as [`standing`] reads the
 /// line's leading changes (#2787).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
+    walk(root, line).0
+}
+
+/// [`placed`], and whether the line made a change it does not say where
+/// it goes, past which a command in that shell is placed nowhere.
+fn walk<'a>(root: &Path, line: &'a Line) -> (Vec<(&'a Argv, PathBuf)>, bool) {
     let (mut dir, mut pushed) = (root.to_path_buf(), Vec::new());
     let mut entered: Vec<(u32, PathBuf, Vec<PathBuf>)> = Vec::new();
     // How many shells were open at a change the line does not say where
     // it goes: nothing is placed until that shell has closed.
     let mut lost: Option<usize> = None;
-    let mut placed = Vec::new();
+    let (mut placed, mut ever) = (Vec::new(), false);
     for (argv, shells) in line.commands().iter().zip(line.shells()) {
         let kept = entered
             .iter()
@@ -468,12 +509,12 @@ pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)
             continue;
         }
         if matches!(argv.program(), "cd" | "pushd" | "popd") {
-            lost = Some(entered.len());
+            (lost, ever) = (Some(entered.len()), true);
             continue;
         }
         placed.push((argv, moved(dir.clone(), argv)));
     }
-    placed
+    (placed, ever)
 }
 
 /// Where each command of `line` that `fires` runs: where the line stands
