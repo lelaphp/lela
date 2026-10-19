@@ -1,0 +1,6 @@
+# tier.lock: ops::add_slow listed under [kernels] by hand, which no kernels! list names.
+[face]
+tier::Tier
+[kernels]
+ops::add_slow
+ops::sub_slow

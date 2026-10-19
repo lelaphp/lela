@@ -779,6 +779,63 @@ pub fn uses(file: &Path) -> Result<Vec<UsePath>> {
     Ok(collector.0)
 }
 
+/// The `php_engine` paths the `kernels!` lists in a file name, each
+/// line's after its `=` (`jit-design.md` §5.3): what `tier.lock`'s kernels
+/// section is generated from.
+pub fn kernels_named(file: &Path) -> Result<Vec<String>> {
+    let text = crate::read(file)?;
+    let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
+    let mut lists = Lists(Vec::new());
+    lists.visit_file(&parsed);
+    let mut out = Vec::new();
+    for list in lists.0 {
+        let named = list
+            .parse_body_with(served_through)
+            .with_context(|| format!("reading a kernels! list in {}", file.display()))?;
+        out.extend(named);
+    }
+    Ok(out)
+}
+
+/// Every `kernels!` invocation in a file.
+struct Lists(Vec<syn::Macro>);
+
+impl<'ast> Visit<'ast> for Lists {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac.path.is_ident("kernels") {
+            self.0.push(mac.clone());
+        }
+    }
+}
+
+/// One list, `Request => mod wrapped { .. }`, read for the path each line
+/// names after its `=`; a line that names none adds nothing.
+fn served_through(input: syn::parse::ParseStream<'_>) -> syn::Result<Vec<String>> {
+    input.parse::<Type>()?;
+    input.parse::<syn::Token![=>]>()?;
+    input.parse::<syn::Token![mod]>()?;
+    input.parse::<syn::Ident>()?;
+    let lines;
+    syn::braced!(lines in input);
+    let mut out = Vec::new();
+    while !lines.is_empty() {
+        if lines.peek(syn::Token![=]) && !lines.peek(syn::Token![=>]) {
+            lines.parse::<syn::Token![=]>()?;
+            let path: syn::Path = lines.parse()?;
+            let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            out.push(segs.join("::"));
+        } else {
+            lines.step(|cursor| {
+                let (_, next) = cursor
+                    .token_tree()
+                    .ok_or_else(|| cursor.error("a kernels! line ends early"))?;
+                Ok(((), next))
+            })?;
+        }
+    }
+    Ok(out)
+}
+
 struct Collector(Vec<UsePath>);
 
 impl<'ast> Visit<'ast> for Collector {
