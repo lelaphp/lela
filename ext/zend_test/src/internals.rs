@@ -29,6 +29,7 @@
 //! `zend_test_set_fmode` is Windows' alone, and is left out as php
 //! leaves it out on every other platform.
 
+use php_ext::abi::{FromArgument as _, Raw};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::Request;
@@ -125,20 +126,26 @@ pub(crate) fn zend_test_zend_call_stack_get(
 /// `zend_test_zend_call_stack_use_all(): int`: the native recursing until
 /// its frame reaches 4 KiB above the thread's end, the frames counted,
 /// which holds that the stack `zend_call_stack_get` describes is the
-/// stack the thread has; nothing where the platform cannot describe it.
+/// stack the thread has. Where the platform cannot describe it, php's
+/// bare `return` answers `null` under the declared `int`, which only a
+/// debug build of php verifies, and so does this.
 ///
 /// ```php
 /// var_dump(zend_test_zend_call_stack_use_all() > 1000);
+/// echo (new ReflectionFunction('zend_test_zend_call_stack_use_all'))->getReturnType(), "\n";
 /// ```
 /// ```expect
 /// bool(true)
+/// int
 /// ```
 #[php_function]
-pub(crate) fn zend_test_zend_call_stack_use_all(req: &mut Request) -> Option<i64> {
-    let stack = req.call_stack_bounds()?;
-    // `zend_call_stack_limit(base, max_size, 4096)`.
-    let limit = (stack.base.saturating_sub(stack.max_size)).saturating_add(4096);
-    Some(use_all(limit))
+pub(crate) fn zend_test_zend_call_stack_use_all(req: &mut Request) -> Result<Raw<i64>, Thrown> {
+    let counted = req.call_stack_bounds().map_or(Value::null(), |stack| {
+        // `zend_call_stack_limit(base, max_size, 4096)`.
+        let limit = (stack.base.saturating_sub(stack.max_size)).saturating_add(4096);
+        Value::int(use_all(limit))
+    });
+    Raw::from_value(req, counted)
 }
 
 /// `zend_call_stack_use_all`: one frame more until
