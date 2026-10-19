@@ -139,8 +139,9 @@ enum Body {
 }
 
 /// What the next word of a command is for.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Next {
+    #[default]
     Argument,
     /// The file a redirection names, which is no word of the argv;
     /// `writes` for one the redirection writes (`>`, `>>`, `<>`, `&>`).
@@ -153,12 +154,14 @@ enum Next {
 }
 
 /// A word being read: its text and whether any of it was quoted.
+#[derive(Default)]
 struct Word {
     text: String,
     quoted: bool,
 }
 
 /// The command being read.
+#[derive(Default)]
 struct Command {
     words: Vec<String>,
     word: Option<Word>,
@@ -166,22 +169,8 @@ struct Command {
 }
 
 impl Command {
-    fn new() -> Command {
-        Command {
-            words: Vec::new(),
-            word: None,
-            next: Next::Argument,
-        }
-    }
-
     fn push(&mut self, c: char) {
-        self.word
-            .get_or_insert_with(|| Word {
-                text: String::new(),
-                quoted: false,
-            })
-            .text
-            .push(c);
+        self.word.get_or_insert_with(Word::default).text.push(c);
     }
 
     /// A quote or a substitution opens a word even when it adds no text.
@@ -194,6 +183,7 @@ impl Command {
     }
 }
 
+#[derive(Default)]
 struct Lexer {
     chars: Vec<char>,
     at: usize,
@@ -222,17 +212,7 @@ impl Lexer {
     fn new(line: &str) -> Lexer {
         Lexer {
             chars: line.chars().collect(),
-            at: 0,
-            commands: Vec::new(),
-            shells: Vec::new(),
-            open: Vec::new(),
-            opened: 0,
-            heredocs: Vec::new(),
-            line_start: 0,
-            text_bodies: Vec::new(),
-            assigned: Assigned::new(),
-            written: Vec::new(),
-            bodies: Vec::new(),
+            ..Lexer::default()
         }
     }
 
@@ -294,7 +274,7 @@ impl Lexer {
 
     /// Commands until `close`, the `)` of a subshell or a `$(`, or the end.
     fn list(&mut self, close: Option<char>) {
-        let mut command = Command::new();
+        let mut command = Command::default();
         while let Some(c) = self.bump() {
             match c {
                 c if Some(c) == close => break,
@@ -497,7 +477,7 @@ impl Lexer {
                 // substitutions as it reads the body, whoever reads it next.
                 let mut read = Lexer::new(&line);
                 if heredoc.expands {
-                    read.expand(&mut Command::new(), None);
+                    read.expand(&mut Command::default(), None);
                 }
                 match body {
                     Body::Text if read.commands.is_empty() => {
@@ -540,13 +520,10 @@ const DECLARING: [&str; 5] = ["export", "readonly", "declare", "typeset", "local
 /// not the shell's, which expands the line before it assigns, so it is
 /// none of these. One made in a subshell or a substitution is read as
 /// the line's: the reading is then stricter than the shell, never looser.
+#[derive(Default)]
 struct Assigned(BTreeMap<String, String>);
 
 impl Assigned {
-    fn new() -> Assigned {
-        Assigned(BTreeMap::new())
-    }
-
     /// The assignments a command's words make, where they are the whole
     /// command or a declaring builtin's operands.
     fn read(&mut self, words: &[String]) {

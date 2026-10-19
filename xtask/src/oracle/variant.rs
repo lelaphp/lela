@@ -98,14 +98,6 @@ impl Variant {
         }
     }
 
-    fn build_mut(&mut self, platform: Platform) -> Option<&mut Build> {
-        match platform {
-            Platform::DarwinArm64 => self.darwin_arm64.as_mut(),
-            Platform::LinuxX86_64 => self.linux_x86_64.as_mut(),
-            Platform::LinuxAarch64 => self.linux_aarch64.as_mut(),
-        }
-    }
-
     /// Hold each platform's table to what the platform's build is: a Linux
     /// build names the base image's manifest digest, which the recipe pins
     /// and rebuilds from (#1948), and no closure; the macOS one, made on no
@@ -123,7 +115,11 @@ impl Variant {
             let repin = format!(
                 "re-pinning it with `scripts/oracle-build.py build {key} {name}` is a person's act (harness §11)"
             );
-            match (imaged, &build.image, &build.closure, closure) {
+            let Provenance {
+                image,
+                closure: named,
+            } = &build.provenance;
+            match (imaged, image, named, closure) {
                 (true, None, ..) => bail!(
                     "{at} names no image; a Linux build is pinned by its base image's manifest digest beside its md5 (#1782, #1948)"
                 ),
@@ -153,10 +149,13 @@ impl Variant {
     /// pin's own, so a build a recipe lays down inside the checkout is named
     /// as the file stands and found from wherever a lane runs.
     pub(super) fn placed(&mut self, dir: &Path) {
-        for platform in Platform::ALL {
-            if let Some(build) = self.build_mut(platform)
-                && build.path.is_relative()
-            {
+        let builds = [
+            &mut self.darwin_arm64,
+            &mut self.linux_x86_64,
+            &mut self.linux_aarch64,
+        ];
+        for build in builds.into_iter().flatten() {
+            if build.path.is_relative() {
                 build.path = dir.join(&build.path);
             }
         }
@@ -165,21 +164,35 @@ impl Variant {
 
 /// One platform's build of a variant: where its binary is on a machine of
 /// that platform, the binary's md5, which is its identity as `[oracle]`'s
-/// md5 is the main oracle's, and for a Linux build the base image's
-/// manifest digest, which the recipe pins and rebuilds from, the md5
-/// holding the binary it rebuilt (#1948); for the macOS build, the digest
-/// of the `[closure]` it was made against (#2935). The path is where a machine
-/// finds the binary: on Linux, the install prefix the recipe builds it to;
-/// a relative path is the pin's directory's.
+/// md5 is the main oracle's, and what it was made from. The path is where
+/// a machine finds the binary: on Linux, the install prefix the recipe
+/// builds it to; a relative path is the pin's directory's.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Build {
     pub path: PathBuf,
     pub md5: String,
-    #[serde(default)]
+    #[serde(flatten)]
+    pub provenance: Provenance,
+}
+
+/// What a build was made from, never an input to a run: for a Linux build
+/// the base image's manifest digest, which the recipe pins and rebuilds
+/// from, the md5 holding the binary it rebuilt (#1948); for the macOS
+/// build, the digest of the `[closure]` it was made against (#2935). The
+/// pin's digest leaves out every field declared here and nothing else
+/// (#2969), so a key added to a build later is digested unless it is
+/// declared provenance.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Provenance {
     pub image: Option<String>,
-    #[serde(default)]
     pub closure: Option<ClosureDigest>,
+}
+
+impl Provenance {
+    /// The keys a build's table records provenance under, held to this
+    /// type's fields as serde's derive names them by a test.
+    pub(super) const KEYS: [&str; 2] = ["image", "closure"];
 }
 
 /// The oracles one run holds: the main oracle's, and one for each variant
@@ -323,6 +336,61 @@ mod tests {
             None,
         );
         assert!(err.contains("the pin's [closure] records none"), "{err}");
+    }
+
+    /// The names serde's derive hands a deserializer for `T`'s fields.
+    fn fields<T: Deserialize<'static>>() -> &'static [&'static str] {
+        use serde::de::{Error as _, Visitor, value::Error};
+        struct Fields(&'static [&'static str]);
+        impl<'de> serde::Deserializer<'de> for &mut Fields {
+            type Error = Error;
+            fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Error> {
+                Err(Error::custom("not a struct"))
+            }
+            fn deserialize_struct<V: Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Error> {
+                self.0 = fields;
+                Err(Error::custom("named"))
+            }
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+                byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum
+                identifier ignored_any
+            }
+        }
+        let mut fields = Fields(&[]);
+        T::deserialize(&mut fields).ok();
+        fields.0
+    }
+
+    /// A build's provenance is the keys its type declares, and the pin's
+    /// digest leaves those out and nothing else (#2969): adding `closure`
+    /// to a build keeps the digest a kept run and a reading under the
+    /// recipe record, and a key not declared provenance moves it.
+    #[test]
+    fn adding_a_closure_to_a_build_keeps_the_pins_digest() {
+        assert_eq!(fields::<Provenance>(), Provenance::KEYS);
+        let pin = |build: &str| {
+            let text = format!(
+                "[oracle]\nmd5 = \"0\"\n[variant.zend-test]\nflags = []\ndarwin-arm64 = {{ path = \"php\", md5 = \"0\"{build} }}\n"
+            );
+            super::super::digest(&text).unwrap()
+        };
+        assert_eq!(pin(""), pin(", closure = \"sha256:1\""));
+        assert_ne!(pin(""), pin(", md5x = \"1\""));
+    }
+
+    /// A key a build does not declare is refused as it was before its
+    /// provenance was a type of its own (#2969).
+    #[test]
+    fn an_unknown_key_in_a_build_is_refused() {
+        let text = "flags = []\ndarwin-arm64 = { path = \"php\", md5 = \"0\", closure = \"sha256:1\", built = \"0\" }\n";
+        let err = toml::from_str::<Variant>(text).unwrap_err().to_string();
+        assert!(err.contains("unknown field `built`"), "{err}");
     }
 
     #[test]

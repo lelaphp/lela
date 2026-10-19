@@ -33,7 +33,7 @@ mod variant;
 pub(crate) use closure::Closure;
 pub use closure::ClosureDigest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
-pub use variant::{Build, Oracles, Platform, Variant};
+pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -207,6 +207,20 @@ pub struct Pin {
     wrapper: Vec<String>,
 }
 
+/// [`Pin::digest`] of the pin's text: the git blob id of its values with
+/// the keys [`Provenance`] declares taken out of each variant's builds.
+fn digest(text: &str) -> Result<String> {
+    let mut table: toml::Table = toml::from_str(text)?;
+    let variants = table.get_mut("variant").and_then(toml::Value::as_table_mut);
+    for (_, variant) in variants.into_iter().flatten() {
+        let builds = variant.as_table_mut().into_iter().flatten();
+        for build in builds.filter_map(|(_, build)| build.as_table_mut()) {
+            build.retain(|key, _| !Provenance::KEYS.contains(&key));
+        }
+    }
+    Ok(crate::git::blob_id(table.to_string().as_bytes()))
+}
+
 /// `[sapi]`: the binaries upstream's run-tests.php finds beside `php` for
 /// `sapi/cgi`, `sapi/fpm` and `sapi/phpdbg` (`get_binary`, run-tests.php at
 /// the tag; php-fpm by `FPM\Tester::findExecutable`), each by path and
@@ -254,9 +268,7 @@ impl Host {
     /// as [`Pin`]'s does for `php`. Reached through
     /// [`Oracle::host_asserted`], which holds the closure first.
     fn assert_digest(&self) -> Result<()> {
-        let bytes = fs::read(&self.path)
-            .with_context(|| format!("reading the pinned host at {}", self.path.display()))?;
-        let actual = format!("{:x}", md5::compute(bytes));
+        let actual = md5_of(&self.path, "the pinned host at ")?;
         if actual != self.md5 {
             bail!(
                 "{} has md5 {actual}; the pin's [sapi] says {}. Report the drift; the pin moves only by a person's hand",
@@ -266,6 +278,13 @@ impl Host {
         }
         Ok(())
     }
+}
+
+/// The md5 of the file at `path`, as the pin names a binary by, `what`
+/// naming it before its path where the file cannot be read.
+fn md5_of(path: &Path, what: &str) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("reading {what}{}", path.display()))?;
+    Ok(format!("{:x}", md5::compute(bytes)))
 }
 
 /// A count of digest assertions: disclosure, so a test can hold a lane to
@@ -704,15 +723,16 @@ impl Pin {
         for (name, variant) in &pin.variant {
             variant.held(name, closure.as_ref())?;
         }
-        pin.digest =
-            crate::git::blob_id(toml::from_str::<toml::Table>(text)?.to_string().as_bytes());
+        pin.digest = digest(text)?;
         Ok(pin)
     }
 
     /// The digest of the pin's values, every section's and none of its
-    /// comments: what a reading taken under the oracle's recipe records, so
-    /// a change to the recipe, its environment or the binary stales it as
-    /// a change to its crate's tree does (#1387). Computed here and nowhere
+    /// comments, leaving out each build's [`Provenance`] and nothing else
+    /// (#2969): what a reading taken under the oracle's recipe records, so
+    /// a change to the recipe, its environment or a binary stales it as a
+    /// change to its crate's tree does (#1387), and a record of what a
+    /// binary was made from does not. Computed by [`digest`] and nowhere
     /// else.
     pub fn digest(&self) -> &str {
         &self.digest
@@ -849,9 +869,7 @@ impl Pin {
             bail!("{why}");
         }
         let path = &self.oracle.path;
-        let bytes = fs::read(path)
-            .with_context(|| format!("reading the pinned php at {}", path.display()))?;
-        let actual = format!("{:x}", md5::compute(bytes));
+        let actual = md5_of(path, "the pinned php at ")?;
         if actual != self.oracle.md5 {
             bail!(
                 "{} has md5 {actual}; the pin says {} for php {}{}. Report the drift; the pin moves only by a person's hand",
@@ -1822,8 +1840,7 @@ impl Runner {
     pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
         if let Some(path) = named {
             let path = named_binary(path)?;
-            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            let digest = format!("{:x}", md5::compute(bytes));
+            let digest = md5_of(&path, "")?;
             return Ok(if digest == pin.oracle.md5 {
                 // The pinned oracle is a control and never this tree's
                 // engine, so when the tree was last written says nothing
