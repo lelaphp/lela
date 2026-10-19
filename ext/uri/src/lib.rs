@@ -2,8 +2,9 @@
 //! (ADR-0004), 8.5's `Uri\Rfc3986\Uri` over uriparser and
 //! `Uri\WhatWg\Url` over lexbor. Two dependencies: the facade, and
 //! `ext/lexbor`, whose URL parser php's `uri_parser_whatwg.c` includes
-//! (design §4.10); one entry, `extension()`; no state (ADR-0005). The
-//! phpt subset is `php-src/ext/uri/tests`, through `xtask phpt --subset`.
+//! (design §4.10); one entry, `extension()`; one request state, the
+//! WHATWG parser php's `RINIT` lays (ADR-0005). The phpt subset is
+//! `php-src/ext/uri/tests`, through `xtask phpt --subset`.
 //!
 //! This file is `php_uri.c` and `php_uri_common.c`: the classes the two
 //! standards share, and the class machinery written once over
@@ -120,13 +121,22 @@ pub(crate) trait UriParser: Sized + Send + 'static {
         let _ = req;
     }
 
-    /// `to_string`, `None` where the URI cannot be recomposed.
-    fn recompose(&mut self, mode: Recomposition, exclude_fragment: bool) -> Option<Vec<u8>>;
+    /// `to_string`, `None` where the URI cannot be recomposed; the `Err`
+    /// is the memory limit's fatal, met where the recomposition
+    /// allocates on the request's heap.
+    fn recompose(
+        &mut self,
+        req: &mut Request,
+        mode: Recomposition,
+        exclude_fragment: bool,
+    ) -> Result<Option<Vec<u8>>, Thrown>;
 
     fn scheme(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
     fn username(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
     fn password(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
-    fn host(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
+    /// The host, which a read in Unicode converts on the request's heap;
+    /// the `Err` is the memory limit's fatal.
+    fn host(&mut self, req: &mut Request, mode: ReadAs) -> Result<Read<Option<Vec<u8>>>, Thrown>;
     fn port(&mut self, mode: ReadAs) -> Read<Option<i64>>;
     fn path(&mut self, mode: ReadAs) -> Read<Vec<u8>>;
     fn query(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>>;
@@ -229,30 +239,33 @@ fn to_struct<P: UriParser>(
     let Some(mut uri) = P::parse(req, text, None, false, silent)?.uri else {
         return Ok(None);
     };
-    let read = match uri.prepare(req, form) {
-        Ok(()) => components(&mut uri, form).ok(),
-        Err(thrown) => {
-            uri.free(req);
-            return Err(thrown);
-        }
-    };
+    let read = uri
+        .prepare(req, form)
+        .and_then(|()| components(req, &mut uri, form));
     uri.free(req);
-    Ok(read)
+    Ok(read?.ok())
 }
 
 /// Each component in `php_uri_parse_to_struct`'s order, the first a
 /// parser cannot read ending the read.
-fn components<P: UriParser>(uri: &mut P, form: ReadAs) -> Read<UriStruct> {
-    Ok(UriStruct {
-        scheme: uri.scheme(form)?,
-        user: uri.username(form)?,
-        password: uri.password(form)?,
-        host: uri.host(form)?,
-        port: uri.port(form)?,
-        path: Some(uri.path(form)?),
-        query: uri.query(form)?,
-        fragment: uri.fragment(form)?,
-    })
+fn components<P: UriParser>(
+    req: &mut Request,
+    uri: &mut P,
+    form: ReadAs,
+) -> Result<Read<UriStruct>, Thrown> {
+    let host = uri.host(req, form)?;
+    Ok((|| {
+        Ok(UriStruct {
+            scheme: uri.scheme(form)?,
+            user: uri.username(form)?,
+            password: uri.password(form)?,
+            host: host?,
+            port: uri.port(form)?,
+            path: Some(uri.path(form)?),
+            query: uri.query(form)?,
+            fragment: uri.fragment(form)?,
+        })
+    })())
 }
 
 /// `php_uri_object`'s `uri`: `None` until a constructor, `parse()`,
@@ -476,11 +489,11 @@ fn read<P: UriParser, T>(
     req: &mut Request,
     this: PhpObject,
     mode: ReadAs,
-    f: impl FnOnce(&mut P) -> T,
+    f: impl FnOnce(&mut Request, &mut P) -> Result<T, Thrown>,
 ) -> Result<T, Thrown> {
     with_uri::<P, _>(req, this, |req, uri| {
         uri.prepare(req, mode)?;
-        Ok(f(uri))
+        f(req, uri)
     })
 }
 
@@ -491,7 +504,7 @@ fn component<P: UriParser, T>(
     this: PhpObject,
     name: &str,
     mode: ReadAs,
-    f: impl FnOnce(&mut P) -> Read<T>,
+    f: impl FnOnce(&mut Request, &mut P) -> Result<Read<T>, Thrown>,
 ) -> Result<T, Thrown> {
     match read::<P, _>(req, this, mode, f)? {
         Ok(value) => Ok(value),
@@ -509,7 +522,7 @@ fn component_string<P: UriParser>(
     this: PhpObject,
     name: &str,
     mode: ReadAs,
-    f: impl FnOnce(&mut P) -> Read<Option<Vec<u8>>>,
+    f: impl FnOnce(&mut Request, &mut P) -> Result<Read<Option<Vec<u8>>>, Thrown>,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
     let bytes = component::<P, _>(req, this, name, mode, f)?;
     bytes.map(|bytes| PhpString::new(req, &bytes)).transpose()
@@ -560,7 +573,9 @@ fn recompose<P: UriParser>(
     this: PhpObject,
     mode: Recomposition,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let bytes = read::<P, _>(req, this, mode.read_as(), |uri| uri.recompose(mode, false))?;
+    let bytes = read::<P, _>(req, this, mode.read_as(), |req, uri| {
+        uri.recompose(req, mode, false)
+    })?;
     match bytes {
         Some(bytes) => PhpString::new(req, &bytes),
         None => Err(cannot_recompose(req, P::CLASS)),
@@ -577,8 +592,8 @@ fn equals<P: UriParser>(
 ) -> Result<bool, Thrown> {
     let exclude_fragment = mode == UriComparisonMode::ExcludeFragment;
     let side = |req: &mut Request, object| {
-        let bytes = read::<P, _>(req, object, ReadAs::NormalizedAscii, |uri| {
-            uri.recompose(Recomposition::NormalizedAscii, exclude_fragment)
+        let bytes = read::<P, _>(req, object, ReadAs::NormalizedAscii, |req, uri| {
+            uri.recompose(req, Recomposition::NormalizedAscii, exclude_fragment)
         })?;
         bytes.ok_or_else(|| cannot_recompose(req, P::CLASS))
     };
@@ -664,17 +679,17 @@ fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<
         return Ok(out);
     }
     let raw = ReadAs::Raw;
-    let read = read::<P, _>(req, this, raw, |u| {
-        (
+    let read = read::<P, _>(req, this, raw, |req, u| {
+        Ok((
             u.scheme(raw),
             u.username(raw),
             u.password(raw),
-            u.host(raw),
+            u.host(req, raw)?,
             u.port(raw),
             u.path(raw),
             u.query(raw),
             u.fragment(raw),
-        )
+        ))
     });
     let (scheme, username, password, host, port, path, query, fragment) = match read {
         Ok(read) => read,
@@ -804,7 +819,9 @@ pub(crate) enum UriComparisonMode {
 impl UriComparisonMode {}
 
 /// The extension value (design §7.1): `uri_module_entry`, which requires
-/// `lexbor`, with its classes in `PHP_MINIT_FUNCTION(uri)`'s order.
+/// `lexbor`, with its classes in `PHP_MINIT_FUNCTION(uri)`'s order, and
+/// `PHP_RINIT(uri)` and its `post_deactivate`, which lay and destroy the
+/// request's WHATWG parser.
 ///
 /// ```php
 /// var_dump(extension_loaded('uri'), (new ReflectionExtension('uri'))->getDependencies());
@@ -833,6 +850,9 @@ pub fn extension() -> Extension {
         .class::<whatwg::InvalidUrlException>()
         .class::<whatwg::UrlValidationError>()
         .class::<whatwg::UrlValidationErrorType>()
+        .request_state::<whatwg::State>()
+        .rinit(whatwg::rinit)
+        .post_deactivate(whatwg::post_deactivate)
         .info(uri_info)
         .build("uri")
 }

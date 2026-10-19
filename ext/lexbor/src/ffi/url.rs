@@ -4,21 +4,23 @@
 //! serialised with the host in ASCII or in Unicode, and the validation
 //! errors each parse or setter logs as [`ValidationError`]s.
 //!
-//! php keeps one parser, one memory pool and one `lxb_unicode_idna_t` per
-//! request and allocates every URL in that pool. Here each [`Url`] owns
-//! the pool it lives in, so a URL is a value that frees itself and
-//! outlives no request state; a parser and an IDNA converter are made for
-//! the one call that needs them, as php's `lxb_url_parser_clean` and
-//! `lxb_unicode_idna_clean` leave them empty between calls.
+//! php keeps one memory pool, one parser over it and one
+//! `lxb_unicode_idna_t` per request, laid at `RINIT` and destroyed at
+//! `post_deactivate` (`Z/ext/uri/uri_parser_whatwg.c:533-577`), and
+//! allocates every URL of the request in that pool. So does this: the
+//! three are a [`Parser`], the request's, and a [`Url`] is a URL in its
+//! pool, given back to it by [`Parser::free`] as php's
+//! `php_uri_parser_whatwg_destroy` gives it back. Whatever can allocate
+//! is a method of the parser and takes the lend's proof ([`Lent`]); a
+//! URL's own reads allocate nothing.
 
 use std::ffi::{CStr, c_void};
 use std::ptr::{self, NonNull};
 
-use super::sys;
+use super::{Lent, sys};
 
-/// The chunk size of a URL's own pool: `LXB_URL_BUFFER_SIZE`, what
-/// `lxb_url_parser_init` gives a pool it makes itself.
-const POOL_CHUNK: usize = 4096;
+/// `lexbor_mraw_byte_size`, the chunk size of the request's pool.
+const POOL_CHUNK: usize = 8192;
 
 /// `lxb_url_error_type_t`: one validation error of the URL standard
 /// (<https://url.spec.whatwg.org/#writing>), as lexbor logs it.
@@ -130,65 +132,316 @@ pub enum Host<'a> {
     Empty,
 }
 
-/// A memory pool, `lexbor_mraw_t`, owned: destroyed with everything
-/// allocated in it.
-struct Pool(NonNull<c_void>);
-
-impl Pool {
-    fn new() -> Option<Pool> {
-        // SAFETY: no argument; the pool is this value's from here.
-        let pool = Pool(NonNull::new(unsafe { sys::lexbor_mraw_create() })?);
-        // SAFETY: a pool just created, not yet initialised.
-        let status = unsafe { sys::lexbor_mraw_init(pool.0.as_ptr(), POOL_CHUNK) };
-        (status == sys::LXB_STATUS_OK).then_some(pool)
-    }
+/// The request's URL parser, php's three `ZEND_TLS` values of
+/// `uri_parser_whatwg.c`: `lexbor_mraw`, the pool every URL of the
+/// request is allocated in; `lexbor` over it, whose log a parse
+/// or setter reads; and `lexbor_idna`, the converter a Unicode read
+/// uses. The three structs are this value's own, outside lexbor's
+/// allocator as php's are outside `emalloc`, and boxed so the pointers
+/// lexbor keeps between them hold wherever the value moves. Laid by
+/// [`Parser::new`] and given back by [`Parser::destroy`], each under a
+/// lend; a parser dropped without its destroy leaves what lexbor holds
+/// to its request's end.
+pub struct Parser {
+    mraw: Box<sys::lexbor_mraw_t>,
+    lexbor: Box<sys::lxb_url_parser_t>,
+    idna: Box<sys::lxb_unicode_idna_t>,
 }
 
-impl Drop for Pool {
-    fn drop(&mut self) {
-        // SAFETY: a pool this owns; nothing allocated in it is reached
-        // after this.
-        unsafe { sys::lexbor_mraw_destroy(self.0.as_ptr(), true) };
-    }
-}
-
-/// A URL parser over one pool, `lxb_url_parser_t`, for one call: its log
-/// and buffers are freed on drop, the pool is not.
-struct Parser(NonNull<sys::lxb_url_parser_t>);
+// SAFETY: the three structs and everything lexbor hangs off them are this
+// value's and its URLs', which belong to one request and are reached on
+// its thread alone.
+unsafe impl Send for Parser {}
 
 impl Parser {
-    fn new(pool: &Pool) -> Option<Parser> {
-        // SAFETY: no argument; the parser is this value's from here.
-        let parser = Parser(NonNull::new(unsafe { sys::lxb_url_parser_create() })?);
-        // SAFETY: a parser just created, over a live pool that outlives
-        // it at every caller.
-        let status = unsafe { sys::lxb_url_parser_init(parser.raw(), pool.0.as_ptr()) };
-        (status == sys::LXB_STATUS_OK).then_some(parser)
+    /// `PHP_RINIT_FUNCTION(uri_parser_whatwg)`: the pool laid with
+    /// `lexbor_mraw_byte_size`, the parser over it and the IDNA
+    /// converter; `None` where lexbor refused one, what was laid
+    /// destroyed as php's `fail:` destroys it.
+    #[must_use]
+    pub fn new(_: &Lent) -> Option<Parser> {
+        let mut made = Parser {
+            mraw: Box::new(sys::lexbor_mraw_t {
+                mem: ptr::null_mut(),
+                cache: ptr::null_mut(),
+                ref_count: 0,
+            }),
+            lexbor: Box::new(sys::lxb_url_parser_t {
+                url: ptr::null_mut(),
+                mraw: ptr::null_mut(),
+                log: ptr::null_mut(),
+                idna: ptr::null_mut(),
+                buffer: ptr::null_mut(),
+            }),
+            idna: Box::new(sys::lxb_unicode_idna_t {
+                decomposition: ptr::null_mut(),
+                composition: ptr::null_mut(),
+                starter: ptr::null_mut(),
+                buf: ptr::null_mut(),
+                end: ptr::null(),
+                p: ptr::null_mut(),
+                ican: ptr::null_mut(),
+                tmp: [0; 4],
+                tmp_lenght: 0,
+                quick_ccc: 0,
+                quick_type: 0,
+                flush_cp: 0,
+            }),
+        };
+        // SAFETY: a zeroed pool this owns, laid once.
+        let laid = unsafe { sys::lexbor_mraw_init(&raw mut *made.mraw, POOL_CHUNK) }
+            == sys::LXB_STATUS_OK
+            // SAFETY: a zeroed parser this owns, over the pool just laid,
+            // which the box keeps in place as long as the parser.
+            && unsafe { sys::lxb_url_parser_init(&raw mut *made.lexbor, &raw mut *made.mraw) }
+                == sys::LXB_STATUS_OK
+            // SAFETY: a zeroed converter this owns, laid once.
+            && unsafe { sys::lxb_unicode_idna_init(&raw mut *made.idna) } == sys::LXB_STATUS_OK;
+        if laid {
+            Some(made)
+        } else {
+            made.give_back();
+            None
+        }
     }
 
-    fn raw(&self) -> *mut sys::lxb_url_parser_t {
-        self.0.as_ptr()
+    /// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(uri_parser_whatwg)`: the
+    /// converter, the parser and the pool destroyed in php's order, with
+    /// every URL still in the pool.
+    pub fn destroy(mut self, _: &Lent) {
+        self.give_back();
+    }
+
+    /// The three destroyed, none freed itself, as php destroys them,
+    /// and safe on a zeroed one, as php's `fail:` relies on.
+    fn give_back(&mut self) {
+        // SAFETY: a converter this owns, laid or zeroed, not freed itself.
+        unsafe { sys::lxb_unicode_idna_destroy(&raw mut *self.idna, false) };
+        // SAFETY: a parser this owns, laid or zeroed; its log, IDNA
+        // context and buffer go with it, its pool does not.
+        unsafe { sys::lxb_url_parser_destroy(&raw mut *self.lexbor, false) };
+        // SAFETY: the pool this owns, laid or zeroed, with every URL in
+        // it; nothing allocated in it is reached after this.
+        unsafe { sys::lexbor_mraw_destroy(&raw mut *self.mraw, false) };
+    }
+
+    fn raw(&mut self) -> *mut sys::lxb_url_parser_t {
+        &raw mut *self.lexbor
+    }
+
+    /// `lxb_url_parser_clean`, which php makes before every parse and
+    /// setter: the log emptied and the buffer freed.
+    fn clean(&mut self) {
+        // SAFETY: the live parser this owns.
+        unsafe { sys::lxb_url_parser_clean(self.raw()) };
     }
 
     /// The log, popped as php's `fill_errors` pops it: the last entry
     /// first. Read before anything the entries point into is freed.
     fn errors(&self) -> Vec<ValidationError> {
-        // SAFETY: a live parser; `log` is its field.
-        let log = unsafe { (*self.raw()).log };
-        let logged: Vec<&sys::lexbor_plog_entry_t> = super::html::entries(log, 0).collect();
+        let logged: Vec<&sys::lexbor_plog_entry_t> =
+            super::html::entries(self.lexbor.log, 0).collect();
         logged
             .into_iter()
             .rev()
             .filter_map(validation_error)
             .collect()
     }
-}
 
-impl Drop for Parser {
-    fn drop(&mut self) {
-        // SAFETY: a parser this owns; its log, IDNA context and buffer
-        // are freed with it, its pool is not.
-        unsafe { sys::lxb_url_parser_destroy(self.raw(), true) };
+    /// `php_uri_parser_whatwg_parse_ex`'s `lxb_url_parse`: `input` parsed
+    /// against `base` into the request's pool, the parser cleaned first.
+    #[must_use]
+    pub fn parse(&mut self, _: &Lent, input: &[u8], base: Option<&Url>) -> Parsed {
+        self.clean();
+        let input = terminated(input);
+        let base = base.map_or(ptr::null(), |b| b.url.as_ptr().cast_const());
+        // SAFETY: the live parser over the request's pool, a live base or
+        // null, and the live bytes of `input` less its NUL.
+        let url = unsafe { sys::lxb_url_parse(self.raw(), base, input.as_ptr(), input.len() - 1) };
+        Parsed {
+            url: NonNull::new(url).map(|url| Url { url }),
+            errors: self.errors(),
+        }
+    }
+
+    /// `php_uri_parser_whatwg_clone`: `lxb_url_clone` into the request's
+    /// pool; `None` where lexbor could not allocate.
+    #[must_use]
+    pub fn clone_url(&mut self, _: &Lent, url: &Url) -> Option<Url> {
+        // SAFETY: the request's pool and a live URL in it.
+        let copy = unsafe { sys::lxb_url_clone(&raw mut *self.mraw, url.url.as_ptr()) };
+        NonNull::new(copy).map(|url| Url { url })
+    }
+
+    /// `php_uri_parser_whatwg_destroy`: `lxb_url_destroy`, the URL's
+    /// memory given back to the request's pool.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taken, so the URL given back is reached no more"
+    )]
+    pub fn free(&mut self, _: &Lent, url: Url) {
+        // SAFETY: a live URL of the request's pool, given back once: the
+        // value is taken.
+        unsafe { sys::lxb_url_destroy(url.url.as_ptr()) };
+    }
+
+    /// A setter that takes the parser, after `lxb_url_parser_clean`, with
+    /// the log read where lexbor refused.
+    fn set_with(
+        &mut self,
+        url: &mut Url,
+        value: &[u8],
+        set: unsafe extern "C" fn(
+            *mut sys::lxb_url_t,
+            *mut sys::lxb_url_parser_t,
+            *const u8,
+            usize,
+        ) -> sys::lxb_status_t,
+    ) -> Result<(), Refused> {
+        let value = terminated(value);
+        self.clean();
+        // SAFETY: a live URL of the request's pool, the live parser, and
+        // the live bytes of `value` less its NUL.
+        let status = unsafe {
+            set(
+                url.url.as_ptr(),
+                self.raw(),
+                value.as_ptr(),
+                value.len() - 1,
+            )
+        };
+        self.answer(status)
+    }
+
+    /// What a setter answered, the log read where it refused.
+    fn answer(&self, status: sys::lxb_status_t) -> Result<(), Refused> {
+        if status == sys::LXB_STATUS_OK {
+            Ok(())
+        } else {
+            Err(Refused(self.errors()))
+        }
+    }
+
+    /// `lxb_url_api_protocol_set`.
+    pub fn set_protocol(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        self.set_with(url, value, sys::lxb_url_api_protocol_set)
+    }
+
+    /// `lxb_url_api_hostname_set`.
+    pub fn set_hostname(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        self.set_with(url, value, sys::lxb_url_api_hostname_set)
+    }
+
+    /// `lxb_url_api_port_set`; the empty string removes it. A number's
+    /// text is copied into the request's pool first, as php's
+    /// `zval_long_or_null_to_lexbor_str` copies it there.
+    pub fn set_port(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        if value.is_empty() {
+            return self.set_with(url, value, sys::lxb_url_api_port_set);
+        }
+        let mut text = sys::lexbor_str_t {
+            data: ptr::null_mut(),
+            length: 0,
+        };
+        // SAFETY: an empty string, the request's pool and the live bytes
+        // of `value`; the copy is the pool's, NUL-terminated.
+        let copied = unsafe {
+            sys::lexbor_str_init_append(
+                &raw mut text,
+                &raw mut *self.mraw,
+                value.as_ptr(),
+                value.len(),
+            )
+        };
+        if copied.is_null() {
+            return Err(Refused(Vec::new()));
+        }
+        self.clean();
+        // SAFETY: a live URL of the request's pool, the live parser, and
+        // the copy's `length` bytes in the pool.
+        let status = unsafe {
+            sys::lxb_url_api_port_set(url.url.as_ptr(), self.raw(), text.data, text.length)
+        };
+        self.answer(status)
+    }
+
+    /// `lxb_url_api_pathname_set`.
+    pub fn set_pathname(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        self.set_with(url, value, sys::lxb_url_api_pathname_set)
+    }
+
+    /// `lxb_url_api_search_set`.
+    pub fn set_search(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        self.set_with(url, value, sys::lxb_url_api_search_set)
+    }
+
+    /// `lxb_url_api_hash_set`.
+    pub fn set_hash(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        self.set_with(url, value, sys::lxb_url_api_hash_set)
+    }
+
+    /// `lxb_url_api_username_set`, after `lxb_url_parser_clean`; it logs
+    /// nothing.
+    pub fn set_username(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        self.clean();
+        // SAFETY: a live URL of the request's pool and the live bytes of
+        // `value`.
+        let status =
+            unsafe { sys::lxb_url_api_username_set(url.url.as_ptr(), value.as_ptr(), value.len()) };
+        self.answer(status)
+    }
+
+    /// `lxb_url_api_password_set`, after `lxb_url_parser_clean`; it logs
+    /// nothing.
+    pub fn set_password(&mut self, _: &Lent, url: &mut Url, value: &[u8]) -> Result<(), Refused> {
+        self.clean();
+        // SAFETY: a live URL of the request's pool and the live bytes of
+        // `value`.
+        let status =
+            unsafe { sys::lxb_url_api_password_set(url.url.as_ptr(), value.as_ptr(), value.len()) };
+        self.answer(status)
+    }
+
+    /// `lxb_url_serialize_idna` over the request's converter, then
+    /// `lxb_unicode_idna_clean`: the URL with its host in Unicode.
+    #[must_use]
+    pub fn serialize_idna(&mut self, _: &Lent, url: &Url, exclude_fragment: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        // SAFETY: the live converter, a live URL, and a live `Vec<u8>`
+        // for `append`.
+        unsafe {
+            sys::lxb_url_serialize_idna(
+                &raw mut *self.idna,
+                url.url.as_ptr(),
+                append,
+                ptr::from_mut(&mut out).cast(),
+                exclude_fragment,
+            )
+        };
+        // SAFETY: the live converter.
+        unsafe { sys::lxb_unicode_idna_clean(&raw mut *self.idna) };
+        out
+    }
+
+    /// `lxb_url_serialize_host_unicode` over the request's converter, then
+    /// `lxb_unicode_idna_clean`: the host with a domain turned to
+    /// Unicode.
+    #[must_use]
+    pub fn host_unicode(&mut self, _: &Lent, url: &Url) -> Vec<u8> {
+        let mut out = Vec::new();
+        // SAFETY: the live converter, the live host of a live URL, and a
+        // live `Vec<u8>` for `append`.
+        unsafe {
+            sys::lxb_url_serialize_host_unicode(
+                &raw mut *self.idna,
+                &raw const url.get().host,
+                append,
+                ptr::from_mut(&mut out).cast(),
+            )
+        };
+        // SAFETY: the live converter.
+        unsafe { sys::lxb_unicode_idna_clean(&raw mut *self.idna) };
+        out
     }
 }
 
@@ -205,26 +458,6 @@ fn validation_error(entry: &sys::lexbor_plog_entry_t) -> Option<ValidationError>
             .to_vec()
     };
     Some(ValidationError { data, kind })
-}
-
-/// An IDNA converter, `lxb_unicode_idna_t`, for one serialisation.
-struct Idna(NonNull<c_void>);
-
-impl Idna {
-    fn new() -> Option<Idna> {
-        // SAFETY: no argument; the context is this value's from here.
-        let idna = Idna(NonNull::new(unsafe { sys::lxb_unicode_idna_create() })?);
-        // SAFETY: a context just created, not yet initialised.
-        let status = unsafe { sys::lxb_unicode_idna_init(idna.0.as_ptr()) };
-        (status == sys::LXB_STATUS_OK).then_some(idna)
-    }
-}
-
-impl Drop for Idna {
-    fn drop(&mut self) {
-        // SAFETY: a context this owns.
-        unsafe { sys::lxb_unicode_idna_destroy(self.0.as_ptr(), true) };
-    }
 }
 
 /// `serialize_to_smart_str_callback`: each piece appended to the
@@ -248,11 +481,13 @@ fn terminated(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// One parsed URL, `lxb_url_t`, in a pool of its own.
+/// One parsed URL, `lxb_url_t`, in the request's pool: valid while the
+/// [`Parser`] that made it stands, which the request's end destroys after
+/// its objects are freed (ADR-0010's `post_deactivate`). It has no drop
+/// of its own: [`Parser::free`] gives it back to the pool, and one never
+/// given back goes with the pool.
 pub struct Url {
     url: NonNull<sys::lxb_url_t>,
-    /// Declared after `url`, which lives in it.
-    pool: Pool,
 }
 
 impl std::fmt::Debug for Url {
@@ -263,52 +498,11 @@ impl std::fmt::Debug for Url {
     }
 }
 
-// SAFETY: the URL and the pool it lives in are owned by this value alone
-// and reached only through it.
+// SAFETY: the URL is its request's, in the request's pool, reached on
+// the request's thread alone and only while the pool stands.
 unsafe impl Send for Url {}
 
 impl Url {
-    /// `lxb_url_parse`: `input` parsed against `base`, as
-    /// `php_uri_parser_whatwg_parse_ex` parses it.
-    #[must_use]
-    pub fn parse(input: &[u8], base: Option<&Url>) -> Parsed {
-        let failed = Parsed {
-            url: None,
-            errors: Vec::new(),
-        };
-        let Some(pool) = Pool::new() else {
-            return failed;
-        };
-        let Some(parser) = Parser::new(&pool) else {
-            return failed;
-        };
-        let input = terminated(input);
-        let base = base.map_or(ptr::null(), |b| b.url.as_ptr().cast_const());
-        // SAFETY: a live parser over `pool`, a live base or null, and the
-        // live bytes of `input` less its NUL.
-        let url =
-            unsafe { sys::lxb_url_parse(parser.raw(), base, input.as_ptr(), input.len() - 1) };
-        let errors = parser.errors();
-        drop(parser);
-        Parsed {
-            url: NonNull::new(url).map(|url| Url { url, pool }),
-            errors,
-        }
-    }
-
-    /// `lxb_url_clone` into a pool of its own; `None` where lexbor could
-    /// not allocate.
-    #[must_use]
-    pub fn try_clone(&self) -> Option<Url> {
-        let pool = Pool::new()?;
-        // SAFETY: a live pool and a live URL.
-        let url = unsafe { sys::lxb_url_clone(pool.0.as_ptr(), self.url.as_ptr()) };
-        Some(Url {
-            url: NonNull::new(url)?,
-            pool,
-        })
-    }
-
     fn get(&self) -> &sys::lxb_url_t {
         // SAFETY: a live URL this owns, borrowed as long as `self` is.
         unsafe { self.url.as_ref() }
@@ -383,93 +577,6 @@ impl Url {
         present(&self.get().fragment)
     }
 
-    /// A setter that takes the parser, over a fresh one on this URL's
-    /// pool, with the log read where lexbor refused.
-    fn set_with(
-        &mut self,
-        value: &[u8],
-        set: unsafe extern "C" fn(
-            *mut sys::lxb_url_t,
-            *mut sys::lxb_url_parser_t,
-            *const u8,
-            usize,
-        ) -> sys::lxb_status_t,
-    ) -> Result<(), Refused> {
-        let parser = Parser::new(&self.pool).ok_or(Refused(Vec::new()))?;
-        let value = terminated(value);
-        // SAFETY: a live URL this owns, a live parser over its pool, and
-        // the live bytes of `value` less its NUL.
-        let status = unsafe {
-            set(
-                self.url.as_ptr(),
-                parser.raw(),
-                value.as_ptr(),
-                value.len() - 1,
-            )
-        };
-        if status == sys::LXB_STATUS_OK {
-            Ok(())
-        } else {
-            Err(Refused(parser.errors()))
-        }
-    }
-
-    /// `lxb_url_api_protocol_set`.
-    pub fn set_protocol(&mut self, value: &[u8]) -> Result<(), Refused> {
-        self.set_with(value, sys::lxb_url_api_protocol_set)
-    }
-
-    /// `lxb_url_api_hostname_set`.
-    pub fn set_hostname(&mut self, value: &[u8]) -> Result<(), Refused> {
-        self.set_with(value, sys::lxb_url_api_hostname_set)
-    }
-
-    /// `lxb_url_api_port_set`; the empty string removes it.
-    pub fn set_port(&mut self, value: &[u8]) -> Result<(), Refused> {
-        self.set_with(value, sys::lxb_url_api_port_set)
-    }
-
-    /// `lxb_url_api_pathname_set`.
-    pub fn set_pathname(&mut self, value: &[u8]) -> Result<(), Refused> {
-        self.set_with(value, sys::lxb_url_api_pathname_set)
-    }
-
-    /// `lxb_url_api_search_set`.
-    pub fn set_search(&mut self, value: &[u8]) -> Result<(), Refused> {
-        self.set_with(value, sys::lxb_url_api_search_set)
-    }
-
-    /// `lxb_url_api_hash_set`.
-    pub fn set_hash(&mut self, value: &[u8]) -> Result<(), Refused> {
-        self.set_with(value, sys::lxb_url_api_hash_set)
-    }
-
-    /// `lxb_url_api_username_set`, which logs nothing.
-    pub fn set_username(&mut self, value: &[u8]) -> Result<(), Refused> {
-        // SAFETY: a live URL this owns and the live bytes of `value`.
-        let status = unsafe {
-            sys::lxb_url_api_username_set(self.url.as_ptr(), value.as_ptr(), value.len())
-        };
-        if status == sys::LXB_STATUS_OK {
-            Ok(())
-        } else {
-            Err(Refused(Vec::new()))
-        }
-    }
-
-    /// `lxb_url_api_password_set`, which logs nothing.
-    pub fn set_password(&mut self, value: &[u8]) -> Result<(), Refused> {
-        // SAFETY: a live URL this owns and the live bytes of `value`.
-        let status = unsafe {
-            sys::lxb_url_api_password_set(self.url.as_ptr(), value.as_ptr(), value.len())
-        };
-        if status == sys::LXB_STATUS_OK {
-            Ok(())
-        } else {
-            Err(Refused(Vec::new()))
-        }
-    }
-
     /// `lxb_url_serialize`: the URL with its host in ASCII.
     #[must_use]
     pub fn serialize(&self, exclude_fragment: bool) -> Vec<u8> {
@@ -481,48 +588,6 @@ impl Url {
                 append,
                 ptr::from_mut(&mut out).cast(),
                 exclude_fragment,
-            )
-        };
-        out
-    }
-
-    /// `lxb_url_serialize_idna`: the URL with its host in Unicode.
-    #[must_use]
-    pub fn serialize_idna(&self, exclude_fragment: bool) -> Vec<u8> {
-        let mut out = Vec::new();
-        let Some(idna) = Idna::new() else {
-            return self.serialize(exclude_fragment);
-        };
-        // SAFETY: a live IDNA context, a live URL, and a live `Vec<u8>`
-        // for `append`.
-        unsafe {
-            sys::lxb_url_serialize_idna(
-                idna.0.as_ptr(),
-                self.url.as_ptr(),
-                append,
-                ptr::from_mut(&mut out).cast(),
-                exclude_fragment,
-            )
-        };
-        out
-    }
-
-    /// `lxb_url_serialize_host_unicode`: the host with a domain turned to
-    /// Unicode.
-    #[must_use]
-    pub fn host_unicode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        let Some(idna) = Idna::new() else {
-            return out;
-        };
-        // SAFETY: a live IDNA context, the live host of a live URL, and a
-        // live `Vec<u8>` for `append`.
-        unsafe {
-            sys::lxb_url_serialize_host_unicode(
-                idna.0.as_ptr(),
-                &raw const self.get().host,
-                append,
-                ptr::from_mut(&mut out).cast(),
             )
         };
         out
