@@ -706,6 +706,7 @@ text = "Harness configuration, the oracle pin and the divergence registry are ed
 [[rule]]
 id = "harness.self-shell"
 tool = "Bash"
+where = "checkout"   # grammar: where, a checkout of this repository, the main one or a linked worktree, and never a scratch repository outside them; judged wherever permit cannot follow the line (#2887, #2915)
 # The six paths of harness.self, written by a shell line (#625, ruled
 # 2026-09-28): a redirection into one, `tee` naming one, `sed -i` or
 # `perl -i` over one, `cp`, `mv`, `ln` or `install` with one as the
