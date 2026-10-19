@@ -31,7 +31,7 @@ use crate::cli::{Format, Section};
 use crate::divergence::{Counts, Registry, Retires, Status};
 use crate::git::git;
 use crate::layout;
-use crate::manifest::{LockCeiling, Manifest, Measure, SCRIPTS, Seam, Week};
+use crate::manifest::{LockCeiling, Manifest, SCRIPTS, Seam};
 use crate::oracle::hosts::{EngineHost, HOSTS};
 use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
 use crate::permit;
@@ -140,9 +140,8 @@ fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Render one section to a string in the asked format; `week` picks one
-/// row of the `week` section and `session_id` names "this session" of the
-/// `permits` section, each belonging to no other.
+/// Render one section to a string in the asked format; `session_id` names
+/// "this session" of the `permits` section, and belongs to no other.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     manifest: &Manifest,
@@ -151,14 +150,10 @@ pub fn render(
     root: &Path,
     section: Section,
     format: Format,
-    week: Option<usize>,
     session_id: Option<&str>,
     uncut: bool,
 ) -> Result<String> {
     let format = Table::of(format)?;
-    if week.is_some() && section != Section::Week {
-        bail!("--week picks a row of the week section; use --section week");
-    }
     if session_id.is_some() && section != Section::Permits {
         bail!("--session-id names this session of the permits section; use --section permits");
     }
@@ -220,7 +215,6 @@ pub fn render(
                 uncut,
             );
         }
-        Section::Week => return week_section(manifest, &readings, week, format),
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
         Section::Crates => return graph::crates(manifest, root, format, uncut),
         Section::Edges => return graph::edges(manifest, format),
@@ -1257,195 +1251,6 @@ fn instruments(
         .collect()
 }
 
-/// The weekly exit bar table (harness-design.md §9): one row per `[[week]]`
-/// of the manifest, or the one `--week` names, each read the bar names
-/// judged against the latest reading of its instrument over its scope.
-fn week_section(
-    manifest: &Manifest,
-    readings: &[Reading],
-    week: Option<usize>,
-    format: Table,
-) -> Result<String> {
-    let weeks: Vec<(usize, &Week)> = match week {
-        Some(n) => {
-            let row = n
-                .checked_sub(1)
-                .and_then(|i| manifest.weeks.get(i))
-                .with_context(|| {
-                    format!(
-                        "--week {n}: the manifest's [[week]] table has {} rows",
-                        manifest.weeks.len()
-                    )
-                })?;
-            vec![(n, row)]
-        }
-        None => manifest
-            .weeks
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (i + 1, w))
-            .collect(),
-    };
-    let rows: Vec<(usize, &Week, Vec<Judged>)> = weeks
-        .into_iter()
-        .map(|(n, w)| (n, w, w.reads.iter().map(|r| judge(r, readings)).collect()))
-        .collect();
-    Ok(match format {
-        Table::Json => serde_json::to_string_pretty(
-            &rows
-                .iter()
-                .map(|(n, w, reads)| {
-                    json!({
-                        "week": n,
-                        "days": w.days,
-                        "text": w.text,
-                        "verdict": verdict_of(reads).as_str(),
-                        "reads": reads.iter().map(Judged::json).collect::<Vec<_>>(),
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )?,
-        Table::Md if rows.is_empty() => format!("{NO_READING}\n"),
-        Table::Md => {
-            let mut out = String::new();
-            writeln!(out, "| week | days | reading | bar | readings |").ok();
-            writeln!(out, "|---|---|---|---|---|").ok();
-            for (n, w, reads) in &rows {
-                writeln!(
-                    out,
-                    "| {n} | {} | {} | {} | {} |",
-                    cell(&w.days),
-                    verdict_of(reads).as_str(),
-                    cell(&w.text),
-                    reads
-                        .iter()
-                        .map(Judged::text)
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-                .ok();
-            }
-            out
-        }
-    })
-}
-
-/// What a bar's row says: pass when every read holds, fail when one
-/// contradicts, "no reading" while one is unmeasured and none contradicts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verdict {
-    Pass,
-    Fail,
-    NoReading,
-}
-
-impl Verdict {
-    fn as_str(self) -> &'static str {
-        match self {
-            Verdict::Pass => "pass",
-            Verdict::Fail => "fail",
-            Verdict::NoReading => NO_READING,
-        }
-    }
-}
-
-fn verdict_of(reads: &[Judged]) -> Verdict {
-    if reads.iter().any(|r| r.verdict == Verdict::Fail) {
-        Verdict::Fail
-    } else if reads.iter().any(|r| r.verdict == Verdict::NoReading) {
-        Verdict::NoReading
-    } else {
-        Verdict::Pass
-    }
-}
-
-/// One read of a bar against the store: the reading it found, if any, and
-/// the verdict, with the number and the bound it missed when it failed one.
-struct Judged<'a> {
-    read: &'a Measure,
-    reading: Option<Reading>,
-    verdict: Verdict,
-    /// The number read, when the read names one and the reading has it.
-    value: Option<reading::Number>,
-    /// `< min` or `> max`, when the number missed a bound.
-    missed: Option<String>,
-}
-
-impl Judged<'_> {
-    fn json(&self) -> Value {
-        json!({
-            "instrument": self.read.instrument,
-            "scope": self.read.scope,
-            "number": self.read.number,
-            "verdict": self.verdict.as_str(),
-            "status": self.reading.as_ref().map(|r| r.status.as_str()),
-            "value": self.value,
-            "missed": self.missed,
-        })
-    }
-
-    /// The read as one cell: `phpt Zend/tests percent=42.5 < 60`.
-    fn text(&self) -> String {
-        let head = format!("{} {}", self.read.instrument, self.read.scope);
-        match (&self.read.number, self.value) {
-            (Some(number), Some(value)) => format!(
-                "{head} {number}={value}{}",
-                self.missed
-                    .as_deref()
-                    .map(|m| format!(" {m}"))
-                    .unwrap_or_default()
-            ),
-            _ => format!("{head} {}", self.verdict.as_str()),
-        }
-    }
-}
-
-/// Judge one read: a status read holds on pass and fails on fail; a number
-/// read holds within its bounds, and never on a reading that failed, since
-/// a partial run's number is not a bar's. A skip, or a reading without the
-/// number, is no reading.
-fn judge<'a>(read: &'a Measure, readings: &[Reading]) -> Judged<'a> {
-    let reading = latest_of(readings, &read.instrument, &read.scope);
-    let mut judged = Judged {
-        read,
-        reading: None,
-        verdict: Verdict::NoReading,
-        value: None,
-        missed: None,
-    };
-    let Some(reading) = reading else {
-        return judged;
-    };
-    match &read.number {
-        None => {
-            judged.verdict = match reading.status {
-                reading::Status::Pass => Verdict::Pass,
-                reading::Status::Fail => Verdict::Fail,
-                reading::Status::Skip => Verdict::NoReading,
-            };
-        }
-        Some(number) => {
-            if let Some(value) = reading.numbers.get(number).copied() {
-                let n = value.as_f64();
-                judged.value = Some(value);
-                judged.missed = match (read.min, read.max) {
-                    (Some(min), _) if n < min => Some(format!("< {min}")),
-                    (_, Some(max)) if n > max => Some(format!("> {max}")),
-                    _ => None,
-                };
-                judged.verdict =
-                    if judged.missed.is_some() || reading.status == reading::Status::Fail {
-                        Verdict::Fail
-                    } else {
-                        Verdict::Pass
-                    };
-            }
-        }
-    }
-    judged.reading = Some(reading);
-    judged
-}
-
 /// The bundle's order: each crate whose edge carries an `order`, against
 /// the `api-check` reading that held the order to the crate graph.
 fn bundle(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
@@ -1640,7 +1445,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "platform": platform.map(Platform::key),
                 "path": build.path.display().to_string(),
                 "md5": build.md5,
-                "closure": build.closure.as_ref().map(ToString::to_string),
+                "closure": build.provenance.closure.as_ref().map(ToString::to_string),
             }))).collect::<serde_json::Map<_, _>>(),
         }))?,
         Table::Md => {
@@ -1680,7 +1485,7 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             closure_row(o, pin.closure.as_ref());
             for (name, build) in &builds {
                 let fact = format!("variant {name}");
-                let closure = build.closure.as_ref().map(|c| format!(", closure {c}"));
+                let closure = (build.provenance.closure.as_ref()).map(|c| format!(", closure {c}"));
                 let md5 = format!("md5 {}{}", build.md5, closure.unwrap_or_default());
                 row(o, &fact, "", &build.path.display().to_string(), &md5);
             }

@@ -7,7 +7,7 @@
 
 use std::ptr::{self, NonNull};
 
-use super::sys;
+use super::{Lent, sys};
 
 /// `LXB_ENCODING_REPLACEMENT_BYTES`: U+FFFD in UTF-8.
 pub const REPLACEMENT_BYTES: &[u8] = b"\xEF\xBF\xBD";
@@ -367,7 +367,7 @@ impl Encoding {
     /// `lxb_encoding_data_by_pre_name`; `None` where it finds none, or
     /// none lexbor knows.
     #[must_use]
-    pub fn prescan(bytes: &[u8]) -> Option<Encoding> {
+    pub fn prescan(_: &Lent, bytes: &[u8]) -> Option<Encoding> {
         prescan(bytes)
     }
 }

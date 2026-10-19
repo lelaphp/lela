@@ -39,10 +39,7 @@ use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
-use crate::array::{
-    Arr, Key, add_interned, free_persistent_array, free_table_header, persistent_array,
-    table_header,
-};
+use crate::array::{Arr, Key, free_persistent_array, persistent_array};
 use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::Fatal;
 use crate::mm::Mm;
@@ -862,8 +859,8 @@ impl std::fmt::Debug for Strings {
 /// bytes, which is the walk `zend_interned_string_ht_lookup_ex` makes
 /// over php's hash slots (`Z/Zend/zend_string.c:132-169`). It is the
 /// table opcache holds in shared memory, and nothing counts it, so it is
-/// a `HashMap` on the system allocator and not an [`Arr`]; the request's
-/// [`Table`] is the one `memory_get_usage()` reads.
+/// a `HashMap` on the system allocator and not an [`Arr`], as the
+/// request's own [`Table`] is.
 #[derive(Default)]
 pub(crate) struct Permanent {
     slots: HashMap<u64, Vec<Interned>>,
@@ -902,56 +899,25 @@ impl Permanent {
     }
 }
 
-/// `zend_init_interned_strings_ht(&CG(interned_strings), 0)`'s `nSize`
-/// (`Z/Zend/zend_string.c:78-84`, `:346-349`), which
-/// `zend_hash_check_size` leaves at 1024 because it is already a power of
-/// two.
-const REQUEST_TABLE_SIZE: u32 = 1024;
-
-/// One request's interned strings, php's `CG(interned_strings)`: a
-/// `HashTable` of `zend_string *` keyed by the string itself
-/// (`zend_init_interned_strings_ht`, `Z/Zend/zend_string.c:78-84`), here
-/// one [`Arr`], the array of design §5.3, whose data is the request's own
-/// memory (design §5.13) and whose header is not, as php's is a field of
-/// `zend_compiler_globals`. The lookup is `zend_interned_string_ht_lookup_ex`
-/// (`Z/Zend/zend_string.c:132-169`), [`Arr::find_bytes`] with the hash
-/// the bytes take; the add is `zend_add_interned_string` over
-/// `zend_hash_add_new` (`:173-185`), [`crate::array::add_interned`].
+/// One request's own strings of its declarations: the constants and
+/// names of the units it compiled for itself and the names read off its
+/// declarations, held once so that a declaration's name is one string,
+/// as php's op arrays and class entries hold theirs. Under opcache, the
+/// regime a request's memory is held to from its first line (design
+/// §5.13, #2863), php keeps no `CG(interned_strings)` on the request's
+/// heap: `zend_string_init_interned` and `zend_new_interned_string` are
+/// `accel_init_interned_string_for_php` and
+/// `accel_new_interned_string_for_php`
+/// (`Z/ext/opcache/ZendAccelerator.c`), which hand out a plain string of
+/// the request's heap at the size `zend_string_init` takes, so php's
+/// 40960-byte bucket array, which `php -n` `emalloc`s on the first string
+/// a request interns, is not on it. Here the strings are the request's
+/// heap's, at that size, and the table that finds them again is a
+/// [`Permanent`] on the system allocator, which nothing counts.
 ///
-/// php's table is inited with `persistent` 0 and no eager real-init, so
-/// the array's data is `emalloc`ed by the first string the request
-/// interns and every byte of it is in `memory_get_usage()`
-/// (`zend_hash_real_init_mixed_ex`'s `emalloc` branch,
-/// `Z/Zend/zend_hash.c:166-231`, reached from
-/// `_zend_hash_add_or_update_i`'s `HASH_FLAG_UNINITIALIZED` arm). One
-/// allocation holds the buckets and the hash slots together,
-/// `HT_SIZE_EX(nTableSize, HT_SIZE_TO_MASK(nTableSize))`
-/// (`Z/Zend/zend_types.h:486-493`): forty bytes to a bucket, so 40960 for
-/// php's 1024, ten whole pages of the request's heap.
-///
-/// It doubles where php's doubles, `ZEND_HASH_IF_FULL_DO_RESIZE` over
-/// `zend_hash_do_resize` (`Z/Zend/zend_hash.c:84-87`, `:1147-1173`):
-/// nothing is ever taken out of this table, so `nNumUsed` is the count of
-/// strings and the rehash-in-place arm is never the one taken. php
-/// allocates the larger array before it frees the smaller, which is what
-/// the peak reads. The data goes back with the heap's chunks at the
-/// request's end, as php's does under `zend_interned_strings_deactivate`'s
-/// `zend_hash_destroy`; the header alone is this table's to free.
-///
-/// The absolute number, held to the oracle. The two function names this
-/// source interns cost 40 and 48, php's aligned string size over each,
-/// and the first of them charges this array's 40960; that much is php's
-/// own arithmetic and the two engines agree on it to the byte, as they do
-/// on the VM stack's pages, which come from the request's heap as php's
-/// do (#761). What php reports beside it is the op array, the compiler,
-/// the syntax tree and the request arena, which design §5.13 puts on the
-/// system allocator here, so the witness reads a smaller total than the
-/// oracle's and stands under the divergence row that says so (#178,
-/// #788). It is the row's fixture: without the row it is red, this
-/// engine's smaller number against php's below. That number is php's under the harness's own
-/// recipe and scratch tree, and it moves with what the CLI puts in
-/// `$_SERVER` before a line runs, the file's directory and the
-/// environment, so it is read off what the oracle printed, never worked out.
+/// That is the regime the witness reads: under `php -n` php's compile
+/// lays the 40960 down before the first line, which the divergence
+/// row `witness:cf4528199e…` accepts with the rest of that compile.
 ///
 /// ```php
 /// var_dump(memory_get_usage());
@@ -959,94 +925,58 @@ const REQUEST_TABLE_SIZE: u32 = 1024;
 /// ```expect exit=0
 /// int(464552)
 /// ```
+///
+/// A string the request interns costs its own bytes and nothing beside
+/// them, the first as every one after, and `get_class` and its kin hand
+/// out names the classes hold already:
+///
+/// ```php
+/// $m = memory_get_usage();
+/// $c = get_class(new ArrayObject);
+/// echo memory_get_usage() - $m < 4096 ? "no table laid down here\n" : "a table laid down here\n";
+/// ```
+/// ```expect
+/// no table laid down here
+/// ```
+#[derive(Debug, Default)]
 pub(crate) struct Table {
-    /// The `HashTable`, laid down by the first add; `None` is a request
-    /// that has interned nothing but what the process froze.
-    arr: Option<Arr>,
+    held: Permanent,
 }
 
 impl Table {
-    /// A table holding nothing: what `zend_interned_strings_activate`
-    /// leaves behind at request start, before any string has been
-    /// interned.
-    pub(crate) const fn new() -> Table {
-        Table { arr: None }
+    /// A table holding nothing: what a request starts with.
+    pub(crate) fn new() -> Table {
+        Table::default()
     }
 
     /// The string here whose bytes are `bytes`, if it is here.
     pub(crate) fn find(&self, hash: u64, bytes: &[u8]) -> Option<Str> {
-        self.arr?.find_bytes(hash, bytes)
+        self.held.find(hash, bytes)
     }
 
-    /// The table's data laid down before anything is interned: what the
-    /// first `zend_new_interned_string` of php's compiler lays down while
-    /// it compiles the primary file, which a request here, whose units
-    /// intern into the engine's table, lays down as that file is
-    /// compiled.
-    pub(crate) fn lay_down(&mut self, mm: &mut Mm) -> Result<(), Fatal> {
-        let arr = match self.arr {
-            Some(arr) => arr,
-            None => *self.arr.insert(table_header(REQUEST_TABLE_SIZE)?),
-        };
-        crate::array::lay_interned(mm, arr)
+    /// Publish `s`, interned already and hashed under `hash`, so the
+    /// next lookup of its bytes finds it; the room the table takes is
+    /// the system's.
+    pub(crate) fn add(&mut self, hash: u64, s: Str) {
+        self.held.add(hash, s);
     }
 
-    /// Publish `s`, php's `zend_add_interned_string`
-    /// (`Z/Zend/zend_string.c:173-185`), with the room the add takes out
-    /// of `mm`: the whole array on the first add, the doubled one on the
-    /// add that fills it. php takes the hash before it publishes;
-    /// [`Str::cache_hash`] here is that act.
-    pub(crate) fn add(&mut self, mm: &mut Mm, s: Str) -> Result<(), Fatal> {
-        s.cache_hash();
-        let arr = match self.arr {
-            Some(arr) => arr,
-            None => *self.arr.insert(table_header(REQUEST_TABLE_SIZE)?),
-        };
-        add_interned(mm, arr, s)
-    }
-
-    /// How many strings are here, `zend_hash_num_elements`.
+    /// How many strings are here.
     pub(crate) fn count(&self) -> usize {
-        self.arr.as_ref().map_or(0, Arr::len)
+        self.held.count()
     }
-}
 
-impl Table {
     /// `zend_interned_strings_deactivate` (`Z/Zend/zend_string.c:346`) in
     /// a debug build's teardown before the request leak sensor: every
-    /// string the request interned freed, then the table's data, then its
-    /// header.
+    /// string the request interned freed, and the table emptied.
     #[cfg(debug_assertions)]
     pub(crate) fn destroy(&mut self, mm: &mut Mm) {
-        let Some(arr) = self.arr.take() else {
-            return;
-        };
-        for (_, z) in &arr {
-            if let Some(s) = z.as_str() {
-                // SAFETY: the string was interned out of `mm` and the
-                // table, freed with it, is its last name.
-                unsafe { mm.free(s.address()) };
-            }
+        for s in self.held.strings() {
+            // SAFETY: the string was interned out of `mm` and the
+            // table, emptied with it, is its last name.
+            unsafe { mm.free(s.address()) };
         }
-        crate::array::free_table_data(mm, arr);
-        crate::array::free_table_header(arr);
-    }
-}
-
-impl Drop for Table {
-    /// The header back to the system allocator. The data was the
-    /// request's and went, or goes, with the heap's chunks.
-    fn drop(&mut self) {
-        if let Some(arr) = self.arr.take() {
-            free_table_header(arr);
-        }
-    }
-}
-
-impl std::fmt::Debug for Table {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let size = self.arr.map_or(REQUEST_TABLE_SIZE, |arr| arr.table_size());
-        write!(f, "Table({} of {size} used)", self.count())
+        self.held = Permanent::default();
     }
 }
 

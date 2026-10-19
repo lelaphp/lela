@@ -2,9 +2,10 @@
 //! on the engine's timer, which raises it for `max_execution_time` and
 //! for every periodic interrupt an extension started, `set_time_limit()`,
 //! the interrupt hooks the bundle supplied, the thread's stack limit,
-//! and `fork(2)`, which joins the timer's thread around it. The
-//! interrupt, the deadlines and the stack limit are [`Limits`]'s, whose
-//! fields no file but this one reads.
+//! the running execution's trace number, which is the tier's recording
+//! exclusion, and `fork(2)`, which joins the timer's thread around it.
+//! The interrupt, the deadlines, the stack limit and the trace number
+//! are [`Limits`]'s, whose fields no file but this one reads.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use php_compile::StackLimit;
 
 use super::{Forked, Periodic, Receiving, Reentry, Request};
 use crate::api::abi::{Beneath, chain};
+use crate::tier::TraceNum;
 
 /// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
@@ -170,8 +172,8 @@ impl AsMut<Request> for Request {
     }
 }
 
-/// The interrupt, the deadlines and the stack limit, whose fields no
-/// file but this one reads.
+/// The interrupt, the deadlines, the stack limit and the trace number,
+/// whose fields no file but this one reads.
 pub(super) struct Limits {
     /// The interrupt, shared with whatever thread sets it (design §5.8).
     interrupt: Interrupt,
@@ -185,6 +187,10 @@ pub(super) struct Limits {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// php's `EG(jit_trace_num)`, the running execution's trace number
+    /// ([`crate::tier::trace_num`]), kept here beside the stack limit
+    /// because a fiber switch swaps both ([`Request::switch_execution`]).
+    trace_num: TraceNum,
     /// How a function C calls back reaches the request
     /// ([`Request::reentry`]), made at the first ask and closed as the
     /// request is dropped.
@@ -211,6 +217,7 @@ impl Limits {
             deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
+            trace_num: TraceNum::NONE,
             reentry: None,
         }
     }
@@ -228,6 +235,14 @@ impl Request {
     /// state does at a fiber switch ([`Request::switch_execution`]).
     pub(super) fn swap_stack_limit(&mut self, other: &mut StackLimit) {
         std::mem::swap(&mut self.limits.stack_limit, other);
+    }
+
+    /// The trace number and `other`'s change places, as the execution
+    /// state does at a fiber switch ([`Request::switch_execution`]):
+    /// `zend_fiber_capture_vm_state` and `zend_fiber_restore_vm_state`
+    /// carry `EG(jit_trace_num)` (`Z/Zend/zend_fibers.c:131`, `:148`).
+    pub(super) fn swap_trace_num(&mut self, other: &mut TraceNum) {
+        std::mem::swap(&mut self.limits.trace_num, other);
     }
 
     /// The thread's stack limit as request start read it, for the
@@ -445,6 +460,19 @@ impl Request {
     #[must_use]
     pub fn interrupt(&self) -> &Interrupt {
         &self.limits.interrupt
+    }
+
+    /// The trace number of the execution the request runs on, which
+    /// the tier reads through [`crate::tier::trace_num`] and the
+    /// generator's resume sets aside around a body.
+    pub(crate) fn trace_num(&self) -> TraceNum {
+        self.limits.trace_num
+    }
+
+    /// The trace number of the execution the request runs on written
+    /// ([`crate::tier::set_trace_num`]).
+    pub(crate) fn set_trace_num(&mut self, trace_num: TraceNum) {
+        self.limits.trace_num = trace_num;
     }
 
     /// How a function C calls back reaches this request (#1638, #1640):

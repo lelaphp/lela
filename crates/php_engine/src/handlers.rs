@@ -786,8 +786,15 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     }
     // `zend_create_closure_ex` over the op array: its cache, laid down
     // for the scope here where no closure laid it down yet.
-    let cache =
-        crate::classes::closure_cache(req, function, scope, crate::classes::ClosureCache::Function);
+    let cache = match crate::classes::closure_cache(
+        req,
+        function,
+        scope,
+        crate::classes::ClosureCache::Function,
+    ) {
+        Ok(cache) => cache,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     let payload = crate::classes::ClosureObject {
         info: closure,
         cache,
@@ -7163,7 +7170,7 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let value = if op.op2_type != OperandKind::Const && name.eq_ignore_ascii_case(b"class") {
         let written = req.class_name_bytes(class);
-        req.interned(&written).map(Value::string)
+        req.declared_string(&written).map(Value::string)
     } else {
         req.class_constant(class, &name)
     };
@@ -11330,7 +11337,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         .class_decl(class)
         .map(|decl| decl.name.0.to_vec())
         .unwrap_or_default();
-    let name = match req.interned(&name) {
+    let name = match req.declared_string(&name) {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -21308,7 +21315,7 @@ fn class_name_into(
     class: crate::api::values::ClassId,
 ) -> Edge {
     let name = req.class_name_bytes(class);
-    let name = match req.interned(&name) {
+    let name = match req.declared_string(&name) {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };

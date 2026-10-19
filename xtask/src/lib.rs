@@ -610,7 +610,6 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
     let Command::Status {
         section,
         format,
-        week,
         session_id,
         uncut,
         tracked,
@@ -637,7 +636,6 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
                 root,
                 section,
                 format,
-                week,
                 session_id.as_deref(),
                 uncut,
             )?

@@ -62,22 +62,111 @@ const PRINT_STDERR_MSHUTDOWN: &[u8] = b"zend_test.print_stderr_mshutdown";
 /// `zend_test.register_passes`.
 const REGISTER_PASSES: &[u8] = b"zend_test.register_passes";
 
-/// `test.c`'s `PHP_INI_BEGIN` table, in its order: each entry's name,
-/// its default, and whether a request may change it (`PHP_INI_ALL`) or
-/// only the host (`PHP_INI_SYSTEM`). `zend_test.limit_copy_file_range`
-/// is `HAVE_COPY_FILE_RANGE`'s, which the oracle's platform has not.
-/// `replace_zend_execute_ex` and `observe_opline_in_zendmm` swap a
-/// pointer and a heap of php's, nothing a program prints tells apart,
-/// and here are entries alone.
-const ENTRIES: [(&[u8], &[u8], bool); 7] = [
-    (b"zend_test.replace_zend_execute_ex", b"0", false),
-    (REGISTER_PASSES, b"0", false),
-    (PRINT_STDERR_MSHUTDOWN, b"0", false),
-    (QUANTITY_VALUE, b"0", true),
-    (STR_TEST, b"", true),
-    (NOT_EMPTY_STR_TEST, b"val", true),
-    (b"zend_test.observe_opline_in_zendmm", b"0", true),
-];
+/// `test.c`'s `PHP_INI_BEGIN` table, in its order.
+/// `zend_test.limit_copy_file_range` is `HAVE_COPY_FILE_RANGE`'s, which
+/// the oracle's platform has not. `replace_zend_execute_ex` and
+/// `observe_opline_in_zendmm` swap a pointer and a heap of php's, nothing
+/// a program prints tells apart, and here are entries alone.
+const ENTRIES: [Entry; 7] = {
+    use Modifiable::{All, System};
+    [
+        Entry::boolean(b"zend_test.replace_zend_execute_ex", b"0", System),
+        Entry::boolean(REGISTER_PASSES, b"0", System),
+        Entry::boolean(PRINT_STDERR_MSHUTDOWN, b"0", System),
+        Entry::plain(QUANTITY_VALUE, b"0", All),
+        Entry::plain(STR_TEST, b"", All),
+        Entry::plain(NOT_EMPTY_STR_TEST, b"val", All),
+        Entry::boolean(b"zend_test.observe_opline_in_zendmm", b"0", All),
+    ]
+};
+
+/// Who may change an entry: its `modifiable` bits, `PHP_INI_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Modifiable {
+    /// `PHP_INI_ALL`: the host, a directory and a request.
+    All,
+    /// `PHP_INI_SYSTEM`: the host alone.
+    System,
+    /// `PHP_INI_USER`: a request alone.
+    User,
+}
+
+/// The displayer an entry is registered with, which `MINFO` shows its
+/// values through (`Z/main/php_ini.c:67`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Displayer {
+    /// None, `STD_PHP_INI_ENTRY`'s: the value as it is, which
+    /// `display_ini_entries` shows as `no value` where it is empty.
+    Plain,
+    /// `zend_ini_boolean_displayer_cb`, `STD_PHP_INI_BOOLEAN`'s: `On` or
+    /// `Off`.
+    Boolean,
+}
+
+/// One row of a `PHP_INI_BEGIN` table: the entry's name, its default,
+/// who may change it and the displayer it is registered with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Entry {
+    pub(crate) name: &'static [u8],
+    pub(crate) default: &'static [u8],
+    modifiable: Modifiable,
+    displayer: Displayer,
+}
+
+impl Entry {
+    /// `STD_PHP_INI_BOOLEAN`.
+    pub(crate) const fn boolean(
+        name: &'static [u8],
+        default: &'static [u8],
+        modifiable: Modifiable,
+    ) -> Entry {
+        Entry {
+            name,
+            default,
+            modifiable,
+            displayer: Displayer::Boolean,
+        }
+    }
+
+    /// `STD_PHP_INI_ENTRY`.
+    pub(crate) const fn plain(
+        name: &'static [u8],
+        default: &'static [u8],
+        modifiable: Modifiable,
+    ) -> Entry {
+        Entry {
+            name,
+            default,
+            modifiable,
+            displayer: Displayer::Plain,
+        }
+    }
+
+    /// The entry as the extension declares it.
+    pub(crate) fn decl(&self) -> IniDecl {
+        let (user, per_dir, system) = match self.modifiable {
+            Modifiable::All => (true, true, true),
+            Modifiable::System => (false, false, true),
+            Modifiable::User => (true, false, false),
+        };
+        IniDecl {
+            name: Name(self.name.into()),
+            default: Some(self.default.into()),
+            user,
+            per_dir,
+            system,
+        }
+    }
+
+    /// A value of the entry as its displayer shows it.
+    fn shown(&self, value: &[u8]) -> String {
+        match self.displayer {
+            Displayer::Boolean if Request::ini_parse_bool(value) => String::from("On"),
+            Displayer::Boolean => String::from("Off"),
+            Displayer::Plain => String::from_utf8_lossy(value).into_owned(),
+        }
+    }
+}
 
 /// The extension value (design §7.1): `zend_test_module_entry`, `MINIT`'s
 /// registrations in its order, the request's edges and the `MINFO`
@@ -124,16 +213,7 @@ pub fn extension() -> Extension {
 
 /// The table as the extension declares it.
 fn ini() -> Vec<IniDecl> {
-    ENTRIES
-        .iter()
-        .map(|&(name, default, user)| IniDecl {
-            name: Name(name.into()),
-            default: Some(default.into()),
-            user,
-            per_dir: user,
-            system: true,
-        })
-        .collect()
+    ENTRIES.iter().map(Entry::decl).collect()
 }
 
 /// `OnUpdateStrNotEmpty`: the empty string refused.
@@ -253,11 +333,55 @@ fn mshutdown(req: &mut Request) {
     }
 }
 
-/// `PHP_MINFO_FUNCTION(zend_test)`: the one row, then the ini entries.
+/// `PHP_MINFO_FUNCTION(zend_test)`: the one row, then the ini entries,
+/// `DISPLAY_INI_ENTRIES()`, each value through its entry's displayer.
+///
+/// ```php
+/// (new ReflectionExtension('zend_test'))->info();
+/// ```
+/// ```expect
+///
+/// zend_test
+///
+/// zend_test extension => enabled
+///
+/// Directive => Local Value => Master Value
+/// zend_test.replace_zend_execute_ex => Off => Off
+/// %A
+/// zend_test.quantity_value => 0 => 0
+/// zend_test.str_test => no value => no value
+/// zend_test.not_empty_str_test => val => val
+/// zend_test.observe_opline_in_zendmm => Off => Off
+/// zend_test.observer.enabled => Off => Off
+/// zend_test.observer.show_output => On => On
+/// %A
+/// zend_test.zend_mm_custom_handlers.enabled => Off => Off
+/// ```
 fn info(req: &mut Request) {
     req.info_table(&[&["zend_test extension", "enabled"]]);
-    let mut names: Vec<&[u8]> = ENTRIES.iter().map(|entry| entry.0).collect();
-    names.extend(observer::ENTRIES.iter().map(|entry| entry.0));
-    names.push(mm_custom_handlers::ENABLED);
-    req.info_ini_entries(&names);
+    let Some(me) = req.extension_named(b"zend_test") else {
+        return;
+    };
+    let tables = ENTRIES
+        .iter()
+        .chain(&observer::ENTRIES)
+        .chain([&mm_custom_handlers::ENTRY]);
+    let rows: Vec<[String; 3]> = req
+        .extension_ini(me)
+        .into_iter()
+        .filter_map(|held| {
+            let entry = tables
+                .clone()
+                .find(|entry| *entry.name == *held.decl.name.0)?;
+            let local = held.value.as_deref().unwrap_or_default();
+            let master = held.master.as_deref().unwrap_or_default();
+            let name = String::from_utf8_lossy(entry.name).into_owned();
+            Some([name, entry.shown(local), entry.shown(master)])
+        })
+        .collect();
+    let rows: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+        .collect();
+    req.info_ini_table(&rows);
 }

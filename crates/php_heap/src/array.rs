@@ -269,25 +269,6 @@ pub(crate) fn free_table_data(mm: &mut Mm, a: Arr) {
     }
 }
 
-/// `zend_hash_add_new(ht, str, &val)` under `zend_add_interned_string`
-/// (`Z/Zend/zend_string.c:173-185`): `s`, interned already, as its own
-/// key and as the value, out of `mm` for the data the first add lays
-/// down and for each doubling. The caller has looked the bytes up and
-/// found nothing, so the add is an add.
-pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
-    append_str(mm, a, s, Zval::string(s))?;
-    Ok(())
-}
-
-/// The data [`add_interned`]'s first add lays down, laid down ahead of
-/// it (`zend_hash_real_init_mixed`); nothing where it stands already.
-pub(crate) fn lay_interned(mm: &mut Mm, a: Arr) -> Result<(), Fatal> {
-    if a.is_uninitialized() {
-        a.real_init_mixed(mm)?;
-    }
-    Ok(())
-}
-
 /// `zend_hash_index_add_new(ht, index, &zv)` over a request's `mm` for a
 /// key the caller knows is not there, which is what `zend_list_insert`
 /// (`Z/Zend/zend_list.c:32-44`) knows of the id `nNextFreeElement` gave
@@ -1022,17 +1003,6 @@ impl Arr {
         None
     }
 
-    /// `zend_interned_string_ht_lookup_ex` (`Z/Zend/zend_string.c:132-169`):
-    /// the string key whose hash is `h` and whose bytes are `bytes`, for
-    /// a table of interned strings asked about bytes that are not yet a
-    /// string. The walk is [`Arr::find_str`]'s over the chain `h` names,
-    /// comparing the bytes, since the caller holds no string to be the
-    /// same as.
-    pub(crate) fn find_bytes(self, h: u64, bytes: &[u8]) -> Option<Str> {
-        let idx = self.find_bucket_bytes(h, bytes)?;
-        self.read_bucket(idx).key
-    }
-
     /// `zend_hash_str_find_bucket`: the bucket of the string key whose
     /// hash is `h` and whose bytes are `bytes`, none in a packed or an
     /// uninitialised table, whose two hash slots name no bucket.
@@ -1113,21 +1083,33 @@ impl Arr {
     /// array(0) {
     /// }
     /// ```
-    #[inline]
+    #[inline(always)] // the packed test and its slot, at every element access
+    #[allow(clippy::inline_always)]
     fn find(self, key: Key) -> Option<Pos> {
+        if let Key::Long(n) = key
+            && self.flags() & PACKED != 0
+        {
+            let h = n.cast_unsigned();
+            if h >= u64::from(self.num_used()) {
+                return None;
+            }
+            let idx = h as u32;
+            return (!self.read_slot(idx).is_undef()).then_some(Pos::Slot(idx));
+        }
+        self.find_hashed(key)
+    }
+
+    /// [`Arr::find`] past a packed table's integer key, out of line as
+    /// `zend_hash_find` and `zend_hash_index_find` are, so the packed
+    /// test and its slot stay small enough to inline at every element
+    /// access: a string key over a packed table, an uninitialised table,
+    /// and a hash table's chain walk.
+    #[inline(never)]
+    fn find_hashed(self, key: Key) -> Option<Pos> {
         let flags = self.flags();
         match key {
-            Key::Long(n) if flags & PACKED != 0 => {
-                let h = n.cast_unsigned();
-                if h >= u64::from(self.num_used()) {
-                    return None;
-                }
-                let idx = h as u32;
-                (!self.read_slot(idx).is_undef()).then_some(Pos::Slot(idx))
-            }
-            _ if flags & UNINITIALIZED != 0 => None,
+            _ if flags & (UNINITIALIZED | PACKED) != 0 => None,
             Key::Long(n) => self.find_long(n.cast_unsigned()).map(Pos::Bucket),
-            Key::Str(_) if flags & PACKED != 0 => None,
             Key::Str(s) => self.find_str(s).map(Pos::Bucket),
         }
     }
@@ -1169,7 +1151,8 @@ impl Arr {
     /// asked for it and the `ASSIGN*` beside it and no further; php
     /// holds `zval *` under the same rule.
     #[must_use]
-    #[inline]
+    #[inline(always)] // as `find`: a dimension handler's inline path reads through it
+    #[allow(clippy::inline_always)]
     pub fn value_ref(&self, key: Key) -> Option<ZvalRef> {
         Some(ZvalRef::new(self.value_ptr(self.find(key)?)))
     }

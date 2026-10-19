@@ -556,7 +556,7 @@ impl Request {
 
 /// A constant expression that is a value as written: `null`, a bool,
 /// a number, a string, or the array the compiler folded.
-fn is_literal(expr: &ConstExpr) -> bool {
+pub(super) fn is_literal(expr: &ConstExpr) -> bool {
     matches!(
         expr,
         ConstExpr::Null

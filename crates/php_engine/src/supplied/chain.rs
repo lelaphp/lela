@@ -239,6 +239,11 @@ impl sealed::Kind for CompileFile {
         if let Some(opened) = args.opened {
             req.hold_opened(opened, args.handle);
         }
+        // `persistent_compile_file` takes opcache's hold for every file
+        // but a stream no cache keeps (`ZendAccelerator.c:2051`, `:2106`).
+        if args.handle != crate::api::request::HandlePath::Stream {
+            req.take_shared_hold();
+        }
         Ok(req.cached_source(args).map(Compiled))
     }
 }

@@ -881,7 +881,7 @@ impl Request {
         } else {
             self.declared_name(function)
         };
-        self.interned(name.as_bytes())
+        self.declared_string(name.as_bytes())
     }
 
     /// [`Request::qualified_name`] for a raise about a method called on

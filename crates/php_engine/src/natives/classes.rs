@@ -72,10 +72,10 @@ fn object_or_class_name(req: &mut Request, given: Value, position: u32) -> Resul
 }
 
 /// `ce->name`: the declared name of a class, the interned string php
-/// keeps on the class entry ([`Request::interned`]).
+/// keeps on the class entry ([`Request::declared_string`]).
 fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
     let name = req.class_name_bytes(class);
-    req.interned(&name)
+    req.declared_string(&name)
 }
 
 /// `get_called_class(): string`, php's `ZEND_FUNCTION(get_called_class)`
@@ -816,7 +816,7 @@ fn get_class_methods(
     let mut array = PhpArray::new(req)?;
     for name in names {
         // `ZVAL_STR_COPY(&method_name, mptr->common.function_name)`.
-        let name = Value::string(req.interned(&name)?);
+        let name = Value::string(req.declared_string(&name)?);
         array.append(req, Owner::take(req, name))?;
     }
     Ok(array)
@@ -1131,16 +1131,6 @@ fn reserved_class_name(lowered: &[u8]) -> bool {
     .contains(&unqualified)
 }
 
-/// `zend_get_object_type`: the word php names a class's kind by.
-fn kind_word(kind: ClassKind) -> &'static str {
-    match kind {
-        ClassKind::Class => "class",
-        ClassKind::Interface => "interface",
-        ClassKind::Trait => "trait",
-        ClassKind::Enum => "enum",
-    }
-}
-
 /// `class_alias(string $class, string $alias, bool $autoload = true):
 /// bool`, php's `ZEND_FUNCTION(class_alias)`
 /// (`Z/Zend/zend_builtin_functions.c:1229`) over
@@ -1222,17 +1212,7 @@ fn class_alias(
     if req.class_alias(class, alias) {
         return Ok(true);
     }
-    let shown = String::from_utf8_lossy(&alias_bytes).into_owned();
-    let message = match req.class_decl(class) {
-        Some(decl) if !decl.file.0.is_empty() => format!(
-            "Cannot redeclare {} {shown} (previously declared in {}:{})",
-            kind_word(decl.kind),
-            String::from_utf8_lossy(&decl.file.0),
-            decl.line
-        ),
-        Some(decl) => format!("Cannot redeclare {} {shown}", kind_word(decl.kind)),
-        None => format!("Cannot redeclare class {shown}"),
-    };
+    let message = req.alias_redeclaration(class, &alias_bytes);
     warning(req, &message);
     Ok(false)
 }
@@ -1258,7 +1238,7 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Owner<PhpArray>, T
     let mut array = PhpArray::new(req)?;
     for name in names {
         // `copy_class_or_interface_name`: `ce->name`, or the alias's key.
-        let name = Value::string(req.interned(&name)?);
+        let name = Value::string(req.declared_string(&name)?);
         array.append(req, Owner::take(req, name))?;
     }
     Ok(array)

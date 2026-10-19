@@ -8,13 +8,15 @@
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
+use php_ext_lexbor::ffi::array::ArrayObj;
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,
 };
 use php_ext_lexbor::ffi::html::{
-    Document as HtmlDocument, FragmentParser, Namespace, Node as HtmlNode, NodeKind, Observations,
-    Quirks as HtmlQuirks, TokenizerErrorId, TreeErrorId,
+    Document as HtmlDocument, Fragment, FragmentParser, Namespace, Node as HtmlNode, NodeKind,
+    Observations, Quirks as HtmlQuirks, TokenizerErrorId, TreeErrorId,
 };
+use php_ext_lexbor::ffi::{self as lexbor, Lent, Owned as _};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{DocString, Kind, Node, NodeObject, Ns, Quirks};
 
@@ -243,18 +245,19 @@ impl App<'_> {
     }
 }
 
-/// `dom_process_parse_chunk`: one chunk handed to lexbor, its errors
-/// reported, and the position moved past it.
+/// `dom_process_parse_chunk`: one chunk handed to lexbor under a lend,
+/// its errors reported, and the position moved past it; `false` where
+/// lexbor refused the chunk, the `Err` the memory limit's fatal.
 fn process_chunk(
     req: &mut Request,
     app: &mut App<'_>,
     doc: &mut HtmlDocument,
     chunk: &[u8],
     input_length: usize,
-) -> bool {
+) -> Result<bool, Thrown> {
     app.input_length = input_length;
-    if doc.parse_chunk(chunk) != Status::Ok {
-        return false;
+    if lexbor::lent(req, |lent| doc.parse_chunk(lent, chunk))? != Status::Ok {
+        return Ok(false);
     }
     if app.report {
         report_errors(req, app, doc, chunk);
@@ -263,7 +266,7 @@ fn process_chunk(
     }
     app.total_offset += input_length;
     app.cache.offset = 0;
-    true
+    Ok(true)
 }
 
 /// `lexbor_libxml2_bridge_report_errors` with php's two reporters.
@@ -346,7 +349,7 @@ impl Coding {
 
 /// `dom_determine_encoding`: a byte order mark, then the `<meta>` pre-scan
 /// of the first 1,024 bytes, then UTF-8; and the length of the mark.
-fn determine_encoding(source: &[u8]) -> Option<(Encoding, usize)> {
+fn determine_encoding(lent: &Lent, source: &[u8]) -> Option<(Encoding, usize)> {
     if source.starts_with(b"\xEF\xBB\xBF") {
         return Some((Encoding::utf_8()?, 3));
     }
@@ -357,23 +360,24 @@ fn determine_encoding(source: &[u8]) -> Option<(Encoding, usize)> {
         return Some((Encoding::utf_16le()?, 2));
     }
     let head = source.get(..source.len().min(1024)).unwrap_or_default();
-    match Encoding::prescan(head) {
+    match Encoding::prescan(lent, head) {
         Some(found) => Some((found, 0)),
         None => Some((Encoding::utf_8()?, 0)),
     }
 }
 
 /// The parser, its decoder and the reporter's state, fed one range of the
-/// source at a time.
+/// source at a time. Each step answers `false` where lexbor refused a
+/// chunk, and the `Err` is the memory limit's fatal.
 struct Feed<'a> {
     app: App<'a>,
-    doc: HtmlDocument,
+    doc: &'a mut HtmlDocument,
     coding: Coding,
 }
 
 impl Feed<'_> {
     /// `dom_parse_decode_encode_step` over `source[start..end]`.
-    fn step(&mut self, req: &mut Request, start: usize, end: usize) -> bool {
+    fn step(&mut self, req: &mut Request, start: usize, end: usize) -> Result<bool, Thrown> {
         if self.coding.fast {
             self.fast(req, start, end)
         } else {
@@ -383,7 +387,7 @@ impl Feed<'_> {
 
     /// `dom_decode_encode_fast_path`: UTF-8 in, validated UTF-8 out, a bad
     /// sequence as the replacement bytes.
-    fn fast(&mut self, req: &mut Request, start: usize, end: usize) -> bool {
+    fn fast(&mut self, req: &mut Request, start: usize, end: usize) -> Result<bool, Thrown> {
         let source = self.app.source;
         let window = source.get(start..end).unwrap_or_default();
         let mut input = window;
@@ -392,8 +396,8 @@ impl Feed<'_> {
             let bytes = Encoder::utf_8_single(cp).unwrap_or_else(|| REPLACEMENT_BYTES.to_vec());
             self.coding.decoder.set_status(Status::Ok);
             let consumed = window.len() - input.len();
-            if !process_chunk(req, &mut self.app, &mut self.doc, &bytes, consumed) {
-                return false;
+            if !process_chunk(req, &mut self.app, self.doc, &bytes, consumed)? {
+                return Ok(false);
             }
         }
         let mut last_output = window.len() - input.len();
@@ -412,15 +416,15 @@ impl Feed<'_> {
             if cp > MAX_CODEPOINT {
                 let at = window.len() - input.len();
                 let chunk = window.get(last_output..backup).unwrap_or_default();
-                if !process_chunk(req, &mut self.app, &mut self.doc, chunk, at - last_output) {
-                    return false;
+                if !process_chunk(req, &mut self.app, self.doc, chunk, at - last_output)? {
+                    return Ok(false);
                 }
                 if cp == DECODE_CONTINUE {
                     self.coding.decoder.set_status(Status::Continue);
-                    return true;
+                    return Ok(true);
                 }
-                if !process_chunk(req, &mut self.app, &mut self.doc, REPLACEMENT_BYTES, 0) {
-                    return false;
+                if !process_chunk(req, &mut self.app, self.doc, REPLACEMENT_BYTES, 0)? {
+                    return Ok(false);
                 }
                 last_output = at;
             }
@@ -428,16 +432,16 @@ impl Feed<'_> {
         let at = window.len() - input.len();
         if at != last_output {
             let chunk = window.get(last_output..at).unwrap_or_default();
-            if !process_chunk(req, &mut self.app, &mut self.doc, chunk, at - last_output) {
-                return false;
+            if !process_chunk(req, &mut self.app, self.doc, chunk, at - last_output)? {
+                return Ok(false);
             }
         }
-        true
+        Ok(true)
     }
 
     /// `dom_decode_encode_slow_path`: another encoding decoded to code
     /// points and encoded to UTF-8, buffer by buffer.
-    fn slow(&mut self, req: &mut Request, start: usize, end: usize) -> bool {
+    fn slow(&mut self, req: &mut Request, start: usize, end: usize) -> Result<bool, Thrown> {
         let source = self.app.source;
         let mut input = source.get(start..end).unwrap_or_default();
         loop {
@@ -449,8 +453,8 @@ impl Feed<'_> {
             loop {
                 let encoded = self.coding.encoder.encode(&mut rest);
                 let bytes = self.coding.encoder.bytes().to_vec();
-                if !process_chunk(req, &mut self.app, &mut self.doc, &bytes, used) {
-                    return false;
+                if !process_chunk(req, &mut self.app, self.doc, &bytes, used)? {
+                    return Ok(false);
                 }
                 self.coding.encoder.clear();
                 if encoded != Status::SmallBuffer {
@@ -462,11 +466,11 @@ impl Feed<'_> {
                 break;
             }
         }
-        true
+        Ok(true)
     }
 
     /// `dom_parse_decode_encode_finish`.
-    fn finish(&mut self, req: &mut Request) -> bool {
+    fn finish(&mut self, req: &mut Request) -> Result<bool, Thrown> {
         self.coding.decoder.finish();
         let cps = self.coding.decoder.codepoints().to_vec();
         if !cps.is_empty() {
@@ -477,9 +481,9 @@ impl Feed<'_> {
         let bytes = self.coding.encoder.bytes().to_vec();
         if !bytes.is_empty() {
             let used = self.coding.decoder.codepoints().len();
-            return process_chunk(req, &mut self.app, &mut self.doc, &bytes, used);
+            return process_chunk(req, &mut self.app, self.doc, &bytes, used);
         }
-        true
+        Ok(true)
     }
 }
 
@@ -502,22 +506,22 @@ enum Input<'a> {
 }
 
 /// The parse shared by `createFromString` and `createFromFile`: the
-/// source fed through the decoder in php's chunks, the document ended; the
-/// document and the encoding it was read in.
+/// source fed through the decoder in php's chunks into `doc`, the
+/// document ended; the encoding it was read in. Every lexbor call is
+/// under a lend of the request (ADR-0014), so what the parse allocates is
+/// the request's.
 fn parse(
     req: &mut Request,
+    doc: &mut HtmlDocument,
     name: &[u8],
     input: &Input<'_>,
     options: i64,
     override_encoding: Option<Encoding>,
-) -> Result<(HtmlDocument, Encoding), Thrown> {
+) -> Result<Encoding, Thrown> {
     let source = match input {
         Input::String(s) | Input::File(s, _) => *s,
     };
-    let Some(mut doc) = HtmlDocument::new() else {
-        return Err(dom_throw(req, Code::InvalidState));
-    };
-    if doc.parse_chunk_begin() != Status::Ok {
+    if lexbor::lent(req, |lent| doc.parse_chunk_begin(lent))? != Status::Ok {
         return Err(dom_throw(req, Code::InvalidState));
     }
     let app = App {
@@ -548,7 +552,8 @@ fn parse(
         Input::String(source) => {
             let mut from = 0;
             if override_encoding.is_none() {
-                let (found, bom) = determine_encoding(source).ok_or_else(|| fail(req))?;
+                let found = lexbor::lent(req, |lent| determine_encoding(lent, source))?;
+                let (found, bom) = found.ok_or_else(|| fail(req))?;
                 encoding = found;
                 feed.coding = Coding::new(found).ok_or_else(|| fail(req))?;
                 from = bom;
@@ -559,7 +564,7 @@ fn parse(
                 if feed.coding.fast {
                     feed.app.walked = Walked::Bytes(walk);
                 }
-                if !feed.step(req, from, end) {
+                if !feed.step(req, from, end)? {
                     return Err(fail(req));
                 }
                 walk += end - from;
@@ -575,7 +580,8 @@ fn parse(
                 if determine {
                     determine = false;
                     let head = source.get(from..end).unwrap_or_default();
-                    let (found, bom) = determine_encoding(head).ok_or_else(|| fail(req))?;
+                    let found = lexbor::lent(req, |lent| determine_encoding(lent, head))?;
+                    let (found, bom) = found.ok_or_else(|| fail(req))?;
                     encoding = found;
                     feed.coding = Coding::new(found).ok_or_else(|| fail(req))?;
                     from += bom;
@@ -583,28 +589,73 @@ fn parse(
                 if feed.coding.fast {
                     feed.app.walked = Walked::Bytes(read_start);
                 }
-                if !feed.step(req, from, end) {
+                if !feed.step(req, from, end)? {
                     return Err(fail(req));
                 }
                 read_start = end;
             }
         }
     }
-    if !feed.finish(req) || feed.doc.parse_chunk_end() != Status::Ok {
+    if !feed.finish(req)? || lexbor::lent(req, |lent| feed.doc.parse_chunk_end(lent))? != Status::Ok
+    {
         return Err(fail(req));
     }
-    Ok((feed.doc, encoding))
+    Ok(encoding)
+}
+
+/// `lxb_html_document_create` under a lend, the document then kept
+/// across `call` and destroyed under a lend on every path out, as
+/// `html_document.c` destroys it on each.
+///
+/// Every lexbor call of the parse and the bridge is under a lend
+/// (ADR-0014), so what lexbor holds is the request's memory as php's is:
+/// a parse grows `memory_get_peak_usage()` by php's number past what one
+/// document costs whatever it holds, and meets `memory_limit` where php's
+/// does, on php's request.
+///
+/// ```php
+/// $peak = function ($n) {
+///     $html = str_repeat('<div class=a><p>hello <b>world</b></p></div>', $n);
+///     $m = memory_get_usage(); memory_reset_peak_usage();
+///     $d = Dom\HTMLDocument::createFromString($html, LIBXML_NOERROR);
+///     return memory_get_peak_usage() - $m;
+/// };
+/// var_dump($peak(20000) - $peak(1));
+/// ini_set('memory_limit', '8M');
+/// Dom\HTMLDocument::createFromString(str_repeat('<div class=a><p>hello <b>world</b></p></div>', 20000), LIBXML_NOERROR);
+/// echo "parsed\n";
+/// ```
+/// ```expect capture exit=255
+/// int(30352568)
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 36864 bytes) in %SCRATCH%/witness.php on line 10
+/// ```
+fn with_document<R>(
+    req: &mut Request,
+    call: impl FnOnce(&mut Request, &mut HtmlDocument) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    let Some(doc) = lexbor::lent(req, HtmlDocument::new)? else {
+        return Err(dom_throw(req, Code::InvalidState));
+    };
+    lexbor::kept(req, doc, call)
 }
 
 // ---- the bridge
 
-/// One item of `lexbor_libxml2_bridge_convert`'s work list.
+/// One item of `lexbor_libxml2_bridge_convert`'s work list, php's
+/// `work_list_item`, of its size, which the list's growth is counted in.
+#[derive(Clone, Copy)]
 struct Work<'doc> {
     node: HtmlNode<'doc>,
     active: Option<Namespace>,
     parent: Node,
     ns: Option<Ns>,
 }
+
+const _: () = assert!(size_of::<Work<'static>>() == 32, "sizeof(work_list_item)");
+
+/// `WORK_LIST_INIT_SIZE`.
+const WORK_LIST_INIT_SIZE: usize = 128;
 
 /// The declarations the bridge makes once for the attributes of a whole
 /// conversion: `xlink_ns`, `xml_ns` and `prefixed_xmlns_ns`.
@@ -678,26 +729,61 @@ fn convert_attributes(
     Some(())
 }
 
-/// `lexbor_libxml2_bridge_convert`: `start` and the siblings before it,
-/// and all their descendants, made libxml2 nodes under `root`.
-fn convert(
-    obj: &mut NodeObject,
+/// `lexbor_libxml2_bridge_convert` for `object`'s document: the bridge
+/// made under one lend of the request, whose node object it borrows for
+/// the length of it, so the work list php keeps on lexbor's allocator is
+/// the request's memory as php's is. `None` where the bridge failed; the
+/// `Err` is the memory limit's fatal.
+fn bridge(
+    req: &mut Request,
+    object: PhpObject,
     start: Option<HtmlNode<'_>>,
+    doc: Node,
+    root: Node,
+    create_default_ns: bool,
+) -> Result<Option<()>, Thrown> {
+    let Some(mut obj) = dom_mut(req, object).map(|d| d.obj.borrow()) else {
+        return Ok(None);
+    };
+    lexbor::lent(req, |lent| {
+        let mut work = ArrayObj::new(lent, WORK_LIST_INIT_SIZE)?;
+        let converted = convert(
+            lent,
+            &mut obj,
+            &mut work,
+            start,
+            doc,
+            root,
+            create_default_ns,
+        );
+        work.give_back(lent);
+        converted
+    })
+}
+
+/// `lexbor_libxml2_bridge_convert`: `start` and the siblings before it,
+/// and all their descendants, made libxml2 nodes under `root`, through
+/// `work`, the work list.
+fn convert<'doc>(
+    lent: &Lent,
+    obj: &mut NodeObject,
+    work: &mut ArrayObj<Work<'doc>>,
+    start: Option<HtmlNode<'doc>>,
     doc: Node,
     root: Node,
     create_default_ns: bool,
 ) -> Option<()> {
     let html_ns = private::of(obj)?.mapper.html(Some(doc));
     let mut attr_ns = AttrNs::default();
-    let mut work: Vec<Work<'_>> = Vec::new();
     let mut at = start;
     while let Some(node) = at {
-        work.push(Work {
+        let item = Work {
             node,
             active: None,
             parent: root,
             ns: None,
-        });
+        };
+        work.push(lent, item).then_some(())?;
         at = node.prev();
     }
     while let Some(item) = work.pop() {
@@ -737,12 +823,13 @@ fn convert(
                     }
                 }
                 while let Some(c) = child {
-                    work.push(Work {
+                    let item = Work {
                         node: c,
                         active: Some(entering),
                         parent: child_parent,
                         ns: current,
-                    });
+                    };
+                    work.push(lent, item).then_some(())?;
                     child = c.prev();
                 }
                 convert_attributes(obj, doc, node, element, &mut attr_ns)?;
@@ -849,15 +936,14 @@ fn finish(
     let private = crate::private::Private::new(req)?;
     let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc, private)?;
     let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
-    let converted = dom_mut(req, *object).and_then(|d| {
-        convert(
-            &mut d.obj,
-            parsed.node().last_child(),
-            doc,
-            doc,
-            create_default_ns,
-        )
-    });
+    let start = parsed.node().last_child();
+    let converted = match bridge(req, *object, start, doc, doc, create_default_ns) {
+        Ok(converted) => converted,
+        Err(thrown) => {
+            object.give_up(req);
+            return Err(thrown);
+        }
+    };
     if converted.is_none() {
         object.give_up(req);
         return Err(dom_throw(req, Code::InvalidState));
@@ -926,11 +1012,51 @@ pub(crate) fn parse_fragment(
         _ => HtmlQuirks::NoQuirks,
     };
     let ns_uri = context.ns().and_then(Ns::href).unwrap_or_default();
-    let Some(mut parser) = FragmentParser::begin(&context.name(), &ns_uri, quirks) else {
+    let name = context.name();
+    let parsed = lexbor::lent(req, |lent| {
+        parse_fragment_input(lent, &name, &ns_uri, quirks, input)
+    })?;
+    let Some(fragment) = parsed else {
         return Err(dom_throw(req, Code::InvalidState));
     };
+    lexbor::kept(req, fragment, |req, fragment| {
+        let Some(doc) = context.doc() else {
+            return Err(dom_throw(req, Code::InvalidState));
+        };
+        let Some(root) = Node::new_fragment(Some(doc)) else {
+            return Err(dom_throw(req, Code::InvalidState));
+        };
+        let start = fragment.root().last_child();
+        match bridge(req, object, start, doc, root, true) {
+            Ok(Some(())) => Ok(root),
+            Ok(None) => {
+                root.free();
+                Err(dom_throw(req, Code::InvalidState))
+            }
+            Err(thrown) => {
+                root.free();
+                Err(thrown)
+            }
+        }
+    })
+}
+
+/// The fragment parse of `dom_html_fragment_parsing_algorithm`, under one
+/// lend: `input` decoded as UTF-8, each bad sequence handed on as the
+/// replacement bytes, into a fragment parser under an element named
+/// `name` in `ns_uri`; `None` where lexbor refused a step, what it made
+/// given back.
+fn parse_fragment_input(
+    lent: &Lent,
+    name: &[u8],
+    ns_uri: &[u8],
+    quirks: HtmlQuirks,
+    input: &[u8],
+) -> Option<Fragment> {
+    let mut parser = FragmentParser::begin(lent, name, ns_uri, quirks)?;
     let Some(mut decoder) = Encoding::utf_8().map(Decoder::single) else {
-        return Err(dom_throw(req, Code::InvalidState));
+        parser.give_back(lent);
+        return None;
     };
     let mut rest = input;
     let mut last_output = 0;
@@ -940,32 +1066,22 @@ pub(crate) fn parse_fragment(
         let cp = decoder.utf_8_single(&mut rest);
         if cp > MAX_CODEPOINT {
             let at = input.len() - rest.len();
-            failed |=
-                parser.chunk(input.get(last_output..backup).unwrap_or_default()) != Status::Ok;
-            failed |= parser.chunk(REPLACEMENT_BYTES) != Status::Ok;
+            let before = input.get(last_output..backup).unwrap_or_default();
+            failed |= parser.chunk(lent, before) != Status::Ok;
+            failed |= parser.chunk(lent, REPLACEMENT_BYTES) != Status::Ok;
             last_output = at;
         }
     }
     if last_output != input.len() {
-        failed |= parser.chunk(input.get(last_output..).unwrap_or_default()) != Status::Ok;
+        let tail = input.get(last_output..).unwrap_or_default();
+        failed |= parser.chunk(lent, tail) != Status::Ok;
     }
-    let fragment = parser.end();
-    let Some(fragment) = fragment.filter(|_| !failed) else {
-        return Err(dom_throw(req, Code::InvalidState));
-    };
-    let Some(doc) = context.doc() else {
-        return Err(dom_throw(req, Code::InvalidState));
-    };
-    let Some(root) = Node::new_fragment(Some(doc)) else {
-        return Err(dom_throw(req, Code::InvalidState));
-    };
-    let converted = dom_mut(req, object)
-        .and_then(|d| convert(&mut d.obj, fragment.root().last_child(), doc, root, true));
-    if converted.is_none() {
-        root.free();
-        return Err(dom_throw(req, Code::InvalidState));
+    let fragment = parser.end(lent)?;
+    if failed {
+        fragment.give_back(lent);
+        return None;
     }
-    Ok(root)
+    Some(fragment)
 }
 
 /// `Dom\HTMLDocument::createFromString`'s body.
@@ -977,8 +1093,17 @@ pub(crate) fn create_from_string(
 ) -> Result<Owner<Value>, Thrown> {
     check_options(req, 2, options)?;
     let encoding = override_encoding(req, 3, given_encoding)?;
-    let (parsed, found) = parse(req, b"Entity", &Input::String(source), options, encoding)?;
-    finish(req, &parsed, found, options, None)
+    with_document(req, |req, doc| {
+        let found = parse(
+            req,
+            doc,
+            b"Entity",
+            &Input::String(source),
+            options,
+            encoding,
+        )?;
+        finish(req, doc, found, options, None)
+    })
 }
 
 /// `Dom\HTMLDocument::createFromFile`'s body. A file that does not
@@ -1046,12 +1171,22 @@ pub(crate) fn create_from_file(
     };
     stream.free(req);
     read?;
-    let (parsed, found) = parse(req, &path, &Input::File(&source, chunks), options, encoding)?;
-    let url = if crate::modern::is_stream_path(&path) {
-        path.clone()
+    with_document(req, |req, doc| {
+        let input = Input::File(&source, chunks);
+        let found = parse(req, doc, &path, &input, options, encoding)?;
+        let url = file_url(req, &path);
+        finish(req, doc, found, options, Some(url))
+    })
+}
+
+/// The document's URL: a stream's path as given, a file's absolute path
+/// as libxml's `xmlPathToURI` writes it, under `file://`.
+fn file_url(req: &mut Request, path: &[u8]) -> Vec<u8> {
+    if crate::modern::is_stream_path(path) {
+        path.to_vec()
     } else {
-        let absolute = req.realpath(&path).map_or_else(
-            || path.clone(),
+        let absolute = req.realpath(path).map_or_else(
+            || path.to_vec(),
             |p| p.to_string_lossy().into_owned().into_bytes(),
         );
         let uri = php_ext_libxml::ffi::Library::path_to_uri(&absolute).unwrap_or(absolute);
@@ -1060,8 +1195,7 @@ pub(crate) fn create_from_file(
         } else {
             [b"file://".as_slice(), &uri].concat()
         }
-    };
-    finish(req, &parsed, found, options, Some(url))
+    }
 }
 
 /// `Dom\HTMLDocument::createEmpty`'s body.

@@ -707,7 +707,7 @@ impl Request {
         let prefix = self
             .property_prefix(declaring, property.visibility)
             .unwrap_or_default();
-        let name = self.interned(&[prefix.as_slice(), &property.name.0].concat())?;
+        let name = self.declared_string(&[prefix.as_slice(), &property.name.0].concat())?;
         Ok(Some(name.heap()))
     }
 

@@ -1138,12 +1138,12 @@ impl Request {
             (b"line", Value::int(i64::from(last.line))),
         ] {
             // `ZSTR_KNOWN`, the four names permanent.
-            let key = Key::Str(self.interned(name)?);
+            let key = Key::Str(self.declared_string(name)?);
             let key = Owner::take(self, key);
             array.set(self, key, Owner::take(self, value))?;
         }
         if let Some((Some(trace), _)) = self.diagnostics.last_fatal_error_backtrace {
-            let key = Key::Str(self.interned(b"trace")?);
+            let key = Key::Str(self.declared_string(b"trace")?);
             let key = Owner::take(self, key);
             array.set(self, key, Owner::take(self, Value::array(trace)))?;
         }

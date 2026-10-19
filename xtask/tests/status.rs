@@ -771,7 +771,7 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
         assert_eq!(laid["path"], built.path.to_str().unwrap(), "{name}");
         assert_eq!(laid["platform"], Platform::this().unwrap().key(), "{name}");
         let pinned = pin.variant[name].build(Platform::this().unwrap()).unwrap();
-        let closure = pinned.closure.as_ref().map(ToString::to_string);
+        let closure = pinned.provenance.closure.as_ref().map(ToString::to_string);
         assert_eq!(laid["closure"], serde_json::json!(closure), "{name}");
     }
     // The record's digest, SHA-256 over each `name=version\n` in name
@@ -2133,102 +2133,22 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     assert_eq!(of("vocab")["silent"], false);
 }
 
-/// The weekly exit bar table (harness-design.md §9): one row per `[[week]]`
-/// of the manifest, pass when every reading it names holds, fail when one
-/// contradicts, "no reading" while one is missing; `--week N` is one row.
+/// The weekly bar table is gone (#2934, #2973): `--section week` and
+/// `--week` are refused as unknown, and a manifest's `[[week]]` row as a
+/// key outside the grammar.
 #[test]
-fn week_renders_one_row_per_bar_from_the_readings() {
+fn the_week_section_and_its_row_are_refused() {
     let root = scratch("week");
-    let mut manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
-    manifest.push_str(
-        r#"
-[[week]]
-days = "1-2"
-text = "every instrument writes a reading"
-reads = [{ instrument = "budget", scope = "xtask" }]
-[[week]]
-days = "3-7"
-text = "xtask under 7000 lines, api within 400 items"
-reads = [
-  { instrument = "budget", scope = "xtask", number = "lines", max = 7000 },
-  { instrument = "api-check", scope = "api", number = "items", max = 400 },
-]
-[[week]]
-days = "8-14"
-text = "vocab clean on xtask"
-reads = [{ instrument = "vocab", scope = "xtask", number = "avoided", max = 0 }]
-"#,
-    );
-    std::fs::write(root.join("seams.toml"), manifest).unwrap();
-
-    let store = Store::of_workspace(&root);
-    let mut budget = Reading::new("budget", "xtask");
-    budget.status = Status::Pass;
-    store.record(std::slice::from_ref(&budget)).unwrap();
-    let mut lines = Reading::new("budget", "xtask");
-    lines.status = Status::Pass;
-    lines.numbers.insert("lines".into(), 6508.into());
-    store.record(std::slice::from_ref(&lines)).unwrap();
-    let mut items = Reading::new("api-check", "api");
-    items.status = Status::Fail;
-    items.numbers.insert("items".into(), 412.5.into());
-    store.record(std::slice::from_ref(&items)).unwrap();
-    let mut crashed = Reading::new("vocab", "xtask");
-    crashed.status = Status::Fail;
-    crashed.numbers.insert("avoided".into(), 0.into());
-
-    let (ok, md, err) = status(&root, &["--section", "week"]);
-    assert!(ok, "{err}");
-    let rows: Vec<&str> = md.lines().skip(2).collect();
-    assert_eq!(rows.len(), 3, "{md}");
-    assert!(
-        rows[0].contains("| 1-2 |") && rows[0].contains("| pass |"),
-        "{}",
-        rows[0]
-    );
-    assert!(
-        rows[1].contains("| 3-7 |") && rows[1].contains("| fail |"),
-        "{}",
-        rows[1]
-    );
-    assert!(
-        rows[1].contains("api items=412.5 > 400"),
-        "the reading that missed the bar is named: {}",
-        rows[1]
-    );
-    assert!(
-        rows[2].contains("| 8-14 |") && rows[2].contains("| no reading |"),
-        "{}",
-        rows[2]
-    );
-    store.record(std::slice::from_ref(&crashed)).unwrap();
-    let (ok, md, _) = status(&root, &["--section", "week", "--week", "3"]);
-    assert!(ok);
-    assert!(
-        md.contains("| fail |"),
-        "a number inside the bound on a reading that failed is no pass: {md}"
-    );
-
-    let (ok, md, err) = status(&root, &["--section", "week", "--week", "2"]);
-    assert!(ok, "{err}");
-    assert_eq!(md.lines().skip(2).count(), 1, "{md}");
-    assert!(md.contains("| 3-7 |"), "{md}");
-    let (ok, _, err) = status(&root, &["--section", "week", "--week", "4"]);
-    assert!(!ok, "a week the manifest has no row for: {err}");
+    let (ok, _, err) = status(&root, &["--section", "week"]);
+    assert!(!ok && err.contains("invalid value 'week'"), "{err}");
     let (ok, _, err) = status(&root, &["--section", "rules", "--week", "1"]);
-    assert!(!ok, "--week belongs to the week section: {err}");
-
-    let (ok, json, _) = status(&root, &["--section", "week", "--format", "json"]);
-    assert!(ok);
-    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let rows = rows.as_array().unwrap();
-    assert_eq!(rows[0]["days"], "1-2");
-    assert_eq!(rows[0]["verdict"], "pass");
-    assert_eq!(rows[1]["verdict"], "fail");
-    assert_eq!(rows[1]["reads"][1]["verdict"], "fail");
-    assert_eq!(rows[1]["reads"][1]["value"], 412.5);
-    assert_eq!(rows[2]["verdict"], "fail", "the crashed vocab run");
-    assert_eq!(rows[2]["reads"][0]["status"], "fail");
+    assert!(!ok && err.contains("unexpected argument '--week'"), "{err}");
+    let text = format!(
+        "{}\n[[week]]\ndays = \"3-7\"\n",
+        std::fs::read_to_string(root.join("seams.toml")).unwrap()
+    );
+    let err = format!("{:#}", Manifest::parse(&text).unwrap_err());
+    assert!(err.contains("unknown field `week`"), "{err}");
 }
 
 /// "This session" (harness-design.md §4.6): `--session-id` names it, and
