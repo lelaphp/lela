@@ -259,8 +259,7 @@ impl<J: Judgement> Tally<J> {
     }
 
     /// What met of what was found, to one decimal: the burndown's number,
-    /// which a `[[week]]` bar reads off one reading. Nothing found is
-    /// nothing met.
+    /// read off one reading. Nothing found is nothing met.
     pub fn percent(&self) -> f64 {
         if self.found == 0 {
             return 0.0;

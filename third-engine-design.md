@@ -367,6 +367,8 @@ Check: `serve`'s signature takes and returns an owned sink; a copied constant ar
 
 **147. Revision 147 (2026-10-19).** §5.8's tail-call paragraph states what Mitchell ruled on #2970 (2026-10-19, a session), as #2975 carries it: the threaded dispatch stays measured only, and a lane holds it. The paragraph said a `cfg(dispatch = "tailcall")` variant may be measured on nightly; since #2905 it is live code, the dispatch threaded by `become` through `extern "rust-preserve-none"` handlers, which `build.rs` writes only where cargo names the cfg, and nothing said what held it. It now says the `match` loop is shipped on the pinned stable toolchain; the threaded variant is held by that lane on a dated nightly and shipped by no build; and the decision is taken again when `explicit_tail_calls` and `rust_preserve_none_cc` are stable, on wall-clock readings under the protocol. The lane is `harness-design.md` §7's row of its revision 150. Rejected, by the ruling: shipping on a pinned nightly, which would put the whole engine on a feature rustc marks incomplete for fewer instructions retired with no wall-clock reading. Nothing an ADR records is reversed, so there is no ADR; §12's row for `become` never stabilising stands. Check: `grep -n "shipped by no build" third-engine-design.md` matches §5.8 and this row; `scripts/ci/tailcall.sh check` exits 0 on the tree #2975 landed on.
 
+**148. Revision 148 (2026-10-19).** §2's **From this engine** paragraph names the log a learnings row's evidence is a query of as the store's log, `target/harness/log/<instrument>.jsonl`, where it named `log.jsonl`. Harness revision 83 (#2164) split the store's log into one file per instrument under `target/harness/log/`, and harness §10's rule 1 reads it there; since harness revision 152 (#2973, as Mitchell ruled on #2934) no reader opens a `log.jsonl` at all, so the sentence named a file nothing reads. It states what #2164 built and reverses, widens or adds to no ruling, so there is no ADR; a person reads this row at the merge (#2979). Check: `grep -n 'log\.jsonl' third-engine-design.md` matches this row alone.
+
 ## 0. The one-paragraph design
 
 Build **Zend's execution model in Rust, once, with nothing beside it, behind nine named seams.** One value representation with Zend's layouts (16-byte zval, 8-byte refcounted header, packed/hash arrays, objects with inline property slots), one Zend-shaped allocator, one single-pass compiler from the inherited syntax tree to op arrays that are **identical to php's own**, one operand-specialised interpreter whose handler bodies are written once and monomorphised over operand kinds, synchronous destructors, Bacon–Rajan GC with Zend's root-buffer placement, generators as heap frames, fibers as real coroutines. **No second executor, no MIR, no DSL; no JIT in month one, and the tier's seam, word and safepoints designed in from day one.** Correctness comes from the real `php` binary at every interface that has one: op arrays diffed against php's dump, witnesses embedded in rustdoc, php-src's `.phpt` corpus per commit, grammar fuzzing nightly. Extensions follow one rule, **write what PHP writes, link what PHP links**, and see the engine through one locked module, `php_engine::api`, whose first version is generated from what Mahout's 19 extension crates already call. Every class, function, constant and attribute, whether written in PHP or as a native, is described once in the unit format. Immutable compiled units are shared across threads through map pointers, so one process serves many requests without a fork and without recompiling. **The crates of §4.1 in `crates/`, `php_jit` among them behind a feature, one crate per extension in `ext/`, nine seams, one declaration model.** The interpreter runs op arrays through `execute::<Nop>`; the same op arrays, the same frames and the same kernels serve `execute::<Jit>` when the feature is on, and the compiled tier reaches the engine through one lock file. Budget: the line ceilings `seams.toml` carries, per crate and in total, and the new-code ceiling within them.
@@ -498,7 +500,7 @@ Each row is a decision for the third engine, with the evidence that forced it.
 
 Both predecessors are single-author, agent-driven, and both spent most of their effort on machinery around the engine. The third engine's process rule is in §10: one design document per subject, an ADR only on reversal, an op spec that is its own documentation, and no ticket corpus in the repository.
 
-**From this engine.** Rows are added here, Keep/Reject shape, when a sensor catches the same class of mistake twice, with a `log.jsonl` query as the evidence (harness rule 1). None yet.
+**From this engine.** Rows are added here, Keep/Reject shape, when a sensor catches the same class of mistake twice, with a query of the store's log, `target/harness/log/<instrument>.jsonl`, as the evidence (harness rule 1). None yet.
 
 ---
 
@@ -536,7 +538,7 @@ The crates are `seams.toml`'s `[[crate]]` rows, counted below by the directory e
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=f9ff100e690e74766bf1e74e128972206aab9e2bc890662277a06addd1afe127 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=6d5e38ed1717e11729581dba212b8c5b3160848784b92c0fb73b1e18aef1c2f6 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 | Crate | Role | Interface (what callers learn) | Origin |
 |---|---|---|---|
@@ -588,7 +590,7 @@ The permitted edges are `seams.toml`'s `[[edge]]` rows, rendered here: a crate d
 | php_engine::{executor,kernels} | php_engine::{serve,headers,gpc,output} | denied |  |
 | sapi/* | php_sapi, php_proto, php_bundle, php_ext |  | ADR-0008 |
 
-<!-- /computed in=da2fcf4eb97dc5167899b499401afe7b378aac42861f4abee323d56f84d63056 out=5f28278f2b9b7afde8e31c26cde0c1e4273513e0448f142cb62c5a2fb9516f2b -->
+<!-- /computed in=69cd198df8bb7a1966f9f320f9597e19c2ca992f612c13b13c09efc3963a6b9c out=5f28278f2b9b7afde8e31c26cde0c1e4273513e0448f142cb62c5a2fb9516f2b -->
 
 What the rows do not say. `php_heap` depends on nothing in the workspace. `php_unit` depends on `php_heap` for names interned and literals as heap values. `php_engine` depends on `php_macros` because its attributes declare Core's natives; `php_macros` depends on no workspace crate, only on `syn`, `quote` and `proc-macro2`: a macro emits paths and never links what they name (ADR-0007). `php_ext` re-exports `api` (with `api::__private`), `tier::Nop` and the attributes only. An `ext/*` crate depends on `php_ext` and on the `ext/*` crates it declares, never on `php_engine`, `php_compile`, `php_syntax` or `php_bundle`. `php_bundle` reaches `php_jit` under `jit` on the targets `php_jit`'s `[[crate]]` row names, and names `php_jit::Jit` and nothing else; nothing depends on `php_jit` but the bundle, and `php_jit` depends on nothing under `ext/`. `php_sapi` never sees `api`; `php_proto` sees nothing. `xtask` links no workspace crate: it reaches the engine through the binaries it builds and starts, `php-linked` and the hosts' own (harness revision 84). Workspace members are the directories §4.1's count names; an extension's package is `php_ext_<name>` at path `ext/<name>`, a host's `php_sapi_<name>` at `sapi/<name>` (ADR-0008).
 
@@ -679,9 +681,9 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | sapi | sapi.lock | 57 |  |
 | tier | tier.lock | 38 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 414 |  |
+| harness | xtask.lock | 409 |  |
 
-<!-- /computed in=3fc6e8bd078c94b8301b2909050c4c67cd20fefbfba50a0ed7707aeb6b0df851 out=e38245fd4d23033e3daa8d97f09b0f0b8b58c7bbe7177f4c3066b8b23ab5d6f0 -->
+<!-- /computed in=b3c6f4825bfedc4fd528cc8c70603b02f4f1e351d57fe4c42d72b202da46b21f out=705e6c7e779cf5251e0213089a6a17ff6a72efdea1b78fea791d26b6e7ada9e2 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
