@@ -14,6 +14,13 @@ set -u
 # The region files are pre-commit's `regions=` line, the one list (#631).
 regions=$(sed -n "s/^regions='\(.*\)'$/\1/p" "$(dirname "$0")/pre-commit")
 cd "$(git rev-parse --show-toplevel)" || exit 1
+# A conflict marker left in, which the merge would add, refuses it, as
+# pre-commit's check does, naming file and line (#2996).
+if markers=$(git diff --cached --check | grep -E ': leftover conflict marker$'); then
+    printf '%s\n' "$markers" >&2
+    echo "pre-merge-commit: the line above is a conflict marker left in, which the merge would commit; the merge stands uncommitted: resolve it, or exempt a file that holds one on purpose by its conflict-marker-size in .gitattributes" >&2
+    exit 1
+fi
 if [ -z "$regions" ]; then
     echo "pre-merge-commit: pre-commit names no region files as regions='...', so the merge's regions are unread; the merge stands uncommitted" >&2
     exit 1
