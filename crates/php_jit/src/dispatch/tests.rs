@@ -192,6 +192,7 @@ fn lines(served: &php_engine::test::Served) -> Vec<String> {
 /// bumped and not recorded, so one `TRACE start` is written, the root's;
 /// the next request records a root of its own, the function the first
 /// recorded inside its root.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
     let scratch = testing::Scratch::new();
@@ -273,6 +274,7 @@ impl Tier for Panics {
 /// A recording a panic unwound out of leaves the running execution's
 /// trace number none, and its claim settled itself as a failed attempt:
 /// the word is cold again.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_trace_number_is_none_after_a_recording_a_panic_unwound() {
     let scratch = testing::Scratch::new();
@@ -293,6 +295,7 @@ fn the_trace_number_is_none_after_a_recording_a_panic_unwound() {
 /// A fiber suspended inside a recording and never resumed: its
 /// execution's trace number went with it, so the resumer records a root
 /// of its own while the fiber's recording stands (revision 9).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fiber_suspended_inside_a_recording_leaves_its_resumer_recording() {
     let scratch = testing::Scratch::new();
@@ -363,6 +366,7 @@ impl Tier for Spy {
 /// program with loops, calls and returns and no word is written; the same
 /// program
 /// under `force` writes words.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn under_off_no_word_is_written() {
     let program = "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }

@@ -46,6 +46,7 @@ fn side(parent: u32, exit: u16) -> Start {
 /// A call and its return: `INIT_FCALL` writes the call down, `Pushed`
 /// writes `Enter`, `Popped` back to the root writes `Back`, and the
 /// root's own return at depth zero ends an entry trace with `return`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_and_its_return_are_entered_and_left() -> Result<(), String> {
     let (record, out) = recorded(
@@ -69,6 +70,7 @@ fn a_call_and_its_return_are_entered_and_left() -> Result<(), String> {
 /// A return trace: its first opline is the `RETURN` it started at, the
 /// first `Popped` roots it where it lands, and it goes on in the caller
 /// to the caller's own return.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_return_trace_starts_at_its_return_and_goes_on_in_the_caller() -> Result<(), String> {
     let (record, out) = recorded(
@@ -94,6 +96,7 @@ fn a_return_trace_starts_at_its_return_and_goes_on_in_the_caller() -> Result<(),
 
 /// A call to a generator function: its frame is activated and then moved
 /// to the heap, where the recorder stops.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_yield_that_creates_a_generator_stops_at_the_moved_frame() -> Result<(), String> {
     let (record, out) = recorded(
@@ -110,6 +113,7 @@ fn a_yield_that_creates_a_generator_stops_at_the_moved_frame() -> Result<(), Str
 
 /// A throw: the step leaves a throwable pending and the recorder stops
 /// with `exception`, the program going on to catch it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_throw_stops_with_exception() -> Result<(), String> {
     let (record, out) = recorded(
@@ -124,6 +128,7 @@ fn a_throw_stops_with_exception() -> Result<(), String> {
 
 /// `do { } while (!$x)`: `BOOL_NOT` then a backward `JMPNZ` to the
 /// header, which closes the loop at the root.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_do_while_not_loop_closes_at_its_header() -> Result<(), String> {
     let (record, out) = recorded(
@@ -151,6 +156,7 @@ fn a_do_while_not_loop_closes_at_its_header() -> Result<(), String> {
 /// A fused compare-and-branch is one `Op` with its direction on it: the
 /// `for` condition jumping back to the header, and an `if` falling
 /// through and jumping over.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fused_branch_is_one_op_taken_each_way() -> Result<(), String> {
     let (record, _) = recorded(
@@ -185,6 +191,7 @@ fn a_fused_branch_is_one_op_taken_each_way() -> Result<(), String> {
 
 /// A conditional jump of its own, on a value no comparison wrote, says
 /// which way it went too, so a trace that ends on one says where it ends.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_conditional_jump_says_which_way_it_went() -> Result<(), String> {
     for (a, taken) in [("true", Some(false)), ("false", Some(true))] {
@@ -207,6 +214,7 @@ fn a_conditional_jump_says_which_way_it_went() -> Result<(), String> {
 
 /// A call into a function an `eval` declared: its op array is the
 /// request's, which no trace may read, and the recorder stops at it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_call_into_an_evaled_function_stops_at_the_request_unit() -> Result<(), String> {
     let (record, out) = recorded(
@@ -224,6 +232,7 @@ fn a_call_into_an_evaled_function_stops_at_the_request_unit() -> Result<(), Stri
 /// php's stops before a step: `FAST_CALL` is not supported,
 /// `INCLUDE_OR_EVAL` exits to the interpreter, and a recording no longer
 /// than php's least limit is too long at its first opline.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_stops_before_a_step() -> Result<(), String> {
     let (record, out) = recorded(
@@ -253,6 +262,7 @@ fn the_stops_before_a_step() -> Result<(), String> {
 /// loop, an outer loop's trace stops at its inner loop, a callee whose
 /// entry is compiled is linked to, a blacklisted one stops the trace, and
 /// an outer loop's trace reaching a compiled inner loop stops there.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_stops_at_a_header_and_a_call() -> Result<(), String> {
     let (record, _) = recorded(
@@ -300,6 +310,7 @@ fn the_stops_at_a_header_and_a_call() -> Result<(), String> {
 
 /// php's megamorphic call under `opcache.jit_max_polymorphic_calls=0`: a
 /// method call is one the interpreter makes (`zend_jit_may_be_polymorphic_call`).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_megamorphic_call_stops_for_the_interpreter() -> Result<(), String> {
     let program = "class C { function m() { return 1; } }
@@ -320,6 +331,7 @@ fn a_megamorphic_call_stops_for_the_interpreter() -> Result<(), String> {
 /// Recursion: a call back into the root's entry is followed once and the
 /// second stops as a recursive call, php's
 /// `opcache.jit_max_recursive_calls` of two.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn recursion_into_the_root_stops_as_a_recursive_call() -> Result<(), String> {
     let (record, out) = recorded(
@@ -335,6 +347,7 @@ fn recursion_into_the_root_stops_as_a_recursive_call() -> Result<(), String> {
 /// A fatal a step raised ends the recording with no record, and the
 /// running execution's trace number is put back: the shutdown function
 /// the fatal leaves to serve is asked with none.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
     let mut ini = at("f", "enter");
@@ -363,6 +376,7 @@ fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
 
 /// While a recording runs, the running execution's trace number is set,
 /// so a nested `execute` is asked with it, and it is none again after.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn the_trace_number_is_set_for_the_recording_alone() {
     let (kept, served) = kept(

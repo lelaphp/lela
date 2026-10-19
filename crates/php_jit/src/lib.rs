@@ -185,6 +185,7 @@ mod tests {
 
     /// The start's lines are written once, by the first request, and only
     /// where `opcache.jit_debug` asks for any: php's default writes none.
+    #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
     #[test]
     fn the_start_logs_once_and_only_under_jit_debug() {
         let quiet = testing::serve::<Lane>(&[("jit.mode", "force")], "echo 1;");
