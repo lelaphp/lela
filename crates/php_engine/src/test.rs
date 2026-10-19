@@ -54,6 +54,47 @@ impl OutputSink for Capture {
     }
 }
 
+/// A sink whose bytes are the process's own, as php's CLI writes them:
+/// each body write straight to the process's fd 1 and each
+/// error-stream write and log entry to its fd 2, unbuffered
+/// (`sapi_cli_single_write`), so what a request wrote stands written
+/// whatever ends the process after it.
+#[derive(Debug, Default)]
+struct Through;
+
+impl OutputSink for Through {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::engine::Aborted> {
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout().lock();
+        // php's CLI writes what it can and drops the rest; a closed
+        // stream is nothing a request is told of here either.
+        stdout.write_all(bytes).and_then(|()| stdout.flush()).ok();
+        Ok(())
+    }
+
+    fn flush(&mut self) {
+        use std::io::Write as _;
+        std::io::stdout().lock().flush().ok();
+    }
+
+    /// The CLI sends no head.
+    fn send_headers(&mut self, _: &ResponseHead) {}
+
+    fn log(&mut self, entry: &[u8]) {
+        use std::io::Write as _;
+        let mut stderr = std::io::stderr().lock();
+        stderr
+            .write_all(entry)
+            .and_then(|()| stderr.write_all(b"\n"))
+            .ok();
+    }
+
+    fn write_stderr(&mut self, bytes: &[u8]) {
+        use std::io::Write as _;
+        std::io::stderr().lock().write_all(bytes).ok();
+    }
+}
+
 /// What one captured request came to: the sink's bytes and the
 /// observables, and the natives it entered, which
 /// [`Engine::serve_capture_traced_in`] alone records.
@@ -79,6 +120,28 @@ impl Engine {
     /// [`Engine::serve_capture_as`].
     pub fn serve_capture(&self, source: &str, sink: Capture) -> Served {
         self.serve_capture_as(b"Standard input code", source, sink)
+    }
+
+    /// Serve `source` as [`Engine::serve_capture`] does, with what it
+    /// writes the process's own fd 1 and fd 2 as it is
+    /// written, unbuffered as php's CLI writes them, rather than kept:
+    /// for a test that reads the request from outside the process, one
+    /// whose request ends the process among them (`zend_test_crash`'s
+    /// signal). The [`Served`] it hands back holds the observables and no
+    /// bytes.
+    pub fn serve_through(&self, source: &str) -> Served {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let (description, dumped) = self.capture_description(
+            &cwd,
+            b"Standard input code",
+            Some(source),
+            Vec::new(),
+            Capture::default(),
+        );
+        let mut through = Through;
+        through.write_stderr(&dumped.stderr);
+        let (observables, _) = self.serve(description, Box::new(through), |_| HostServes::Program);
+        served(observables, Vec::new(), Box::new(Capture::default()))
     }
 
     /// [`Engine::serve_capture`] with the request named `name`: what
