@@ -547,7 +547,7 @@ pub struct Rule {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Where {
-    /// Every checkout: a row without `where`.
+    /// Wherever the call stands: a row without `where`.
     #[default]
     Anywhere,
     /// A checkout whose branch records a ticket, read through
@@ -561,6 +561,11 @@ pub enum Where {
     /// directory, and never a linked worktree: where merges into `main`
     /// are made (#2751).
     Main,
+    /// A checkout of the repository, the main one or a linked worktree,
+    /// as `git worktree list` names them, and never a directory outside
+    /// them, such as a scratch repository: read where each command of a
+    /// shell line runs, and judged wherever `permit` cannot say (#2887).
+    Checkout,
 }
 
 /// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]

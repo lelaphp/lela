@@ -688,6 +688,26 @@ mod tests {
         assert_eq!(standing(&dir, add, "s1", None), Some(Operation::Merge));
     }
 
+    /// #2990: a start run under `caffeinate`, as a long merge is, is
+    /// recorded as any other, so its starter commits and aborts it.
+    #[test]
+    fn a_start_under_caffeinate_is_its_starter_s() {
+        let dir = repository("operation-caffeinate");
+        let start = Line::read("CARGO_BUILD_JOBS=2 caffeinate -i git merge main --no-edit");
+        record(&dir, &call("s1", None), &start).unwrap();
+        merging(&dir);
+        for line in [
+            "git add -- a.txt && git commit --no-edit",
+            "git merge --abort",
+        ] {
+            assert_eq!(standing(&dir, line, "s1", None), None, "{line}");
+        }
+        assert_eq!(
+            standing(&dir, "git commit", "s2", None),
+            Some(Operation::Merge)
+        );
+    }
+
     /// #2734: a record is never dropped while its operation stands.
     /// Another subcommand's abort, a `--abort` that is a message or a
     /// pattern, and a step of the operation leave the merge its starter's,

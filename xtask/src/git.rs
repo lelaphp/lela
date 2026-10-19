@@ -312,11 +312,7 @@ pub(crate) fn run(
     stdin: Option<&str>,
 ) -> Result<Vec<u8>> {
     #[cfg(test)]
-    ASKED.with_borrow_mut(|asked| {
-        if let Some(asked) = asked {
-            asked.push(args.iter().map(ToString::to_string).collect());
-        }
-    });
+    recorder::record(root, args);
     let mut child = command
         .arg("-C")
         .arg(root)
@@ -341,23 +337,48 @@ pub(crate) fn run(
     Ok(out.stdout)
 }
 
+/// The recorder a test counts git calls through ([`asked`]).
 #[cfg(test)]
-thread_local! {
-    /// The questions this thread asks git while [`asked`] listens, each
-    /// as its arguments.
-    static ASKED: std::cell::RefCell<Option<Vec<Vec<String>>>> =
-        const { std::cell::RefCell::new(None) };
+mod recorder {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
+
+    /// The questions asked of git in each directory [`asked`] listens at,
+    /// or below it, each as its arguments.
+    static ASKED: Mutex<BTreeMap<PathBuf, Vec<Vec<String>>>> = Mutex::new(BTreeMap::new());
+
+    fn listening<T>(f: impl FnOnce(&mut BTreeMap<PathBuf, Vec<Vec<String>>>) -> T) -> T {
+        f(&mut ASKED.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// One question asked of git in `root`, for each listener above it.
+    pub(super) fn record(root: &Path, args: &[&str]) {
+        listening(|listeners| {
+            for (at, asked) in listeners.iter_mut() {
+                if root.starts_with(at) {
+                    asked.push(args.iter().map(ToString::to_string).collect());
+                }
+            }
+        });
+    }
+
+    /// What `f` returns and every question asked of git in `root` or below
+    /// it while `f` ran, each as its arguments: the seam a test counts git
+    /// calls through, at the one function every call spawns git from
+    /// (#2972). Each test lays a repository of its own, so its `root` is
+    /// its own and no other test's questions are counted, from whichever
+    /// thread they are asked (#2994).
+    pub(crate) fn asked<T>(root: &Path, f: impl FnOnce() -> T) -> (T, Vec<Vec<String>>) {
+        listening(|listeners| listeners.insert(root.to_path_buf(), Vec::new()));
+        let out = f();
+        let asked = listening(|listeners| listeners.remove(root));
+        (out, asked.unwrap_or_default())
+    }
 }
 
-/// What `f` returns and every question it asked git on this thread, each
-/// as its arguments: the seam a test counts git calls through, at the one
-/// function every call spawns git from (#2972).
 #[cfg(test)]
-pub(crate) fn asked<T>(f: impl FnOnce() -> T) -> (T, Vec<Vec<String>>) {
-    ASKED.set(Some(Vec::new()));
-    let out = f();
-    (out, ASKED.take().unwrap_or_default())
-}
+pub(crate) use recorder::asked;
 
 fn utf8(stdout: Vec<u8>) -> Result<String> {
     String::from_utf8(stdout).context("git wrote something that is not UTF-8")

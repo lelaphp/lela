@@ -21,22 +21,36 @@
 //! recipe sets for correctness and that cost every request:
 //! `zend.assertions=-1` and `opcache.protect_memory=0` ([`INI`]).
 //!
-//! **How each is held.** `makala-fpm/<workload>` is a series, held to no
-//! bound until a person writes one in the manifest once the nightly
-//! series is read (#2336's ruling, after #1902's); its reading states the
-//! paired delta and how far makala stands behind php-fpm, harness §3's
-//! "`FastCGI` ≥ php-fpm" as the distance to go. `makala-aa/<workload>` is an
-//! A/A control. A machine without the pinned php-fpm measures neither,
-//! each a skip that says so.
+//! **Two loads** ([`Load`]). `makala-fpm/<workload>` sends one request a
+//! rep from one client, so it measures latency, against a makala at its
+//! default request threads and a pool of one child. `makala-fpm-c8/<workload>`
+//! is §9.2's worker-throughput bar, "8 threads, one process ≥ php-fpm
+//! with 8 workers" (#2336's ruling, #2660): [`CLIENTS`] clients a rep, each
+//! asking until [`ASKING`] have passed and finishing the request it has
+//! in flight, against a makala of [`CLIENTS`] request threads and a pool of
+//! `pm = static`, `pm.max_children` [`CLIENTS`], behind the same clients as
+//! the latency series, one connection a request. Each arm's rep is the
+//! requests a second it was answered at over the time its last client
+//! took to end, and every answer of the rep carries the body the rep is
+//! held to (§5), so a rep is refused on the first answer that differs.
+//!
+//! **How each is held.** Each series is held to no bound until a person
+//! writes one in the manifest once the nightly series is read (#2336's
+//! ruling, after #1902's); its reading states the paired delta and how far
+//! makala stands behind php-fpm, harness §3's "`FastCGI` ≥ php-fpm" as the
+//! distance to go. `makala-aa/<workload>` and `makala-c8-aa/<workload>` are
+//! their A/A controls, makala against itself under the same load. A
+//! machine without the pinned php-fpm measures none of them, each a skip
+//! that says so.
 
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::{Entry, workloads};
-use crate::bench::{Declared, Held, Sample, Side, Sides, Stream};
+use crate::bench::{Declared, Held, PROTOCOL, Sample, Side, Sides, Stream, Unit};
 use crate::manifest::Manifest;
 use crate::oracle::hosts::MAKALA;
 use crate::oracle::profile;
@@ -53,8 +67,63 @@ fn ini() -> Vec<String> {
     INI.map(str::to_owned).to_vec()
 }
 
+/// How a rep asks a bar's hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Load {
+    /// One request, its milliseconds as its client pays for them.
+    One,
+    /// [`CLIENTS`] clients for [`ASKING`], the requests a second they
+    /// were answered at.
+    Clients,
+}
+
+/// The clients of a [`Load::Clients`] rep, and the request threads and
+/// php-fpm children each host has for them (§9.2, #2660).
+const CLIENTS: usize = 8;
+
+/// How long the clients of a rep ask, each then finishing the request it
+/// has in flight.
+const ASKING: Duration = Duration::from_secs(3);
+
+impl Load {
+    /// What a rep measures under the load.
+    fn unit(self) -> Unit {
+        match self {
+            Load::One => Unit::Ms,
+            Load::Clients => Unit::Rps,
+        }
+    }
+
+    /// The hosts the load is asked of: makala's request threads, its
+    /// default where none, and php-fpm's children.
+    fn hosts(self) -> (Option<usize>, usize) {
+        match self {
+            Load::One => (None, 1),
+            Load::Clients => (Some(CLIENTS), CLIENTS),
+        }
+    }
+
+    /// What a bar's `about` says of its clients.
+    fn clients(self) -> String {
+        match self {
+            Load::One => String::new(),
+            Load::Clients => format!(", {CLIENTS} clients for {}s a rep", ASKING.as_secs()),
+        }
+    }
+}
+
+/// Each workload's bars: the name before the workload's, how it is held
+/// and the load each rep asks under.
+const BARS: [(&str, Held, Load); 4] = [
+    ("makala-fpm", Held::Series, Load::One),
+    ("makala-aa", Held::Control, Load::One),
+    ("makala-fpm-c8", Held::Series, Load::Clients),
+    ("makala-c8-aa", Held::Control, Load::Clients),
+];
+
 /// The bars over each workload of the workspace at `root`: makala against
-/// php-fpm, a series, and makala against itself, its A/A control.
+/// php-fpm, a series, and makala against itself, its A/A control, under
+/// each [`Load`].
 pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
     let mut bars = Vec::new();
     for entry in workloads(root)? {
@@ -62,95 +131,69 @@ pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
             || entry.id.clone(),
             |stem| stem.to_string_lossy().into_owned(),
         );
-        let (fpm_root, aa_root, aa_entry) = (root.to_path_buf(), root.to_path_buf(), entry.clone());
-        bars.push(Declared {
-            id: format!("makala-fpm/{name}"),
-            about: format!(
-                "makala against php-fpm behind a FastCGI client over {}",
-                entry.id
-            ),
-            held: Held::Series,
-            start: Box::new(move || against_fpm(&fpm_root, &entry)),
-        });
-        bars.push(Declared {
-            id: format!("makala-aa/{name}"),
-            about: format!("makala against itself over {}", aa_entry.id),
-            held: Held::Control,
-            start: Box::new(move || against_itself(&aa_root, &aa_entry)),
-        });
+        for (bar, held, load) in BARS {
+            let against = match held {
+                Held::Series => "php-fpm behind a FastCGI client",
+                Held::Control => "itself",
+            };
+            let (root, entry) = (root.to_path_buf(), entry.clone());
+            bars.push(Declared {
+                id: format!("{bar}/{name}"),
+                about: format!(
+                    "makala against {against} over {}{}",
+                    entry.id,
+                    load.clients()
+                ),
+                held,
+                start: Box::new(move || sides(&root, &entry, held, load)),
+            });
+        }
     }
     Ok(bars)
 }
 
-/// makala's arm and the pinned php-fpm's over `entry`.
-fn against_fpm(root: &Path, entry: &Entry) -> Result<Sides> {
-    let Some(Started {
-        manifest,
-        fpm,
-        served,
-    }) = started(root, entry)?
-    else {
+/// The arms of a bar over `entry`: makala's and the pinned php-fpm's for a
+/// series, two of one makala for a control, which is measured only where
+/// php-fpm's is too, so the control is never read beside no series.
+fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
+    let manifest = Manifest::load(root)?;
+    let Some(fpm) = (manifest.pin.sapi.fpm.as_ref()).filter(|fpm| fpm.path.is_file()) else {
         return Ok(Err(NO_FPM.to_owned()));
     };
     let oracle = manifest.pin.oracle();
-    let ports = Ports::default();
+    oracle.host_asserted(fpm)?;
+    let (threads, children) = load.hosts();
+    let served = Arc::new(Served::start(root, &manifest, entry, threads)?);
+    let makala = |name| -> Box<dyn Side> {
+        let (served, program) = (Arc::clone(&served), served.binary.clone());
+        let ask = Box::new(move || served.body());
+        Box::new(ByRequest {
+            name,
+            program,
+            load,
+            ask,
+        })
+    };
+    if held == Held::Control {
+        return Ok(Ok([makala("makala-a"), makala("makala-b")]));
+    }
+    let (program, http) = (fpm.path.clone(), &entry.http);
     let pool = Fpm::start(
         &oracle,
-        &fpm,
+        &program,
         &served.program(),
-        &entry.http,
-        (&ini(), ports),
+        http,
+        (&ini(), Ports::default()),
+        children,
     )?;
-    Ok(Ok([
-        Box::new(ByMakala {
-            name: "makala",
-            served,
-        }),
-        Box::new(ByFpm { pool, program: fpm }),
-    ]))
-}
-
-/// Two arms of one makala over `entry`, measured only where php-fpm's is
-/// too, so the control is never read beside no series.
-fn against_itself(root: &Path, entry: &Entry) -> Result<Sides> {
-    let Some(Started { served, .. }) = started(root, entry)? else {
-        return Ok(Err(NO_FPM.to_owned()));
+    let ask = Box::new(move || fpm_body(pool.ask()?));
+    let fpm = ByRequest {
+        name: "php-fpm",
+        program,
+        load,
+        ask,
     };
-    Ok(Ok([
-        Box::new(ByMakala {
-            name: "makala-a",
-            served: Rc::clone(&served),
-        }),
-        Box::new(ByMakala {
-            name: "makala-b",
-            served,
-        }),
-    ]))
-}
-
-/// What a bar of the production server starts from: the manifest, the
-/// pinned php-fpm held to its digest and the pin's closure, and a makala serving the workload.
-struct Started {
-    manifest: Manifest,
-    fpm: PathBuf,
-    served: Rc<Served>,
-}
-
-/// The start of a bar over `entry`, or none where this machine has not
-/// the pinned php-fpm.
-fn started(root: &Path, entry: &Entry) -> Result<Option<Started>> {
-    let manifest = Manifest::load(root)?;
-    let Some(fpm) = (manifest.pin.sapi.fpm.as_ref()).filter(|fpm| fpm.path.is_file()) else {
-        return Ok(None);
-    };
-    manifest.pin.oracle().host_asserted(fpm)?;
-    let fpm = fpm.path.clone();
-    let served = Rc::new(Served::start(root, &manifest, entry)?);
-    Ok(Some(Started {
-        manifest,
-        fpm,
-        served,
-    }))
+    Ok(Ok([makala("makala"), Box::new(fpm)]))
 }
 
 /// Why a bar of the production server is not measured on this machine.
@@ -169,13 +212,19 @@ struct Served {
 }
 
 impl Served {
-    fn start(root: &Path, manifest: &Manifest, entry: &Entry) -> Result<Served> {
+    /// The makala, with `threads` request threads or its default.
+    fn start(
+        root: &Path,
+        manifest: &Manifest,
+        entry: &Entry,
+        threads: Option<usize>,
+    ) -> Result<Served> {
         let recipe = &manifest.pin.recipe;
         let binary = profile::released(root, &MAKALA.package(), MAKALA.binary, None)?;
         let own = Tree::new("bench-makala")?;
         own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");
-        let server = Server::start(recipe, &binary, own.path(), &ini(), None, &log, &[])?;
+        let server = Server::start(recipe, &binary, own.path(), &ini(), threads, &log, &[])?;
         Ok(Served {
             server,
             binary,
@@ -190,61 +239,47 @@ impl Served {
         self.own.join(&self.script)
     }
 
-    /// The workload's request sent once more: the response as it came.
-    fn ask(&self) -> Result<Vec<u8>> {
+    /// The workload's request sent once more: the response's body,
+    /// refused where its status is not 200.
+    fn body(&self) -> Result<Vec<u8>> {
         let (answer, _) = self.server.ask(&self.http, &self.script, self.timeout)?;
-        Ok(answer)
-    }
-}
-
-/// An arm that sends the workload's request to a makala.
-struct ByMakala {
-    name: &'static str,
-    served: Rc<Served>,
-}
-
-impl Side for ByMakala {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn program(&self) -> &Path {
-        &self.served.binary
-    }
-
-    fn stream(&self) -> Stream {
-        Stream::Body
-    }
-
-    fn once(&mut self) -> Result<Sample> {
-        let start = Instant::now();
-        let answer = self.served.ask()?;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
         let (head, body) = split_head(&answer);
         let status = head.lines().next().unwrap_or_default();
         if status.split(' ').nth(1) != Some("200") {
-            bail!(
-                "the arm {} answered {status:?}: {}",
-                self.name,
-                String::from_utf8_lossy(body)
-            );
+            bail!("answered {status:?}: {}", String::from_utf8_lossy(body));
         }
-        Ok(Sample {
-            ms,
-            wrote: body.to_vec(),
-        })
+        Ok(body.to_vec())
     }
 }
 
-/// An arm that hands the workload's request to the pinned php-fpm.
-struct ByFpm {
-    pool: Fpm,
-    program: PathBuf,
+/// What php-fpm wrote on `FCGI_STDOUT`, its head off, refused where its
+/// `Status:` is not 200.
+fn fpm_body((stdout, stderr): (Vec<u8>, Vec<u8>)) -> Result<Vec<u8>> {
+    let (head, body) = split_head(&stdout);
+    if let Some(status) = head.lines().find_map(|line| line.strip_prefix("Status: "))
+        && !status.starts_with("200")
+    {
+        bail!(
+            "answered {status:?}: {}{}",
+            String::from_utf8_lossy(body),
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+    Ok(body.to_vec())
 }
 
-impl Side for ByFpm {
-    fn name(&self) -> &'static str {
-        "php-fpm"
+/// An arm that asks a host the workload's request, `ask` giving the
+/// response's body, under its bar's [`Load`].
+struct ByRequest {
+    name: &'static str,
+    program: PathBuf,
+    load: Load,
+    ask: Box<dyn Fn() -> Result<Vec<u8>> + Sync>,
+}
+
+impl Side for ByRequest {
+    fn name(&self) -> &str {
+        self.name
     }
 
     fn program(&self) -> &Path {
@@ -255,50 +290,160 @@ impl Side for ByFpm {
         Stream::Body
     }
 
+    fn unit(&self) -> Unit {
+        self.load.unit()
+    }
+
     fn once(&mut self) -> Result<Sample> {
         let start = Instant::now();
-        let (stdout, stderr) = self.pool.ask()?;
-        let ms = start.elapsed().as_secs_f64() * 1000.0;
-        let (head, body) = split_head(&stdout);
-        if let Some(status) = head.lines().find_map(|line| line.strip_prefix("Status: "))
-            && !status.starts_with("200")
-        {
-            bail!(
-                "the arm php-fpm answered {status:?}: {}{}",
-                String::from_utf8_lossy(body),
-                String::from_utf8_lossy(&stderr)
-            );
-        }
-        Ok(Sample {
-            ms,
-            wrote: body.to_vec(),
-        })
+        let sample = match self.load {
+            Load::One => (self.ask)().map(|wrote| Sample {
+                value: start.elapsed().as_secs_f64() * 1000.0,
+                wrote,
+            }),
+            Load::Clients => clients(&*self.ask, CLIENTS, ASKING),
+        };
+        sample.with_context(|| format!("the arm {}", self.name))
     }
+}
+
+/// `count` clients asking `ask` until `time` has passed since they
+/// began, each finishing the request it has in flight: the requests a
+/// second the rep was answered at, over the time its last client took to
+/// end, and the body every answer carried, an answer that carried another
+/// refusing the rep (§5).
+fn clients(
+    ask: &(dyn Fn() -> Result<Vec<u8>> + Sync),
+    count: usize,
+    time: Duration,
+) -> Result<Sample> {
+    let start = Instant::now();
+    let until = start + time;
+    let each: Vec<(u32, Vec<u8>)> = std::thread::scope(|scope| {
+        let asking: Vec<_> = (0..count)
+            .map(|_| {
+                scope.spawn(|| -> Result<(u32, Vec<u8>)> {
+                    let (mut answered, body) = (1, ask()?);
+                    while Instant::now() < until {
+                        if ask()? != body {
+                            bail!(
+                                "two answers of one rep carried different bodies ({PROTOCOL} §5)"
+                            );
+                        }
+                        answered += 1;
+                    }
+                    Ok((answered, body))
+                })
+            })
+            .collect();
+        let joined = asking.into_iter().map(std::thread::ScopedJoinHandle::join);
+        joined
+            .map(|client| client.map_err(|_| anyhow!("a client panicked"))?)
+            .collect::<Result<Vec<_>>>()
+    })?;
+    let seconds = start.elapsed().as_secs_f64();
+    let wrote = each
+        .first()
+        .map(|(_, body)| body.clone())
+        .unwrap_or_default();
+    if each.iter().any(|(_, body)| *body != wrote) {
+        bail!("two clients of one rep were answered different bodies ({PROTOCOL} §5)");
+    }
+    let answered: u32 = each.iter().map(|(n, _)| n).sum();
+    Ok(Sample {
+        value: f64::from(answered) / seconds,
+        wrote,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Each workload is two bars, the series against php-fpm and its A/A
-    /// control, named by the workload's file.
+    /// Each workload is four bars: the latency series against php-fpm and
+    /// its A/A control, and the throughput series at [`CLIENTS`] clients
+    /// and its control, named by the workload's file and stating their
+    /// clients (#2660).
     #[test]
-    fn each_workload_is_a_series_against_php_fpm_and_its_a_a_control() {
+    fn each_workload_is_a_latency_and_a_throughput_series_each_with_its_control() {
         let root = crate::package_dir().join("..");
         let bars = declared(&root).unwrap();
         let named: Vec<(&str, Held)> = bars.iter().map(|bar| (bar.id.as_str(), bar.held)).collect();
+        for (bar, held) in [
+            ("makala-fpm/ucall", Held::Series),
+            ("makala-aa/ucall", Held::Control),
+            ("makala-fpm-c8/ucall", Held::Series),
+            ("makala-c8-aa/ucall", Held::Control),
+            ("makala-fpm/bench_quiet", Held::Series),
+        ] {
+            assert!(named.contains(&(bar, held)), "{bar}: {named:?}");
+        }
+        assert_eq!(bars.len(), 4 * workloads(&root).unwrap().len());
+        let c8 = bars
+            .iter()
+            .find(|bar| bar.id == "makala-fpm-c8/ucall")
+            .unwrap();
         assert!(
-            named.contains(&("makala-fpm/ucall", Held::Series)),
-            "{named:?}"
+            c8.about.ends_with(", 8 clients for 3s a rep"),
+            "{}",
+            c8.about
         );
+        assert_eq!(
+            BARS.map(|(_, _, load)| load == Load::Clients),
+            [false, false, true, true]
+        );
+    }
+
+    /// An arm of the latency series is a time and one of the throughput
+    /// series a rate, asked of a makala of 8 request threads and a pool of
+    /// 8 children, where the latency series asks makala's default and one.
+    #[test]
+    fn a_throughput_arm_is_8_clients_reading_requests_a_second() {
+        let arm = |load| ByRequest {
+            name: "a",
+            program: PathBuf::new(),
+            load,
+            ask: Box::new(|| Ok(b"x".to_vec())),
+        };
+        assert_eq!(
+            (arm(Load::One).unit(), arm(Load::Clients).unit()),
+            (Unit::Ms, Unit::Rps)
+        );
+        assert_eq!(
+            (Load::One.hosts(), Load::Clients.hosts()),
+            ((None, 1), (Some(8), 8))
+        );
+    }
+
+    /// The clients' requests a second are those answered over the time the
+    /// last client took: 4 clients each answered every 10 ms for 50 ms
+    /// read about 400 a second, the body the one they all carried; an
+    /// answer of another body refuses the rep.
+    #[test]
+    fn the_clients_read_the_requests_a_second_they_were_answered_at() {
+        let slow = || {
+            std::thread::sleep(Duration::from_millis(10));
+            Ok(b"body".to_vec())
+        };
+        let sample = clients(&slow, 4, Duration::from_millis(50)).unwrap();
+        assert_eq!(sample.wrote, b"body");
+        assert!((150.0..=420.0).contains(&sample.value), "{}", sample.value);
+        let asked = std::sync::atomic::AtomicU32::new(0);
+        let moving = || {
+            let n = asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(1));
+            Ok(if n == 5 {
+                b"other".to_vec()
+            } else {
+                b"body".to_vec()
+            })
+        };
+        let Err(refused) = clients(&moving, 2, Duration::from_millis(30)) else {
+            panic!("a rep whose answers differ is refused");
+        };
         assert!(
-            named.contains(&("makala-aa/ucall", Held::Control)),
-            "{named:?}"
+            format!("{refused}").contains("different bodies"),
+            "{refused}"
         );
-        assert!(
-            named.contains(&("makala-fpm/bench_quiet", Held::Series)),
-            "{named:?}"
-        );
-        assert_eq!(bars.len(), 2 * workloads(&root).unwrap().len());
     }
 }
