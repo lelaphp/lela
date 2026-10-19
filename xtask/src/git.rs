@@ -311,6 +311,12 @@ pub(crate) fn run(
     args: &[&str],
     stdin: Option<&str>,
 ) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    ASKED.with_borrow_mut(|asked| {
+        if let Some(asked) = asked {
+            asked.push(args.iter().map(ToString::to_string).collect());
+        }
+    });
     let mut child = command
         .arg("-C")
         .arg(root)
@@ -333,6 +339,24 @@ pub(crate) fn run(
         bail!("git {}: {}", args.join(" "), stderr.trim());
     }
     Ok(out.stdout)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The questions this thread asks git while [`asked`] listens, each
+    /// as its arguments.
+    static ASKED: std::cell::RefCell<Option<Vec<Vec<String>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// What `f` returns and every question it asked git on this thread, each
+/// as its arguments: the seam a test counts git calls through, at the one
+/// function every call spawns git from (#2972).
+#[cfg(test)]
+pub(crate) fn asked<T>(f: impl FnOnce() -> T) -> (T, Vec<Vec<String>>) {
+    ASKED.set(Some(Vec::new()));
+    let out = f();
+    (out, ASKED.take().unwrap_or_default())
 }
 
 fn utf8(stdout: Vec<u8>) -> Result<String> {
