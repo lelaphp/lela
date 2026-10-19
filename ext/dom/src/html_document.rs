@@ -119,7 +119,7 @@ fn set_body(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), T
         return Ok(());
     }
     if let Some(current) = current {
-        crate::adopt(req, object, fresh, doc);
+        crate::adopt(req, object, fresh, doc)?;
         current.replace_with(fresh);
         if current.object().is_none() {
             current.free_resource(req);
@@ -134,7 +134,7 @@ fn set_body(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), T
             true,
         );
     };
-    crate::adopt(req, object, fresh, doc);
+    crate::adopt(req, object, fresh, doc)?;
     root.add_child(fresh);
     Ok(())
 }
@@ -241,9 +241,13 @@ fn set_title(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), 
         } else {
             {
                 let ns = match root.ns() {
-                    Some(ns) if ns.prefix().is_some() => crate::dom_mut(req, object)
-                        .and_then(|d| crate::private::of(&mut d.obj))
-                        .and_then(|p| p.mapper.get(Some(doc), b"", SVG_NS)),
+                    Some(ns) if ns.prefix().is_some() => {
+                        crate::private::with_mapper(req, object, |mapper, req| {
+                            let svg = crate::private::Handed::Made(SVG_NS);
+                            mapper.get_ns(req, Some(doc), crate::private::Handed::Empty, svg)
+                        })?
+                        .flatten()
+                    }
                     other => other,
                 };
                 let Some(element) = Node::new_element(Some(doc), ns, b"title", None) else {
@@ -268,9 +272,10 @@ fn set_title(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), 
             (Some(t), _) => t,
             (None, None) => return Ok(()),
             (None, Some(head)) => {
-                let ns = crate::dom_mut(req, object)
-                    .and_then(|d| crate::private::of(&mut d.obj))
-                    .and_then(|p| p.mapper.html(Some(doc)));
+                let ns = crate::private::with_mapper(req, object, |mapper, req| {
+                    mapper.html(req, Some(doc))
+                })?
+                .flatten();
                 let Some(element) = Node::new_element(Some(doc), ns, b"title", None) else {
                     return Err(crate::dom_throw(req, Code::InvalidState));
                 };

@@ -895,6 +895,11 @@ impl std::hash::Hasher for WordHasher {
 }
 
 impl Declared {
+    /// The class's linked record, once it bound.
+    pub(crate) fn record(&self) -> Option<&LinkedClass<ClassId>> {
+        self.bound.record.as_ref()
+    }
+
     /// The declaration the table holds for the class.
     fn decl(&self) -> Option<&ClassDecl> {
         match &self.composed {

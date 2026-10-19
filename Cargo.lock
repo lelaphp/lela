@@ -1552,6 +1552,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "php_engine",
+ "php_unit",
 ]
 
 [[package]]

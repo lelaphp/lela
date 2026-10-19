@@ -10,8 +10,8 @@
 # locks, §10 the lints and profiles, and the harness's §12 item 6 the harness's
 # own prose; each cites this file and none of the three design documents
 # restates a number (design ledger 14, jit ledger 6, harness ledger 38).
-# `xtask` refuses a manifest with a key outside this grammar:
-#   [oracle] [budget] [telemetry] [divergence] [[crate]] [[seam]] [[edge]] [[rule]] [[week]]
+# `xtask` refuses a manifest with a key outside the grammar `Manifest` reads
+# (xtask/src/manifest.rs); this comment does not restate the list.
 # Keys beyond the harness's §4.1 example, added here because §10 states a rule
 # the example had no predicate for, are marked `# grammar:` where they first
 # appear. Each is one predicate, as the grammar requires.
@@ -24,7 +24,7 @@ total = 480000                             # every counted line of the workspace
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 5000                                # design §10; `docs/**` plus the three living documents
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
-lock_packages = 164                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled
+lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
 api_items = 1500                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
@@ -706,6 +706,7 @@ text = "Harness configuration, the oracle pin and the divergence registry are ed
 [[rule]]
 id = "harness.self-shell"
 tool = "Bash"
+where = "checkout"   # grammar: where, a checkout of this repository, the main one or a linked worktree, and never a scratch repository outside them; judged wherever permit cannot follow the line (#2887, #2915)
 # The six paths of harness.self, written by a shell line (#625, ruled
 # 2026-09-28): a redirection into one, `tee` naming one, `sed -i` or
 # `perl -i` over one, `cp`, `mv`, `ln` or `install` with one as the

@@ -9,7 +9,7 @@ A track works a frontier: the open, unblocked tickets `xtask track next --track 
 ## Where you stand
 
 - The track is the first argument, `<track>`: the tickets that carry the label `track:<track>`, or `main`, the tickets that carry no `track:` label (CONTEXT.md, Track; ADR-0009). A track has no branch, clone or store, so nothing here reads it from where you run. Every issue filed for a named track carries `track:<track>`; one filed for `main` carries no `track:` label, which makes it `main`'s.
-- The state is the store's renderings and nothing re-measured: `.claude/harness.local.md` (`budget`, `phpt`, `witness`, `divergence`) and `cargo run -q -p xtask -- status --section week`, which says "no reading" until the manifest carries `[[week]]`. A rendering that is stale is what you have; running an instrument to refresh it is another session's act.
+- The state is the store's renderings and nothing re-measured: `.claude/harness.local.md` (`budget`, `phpt`, `witness`, `divergence`). A rendering that is stale is what you have; running an instrument to refresh it is another session's act.
 - The row is the `Days` cell of one row of §11's table, `1–2`, `3–7`, `8–14`, `15–21`, `22–30` or `31`, and its `Work` and `Exit bar` cells are the whole source of the batch. The design carries no numbers of its own; a ceiling or an interface it names lives in `seams.toml` and a lock.
 
 ## Labels

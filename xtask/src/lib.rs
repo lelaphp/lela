@@ -59,6 +59,7 @@ pub mod reading;
 mod reply;
 mod rust;
 pub mod scratch;
+mod seat;
 mod sources;
 pub mod status;
 pub mod steer;
@@ -235,6 +236,7 @@ fn command_line() -> Result<()> {
     }
     let manifest = Manifest::load(&root)?;
     let store = Store::of_workspace(&root);
+    let _seat = seat::of_command(&cli.command);
     match cli.command {
         ask @ Command::Status { .. } => status_command(&manifest, &store, &root, ask),
         // The judge itself returned above; what is left of `permit` are the
@@ -248,6 +250,9 @@ fn command_line() -> Result<()> {
         Command::Permit { diff: true, .. } => permit::run_diff(&root, &manifest),
         Command::Permit { .. } => bail!("permit: the judge at the tool call is run above"),
         Command::Done { hook: true, .. } => {
+            // A build apart from the tree exits 1 and judges no turn, so
+            // the hook's next candidate does, as permit's walk (#2982).
+            built::judges(&root, &root, &built_root())?;
             done::run_hook(&root, &manifest, &Registry::load(&root)?, &store);
             Ok(())
         }
@@ -610,7 +615,6 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
     let Command::Status {
         section,
         format,
-        week,
         session_id,
         uncut,
         tracked,
@@ -637,7 +641,6 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
                 root,
                 section,
                 format,
-                week,
                 session_id.as_deref(),
                 uncut,
             )?

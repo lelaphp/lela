@@ -484,8 +484,10 @@ pub(crate) const COMMIT_INDEX: &str = "XTASK_COMMIT_INDEX";
 /// to a hook; a test that lays a scratch repository down would otherwise
 /// write into the repository being committed to. `GIT_INDEX_FILE` is kept
 /// as [`COMMIT_INDEX`], which only a reader of the commit's index reads
-/// ([`crate::test::committed`]).
+/// ([`crate::test::committed`]). A seated instrument's command is marked
+/// as its child, which takes no seat of its own ([`crate::seat`]).
 pub fn without_git(command: &mut Command) {
+    crate::seat::lend(command);
     for (key, value) in std::env::vars_os() {
         if key == "GIT_INDEX_FILE" {
             let index = std::path::absolute(&value).unwrap_or_else(|_| value.into());

@@ -783,7 +783,7 @@ pub(crate) struct Shared {
     pub(crate) parameter_classes: Vec<Box<[Option<ClassId>]>>,
     /// Each class's linked record, one row per row of `classes`
     /// ([`native_records`]): `ce->function_table` whole, in php's order.
-    pub(crate) records: Vec<LinkedClass<ClassId>>,
+    pub(crate) records: Arc<[LinkedClass<ClassId>]>,
     /// The function each class's own methods are, one row per row of
     /// `classes` ([`method_functions`]), by their index among its
     /// declaration.
@@ -3503,7 +3503,7 @@ impl EngineBuilder {
         } = link_classes(&mut declarations);
         let class_keys = ClassKeys::over(&classes);
         let class_at = |name: &[u8]| class_keys.find(&classes, name);
-        let records = native_records(&classes, &class_keys);
+        let records: Arc<[LinkedClass<ClassId>]> = native_records(&classes, &class_keys).into();
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
@@ -3532,8 +3532,8 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let sapi_names = crate::constants::host_names(&mut strings);
         let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
-        let arena = crate::arena::Epochs::of(crate::arena::Arena::past(
-            classes.len(),
+        let arena = crate::arena::Epochs::of(crate::arena::Arena::of_engine(
+            Arc::clone(&records),
             functions.len().saturating_add(methods.len()),
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
         ));

@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=0c291d3ba6fa6da0f65981a918785cce2d1ec5ee2c05ba340b59209d6e1108ed out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=04727f1b11cbb5cd6cf8742abc2f30fde8d785bd073a4abcc0275793b58293ca out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=5fd54756f2e1a930751a137215466d4577216fe8780c8f635801f7b16bdaf73d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=6ed28d39f43c9db9444b95f02cbbc0ab71faaa8c122024d97b2be1a8f67079ae out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -128,11 +128,11 @@ third-engine-design.md
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1447 | 1500 |
 | sapi | sapi.lock | 57 |  |
-| tier | tier.lock | 38 |  |
+| tier | tier.lock | 62 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 414 |  |
+| harness | xtask.lock | 409 |  |
 
-<!-- /computed in=e8d72d88b9d382fe74039b41162b017475af628a7f2bfc6881be8ac0faefdf73 out=a870c2c9f85d95f5aa79c8273198778d2829daffca4481f53ff7f4d4167518da -->
+<!-- /computed in=3a963fdad88fc1aaf1db0fbe0350b7e911ec6ae72ed908ca3f445f305f427cbe out=ddb605a78057ad14ce86d6851210a28355cc508ce7c6f5c7aab3d50d07e1788a -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -173,7 +173,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=61d87ad8ce7ea436a6ee2fee3fa23a7d371bd7e7059c0cb32dc710cd1d4d7d2f out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
+<!-- /computed in=dcdd1afde96f157d1cdb38aa8010ebdf40fe92a4e25b42d8cee69a6474da9002 out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

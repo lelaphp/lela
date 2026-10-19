@@ -330,8 +330,9 @@ fn another_stores_log_is_landed_and_emptied() {
     let mut foreign = std::fs::read(&fixture).unwrap();
     foreign.pop();
     assert!(!foreign.ends_with(b"\n"), "the last line has no newline");
-    std::fs::create_dir_all(from.root()).unwrap();
-    std::fs::write(from.root().join(reading::LEGACY), &foreign).unwrap();
+    let log = from.root().join(reading::LOG);
+    std::fs::create_dir_all(&log).unwrap();
+    std::fs::write(log.join("permit.jsonl"), &foreign).unwrap();
 
     assert_eq!(store.land(&from).unwrap(), 4);
     store.record(&[reading(Status::Fail, 3)]).unwrap();
@@ -524,63 +525,27 @@ fn an_unreadable_file_is_named_and_the_rest_are_read() {
     );
 }
 
-/// The variable that names the store [`migrate_the_store_the_variable_names`]
-/// migrates in a process of its own.
-const RACER: &str = "XTASK_STORE_RACER";
-
-/// Run by [`a_legacy_log_is_split_once_however_many_processes_race`] in a
-/// process of its own: migrate the store [`RACER`] names. Without it, as
-/// in the run of the suite, nothing.
+/// A store's log is `log/<instrument>.jsonl` alone (#2934, #2973): a
+/// `log.jsonl` from before revision 83 is no log of the store's, read by
+/// no history and landed by no retire, and left where it stands.
 #[test]
-fn migrate_the_store_the_variable_names() {
-    if let Ok(dir) = std::env::var(RACER) {
-        Store::at(dir).migrate().unwrap();
-    }
-}
-
-/// A store written before revision 83 keeps one `log.jsonl`; four
-/// processes that find it at once split it once (#2164): the rename that
-/// claims it decides which, so the instrument's log holds each line once,
-/// the old file is kept whole as `log.migrated.jsonl`, and nothing is left
-/// claimed.
-#[test]
-fn a_legacy_log_is_split_once_however_many_processes_race() {
-    let dir = scratch("migrate");
+fn a_log_from_before_revision_83_is_not_read() {
+    let dir = scratch("legacy");
     let store = Store::at(dir.path());
-    std::fs::create_dir_all(store.root()).unwrap();
-    let mut lines = String::new();
-    for n in 0..200 {
-        let mut one = reading(Status::Pass, n);
-        one.scope = format!("ext/s{}", n % 5);
-        lines.push_str(&one.to_json().unwrap().to_string());
-        lines.push('\n');
-    }
-    std::fs::write(store.root().join(reading::LEGACY), &lines).unwrap();
-
-    let exe = std::env::current_exe().unwrap();
-    let racers: Vec<_> = (0..4)
-        .map(|_| {
-            std::process::Command::new(&exe)
-                .args(["--exact", "migrate_the_store_the_variable_names", "--quiet"])
-                .env(RACER, store.root())
-                .spawn()
-                .unwrap()
-        })
-        .collect();
-    for mut racer in racers {
-        assert!(racer.wait().unwrap().success());
+    let from_dir = scratch("legacy-from");
+    let from = Store::at(from_dir.path());
+    let line = format!("{}\n", reading(Status::Pass, 0).to_json().unwrap());
+    for one in [&store, &from] {
+        std::fs::create_dir_all(one.root()).unwrap();
+        std::fs::write(one.root().join("log.jsonl"), &line).unwrap();
     }
 
-    assert!(!store.root().join(reading::LEGACY).exists());
+    assert!(store.history("witness").unwrap().readings.is_empty());
+    assert_eq!(store.land(&from).unwrap(), 0);
+    assert!(store.history_all().unwrap().readings.is_empty());
     assert_eq!(
-        std::fs::read_to_string(store.root().join(reading::MIGRATED)).unwrap(),
-        lines
+        std::fs::read_to_string(from.root().join("log.jsonl")).unwrap(),
+        line,
+        "left where it stands"
     );
-    assert_eq!(store.history("witness").unwrap().readings.len(), 200);
-    let claimed: Vec<_> = std::fs::read_dir(store.root())
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".splitting"))
-        .collect();
-    assert!(claimed.is_empty(), "{claimed:?}");
 }
