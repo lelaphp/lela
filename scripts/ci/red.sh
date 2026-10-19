@@ -39,21 +39,21 @@ this="${GITHUB_SERVER_URL:-https://github.com}/$repo/actions/runs/$run"
 subject=${1:-}
 case $subject in
 main)
-    workflow=harness.yml label=ci:red-main name=""
-    what="the harness workflow on main" streak="pushes to main" cause="#1156"
-    title="harness.yml: main"
+    workflow=harness.yml label=ci:red-main job_name=""
+    what="the harness workflow on main" runs_of="pushes to main" cause="#1156"
+    heading="harness.yml: main"
     ;;
 nightly)
     job=${2:?nightly names a job of dashboard.yml}
     workflow=dashboard.yml label=ci:red-$job
-    # The job's `name:`, which is what the API reports a job by.
-    name=$(awk -v key="  $job:" '$0 == key { inside = 1; next }
+    # The job's `name:`, unquoted, which is what the API reports a job by.
+    job_name=$(awk -v key="  $job:" '$0 == key { inside = 1; next }
         inside && /^  [^ #]/ { exit }
-        inside && sub(/^    name: /, "") { print; exit }' \
+        inside && sub(/^    name: /, "") { gsub(/^["'\'']|["'\'']$/, ""); print; exit }' \
         "$(dirname "$0")/../../.github/workflows/$workflow")
-    [ -n "$name" ] || { echo "red.sh: $workflow has no job $job with a name" >&2; exit 2; }
-    what="dashboard.yml's \`$job\` job" streak="nightlies" cause="#2980"
-    title="dashboard.yml: the $job nightly"
+    [ -n "$job_name" ] || { echo "red.sh: $workflow has no job $job with a name" >&2; exit 2; }
+    what="dashboard.yml's \`$job\` job" runs_of="nightlies" cause="#2980"
+    heading="dashboard.yml: the $job nightly"
     ;;
 *)
     echo "usage: red.sh main | red.sh nightly JOB" >&2
@@ -79,9 +79,10 @@ write() {
 
 # The earlier verdicts, newest first, each `{conclusion, headSha, url}`:
 # main's are the finished runs of a push to main; a nightly JOB's are its
-# own in each finished dashboard run of the schedule or by hand, read back
-# to its last green. This run, and a verdict neither green nor red, are left
-# out.
+# own in each finished dashboard run of main, of the schedule or by hand,
+# read back to its last green. A job that ran out of its time is red: the
+# API says `timed_out`, or `cancelled` in a run nobody cancelled. This run,
+# and a verdict neither green nor red, are left out.
 verdicts() {
     if [ "$subject" = main ]; then
         gh run list --repo "$repo" --workflow "$workflow" --branch main --event push --limit 50 \
@@ -91,15 +92,18 @@ verdicts() {
         return
     fi
     # Asked by event, since a dashboard run follows every push to main too.
-    local nightlies event id head url conclusion
+    # Bash clears -e in the command substitution this runs in, so each call
+    # that fails ends it by hand rather than read as a run with no verdict.
+    local nightlies event id ran head url conclusion
     nightlies=$(for event in schedule workflow_dispatch; do
-        gh api "repos/$repo/actions/workflows/$workflow/runs?status=completed&event=$event&per_page=50" \
-            --jq '.workflow_runs[] | "\(.created_at) \(.id) \(.head_sha) \(.html_url)"'
-    done | sort -r | cut -d' ' -f2-)
-    while read -r id head url; do
+        gh api "repos/$repo/actions/workflows/$workflow/runs?status=completed&branch=main&event=$event&per_page=50" \
+            --jq '.workflow_runs[] | "\(.created_at) \(.id) \(.conclusion) \(.head_sha) \(.html_url)"' || exit 1
+    done | sort -r | cut -d' ' -f2-) || return 1
+    while read -r id ran head url; do
         [ -n "$id" ] && [ "$id" != "$run" ] || continue
         conclusion=$(gh run view "$id" --repo "$repo" --json jobs |
-            jq -r --arg name "$name" '[.jobs[] | select(.name == $name) | .conclusion][0] // "none"')
+            jq -r --arg name "$job_name" --arg ran "$ran" '[.jobs[] | select(.name == $name) | .conclusion][0] // "none"
+                | if . == "timed_out" or (. == "cancelled" and $ran != "cancelled") then "failure" else . end') || exit 1
         [ "$conclusion" = success ] || [ "$conclusion" = failure ] || continue
         jq -n --arg c "$conclusion" --arg sha "$head" --arg url "$url" '{conclusion: $c, headSha: $sha, url: $url}'
         [ "$conclusion" != success ] || break
@@ -134,7 +138,7 @@ first=$(jq -r '(map(.conclusion == "success") | index(true)) as $g | .[0:($g // 
 # failed), and a nightly's own job, which has no `done`.
 unmet=$(grep -E '^- ' <<<"${UNMET:-}" || true)
 failing=$(gh run view "$run" --repo "$repo" --json jobs |
-    jq -r --arg name "$name" '[.jobs[] | select(.conclusion == "failure" and ($name == "" or .name == $name))
+    jq -r --arg name "$job_name" '[.jobs[] | select(.conclusion == "failure" and ($name == "" or .name == $name))
     | .name + ([.steps[] | select(.conclusion == "failure") | .name] | if length > 0 then " (" + join(", ") + ")" else "" end)]
     | join("; ")')
 if [ -n "$unmet" ]; then
@@ -143,7 +147,7 @@ if [ -n "$unmet" ]; then
 else
     named=${failing:-a failed job}
 fi
-title="$title is red since ${first:0:8}: $named"
+title="$heading is red since ${first:0:8}: $named"
 # What main's ticket says beyond the runs, and holds its builder to.
 criteria="- [ ] The cause is named, and $what is green again"
 done_lines() {
@@ -163,7 +167,7 @@ ticket() {
     cat <<EOF
 ## What happened
 
-On two $streak in a row, $what failed ($cause).
+On two $runs_of in a row, $what failed ($cause).
 
 - this run: $this, at $sha
 - the run before it: $(jq -r '.[0].url' <<<"$runs"), at $(jq -r '.[0].headSha' <<<"$runs")
