@@ -5,8 +5,9 @@
 //! The grammar is `[oracle] [budget] [telemetry] [[crate]] [[seam]]
 //! [[edge]] [[rule]] [[bench]]`, each rule carrying exactly one predicate.
 //! A manifest with a key outside the grammar is refused with the offending
-//! key named; so is a rule with zero or two predicates. The numbers live in the file; nothing here restates one,
-//! and an optional table that is absent is absent, never defaulted.
+//! key named; so is a rule with zero or two predicates. The numbers live
+//! in the file; nothing here restates one, and an optional table that is
+//! absent is absent, never defaulted.
 
 use std::collections::BTreeMap;
 use std::fs;

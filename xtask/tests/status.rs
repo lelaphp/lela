@@ -2140,15 +2140,15 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
 fn the_week_section_and_its_row_are_refused() {
     let root = scratch("week");
     let (ok, _, err) = status(&root, &["--section", "week"]);
-    assert!(!ok && err.contains("week"), "{err}");
+    assert!(!ok && err.contains("invalid value 'week'"), "{err}");
     let (ok, _, err) = status(&root, &["--section", "rules", "--week", "1"]);
-    assert!(!ok && err.contains("--week"), "{err}");
+    assert!(!ok && err.contains("unexpected argument '--week'"), "{err}");
     let text = format!(
         "{}\n[[week]]\ndays = \"3-7\"\n",
         std::fs::read_to_string(root.join("seams.toml")).unwrap()
     );
-    let err = Manifest::parse(&text).unwrap_err().to_string();
-    assert!(err.contains("week"), "{err}");
+    let err = format!("{:#}", Manifest::parse(&text).unwrap_err());
+    assert!(err.contains("unknown field `week`"), "{err}");
 }
 
 /// "This session" (harness-design.md §4.6): `--session-id` names it, and
