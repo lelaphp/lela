@@ -1631,6 +1631,23 @@ impl DateTime {
     /// 624 352
     /// 640 320
     /// ```
+    ///
+    /// So a `memory_limit` falls where php's does: under opcache's regime a
+    /// request starts with php's memory (design §5.13, #2863), each object
+    /// costs what php's does, and the array of them meets the limit on
+    /// the same growth of its buckets, asking for php's size (#2854):
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// $dates = [];
+    /// for ($i = 0; $i < 100000; $i++) {
+    ///     $dates[] = new DateTime('2024-01-01 Europe/Amsterdam');
+    /// }
+    /// echo "unexpected success\n";
+    /// ```
+    /// ```expect regime=jit-off exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 135168 bytes) in %SCRATCH%/witness.php on line 5
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
