@@ -1463,10 +1463,11 @@ fn match_node(node: Node, list: &List, options: Options) -> Answer {
     }
 }
 
-/// `dom_parse_selector`: the list, or php's `DOMException` naming
-/// lexbor's first complaint.
+/// `dom_parse_selector`: the list, parsed under a lend so lexbor's parser
+/// is the request's memory while it works, or php's `DOMException`
+/// naming lexbor's first complaint.
 fn parse(req: &mut Request, text: &[u8]) -> Result<List, Thrown> {
-    List::parse(text).map_err(|refused| {
+    php_ext_lexbor::ffi::lent(req, |lent| List::parse(lent, text))?.map_err(|refused| {
         let message = match refused.message {
             Some(m) => format!("Invalid selector ({})", String::from_utf8_lossy(&m)),
             None => "Invalid selector".to_owned(),

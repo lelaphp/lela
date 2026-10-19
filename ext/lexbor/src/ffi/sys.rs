@@ -460,40 +460,109 @@ pub(crate) struct lexbor_plog_entry_t {
 #[repr(C)]
 pub(crate) struct lxb_url_parser_t {
     pub(crate) url: *mut lxb_url_t,
-    pub(crate) mraw: *mut c_void,
+    pub(crate) mraw: *mut lexbor_mraw_t,
     pub(crate) log: *mut lexbor_array_obj_t,
     pub(crate) idna: *mut c_void,
     pub(crate) buffer: *mut u8,
 }
 
+/// `lexbor_mraw_t`: the pool's memory, its cache of freed blocks and its
+/// count, each null until `lexbor_mraw_init`.
+#[repr(C)]
+pub(crate) struct lexbor_mraw_t {
+    pub(crate) mem: *mut c_void,
+    pub(crate) cache: *mut c_void,
+    pub(crate) ref_count: usize,
+}
+
+/// `lxb_unicode_idna_t`, whose one field is a `lxb_unicode_normalizer_t`
+/// (`unicode/base.h`), every field null or zero until
+/// `lxb_unicode_idna_init`.
+#[repr(C)]
+pub(crate) struct lxb_unicode_idna_t {
+    pub(crate) decomposition: *mut c_void,
+    pub(crate) composition: *mut c_void,
+    pub(crate) starter: *mut c_void,
+    pub(crate) buf: *mut c_void,
+    pub(crate) end: *const c_void,
+    pub(crate) p: *mut c_void,
+    pub(crate) ican: *mut c_void,
+    pub(crate) tmp: [u8; 4],
+    pub(crate) tmp_lenght: u8,
+    pub(crate) quick_ccc: u8,
+    pub(crate) quick_type: u8,
+    pub(crate) flush_cp: usize,
+}
+
+/// `lexbor_memory_malloc_f`, `lexbor_memory_realloc_f`,
+/// `lexbor_memory_calloc_f` and `lexbor_memory_free_f`.
+pub(crate) type lexbor_memory_malloc_f = extern "C" fn(size: usize) -> *mut c_void;
+pub(crate) type lexbor_memory_realloc_f =
+    unsafe extern "C" fn(dst: *mut c_void, size: usize) -> *mut c_void;
+pub(crate) type lexbor_memory_calloc_f = extern "C" fn(num: usize, size: usize) -> *mut c_void;
+pub(crate) type lexbor_memory_free_f = unsafe extern "C" fn(dst: *mut c_void);
+
 unsafe extern "C" {
-    // core/mraw.h
-    pub(crate) fn lexbor_mraw_create() -> *mut c_void;
-    pub(crate) fn lexbor_mraw_init(mraw: *mut c_void, chunk_size: usize) -> lxb_status_t;
-    pub(crate) fn lexbor_mraw_destroy(mraw: *mut c_void, destroy_self: bool) -> *mut c_void;
+    // core/array_obj.h
+    pub(crate) fn lexbor_array_obj_init(
+        array: *mut lexbor_array_obj_t,
+        size: usize,
+        struct_size: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lexbor_array_obj_push_wo_cls(array: *mut lexbor_array_obj_t) -> *mut c_void;
+    pub(crate) fn lexbor_array_obj_pop(array: *mut lexbor_array_obj_t) -> *mut c_void;
+    pub(crate) fn lexbor_array_obj_destroy(
+        array: *mut lexbor_array_obj_t,
+        self_destroy: bool,
+    ) -> *mut lexbor_array_obj_t;
+
+    // core/lexbor.h
+    pub(crate) fn lexbor_memory_setup(
+        new_malloc: lexbor_memory_malloc_f,
+        new_realloc: lexbor_memory_realloc_f,
+        new_calloc: lexbor_memory_calloc_f,
+        new_free: lexbor_memory_free_f,
+    ) -> lxb_status_t;
+
+    // core/mraw.h, core/str.h
+    pub(crate) fn lexbor_mraw_init(mraw: *mut lexbor_mraw_t, chunk_size: usize) -> lxb_status_t;
+    pub(crate) fn lexbor_mraw_destroy(
+        mraw: *mut lexbor_mraw_t,
+        destroy_self: bool,
+    ) -> *mut lexbor_mraw_t;
+    pub(crate) fn lexbor_str_init_append(
+        str_: *mut lexbor_str_t,
+        mraw: *mut lexbor_mraw_t,
+        data: *const u8,
+        length: usize,
+    ) -> *mut u8;
 
     // unicode/idna.h
-    pub(crate) fn lxb_unicode_idna_create() -> *mut c_void;
-    pub(crate) fn lxb_unicode_idna_init(idna: *mut c_void) -> lxb_status_t;
-    pub(crate) fn lxb_unicode_idna_destroy(idna: *mut c_void, self_destroy: bool) -> *mut c_void;
+    pub(crate) fn lxb_unicode_idna_init(idna: *mut lxb_unicode_idna_t) -> lxb_status_t;
+    pub(crate) fn lxb_unicode_idna_clean(idna: *mut lxb_unicode_idna_t);
+    pub(crate) fn lxb_unicode_idna_destroy(
+        idna: *mut lxb_unicode_idna_t,
+        self_destroy: bool,
+    ) -> *mut lxb_unicode_idna_t;
 
     // url/url.h
-    pub(crate) fn lxb_url_parser_create() -> *mut lxb_url_parser_t;
     pub(crate) fn lxb_url_parser_init(
         parser: *mut lxb_url_parser_t,
-        mraw: *mut c_void,
+        mraw: *mut lexbor_mraw_t,
     ) -> lxb_status_t;
+    pub(crate) fn lxb_url_parser_clean(parser: *mut lxb_url_parser_t);
     pub(crate) fn lxb_url_parser_destroy(
         parser: *mut lxb_url_parser_t,
         destroy_self: bool,
     ) -> *mut lxb_url_parser_t;
+    pub(crate) fn lxb_url_destroy(url: *mut lxb_url_t) -> *mut lxb_url_t;
     pub(crate) fn lxb_url_parse(
         parser: *mut lxb_url_parser_t,
         base_url: *const lxb_url_t,
         data: *const u8,
         length: usize,
     ) -> *mut lxb_url_t;
-    pub(crate) fn lxb_url_clone(mraw: *mut c_void, url: *const lxb_url_t) -> *mut lxb_url_t;
+    pub(crate) fn lxb_url_clone(mraw: *mut lexbor_mraw_t, url: *const lxb_url_t) -> *mut lxb_url_t;
     pub(crate) fn lxb_url_api_protocol_set(
         url: *mut lxb_url_t,
         parser: *mut lxb_url_parser_t,
@@ -547,14 +616,14 @@ unsafe extern "C" {
         exclude_fragment: bool,
     ) -> lxb_status_t;
     pub(crate) fn lxb_url_serialize_idna(
-        idna: *mut c_void,
+        idna: *mut lxb_unicode_idna_t,
         url: *const lxb_url_t,
         cb: lexbor_serialize_cb_f,
         ctx: *mut c_void,
         exclude_fragment: bool,
     ) -> lxb_status_t;
     pub(crate) fn lxb_url_serialize_host_unicode(
-        idna: *mut c_void,
+        idna: *mut lxb_unicode_idna_t,
         host: *const lxb_url_host_t,
         cb: lexbor_serialize_cb_f,
         ctx: *mut c_void,

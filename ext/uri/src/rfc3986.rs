@@ -88,6 +88,22 @@ impl Rfc3986 {
         self.0.normalized.as_ref().ok_or(Unreadable)
     }
 
+    /// `php_uri_parser_rfc3986_host_read`: an IP address in its brackets.
+    fn host_read(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>> {
+        let uri = self.reading(mode)?;
+        let Some(text) = uri.host_text() else {
+            return Ok(None);
+        };
+        if !uri.host_is_ip_literal() {
+            return Ok(Some(text.to_vec()));
+        }
+        let mut host = Vec::with_capacity(text.len() + 2);
+        host.push(b'[');
+        host.extend_from_slice(text);
+        host.push(b']');
+        Ok(Some(host))
+    }
+
     /// `get_uri_for_writing`: the URI as parsed, its normalized copy
     /// given back, since the write makes it stale.
     fn writing(&mut self, req: &mut Request) -> &mut ffi::Uri {
@@ -231,16 +247,23 @@ impl UriParser for Rfc3986 {
 
     /// `php_uri_parser_rfc3986_to_string`: the fragment cut at the last
     /// `#` where it is excluded.
-    fn recompose(&mut self, mode: Recomposition, exclude_fragment: bool) -> Option<Vec<u8>> {
+    fn recompose(
+        &mut self,
+        _: &mut Request,
+        mode: Recomposition,
+        exclude_fragment: bool,
+    ) -> Result<Option<Vec<u8>>, Thrown> {
         let read = match mode {
             Recomposition::RawAscii | Recomposition::RawUnicode => ReadAs::Raw,
             Recomposition::NormalizedAscii => ReadAs::NormalizedAscii,
         };
-        let mut text = self.reading(read).ok()?.recompose().ok()?;
-        if exclude_fragment && let Some(hash) = text.iter().rposition(|&b| b == b'#') {
-            text.truncate(hash);
-        }
-        Some(text)
+        let text = self.reading(read).ok().and_then(|uri| uri.recompose().ok());
+        Ok(text.map(|mut text| {
+            if exclude_fragment && let Some(hash) = text.iter().rposition(|&b| b == b'#') {
+                text.truncate(hash);
+            }
+            text
+        }))
     }
 
     fn scheme(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>> {
@@ -273,20 +296,9 @@ impl UriParser for Rfc3986 {
         Ok(Some(password.to_vec()))
     }
 
-    /// `php_uri_parser_rfc3986_host_read`: an IP address in its brackets.
-    fn host(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>> {
-        let uri = self.reading(mode)?;
-        let Some(text) = uri.host_text() else {
-            return Ok(None);
-        };
-        if !uri.host_is_ip_literal() {
-            return Ok(Some(text.to_vec()));
-        }
-        let mut host = Vec::with_capacity(text.len() + 2);
-        host.push(b'[');
-        host.extend_from_slice(text);
-        host.push(b']');
-        Ok(Some(host))
+    /// [`Rfc3986::host_read`], which allocates nothing of the request's.
+    fn host(&mut self, _: &mut Request, mode: ReadAs) -> Result<Read<Option<Vec<u8>>>, Thrown> {
+        Ok(self.host_read(mode))
     }
 
     fn port(&mut self, mode: ReadAs) -> Read<Option<i64>> {
@@ -466,9 +478,13 @@ impl Uri {
     /// NULL
     /// ```
     fn getScheme(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "scheme", ReadAs::NormalizedAscii, |u| {
-            u.scheme(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<R>(
+            req,
+            this.object(),
+            "scheme",
+            ReadAs::NormalizedAscii,
+            |_, u| Ok(u.scheme(ReadAs::NormalizedAscii)),
+        )
     }
 
     /// `getRawScheme(): ?string`.
@@ -483,8 +499,8 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "scheme", ReadAs::Raw, |u| {
-            u.scheme(ReadAs::Raw)
+        crate::component_string::<R>(req, this.object(), "scheme", ReadAs::Raw, |_, u| {
+            Ok(u.scheme(ReadAs::Raw))
         })
     }
 
@@ -580,7 +596,7 @@ impl Uri {
             this.object(),
             "username",
             ReadAs::NormalizedAscii,
-            |u| u.username(ReadAs::NormalizedAscii),
+            |_, u| Ok(u.username(ReadAs::NormalizedAscii)),
         )
     }
 
@@ -596,8 +612,8 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "username", ReadAs::Raw, |u| {
-            u.username(ReadAs::Raw)
+        crate::component_string::<R>(req, this.object(), "username", ReadAs::Raw, |_, u| {
+            Ok(u.username(ReadAs::Raw))
         })
     }
 
@@ -619,7 +635,7 @@ impl Uri {
             this.object(),
             "password",
             ReadAs::NormalizedAscii,
-            |u| u.password(ReadAs::NormalizedAscii),
+            |_, u| Ok(u.password(ReadAs::NormalizedAscii)),
         )
     }
 
@@ -635,8 +651,8 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "password", ReadAs::Raw, |u| {
-            u.password(ReadAs::Raw)
+        crate::component_string::<R>(req, this.object(), "password", ReadAs::Raw, |_, u| {
+            Ok(u.password(ReadAs::Raw))
         })
     }
 
@@ -651,9 +667,13 @@ impl Uri {
     /// NULL
     /// ```
     fn getHost(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "host", ReadAs::NormalizedAscii, |u| {
-            u.host(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<R>(
+            req,
+            this.object(),
+            "host",
+            ReadAs::NormalizedAscii,
+            |req, u| u.host(req, ReadAs::NormalizedAscii),
+        )
     }
 
     /// `getRawHost(): ?string`.
@@ -665,8 +685,8 @@ impl Uri {
     /// string(11) "EXAMPLE.com"
     /// ```
     fn getRawHost(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "host", ReadAs::Raw, |u| {
-            u.host(ReadAs::Raw)
+        crate::component_string::<R>(req, this.object(), "host", ReadAs::Raw, |req, u| {
+            u.host(req, ReadAs::Raw)
         })
     }
 
@@ -704,8 +724,8 @@ impl Uri {
     /// NULL
     /// ```
     fn getPort(req: &mut Request, this: This<Self>) -> Result<Option<i64>, Thrown> {
-        crate::component::<R, _>(req, this.object(), "port", ReadAs::Raw, |u| {
-            u.port(ReadAs::Raw)
+        crate::component::<R, _>(req, this.object(), "port", ReadAs::Raw, |_, u| {
+            Ok(u.port(ReadAs::Raw))
         })
     }
 
@@ -789,9 +809,13 @@ impl Uri {
     /// NULL
     /// ```
     fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "query", ReadAs::NormalizedAscii, |u| {
-            u.query(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<R>(
+            req,
+            this.object(),
+            "query",
+            ReadAs::NormalizedAscii,
+            |_, u| Ok(u.query(ReadAs::NormalizedAscii)),
+        )
     }
 
     /// `getRawQuery(): ?string`.
@@ -806,8 +830,8 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "query", ReadAs::Raw, |u| {
-            u.query(ReadAs::Raw)
+        crate::component_string::<R>(req, this.object(), "query", ReadAs::Raw, |_, u| {
+            Ok(u.query(ReadAs::Raw))
         })
     }
 
@@ -849,7 +873,7 @@ impl Uri {
             this.object(),
             "fragment",
             ReadAs::NormalizedAscii,
-            |u| u.fragment(ReadAs::NormalizedAscii),
+            |_, u| Ok(u.fragment(ReadAs::NormalizedAscii)),
         )
     }
 
@@ -865,8 +889,8 @@ impl Uri {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<R>(req, this.object(), "fragment", ReadAs::Raw, |u| {
-            u.fragment(ReadAs::Raw)
+        crate::component_string::<R>(req, this.object(), "fragment", ReadAs::Raw, |_, u| {
+            Ok(u.fragment(ReadAs::Raw))
         })
     }
 
@@ -1026,7 +1050,7 @@ fn user_info(
     this: This<Uri>,
     mode: ReadAs,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
-    let bytes = crate::read::<R, _>(req, this.object(), mode, |u| u.user_info(mode))?;
+    let bytes = crate::read::<R, _>(req, this.object(), mode, |_, u| Ok(u.user_info(mode)))?;
     match bytes {
         Ok(bytes) => bytes.map(|bytes| PhpString::new(req, &bytes)).transpose(),
         Err(Unreadable) => Err(throw_error(
@@ -1039,6 +1063,7 @@ fn user_info(
 
 /// The path read, a string always.
 fn path(req: &mut Request, this: This<Uri>, mode: ReadAs) -> Result<Owner<PhpString>, Thrown> {
-    let bytes = crate::component::<R, _>(req, this.object(), "path", mode, |u| u.path(mode))?;
+    let bytes =
+        crate::component::<R, _>(req, this.object(), "path", mode, |_, u| Ok(u.path(mode)))?;
     PhpString::new(req, &bytes)
 }
