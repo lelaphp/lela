@@ -586,8 +586,9 @@ struct Walk<'a> {
 
 /// One shell the walk is in: its id, the places it may stand where every
 /// command of its `&&` chain succeeded, those where one of them failed,
-/// its `pushd` stack, each entry the places it pushed, and whether it
-/// lost.
+/// its `pushd` stack, each entry the places it pushed, whether it lost,
+/// and the places, stack and loss it began its chain with, which a chain
+/// sent to the background leaves it.
 #[derive(Default)]
 struct Shell {
     id: u32,
@@ -595,26 +596,30 @@ struct Shell {
     failed: Vec<PathBuf>,
     pushed: Vec<Vec<PathBuf>>,
     lost: bool,
+    chain: (Vec<PathBuf>, Vec<Vec<PathBuf>>, bool),
 }
 
 impl Shell {
     fn new(id: u32, sure: Vec<PathBuf>, lost: bool) -> Shell {
+        let chain = (sure.clone(), Vec::new(), lost);
         Shell {
             id,
             sure,
             lost,
+            chain,
             ..Shell::default()
         }
     }
 
     /// Where a command joined by `before` runs: after `&&` or a pipe where
     /// the chain succeeded, and after any other separator wherever the
-    /// shell may stand, which ends the chain.
+    /// shell may stand, which begins a chain.
     fn runs_at(&mut self, before: Joint) -> Vec<PathBuf> {
         if !matches!(before, Joint::And | Joint::Pipe) {
             for dir in std::mem::take(&mut self.failed) {
                 add(&mut self.sure, dir);
             }
+            self.chain = (self.sure.clone(), self.pushed.clone(), self.lost);
         }
         self.sure.clone()
     }
@@ -637,12 +642,24 @@ impl Shell {
             (Some("popd"), _) if words.len() == 1 => self.pushed.pop(),
             _ => None,
         };
-        self.lost = moved.is_none();
-        self.sure = moved.unwrap_or_default();
-        self.sure.dedup();
+        let Some(moved) = moved else {
+            self.lost = true;
+            return;
+        };
+        self.sure.clear();
+        for dir in moved {
+            add(&mut self.sure, dir);
+        }
         for dir in from {
             add(&mut self.failed, dir);
         }
+    }
+
+    /// The shell as its chain began, the chain having run in a shell of
+    /// its own in the background.
+    fn background(&mut self) {
+        (self.sure, self.pushed, self.lost) = self.chain.clone();
+        self.failed.clear();
     }
 }
 
@@ -660,6 +677,7 @@ impl<'a> Walk<'a> {
         for (n, ((argv, ids), joints)) in each.enumerate() {
             let kept = nested.iter().zip(ids).take_while(|(s, id)| s.id == **id);
             nested.truncate(kept.count());
+            let entering = ids.len() > nested.len();
             for id in ids.get(nested.len()..).unwrap_or_default() {
                 let parent = nested.last_mut().unwrap_or(&mut top);
                 let (sure, lost) = (parent.runs_at(joints.before), parent.lost);
@@ -671,8 +689,10 @@ impl<'a> Walk<'a> {
             let shell = nested.last_mut().unwrap_or(&mut top);
             let at = shell.runs_at(joints.before);
             let changes = matches!(argv.program(), "cd" | "pushd" | "popd");
-            let apart = joints.before == Joint::Pipe
-                || matches!(joints.after, Joint::Pipe | Joint::Background);
+            // A pipe's side runs in a shell of its own, unless the command
+            // opens one, a subshell or a substitution, which its own
+            // changes move.
+            let apart = (joints.before == Joint::Pipe && !entering) || joints.after == Joint::Pipe;
             if changes && !apart && !shell.lost {
                 shell.change(at.clone(), argv);
                 walk.lost |= shell.lost;
@@ -687,8 +707,12 @@ impl<'a> Walk<'a> {
             let exports = words.first().is_some_and(|w| w == "export")
                 && words.iter().skip(1).all(|w| w.contains('='));
             let read_past = exports || (changes && (apart || !shell.lost));
+            let background = joints.after == Joint::Background;
+            if background {
+                shell.background();
+            }
             if leading && ids.is_empty() {
-                walk.stands = at;
+                walk.stands = if background { shell.sure.clone() } else { at };
             }
             if leading && !read_past {
                 leading = false;
@@ -727,17 +751,20 @@ fn add<T: PartialEq>(set: &mut Vec<T>, one: T) {
 
 /// Where a command its shell runs in `dir` runs, moved by each
 /// [`Move::Into`] of its words, then each place it reaches besides
-/// ([`Move::Reaches`]), each read from where the moves before it left
-/// the program.
+/// ([`Move::Reaches`]), read from where the moves into left the program,
+/// as git reads `GIT_DIR` once its `-C` has moved it.
 fn moved(dir: &Path, argv: &Argv) -> Vec<PathBuf> {
-    let (mut runs, mut reached) = (dir.to_path_buf(), Vec::new());
+    let mut runs = dir.to_path_buf();
     for one in argv.moves() {
-        match one {
-            Move::Into(to) => runs = at(&runs, to),
-            Move::Reaches(to) => reached.push(at(&runs, to)),
-            Move::Unsaid => {}
+        if let Move::Into(to) = one {
+            runs = at(&runs, to);
         }
     }
+    let reached = argv.moves().iter().filter_map(|one| match one {
+        Move::Reaches(to) => Some(at(&runs, to)),
+        Move::Into(_) | Move::Unsaid => None,
+    });
+    let reached: Vec<PathBuf> = reached.collect();
     std::iter::once(runs).chain(reached).collect()
 }
 
@@ -928,12 +955,21 @@ mod tests {
         assert_eq!(fired("cd /wt & y", "y"), [root]);
         assert_eq!(fired("cd /wt; cd /a && y", "y"), [Path::new("/a")]);
         assert_eq!(fired("env -C /wt y", "y"), [wt]);
+        // A lone `&` sends the whole `&&` list to the background; a pipe's
+        // subshell is moved by its own change; `|&` is a pipe.
+        assert_eq!(fired("cd /wt && x & y", "y"), [root]);
+        assert_eq!(fired("x | (cd /wt; y)", "y"), [wt, root]);
+        assert_eq!(fired("x |& cd /wt && y", "y"), [root]);
+        assert_eq!(fired("env -iC /wt y; env -C/wt y", "y"), [wt]);
+        let reached = [wt.to_path_buf(), wt.join(".git")];
+        assert_eq!(fired("GIT_DIR=.git git -C /wt status", "git"), reached);
         assert_eq!(
             fired("cd /a && GIT_DIR=/wt git x", "git"),
             [Path::new("/a"), wt]
         );
         let line = |text: &str| Line::read(text);
         assert_eq!(runs_in(root, Some(&line("cd /wt; git add x"))), root);
+        assert_eq!(runs_in(root, Some(&line("cd /wt && x & git add y"))), root);
         assert_eq!(runs_in(root, Some(&line("cd /wt && x; git add x"))), wt);
         assert_eq!(acts_in(root, Some(&line("cd /a; git -C sub add x"))), root);
         assert_eq!(acts_in(root, Some(&line("env -C /wt git add x"))), wt);

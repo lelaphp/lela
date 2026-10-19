@@ -3250,6 +3250,8 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
         format!("cd {scratch}/repo && patch -d {worktree} seams.toml < fix.diff"),
         format!("cd {scratch}/repo && GIT_WORK_TREE={worktree} git checkout -- seams.toml"),
         format!("cd {scratch}/repo && ln -sf {main_dir}/seams.toml . && {write}"),
+        format!("cd {scratch}/repo && env -iC {worktree} sed -i '' 's/a/b/' seams.toml"),
+        format!("cd {scratch}/repo && patch -d{worktree} seams.toml < fix.diff"),
     ] {
         assert!(refused(main, &line), "{line}");
     }

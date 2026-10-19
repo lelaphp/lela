@@ -59,11 +59,8 @@ pub(super) enum Move {
 }
 
 /// The separator on one side of a simple command, as its shell reads the
-/// list the command stands in (#2995). Ordered so that a separator
-/// outranks the `;` or newline after it that ends no command, so a line
-/// continued past `&&` or `|`, or a subshell opened after one, is joined
-/// by it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+/// list the command stands in (#2995).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Joint {
     /// `;`, `||`, a newline, the line's edge or a subshell's close: what
     /// follows may run whether this succeeded or not.
@@ -71,10 +68,10 @@ pub(super) enum Joint {
     Then,
     /// `&&`: what follows runs only where this succeeded.
     And,
-    /// `|`: both sides run at once, each in a shell of its own.
+    /// `|` or `|&`: both sides run at once, each in a shell of its own.
     Pipe,
-    /// A lone `&`: what it ends runs in a shell of its own, in the
-    /// background.
+    /// A lone `&`: the `&&` list it ends runs in a shell of its own, in
+    /// the background.
     Background,
 }
 
@@ -392,7 +389,10 @@ impl Lexer {
                     let after = match c {
                         '&' if self.eat('&') => Joint::And,
                         '&' => Joint::Background,
-                        '|' if !self.eat('|') => Joint::Pipe,
+                        '|' if !self.eat('|') => {
+                            self.eat('&');
+                            Joint::Pipe
+                        }
                         _ => Joint::Then,
                     };
                     self.end(&mut command, after);
@@ -510,7 +510,10 @@ impl Lexer {
         self.assigned.read(&words);
         let kept = Some(self.before).filter(|_| words.is_empty());
         let Some(argv) = Argv::running(words, &self.assigned) else {
-            self.before = after.max(kept.unwrap_or_default());
+            self.before = match kept {
+                Some(before) if after == Joint::Then => before,
+                _ => after,
+            };
             return;
         };
         let nested = argv.nested_line();
@@ -777,53 +780,74 @@ fn is_name(name: &str) -> bool {
 }
 
 /// The options of the programs named that move one into a directory
-/// (`Some(true)`), name one it reaches besides (`Some(false)`), or take a
-/// value and move nothing (`None`), as the option and its value or
-/// `--option=value`; git's stand before its subcommand, so a `-C` after
-/// it is the subcommand's own (`git commit -C HEAD`).
-const MOVING: [(&str, &str, Option<bool>); 12] = [
-    ("env", "-C", Some(true)),
-    ("env", "--chdir", Some(true)),
-    ("git", "-C", Some(true)),
-    ("git", "--git-dir", Some(false)),
-    ("git", "--work-tree", Some(false)),
-    ("git", "-c", None),
-    ("git", "--namespace", None),
-    ("git", "--config-env", None),
-    ("patch", "-d", Some(true)),
-    ("patch", "--directory", Some(true)),
-    ("cp mv install ln", "-t", Some(false)),
-    ("cp mv install ln", "--target-directory", Some(false)),
+/// ([`Move::Into`]), name one it reaches besides ([`Move::Reaches`]), or
+/// take a value and move nothing (`None`), each as [`valued`] reads it;
+/// git's stand before its subcommand, so a `-C` after it is the
+/// subcommand's own (`git commit -C HEAD`).
+const MOVING: [(&[&str], &str, Moving); 12] = [
+    (&["env"], "-C", Some(Move::Into)),
+    (&["env"], "--chdir", Some(Move::Into)),
+    (&["git"], "-C", Some(Move::Into)),
+    (&["git"], "--git-dir", Some(Move::Reaches)),
+    (&["git"], "--work-tree", Some(Move::Reaches)),
+    (&["git"], "-c", None),
+    (&["git"], "--namespace", None),
+    (&["git"], "--config-env", None),
+    (&["patch"], "-d", Some(Move::Into)),
+    (&["patch"], "--directory", Some(Move::Into)),
+    (TARGETS, "-t", Some(Move::Reaches)),
+    (TARGETS, "--target-directory", Some(Move::Reaches)),
 ];
+
+/// The move an option of [`MOVING`] makes of its value, or none.
+type Moving = Option<fn(String) -> Move>;
+
+/// The programs whose `-t` names the directory they write into.
+const TARGETS: &[&str] = &["cp", "mv", "install", "ln"];
+
+/// The value `word` gives `option`: empty where it is the option alone,
+/// or a cluster of short options ending in it (`-iC`), its value then
+/// being the next word; the rest of the word where the value is attached
+/// (`-C/wt`, `--chdir=/wt`); `None` where the word is not the option.
+fn valued<'w>(word: &'w str, option: &str) -> Option<&'w str> {
+    if option.starts_with("--") {
+        let rest = word.strip_prefix(option)?;
+        return (rest.is_empty() || rest.starts_with('=')).then(|| rest.trim_start_matches('='));
+    }
+    let cluster = word.strip_prefix('-').filter(|c| !c.starts_with('-'))?;
+    cluster
+        .split_once(option.trim_start_matches('-'))
+        .map(|(_, value)| value)
+}
 
 impl Move {
     /// The moves `program`'s own words make, in order: its options
     /// ([`MOVING`]), `GIT_DIR` or `GIT_WORK_TREE` the line assigned for
-    /// git, the directory of each of `ln`'s operands, and `find
-    /// -execdir`'s, which its words do not say.
+    /// git, each of `ln`'s operands, a link through which a later write
+    /// lands there, and `find -execdir`'s, which its words do not say.
     fn of(program: &str, words: &[String], assigned: &Assigned) -> Vec<Move> {
         let set = assigned.0.iter().filter(|_| program == "git");
         let mut moves: Vec<Move> = set
             .filter_map(|(name, value)| Move::git_tree(name, value, assigned))
             .collect();
-        let mut words = words.iter().map(String::as_str).take_while(|w| *w != "--");
+        let mut words = words.iter().map(String::as_str);
         while let Some(word) = words.next() {
-            let (option, value) = word.split_once('=').unwrap_or((word, ""));
-            let named = |(programs, moving, _): &&(&str, &str, Option<bool>)| {
-                *moving == option && programs.split(' ').any(|p| p == program)
-            };
-            if let Some((.., into)) = MOVING.iter().find(named) {
+            let mut own = MOVING
+                .iter()
+                .filter(|(programs, ..)| programs.contains(&program));
+            let option = own.find_map(|(_, option, make)| Some((valued(word, option)?, make)));
+            if let Some((value, make)) = option {
                 let value = Some(value)
                     .filter(|v| !v.is_empty())
                     .or_else(|| words.next());
-                let to = |into| value.map(|value| Move::to(value, into, assigned));
-                moves.extend(into.and_then(to));
+                let to = make
+                    .zip(value)
+                    .map(|(make, value)| Move::to(value, make, assigned));
+                moves.extend(to);
             } else if program == "git" && !word.starts_with('-') {
                 break;
-            } else if program == "ln"
-                && let Some((dir, _)) = word.rsplit_once('/')
-            {
-                moves.push(Move::to(dir, false, assigned));
+            } else if program == "ln" && !word.starts_with('-') {
+                moves.push(Move::to(word, Move::Reaches, assigned));
             } else if program == "find" && matches!(word, "-execdir" | "-okdir") {
                 moves.push(Move::Unsaid);
             }
@@ -831,21 +855,21 @@ impl Move {
         moves
     }
 
-    /// A move to the directory `word` names, a variable the line assigned
-    /// read as its value; one it did not is [`Move::Unsaid`].
-    fn to(word: &str, into: bool, assigned: &Assigned) -> Move {
+    /// `make`'s move to the directory `word` names, a variable the line
+    /// assigned read as its value; one it did not is [`Move::Unsaid`].
+    fn to(word: &str, make: fn(String) -> Move, assigned: &Assigned) -> Move {
         let plain = (!word.starts_with('$')).then(|| word.to_owned());
-        match assigned.directory(word).or(plain) {
-            Some(dir) if into => Move::Into(dir),
-            Some(dir) => Move::Reaches(dir),
-            None => Move::Unsaid,
-        }
+        assigned
+            .directory(word)
+            .or(plain)
+            .map_or(Move::Unsaid, make)
     }
 
     /// The tree git reaches by an assignment of `value` to `name`, where
     /// it is `GIT_DIR` or `GIT_WORK_TREE`.
     fn git_tree(name: &str, value: &str, assigned: &Assigned) -> Option<Move> {
-        matches!(name, "GIT_DIR" | "GIT_WORK_TREE").then(|| Move::to(value, false, assigned))
+        let tree = matches!(name, "GIT_DIR" | "GIT_WORK_TREE");
+        tree.then(|| Move::to(value, Move::Reaches, assigned))
     }
 }
 
@@ -883,7 +907,8 @@ impl Argv {
             let options = at + 1;
             at = options;
             while let Some(option) = words.get(at).filter(|w| w.starts_with('-')) {
-                at += 1 + usize::from(valued.contains(&option.as_str()));
+                let takes = valued.iter().any(|v| self::valued(option, v) == Some(""));
+                at += 1 + usize::from(takes);
             }
             let own = words.get(options..at).unwrap_or_default();
             moves.extend(Move::of(name, own, assigned));
@@ -1423,8 +1448,17 @@ mod tests {
             [vec![], vec![reaches("/wt/.git")]]
         );
         assert_eq!(
-            moves("patch -d /wt -p1 < f; cp -t /wt a; ln -sf /m/seams.toml ."),
-            [[into("/wt")], [reaches("/wt")], [reaches("/m")]]
+            moves("patch -d /wt -p1 < f; cp -t /wt a; ln -sf -- /m/seams.toml ."),
+            [
+                vec![into("/wt")],
+                vec![reaches("/wt")],
+                vec![reaches("/m/seams.toml"), reaches(".")]
+            ]
+        );
+        // A short option in a cluster, or with its value attached.
+        assert_eq!(
+            moves("env -iC /wt ls; patch -d/wt; cp -vt /wt a"),
+            [[into("/wt")], [into("/wt")], [reaches("/wt")]]
         );
         assert_eq!(
             moves("find . -execdir rm {} +; env -C \"$X\" ls"),
