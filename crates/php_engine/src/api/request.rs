@@ -439,6 +439,13 @@ pub struct Request {
     /// an `eval` of a statement allocates nothing for its tree. Not the
     /// engine's published arena of rows, the `arena` above.
     compile_arena: php_compile::syntax::Arena,
+    /// The last request-only unit the request gave up
+    /// ([`Request::give_back`]), whose main op array's tables the next
+    /// compile lays its own down in and in whose room the next unit is
+    /// published (#3028): php's `destroy_op_array` gives an `eval`'s op
+    /// array back to the request's heap, from which the next `eval`'s is
+    /// `emalloc`ed.
+    spare_unit: Option<php_unit::SpareUnit>,
     /// Whether the string compiling now is one the host evaluates of its
     /// own, which `zend_eval_stringl` compiles with `CG(compiler_options)`
     /// at `ZEND_COMPILE_DEFAULT_FOR_EVAL`, so without the engine's
@@ -1042,6 +1049,7 @@ impl Request {
             record: recording::Record::default(),
             keys_made: 0,
             compile_arena: php_compile::syntax::Arena::new(),
+            spare_unit: None,
             compiling_host_string: false,
             no_extensions: false,
             script_encodings: None,

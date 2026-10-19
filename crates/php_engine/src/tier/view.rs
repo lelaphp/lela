@@ -79,7 +79,7 @@ impl Epoch {
     pub fn fixture(mut unit: php_unit::Unit) -> (Epoch, FuncRef) {
         let numbers = std::sync::atomic::AtomicU32::new(0);
         crate::engine::assign_map_ptrs(&mut unit, &numbers);
-        let unit = unit.published();
+        let unit = unit.published(None);
         let files = crate::unit_cache::Files::new(1);
         files.funcs.publish(&unit);
         let arena = Arena::of_engine(Arc::from([]), 0, files, crate::arena::Interned::default());

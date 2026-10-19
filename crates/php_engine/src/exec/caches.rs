@@ -168,12 +168,35 @@ impl RuntimeCaches {
         })
     }
 
+    /// `unit`, whose last share its holder is giving up: the numbers
+    /// its op arrays held handed out again, their caches emptied, as php
+    /// frees a heap cache with its op array, so the next unit takes them
+    /// with no scan. A unit another share holds, or one the request did
+    /// not take, keeps what it holds.
+    pub(crate) fn release(&mut self, unit: &PublishedUnit) {
+        let Some(at) = self.held.iter().rposition(|(held, _)| {
+            std::ptr::eq(held.as_ptr(), PublishedUnit::as_ptr(unit)) && held.strong_count() == 1
+        }) else {
+            return;
+        };
+        let (_, mut numbers) = self.held.swap_remove(at);
+        for &number in &numbers {
+            *self.request.map(MapPtr::new(number)) = RuntimeCache::default();
+        }
+        self.free.append(&mut numbers);
+        self.spare.push(numbers);
+    }
+
     /// A unit compiled for this request alone, shared from here on: each
     /// of its op arrays given a number of the request's, a number of a
     /// unit nothing holds any longer first, whose cache was emptied as
     /// the unit was found over, as php frees a heap cache with its op
     /// array.
-    pub(crate) fn take(&mut self, mut unit: Unit) -> PublishedUnit {
+    pub(crate) fn take(
+        &mut self,
+        mut unit: Unit,
+        room: Option<php_unit::SpareUnit>,
+    ) -> PublishedUnit {
         let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
         self.held.retain_mut(|(unit, numbers)| {
             if unit.strong_count() > 0 {
@@ -192,7 +215,7 @@ impl RuntimeCaches {
             code.runtime_cache = MapPtrOffset::Request(number);
             numbers.push(number);
         }
-        let unit = unit.published();
+        let unit = unit.published(room);
         self.held.push((PublishedUnit::downgrade(&unit), numbers));
         unit
     }

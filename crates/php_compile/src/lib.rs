@@ -392,9 +392,67 @@ pub fn compile_source(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    let made = compile_in(arena, source, options, strings);
+    compile_source_into(arena, source, options, strings, Room::default())
+}
+
+/// [`compile_source`] into `room`, the room of a unit the caller gave
+/// up, which the unit's main op array is laid down in ([`Room`]).
+pub fn compile_source_into(
+    arena: &mut Arena,
+    source: &[u8],
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+    room: Room,
+) -> Result<Unit, CompileError> {
+    let made = compile_in(arena, source, options, strings, room);
     arena.reset();
     made
+}
+
+/// The room a unit's main op array is laid down in, taken from a unit
+/// the caller gave up rather than asked of the allocator (#3028): its
+/// oplines' and its constants' vectors, emptied, and its file's name,
+/// which a unit of a name as long writes over. php `emalloc`s an
+/// `eval`'s op array and its tables from the request's heap, which the
+/// last one's `destroy_op_array` gave back, so an `eval` in a loop asks
+/// the system for nothing; a request that keeps the room of the unit it
+/// gave up last does the same.
+#[derive(Debug, Default)]
+pub struct Room {
+    oplines: Vec<php_unit::Opline>,
+    literals: Vec<php_heap::Zval>,
+    filename: Option<php_unit::decl::Name>,
+}
+
+impl Room {
+    /// The most bytes of one table a room keeps: a unit of a large file
+    /// gives its own up.
+    const KEPT: usize = 64 * 1024;
+
+    /// The room of `main`, the main op array of a unit given up: its
+    /// tables taken out emptied, each within [`Room::KEPT`], and its
+    /// file's name.
+    #[must_use]
+    pub fn of(main: &mut php_unit::OpArray) -> Room {
+        let mut oplines = std::mem::take(&mut main.oplines);
+        let mut literals = std::mem::take(&mut main.literals);
+        oplines.clear();
+        literals.clear();
+        Room {
+            oplines: kept(oplines),
+            literals: kept(literals),
+            filename: Some(std::mem::take(&mut main.filename)),
+        }
+    }
+}
+
+/// `table`, where its room is within [`Room::KEPT`].
+fn kept<T>(table: Vec<T>) -> Vec<T> {
+    if table.capacity() * size_of::<T>() <= Room::KEPT {
+        table
+    } else {
+        Vec::new()
+    }
 }
 
 /// [`compile_source`] in `arena`, where the parse and the compiler's
@@ -404,10 +462,11 @@ fn compile_in(
     source: &[u8],
     options: &Options<'_>,
     strings: &mut dyn Intern,
+    room: Room,
 ) -> Result<Unit, CompileError> {
     let Some(multibyte) = options.multibyte else {
         let parsed = php_syntax::parse(arena, source, &syntax_options(options));
-        return compile_scanned(arena, &parsed, options, strings, None);
+        return compile_scanned(arena, &parsed, options, strings, None, room);
     };
     let from = match options.kind {
         SourceKind::File => multibyte::Source::File {
@@ -430,7 +489,7 @@ fn compile_in(
         original: source.get(opened.bom..).unwrap_or_default(),
         filter: opened.filter,
     };
-    compile_scanned(arena, &parsed, options, strings, Some(scanning))
+    compile_scanned(arena, &parsed, options, strings, Some(scanning), room)
 }
 
 /// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
@@ -498,7 +557,7 @@ pub fn compile<'a>(
     options: &Options<'_>,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    compile_scanned(arena, parsed, options, strings, None)
+    compile_scanned(arena, parsed, options, strings, None, Room::default())
 }
 
 /// [`compile`] over a parse of what the scanner read through
@@ -509,6 +568,7 @@ fn compile_scanned<'p>(
     options: &Options<'p>,
     strings: &mut dyn Intern,
     scanning: Option<multibyte::Scanning<'p>>,
+    room: Room,
 ) -> Result<Unit, CompileError> {
     // `Parsed::diagnostics` is in php's order (design §6.1): the
     // scanner's and the parser's by position, the compiler's one after
@@ -556,7 +616,7 @@ fn compile_scanned<'p>(
     let halt = emit::walk::halt_offset(parsed).map(|offset| scanned.original_offset(offset));
     // The unit is finished where `unit` made it, and handed back as it
     // stands rather than moved out and into a result again.
-    let mut made = emit::unit(arena, parsed, options, strings, halt);
+    let mut made = emit::unit(arena, parsed, options, strings, halt, room);
     match &mut made {
         Ok(unit) => {
             if !raised.is_empty() {
@@ -1116,6 +1176,41 @@ mod tests {
             dump_under_short_open_tag(source, true),
             dump(2, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
             "on, the tag opens code and the 1 inside it is echoed"
+        );
+    }
+
+    /// A unit laid down in the room of one given up (#3028) is the unit
+    /// laid down in none, and an `eval` of one line in a loop takes its
+    /// oplines', its constants' and its file name's room from the last.
+    #[test]
+    fn a_unit_laid_down_in_a_room_is_the_unit_laid_down_in_none() {
+        let options = Options {
+            kind: SourceKind::EVAL,
+            filename: b"/a.php(2) : eval()'d code",
+            ..Options::default()
+        };
+        let mut arena = Arena::new();
+        let mut strings = php_heap::Strings::new();
+        let mut compile = |source: &[u8], room: Room| {
+            compile_source_into(&mut arena, source, &options, &mut strings, room)
+        };
+        let fresh = compile(b"echo 'a', 'b'; return 1;", Room::default()).unwrap_or_default();
+        let mut given_up = compile(b"echo 'c'; return 2;", Room::default()).unwrap_or_default();
+        assert!(!given_up.main.oplines.is_empty() && !fresh.main.oplines.is_empty());
+        let oplines = given_up.main.oplines.as_ptr();
+        let filename = given_up.main.filename.0.as_ptr();
+        let room = Room::of(&mut given_up.main);
+        let laid = compile(b"echo 'a', 'b'; return 1;", room).unwrap_or_default();
+        assert_eq!(fresh, laid);
+        assert_eq!(
+            laid.main.oplines.as_ptr(),
+            oplines,
+            "the oplines' room is the last unit's"
+        );
+        assert_eq!(
+            laid.main.filename.0.as_ptr(),
+            filename,
+            "the file's name is written over"
         );
     }
 

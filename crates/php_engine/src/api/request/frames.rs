@@ -532,7 +532,31 @@ impl Request {
     /// as php gives them caches on the heap, and none of the engine's
     /// offsets ([`exec::RuntimeCaches::take`]).
     pub(crate) fn take_unit(&mut self, unit: Unit) -> PublishedUnit {
-        self.map.take(unit)
+        let room = self.spare_unit.take();
+        self.map.take(unit, room)
+    }
+
+    /// The room the next compile lays its unit's main op array down in,
+    /// the tables of the last unit the request gave up
+    /// ([`Request::give_back`]).
+    pub(crate) fn compile_room(&mut self) -> php_compile::Room {
+        (self.spare_unit.as_mut())
+            .and_then(php_unit::SpareUnit::main_mut)
+            .map(php_compile::Room::of)
+            .unwrap_or_default()
+    }
+
+    /// `unit`'s share given up by the holder that kept it last, the
+    /// loop's ([`crate::tier`]): where nothing else holds it, its runtime
+    /// caches' numbers handed out again and its room kept for the next
+    /// unit the request compiles, as php's `destroy_op_array` frees an
+    /// `eval`'s op array to the request's heap (#3028); else the share
+    /// dropped.
+    pub(crate) fn give_back(&mut self, unit: PublishedUnit) {
+        self.map.release(&unit);
+        if let Ok(spare) = PublishedUnit::into_spare(unit) {
+            self.spare_unit = Some(spare);
+        }
     }
 
     /// The frame for `unit`'s main op array, `zend_vm_stack_push_call_frame`

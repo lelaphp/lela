@@ -1650,7 +1650,10 @@ impl Shared {
             },
             // A unit for every request is compiled on the thread that
             // asked, no request's arena at hand, so it brings its own.
-            &mut php_compile::syntax::Arena::new(),
+            Laid {
+                arena: &mut php_compile::syntax::Arena::new(),
+                room: php_compile::Room::default(),
+            },
         )
     }
 
@@ -1662,7 +1665,7 @@ impl Shared {
     pub(crate) fn publish_compiled(&self, mut unit: Unit) -> PublishedUnit {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
         unit.compact();
-        unit.published()
+        unit.published(None)
     }
 
     /// One source compiled for one request alone, under the request's
@@ -1711,6 +1714,7 @@ impl Shared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
+        let room = req.compile_room();
         let unit = req.compiling(|heap, request_classes, arena| {
             let origin = Origin {
                 filename,
@@ -1720,7 +1724,15 @@ impl Shared {
                 request_classes,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
-            compile(source, origin, ini, declared, stack, heap, arena)
+            compile(
+                source,
+                origin,
+                ini,
+                declared,
+                stack,
+                heap,
+                Laid { arena, room },
+            )
         });
         let unit = match unit {
             Ok(unit) => unit,
@@ -5695,7 +5707,8 @@ struct CompileIni {
 /// The unit's op arrays take their runtime caches where it is shared:
 /// offsets of the engine's as it is published ([`assign_map_ptrs`]), or
 /// numbers of the request's it was compiled for
-/// ([`exec::RuntimeCaches::take`]).
+/// ([`exec::RuntimeCaches::take`]). `laid` is where the compile lays its
+/// work down ([`Laid`]).
 fn compile(
     source: &[u8],
     origin: Origin<'_>,
@@ -5703,7 +5716,7 @@ fn compile(
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
-    arena: &mut php_compile::syntax::Arena,
+    laid: Laid<'_>,
 ) -> Result<Unit, CompileError> {
     let options = php_compile::Options {
         filename: origin.filename,
@@ -5725,7 +5738,17 @@ fn compile(
         hooked: declared.hooked,
         extended_info: declared.extended_info,
     };
-    php_compile::compile_source(arena, source, &options, strings)
+    php_compile::compile_source_into(laid.arena, source, &options, strings, laid.room)
+}
+
+/// Where a compile lays its work down: the arena its parse and the
+/// compiler's temporaries are bumped into, a request's or one of its
+/// own, and the room of a unit given up that the unit's main op array is
+/// laid down in ([`php_compile::Room`]), none where there is no such
+/// unit.
+struct Laid<'a> {
+    arena: &'a mut php_compile::syntax::Arena,
+    room: php_compile::Room,
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -7980,7 +8003,10 @@ mod tests {
                     Declared::default(),
                     StackLimit::UNCHECKED,
                     strings,
-                    &mut php_compile::syntax::Arena::new(),
+                    Laid {
+                        arena: &mut php_compile::syntax::Arena::new(),
+                        room: php_compile::Room::default(),
+                    },
                 )
             });
             assert!(compiled.is_ok(), "the source compiles");
@@ -8245,7 +8271,7 @@ mod tests {
             },
             ..Unit::default()
         };
-        let frame = req.pushed(unit.published());
+        let frame = req.pushed(unit.published(None));
         assert_eq!(
             crate::tier::execute::<Nop, Untold>(&mut req, frame),
             Err(Fatal::error(
@@ -8264,7 +8290,7 @@ mod tests {
         let unit = engine
             .unit(b"<?php echo 1;", b"witness.php")
             .map_or_else(Unit::default, |unit| Unit::clone(&unit));
-        let frame = req.pushed(unit.published());
+        let frame = req.pushed(unit.published(None));
         assert_eq!(
             crate::tier::execute::<Probe, Untold>(&mut req, frame),
             Ok(())
@@ -8290,7 +8316,7 @@ mod tests {
                 b"<?php function f($a, $b = 1) { return $a; } f(1); f(2, 3); f();",
                 b"witness.php",
             )
-            .unwrap_or_else(|| Unit::default().published());
+            .unwrap_or_else(|| Unit::default().published(None));
         req.declare_functions(&unit);
         let frame = req.pushed(unit);
         let outcome = crate::tier::execute::<Probe, Untold>(&mut req, frame);
