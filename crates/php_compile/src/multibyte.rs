@@ -440,6 +440,7 @@ impl Refusal {
             raised,
             thrown: self.thrown,
             stage: crate::Stage::Compiling,
+            declared: None,
         }
     }
 }
