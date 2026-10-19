@@ -944,7 +944,13 @@ impl Implementation {
         let Some(document) = Node::new_doc(Some(b"1.0")) else {
             return Err(dom_throw(req, Code::InvalidState));
         };
-        let mut private = Private::new(req)?;
+        let mut private = match Private::new(req) {
+            Ok(private) => private,
+            Err(thrown) => {
+                document.free_document();
+                return Err(thrown);
+            }
+        };
         document.set_doc_string(DocString::Encoding, Some(b"UTF-8"));
         let mut element = None;
         if !qualified_name.is_empty() {
@@ -954,7 +960,7 @@ impl Implementation {
                         req,
                         Some(document),
                         prefix.as_deref().unwrap_or_default(),
-                        Handed::given(namespace.as_ref().map(|n| n.0)),
+                        Handed::argument(namespace.as_ref().map(|n| n.0)),
                     );
                     let ns = match ns {
                         Ok(ns) => ns,

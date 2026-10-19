@@ -242,10 +242,11 @@ fn set_title(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), 
             {
                 let ns = match root.ns() {
                     Some(ns) if ns.prefix().is_some() => {
-                        crate::private::mapped(req, object, |mapper, req| {
+                        crate::private::with_mapper(req, object, |mapper, req| {
                             let svg = crate::private::Handed::Made(SVG_NS);
                             mapper.get_ns(req, Some(doc), crate::private::Handed::Empty, svg)
                         })?
+                        .flatten()
                     }
                     other => other,
                 };
@@ -271,8 +272,10 @@ fn set_title(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), 
             (Some(t), _) => t,
             (None, None) => return Ok(()),
             (None, Some(head)) => {
-                let ns =
-                    crate::private::mapped(req, object, |mapper, req| mapper.html(req, Some(doc)))?;
+                let ns = crate::private::with_mapper(req, object, |mapper, req| {
+                    mapper.html(req, Some(doc))
+                })?
+                .flatten();
                 let Some(element) = Node::new_element(Some(doc), ns, b"title", None) else {
                     return Err(crate::dom_throw(req, Code::InvalidState));
                 };

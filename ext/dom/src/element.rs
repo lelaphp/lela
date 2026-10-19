@@ -185,10 +185,11 @@ pub(crate) fn mapped_ns(
     prefix: Option<&[u8]>,
     uri: Option<PhpString>,
 ) -> Result<Option<Ns>, Thrown> {
-    let uri = crate::private::Handed::given(uri);
-    crate::private::mapped(req, object, |mapper, req| {
+    let uri = crate::private::Handed::argument(uri);
+    let ns = crate::private::with_mapper(req, object, |mapper, req| {
         mapper.get_raw_prefix(req, doc, prefix.unwrap_or_default(), uri)
-    })
+    })?;
+    Ok(ns.flatten())
 }
 
 /// `dom_remove_attribute`.
@@ -418,9 +419,10 @@ fn in_scope_namespace_info(
                 if table.iter().any(|(k, _)| *k == key) {
                     continue;
                 }
-                let found = crate::private::mapped(req, this, |mapper, req| {
+                let found = crate::private::with_mapper(req, this, |mapper, req| {
                     mapper.get_raw(req, doc, prefix.as_deref(), Some(&content))
-                })?;
+                })?
+                .flatten();
                 table.push((key, found));
             }
         }

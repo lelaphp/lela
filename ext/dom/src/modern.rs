@@ -268,7 +268,7 @@ pub(crate) fn convert_to_modern(
     object: PhpObject,
     doc: f::Node,
 ) -> Result<(), Thrown> {
-    crate::private::mapped(req, object, |mapper, req| {
+    crate::private::with_mapper(req, object, |mapper, req| {
         let mut at = doc.children();
         while let Some(node) = at {
             if node.kind() == php_ext_libxml::ffi::Kind::Element {
@@ -276,7 +276,7 @@ pub(crate) fn convert_to_modern(
             }
             at = crate::next_in_tree_order_from(node, None);
         }
-        Ok(Some(()))
+        Ok(())
     })
     .map(drop)
 }

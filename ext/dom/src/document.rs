@@ -1055,9 +1055,10 @@ fn modern_import(
     if node.doc() == Some(doc) {
         return object_for(req, node, Some(this));
     }
-    let copy = crate::private::mapped(req, this, |mapper, req| {
+    let copy = crate::private::with_mapper(req, this, |mapper, req| {
         crate::node::clone_node_modern(req, mapper, node, Some(doc), deep)
-    })?;
+    })?
+    .flatten();
     let Some(copy) = copy else {
         return Err(crate::dom_throw(req, Code::InvalidState));
     };
@@ -2127,7 +2128,9 @@ impl Document {
             return Err(crate::dom_throw(req, Code::InvalidCharacter));
         }
         let node = if doc.kind() == Kind::HtmlDocument {
-            let ns = crate::private::mapped(req, this, |mapper, req| mapper.html(req, Some(doc)))?;
+            let ns =
+                crate::private::with_mapper(req, this, |mapper, req| mapper.html(req, Some(doc)))?
+                    .flatten();
             Node::new_element(Some(doc), ns, &name.to_ascii_lowercase(), None)
         } else {
             Node::new_element(Some(doc), None, name, None)

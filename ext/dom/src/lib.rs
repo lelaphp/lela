@@ -1715,8 +1715,8 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> Result
         if modern::follows_spec(req, doc_obj) {
             node.unlink();
             node.set_tree_doc(Some(doc));
-            reconciled = private::mapped(req, doc_obj, |mapper, req| {
-                mapper.reconcile(req, Some(doc), node).map(Some)
+            reconciled = private::with_mapper(req, doc_obj, |mapper, req| {
+                mapper.reconcile(req, Some(doc), node)
             })
             .map(drop);
         } else if !node.adopt_into(doc) {

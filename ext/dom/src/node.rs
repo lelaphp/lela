@@ -1180,10 +1180,16 @@ fn clone_node_of(
     if follows_spec(req, this) {
         if is_document {
             let mut private = Private::new(req)?;
-            let cloned = clone_node_modern(req, &mut private.mapper, n, n.doc(), recursive);
-            let Ok(Some(node)) = cloned else {
-                private.free(req);
-                return cloned.map(|_| Owner::bool(false));
+            let node = match clone_node_modern(req, &mut private.mapper, n, n.doc(), recursive) {
+                Ok(Some(node)) => node,
+                Ok(None) => {
+                    private.free(req);
+                    return Ok(Owner::bool(false));
+                }
+                Err(thrown) => {
+                    private.free(req);
+                    return Err(thrown);
+                }
             };
             let copy =
                 crate::modern::document_object(req, modern_document_class(n), node, private)?;

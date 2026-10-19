@@ -21,7 +21,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{Kind, Node, NodeObject, Ns, PrivateData};
 
 use crate::document::XMLNS_NS;
@@ -35,13 +35,20 @@ pub(crate) const MATHML_NS: &[u8] = b"http://www.w3.org/1998/Math/MathML";
 /// `DOM_XLINK_NS_URI`.
 pub(crate) const XLINK_NS: &[u8] = b"http://www.w3.org/1999/xlink";
 
-/// `sizeof(php_dom_private_data)` on the pinned 64-bit build, less the
-/// namespace mapper's `HashTable` it embeds: the header's two pointers,
-/// the mapper's two declarations and `template_fragments`
-/// (`Z/ext/dom/private_data.h`). The table's 56 bytes are the header of
-/// the mapper's [`PhpArray`], so the two allocations read php's 96 in
-/// `memory_get_usage()`.
-const PRIVATE_DATA: usize = 96 - 56;
+/// `sizeof(php_dom_private_data)` on the pinned 64-bit build: the
+/// header's two pointers, the namespace mapper's table and two
+/// declarations, and `template_fragments` (`Z/ext/dom/private_data.h`).
+const PRIVATE_DATA: usize = 96;
+
+/// `HT_MIN_SIZE`, the size `zend_hash_real_init_mixed` lays a table down
+/// at.
+const HT_MIN_SIZE: usize = 8;
+
+/// `HT_SIZE_EX(size, HT_SIZE_TO_MASK(size))`: a bucket a slot and two
+/// hash words a slot.
+const fn hash_size(size: usize) -> usize {
+    size * 40
+}
 
 /// `sizeof(xmlNs)` on the pinned 64-bit build, what `dom_create_owned_ns`
 /// `emalloc`s for a declaration.
@@ -87,18 +94,10 @@ impl Private {
     /// `php_dom_private_data_create`: `emalloc(sizeof(*private_data))`,
     /// an empty mapper and no templates; the `Err` is the memory limit.
     pub(crate) fn new(req: &mut Request) -> Result<Private, Thrown> {
-        let charge = Emalloc::new(req, PRIVATE_DATA)?;
-        let mapper = match Mapper::new(req) {
-            Ok(mapper) => mapper,
-            Err(thrown) => {
-                charge.free(req);
-                return Err(thrown);
-            }
-        };
         Ok(Private {
-            mapper,
+            mapper: Mapper::default(),
             templates: Vec::new(),
-            charge: Some(charge),
+            charge: Some(Emalloc::new(req, PRIVATE_DATA)?),
         })
     }
 
@@ -173,7 +172,7 @@ pub(crate) enum Handed<'a> {
 impl Handed<'_> {
     /// A PHP argument that may be null, which an entry point reads as the
     /// empty string.
-    pub(crate) fn given(argument: Option<PhpString>) -> Handed<'static> {
+    pub(crate) fn argument(argument: Option<PhpString>) -> Handed<'static> {
         argument.map_or(Handed::Empty, Handed::Given)
     }
 
@@ -189,50 +188,137 @@ impl Handed<'_> {
     }
 }
 
-/// A declaration a prefix table names, `DOM_Z_OWNED` or `DOM_Z_UNOWNED`:
-/// one the mapper made, with the `emalloc` php's is, or one a parser made
-/// and the mapper only knows.
-struct Decl {
-    ns: Ns,
-    owned: Option<Emalloc>,
+/// A declaration a prefix table names.
+enum Decl {
+    /// `DOM_Z_OWNED`: one the mapper made, charged the `emalloc` php's is.
+    Owned { ns: Ns, charge: Emalloc },
+    /// `DOM_Z_UNOWNED`: one a parser made, which the mapper only knows.
+    Parsed(Ns),
+}
+
+impl Decl {
+    fn ns(&self) -> Ns {
+        match self {
+            Decl::Owned { ns, .. } | Decl::Parsed(ns) => *ns,
+        }
+    }
+}
+
+/// Where a declaration stands in the mapper's list, what a prefix table's
+/// row holds in the place of php's `xmlNsPtr`: written as the row's value
+/// and read back from it here and nowhere else.
+#[derive(Clone, Copy)]
+struct DeclAt(usize);
+
+impl DeclAt {
+    /// The row's value. A list of declarations never outgrows `i64`.
+    fn value(self) -> Owner<Value> {
+        Owner::int(i64::try_from(self.0).unwrap_or(i64::MAX))
+    }
+
+    /// The place a row's value names.
+    fn read(value: &Value) -> Option<DeclAt> {
+        value
+            .as_int()
+            .and_then(|n| usize::try_from(n).ok())
+            .map(DeclAt)
+    }
+}
+
+/// One row of `uri_to_prefix_map`: the URI's string, which the bucket
+/// keeps as its key, and the URI's table of prefixes, an `emalloc`'d
+/// `HashTable` as php's is.
+struct UriRow {
+    key: Owner<PhpString>,
+    prefixes: Owner<PhpArray>,
+}
+
+/// `uri_to_prefix_map`, the `HashTable` php embeds in the private data, so
+/// only its data is an allocation of its own: laid down at the first row
+/// by `zend_hash_real_init_mixed` and doubled when full by
+/// `zend_hash_do_resize`, the new data allocated before the old is freed,
+/// as `zend_hash` grows a table no row leaves. The rows are in their order.
+#[derive(Default)]
+struct UriTable {
+    rows: Vec<UriRow>,
+    data: Option<Emalloc>,
+}
+
+impl UriTable {
+    /// `zend_hash_find`: the prefix table `uri` keys.
+    fn find(&self, uri: &[u8]) -> Option<PhpArray> {
+        self.rows
+            .iter()
+            .find(|row| row.key.as_bytes() == uri)
+            .map(|row| *row.prefixes)
+    }
+
+    /// `zend_hash_add_new`: room made for the row, then the row; the
+    /// `Err` is the memory limit, the row given up.
+    fn add(&mut self, req: &mut Request, row: UriRow) -> Result<PhpArray, Thrown> {
+        if let Err(thrown) = self.make_room(req) {
+            row.key.give_up(req);
+            row.prefixes.give_up(req);
+            return Err(thrown);
+        }
+        let prefixes = *row.prefixes;
+        self.rows.push(row);
+        Ok(prefixes)
+    }
+
+    fn make_room(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        let size = match &self.data {
+            None => {
+                self.data = Some(Emalloc::new(req, hash_size(HT_MIN_SIZE))?);
+                return Ok(());
+            }
+            Some(data) => data.len() / hash_size(1),
+        };
+        if self.rows.len() < size {
+            return Ok(());
+        }
+        let grown = Emalloc::new(req, hash_size(size * 2))?;
+        if let Some(old) = self.data.replace(grown) {
+            old.free(req);
+        }
+        Ok(())
+    }
+
+    /// `zend_hash_destroy`: each prefix table destroyed and each key
+    /// released, in order, then the data freed.
+    fn destroy(&mut self, req: &mut Request) {
+        for row in self.rows.drain(..) {
+            row.prefixes.give_up(req);
+            row.key.give_up(req);
+        }
+        if let Some(data) = self.data.take() {
+            data.free(req);
+        }
+    }
 }
 
 /// `php_dom_libxml_ns_mapper`: one declaration per prefix and URI.
+#[derive(Default)]
 pub(crate) struct Mapper {
     /// Cached, since an HTML document asks for it for every element.
     html: Option<Ns>,
     /// Cached, since every prefixless `xmlns` attribute of XML asks.
     prefixless_xmlns: Option<Ns>,
-    /// `uri_to_prefix_map`: each URI the key of its own table, whose
-    /// prefixes are the keys of the declarations' places in `decls`;
-    /// none once [`Mapper::destroy`] gave it back.
-    table: Option<Owner<PhpArray>>,
+    /// `uri_to_prefix_map`: each URI's table, whose prefixes key the
+    /// places of their declarations in `decls`.
+    table: UriTable,
     /// The declarations the prefix tables name.
     decls: Vec<Decl>,
 }
 
 impl Mapper {
-    /// `zend_hash_init(&uri_to_prefix_map, 0, ...)`: the table's header,
-    /// its buckets laid down by the first URI; the `Err` is the memory
-    /// limit.
-    fn new(req: &mut Request) -> Result<Mapper, Thrown> {
-        Ok(Mapper {
-            html: None,
-            prefixless_xmlns: None,
-            table: Some(PhpArray::new(req)?),
-            decls: Vec::new(),
-        })
-    }
-
     /// `zend_hash_destroy(&uri_to_prefix_map)`: every URI's table with
     /// its keys, and each declaration the mapper made `efree`d.
     fn destroy(&mut self, req: &mut Request) {
-        if let Some(table) = self.table.take() {
-            table.give_up(req);
-        }
+        self.table.destroy(req);
         for decl in self.decls.drain(..) {
-            if let Some(owned) = decl.owned {
-                owned.free(req);
+            if let Decl::Owned { charge, .. } = decl {
+                charge.free(req);
             }
         }
         self.html = None;
@@ -241,32 +327,26 @@ impl Mapper {
 
     /// `php_dom_libxml_ns_mapper_ensure_prefix_map`: `uri`'s table of
     /// prefixes, an `emalloc`'d `HashTable` keyed by `uri` the first
-    /// time. `None` once the mapper is destroyed; the `Err` is the memory
-    /// limit.
-    fn prefix_map(
-        &mut self,
-        req: &mut Request,
-        uri: PhpString,
-    ) -> Result<Option<PhpArray>, Thrown> {
-        let Some(table) = self.table.as_mut() else {
-            return Ok(None);
-        };
-        if let Some(found) = table.find(uri.as_bytes())
-            && let Some(prefixes) = found.as_array()
-        {
-            return Ok(Some(*prefixes));
+    /// time; the `Err` is the memory limit.
+    fn prefix_map(&mut self, req: &mut Request, uri: PhpString) -> Result<PhpArray, Thrown> {
+        if let Some(prefixes) = self.table.find(uri.as_bytes()) {
+            return Ok(prefixes);
         }
         let prefixes = PhpArray::new(req)?;
-        let view = *prefixes;
-        let key = Owner::take(req, uri).into_key();
-        table.set(req, key, prefixes.into_value())?;
-        Ok(Some(view))
+        let key = Owner::take(req, uri);
+        self.table.add(req, UriRow { key, prefixes })
     }
 
     /// The declaration a prefix table names under `prefix`.
     fn named(&self, prefixes: PhpArray, prefix: &[u8]) -> Option<Ns> {
-        let at = prefixes.find(prefix)?.as_int()?;
-        self.decls.get(usize::try_from(at).ok()?).map(|d| d.ns)
+        let at = DeclAt::read(&prefixes.find(prefix)?)?;
+        self.decls.get(at.0).map(Decl::ns)
+    }
+
+    /// A declaration put at the end of the list, and its place.
+    fn push(&mut self, decl: Decl) -> DeclAt {
+        self.decls.push(decl);
+        DeclAt(self.decls.len() - 1)
     }
 
     /// `php_dom_libxml_ns_mapper_get_ns`: the declaration of `uri` under
@@ -333,28 +413,22 @@ impl Mapper {
         if prefix.is_empty() && uri.is_empty() {
             return Ok(None);
         }
-        let Some(mut prefixes) = self.prefix_map(req, uri)? else {
-            return Ok(None);
-        };
+        let mut prefixes = self.prefix_map(req, uri)?;
         if let Some(found) = self.named(prefixes, prefix.as_bytes()) {
             return Ok(Some(found));
         }
-        let owned = Emalloc::new(req, XML_NS)?;
+        let charge = Emalloc::new(req, XML_NS)?;
         let Some(ns) = Ns::owned(
             Some(uri.as_bytes()),
             (!prefix.is_empty()).then_some(prefix.as_bytes()),
         ) else {
-            owned.free(req);
+            charge.free(req);
             return Ok(None);
         };
         ns.move_to_old(doc);
-        let at = i64::try_from(self.decls.len()).unwrap_or(i64::MAX);
-        self.decls.push(Decl {
-            ns,
-            owned: Some(owned),
-        });
+        let at = self.push(Decl::Owned { ns, charge });
         let key = Owner::take(req, prefix).into_key();
-        prefixes.set(req, key, Owner::int(at))?;
+        prefixes.set(req, key, at.value())?;
         Ok(Some(ns))
     }
 
@@ -423,14 +497,11 @@ impl Mapper {
         let held = Handed::Made(&href).hold(req)?;
         let prefixes = self.prefix_map(req, *held);
         held.give_up(req);
-        let Some(mut prefixes) = prefixes? else {
-            return Ok(());
-        };
+        let mut prefixes = prefixes?;
         let prefix = ns.prefix().unwrap_or_default();
         if prefixes.find(&prefix).is_none() {
-            let at = i64::try_from(self.decls.len()).unwrap_or(i64::MAX);
-            self.decls.push(Decl { ns, owned: None });
-            prefixes.set_str(req, &prefix, Owner::int(at))?;
+            let at = self.push(Decl::Parsed(ns));
+            prefixes.set_str(req, &prefix, at.value())?;
         }
         Ok(())
     }
@@ -630,17 +701,19 @@ pub(crate) fn of(obj: &mut NodeObject) -> Option<&mut Private> {
 
 /// `php_dom_get_ns_mapper(intern)`: `call` served with the mapper of
 /// `object`'s document and the request beside it; `None` where the object
-/// keeps no private data.
-pub(crate) fn mapped<R>(
+/// keeps no private data. The mapper reaches no object, so the borrow of
+/// the object's libxml half beside the request is never read through
+/// while `call` runs.
+pub(crate) fn with_mapper<R>(
     req: &mut Request,
     object: PhpObject,
-    call: impl FnOnce(&mut Mapper, &mut Request) -> Result<Option<R>, Thrown>,
+    call: impl FnOnce(&mut Mapper, &mut Request) -> Result<R, Thrown>,
 ) -> Result<Option<R>, Thrown> {
-    let Some(mut obj) = crate::libxml_half(req, object) else {
+    let Some(mut obj) = crate::dom_mut(req, object).map(|d| d.obj.borrow()) else {
         return Ok(None);
     };
     match of(&mut obj) {
-        Some(private) => call(&mut private.mapper, req),
+        Some(private) => call(&mut private.mapper, req).map(Some),
         None => Ok(None),
     }
 }
