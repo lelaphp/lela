@@ -128,12 +128,19 @@ impl Hasher for Word {
 /// reads.
 pub(super) struct RequestState {
     states: States<(TypeId, Box<dyn Any + Send>)>,
+    /// The states a test asked kept past the request's end
+    /// ([`Request::keep_states`]): what a debug build's leak sensor drops
+    /// is set aside here instead, for the test to take back.
+    #[cfg(any(test, feature = "test"))]
+    kept: Option<States<(TypeId, Box<dyn Any + Send>)>>,
 }
 
 impl Default for RequestState {
     fn default() -> RequestState {
         RequestState {
             states: States::new(),
+            #[cfg(any(test, feature = "test"))]
+            kept: None,
         }
     }
 }
@@ -155,7 +162,34 @@ impl Request {
     /// it held. A state touched after this is built afresh.
     #[cfg(debug_assertions)]
     pub(super) fn drop_request_states(&mut self) {
+        #[cfg(any(test, feature = "test"))]
+        if self.state.kept.is_some() {
+            self.state.kept = Some(std::mem::replace(&mut self.state.states, States::new()));
+            return;
+        }
         drop(std::mem::take(&mut self.state));
+    }
+
+    /// The request's states kept past its end for the test that serves
+    /// it, which takes one back with [`Request::take_kept_state`].
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn keep_states(&mut self) {
+        self.state.kept = Some(States::new());
+    }
+
+    /// The request state of type `T` as the request left it: where the
+    /// end set it aside, or where it stands; none for a type the request
+    /// never built.
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn take_kept_state<T: Send + 'static>(&mut self) -> Option<T> {
+        let wanted = TypeId::of::<T>();
+        let held = match &mut self.state.kept {
+            Some(kept) if kept.iter().any(|(id, _)| *id == wanted) => kept,
+            _ => &mut self.state.states,
+        };
+        let at = held.iter().position(|(id, _)| *id == wanted)?;
+        let (_, state) = held.remove(at);
+        state.downcast::<T>().ok().map(|state| *state)
     }
 
     /// The request state of the calling extension, `T` being the type it

@@ -126,9 +126,55 @@ impl Engine {
         name: &[u8],
         source: &str,
         env: Vec<(Vec<u8>, Vec<u8>)>,
-        mut sink: Capture,
+        sink: Capture,
         traced: bool,
     ) -> Served {
+        let (description, sink) = self.capture_description(dir, name, source, env, sink);
+        let sink = Box::new(sink);
+        let (observables, entered, sink) = if traced {
+            self.serve_traced(description, sink)
+        } else {
+            let (observables, sink) = self.serve(description, sink, |_| HostServes::Program);
+            (observables, Vec::new(), sink)
+        };
+        served(observables, entered, sink)
+    }
+
+    /// [`Engine::serve_capture_in`], and the request state of type `T` as
+    /// the request left it once it ended, where the request built one:
+    /// what a test tier declared through `Tier::extension()` read back by
+    /// the test that served the program (`tier::serve_kept`).
+    pub(crate) fn serve_capture_keeping<T: Send + 'static>(
+        &self,
+        dir: &Path,
+        name: &[u8],
+        source: &str,
+    ) -> (Served, Option<T>) {
+        let (description, sink) =
+            self.capture_description(dir, name, source, Vec::new(), Capture::default());
+        let program = description.source.clone();
+        let mut req = match self.begin(description, Box::new(sink), false) {
+            Ok(req) => req,
+            Err((refused, sink)) => return (served(refused, Vec::new(), sink), None),
+        };
+        req.keep_states();
+        self.serve_in(&mut req, program.as_deref(), HostServes::Program);
+        let (observables, entered, sink) = self.shutdown(&mut req);
+        let kept = req.take_kept_state::<T>();
+        (served(observables, entered, sink), kept)
+    }
+
+    /// The CLI's description of a request serving `source` as `name` in
+    /// `dir`, and `sink` with the op arrays written to it first where
+    /// `opcache.opt_debug_level` asks for them.
+    fn capture_description(
+        &self,
+        dir: &Path,
+        name: &[u8],
+        source: &str,
+        env: Vec<(Vec<u8>, Vec<u8>)>,
+        mut sink: Capture,
+    ) -> (RequestDescription, Capture) {
         // `sapi_cli_register_variables`' rows, as the CLI host describes
         // them: a piped source has no file behind it.
         let file: &[u8] = if name == b"Standard input code" {
@@ -164,23 +210,25 @@ impl Engine {
         if let Some(arrays) = self.dump_before_optimizer(&description) {
             sink.write_stderr(&arrays);
         }
-        let sink = Box::new(sink);
-        let (observables, entered, sink) = if traced {
-            self.serve_traced(description, sink)
-        } else {
-            let (observables, sink) = self.serve(description, sink, |_| HostServes::Program);
-            (observables, Vec::new(), sink)
-        };
-        let sink: Capture = handed_back(sink).unwrap_or_default();
-        Served {
-            stdout: sink.stdout,
-            stderr: sink.stderr,
-            headers: sink.headers,
-            log: sink.log,
-            exit_code: observables.exit_code,
-            fatal: observables.fatal,
-            entered,
-        }
+        (description, sink)
+    }
+}
+
+/// What a served request handed back, as a test reads it.
+fn served(
+    observables: crate::engine::Observables,
+    entered: Vec<Entered>,
+    sink: Box<dyn OutputSink + Send>,
+) -> Served {
+    let sink: Capture = handed_back(sink).unwrap_or_default();
+    Served {
+        stdout: sink.stdout,
+        stderr: sink.stderr,
+        headers: sink.headers,
+        log: sink.log,
+        exit_code: observables.exit_code,
+        fatal: observables.fatal,
+        entered,
     }
 }
 

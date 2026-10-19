@@ -4830,7 +4830,7 @@ impl Engine {
     /// What a started request serves, then each extension's hook for the
     /// moment after it, which php-fpm's `fastcgi_request_done` stands at
     /// for a page as for a program.
-    fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
+    pub(crate) fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
         match serves {
             HostServes::Program => {
                 self.execute_script(req, source);

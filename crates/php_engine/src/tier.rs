@@ -218,6 +218,24 @@ pub fn set_trace_num(req: &mut Request, n: TraceNum) {
     req.set_trace_num(n);
 }
 
+/// `source` served on `engine` as the test face serves a program named
+/// `name` in `dir` ([`crate::test::Engine::serve_capture_in`]), and the
+/// request state of type `T` as the request left it once it ended: what
+/// a tier under test kept in the state it declared through
+/// [`Tier::extension`], read back by the test that served the program,
+/// since a tier keeps nothing anywhere else (`jit-design.md` §8). None
+/// where the request built no such state.
+#[cfg(any(test, feature = "test"))]
+#[must_use]
+pub fn serve_kept<T: Send + 'static>(
+    engine: &crate::engine::Engine,
+    dir: &std::path::Path,
+    name: &[u8],
+    source: &str,
+) -> (crate::test::Served, Option<T>) {
+    engine.serve_capture_keeping(dir, name, source)
+}
+
 /// What one `step` did to the frame chain (`jit-design.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stepped {

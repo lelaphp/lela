@@ -1051,6 +1051,13 @@ impl<T> States<T> {
     pub(crate) fn get_mut(&mut self, at: usize) -> Option<&mut T> {
         self.0.get_mut(at)
     }
+
+    /// The state held at `at` taken out, the rest closing up behind it:
+    /// what a test takes back from a request that ended.
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn remove(&mut self, at: usize) -> T {
+        self.0.remove(at)
+    }
 }
 
 impl<T> FromIterator<T> for States<T> {
