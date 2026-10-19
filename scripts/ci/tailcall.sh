@@ -18,6 +18,9 @@
 #                                         and each directory of <tree>'s
 #                                         `tests/` with `--engine` on that
 #                                         build
+#   scripts/ci/tailcall.sh restore        the runs `phpt` keeps put back as
+#                                         they stood before `phpt`, where a
+#                                         killed run left them set aside
 #
 # <corpus> and <tree> are the corpus action's outputs: the file `xtask
 # status --section corpus --format json` was written to, whose `hosts` are
@@ -39,14 +42,40 @@ set -euo pipefail
 
 TOOLCHAIN=nightly-2026-10-15
 
+# The workspace root, whatever directory it is run from.
+cd "$(dirname "$0")/../.."
 target=target/tailcall
 read -ra xtask <<<"${XTASK:-cargo xtask}"
 export RUSTFLAGS='--cfg dispatch="tailcall"'
 
+# `phpt` keeps a whole subset's run by the tree the engine is built from
+# (xtask/src/phpt/against.rs), which the threaded build shares with the
+# shipped one, so the kept runs, the targets under the pin among them, are
+# set aside before the subsets and put back as they stood after: a base
+# `--against` or `done` reads is never the threaded build's. The EXIT trap
+# puts them back, and dashboard.yml's step after the subsets runs `restore`
+# whatever ended them, a timeout included.
+runs=target/harness/phpt-runs
+aside=$target/phpt-runs-aside
+restore() {
+    [ -d "$aside" ] || return 0
+    rm -rf "$runs" || return 1
+    mv "$aside" "$runs"
+}
+
+usage="usage: scripts/ci/tailcall.sh check | phpt <corpus> <tree> | restore"
 case ${1:-} in
-check | phpt) ;;
+check) ;;
+phpt)
+    corpus=${2:?$usage}
+    tree=${3:?$usage}
+    ;;
+restore)
+    restore
+    exit
+    ;;
 *)
-    echo "usage: scripts/ci/tailcall.sh check | phpt <corpus> <tree>" >&2
+    echo "$usage" >&2
     exit 2
     ;;
 esac
@@ -58,24 +87,23 @@ check)
     cargo "+$TOOLCHAIN" check -p php_engine --target-dir "$target"
     ;;
 phpt)
-    corpus=${2:?the file the corpus action wrote the corpus section to}
-    tree=${3:?the pinned php-src, as the corpus action checked it out}
     packages=()
-    while read -r package; do packages+=(-p "$package"); done < <(jq -er '.hosts[].package' "$corpus")
+    while read -r package; do packages+=(-p "$package"); done < <(jq -r '.hosts[].package' "$corpus")
     [ ${#packages[@]} -gt 0 ] || { echo "::error::xtask status --section corpus names no host"; exit 1; }
     echo "the hosts built under the cfg: ${packages[*]}"
     cargo "+$TOOLCHAIN" build --profile release-da --target-dir "$target" "${packages[@]}"
     # The harness is built on the pinned toolchain with no cfg.
     unset RUSTFLAGS
-    # `phpt` keeps a whole subset's run by the tree the engine is built
-    # from (xtask/src/phpt/against.rs), which the threaded build shares
-    # with the shipped one, so the kept runs are put back as they stood
-    # once the lane has run: a base `--against` or `done` reads is never
-    # the threaded build's. The targets under the pin are kept there too.
-    runs=target/harness/phpt-runs
-    aside=$(mktemp -d)
-    if [ -d "$runs" ]; then cp -cR "$runs" "$aside/" 2>/dev/null || cp -R "$runs" "$aside/"; fi
-    trap 'rm -rf "$runs"; if [ -d "$aside/phpt-runs" ]; then mv "$aside/phpt-runs" "$runs"; fi; rm -rf "$aside"' EXIT
+    # A set-aside a killed run left behind is older than the runs the
+    # shipped lane has kept since, so it is dropped, not put back.
+    rm -rf "$aside"
+    mkdir -p "$target"
+    if [ -d "$runs" ]; then
+        cp -cR "$runs" "$aside" 2>/dev/null || { rm -rf "$aside"; cp -R "$runs" "$aside"; }
+    else
+        mkdir -p "$aside"
+    fi
+    trap restore EXIT
     engine=$target/release-da/php
     failed=0
     "${xtask[@]}" phpt --engine "$engine" --subset Zend/tests || failed=1
