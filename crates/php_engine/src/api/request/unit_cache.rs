@@ -483,14 +483,7 @@ impl Request {
             Lookup::AsWritten => written.and_then(|written| self.written_key(written)),
             Lookup::Resolved => None,
         };
-        let disk = file_cache
-            .as_ref()
-            .map(|file_cache| disk(file_cache, &shared.units.build));
-        let levels = match disk {
-            None => Levels::Memory,
-            Some(disk) if memory => Levels::Both(disk),
-            Some(disk) => Levels::Disk(disk),
-        };
+        let levels = levels(file_cache.as_ref(), memory, &shared.units.build);
         // `persistent_compile_file` opens the file to resolve its path
         // wherever the lookup by the key misses.
         let by_key = written
@@ -511,23 +504,28 @@ impl Request {
         let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
         let (arena, cwd) = (Arc::clone(&self.arena), &self.cwd);
+        // What the compile read and the most `CG(loop_var_stack)` held.
         let scanned = std::cell::Cell::new(None);
         let (compiled, filed, early) = shared.units.file(
             &arena.files,
             asked,
             |source| {
-                scanned.set(Some(source.len()));
-                shared.compile_file(source, path, cwd, stack, request_classes, multibyte)
+                let compiled =
+                    shared.compile_file(source, path, cwd, stack, request_classes, multibyte);
+                let loops = compiled.as_ref().map_or(0, |unit| unit.loop_vars);
+                scanned.set(Some((source.len(), loops)));
+                compiled
             },
             |body| shared.decode_kept(body),
             |unit| shared.publish_compiled(unit),
             |unit| self.publish_unit(unit),
         );
+        self.note_loop_vars(scanned.get().map_or(0, |(_, loops)| loops));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
         // The primary file compiled through the host's handle, which
         // `zend_stream_fixup` reads it into and `CG(open_files)` lists.
         if handle == HandlePath::Host
-            && let Some(len) = scanned.get()
+            && let Some((len, _)) = scanned.get()
         {
             self.fill_primary_handle(len).ok();
         }
@@ -587,13 +585,7 @@ impl Request {
             self.open_include_stream(full, args.handle);
         }
         let shared = Arc::clone(&self.shared);
-        Some(shared.compile_for(
-            self,
-            &source,
-            args.path,
-            SourceKind::File,
-            super::ConstantHome::Unit,
-        ))
+        Some(shared.compile_for(self, &source, args.path, SourceKind::File))
     }
 
     /// `do_validate_timestamps` over a held copy whose stat is due
@@ -968,6 +960,20 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
         directory: &file_cache.directory,
         read_only: file_cache.read_only,
         build,
+    }
+}
+
+/// The levels a lookup asks: shared memory where `memory`, the file
+/// cache where one is configured, or both.
+fn levels<'a>(
+    file_cache: Option<&'a FileCache>,
+    memory: bool,
+    build: &'a [u8; crate::unit_cache::BUILD],
+) -> Levels<'a> {
+    match file_cache.map(|file_cache| disk(file_cache, build)) {
+        None => Levels::Memory,
+        Some(disk) if memory => Levels::Both(disk),
+        Some(disk) => Levels::Disk(disk),
     }
 }
 

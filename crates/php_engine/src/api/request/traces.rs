@@ -480,7 +480,7 @@ impl Request {
                         (Some(class), _) => Some(self.class_name_string(class)?),
                         (None, Some(this)) => {
                             let name = this.handlers(self).get_class_name(self, this);
-                            Some(self.op_array_string(&name)?)
+                            Some(self.declared_string(&name)?.hand_on())
                         }
                         (None, None) => None,
                     };
@@ -496,8 +496,8 @@ impl Request {
                         } else {
                             Known::PaamayimNekudotayim
                         };
-                        let join = Value::string(self.known(join)?);
-                        self.set_string_key(&mut row, Known::Type, Owner::adopt(join))?;
+                        let join = self.known(join)?.into_value();
+                        self.set_string_key(&mut row, Known::Type, join)?;
                     }
                     if !ignore_arguments {
                         let args = self.trace_row_arguments(function, arguments, named)?;
@@ -523,8 +523,8 @@ impl Request {
                             Owner::adopt(Value::array(args)),
                         )?;
                     }
-                    let name = Value::string(self.known(kind.known())?);
-                    self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
+                    let name = self.known(kind.known())?.into_value();
+                    self.set_string_key(&mut row, Known::Function, name)?;
                 }
                 Traced::Unknown => {
                     let name = Value::string(self.string(b"unknown")?);
@@ -555,9 +555,9 @@ impl Request {
             Some(Some(held)) => Ok(PhpString::of(held)),
             Some(None) => {
                 let name = self.declared_name(function);
-                self.op_array_string(name.as_bytes())
+                self.declared_string(name.as_bytes()).map(Owner::hand_on)
             }
-            None => self.op_array_string(b"native"),
+            None => self.declared_string(b"native").map(Owner::hand_on),
         }
     }
 
@@ -571,7 +571,7 @@ impl Request {
             return Ok(PhpString::of(held));
         }
         let name = self.class_name_bytes(class);
-        self.op_array_string(&name)
+        self.declared_string(&name).map(Owner::hand_on)
     }
 
     /// The string of a row's file: the one the row before copied where
@@ -589,7 +589,7 @@ impl Request {
             self.addref(&Value::string(*file));
             return Ok(*file);
         }
-        let file = self.op_array_string(bytes)?;
+        let file = self.declared_string(bytes)?.hand_on();
         *last = Some((at.clone(), file));
         Ok(file)
     }
@@ -1413,7 +1413,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         // `ZSTR_KNOWN(ZEND_STR_FILE)` and its kin.
         let key = match self.known(name) {
-            Ok(name) => Owner::take(self, Key::Str(name)),
+            Ok(name) => name.into_key(),
             Err(thrown) => {
                 value.give_up(self);
                 return Err(thrown);

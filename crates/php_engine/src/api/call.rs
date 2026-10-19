@@ -1926,7 +1926,7 @@ fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<Cla
             let class = if bare.len() < name.len() {
                 req.string(bare)?
             } else {
-                req.declared_string(bare)?
+                req.standing_string(bare)?
             };
             let returned = serve(req, loader.target(), &[Value::string(class)], &[]);
             req.release(Value::string(class));
@@ -2301,7 +2301,7 @@ pub(crate) fn eval_declared_made(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     if let ConstExpr::Str(s) = expr {
-        return Ok(Value::string(req.declared_string(s)?));
+        return Ok(req.declared_string(s)?.into_value().hand_on());
     }
     eval_const_expr_made(req, expr, scope)
 }
@@ -2614,10 +2614,9 @@ fn class_name_node(
     } else {
         class.to_vec()
     };
-    // `ZVAL_STR_COPY(result, ce->name)`: the class's interned name, which
-    // for a class the engine or the bundle declared costs the request
-    // nothing.
-    Ok(Value::string(req.declared_string(&name)?))
+    // `ZVAL_STR_COPY(result, ce->name)`: the class's name, which for a
+    // class the engine or the bundle declared costs the request nothing.
+    Ok(req.declared_string(&name)?.into_value().hand_on())
 }
 
 /// `_IS_BOOL`, the type code a `(bool)` cast carries.

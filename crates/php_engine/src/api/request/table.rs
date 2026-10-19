@@ -675,7 +675,8 @@ impl Request {
     /// The key php's table holds each declared slot of `class` under,
     /// in slot order: `zend_mangle_property_name`'s `\0*\0p` for a
     /// protected property, `\0C\0p` for a private one `C` declared, and
-    /// the name itself for a public one, interned as php's are.
+    /// the name itself for a public one, the string the declaration
+    /// holds ([`Request::kept_string`]), views.
     pub(crate) fn slot_names(&mut self, class: ClassId) -> Result<Vec<php_heap::Str>, Thrown> {
         let slots = self.placed_properties(class).len();
         let mut names = Vec::with_capacity(slots);
@@ -707,7 +708,7 @@ impl Request {
         let prefix = self
             .property_prefix(declaring, property.visibility)
             .unwrap_or_default();
-        let name = self.declared_string(&[prefix.as_slice(), &property.name.0].concat())?;
+        let name = self.kept_string(&[prefix.as_slice(), &property.name.0].concat())?;
         Ok(Some(name.heap()))
     }
 

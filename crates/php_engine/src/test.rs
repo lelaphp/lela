@@ -8,7 +8,9 @@ use std::any::Any;
 use std::path::Path;
 
 pub use crate::engine::Engine;
-use crate::engine::{FileHandles, HostServes, OutputSink, RequestDescription, ResponseHead};
+use crate::engine::{
+    FileHandles, HostServes, OutputSink, ProgramFile, RequestDescription, ResponseHead,
+};
 
 /// An in-process sink: everything the request wrote, kept, the way
 /// php's CLI has it. `stderr` is the CLI's second stream whole: each
@@ -129,25 +131,24 @@ impl Engine {
     /// bytes.
     pub fn serve_through(&self, source: &str) -> Served {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let (description, _) = self.capture_description(
+        let (description, dumped) = self.capture_description(
             &cwd,
             b"Standard input code",
-            source,
+            Some(source),
             Vec::new(),
             Capture::default(),
         );
-        let (observables, _) = self.serve(description, Box::new(Through), |_| HostServes::Program);
+        let mut through = Through;
+        through.write_stderr(&dumped.stderr);
+        let (observables, _) = self.serve(description, Box::new(through), |_| HostServes::Program);
         served(observables, Vec::new(), Box::new(Capture::default()))
     }
 
     /// [`Engine::serve_capture`] with the request named `name`: what
     /// `$_SERVER['SCRIPT_NAME']` and `$argv[0]` read, and, expanded
     /// against the working directory as php opens its primary file,
-    /// what `__FILE__` and every diagnostic's `in %s` read (#1569). The
-    /// witness lane's linked adapter serves
-    /// each snippet under the recipe's `script_name` this way, as the
-    /// fresh-process adapter runs it as that file (#293), which under the
-    /// CLI is `argv` of that one word.
+    /// what `__FILE__` and every diagnostic's `in %s` read (#1569), which
+    /// under the CLI is `argv` of that one word.
     pub fn serve_capture_as(&self, name: &[u8], source: &str, sink: Capture) -> Served {
         let cwd = std::env::current_dir().unwrap_or_default();
         self.serve_capture_in(&cwd, name, source, sink)
@@ -155,37 +156,41 @@ impl Engine {
 
     /// [`Engine::serve_capture_as`] with the request's working directory
     /// `dir` rather than the process's: what `__DIR__`, a relative
-    /// `include` and `getcwd()` read. The witness lane's linked adapter
-    /// serves each snippet in the scratch tree the file stands in, as the
-    /// fresh-process adapter runs it there, so an `include` of the
-    /// witness's own file reads the same file under both.
+    /// `include` and `getcwd()` read.
     pub fn serve_capture_in(&self, dir: &Path, name: &[u8], source: &str, sink: Capture) -> Served {
-        self.serve_capture_with(dir, name, source, Vec::new(), sink, false)
+        self.serve_capture_with(dir, name, Some(source), Vec::new(), sink, false)
     }
 
-    /// [`Engine::serve_capture_in`] under the environment `env`, what
-    /// `getenv()`, `$_ENV` and `$_SERVER` read, with every native the
-    /// request enters recorded in [`Served::entered`]: what the witness
-    /// lane's linked adapter serves a fence through, under the recipe's
-    /// environment as the oracle runs (#1077), so coverage is what the
-    /// fence ran (harness §4.5 condition 2, revision 58). The others
-    /// serve under none, so what a test reads is the same on any shell.
+    /// The file `name` in `dir`, which the caller has written, served as
+    /// php's CLI serves `php <name>` in `dir`: compiled as a file,
+    /// through the unit cache, and held open while it is served
+    /// ([`crate::engine::ProgramFile::Opened`]), so a name the program
+    /// holds is in the table php compiles a file's names into, where
+    /// `zend_string_init_existing_interned` finds it (#2985). It is served
+    /// under the environment `env`, what `getenv()`, `$_ENV` and
+    /// `$_SERVER` read, with every native the request enters recorded in
+    /// [`Served::entered`]: what the witness lane's linked adapter serves
+    /// a fence through, the file standing in the scratch tree the oracle
+    /// serves it in, under the recipe's environment as the oracle has it
+    /// (#1077), so coverage is what the fence reached (harness §4.5 condition
+    /// 2, revision 58). The others serve a source handed over as a piped
+    /// one is, under no environment, so what a test reads is the same on
+    /// any shell.
     pub fn serve_capture_traced_in(
         &self,
         dir: &Path,
         name: &[u8],
-        source: &str,
         env: Vec<(Vec<u8>, Vec<u8>)>,
         sink: Capture,
     ) -> Served {
-        self.serve_capture_with(dir, name, source, env, sink, true)
+        self.serve_capture_with(dir, name, None, env, sink, true)
     }
 
     fn serve_capture_with(
         &self,
         dir: &Path,
         name: &[u8],
-        source: &str,
+        source: Option<&str>,
         env: Vec<(Vec<u8>, Vec<u8>)>,
         sink: Capture,
         traced: bool,
@@ -212,7 +217,7 @@ impl Engine {
         source: &str,
     ) -> (Served, Option<T>) {
         let (description, sink) =
-            self.capture_description(dir, name, source, Vec::new(), Capture::default());
+            self.capture_description(dir, name, Some(source), Vec::new(), Capture::default());
         let program = description.source.clone();
         let mut req = match self.begin(description, Box::new(sink), false) {
             Ok(req) => req,
@@ -226,13 +231,14 @@ impl Engine {
     }
 
     /// The CLI's description of a request serving `source` as `name` in
-    /// `dir`, and `sink` with the op arrays written to it first where
-    /// `opcache.opt_debug_level` asks for them.
+    /// `dir`, as a piped source is handed over, or where there is none the
+    /// file `name` as the CLI opens it, and `sink` with the op arrays
+    /// written to it first where `opcache.opt_debug_level` asks for them.
     fn capture_description(
         &self,
         dir: &Path,
         name: &[u8],
-        source: &str,
+        source: Option<&str>,
         env: Vec<(Vec<u8>, Vec<u8>)>,
         mut sink: Capture,
     ) -> (RequestDescription, Capture) {
@@ -259,9 +265,13 @@ impl Engine {
             server,
             sapi_name: String::from("cli"),
             script_name: Some(name.to_vec()),
-            source: Some(source.as_bytes().to_vec()),
+            source: source.map(|source| source.as_bytes().to_vec()),
             cwd: dir.to_path_buf(),
             file_handles: Some(piped()),
+            program_file: match source {
+                Some(_) => ProgramFile::default(),
+                None => ProgramFile::Opened,
+            },
             process_title: crate::engine::ProcessTitle::Unsaved,
             ..RequestDescription::default()
         };
