@@ -8,6 +8,7 @@ What CI's runners are made of, as Mitchell ruled on 2026-10-07 (#2218, #2253): t
 - `oracle-variants.sh` lays each oracle variant the pin names for this machine at its path, held to its md5: a binary already there with the pin's md5 is left, and an absent or other one is built with `scripts/oracle-build.py` from the pinned tree the corpus action checked out (#2298). A build that does not reproduce the md5 is laid nowhere, kept beside the path as a refusal the later jobs repeat without building again, and fails its step, which both jobs run with `continue-on-error`, so the lanes under the variant read the binary as absent or not the pin's and every other lane runs; the difference is a person's to settle. Both `oracle` jobs run it after the corpus action, and `runner.sh mac` makes each variant's directory the runner's. `DRY_RUN=1` says what it would build and builds nothing.
 - `bound-target.sh` holds a runner's `target/` under `DAX_TARGET_GIB`, the bound `runner.sh` writes into each runner's environment (#2299). Every building job runs it through `.github/actions/workspace`: it logs the directory's size, and where that is past the bound, or a job of `main` finds the toolchain moved since `main`'s last job, it removes everything under `target/` but the phpt targets under the current pin (`xtask status --section corpus`'s `targets`) and uninstalls the toolchain that moved. The bound is provisional until the runners' growth is measured; `runner.sh` says why it is the number it is.
 - `red-main.sh` files a red `main` once (#1156). `DRY_RUN=1` prints what it would write.
+- `tailcall.sh` is the lane that holds the threaded dispatch, `cfg(dispatch = "tailcall")` (#2905), on a dated nightly, as Mitchell ruled on #2970 (harness-design.md §7). `check` is harness.yml's per-commit `cargo +<nightly> check -p php_engine` under the cfg; `phpt <corpus> <tree>` is dashboard.yml's nightly, the hosts built under the cfg in `release-da` and `Zend/tests` and each directory of `tests/` run with `--engine` on that build, the runs `phpt` keeps set aside before the subsets and put back after, which `restore` does where a killed run left them set aside. The nightly is `tailcall.sh`'s `TOOLCHAIN` line, the one place it is named, so moving it is that line; a nightly that breaks the check is moved past, not followed. It installs the nightly where the runner has not yet, and builds in `target/tailcall`, so the shipped build stays warm.
 
 ## `DAX_BUILD_RUNNER`: the Linux jobs on a hosted image
 
@@ -17,7 +18,7 @@ Until `dax-build` is online (#2296), the Linux jobs run on GitHub-hosted Linux, 
 runs-on: ${{ fromJSON(vars.DAX_BUILD_RUNNER || '["self-hosted","linux","dax-build"]') }}
 ```
 
-That is `regions`, `per-commit`, `miri`, `done` and `red-main` in `harness.yml`, and `measure`, `soak`, `publish` and `deploy` in `dashboard.yml`.
+That is `regions`, `per-commit`, `miri`, `tailcall`, `done` and `red-main` in `harness.yml`, and `measure`, `soak`, `publish` and `deploy` in `dashboard.yml`.
 
 - **Unset** (or empty), every job runs on `[self-hosted, linux, dax-build]`, as before the variable existed.
 - **Set**, its value is a JSON list of runner labels. The value to set is the hosted Ubuntu 26.04 image, the release `packages.txt` names (#1724):
