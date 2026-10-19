@@ -163,11 +163,15 @@ impl Heap {
         Heap::over(mm::Mm::new())
     }
 
-    /// [`Heap::new`], its chunks taken from the engine's `cache` and given
-    /// back to it when the heap drops, as a php-fpm child keeps its heap's
-    /// chunks from one request to the next (`zend_mm_shutdown(full=0)`):
-    /// what the heap reads is a new heap's. A request of a php-fpm child
-    /// starts on the one chunk its heap kept:
+    /// A heap that starts from the newest heap the engine's `cache` keeps
+    /// and is kept there when it drops, as a php-fpm child keeps its heap
+    /// from one request to the next (`zend_mm_shutdown(full=0)`): the kept
+    /// heap's main chunk laid down again, its cached chunks counted in
+    /// `memory_get_usage(true)` and its real peak, and its
+    /// `avg_chunks_count` carried on; [`Heap::new`]'s one mapped chunk
+    /// where the cache keeps none. Each chunk it grows by comes from its
+    /// own cached chunks before it maps one. A request of a php-fpm child
+    /// whose last request held one chunk starts on that chunk:
     ///
     /// ```php
     /// echo memory_get_usage(true), ' ', memory_get_peak_usage(true), ' ', ini_get('memory_limit'), "\n";
