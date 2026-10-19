@@ -1009,20 +1009,25 @@ impl Request {
     /// reuses.
     /// With the room, where the callee's record stands, which the
     /// call's header names ([`Request::callee_at`]); none for a callee
-    /// no table holds one for, whose push makes it.
+    /// no table holds one for, whose push makes it; and what the call's
+    /// flags take of a user callee
+    /// ([`crate::api::request::FrameShape::sent`]), none of a
+    /// native's.
     #[inline]
     pub(crate) fn call_room(
         &self,
         function: Function,
         count: u32,
-    ) -> (usize, crate::readable::CalleeAt) {
-        match self.user_function(function) {
-            Some(user) => (
+    ) -> (usize, crate::readable::CalleeAt, exec::CallInfo) {
+        if let Some(user) = self.user_function(function) {
+            return (
                 usize::try_from(user.shape.room(count)).unwrap_or(usize::MAX),
                 user.callee_at(),
-            ),
-            None => self.call_room_past_user(function, count),
+                user.shape.sent,
+            );
         }
+        let (room, callee) = self.call_room_past_user(function, count);
+        (room, callee, exec::CallInfo::default())
     }
 
     /// [`Request::call_room`] of a callee that is no user function: a
@@ -1052,8 +1057,12 @@ impl Request {
     /// write its arguments into, `header` laid down whole; a page the
     /// memory limit refuses is the fatal php raises there.
     pub(crate) fn push_call(&mut self, mut header: exec::Header) -> Result<FrameRef, Fatal> {
-        let (_, room, callee) = self.callee_room(&header)?;
+        let Some(function) = header.function else {
+            return Err(Fatal::error("InternalError: a call pushed with no callee"));
+        };
+        let (room, callee, sent) = self.call_room(function, header.num_args);
         header.callee = callee;
+        header.info.join(sent);
         self.push_room(room, header)
     }
 
@@ -1105,20 +1114,6 @@ impl Request {
             self.release_zval_nogc(operand);
         }
         self.vm.stack.pop_frame(&mut self.heap);
-    }
-
-    /// The callee `header` names and the room its call takes
-    /// ([`Request::call_room`]); a header with no callee is the engine's
-    /// error.
-    fn callee_room(
-        &self,
-        header: &exec::Header,
-    ) -> Result<(Function, usize, crate::readable::CalleeAt), Fatal> {
-        let Some(function) = header.function else {
-            return Err(Fatal::error("InternalError: a call pushed with no callee"));
-        };
-        let (room, callee) = self.call_room(function, header.num_args);
-        Ok((function, room, callee))
     }
 
     /// A call pushed with `room` slots past its header, which the caller
@@ -1234,7 +1229,7 @@ impl Request {
     /// The callee of the call being built, which a `SEND_*_EX` reads the
     /// parameter's by-reference bit off (`ARG_MUST_BE_SENT_BY_REF`).
     pub(crate) fn building_call_function(&self) -> Option<Function> {
-        self.vm.at(self.building_call()?)?.function
+        self.vm.building()?.function
     }
 
     /// The call being served where it is a native's ([`Vm::serving_at`]):

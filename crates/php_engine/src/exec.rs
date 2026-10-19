@@ -769,6 +769,18 @@ impl CallInfo {
     /// nothing executing below it, where the walk another process makes
     /// of the chain ends (`fpm_php_trace_dump`).
     const TOP_CODE: u32 = 1 << 10;
+    /// `quick_arg_flags` (`ZEND_CHECK_ARG_FLAG`, `Z/Zend/zend_compile.h`)
+    /// as the `INIT` read it off a user callee
+    /// ([`crate::api::request::FrameShape::sent`]): the bit this many
+    /// places up, and `n - 1` more, set where the argument numbered `n`,
+    /// up to [`CallInfo::QUICK`], goes by value for certain, its
+    /// parameter, or past the declared ones the variadic, taking none by
+    /// reference. Clear where the declaration is asked, as it is for a
+    /// call whose `INIT` wrote nothing, a native's.
+    const BY_VALUE_AT: u32 = 11;
+    /// `MAX_ARG_FLAG_NUM`: how many arguments [`CallInfo::BY_VALUE_AT`]
+    /// covers.
+    const QUICK: u32 = 12;
 
     /// The flags as another process read them ([`crate::readable`]).
     pub(crate) fn of(bits: u32) -> CallInfo {
@@ -879,6 +891,35 @@ impl CallInfo {
 
     pub(crate) fn frameless(self) -> bool {
         self.has(Self::FRAMELESS)
+    }
+
+    /// The by-value bits of a function whose argument numbered `n` is
+    /// taken by reference where `by_ref(n)` says so
+    /// ([`CallInfo::BY_VALUE_AT`]), what its `INIT` writes.
+    pub(crate) fn sent(by_ref: impl Fn(u32) -> bool) -> CallInfo {
+        let bits = (1..=Self::QUICK)
+            .filter(|&number| !by_ref(number))
+            .fold(0, |bits, number| {
+                bits | 1 << (Self::BY_VALUE_AT + number - 1)
+            });
+        CallInfo(bits)
+    }
+
+    /// `!QUICK_ARG_SHOULD_BE_SENT_BY_REF(EX(call)->func, number)` where
+    /// the `INIT` wrote it: the argument numbered `number` goes by value
+    /// for certain. `false` past [`CallInfo::QUICK`] and where nothing
+    /// was written, which asks the declaration.
+    #[inline]
+    pub(crate) fn sends_by_value(self, number: u32) -> bool {
+        let at = number.wrapping_sub(1);
+        at < Self::QUICK && self.0 & 1 << (Self::BY_VALUE_AT + at) != 0
+    }
+
+    /// The bits `more` sets set here too: what an `INIT` writes of its
+    /// callee into the call's flags.
+    #[inline]
+    pub(crate) fn join(&mut self, more: CallInfo) {
+        self.0 |= more.0;
     }
 
     pub(crate) fn set_frameless(&mut self, on: bool) {
@@ -1836,10 +1877,17 @@ impl Vm {
     /// The call the `SEND_*` oplines are placing arguments into, the
     /// one on top of the stack while it is being built.
     pub(crate) fn building_at(&self) -> Option<FrameRef> {
-        let top = self.stack.current();
-        self.at(top)
-            .is_some_and(|header| header.info.building())
-            .then_some(top)
+        let (top, frame) = self.stack.top()?;
+        frame.header().info.building().then_some(top)
+    }
+
+    /// The header of the call being built ([`Vm::building_at`]), what a
+    /// `SEND_*` reads of `EX(call)`.
+    #[inline]
+    pub(crate) fn building(&self) -> Option<&Header> {
+        let (_, frame) = self.stack.top()?;
+        let header = frame.header();
+        header.info.building().then_some(header)
     }
 
     /// `EX(opline) = EG(exception_op)` on `frame`, or the frame back at

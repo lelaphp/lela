@@ -1708,6 +1708,7 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
     let room = user.shape.room(op.extended_value);
     let mut header = exec::Header::call(function, op.extended_value);
     header.callee = user.callee_at();
+    header.info.join(user.shape.sent);
     Some(match req.push_room(room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
@@ -1932,7 +1933,7 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 /// where the callee's parameter at the number takes its argument by
 /// value, as php's `_EX` handlers go to the same arm once
 /// `ARG_SHOULD_BE_SENT_BY_REF` is clear, which `ex` asks of the callee
-/// ([`Request::arg_send_mode`]).
+/// ([`exec::CallInfo::sends_by_value`], then [`Request::arg_send_mode`]).
 ///
 /// ```php
 /// function f($a, $b, $c) { return "$a|$b|$c"; }
@@ -1970,7 +1971,9 @@ fn inline_send(
     if !header.info.building()
         || to >= header.num_args as usize
         || !callee.slots().get(to)?.is_undef()
-        || ex && req.arg_send_mode(header.function?, op.op2).0
+        || ex
+            && !header.info.sends_by_value(op.op2)
+            && req.arg_send_mode(header.function?, op.op2).0
     {
         return None;
     }
@@ -2092,12 +2095,54 @@ fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
 /// the `INIT` resolved: whether the parameter numbered `number` takes
 /// its argument by reference, and whether only where it can
 /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past the
-/// declared ones.
+/// declared ones. The bit the `INIT` wrote answers the first twelve
+/// arguments of a user callee with no lookup, as
+/// `QUICK_ARG_SHOULD_BE_SENT_BY_REF` reads `quick_arg_flags`
+/// ([`exec::CallInfo::sends_by_value`]); the declaration answers the
+/// rest. Below, the twelfth argument is the last the bits answer, the
+/// thirteenth goes by value and the fourteenth by reference as the
+/// declaration says, a variadic's take every argument past the declared
+/// ones, a name takes its parameter's, and a constant where a reference
+/// is taken is php's `Error`:
+///
+/// ```php
+/// if (PHP_VERSION_ID > 0) {
+///     function r1(&$a) { $a = 'r1'; }
+///     function r12($a1, $a2, $a3, $a4, $a5, $a6, $a7, $a8, $a9, $a10, $a11, &$a12, $a13, &$a14) { $a12 = 'r12'; $a14 = 'r14'; }
+///     function rv($a, &...$v) { foreach ($v as &$x) { $x = 'v'; } }
+///     function rn($a, &$b = null) { $b = 'n'; }
+/// }
+/// r1($x);
+/// r12(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, $y, $w, $z);
+/// rv(0, $p, $q);
+/// rn(1, b: $n);
+/// var_dump($x, $y, $w, $z, $p, $q, $n);
+/// try { r1(1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { r12(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: Undefined variable $w in %s on line 9
+///
+/// Warning: Undefined variable $w in %s on line 12
+/// string(2) "r1"
+/// string(3) "r12"
+/// NULL
+/// string(3) "r14"
+/// string(1) "v"
+/// string(1) "v"
+/// string(1) "n"
+/// r1(): Argument #1 ($a) could not be passed by reference
+/// r12(): Argument #12 ($a12) could not be passed by reference
+/// ```
 fn send_mode(req: &Request, number: u32) -> (bool, bool) {
-    req.building_call_function()
-        .map_or((false, false), |function| {
-            req.arg_send_mode(function, number)
-        })
+    match req.vm().building() {
+        Some(call) if !call.info.sends_by_value(number) => {
+            call.function.map_or((false, false), |function| {
+                req.arg_send_mode(function, number)
+            })
+        }
+        _ => (false, false),
+    }
 }
 
 /// `ARG_SHOULD_BE_SENT_BY_REF`: by reference, or by reference where it
@@ -2506,8 +2551,8 @@ pub(crate) fn send_func_arg<T: Tier>(
 /// `ZEND_CALL_INFO(EX(call)) & ZEND_CALL_SEND_ARG_BY_REF`: what the last
 /// `CHECK_FUNC_ARG` read for the call being built.
 fn sends_arg_by_ref(req: &Request) -> bool {
-    req.building_call()
-        .and_then(|call| req.vm().at(call))
+    req.vm()
+        .building()
         .is_some_and(|call| call.info.send_by_ref())
 }
 
@@ -5892,9 +5937,10 @@ fn inline_init_method_call(
     if !instance {
         return None;
     }
-    let (room, callee) = req.call_room(function, op.extended_value);
+    let (room, callee, sent) = req.call_room(function, op.extended_value);
     let mut header = exec::Header::call(function, op.extended_value);
     header.callee = callee;
+    header.info.join(sent);
     header.set_called_scope(Some(class));
     header.set_receiver(Some(match at {
         None => exec::Receiver::lent(object),

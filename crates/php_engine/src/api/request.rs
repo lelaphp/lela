@@ -760,6 +760,11 @@ pub(crate) struct FrameShape {
     /// off the shape and not off the declaration
     /// ([`Request::arg_send_mode`]).
     pub(crate) by_ref: bool,
+    /// php's `quick_arg_flags`, which of the first twelve arguments the
+    /// function takes by value, as the `INIT` of a call to it writes
+    /// them into the call's flags for the `SEND_*_EX` oplines to test
+    /// with no lookup ([`exec::CallInfo::sends_by_value`]).
+    pub(crate) sent: exec::CallInfo,
 }
 
 impl FrameShape {
@@ -785,8 +790,27 @@ impl FrameShape {
             }),
             cache_size: code.map_or(0, |code| code.cache_size),
             by_ref: decl.parameters.iter().any(|p| p.by_ref),
+            sent: exec::CallInfo::sent(|number| {
+                sent_parameter(decl, number).is_some_and(|parameter| parameter.by_ref)
+            }),
         }
     }
+}
+
+/// The parameter of `decl` the argument numbered `number` is sent to,
+/// `zend_check_arg_send_type`'s `arg_info`: the declared one at its
+/// place, or past the declared ones the variadic; none past them
+/// without one.
+pub(crate) fn sent_parameter(
+    decl: &FunctionDecl,
+    number: u32,
+) -> Option<&php_unit::decl::Parameter> {
+    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+    let variadic = decl.parameters.last().filter(|last| last.variadic);
+    decl.parameters
+        .get(at)
+        .filter(|parameter| !parameter.variadic)
+        .or(variadic)
 }
 
 /// A method as its class holds it: the class, `common.scope`, and
