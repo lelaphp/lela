@@ -24,7 +24,15 @@ php_ext_libxml = { path = "../libxml" }
 # ext/uri, whose `php_uri.h` types `zend_test_uri_parser` reads a parse
 # in, the parsers named through ext/standard's `UriParser` (design §4.10).
 php_ext_uri = { path = "../uri" }
+# `raise(3)` and the signal mask, for `zend_test_crash`'s `SIGSEGV`, in
+# `src/ffi/` alone (`unsafe.homes`).
+libc = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
+
+# `zend_test_crash`'s end, its process this test's own `main` (#2976).
+[[test]]
+name = "crash"
+harness = false
