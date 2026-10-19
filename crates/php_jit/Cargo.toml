@@ -1,8 +1,7 @@
 # php_jit: the compiled tier (jit-design.md; design §4.1, §4.3 seam 8;
 # ADR-0006), `php_bundle`'s `jit` feature on the four targets its
 # `[[crate]]` row names. It reads `php_engine` through `tier.lock` alone
-# (jit-design.md §5.3, §6), and binds no Cranelift crate until a trace is
-# lowered.
+# (jit-design.md §5.3, §6); `lower` alone names a Cranelift type.
 [package]
 name = "php_jit"
 version = "0.0.0"
@@ -20,6 +19,9 @@ php_engine = { path = "../php_engine" }
 php_unit = { path = "../php_unit" }       # the ini entries the tier declares (decl::IniDecl) and the op arrays the recorder reads, through unit.lock
 php_heap = { path = "../php_heap" }       # the type a sampled operand holds (ZvalType), through heap.lock
 libc = { workspace = true }               # the code arena's mapping and its cache maintenance on macOS (jit-design.md §4.4), already in the lock
+cranelift-codegen = { workspace = true }  # lower: the one module that names a Cranelift type (jit-design.md §4.3)
+cranelift-frontend = { workspace = true }
+cranelift-native = { workspace = true }
 
 [dev-dependencies]
 # `tier::Epoch::fixture`, an epoch over one unit, so policy's state machine

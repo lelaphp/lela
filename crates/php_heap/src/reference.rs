@@ -41,6 +41,10 @@ pub(crate) struct RefHeader {
     sources: Cell<usize>,
 }
 
+// The header at the block's start, where `Zval::counted` reads it for
+// every counted kind without asking which.
+const _: () = assert!(std::mem::offset_of!(RefHeader, gc) == 0);
+
 /// One reference: php's `zend_reference *`. Naming one does not keep it
 /// alive, exactly as php's pointer does not; the engine's kernels take
 /// and give up owners through [`crate::Heap::addref`] and
@@ -55,6 +59,11 @@ pub struct Ref(NonNull<RefHeader>);
 unsafe impl Send for Ref {}
 
 impl Ref {
+    /// Where in `zend_reference` the value it holds is, `val`: what the
+    /// compiled tier reads a variable seen through a reference at
+    /// (`jit-design.md` §4.3).
+    pub const VALUE_AT: usize = std::mem::offset_of!(RefHeader, val);
+
     fn header(&self) -> &RefHeader {
         // SAFETY: a `Ref` names a reference `init` laid down, live while
         // its owner holds it, which is php's `zend_reference *` contract.

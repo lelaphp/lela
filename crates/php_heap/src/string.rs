@@ -58,6 +58,10 @@ pub(crate) struct StrHeader {
     len: usize,
 }
 
+// The header at the block's start, where `Zval::counted` reads it for
+// every counted kind without asking which.
+const _: () = assert!(std::mem::offset_of!(StrHeader, gc) == 0);
+
 /// The header's size, php's `_ZSTR_HEADER_SIZE`.
 const HEADER: usize = size_of::<StrHeader>();
 

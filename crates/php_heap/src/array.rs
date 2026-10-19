@@ -46,7 +46,7 @@ use crate::mm::Mm;
 use crate::reference::Ref;
 use crate::sort::zend_sort;
 use crate::string::Str;
-use crate::{GivenUp, Heap, Last, Zval, ZvalRef, ZvalType};
+use crate::{Heap, Last, Zval, ZvalRef, ZvalType};
 
 /// Where an array's header and data come from: the request's heap for
 /// every array a request builds, which is what `memory_get_usage()`
@@ -399,6 +399,10 @@ pub(crate) struct ArrHeader {
     _dtor: u32,
 }
 
+// The header at the block's start, where `Zval::counted` reads it for
+// every counted kind without asking which.
+const _: () = assert!(std::mem::offset_of!(ArrHeader, gc) == 0);
+
 /// `Bucket`: a zval, the hash or the integer key, and the string key or
 /// none. Thirty-two bytes.
 #[repr(C)]
@@ -506,6 +510,21 @@ unsafe impl Sync for FrozenEmpty {}
 unsafe impl Send for FrozenEmpty {}
 
 impl Arr {
+    /// Where in `zend_array` its count is, `GC_REFCOUNT`, the word whose
+    /// pin sits above the count: one with nothing else in it names an
+    /// array its one holder may write in place, where its zval says it is
+    /// refcounted, as an immutable array's does not. What the compiled
+    /// tier reads its packed arrays through (`jit-design.md` §4.3).
+    pub const REFCOUNT_AT: usize = std::mem::offset_of!(ArrHeader, gc) + crate::gc::REFCOUNT_AT;
+    /// Where `u.flags` is, `HT_FLAGS`.
+    pub const FLAGS_AT: usize = std::mem::offset_of!(ArrHeader, flags);
+    /// php's `HASH_FLAG_PACKED`, a bit of the flags at [`Arr::FLAGS_AT`].
+    pub const PACKED: u32 = PACKED;
+    /// Where `arPacked` is: a packed array's slots, sixteen bytes each.
+    pub const DATA_AT: usize = std::mem::offset_of!(ArrHeader, data);
+    /// Where `nNumUsed` is: past it a packed array has no slot.
+    pub const USED_AT: usize = std::mem::offset_of!(ArrHeader, num_used);
+
     fn header(&self) -> &ArrHeader {
         // SAFETY: an `Arr` names an array `init` laid down, live while
         // its owner holds it, which is php's `zend_array *` contract.
@@ -2627,13 +2646,23 @@ impl crate::Heap {
     /// [`Heap::release`] of one element inside [`Heap::destroy`]: what it
     /// would destroy is handed back for the walk to take next.
     fn release_within(hooks: &mut dyn HeapHooks, z: Zval) -> Option<Last> {
-        match Heap::give_up(hooks, z) {
-            GivenUp::Owned => {
-                Heap::gc_check_possible_root(hooks, z);
+        let header = z.counted()?;
+        match Heap::give_up(header) {
+            gc::Release::Owned => {
+                Heap::owners_left(hooks, z, header);
                 None
             }
-            GivenUp::Freed => None,
-            GivenUp::Last(last) => Some(last),
+            gc::Release::Last => {
+                if let Some(a) = z.as_arr() {
+                    Some(Last::Table(a))
+                } else if let Some(r) = z.as_reference() {
+                    Some(Last::Cell(r))
+                } else {
+                    Heap::rc_dtor(hooks, z);
+                    None
+                }
+            }
+            gc::Release::Ownerless => None,
         }
     }
 

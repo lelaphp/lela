@@ -2,6 +2,11 @@
 Allocation
 AllocationObserverId
 Arr
+Arr::DATA_AT
+Arr::FLAGS_AT
+Arr::PACKED
+Arr::REFCOUNT_AT
+Arr::USED_AT
 Arr::addref
 Arr::backward
 Arr::contains
@@ -291,6 +296,7 @@ PropertyTable::table
 PropertyTable::used
 ROOM_BYTES
 Ref
+Ref::VALUE_AT
 Ref::addref
 Ref::is_same
 Ref::refcount
@@ -370,7 +376,11 @@ VmStack::top
 VmStack::top_mut
 VmStack::unlink_room
 Zval
+Zval::FLAGS_AT
+Zval::TYPE_AT
+Zval::TYPE_REFCOUNTED
 Zval::UNDEF
+Zval::addref
 Zval::array
 Zval::as_arr
 Zval::as_bool

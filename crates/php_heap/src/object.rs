@@ -99,6 +99,10 @@ pub(crate) struct ObjHeader {
     properties: Cell<Option<Arr>>,
 }
 
+// The header at the block's start, where `Zval::counted` reads it for
+// every counted kind without asking which.
+const _: () = assert!(std::mem::offset_of!(ObjHeader, gc) == 0);
+
 /// What an object's two lazy bits say of it (`zend_lazy_objects.h`):
 /// the strategy of an object nothing has initialised, or the proxy that
 /// forwards to the instance its factory returned. What goes with each,

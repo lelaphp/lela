@@ -734,7 +734,7 @@ impl Request {
         for (slot, value) in (0u32..).zip(&data.defaults) {
             match value {
                 Some(value) => {
-                    self.heap.addref(value.to_zval());
+                    value.to_zval().addref();
                     if let Some(at) = o.slot_ref(slot) {
                         at.write(value.to_zval());
                     }

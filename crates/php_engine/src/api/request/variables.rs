@@ -981,10 +981,43 @@ impl Request {
         }
     }
 
+    /// The key `zend_symtable_str_update_ind` makes a container of the
+    /// walk under: an integer where `ZEND_HANDLE_NUMERIC_STR` reads one,
+    /// and otherwise `zend_hash_str_update_ind`'s `zend_string_init`, a
+    /// string of its own however short, never the one-byte string
+    /// [`PhpString::new`] would share.
+    fn container_key(&mut self, index: &[u8]) -> Result<Owner<Key>, Thrown> {
+        match php_heap::canonical_int(index) {
+            Some(index) => Ok(Owner::index(index)),
+            None => Ok(Owner::adopt(self.string_init(index)?).into_key()),
+        }
+    }
+
     /// `php_register_variable_ex` into `track`, with `cookie` saying the
     /// track is `$_COOKIE`'s, whose plain name already there keeps the
     /// first value (RFC 2965's more specific path first). `value` is the
     /// array's from here, and so is each key the walk makes.
+    ///
+    /// A plain name is `php_register_variable_quick`'s, and a bracketed
+    /// name's containers are `zend_symtable_str_update_ind`'s, each a
+    /// string of its own whatever its length:
+    ///
+    /// ```php
+    /// foreach (['x=1', 'xy=1', 'x[a]=1', 'xy[a]=1', 'x[ab]=1', 'xy[ab]=1', 'x[a][b]=1', '1[a]=1', 'x[1]=1'] as $q) {
+    ///     $m = memory_get_usage(); parse_str($q, $r); $n = memory_get_usage() - $m; unset($r); echo $q, " ", $n, "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-off
+    /// x=1 408
+    /// xy=1 440
+    /// x[a]=1 816
+    /// xy[a]=1 816
+    /// x[ab]=1 848
+    /// xy[ab]=1 848
+    /// x[a][b]=1 1224
+    /// 1[a]=1 624
+    /// x[1]=1 656
+    /// ```
     pub(crate) fn register_in(
         &mut self,
         track: PhpArray,
@@ -1025,48 +1058,15 @@ impl Request {
         // The keys of the containers entered, each one owner of its own
         // until the walk ends, so the key names a string that stands.
         let mut path: Vec<Owner<Key>> = Vec::new();
-        let walked = self.walk_brackets(&place, &var, var_len, ip, index, &mut path, value);
-        for key in path {
-            key.give_up(self);
-        }
-        walked
-    }
-
-    /// `php_register_variable_ex`'s walk over the brackets after the
-    /// name, from the `[` at `ip`: each index one level of nested array
-    /// entered or made, its key kept in `path`, and `value` written at
-    /// the last.
-    #[allow(clippy::too_many_arguments)]
-    fn walk_brackets(
-        &mut self,
-        place: &Place<'_>,
-        var: &[u8],
-        var_len: usize,
-        mut ip: usize,
-        mut index: Option<Vec<u8>>,
-        path: &mut Vec<Owner<Key>>,
-        value: Owner<Value>,
-    ) -> Result<(), Thrown> {
-        let track = place.track;
-        let original = place.original;
-        let max_nesting = self.ini_long(b"max_input_nesting_level");
-        let mut nest = 0i64;
-        loop {
-            nest += 1;
-            if nest > max_nesting {
-                let top = match PhpString::new(self, &var[..var_len]) {
-                    Ok(top) => top,
-                    Err(thrown) => {
-                        value.give_up(self);
-                        return Err(thrown);
-                    }
-                };
-                let mut top_level = track;
-                let unset = top_level.unset(self, &Key::lookup(*top));
-                top.give_up(self);
+        let written = match self.walk_brackets(&place, &var, var_len, ip, index, &mut path) {
+            Ok(Walked::At(index)) => self.write_at(&place, &path, index.as_deref(), value),
+            Ok(walked) => {
+                // `zval_ptr_dtor_nogc(val)`, then the warning, which php
+                // keeps off the screen.
                 value.give_up(self);
-                unset?;
-                if super::diagnostics::display_errors_mode_of(self.ini_get(b"display_errors")) == 0
+                if let Walked::TooDeep(max_nesting) = walked
+                    && super::diagnostics::display_errors_mode_of(self.ini_get(b"display_errors"))
+                        == 0
                 {
                     docref(
                         self,
@@ -1076,7 +1076,45 @@ impl Request {
                         ),
                     );
                 }
-                return Ok(());
+                Ok(())
+            }
+            Err(thrown) => {
+                value.give_up(self);
+                Err(thrown)
+            }
+        };
+        for key in path {
+            key.give_up(self);
+        }
+        written
+    }
+
+    /// `php_register_variable_ex`'s walk over the brackets after the
+    /// name, from the `[` at `ip`: each index one level of nested array
+    /// entered or made, its key kept in `path`, and where the value goes
+    /// ([`Walked`]).
+    fn walk_brackets(
+        &mut self,
+        place: &Place<'_>,
+        var: &[u8],
+        var_len: usize,
+        mut ip: usize,
+        mut index: Option<Vec<u8>>,
+        path: &mut Vec<Owner<Key>>,
+    ) -> Result<Walked, Thrown> {
+        let track = place.track;
+        let original = place.original;
+        let max_nesting = self.ini_long(b"max_input_nesting_level");
+        let mut nest = 0i64;
+        loop {
+            nest += 1;
+            if nest > max_nesting {
+                let top = PhpString::new(self, &var[..var_len])?;
+                let mut top_level = track;
+                let unset = top_level.unset(self, &Key::lookup(*top));
+                top.give_up(self);
+                unset?;
+                return Ok(Walked::TooDeep(max_nesting));
             }
             ip += 1;
             let index_s = ip;
@@ -1106,41 +1144,22 @@ impl Request {
                         });
                     }
                 }
-                return self.write_at(place, path, name.as_deref(), value);
+                return Ok(Walked::At(name));
             };
             // Enter, or make, the container at `index`.
             let key = match &index {
+                Some(index) if forbidden(index, original) => return Ok(Walked::Dropped),
+                Some(index) => Some(self.container_key(index)?),
                 None => None,
-                Some(index) => {
-                    if forbidden(index, original) {
-                        value.give_up(self);
-                        return Ok(());
-                    }
-                    match PhpString::new(self, index) {
-                        Ok(index) => Some(Key::from_string(self, index)),
-                        Err(thrown) => {
-                            value.give_up(self);
-                            return Err(thrown);
-                        }
-                    }
-                }
             };
-            let entered = match self.enter(track, path, key) {
-                Ok(entered) => entered,
-                Err(thrown) => {
-                    value.give_up(self);
-                    return Err(thrown);
-                }
-            };
-            let Some(key) = entered else {
-                value.give_up(self);
-                return Ok(());
+            let Some(key) = self.enter(track, path, key)? else {
+                return Ok(Walked::Dropped);
             };
             path.push(key);
             index = new_index;
             ip += 1;
             if var.get(ip) != Some(&b'[') {
-                return self.write_at(place, path, index.as_deref(), value);
+                return Ok(Walked::At(index));
             }
         }
     }
@@ -1238,6 +1257,18 @@ impl Request {
         }
         Ok(array)
     }
+}
+
+/// Where [`Request::walk_brackets`] leaves the value of one
+/// registration.
+enum Walked {
+    /// Written at this index of the last container entered, appended
+    /// for `None`.
+    At(Option<Vec<u8>>),
+    /// Dropped: a forbidden name, or a next index already taken.
+    Dropped,
+    /// Nested past `max_input_nesting_level`, the top-level name unset.
+    TooDeep(i64),
 }
 
 /// Where one registration writes: the track, the name as it came, and
