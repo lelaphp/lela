@@ -596,11 +596,12 @@ impl Request {
             }
         };
         exec::init_runtime_cache(&mut self.map, &mut self.heap, code, exec::Body::Main)?;
-        let statics = code.runtime_cache;
+        let statics = Some(self.file_statics(&unit));
         let annex = self.annexes.insert(exec::Annex {
             unit: Some(unit),
             scope,
             symbol_table: table,
+            statics,
             ..exec::Annex::default()
         });
         header.annex = Some(annex);
@@ -612,7 +613,6 @@ impl Request {
                 return Err(fatal);
             }
         };
-        self.forget_main_statics(statics);
         if table.is_none()
             && let Some(caller) = caller
         {
@@ -1437,13 +1437,26 @@ impl Request {
     /// ```
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.vm.stack.current();
-        let Some(header) = self.vm.at_mut(frame) else {
+        let Some(header) = self.vm.at(frame) else {
             return;
         };
         if header.info.call() {
             self.pop_call();
             return;
         }
+        // A nested file's table goes while its frame is still the current
+        // one, as `zend_leave_helper` destroys it; a top-level file's once
+        // `zend_execute` has returned.
+        let top = header.info.top_code();
+        let statics = (header.function.is_none())
+            .then(|| self.leaving_statics(header.annex))
+            .flatten();
+        if let Some(of) = statics.filter(|_| !top) {
+            self.destroy_file_statics(of);
+        }
+        let Some(header) = self.vm.at_mut(frame) else {
+            return;
+        };
         // `EG(current_execute_data) = EX(prev_execute_data)`: off the
         // chain from here, its receiver and closure taken off the header
         // for the release.
@@ -1463,6 +1476,9 @@ impl Request {
             // An `eval`'s main op array is destroyed when its execution
             // ends, and the names its compile made with it.
             self.give_up_annex(annex, function.is_none() && !self.bailout);
+        }
+        if let Some(of) = statics.filter(|_| top) {
+            self.destroy_file_statics(of);
         }
     }
 

@@ -73,6 +73,7 @@ impl Request {
         let from = super::CodeFrom::Top(self.innermost_user_frame());
         let pushed = self.push_code_frame(unit, from);
         let frame = self.fatal_of(pushed)?;
+        self.keep_file_statics(frame);
         crate::observer::call(self, frame);
         let reenter = self.shared.loops.reenter;
         let served = reenter(self, frame);
