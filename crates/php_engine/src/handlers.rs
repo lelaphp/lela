@@ -10521,7 +10521,8 @@ fn inline_fetch_dim_w(
     *req.slots_mut(frame).get_mut(out)? = Zval::indirect(placed.entry);
     // The table the entry stands in, for the write after this to hold
     // across what it serves, as every `FETCH_DIM_W` notes it.
-    req.note_walk(Some((placed.entry, Value::of_zval(placed.table))));
+    let table = Value::array(PhpArray::of(placed.table));
+    req.note_walk(Some((placed.entry, table)));
     Some(Ok(advanced()))
 }
 
@@ -10531,8 +10532,8 @@ fn inline_fetch_dim_w(
 /// `FETCH_*_W` left in a `VAR` as an `IS_INDIRECT` holds, and in either
 /// the one a reference there names (`Z_REFVAL_P`, `goto
 /// try_assign_dim_array`), where that array is refcounted with one
-/// owner, so `SEPARATE_ARRAY` copies nothing. The array's zval is
-/// answered beside it. None for every other container.
+/// owner, so `SEPARATE_ARRAY` copies nothing. None for every other
+/// container.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn owned_array(
@@ -10540,7 +10541,7 @@ fn owned_array(
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
-) -> Option<(php_heap::Arr, Zval)> {
+) -> Option<php_heap::Arr> {
     let held = a.read(slots, code, op.op1);
     let held = match a.kind() {
         OperandKind::Cv => held,
@@ -10549,7 +10550,7 @@ fn owned_array(
     };
     let held = crate::operand::deref(held);
     let array = held.as_arr()?;
-    (held.is_refcounted() && array.refcount() == 1).then_some((array, held))
+    (held.is_refcounted() && array.refcount() == 1).then_some(array)
 }
 
 /// The element a dimension write's inline path writes in place, as
@@ -10574,7 +10575,7 @@ fn owned_entry(
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Result<OwnedEntry, Edge>> {
     let slots = req.slots_mut(frame);
-    let (array, table) = owned_array(slots, code, op, a)?;
+    let array = owned_array(slots, code, op, a)?;
     let key = match b.kind() {
         OperandKind::Unused => None,
         _ => Some(inline_key(slots, code, op, b)?),
@@ -10599,7 +10600,7 @@ fn owned_entry(
     );
     plain.then_some(Ok(OwnedEntry {
         entry,
-        table,
+        table: array,
         free_dim: key.is_some_and(|(_, free)| free),
     }))
 }
@@ -10629,13 +10630,13 @@ fn laid_down(
     }
 }
 
-/// An entry [`owned_entry`] found or laid down: the place, the zval of
-/// the table it stands in, and whether the dimension is a temporary
+/// An entry [`owned_entry`] found or laid down: the place, the table it
+/// stands in, and whether the dimension is a temporary
 /// string the opcode gives up after the write (`FREE_OP2`).
 #[derive(Clone, Copy)]
 struct OwnedEntry {
     entry: php_heap::ZvalRef,
-    table: Zval,
+    table: php_heap::Arr,
     free_dim: bool,
 }
 
@@ -15286,7 +15287,7 @@ fn inline_assign_dim_op(
     let data = *exec::opline_at(code, at.saturating_add(1))
         .filter(|data| data.opcode == Opcode::OpData)?;
     let slots = req.slots_mut(frame);
-    let (array, _) = owned_array(slots, code, op, a)?;
+    let array = owned_array(slots, code, op, a)?;
     let (key, free_dim) = inline_key(slots, code, op, b)?;
     let entry = array.value_ref(key)?;
     // `get_op_data_zval_ptr_r`: php specialises no `OP_DATA` kind here.
