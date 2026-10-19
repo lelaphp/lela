@@ -17,7 +17,7 @@ use crate::element::DOMElement;
 use crate::modern::follows_spec;
 use crate::node::DOMNode;
 use crate::object::{Code, Dom};
-use crate::private::Private;
+use crate::private::{Handed, Private};
 use crate::{dom_error, dom_throw, fetch, object_for, passed, returned, strict, string};
 
 /// The content of a character node, the empty string for none:
@@ -944,17 +944,32 @@ impl Implementation {
         let Some(document) = Node::new_doc(Some(b"1.0")) else {
             return Err(dom_throw(req, Code::InvalidState));
         };
-        let mut private = Private::new(req)?;
+        let mut private = match Private::new(req) {
+            Ok(private) => private,
+            Err(thrown) => {
+                document.free_document();
+                return Err(thrown);
+            }
+        };
         document.set_doc_string(DocString::Encoding, Some(b"UTF-8"));
         let mut element = None;
         if !qualified_name.is_empty() {
             match crate::validate_and_extract(uri, qualified_name) {
                 Ok((local, prefix)) => {
-                    let ns = private.mapper.get(
+                    let ns = private.mapper.get_raw_prefix(
+                        req,
                         Some(document),
                         prefix.as_deref().unwrap_or_default(),
-                        uri.unwrap_or_default(),
+                        Handed::argument(namespace.as_ref().map(|n| n.0)),
                     );
+                    let ns = match ns {
+                        Ok(ns) => ns,
+                        Err(thrown) => {
+                            document.free_document();
+                            private.free(req);
+                            return Err(thrown);
+                        }
+                    };
                     let Some(e) = Node::new_element(Some(document), ns, &local, None) else {
                         document.free_document();
                         private.free(req);
@@ -971,7 +986,13 @@ impl Implementation {
         }
         let object = crate::modern::document_object(req, "Dom\\XMLDocument", document, private)?;
         if let Some(dtd) = doctype {
-            crate::adopt(req, *object, dtd, document);
+            if let Err(thrown) = crate::adopt(req, *object, dtd, document) {
+                if let Some(e) = element {
+                    e.free();
+                }
+                object.give_up(req);
+                return Err(thrown);
+            }
             document.add_child(dtd);
             dtd.set_tree_doc(Some(document));
             document.set_int_subset(Some(dtd));
@@ -1015,7 +1036,14 @@ impl Implementation {
         doc.set_doc_string(DocString::Encoding, Some(b"UTF-8"));
         let dtd = Node::create_int_subset(Some(doc), b"html", None, None);
         let mut private = Private::new(req)?;
-        let html_ns = private.mapper.html(Some(doc));
+        let html_ns = match private.mapper.html(req, Some(doc)) {
+            Ok(ns) => ns,
+            Err(thrown) => {
+                doc.free_document();
+                private.free(req);
+                return Err(thrown);
+            }
+        };
         let element = |name: &[u8], parent: Node| {
             let e = Node::new_element(Some(doc), html_ns, name, None)?;
             parent.add_child(e);

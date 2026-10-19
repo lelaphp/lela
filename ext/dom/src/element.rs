@@ -183,10 +183,13 @@ pub(crate) fn mapped_ns(
     object: PhpObject,
     doc: Option<Node>,
     prefix: Option<&[u8]>,
-    uri: Option<&[u8]>,
-) -> Option<Ns> {
-    let private = dom_mut(req, object).and_then(|d| crate::private::of(&mut d.obj))?;
-    private.mapper.get_nullsafe(doc, prefix, uri)
+    uri: Option<PhpString>,
+) -> Result<Option<Ns>, Thrown> {
+    let uri = crate::private::Handed::argument(uri);
+    let ns = crate::private::with_mapper(req, object, |mapper, req| {
+        mapper.get_raw_prefix(req, doc, prefix.unwrap_or_default(), uri)
+    })?;
+    Ok(ns.flatten())
 }
 
 /// `dom_remove_attribute`.
@@ -364,15 +367,16 @@ fn set_attribute_ns_modern(
     req: &mut Request,
     this: PhpObject,
     elem: Node,
-    uri: Option<&[u8]>,
+    namespace: Option<PhpString>,
     name: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
+    let uri = namespace.as_ref().map(PhpString::as_bytes);
     let (local, prefix) = match validate_and_extract(uri, name) {
         Ok(parts) => parts,
         Err(code) => return Err(dom_throw(req, code)),
     };
-    let ns = mapped_ns(req, this, elem.doc(), prefix.as_deref(), uri);
+    let ns = mapped_ns(req, this, elem.doc(), prefix.as_deref(), namespace)?;
     match elem.set_ns_prop(ns, &local, value) {
         Some(attr) => {
             register_attribute_id(req, this, attr);
@@ -415,7 +419,10 @@ fn in_scope_namespace_info(
                 if table.iter().any(|(k, _)| *k == key) {
                     continue;
                 }
-                let found = mapped_ns(req, this, doc, prefix.as_deref(), Some(&content));
+                let found = crate::private::with_mapper(req, this, |mapper, req| {
+                    mapper.get_raw(req, doc, prefix.as_deref(), Some(&content))
+                })?
+                .flatten();
                 table.push((key, found));
             }
         }
@@ -517,7 +524,7 @@ fn insert_adjacent(
     let Some(doc) = elem.doc() else {
         return Ok(Inserted::Failed);
     };
-    if !crate::adopt(req, this, other, doc) {
+    if !crate::adopt(req, this, other, doc)? {
         return Ok(Inserted::Failed);
     }
     if !crate::parent::pre_insert(req, this, other, parent, before)? {
@@ -621,7 +628,7 @@ fn set_attribute_node(
         if let (Some(from), Some(doc)) = (attr.doc(), elem.doc())
             && from != doc
         {
-            crate::adopt(req, this, attr, doc);
+            crate::adopt(req, this, attr, doc)?;
         }
     } else if attr.doc().is_some() && attr.doc() != elem.doc() {
         let strict = strict(req, this);
@@ -1403,11 +1410,11 @@ impl DOMElement {
     ) -> Result<(), Thrown> {
         let this = this.object();
         let elem = fetch(req, this)?;
-        let uri = namespace.as_ref().map(PhpString::as_bytes);
         let (name, value) = (qualifiedName.as_bytes(), value.as_bytes());
         if follows_spec(req, this) {
-            set_attribute_ns_modern(req, this, elem, uri, name, value)
+            set_attribute_ns_modern(req, this, elem, namespace, name, value)
         } else {
+            let uri = namespace.as_ref().map(PhpString::as_bytes);
             set_attribute_ns_legacy(req, this, elem, uri, name, value)
         }
     }
@@ -2444,7 +2451,7 @@ impl Element {
             }
         }
         invalidate(req, this);
-        let ns = mapped_ns(req, this, node.doc(), prefix.as_deref(), uri);
+        let ns = mapped_ns(req, this, node.doc(), prefix.as_deref(), namespaceURI)?;
         node.set_ns(ns);
         node.set_name(&local);
         Ok(())
