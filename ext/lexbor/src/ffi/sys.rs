@@ -503,6 +503,19 @@ pub(crate) type lexbor_memory_calloc_f = extern "C" fn(num: usize, size: usize) 
 pub(crate) type lexbor_memory_free_f = unsafe extern "C" fn(dst: *mut c_void);
 
 unsafe extern "C" {
+    // core/array_obj.h
+    pub(crate) fn lexbor_array_obj_init(
+        array: *mut lexbor_array_obj_t,
+        size: usize,
+        struct_size: usize,
+    ) -> lxb_status_t;
+    pub(crate) fn lexbor_array_obj_push_wo_cls(array: *mut lexbor_array_obj_t) -> *mut c_void;
+    pub(crate) fn lexbor_array_obj_pop(array: *mut lexbor_array_obj_t) -> *mut c_void;
+    pub(crate) fn lexbor_array_obj_destroy(
+        array: *mut lexbor_array_obj_t,
+        self_destroy: bool,
+    ) -> *mut lexbor_array_obj_t;
+
     // core/lexbor.h
     pub(crate) fn lexbor_memory_setup(
         new_malloc: lexbor_memory_malloc_f,

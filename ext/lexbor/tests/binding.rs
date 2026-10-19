@@ -13,13 +13,26 @@ use php_ext_lexbor::ffi::html::{
     Document, FragmentParser, Namespace, Node, NodeKind, Quirks, TokenizerErrorId, TreeErrorId,
 };
 use php_ext_lexbor::ffi::url::{ErrorKind, Host, Parser, ipv4_text, ipv6_text};
-use php_ext_lexbor::ffi::{Lent, lent};
+use php_ext_lexbor::ffi::{Lent, Owned, lent};
 
-fn parse(source: &[u8]) -> Document {
-    let mut doc = Document::new().expect("a document");
-    assert_eq!(doc.parse_chunk_begin(), Status::Ok);
-    assert_eq!(doc.parse_chunk(source), Status::Ok);
-    assert_eq!(doc.parse_chunk_end(), Status::Ok);
+/// `body` served under a lend of a request's heap ([`in_request`]), as
+/// every caller of the binding serves a lexbor call that allocates.
+macro_rules! lent_by_a_request {
+    ($body:expr) => {
+        in_request(|req| {
+            lent(req, |lent| {
+                let body: fn(&Lent) = $body;
+                body(lent);
+            })
+        })
+    };
+}
+
+fn parse(lent: &Lent, source: &[u8]) -> Document {
+    let mut doc = Document::new(lent).expect("a document");
+    assert_eq!(doc.parse_chunk_begin(lent), Status::Ok);
+    assert_eq!(doc.parse_chunk(lent, source), Status::Ok);
+    assert_eq!(doc.parse_chunk_end(lent), Status::Ok);
     doc
 }
 
@@ -39,7 +52,17 @@ fn names<'a>(nodes: &[Node<'a>]) -> Vec<&'a [u8]> {
 
 #[test]
 fn a_document_is_parsed_and_walked() {
-    let doc = parse(b"<p class=a id='b'>x</p><!--c--><template><b>t</b></template>");
+    lent_by_a_request!(|lent| {
+        let doc = parse(
+            lent,
+            b"<p class=a id='b'>x</p><!--c--><template><b>t</b></template>",
+        );
+        walk(&doc);
+        doc.give_back(lent);
+    });
+}
+
+fn walk(doc: &Document) {
     let root = doc.node();
     assert_eq!(root.kind(), NodeKind::Document);
     let html = children(root);
@@ -86,10 +109,18 @@ fn a_document_is_parsed_and_walked() {
 
 #[test]
 fn doctypes_foreign_content_and_prefixes() {
-    let doc = parse(
-        b"<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\">\
+    lent_by_a_request!(|lent| {
+        let doc = parse(
+            lent,
+            b"<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\">\
           <svg><circle xlink:href=\"u\"/></svg><math></math>",
-    );
+        );
+        foreign(&doc);
+        doc.give_back(lent);
+    });
+}
+
+fn foreign(doc: &Document) {
     let top = children(doc.node());
     assert_eq!(top[0].kind(), NodeKind::DocumentType);
     assert_eq!(top[0].doctype_name(), b"html");
@@ -111,10 +142,14 @@ fn doctypes_foreign_content_and_prefixes() {
 
 #[test]
 fn parse_errors_and_observations() {
+    lent_by_a_request!(errors_and_observations);
+}
+
+fn errors_and_observations(lent: &Lent) {
     let source = b"<!DOCTYPE html><p a=1 a=2>x&unknown;</p>";
-    let mut doc = Document::new().expect("a document");
-    assert_eq!(doc.parse_chunk_begin(), Status::Ok);
-    assert_eq!(doc.parse_chunk(source), Status::Ok);
+    let mut doc = Document::new(lent).expect("a document");
+    assert_eq!(doc.parse_chunk_begin(lent), Status::Ok);
+    assert_eq!(doc.parse_chunk(lent, source), Status::Ok);
     let tokenizer = doc.tokenizer_errors(0, source);
     assert_eq!(tokenizer.len(), 1);
     assert_eq!(
@@ -124,52 +159,63 @@ fn parse_errors_and_observations() {
     // php reports it at column 36 of line 1: the `;` at offset 35.
     assert_eq!(tokenizer[0].offset, 35);
     assert!(doc.tokenizer_errors(1, source).is_empty());
-    assert_eq!(doc.parse_chunk_end(), Status::Ok);
+    assert_eq!(doc.parse_chunk_end(lent), Status::Ok);
     assert!(doc.tree_errors(0).is_empty());
     let seen = doc.observations();
     assert!(
         !seen.has_explicit_html_tag && !seen.has_explicit_head_tag && !seen.has_explicit_body_tag
     );
     assert_eq!(seen.quirks, Quirks::NoQuirks);
+    doc.give_back(lent);
 
     // php: "tree error unexpected-token-in-initial-mode in Entity, line:
     // 1, column: 2", from zero here.
-    let doc = parse(b"<p class=a>x</p>");
+    let doc = parse(lent, b"<p class=a>x</p>");
     let tree = doc.tree_errors(0);
     assert_eq!(tree[0].id, TreeErrorId::UnexpectedTokenInInitialMode);
     assert_eq!((tree[0].line, tree[0].column), (0, 1));
     assert!(tree[0].length <= 1);
     assert_eq!(doc.quirks(), Quirks::Quirks);
+    doc.give_back(lent);
 
-    let doc = parse(b"<html><head></head><body></body></html>");
+    let doc = parse(lent, b"<html><head></head><body></body></html>");
     let seen = doc.observations();
     assert!(seen.has_explicit_html_tag && seen.has_explicit_head_tag && seen.has_explicit_body_tag);
+    doc.give_back(lent);
 }
 
 #[test]
 fn a_fragment_is_parsed_in_its_context() {
-    let mut parser =
-        FragmentParser::begin(b"tr", b"http://www.w3.org/1999/xhtml", Quirks::NoQuirks)
-            .expect("a parser");
-    assert_eq!(parser.chunk(b"<td>a</td><td>"), Status::Ok);
-    assert_eq!(parser.chunk(b"b</td>"), Status::Ok);
-    let fragment = parser.end().expect("a fragment");
+    lent_by_a_request!(fragments);
+}
+
+fn fragments(lent: &Lent) {
+    let mut parser = FragmentParser::begin(
+        lent,
+        b"tr",
+        b"http://www.w3.org/1999/xhtml",
+        Quirks::NoQuirks,
+    )
+    .expect("a parser");
+    assert_eq!(parser.chunk(lent, b"<td>a</td><td>"), Status::Ok);
+    assert_eq!(parser.chunk(lent, b"b</td>"), Status::Ok);
+    let fragment = parser.end(lent).expect("a fragment");
     let cells = children(fragment.root());
     assert_eq!(names(&cells), [b"td".as_slice(), b"td"]);
     assert_eq!(
         cells[1].first_child().map(Node::data),
         Some(b"b".as_slice())
     );
+    fragment.give_back(lent);
 
-    let fragment = FragmentParser::begin(b"svg", b"http://www.w3.org/2000/svg", Quirks::Quirks)
-        .expect("a parser");
-    let fragment = {
-        let mut p = fragment;
-        assert_eq!(p.chunk(b"<g/>"), Status::Ok);
-        p.end().expect("a fragment")
-    };
+    let mut parser =
+        FragmentParser::begin(lent, b"svg", b"http://www.w3.org/2000/svg", Quirks::Quirks)
+            .expect("a parser");
+    assert_eq!(parser.chunk(lent, b"<g/>"), Status::Ok);
+    let fragment = parser.end(lent).expect("a fragment");
     let g = fragment.root().first_child().expect("g");
     assert_eq!(g.namespace(), Namespace::Svg);
+    fragment.give_back(lent);
 }
 
 #[test]
@@ -189,14 +235,17 @@ fn encodings_by_name_and_prescan() {
         Encoding::utf_16be().map(Encoding::name),
         Some(b"UTF-16BE".as_slice())
     );
-    let found = Encoding::prescan(b"<html><head><meta charset=\"koi8-r\"></head>");
-    assert_eq!(found.map(Encoding::name), Some(b"KOI8-R".as_slice()));
-    let found = Encoding::prescan(
-        b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=ISO-8859-2\">",
-    );
-    assert_eq!(found.map(Encoding::name), Some(b"ISO-8859-2".as_slice()));
-    assert!(Encoding::prescan(b"<p>nothing</p>").is_none());
     assert_eq!(Encoding::by_pre_name(b"utf-8"), Some(utf8));
+    lent_by_a_request!(|lent| {
+        let found = Encoding::prescan(lent, b"<html><head><meta charset=\"koi8-r\"></head>");
+        assert_eq!(found.map(Encoding::name), Some(b"KOI8-R".as_slice()));
+        let found = Encoding::prescan(
+            lent,
+            b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=ISO-8859-2\">",
+        );
+        assert_eq!(found.map(Encoding::name), Some(b"ISO-8859-2".as_slice()));
+        assert!(Encoding::prescan(lent, b"<p>nothing</p>").is_none());
+    });
 }
 
 #[test]
@@ -254,8 +303,15 @@ fn decoding_and_encoding_stream() {
 
 #[test]
 fn selectors_are_parsed_into_an_owned_tree() {
-    let list = List::parse(b"div > p.a[title^=x i], :nth-child(2n+1 of .b), :not(#c) ~ *")
-        .expect("a list");
+    lent_by_a_request!(selectors);
+}
+
+fn selectors(lent: &Lent) {
+    let list = List::parse(
+        lent,
+        b"div > p.a[title^=x i], :nth-child(2n+1 of .b), :not(#c) ~ *",
+    )
+    .expect("a list");
     assert_eq!(list.len(), 3);
     let first = &list[0].selectors;
     assert_eq!(first.len(), 4);
@@ -295,22 +351,24 @@ fn selectors_are_parsed_into_an_owned_tree() {
     assert_eq!(third[1].combinator, Combinator::Following);
     assert_eq!(third[1].kind, Kind::Any);
 
-    let has = List::parse(b"a:has(> b)").expect("a list");
+    let has = List::parse(lent, b"a:has(> b)").expect("a list");
     let Kind::PseudoClassFunction(PseudoClassFunction::Has(rel)) = &has[0].selectors[1].kind else {
         panic!("has: {:?}", has[0].selectors[1].kind);
     };
     assert_eq!(rel[0].selectors[0].combinator, Combinator::Child);
 
-    let presence = List::parse(b"[data-x]").expect("a list");
+    let presence = List::parse(lent, b"[data-x]").expect("a list");
     assert_eq!(presence[0].selectors[0].kind, Kind::Attribute(None));
 }
 
 #[test]
 fn a_selector_is_refused_with_lexbor_message() {
-    let refused = List::parse(b"div >").expect_err("refused");
-    let message = refused.message.expect("a message");
-    assert!(!message.is_empty(), "{}", String::from_utf8_lossy(&message));
-    assert!(List::parse(b"").is_err());
+    lent_by_a_request!(|lent| {
+        let refused = List::parse(lent, b"div >").expect_err("refused");
+        let message = refused.message.expect("a message");
+        assert!(!message.is_empty(), "{}", String::from_utf8_lossy(&message));
+        assert!(List::parse(lent, b"").is_err());
+    });
 }
 
 /// `body` served as a request's `rinit`, with the heap lent to lexbor
@@ -336,7 +394,7 @@ macro_rules! with_parser {
                 let mut parser = Parser::new(lent).expect("a parser");
                 let body: fn(&Lent, &mut Parser) = $body;
                 body(lent, &mut parser);
-                parser.destroy(lent);
+                parser.give_back(lent);
             })
         })
     };

@@ -17,7 +17,7 @@
 use std::ffi::{CStr, c_void};
 use std::ptr::{self, NonNull};
 
-use super::{Lent, sys};
+use super::{Lent, Owned, sys};
 
 /// `lexbor_mraw_byte_size`, the chunk size of the request's pool.
 const POOL_CHUNK: usize = 8192;
@@ -139,9 +139,9 @@ pub enum Host<'a> {
 /// uses. The three structs are this value's own, outside lexbor's
 /// allocator as php's are outside `emalloc`, and boxed so the pointers
 /// lexbor keeps between them hold wherever the value moves. Laid by
-/// [`Parser::new`] and given back by [`Parser::destroy`], each under a
-/// lend; a parser dropped without its destroy leaves what lexbor holds
-/// to its request's end.
+/// [`Parser::new`] and given back as an [`Owned`], each under a
+/// lend; a parser dropped without being given back ([`Owned`]) leaves
+/// what lexbor holds to its request's end.
 pub struct Parser {
     mraw: Box<sys::lexbor_mraw_t>,
     lexbor: Box<sys::lxb_url_parser_t>,
@@ -200,21 +200,14 @@ impl Parser {
         if laid {
             Some(made)
         } else {
-            made.give_back();
+            made.destroy();
             None
         }
     }
 
-    /// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(uri_parser_whatwg)`: the
-    /// converter, the parser and the pool destroyed in php's order, with
-    /// every URL still in the pool.
-    pub fn destroy(mut self, _: &Lent) {
-        self.give_back();
-    }
-
     /// The three destroyed, none freed itself, as php destroys them,
     /// and safe on a zeroed one, as php's `fail:` relies on.
-    fn give_back(&mut self) {
+    fn destroy(&mut self) {
         // SAFETY: a converter this owns, laid or zeroed, not freed itself.
         unsafe { sys::lxb_unicode_idna_destroy(&raw mut *self.idna, false) };
         // SAFETY: a parser this owns, laid or zeroed; its log, IDNA
@@ -442,6 +435,15 @@ impl Parser {
         // SAFETY: the live converter.
         unsafe { sys::lxb_unicode_idna_clean(&raw mut *self.idna) };
         out
+    }
+}
+
+impl Owned for Parser {
+    /// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(uri_parser_whatwg)`: the
+    /// converter, the parser and the pool destroyed in php's order, with
+    /// every URL still in the pool.
+    fn give_back(mut self, _: &Lent) {
+        self.destroy();
     }
 }
 

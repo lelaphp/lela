@@ -5,9 +5,10 @@
 //! `config.m4` itself, so the tree holds files php's build leaves out (the
 //! `ports/windows_nt` sources, `core/utils.c`) and compiles none of them; the flags are
 //! `PHP_LEXBOR_CFLAGS`, the crate root on the include path. Nothing is
-//! discovered on the system. `lexbor_memory_setup` is never called, so
-//! lexbor allocates with the C library's `malloc` and `free` where php's
-//! `PHP_MINIT_FUNCTION(lexbor)` points it at `emalloc` and `efree`.
+//! discovered on the system. The extension's process start points
+//! lexbor's allocator at the request's heap with `lexbor_memory_setup`,
+//! as php's `PHP_MINIT_FUNCTION(lexbor)` points it at `emalloc` and
+//! `efree` (`src/ffi/mod.rs`).
 
 fn main() {
     let m4 = std::fs::read_to_string("config.m4").unwrap_or_default();

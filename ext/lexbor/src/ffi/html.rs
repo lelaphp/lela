@@ -10,10 +10,11 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use super::encoding::Status;
-use super::sys;
+use super::{Lent, Owned, sys};
 
-/// An HTML document of lexbor's, `lxb_html_document_t`, destroyed when
-/// dropped with every node and parser it owns.
+/// An HTML document of lexbor's, `lxb_html_document_t`, on the request's
+/// heap: made, parsed and given back ([`Owned`]) under a lend, with
+/// every node and parser it owns.
 pub struct Document(NonNull<sys::lxb_dom_document_t>);
 
 // SAFETY: the document and everything it points at are owned by this
@@ -62,7 +63,7 @@ pub struct TreeError {
 impl Document {
     /// `lxb_html_document_create`.
     #[must_use]
-    pub fn new() -> Option<Document> {
+    pub fn new(_: &Lent) -> Option<Document> {
         // SAFETY: no argument; the document is this value's from here.
         NonNull::new(unsafe { sys::lxb_html_document_create() }).map(Document)
     }
@@ -72,14 +73,14 @@ impl Document {
     }
 
     /// `lxb_html_document_parse_chunk_begin`.
-    pub fn parse_chunk_begin(&mut self) -> Status {
+    pub fn parse_chunk_begin(&mut self, _: &Lent) -> Status {
         // SAFETY: a live document this owns.
         Status::from_raw(unsafe { sys::lxb_html_document_parse_chunk_begin(self.raw()) })
     }
 
     /// `lxb_html_document_parse_chunk`: `chunk` tokenized and built; the
     /// parser keeps no pointer into it.
-    pub fn parse_chunk(&mut self, chunk: &[u8]) -> Status {
+    pub fn parse_chunk(&mut self, _: &Lent, chunk: &[u8]) -> Status {
         // SAFETY: a live document and the live bytes of `chunk`.
         Status::from_raw(unsafe {
             sys::lxb_html_document_parse_chunk(self.raw(), chunk.as_ptr(), chunk.len())
@@ -87,7 +88,7 @@ impl Document {
     }
 
     /// `lxb_html_document_parse_chunk_end`.
-    pub fn parse_chunk_end(&mut self) -> Status {
+    pub fn parse_chunk_end(&mut self, _: &Lent) -> Status {
         // SAFETY: a live document this owns.
         Status::from_raw(unsafe { sys::lxb_html_document_parse_chunk_end(self.raw()) })
     }
@@ -204,26 +205,41 @@ impl Document {
     }
 }
 
-impl Drop for Document {
-    fn drop(&mut self) {
-        // SAFETY: the document this owns, destroyed once with its parser.
+impl Owned for Document {
+    /// `lxb_html_document_destroy`.
+    fn give_back(self, _: &Lent) {
+        // SAFETY: the document this owns, destroyed once with its parser:
+        // the value is taken.
         unsafe { sys::lxb_html_document_destroy(self.raw()) };
     }
 }
 
 /// The HTML fragment parsing algorithm, `dom_html_fragment_parsing_algorithm`:
 /// a document of its own with an element standing for the one the
-/// fragment is parsed under, parsed chunk by chunk.
+/// fragment is parsed under, parsed chunk by chunk and ended by
+/// [`FragmentParser::end`], or given back unended ([`Owned`]).
 pub struct FragmentParser {
     document: Document,
 }
 
+impl Owned for FragmentParser {
+    fn give_back(self, lent: &Lent) {
+        self.document.give_back(lent);
+    }
+}
+
 /// A parsed fragment: its document, and the node whose children are the
-/// fragment's.
+/// fragment's, given back with the document ([`Owned`]).
 pub struct Fragment {
     /// Held so the nodes `root` reaches live as long as this.
-    _document: Document,
+    document: Document,
     root: NonNull<sys::lxb_dom_node_t>,
+}
+
+impl Owned for Fragment {
+    fn give_back(self, lent: &Lent) {
+        self.document.give_back(lent);
+    }
 }
 
 impl FragmentParser {
@@ -233,12 +249,21 @@ impl FragmentParser {
     /// what lexbor does not know), and
     /// `lxb_html_document_parse_fragment_chunk_begin`.
     #[must_use]
-    pub fn begin(name: &[u8], ns_uri: &[u8], quirks: Quirks) -> Option<FragmentParser> {
-        let mut document = Document::new()?;
+    pub fn begin(
+        lent: &Lent,
+        name: &[u8],
+        ns_uri: &[u8],
+        quirks: Quirks,
+    ) -> Option<FragmentParser> {
+        let mut document = Document::new(lent)?;
         document.set_quirks(quirks);
         // SAFETY: a live document; the element is the document's.
-        let context =
-            NonNull::new(unsafe { sys::lxb_dom_element_interface_create(document.raw()) })?;
+        let Some(context) =
+            NonNull::new(unsafe { sys::lxb_dom_element_interface_create(document.raw()) })
+        else {
+            document.give_back(lent);
+            return None;
+        };
         // SAFETY: a live document; `tags` is its field.
         let tags = unsafe { (*document.raw()).tags };
         // SAFETY: the document's tag table and the live bytes of `name`.
@@ -258,11 +283,16 @@ impl FragmentParser {
         let status = unsafe {
             sys::lxb_html_document_parse_fragment_chunk_begin(document.raw(), context.as_ptr())
         };
-        (status == sys::LXB_STATUS_OK).then_some(FragmentParser { document })
+        if status == sys::LXB_STATUS_OK {
+            Some(FragmentParser { document })
+        } else {
+            document.give_back(lent);
+            None
+        }
     }
 
     /// `lxb_html_document_parse_fragment_chunk`.
-    pub fn chunk(&mut self, chunk: &[u8]) -> Status {
+    pub fn chunk(&mut self, _: &Lent, chunk: &[u8]) -> Status {
         // SAFETY: a live document and the live bytes of `chunk`.
         Status::from_raw(unsafe {
             sys::lxb_html_document_parse_fragment_chunk(
@@ -274,13 +304,17 @@ impl FragmentParser {
     }
 
     /// `lxb_html_document_parse_fragment_chunk_end`: the fragment, `None`
-    /// where lexbor gave no root.
+    /// where lexbor gave no root, its document then given back.
     #[must_use]
-    pub fn end(self) -> Option<Fragment> {
+    pub fn end(self, lent: &Lent) -> Option<Fragment> {
         // SAFETY: a live document mid-parse.
         let root = unsafe { sys::lxb_html_document_parse_fragment_chunk_end(self.document.raw()) };
-        NonNull::new(root).map(|root| Fragment {
-            _document: self.document,
+        let Some(root) = NonNull::new(root) else {
+            self.document.give_back(lent);
+            return None;
+        };
+        Some(Fragment {
+            document: self.document,
             root,
         })
     }

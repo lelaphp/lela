@@ -1,5 +1,11 @@
 # The pub items of ext/lexbor beyond extension(), its surface: design §4.10's rows hold its edges, this file its items, and `xtask api-check --write` rewrites it.
 ffi::Lent
+ffi::Owned
+ffi::Owned::give_back
+ffi::array::ArrayObj
+ffi::array::ArrayObj::new
+ffi::array::ArrayObj::pop
+ffi::array::ArrayObj::push
 ffi::css::Anb
 ffi::css::AttributeMatch
 ffi::css::Combinator
@@ -94,13 +100,13 @@ ffi::html::Observations
 ffi::html::Quirks
 ffi::html::TokenizerError
 ffi::html::TreeError
+ffi::kept
 ffi::lent
 ffi::url::ErrorKind
 ffi::url::Host
 ffi::url::Parsed
 ffi::url::Parser
 ffi::url::Parser::clone_url
-ffi::url::Parser::destroy
 ffi::url::Parser::free
 ffi::url::Parser::host_unicode
 ffi::url::Parser::new

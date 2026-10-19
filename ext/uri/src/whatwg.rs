@@ -10,7 +10,7 @@ use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, throw_valu
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value, walk};
 use php_ext_lexbor::ffi::url::{self as lxb, ErrorKind, Host, Url as LxbUrl, ValidationError};
-use php_ext_lexbor::ffi::{self as lexbor, Lent};
+use php_ext_lexbor::ffi::{self as lexbor, Lent, Owned};
 
 use crate::{
     Handlers, InvalidUriException, Parsed, Read, ReadAs, Recomposition, Slot, UriComparisonMode,
@@ -157,6 +157,25 @@ pub(crate) struct State {
 /// lexbor refuses one, php's `RINIT` answers `FAILURE`; here that is the
 /// `InternalError`, since only an allocation lexbor could not make
 /// refuses it, and the memory limit's fatal comes first.
+///
+/// What it lays, 73,952 bytes (#2923), is the last item of a request's
+/// memory at its first line (design §5.13, #2863), so an empty program's
+/// `memory_get_usage()` reads php's under opcache's regime. The strings
+/// that move with the directory and the environment are taken out, the
+/// working directory's two copies, the file's path and each variable, so
+/// it reads the same from any directory:
+///
+/// ```php
+/// $m = memory_get_usage();
+/// $bin = function ($n) { foreach ([8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072] as $b) { if ($n <= $b) { return $b; } } return ($n + 4095) & ~4095; };
+/// $str = fn ($s) => strlen($s) < 2 ? 0 : $bin(24 + strlen($s) + 1);
+/// $moves = $bin(strlen(getcwd()) + 1) + $str(getcwd()) + $str(__FILE__);
+/// foreach (getenv() as $k => $v) { $moves += $str($k) + $str($v); }
+/// echo $m - $moves, "\n";
+/// ```
+/// ```expect regime=jit-off capture
+/// 423208
+/// ```
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     match lexbor::lent(req, lxb::Parser::new)? {
         Some(parser) => {
@@ -177,7 +196,7 @@ pub(crate) fn post_deactivate(req: &mut Request) {
     if let Some(parser) = req.state::<State>().parser.take() {
         // The limit cannot refuse a free, and nothing is left to raise
         // into at the request's end.
-        lexbor::lent(req, |lent| parser.destroy(lent)).ok();
+        lexbor::lent(req, |lent| parser.give_back(lent)).ok();
     }
 }
 
