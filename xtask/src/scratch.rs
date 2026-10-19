@@ -1212,15 +1212,17 @@ mod tests {
 
     fn strays_stopped() {
         let marks = Tree::new("strays-marks").unwrap();
-        let held = Tree::short("strays").unwrap();
-        let dead = Tree::short("strays").unwrap();
+        // Named for this process: another process's sweep never meets it (#2942).
+        let strays = &format!("strays{:07}", std::process::id());
+        let held = Tree::short(strays).unwrap();
+        let dead = Tree::short(strays).unwrap();
         let dead_path = dead.path().to_path_buf();
         drop(dead);
-        let kept = Tree::short("strays").unwrap();
+        let kept = Tree::short(strays).unwrap();
         std::fs::remove_file(beside(&kept, LOCK)).unwrap();
         // A run killed outright: its tree stands, its lock let go just
         // before the sweep, so no other process's sweep removes it first.
-        let mut cut = Tree::short("strays").unwrap();
+        let mut cut = Tree::short(strays).unwrap();
         // perl forks, and the child takes a session of its own and writes
         // its pid before its parent exits and leaves it to its adopter;
         // it names a path in `tree` on its command line, or stands in it.
@@ -1264,7 +1266,7 @@ mod tests {
         // Held as a sweep elsewhere holds it, once one holding it whole lets go (#2942).
         let _sweeping =
             std::fs::File::open(beside(&cut, LOCK)).inspect(|lock| lock.lock_shared().unwrap());
-        let stopped = stop_forsaken("strays");
+        let stopped = stop_forsaken(strays);
         let child_ran = child.try_wait().unwrap().is_none();
         child.kill().ok();
         child.wait().ok();
