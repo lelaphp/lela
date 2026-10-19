@@ -338,8 +338,9 @@ fn as_xtask_test_runs_a_map_test() {
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
 /// then `xtask regions --staged` over the six region files and not the
 /// gitignored local one, which reaches `computed run`, and `computed
-/// check` over the six; then `clippy` and `test`, then `witness` (#1252),
-/// and no `crosscheck`, whose exit the hook never read (revision 140). The region
+/// check` over the six; then `clippy` and `test` (#1252), and no
+/// `witness`, which `done` asks of a branch once (#2982), and no
+/// `crosscheck`, whose exit the hook never read (revision 140). The region
 /// file `computed` rewrote is re-staged before `test` runs, so the map
 /// tests read the map the commit carries from the index (#1416): a hook
 /// that renders after `test` hands it the map before the render and fails
@@ -363,7 +364,6 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         "xtask vocab --staged",
         "xtask permit --diff",
     ];
-    let building = ["xtask witness --staged"];
     let mut calls = scratch.calls("cargo");
     calls[1..6].sort_unstable();
     let rendering = format!("xtask regions --staged {regions}");
@@ -372,7 +372,6 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         .chain(reading)
         .chain([rendering.as_str()])
         .chain(["xtask clippy --staged", "xtask test --staged"])
-        .chain(building)
         .map(str::to_owned)
         .collect();
     expected[1..6].sort_unstable();
@@ -384,7 +383,8 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     );
     let printed: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("ran ")).collect();
     assert_eq!(printed[1..6], reading, "{out}");
-    assert_eq!(printed[8..], building, "{out}");
+    let building = ["xtask clippy --staged", "xtask test --staged"];
+    assert_eq!(printed[6..], building, "{out}");
     assert_eq!(
         scratch.calls("computed"),
         [
@@ -699,10 +699,9 @@ fn an_untrusted_root_refuses_the_commit_naming_computed_trust() {
 
 /// An instrument that fails past the first group refuses the commit by
 /// name: `test` still runs after a `clippy` refusal, so the commit says
-/// both, and `witness`, whose lanes' build takes minutes, is not started
-/// for a commit already refused (revision 140).
+/// both (revision 140).
 #[test]
-fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
+fn a_failing_instrument_refuses_the_commit_by_name() {
     let scratch = scratch("failing", &Computed::Rendered);
     scratch.refuse("xtask clippy");
     let before = scratch.head();
@@ -713,7 +712,6 @@ fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
         out.contains("pre-commit: cargo xtask clippy --staged failed"),
         "{out}"
     );
-    assert!(out.contains("refused before witness ran"), "{out}");
     let calls = scratch.calls("cargo");
     assert!(
         calls.iter().any(|c| c == "xtask test --staged"),
@@ -730,9 +728,9 @@ fn a_failing_instrument_refuses_the_commit_and_witness_is_not_built() {
 }
 
 /// A merge committed through `git commit` after `--no-commit`, the way
-/// /specs merges into `main`, runs `clippy` and `test` and no `witness`:
-/// the merge check's `witness --unmeasured` measures the merged tree
-/// (revision 140).
+/// /specs merges into `main`, runs `clippy` and `test` and no `witness`,
+/// as no commit does: the merge check's `witness --unmeasured` measures
+/// the merged tree (revision 140, #2982).
 #[test]
 fn a_merge_commit_runs_no_witness() {
     let scratch = scratch("merge-witness", &Computed::Rendered);
@@ -751,10 +749,6 @@ fn a_merge_commit_runs_no_witness() {
     scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t9"], false);
     let (code, out) = scratch.run(&["commit", "-q", "-m", "Merge t9: the work (#9)"], true);
     assert_eq!(code, 0, "{out}");
-    assert!(
-        out.contains("a merge commit; witness is the merge check's"),
-        "{out}"
-    );
     let calls = scratch.calls("cargo");
     for ran in ["xtask clippy --staged", "xtask test --staged"] {
         assert!(calls.iter().any(|c| c == ran), "{ran}: {calls:?}");
@@ -797,7 +791,7 @@ fn a_missing_message_file_is_refused_before_anything_runs() {
 
 /// A refusal among the instruments that only read the tree ends the hook
 /// there (#1252): `vocab` refuses, the rest of its group still runs, and
-/// neither `clippy`, `test`, `witness` nor anything after them is started,
+/// neither `clippy`, `test` nor anything after them is started,
 /// so the commit is refused in the seconds the group takes and not after a
 /// build.
 #[test]
@@ -812,10 +806,7 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
         out.contains("pre-commit: cargo xtask vocab --staged failed"),
         "{out}"
     );
-    assert!(
-        out.contains("refused before clippy, test and witness ran"),
-        "{out}"
-    );
+    assert!(out.contains("refused before clippy and test ran"), "{out}");
     let mut calls = scratch.calls("cargo");
     calls[1..].sort_unstable();
     assert_eq!(

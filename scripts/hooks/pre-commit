@@ -5,10 +5,9 @@
 # unsafe-audit, vocab and `permit --diff`, and a refusal among them ends
 # the hook there, before clippy has built anything, since a vocab word or
 # a missing lock line is seconds to find and a clippy and test cycle is
-# minutes. Then clippy and test on the crates with a staged change, and,
-# once both pass and the commit is not a merge, witness on them; each
+# minutes. Then clippy and test on the crates with a staged change; each
 # writes a reading, so `done` has the readings its condition 1 asks a
-# touched crate for. With `--staged` each leaves out a crate whose
+# touched crate for, and witness is left to `done` (#2982). With `--staged` each leaves out a crate whose
 # reading passes and was taken over exactly what is staged, naming the
 # reading (#1143), a retired worktree's included, which is how a branch's
 # passes stand at its merge (#1252). crosscheck is not run here: its exit
@@ -234,7 +233,7 @@ spawn $X permit --diff
 gather
 if [ "$status" != 0 ]; then
     rm -rf "$at_once"
-    echo "pre-commit: refused before clippy, test and witness ran; they measure the commit once what is above is fixed" >&2
+    echo "pre-commit: refused before clippy and test ran; they measure the commit once what is above is fixed" >&2
     exit "$status"
 fi
 # The regions next, rendered and re-staged before anything that reads
@@ -264,20 +263,10 @@ fi
 rm -rf "$at_once"
 step $X clippy --staged
 step $X test --staged
-# witness builds the lanes' optimised binary, minutes where clippy and
-# test took seconds, so a commit clippy or test already refuses is not
-# built for. A merge commit is not witnessed here either: on `main` it is
-# the merge check's `witness --unmeasured` (the specs skill, §6), and on
-# a branch merging `main` in, `done` asks the witness of each crate the
-# branch touched before it is ready.
-if [ "$status" != 0 ]; then
-    echo "pre-commit: refused before witness ran; it measures the commit once clippy and test pass" >&2
-    exit "$status"
-fi
-if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-    echo "pre-commit: a merge commit; witness is the merge check's (\`cargo xtask witness --unmeasured\`), and not run here" >&2
-    exit "$status"
-fi
-step $X witness --staged
+# No witness here (#2982): it builds the lanes' optimised binary, minutes
+# per commit where clippy and test take seconds, and a branch of small
+# commits paid it on each. A branch is witnessed once, where `done` asks
+# the witness of each crate it touched before it is ready, and `main` in
+# the merge check's `witness --unmeasured` (the specs skill, §6).
 
 exit "$status"
