@@ -394,7 +394,7 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
     let warm = warm_clone(&root);
     write(
         &root,
-        "target/harness/log.jsonl",
+        "target/harness/log/the-clones-own.jsonl",
         "{\"instrument\":\"the-clones-own\"}\n",
     );
 
@@ -411,7 +411,8 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
         "the worktree's target/debug is a directory of its own, not a link to the clone's"
     );
     assert!(
-        !root.join("target/worktrees").exists() && !dir.join("target/harness/log.jsonl").exists(),
+        !root.join("target/worktrees").exists()
+            && !dir.join("target/harness/log/the-clones-own.jsonl").exists(),
         "no shared target directory, and the clone's readings are not the worktree's: {out}"
     );
     assert_eq!(
@@ -479,10 +480,10 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
         "the clone's own build is not what retire removes: {out}"
     );
     assert!(
-        fs::read_to_string(root.join("target/harness/log.migrated.jsonl"))
+        fs::read_to_string(root.join("target/harness/log/the-clones-own.jsonl"))
             .unwrap()
             .contains("the-clones-own"),
-        "the clone's log stands, split into the log of each instrument and kept whole: {out}"
+        "the clone's log stands: {out}"
     );
 }
 
@@ -570,7 +571,11 @@ fn retiring_appends_the_readings_to_the_main_store_and_removes_the_worktree() {
     denial.message = "Edit seams.toml: a person edits the manifest".to_owned();
     denial.session = "the-retired-agent".to_owned();
     let line = serde_json::to_string(&denial.to_json().unwrap()).unwrap();
-    write(&dir, "target/harness/log.jsonl", &format!("{line}\n"));
+    write(
+        &dir,
+        "target/harness/log/permit.jsonl",
+        &format!("{line}\n"),
+    );
     let mut clippy = Reading::new("clippy", "xtask");
     clippy.message = "the worktree's clippy over xtask".to_owned();
     write(
@@ -695,7 +700,7 @@ fn a_worktree_with_no_readings_is_retired_through_the_retire_command() {
     assert!(out.contains("worktree retire: "), "{out}");
     assert!(out.contains("wrote no readings"), "{out}");
     assert!(!dir.exists(), "{out}");
-    assert!(!root.join("target/harness/log.jsonl").exists(), "{out}");
+    assert!(!root.join("target/harness/log").exists(), "{out}");
     assert!(out.contains("git branch -D t46"), "{out}");
 }
 

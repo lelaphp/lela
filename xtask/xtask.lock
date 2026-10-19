@@ -257,11 +257,9 @@ reading::DIR
 reading::Files
 reading::Files::unreadable_note
 reading::KEPT
-reading::LEGACY
 reading::LOG
 reading::Log
 reading::Log::unreadable_note
-reading::MIGRATED
 reading::Number
 reading::Number::as_f64
 reading::Number::count
@@ -287,7 +285,6 @@ reading::Store::at
 reading::Store::history
 reading::Store::history_all
 reading::Store::land
-reading::Store::migrate
 reading::Store::of_workspace
 reading::Store::path
 reading::Store::read
