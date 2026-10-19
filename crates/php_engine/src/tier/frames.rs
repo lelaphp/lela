@@ -264,13 +264,11 @@ mod tests {
     //! unwinding a frame that catches what it threw and handing the rest
     //! back, as `sapi/phpdbg` does.
 
-    use std::cell::RefCell;
-
     use php_heap::FrameRef;
 
+    use crate::api::abi::{Extension, ExtensionBuilder};
     use crate::api::request::{Raised, Request};
-    use crate::engine::Engine;
-    use crate::test::Capture;
+    use crate::engine::{Engine, EngineBuilder};
     use crate::tier::{Flow, Site, Stepped, Tier};
 
     /// The class of the throwable pending, and the `file` and `line` it
@@ -291,9 +289,36 @@ mod tests {
         ))
     }
 
-    thread_local! {
-        /// The line of every opline the tier stood at, and what it read.
-        static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// What the tier read at every opline it stood at, or of every
+    /// evaluation it served, and whether it has taken the request over:
+    /// its request state, read back by the test once the request ended
+    /// ([`super::super::serve_kept`]).
+    #[derive(Default)]
+    struct Seen {
+        lines: Vec<String>,
+        begun: bool,
+    }
+
+    /// The extension a test tier declares its state through.
+    fn seeing() -> Extension {
+        ExtensionBuilder::default()
+            .request_state::<Seen>()
+            .build("seeing")
+    }
+
+    /// What `source` echoed served on the engine `builder` makes, and
+    /// what the tier saw.
+    fn seen(builder: EngineBuilder, source: &str) -> (String, Vec<String>) {
+        let (served, seen) = super::super::serve_kept::<Seen>(
+            &builder.build(),
+            &std::env::current_dir().unwrap_or_default(),
+            b"Standard input code",
+            source,
+        );
+        (
+            String::from_utf8_lossy(&served.stdout).into_owned(),
+            seen.map(|seen| seen.lines).unwrap_or_default(),
+        )
     }
 
     struct Stepper;
@@ -314,7 +339,7 @@ mod tests {
                     Some((class, _, _)) if unwinding => format!("{line} threw {class}"),
                     _ => format!("{line} {opcode}"),
                 };
-                SEEN.with_borrow_mut(|seen| seen.push(what));
+                req.state::<Seen>().lines.push(what);
                 let stepped = if unwinding {
                     if at == super::entry(req) && !super::catches(req, at) {
                         return Flow::Resume(at);
@@ -344,16 +369,14 @@ mod tests {
                 }
             }
         }
+
+        fn extension() -> Option<Extension> {
+            Some(seeing())
+        }
     }
 
     fn stepped(source: &str) -> (String, Vec<String>) {
-        SEEN.with_borrow_mut(Vec::clear);
-        let engine = Engine::cli_builder().tier::<Stepper>().build();
-        let served = engine.serve_capture(source, Capture::default());
-        (
-            String::from_utf8_lossy(&served.stdout).into_owned(),
-            SEEN.with_borrow_mut(std::mem::take),
-        )
+        seen(Engine::cli_builder().tier::<Stepper>(), source)
     }
 
     /// Every opline of the main op array and of the function it calls
@@ -397,39 +420,45 @@ mod tests {
         assert!(seen.contains(&String::from("5 ZEND_CATCH")), "{seen:?}");
     }
 
-    thread_local! {
-        /// The code the tier evaluates at the program's entry, and what
-        /// each evaluation answered with what it left pending.
-        static CODE: RefCell<Vec<&'static [u8]>> = const { RefCell::new(Vec::new()) };
-    }
+    /// The code the tier evaluates at the program's first entry, which
+    /// the test registers with the engine.
+    struct Code(Vec<&'static [u8]>);
 
     struct Initializer;
 
     impl Tier for Initializer {
         fn safepoint(req: &mut Request, _: FrameRef, site: Site) -> Flow {
-            if site != Site::Entry {
+            if site != Site::Entry || std::mem::replace(&mut req.state::<Seen>().begun, true) {
                 return Flow::Continue;
             }
-            for code in CODE.with_borrow_mut(std::mem::take) {
+            let code = req
+                .registered::<Code>()
+                .flat_map(|code| code.0.iter().copied())
+                .collect::<Vec<_>>();
+            for code in code {
                 let evaluated = super::evaluate_code(req, b"phpdbginit code", code);
                 let pending =
                     described(req).map(|(class, file, line)| format!(" {class} in {file}:{line}"));
-                SEEN.with_borrow_mut(|seen| {
-                    seen.push(format!("{evaluated:?}{}", pending.unwrap_or_default()));
-                });
+                let seen = format!("{evaluated:?}{}", pending.unwrap_or_default());
+                req.state::<Seen>().lines.push(seen);
             }
             Flow::Continue
+        }
+
+        fn extension() -> Option<Extension> {
+            Some(seeing())
         }
     }
 
     fn initialized(code: &[&'static [u8]], source: &str) -> (String, Vec<String>) {
-        SEEN.with_borrow_mut(Vec::clear);
-        CODE.with_borrow_mut(|held| *held = code.to_vec());
-        let engine = Engine::cli_builder().tier::<Initializer>().build();
-        let served = engine.serve_capture(source, Capture::default());
-        (
-            String::from_utf8_lossy(&served.stdout).into_owned(),
-            SEEN.with_borrow_mut(std::mem::take),
+        let code = ExtensionBuilder::default()
+            .register(Code(code.to_vec()))
+            .build("init");
+        seen(
+            Engine::cli_builder()
+                .tier::<Initializer>()
+                .extensions(&[code]),
+            source,
         )
     }
 

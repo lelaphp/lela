@@ -70,10 +70,8 @@ impl Request {
     /// order, each the name its `zend_module_entry` carries.
     #[must_use]
     pub fn loaded_extensions(&self) -> Vec<String> {
-        self.shared
-            .extensions
-            .iter()
-            .map(|e| e.name.clone())
+        (self.shared.listed())
+            .map(|(_, e)| e.name.clone())
             .collect()
     }
 
@@ -115,11 +113,9 @@ impl Request {
     #[must_use]
     pub fn extension_named(&self, name: &[u8]) -> Option<ExtensionId> {
         let wanted = name.to_ascii_lowercase();
-        self.shared
-            .extensions
-            .iter()
-            .position(|e| e.name.as_bytes().to_ascii_lowercase() == wanted)
-            .and_then(|i| u32::try_from(i).ok())
+        (self.shared.listed())
+            .find(|(_, e)| e.name.as_bytes().to_ascii_lowercase() == wanted)
+            .and_then(|(i, _)| u32::try_from(i).ok())
             .map(ExtensionId)
     }
 

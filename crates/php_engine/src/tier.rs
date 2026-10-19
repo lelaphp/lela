@@ -222,9 +222,10 @@ pub fn set_trace_num(req: &mut Request, n: TraceNum) {
 /// `name` in `dir` ([`crate::test::Engine::serve_capture_in`]), and the
 /// request state of type `T` as the request left it once it ended: what
 /// a tier under test kept in the state it declared through
-/// [`Tier::extension`], read back by the test that served the program,
-/// since a tier keeps nothing anywhere else (`jit-design.md` §8). None
-/// where the request built no such state.
+/// [`Tier::extension`], or an extension under test in the state it
+/// declared, read back by the test that served the program, since
+/// neither keeps anything anywhere else (`jit-design.md` §8, design
+/// §5.14 *Threads*). None where the request built no such state.
 #[cfg(any(test, feature = "test"))]
 #[must_use]
 pub fn serve_kept<T: Send + 'static>(

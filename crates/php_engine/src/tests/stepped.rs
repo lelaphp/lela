@@ -23,30 +23,37 @@
 //! [`step`]: crate::tier::step
 //! [`unwind`]: crate::tier::unwind
 
-use std::cell::Cell;
-
 use php_heap::FrameRef;
 
-use super::observer::{observed, scratch, serve_main};
+use super::observer::{observed, scratch};
 use super::test_ext::{Event, Phase, Recording, TestExt};
+use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::request::{Opcode, Raised, Request};
 use crate::engine::{Engine, EngineBuilder};
 use crate::probe::Probe;
 use crate::tier::{self, Flow, Site, Stepped, Tier};
 
-thread_local! {
-    /// How many handlers a stepping tier dispatched through `step` or
-    /// `unwind`, so a serving that stepped nothing does not pass as one.
-    static STEPS: Cell<usize> = const { Cell::new(0) };
-    /// Whether the next serving's entry raises the interrupt an
-    /// execution timer of one second leaves when it fires.
-    static ARMED: Cell<bool> = const { Cell::new(false) };
+/// What a stepping tier keeps, its request state: how many handlers it
+/// dispatched through `step` or `unwind`, so a serving that stepped
+/// nothing does not pass as one, and whether it has raised the
+/// interrupt it is armed with.
+#[derive(Debug, Default)]
+struct Stepping {
+    steps: usize,
+    fired: bool,
 }
 
-/// The interrupt [`ARMED`] asks for, raised once, at the first entry
-/// that takes it.
-fn fire_if_armed(req: &mut Request) {
-    if ARMED.replace(false) {
+/// The extension a stepping tier declares its state through.
+fn stepping() -> Extension {
+    ExtensionBuilder::default()
+        .request_state::<Stepping>()
+        .build("stepping")
+}
+
+/// The interrupt an execution timer of one second leaves when it fires,
+/// raised once a request, at the first entry that takes it.
+fn fire(req: &mut Request) {
+    if !std::mem::replace(&mut req.state::<Stepping>().fired, true) {
         req.interrupt().elapsed(1);
     }
 }
@@ -88,7 +95,7 @@ fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool) -> Flow {
         } else {
             tier::step(req, at)
         };
-        STEPS.set(STEPS.get() + 1);
+        req.state::<Stepping>().steps += 1;
         match stepped {
             Ok(
                 Stepped::Same(next)
@@ -128,29 +135,40 @@ fn leaves(opcode: Opcode) -> bool {
 /// `Site::Entry`, the reentered ones a native's callback serves too.
 /// `Stepper<false>` is the debugger, which hands the entry frame's
 /// leaving back to the loop as phpdbg does; `Stepper<true>` a recorder,
-/// which steps it, so `step` itself ends the serving.
-pub(super) struct Stepper<const STEPS_LEAVING: bool>;
+/// which steps it, so `step` itself ends the serving. An `ARMED` one
+/// raises the interrupt ([`fire`]) at its first entry.
+pub(super) struct Stepper<const STEPS_LEAVING: bool, const ARMED: bool = false>;
 
-impl<const STEPS_LEAVING: bool> Tier for Stepper<STEPS_LEAVING> {
+impl<const STEPS_LEAVING: bool, const ARMED: bool> Tier for Stepper<STEPS_LEAVING, ARMED> {
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         if site != Site::Entry || frame != tier::entry(req) {
             return Flow::Continue;
         }
-        fire_if_armed(req);
+        if ARMED {
+            fire(req);
+        }
         stepped(req, frame, STEPS_LEAVING)
+    }
+
+    fn extension() -> Option<Extension> {
+        Some(stepping())
     }
 }
 
-/// The loop alone, with the interrupt [`ARMED`] asks for raised at its
-/// first entry, as the stepping hosts raise it at theirs.
+/// The loop alone, with the interrupt raised at its first entry
+/// ([`fire`]), as the armed stepping hosts raise it at theirs.
 struct Firing;
 
 impl Tier for Firing {
     fn safepoint(req: &mut Request, _: FrameRef, site: Site) -> Flow {
         if site == Site::Entry {
-            fire_if_armed(req);
+            fire(req);
         }
         Flow::Continue
+    }
+
+    fn extension() -> Option<Extension> {
+        Some(stepping())
     }
 }
 
@@ -255,12 +273,11 @@ struct Seen {
     stdout: String,
 }
 
-/// What each of `programs` raised under the engine `builder` makes, each
-/// served with the interrupt armed where `armed`, and how many handlers
-/// a stepping tier dispatched.
-fn served(builder: fn() -> EngineBuilder, programs: &[Program], armed: bool) -> (Vec<Seen>, usize) {
+/// What each of `programs` raised under the engine `builder` makes, and
+/// how many handlers a stepping tier dispatched over all of them.
+fn served(builder: fn() -> EngineBuilder, programs: &[Program]) -> (Vec<Seen>, usize) {
     let rec = Recording::start();
-    STEPS.set(0);
+    let mut steps = 0;
     let engine = builder()
         .extensions(&[TestExt::<0>::observing(), TestExt::<1>::observing()])
         .build();
@@ -271,11 +288,17 @@ fn served(builder: fn() -> EngineBuilder, programs: &[Program], armed: bool) -> 
             std::fs::write(dir.join(name), source).ok();
         }
         rec.mark(program.name);
-        ARMED.set(armed);
-        let out = serve_main(&engine, &dir, program.source);
+        let main = dir.join("main.php");
+        std::fs::write(&main, program.source).ok();
+        let (out, kept) = tier::serve_kept::<Stepping>(
+            &engine,
+            &dir,
+            main.to_string_lossy().as_bytes(),
+            program.source,
+        );
+        steps += kept.map_or(0, |kept| kept.steps);
         stdouts.push(String::from_utf8_lossy(&out.stdout).into_owned());
     }
-    ARMED.set(false);
     rec.mark("end");
     let events = rec.events();
     let ends = programs.iter().skip(1).map(|p| p.name).chain(["end"]);
@@ -288,7 +311,7 @@ fn served(builder: fn() -> EngineBuilder, programs: &[Program], armed: bool) -> 
             stdout,
         })
         .collect();
-    (seen, STEPS.get())
+    (seen, steps)
 }
 
 /// What the loop raised for each program, held against what the tier
@@ -311,7 +334,7 @@ fn same_as_the_loop(named: &str, programs: &[Program], plain: &[Seen], bound: &[
 /// fatals. A sequence that observed nothing does not pass here.
 #[test]
 fn a_stepped_program_raises_the_events_the_loop_raises() {
-    let (plain, _) = served(Engine::cli_builder, PROGRAMS, false);
+    let (plain, _) = served(Engine::cli_builder, PROGRAMS);
     for (program, seen) in PROGRAMS.iter().zip(&plain) {
         assert!(
             seen.events
@@ -321,20 +344,12 @@ fn a_stepped_program_raises_the_events_the_loop_raises() {
             program.name
         );
     }
-    let (probed, _) = served(|| Engine::cli_builder().tier::<Probe>(), PROGRAMS, false);
+    let (probed, _) = served(|| Engine::cli_builder().tier::<Probe>(), PROGRAMS);
     same_as_the_loop("Probe", PROGRAMS, &plain, &probed);
-    let (debugged, steps) = served(
-        || Engine::cli_builder().tier::<Stepper<false>>(),
-        PROGRAMS,
-        false,
-    );
+    let (debugged, steps) = served(|| Engine::cli_builder().tier::<Stepper<false>>(), PROGRAMS);
     assert!(steps > 0, "the debugger stepped nothing");
     same_as_the_loop("the debugger", PROGRAMS, &plain, &debugged);
-    let (recorded, steps) = served(
-        || Engine::cli_builder().tier::<Stepper<true>>(),
-        PROGRAMS,
-        false,
-    );
+    let (recorded, steps) = served(|| Engine::cli_builder().tier::<Stepper<true>>(), PROGRAMS);
     assert!(steps > 0, "the recorder stepped nothing");
     same_as_the_loop("the recorder", PROGRAMS, &plain, &recorded);
 }
@@ -346,7 +361,7 @@ fn a_stepped_program_raises_the_events_the_loop_raises() {
 /// the callee and the main file ended after it, with nothing echoed.
 #[test]
 fn a_stepped_call_meets_the_interrupt_at_its_activation() {
-    let (plain, _) = served(|| Engine::cli_builder().tier::<Firing>(), INTERRUPTED, true);
+    let (plain, _) = served(|| Engine::cli_builder().tier::<Firing>(), INTERRUPTED);
     let fatal = plain.first().and_then(|seen| {
         seen.events.iter().position(
             |e| matches!(e, Event::Ext(0, Phase::Error(m)) if m.starts_with("Maximum execution time")),
@@ -368,15 +383,13 @@ fn a_stepped_call_meets_the_interrupt_at_its_activation() {
         "the callee begun and ended at the fatal: {plain:?}"
     );
     let (debugged, _) = served(
-        || Engine::cli_builder().tier::<Stepper<false>>(),
+        || Engine::cli_builder().tier::<Stepper<false, true>>(),
         INTERRUPTED,
-        true,
     );
     same_as_the_loop("the debugger", INTERRUPTED, &plain, &debugged);
     let (recorded, _) = served(
-        || Engine::cli_builder().tier::<Stepper<true>>(),
+        || Engine::cli_builder().tier::<Stepper<true, true>>(),
         INTERRUPTED,
-        true,
     );
     same_as_the_loop("the recorder", INTERRUPTED, &plain, &recorded);
 }
