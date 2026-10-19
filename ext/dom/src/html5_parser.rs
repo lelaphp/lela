@@ -910,7 +910,10 @@ fn convert_element<'doc>(
             };
             fragment.set_parent(Some(element));
             made.templates.push(element);
-            private.add_template(element, fragment);
+            if let Err(thrown) = private.add_template(req, element, fragment) {
+                fragment.free();
+                return Err(thrown);
+            }
             child_parent = fragment;
         }
         if let Some(content) = node.template_content() {

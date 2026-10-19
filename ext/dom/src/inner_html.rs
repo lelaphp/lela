@@ -17,7 +17,7 @@ use crate::element::AdjacentPosition;
 use crate::object::Code;
 use crate::private::{HTML_NS, html_in_html_document, ns_is};
 use crate::props::Prop;
-use crate::{Read, dom_mut, dom_throw, dom_throw_message, extracted, fetch, prop_node};
+use crate::{Read, dom_throw, dom_throw_message, extracted, fetch, prop_node};
 
 /// `dom_element_html_fragment_serialize` for `innerHTML` (`outer` false:
 /// the element's children) and `outerHTML` (`outer`: the element alone).
@@ -138,10 +138,9 @@ fn xml_fragment(
     let Some(doc) = context.doc() else {
         return Err(dom_throw(req, Code::InvalidState));
     };
-    let in_scope: Vec<Ns> = crate::private::with_mapper(req, object, |mapper, req| {
+    let in_scope = crate::private::with_mapper(req, object, |mapper, req| {
         mapper.in_scope(req, context, true)
-    })?
-    .unwrap_or_default();
+    })?;
     let prefix = context.ns().and_then(Ns::prefix);
     let name = context.name();
     let mut chunks: Vec<Vec<u8>> = Vec::new();
@@ -154,12 +153,15 @@ fn xml_fragment(
     };
     chunks.push(b"<".to_vec());
     tag_name(&mut chunks);
-    for ns in in_scope {
-        chunks.push(b" xmlns:".to_vec());
-        chunks.push(ns.prefix().unwrap_or_default());
-        chunks.push(b"=\"".to_vec());
-        chunks.push(ns.href().unwrap_or_default());
-        chunks.push(b"\"".to_vec());
+    if let Some(in_scope) = in_scope {
+        for ns in &in_scope.list {
+            chunks.push(b" xmlns:".to_vec());
+            chunks.push(ns.prefix().unwrap_or_default());
+            chunks.push(b"=\"".to_vec());
+            chunks.push(ns.href().unwrap_or_default());
+            chunks.push(b"\"".to_vec());
+        }
+        in_scope.free(req);
     }
     if let Some(default) = default_namespace(context) {
         chunks.push(b" xmlns=\"".to_vec());
@@ -250,8 +252,13 @@ fn set_inner_html(req: &mut Request, object: PhpObject, value: &Value) -> Result
         return Ok(());
     };
     if ns_is(context, HTML_NS) && context.name() == b"template" {
-        let contents =
-            dom_mut(req, object).and_then(|d| crate::private::ensure_template(&mut d.obj, context));
+        let contents = match crate::private::ensure_template(req, object, context) {
+            Ok(contents) => contents,
+            Err(thrown) => {
+                fragment.free();
+                return Err(thrown);
+            }
+        };
         let Some(contents) = contents else {
             fragment.free();
             return Ok(());
