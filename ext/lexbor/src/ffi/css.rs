@@ -12,7 +12,7 @@
 
 use std::ptr;
 
-use super::sys;
+use super::{Lent, sys};
 
 /// The comma-separated complex selectors of one selector list.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -215,11 +215,12 @@ impl List {
     ///
     /// # Errors
     /// [`Refused`], with lexbor's first log message where it logged one.
-    pub fn parse(text: &[u8]) -> Result<List, Refused> {
+    pub fn parse(_: &Lent, text: &[u8]) -> Result<List, Refused> {
         parse(text)
     }
 }
 
+/// [`List::parse`]'s body, under the lend its caller proved.
 fn parse(text: &[u8]) -> Result<List, Refused> {
     // SAFETY: no argument; the parser is this function's.
     let parser = unsafe { sys::lxb_css_parser_create() };

@@ -69,6 +69,47 @@ pub(super) struct Ini {
     /// (`PG(open_basedir_modified)`); `None` where it is the entry's value
     /// as set, at startup and once the request's end restored it.
     open_basedir: Option<Vec<u8>>,
+    /// The order `EG(ini_directives)` is walked in ([`IniOrder`]).
+    order: IniOrder,
+}
+
+/// The order php's `EG(ini_directives)` holds its entries in, which
+/// every walk of the table lists them in: `display_ini_entries`,
+/// `ini_get_all()` and `ReflectionExtension`'s `getINIEntries()` and
+/// `__toString()`. Registration order until the first `phpinfo()` or
+/// `ini_get_all()` sorts the table in place
+/// ([`Request::ini_sort_entries`]), and sorted by name from then on.
+///
+/// php's table is the process's, or under ZTS the thread's, so a sort
+/// outlives the request in php; here it is the request's, which is all
+/// a host that serves one request per process (the CLI, CGI) can show,
+/// and what a request served alone shows under any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IniOrder {
+    /// `zend_register_ini_entries`' order: the engine's own entries,
+    /// then each extension's in bundle order, each as it declared them.
+    Registration,
+    /// `zend_ini_sort_entries`' order ([`ini_key_compare`]).
+    Sorted,
+}
+
+impl IniOrder {
+    /// `rows`, handed over in registration order, put in this order,
+    /// each named by `name`.
+    fn arrange<T>(self, rows: &mut [T], name: impl Fn(&T) -> &[u8]) {
+        if self == IniOrder::Sorted {
+            rows.sort_by(|a, b| ini_key_compare(name(a), name(b)));
+        }
+    }
+}
+
+/// `ini_key_compare` (`Z/Zend/zend_ini.c:178`) over two names:
+/// `zend_binary_strcasecmp`, the bytes compared ASCII case-blind up to
+/// the shorter, and the shorter first where one is the other's prefix.
+fn ini_key_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    a.iter()
+        .map(u8::to_ascii_lowercase)
+        .cmp(b.iter().map(u8::to_ascii_lowercase))
 }
 
 impl Ini {
@@ -82,6 +123,7 @@ impl Ini {
             stage: IniStage::Runtime,
             typed,
             open_basedir: None,
+            order: IniOrder::Registration,
         }
     }
 }
@@ -956,10 +998,38 @@ impl Request {
     /// ```
     #[must_use]
     pub fn ini_entries(&self) -> Vec<IniEntry> {
-        (0..self.shared.extensions.len())
+        let entries = (0..self.shared.extensions.len())
             .filter_map(|at| u32::try_from(at).ok())
-            .flat_map(|at| self.extension_ini(ExtensionId(at)))
-            .collect()
+            .flat_map(|at| self.registered_ini(ExtensionId(at)))
+            .collect();
+        self.in_table_order(entries)
+    }
+
+    /// `zend_ini_sort_entries()` (`Z/Zend/zend_ini.c:195`), which
+    /// `phpinfo()` runs whatever it prints and `ini_get_all()` runs
+    /// before it looks the extension up: the table sorted by
+    /// [`ini_key_compare`], so every walk of it from here to the
+    /// request's end lists its entries sorted by name ([`IniOrder`]).
+    ///
+    /// ```php
+    /// $names = fn () => implode(' ', array_keys((new ReflectionExtension('iconv'))->getINIEntries())) . "\n";
+    /// echo $names(); @ini_get_all('nope'); echo $names();
+    /// ```
+    /// ```expect
+    /// iconv.input_encoding iconv.output_encoding iconv.internal_encoding
+    /// iconv.input_encoding iconv.internal_encoding iconv.output_encoding
+    /// ```
+    pub fn ini_sort_entries(&mut self) {
+        self.ini.order = IniOrder::Sorted;
+    }
+
+    /// Entries handed over in registration order, put in the order the
+    /// table holds them now ([`IniOrder`]).
+    fn in_table_order(&self, mut entries: Vec<IniEntry>) -> Vec<IniEntry> {
+        self.ini
+            .order
+            .arrange(&mut entries, |entry| &entry.decl.name.0);
+        entries
     }
 
     /// `zend_ini_parse_bool` (`Z/Zend/zend_ini.c:563`), the one rule
@@ -1333,13 +1403,19 @@ impl Request {
         self.ini_hold(name, Some(value));
     }
 
-    /// The ini entries an extension declared, in the order it declared
-    /// them, which is where `zend_register_ini_entries` put them in
-    /// `EG(ini_directives)`: each with the value in force, the request's
+    /// The ini entries an extension declared, in the order
+    /// `EG(ini_directives)` holds them ([`IniOrder`]), which is the
+    /// order `zend_register_ini_entries` put them in until the request
+    /// sorts the table. Each carries the value in force, the request's
     /// `ini_set` over the engine's startup value, and the startup value
     /// again as `original` where the request changed it.
     #[must_use]
     pub fn extension_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
+        self.in_table_order(self.registered_ini(extension))
+    }
+
+    /// An extension's entries in the order it declared them.
+    fn registered_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
         if extension == ExtensionId::CORE {
             return self.core_ini();
         }
@@ -1434,9 +1510,10 @@ impl Request {
         self.info_ini_table(&rows);
     }
 
-    /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`) after
-    /// `zend_ini_sort_entries`: the entries no extension declared, the
-    /// engine's own, sorted by name, each value through the entry's
+    /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`): the entries
+    /// no extension declared, the engine's own, in the table's order,
+    /// which `phpinfo()` has sorted by name before it prints them
+    /// ([`Request::ini_sort_entries`]), each value through the entry's
     /// displayer ([`IniDisplayer`]). What `PHP_MINFO_FUNCTION(core)` and
     /// `phpinfo()`'s `PHP Core` print.
     ///
@@ -1666,14 +1743,12 @@ impl Request {
     /// ```
     pub fn core_ini_info(&mut self) {
         let shared = Arc::clone(&self.shared);
-        let mut names: Vec<&[u8]> = shared
+        let names: Vec<&[u8]> = shared
             .ini_defaults()
             .iter()
             .map(|(name, _)| name.as_slice())
             .filter(|name| extension_ini(&shared, name).is_none())
             .collect();
-        // `ini_key_compare`: `zend_binary_strcasecmp` of the names.
-        names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
         let rows: Vec<(String, IniCell, IniCell)> = names
             .iter()
             .map(|name| {
@@ -1750,6 +1825,34 @@ impl Request {
     /// <tr><td class="e">iconv.internal_encoding</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// </table>
     /// ```
+    ///
+    /// The rows are listed in the order the table holds them
+    /// ([`Request::ini_sort_entries`]): as the extension registered its
+    /// entries, until the request's first `phpinfo()` or `ini_get_all()`
+    /// sorts them by name.
+    ///
+    /// ```php
+    /// $e = new ReflectionExtension('session'); ob_start(); $e->info();
+    /// echo implode("\n", array_slice(explode("\n", strstr(ob_get_clean(), 'Directive')), 0, 4)), "\n";
+    /// ```
+    /// ```expect
+    /// Directive => Local Value => Master Value
+    /// session.save_path => no value => no value
+    /// session.name => PHPSESSID => PHPSESSID
+    /// session.save_handler => files => files
+    /// ```
+    ///
+    /// ```php
+    /// ini_get_all('session');
+    /// $e = new ReflectionExtension('session'); ob_start(); $e->info();
+    /// echo implode("\n", array_slice(explode("\n", strstr(ob_get_clean(), 'Directive')), 0, 4)), "\n";
+    /// ```
+    /// ```expect
+    /// Directive => Local Value => Master Value
+    /// session.auto_start => Off => Off
+    /// session.cache_expire => 180 => 180
+    /// session.cache_limiter => nocache => nocache
+    /// ```
     pub fn info_ini_table(&mut self, rows: &[[&str; 3]]) {
         let rows: Vec<(String, IniCell, IniCell)> = rows
             .iter()
@@ -1765,11 +1868,19 @@ impl Request {
     }
 
     /// [`Request::info_ini_table`] over cells a displayer may have
-    /// written ([`IniCell`]).
+    /// written ([`IniCell`]), the rows in the order the table holds
+    /// them ([`IniOrder`]): `display_ini_entries` walks
+    /// `EG(ini_directives)` for the extension's entries, so the rows it
+    /// hands over in its registration order are listed sorted
+    /// once the request has sorted the table.
     fn ini_table(&mut self, rows: &[(String, IniCell, IniCell)]) {
         if rows.is_empty() {
             return;
         }
+        let mut rows: Vec<&(String, IniCell, IniCell)> = rows.iter().collect();
+        self.ini
+            .order
+            .arrange(&mut rows, |(name, ..)| name.as_bytes());
         let text = self.phpinfo_as_text();
         let mut out = Vec::new();
         let value = |out: &mut Vec<u8>, cell: &IniCell| match cell {

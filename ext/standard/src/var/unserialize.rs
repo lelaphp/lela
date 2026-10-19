@@ -2274,15 +2274,16 @@ impl State<'_> {
 
     /// `process_nested_object_data`: each key read as
     /// `zend_string_init_existing_interned` reads it, so a property name
-    /// a unit already holds is that string and costs nothing, and a
-    /// dynamic property costs what writing it does:
+    /// the interned table already holds, `name` among php's own, is that
+    /// string and costs nothing, and a dynamic property costs what
+    /// writing it does:
     ///
     /// ```php
     /// #[AllowDynamicProperties] class P {}
-    /// $o = new P; $o->dyn = 5; $s = serialize($o); $w = unserialize($s);
+    /// $o = new P; $o->name = 5; $s = serialize($o); $w = unserialize($s);
     /// $m = memory_get_usage(); $u = unserialize($s); var_dump(memory_get_usage() - $m);
-    /// $m = memory_get_usage(); $n = new P; $n->dyn = 5; var_dump(memory_get_usage() - $m);
-    /// $m = memory_get_usage(); $a = unserialize('a:1:{s:3:"dyn";i:5;}'); var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $n = new P; $n->name = 5; var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $a = unserialize('a:1:{s:4:"name";i:5;}'); var_dump(memory_get_usage() - $m);
     /// ```
     /// ```expect
     /// int(416)

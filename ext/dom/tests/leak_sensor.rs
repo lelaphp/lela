@@ -158,3 +158,66 @@ fn an_evaluator_constructed_anew_in_its_own_callback_evaluates_to_its_end() {
         "string(2) \"v2\"\nfloat(1)\n",
     );
 }
+
+/// lexbor allocates on the request's heap under its lend (ADR-0014,
+/// #2925), and everything it made is given back by the request's end: an
+/// HTML5 parse, a fragment, a selector list, and the request's URL pool,
+/// parser and IDNA converter with every URL in it. One armed engine
+/// serves many such requests, as a long-running host does, each ending
+/// with no block of its heap held and each starting with the usage the
+/// first started with, so nothing of one request's lexbor memory is
+/// carried into the next; one ended by the memory limit mid-parse in
+/// between leaves the next as it found it.
+#[test]
+fn what_lexbor_made_is_given_back_by_each_request_s_end() {
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_libxml::extension(),
+            php_ext_lexbor::extension(),
+            php_ext_standard::extension(),
+            php_ext_uri::extension(),
+            php_ext_dom::extension(),
+        ])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let src = "<?php $m = memory_get_usage();\n\
+         $d = Dom\\HTMLDocument::createFromString(str_repeat('<div class=a><p>x <b>y</b></p></div>', 300), LIBXML_NOERROR);\n\
+         $d->body->firstChild->innerHTML = '<i>z</i><template><u>t</u></template>';\n\
+         echo count($d->querySelectorAll('div.a > p b')), ' ', $d->body->firstChild->innerHTML, \"\\n\";\n\
+         $u = Uri\\WhatWg\\Url::parse('https://xn--mnchen-3ya.de:99999', null, $e);\n\
+         $u = new Uri\\WhatWg\\Url('https://user@example.com/a?q#f');\n\
+         $v = $u->withHost('xn--mnchen-3ya.de')->withPort(81)->withPath('/b c');\n\
+         echo $v->toUnicodeString(), ' ', $v->getUnicodeHost(), ' ', count($e), \"\\n\";\n\
+         echo $m, \"\\n\";\n";
+    let mut first = None;
+    for round in 0..64 {
+        if round == 32 {
+            let limited = engine.serve_capture(
+                "<?php ini_set('memory_limit', '8M');\n\
+                 Dom\\HTMLDocument::createFromString(str_repeat('<div class=a><p>hello <b>world</b></p></div>', 20000), LIBXML_NOERROR);\n",
+                Capture::default(),
+            );
+            let fatal = limited.fatal.unwrap_or_default();
+            assert!(fatal.contains("Allowed memory size"), "{fatal}");
+        }
+        let served = engine.serve_capture(src, Capture::default());
+        assert_eq!(served.fatal, None, "round {round}");
+        let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+        let (shown, start) = stdout
+            .rsplit_once('\n')
+            .map_or((stdout.as_str(), ""), |(a, _)| {
+                a.rsplit_once('\n').unwrap_or(("", a))
+            });
+        assert_eq!(
+            shown,
+            "299 <i>z</i><template><u>t</u></template>\n\
+             https://user@münchen.de:81/b%20c?q#f münchen.de 1",
+            "round {round}"
+        );
+        assert_eq!(
+            *first.get_or_insert_with(|| start.to_owned()),
+            start,
+            "round {round}"
+        );
+    }
+}

@@ -43,16 +43,13 @@ fn errors_reference_assignment_reenters_without_losing_parse_state() {
     );
 }
 
+/// The request's pool is lexbor's on the request's heap (#2925), so a large
+/// URL grows it as php's grows, and the allocation transactions read the
+/// oracle's.
 #[test]
-fn current_system_pool_cannot_prove_php_allocation_parity() {
-    let bytes = served(include_str!("proof/allocation.php"));
-    assert_ne!(
-        bytes,
+fn the_request_s_pool_allocates_as_php_s() {
+    assert_eq!(
+        served(include_str!("proof/allocation.php")),
         include_bytes!("../../../data/uri-storage-2832/allocation.stdout")
     );
-    // Keep the falsification specific: a large URL causes request-pool growth
-    // in php, while the current binding charges only its PHP object.
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("pool-grow 80\n"), "{text}");
-    assert!(text.contains("pool-retain -80\n"), "{text}");
 }

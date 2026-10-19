@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=0c291d3ba6fa6da0f65981a918785cce2d1ec5ee2c05ba340b59209d6e1108ed out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=04727f1b11cbb5cd6cf8742abc2f30fde8d785bd073a4abcc0275793b58293ca out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=2b3e81f6406a6555dfe0ce81efdf8fb88de0b8d42b5d0bcc63b3b012b07dac9f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=1b202375a1e2cdb1d9fa0b20110d1b43587071465f9c771a97332afa57aed20c out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -126,13 +126,13 @@ third-engine-design.md
 | unit | unit.lock | 119 |  |
 | link | link.lock | 57 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1446 | 1500 |
+| api | api.lock | 1447 | 1500 |
 | sapi | sapi.lock | 57 |  |
 | tier | tier.lock | 81 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 414 |  |
+| harness | xtask.lock | 409 |  |
 
-<!-- /computed in=0a7158099b077f233e790e569943322a077d9ba2d236fc0cab3ea44eb94d4075 out=10c8abc3d03f9928bfe1e9be206a1f0d18cf0144268343895e0dc555b9436ede -->
+<!-- /computed in=675e8e5df25f37366e091a428d45513042a3b473d2a1964c54611c403b25c8e5 out=01a7941e9bd57691c8565643d0566c1901a163c2b98029bf87f9df3638818c66 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -173,7 +173,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=61d87ad8ce7ea436a6ee2fee3fa23a7d371bd7e7059c0cb32dc710cd1d4d7d2f out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
+<!-- /computed in=dcdd1afde96f157d1cdb38aa8010ebdf40fe92a4e25b42d8cee69a6474da9002 out=c8233224fd65a9fba70b2adb4454ef938dd14d9245aac865d46385b070f21ea6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

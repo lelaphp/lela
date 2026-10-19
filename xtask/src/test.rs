@@ -28,7 +28,12 @@
 //! `[package.metadata.xtask.test]`: then as many run at once as
 //! [`Beside::schedule`] says, an executable that does share something held
 //! apart from the others that name its key ([`Beside`]), what each one
-//! printed kept whole and read in the executables' order (#2869). The
+//! printed kept whole and read in the executables' order (#2869). Under
+//! `--staged` an executable the `Cargo.toml` names in `own` runs only
+//! where a staged path is one of its own sources, and a crate that passes
+//! with any left out has no reading, since `done` asks the whole crate's
+//! run (#2982): xtask's executables that build with cargo inside a test
+//! held a commit's hook for minutes when their own code was untouched. The
 //! reading is stamped once they have ended, `ms` counts how long they
 //! ran, and a group per executable, `test worktree`, how long that one
 //! did.
@@ -87,6 +92,17 @@ pub fn committed(root: &Path, path: &str) -> Result<String> {
 /// Run the tests of every crate that exists, or of `only`; one reading
 /// each.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
+    measure(root, manifest, only, None)
+}
+
+/// [`run`] with the paths a commit stages, under which an executable the
+/// crate names in `own` runs only where one of its own sources is staged.
+fn measure(
+    root: &Path,
+    manifest: &Manifest,
+    only: &[String],
+    staged: Option<&[String]>,
+) -> Result<Vec<Reading>> {
     let mut crates = manifest.crates_named(only)?;
     crates.retain(|k| sources::exists(root, k));
     // The key each reading carries is the tree's before cargo built it,
@@ -95,6 +111,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     if crates.is_empty() {
         return Ok(Vec::new());
     }
+    let _seat = crate::seat::Seats::of_env().take(INSTRUMENT);
     let mut readings = Vec::with_capacity(crates.len());
     for run in batch::runs(root, &crates)? {
         let built = Run::of(root, &["build", "--keep-going"], &run, Targets::Tests)?;
@@ -102,12 +119,22 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
         let missed = Pin::missed(root, &built, &run)?;
         for krate in run {
             let missed = missed.get(&krate.name).map_or(&[][..], Vec::as_slice);
-            readings.push(reading(
+            let (reading, left_out) = reading(
                 &snapshot,
                 krate,
                 &built,
                 (docs.get(&krate.name), missed),
-            )?);
+                staged,
+            )?;
+            if left_out.is_empty() || reading.status != Status::Pass {
+                readings.push(reading);
+            } else {
+                println!(
+                    "{}; under --staged {} left out, whose own sources are not staged, so it is not recorded: `done` asks the whole crate's run",
+                    reading.message,
+                    left_out.join(", ")
+                );
+            }
         }
     }
     Ok(readings)
@@ -121,7 +148,11 @@ pub fn run_staged(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec
     if measured.is_empty() {
         return Ok(Vec::new());
     }
-    run(root, manifest, &measured)
+    let staged: Vec<String> = crate::git::staged(root)?
+        .into_iter()
+        .map(|change| change.path)
+        .collect();
+    measure(root, manifest, &measured, Some(&staged))
 }
 
 /// What one test executable, or one crate's doctests, did: the counts its
@@ -154,7 +185,8 @@ fn reading(
     krate: &Crate,
     run: &Run,
     (doc, missed): (Option<&Ran>, &[String]),
-) -> Result<Reading> {
+    staged: Option<&[String]>,
+) -> Result<(Reading, Vec<String>)> {
     let name = &krate.name;
     let Some(built) = run.crates.get(name).filter(|b| b.whole) else {
         let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
@@ -167,10 +199,25 @@ fn reading(
         Counts::default().count(&mut reading)?;
         reading.status = Status::Fail;
         reading.message = format!("{name}: the tests did not build\n{}", tail(&said, 40));
-        return Ok(reading);
+        return Ok((reading, Vec::new()));
     };
     let started = Instant::now();
-    let (jobs, apart) = Beside::of(&built.package)?.schedule(name, &built.executables)?;
+    let beside = Beside::of(&built.package)?;
+    let (jobs, apart) = beside.schedule(name, &built.executables)?;
+    let mut left_out = Vec::new();
+    let (executables, apart): (Vec<Executable>, Vec<Apart>) = built
+        .executables
+        .iter()
+        .cloned()
+        .zip(apart)
+        .filter(|(e, _)| {
+            let runs = beside.runs(e, &krate.path(), staged);
+            if !runs {
+                left_out.push(e.name.clone());
+            }
+            runs
+        })
+        .unzip();
     let mut all = Ran {
         passed: true,
         ..Ran::default()
@@ -187,7 +234,7 @@ fn reading(
         all.add(&ran);
     };
     let batch = NonZeroUsize::MIN;
-    tally::pool(&built.executables, jobs, batch, &apart, each, on)?;
+    tally::pool(&executables, jobs, batch, &apart, each, on)?;
     // Stamped once the executables have ended, so a span read off the
     // store's stamps holds their run (#2869).
     let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
@@ -216,7 +263,7 @@ fn reading(
     if !passed {
         reading.message = format!("{}\n{}", reading.message, tail(&all.text, 40));
     }
-    Ok(reading)
+    Ok((reading, left_out))
 }
 
 /// How a crate's test executables stand beside each other, as its
@@ -235,6 +282,11 @@ enum Beside {
     SideBySide {
         #[serde(default)]
         apart: BTreeMap<String, Vec<String>>,
+        /// By target name, the paths under the package that are an
+        /// executable's own: under `--staged` it runs only where one of
+        /// them is staged (#2982).
+        #[serde(default)]
+        own: BTreeMap<String, Vec<String>>,
     },
 }
 
@@ -258,13 +310,16 @@ impl Beside {
     /// own tests on threads of its own. A key held for a name that is no
     /// executable of the crate is an error.
     fn schedule(&self, krate: &str, all: &[Executable]) -> Result<(NonZeroUsize, Vec<Apart>)> {
-        let Beside::SideBySide { apart } = self else {
+        let Beside::SideBySide { apart, own } = self else {
             return Ok((NonZeroUsize::MIN, vec![Apart::default(); all.len()]));
         };
-        if let Some(name) = apart.keys().find(|n| all.iter().all(|e| &e.name != *n)) {
-            bail!(
-                "{krate}: [package.metadata.xtask.test] holds `{name}` apart, which is no test executable of it"
-            );
+        for (named, says) in [(apart, "holds `{}` apart"), (own, "names `{}`'s own paths")] {
+            if let Some(name) = named.keys().find(|n| all.iter().all(|e| &e.name != *n)) {
+                let says = says.replace("{}", name);
+                bail!(
+                    "{krate}: [package.metadata.xtask.test] {says}, which is no test executable of it"
+                );
+            }
         }
         let jobs = std::env::var("CARGO_BUILD_JOBS")
             .ok()
@@ -275,6 +330,24 @@ impl Beside {
             ..Apart::default()
         });
         Ok((jobs.unwrap_or_else(tally::cores), held.collect()))
+    }
+}
+
+impl Beside {
+    /// Whether `executable` of the crate at `dir` runs: always, unless
+    /// `staged` is the commit's paths and the crate names the
+    /// executable's own paths, none of which is staged.
+    fn runs(&self, executable: &Executable, dir: &Path, staged: Option<&[String]>) -> bool {
+        let (Beside::SideBySide { own, .. }, Some(staged)) = (self, staged) else {
+            return true;
+        };
+        let Some(paths) = own.get(&executable.name) else {
+            return true;
+        };
+        paths.iter().any(|path| {
+            let path = dir.join(path);
+            staged.iter().any(|s| Path::new(s).starts_with(&path))
+        })
     }
 }
 

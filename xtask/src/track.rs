@@ -288,6 +288,23 @@ pub(crate) fn worktrees(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
     Ok(found)
 }
 
+/// `root`, then every worktree of its repository that stands on disk, as
+/// [`worktrees`] names them, the main one first; each once, by its
+/// canonical path, so `/tmp` and `/private/tmp` are one. An error where
+/// git cannot list them, which a caller that must fail safe reads as such.
+pub(crate) fn checkouts(root: &Path) -> Result<Vec<PathBuf>> {
+    let listed = worktrees(root)?.into_iter().map(|(tree, _)| tree);
+    let mut found: Vec<PathBuf> = Vec::new();
+    for tree in std::iter::once(root.to_path_buf()).chain(listed) {
+        if let Ok(tree) = std::fs::canonicalize(tree)
+            && !found.contains(&tree)
+        {
+            found.push(tree);
+        }
+    }
+    Ok(found)
+}
+
 /// The full id of `name`.
 pub(crate) fn rev(root: &Path, name: &str) -> Result<String> {
     git::rev_parse(

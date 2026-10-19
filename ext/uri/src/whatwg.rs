@@ -10,6 +10,7 @@ use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, throw_valu
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value, walk};
 use php_ext_lexbor::ffi::url::{self as lxb, ErrorKind, Host, Url as LxbUrl, ValidationError};
+use php_ext_lexbor::ffi::{self as lexbor, Lent, Owned};
 
 use crate::{
     Handlers, InvalidUriException, Parsed, Read, ReadAs, Recomposition, Slot, UriComparisonMode,
@@ -141,33 +142,110 @@ fn refused_write(req: &mut Request, component: &str, errors: &[ValidationError])
     }
 }
 
+/// The extension's request state: the WHATWG parser php's
+/// `PHP_RINIT_FUNCTION(uri_parser_whatwg)` lays, its pool, parser and
+/// IDNA converter, which every `Uri\WhatWg\Url` of the request is
+/// allocated in and served by; `None` before `rinit` and after
+/// `post_deactivate`.
+#[derive(Default)]
+pub(crate) struct State {
+    parser: Option<lxb::Parser>,
+}
+
+/// `PHP_RINIT_FUNCTION(uri_parser_whatwg)` (`Z/ext/uri/uri_parser_whatwg.c:533`):
+/// the request's pool, parser and IDNA converter laid on its heap. Where
+/// lexbor refuses one, php's `RINIT` answers `FAILURE`; here that is the
+/// `InternalError`, since only an allocation lexbor could not make
+/// refuses it, and the memory limit's fatal comes first.
+///
+/// What it lays, 73,952 bytes (#2923), is the last item of a request's
+/// memory at its first line (design §5.13, #2863), so an empty program's
+/// `memory_get_usage()` reads php's under opcache's regime. The strings
+/// that move with the directory and the environment are taken out, the
+/// working directory's two copies, the file's path and each variable, so
+/// it reads the same from any directory:
+///
+/// ```php
+/// $m = memory_get_usage();
+/// $bin = function ($n) { foreach ([8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072] as $b) { if ($n <= $b) { return $b; } } return ($n + 4095) & ~4095; };
+/// $str = fn ($s) => strlen($s) < 2 ? 0 : $bin(24 + strlen($s) + 1);
+/// $moves = $bin(strlen(getcwd()) + 1) + $str(getcwd()) + $str(__FILE__);
+/// foreach (getenv() as $k => $v) { $moves += $str($k) + $str($v); }
+/// echo $m - $moves, "\n";
+/// ```
+/// ```expect regime=jit-off capture
+/// 423208
+/// ```
+pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    match lexbor::lent(req, lxb::Parser::new)? {
+        Some(parser) => {
+            req.state::<State>().parser = Some(parser);
+            Ok(())
+        }
+        None => Err(fatal(
+            req,
+            "InternalError: lexbor refused the request's URL parser",
+        )),
+    }
+}
+
+/// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(uri_parser_whatwg)`: the
+/// converter, the parser and the pool destroyed under a lend of the
+/// request, after its objects, and the URLs they held, are freed.
+pub(crate) fn post_deactivate(req: &mut Request) {
+    if let Some(parser) = req.state::<State>().parser.take() {
+        // The limit cannot refuse a free, and nothing is left to raise
+        // into at the request's end.
+        lexbor::lent(req, |lent| parser.give_back(lent)).ok();
+    }
+}
+
+/// `call` served with the request's parser and the heap lent to lexbor;
+/// the `Err` is the memory limit's fatal, or the `InternalError` of a
+/// request whose `rinit` laid none.
+fn with_parser<R>(
+    req: &mut Request,
+    call: impl FnOnce(&mut lxb::Parser, &Lent) -> R,
+) -> Result<R, Thrown> {
+    let Some(mut parser) = req.state::<State>().parser.take() else {
+        return Err(fatal(
+            req,
+            "InternalError: a URL served before the request laid its parser",
+        ));
+    };
+    let answered = lexbor::lent(req, |lent| call(&mut parser, lent));
+    req.state::<State>().parser = Some(parser);
+    answered
+}
+
 impl WhatWg {
     fn includes_credentials(&self) -> bool {
         !self.0.username().is_empty() || !self.0.password().is_empty()
     }
 
-    /// A setter over the URL, a refusal thrown naming `component`.
+    /// A setter over the URL, under the request's parser, a refusal
+    /// thrown naming `component`.
     fn set(
         &mut self,
         req: &mut Request,
         component: &str,
-        f: impl FnOnce(&mut LxbUrl) -> Result<(), lxb::Refused>,
+        value: &[u8],
+        set: fn(&mut lxb::Parser, &Lent, &mut LxbUrl, &[u8]) -> Result<(), lxb::Refused>,
     ) -> Result<(), Thrown> {
-        f(&mut self.0).map_err(|refused| refused_write(req, component, &refused.0))
+        with_parser(req, |parser, lent| set(parser, lent, &mut self.0, value))?
+            .map_err(|refused| refused_write(req, component, &refused.0))
     }
 
     /// `php_uri_parser_whatwg_username_write`.
     fn set_username(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.set(req, "username", |url| {
-            url.set_username(value.unwrap_or_default())
-        })
+        let value = value.unwrap_or_default();
+        self.set(req, "username", value, lxb::Parser::set_username)
     }
 
     /// `php_uri_parser_whatwg_password_write`.
     fn set_password(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.set(req, "password", |url| {
-            url.set_password(value.unwrap_or_default())
-        })
+        let value = value.unwrap_or_default();
+        self.set(req, "password", value, lxb::Parser::set_password)
     }
 }
 
@@ -183,7 +261,9 @@ impl UriParser for WhatWg {
         want_errors: bool,
         silent: bool,
     ) -> Result<Parsed<Self>, Thrown> {
-        let parsed = LxbUrl::parse(text, base.map(|base| &base.0));
+        let parsed = with_parser(req, |parser, lent| {
+            parser.parse(lent, text, base.map(|base| &base.0))
+        })?;
         let fails = parsed.url.is_none() && !silent;
         let mut errors = None;
         if fails || want_errors {
@@ -201,18 +281,41 @@ impl UriParser for WhatWg {
         })
     }
 
-    fn duplicate(&self, _req: &mut Request) -> Result<Option<Self>, Thrown> {
-        Ok(self.0.try_clone().map(WhatWg))
+    /// `php_uri_parser_whatwg_clone`: a copy in the request's pool.
+    fn duplicate(&self, req: &mut Request) -> Result<Option<Self>, Thrown> {
+        let copy = with_parser(req, |parser, lent| parser.clone_url(lent, &self.0))?;
+        Ok(copy.map(WhatWg))
     }
 
-    /// `php_uri_parser_whatwg_to_string`.
-    fn recompose(&mut self, mode: Recomposition, exclude_fragment: bool) -> Option<Vec<u8>> {
-        Some(match mode {
-            Recomposition::RawUnicode => self.0.serialize_idna(exclude_fragment),
+    /// `php_uri_parser_whatwg_destroy`: the URL given back to the
+    /// request's pool.
+    fn free(self, req: &mut Request) {
+        // A request whose parser is gone has destroyed the pool, and the
+        // URL with it, so there is nothing to give back and nothing to
+        // raise; the limit cannot refuse a free.
+        let Some(mut parser) = req.state::<State>().parser.take() else {
+            return;
+        };
+        lexbor::lent(req, |lent| parser.free(lent, self.0)).ok();
+        req.state::<State>().parser = Some(parser);
+    }
+
+    /// `php_uri_parser_whatwg_to_string`: the Unicode forms through the
+    /// request's IDNA converter.
+    fn recompose(
+        &mut self,
+        req: &mut Request,
+        mode: Recomposition,
+        exclude_fragment: bool,
+    ) -> Result<Option<Vec<u8>>, Thrown> {
+        Ok(Some(match mode {
+            Recomposition::RawUnicode => with_parser(req, |parser, lent| {
+                parser.serialize_idna(lent, &self.0, exclude_fragment)
+            })?,
             Recomposition::RawAscii | Recomposition::NormalizedAscii => {
                 self.0.serialize(exclude_fragment)
             }
-        })
+        }))
     }
 
     fn scheme(&mut self, _: ReadAs) -> Read<Option<Vec<u8>>> {
@@ -234,9 +337,13 @@ impl UriParser for WhatWg {
     }
 
     /// `php_uri_parser_whatwg_host_read`: an IPv6 address in brackets, a
-    /// domain in Unicode for the Unicode read.
-    fn host(&mut self, mode: ReadAs) -> Read<Option<Vec<u8>>> {
-        Ok(self.0.host().map(|host| match host {
+    /// domain in Unicode for the Unicode read, through the request's
+    /// IDNA converter.
+    fn host(&mut self, req: &mut Request, mode: ReadAs) -> Result<Read<Option<Vec<u8>>>, Thrown> {
+        let Some(host) = self.0.host() else {
+            return Ok(Ok(None));
+        };
+        Ok(Ok(Some(match host {
             Host::Ipv4(address) => lxb::ipv4_text(address),
             Host::Ipv6(pieces) => {
                 let mut text = b"[".to_vec();
@@ -246,10 +353,12 @@ impl UriParser for WhatWg {
             }
             Host::Empty => Vec::new(),
             Host::Domain(name) | Host::Opaque(name) => match mode {
-                ReadAs::NormalizedUnicode => self.0.host_unicode(),
+                ReadAs::NormalizedUnicode => {
+                    with_parser(req, |parser, lent| parser.host_unicode(lent, &self.0))?
+                }
                 ReadAs::NormalizedAscii | ReadAs::Raw => name.to_vec(),
             },
-        }))
+        })))
     }
 
     fn port(&mut self, _: ReadAs) -> Read<Option<i64>> {
@@ -269,38 +378,34 @@ impl UriParser for WhatWg {
     }
 
     fn set_scheme(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.set(req, "scheme", |url| {
-            url.set_protocol(value.unwrap_or_default())
-        })
+        let value = value.unwrap_or_default();
+        self.set(req, "scheme", value, lxb::Parser::set_protocol)
     }
 
     fn set_host(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.set(req, "host", |url| {
-            url.set_hostname(value.unwrap_or_default())
-        })
+        let value = value.unwrap_or_default();
+        self.set(req, "host", value, lxb::Parser::set_hostname)
     }
 
     /// `php_uri_parser_whatwg_port_write`: the number as its decimal text,
     /// `null` as the empty string.
     fn set_port(&mut self, req: &mut Request, value: Option<i64>) -> Result<(), Thrown> {
         let text = value.map(|port| port.to_string()).unwrap_or_default();
-        self.set(req, "port", |url| url.set_port(text.as_bytes()))
+        self.set(req, "port", text.as_bytes(), lxb::Parser::set_port)
     }
 
     fn set_path(&mut self, req: &mut Request, value: &[u8]) -> Result<(), Thrown> {
-        self.set(req, "path", |url| url.set_pathname(value))
+        self.set(req, "path", value, lxb::Parser::set_pathname)
     }
 
     fn set_query(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.set(req, "query string", |url| {
-            url.set_search(value.unwrap_or_default())
-        })
+        let value = value.unwrap_or_default();
+        self.set(req, "query string", value, lxb::Parser::set_search)
     }
 
     fn set_fragment(&mut self, req: &mut Request, value: Option<&[u8]>) -> Result<(), Thrown> {
-        self.set(req, "fragment", |url| {
-            url.set_hash(value.unwrap_or_default())
-        })
+        let value = value.unwrap_or_default();
+        self.set(req, "fragment", value, lxb::Parser::set_hash)
     }
 }
 
@@ -646,7 +751,7 @@ impl Url {
             this.object(),
             "scheme",
             ReadAs::NormalizedAscii,
-            |u| u.scheme(ReadAs::NormalizedAscii),
+            |_, u| Ok(u.scheme(ReadAs::NormalizedAscii)),
         )?;
         match scheme {
             Some(scheme) => Ok(scheme),
@@ -693,7 +798,7 @@ impl Url {
             this.object(),
             "username",
             ReadAs::NormalizedAscii,
-            |u| u.username(ReadAs::NormalizedAscii),
+            |_, u| Ok(u.username(ReadAs::NormalizedAscii)),
         )
     }
 
@@ -733,7 +838,7 @@ impl Url {
             this.object(),
             "password",
             ReadAs::NormalizedAscii,
-            |u| u.password(ReadAs::NormalizedAscii),
+            |_, u| Ok(u.password(ReadAs::NormalizedAscii)),
         )
     }
 
@@ -771,9 +876,13 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "host", ReadAs::NormalizedAscii, |u| {
-            u.host(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<W>(
+            req,
+            this.object(),
+            "host",
+            ReadAs::NormalizedAscii,
+            |req, u| u.host(req, ReadAs::NormalizedAscii),
+        )
     }
 
     /// `getUnicodeHost(): ?string`.
@@ -789,9 +898,13 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "host", ReadAs::NormalizedUnicode, |u| {
-            u.host(ReadAs::NormalizedUnicode)
-        })
+        crate::component_string::<W>(
+            req,
+            this.object(),
+            "host",
+            ReadAs::NormalizedUnicode,
+            |req, u| u.host(req, ReadAs::NormalizedUnicode),
+        )
     }
 
     /// `withHost(?string $host): static`.
@@ -823,8 +936,8 @@ impl Url {
     /// int(8443)
     /// ```
     fn getPort(req: &mut Request, this: This<Self>) -> Result<Option<i64>, Thrown> {
-        crate::component::<W, _>(req, this.object(), "port", ReadAs::Raw, |u| {
-            u.port(ReadAs::Raw)
+        crate::component::<W, _>(req, this.object(), "port", ReadAs::Raw, |_, u| {
+            Ok(u.port(ReadAs::Raw))
         })
     }
 
@@ -858,10 +971,13 @@ impl Url {
     /// string(1) "x"
     /// ```
     fn getPath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
-        let path =
-            crate::component::<W, _>(req, this.object(), "path", ReadAs::NormalizedAscii, |u| {
-                u.path(ReadAs::NormalizedAscii)
-            })?;
+        let path = crate::component::<W, _>(
+            req,
+            this.object(),
+            "path",
+            ReadAs::NormalizedAscii,
+            |_, u| Ok(u.path(ReadAs::NormalizedAscii)),
+        )?;
         PhpString::new(req, &path)
     }
 
@@ -893,9 +1009,13 @@ impl Url {
     /// NULL
     /// ```
     fn getQuery(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<W>(req, this.object(), "query", ReadAs::NormalizedAscii, |u| {
-            u.query(ReadAs::NormalizedAscii)
-        })
+        crate::component_string::<W>(
+            req,
+            this.object(),
+            "query",
+            ReadAs::NormalizedAscii,
+            |_, u| Ok(u.query(ReadAs::NormalizedAscii)),
+        )
     }
 
     /// `withQuery(?string $query): static`.
@@ -934,7 +1054,7 @@ impl Url {
             this.object(),
             "fragment",
             ReadAs::NormalizedUnicode,
-            |u| u.fragment(ReadAs::NormalizedUnicode),
+            |_, u| Ok(u.fragment(ReadAs::NormalizedUnicode)),
         )
     }
 

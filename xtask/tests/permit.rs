@@ -60,7 +60,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             Where::Anywhere => workspace(),
             Where::Ticketed => ticketed.path(),
             Where::Operating => merging.path(),
-            Where::Main => quiet.path(),
+            Where::Main | Where::Checkout => quiet.path(),
         };
         // Every control of the rule's directory: each `deny*.json` (or
         // `note*.json`) must fire, each `allow*.json` must not (#625).
@@ -3141,6 +3141,89 @@ fn a_rule_where_main_judges_only_the_main_checkout() {
     assert!(denied(&manifest, &linked, &moved));
 }
 
+/// `harness.self-shell` under `where = "checkout"`, as #2887 ruled and
+/// #2915 built: a shell write to `docs/divergence.toml` is refused in a
+/// checkout, the main one or a linked worktree, however the line reaches
+/// it, and let through in a scratch repository outside every checkout,
+/// by either spelling of a linked temporary directory; a place `permit`
+/// cannot follow is read as a checkout.
+#[test]
+fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
+    let mut manifest = Manifest::load(workspace()).unwrap();
+    let rule = manifest
+        .rules
+        .iter_mut()
+        .find(|r| r.id == "harness.self-shell");
+    rule.unwrap().within = Where::Checkout;
+    let main = checkout("self-shell-main", None);
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(main.path(), &["worktree", "add", "-q", "-b", "own", "own"]);
+    let (main, linked) = (main.path(), main.path().join("own"));
+    let outside = Tree::new("permit-self-shell-outside").unwrap();
+    git(outside.path(), &["init", "-q", "repo"]);
+    let refused = |root: &Path, line: &str| {
+        let judged = judge(&manifest, root, &bash(line)).unwrap();
+        judged
+            .denial()
+            .is_some_and(|f| f.rule == "harness.self-shell")
+    };
+    let write = "echo '[[divergence]]' >> docs/divergence.toml";
+    // The negative control #2887 names, in each checkout.
+    assert!(refused(main, write));
+    assert!(refused(&linked, write));
+    let (scratch, worktree) = (outside.path().display(), linked.display());
+    let unlinked = outside.path().strip_prefix("/private").ok();
+    let spellings = std::iter::once(scratch.to_string())
+        .chain(unlinked.map(|path| format!("/{}", path.display())));
+    for s in spellings {
+        let line = format!("S={s} && cd \"$S/repo\" && {write}");
+        assert!(!refused(main, &line), "{line}");
+        assert!(!refused(&linked, &line), "{line}");
+    }
+    let piped = format!("cd {scratch}/repo && printf x 2>&1 | tee -a docs/divergence.toml");
+    assert!(!refused(main, &piped), "{piped}");
+    std::fs::create_dir(outside.join("links")).unwrap();
+    std::os::unix::fs::symlink(main.join("seams.toml"), outside.join("links/seams.toml")).unwrap();
+    std::fs::write(outside.join("file"), "").unwrap();
+    let main_dir = main.display();
+    for line in [
+        // Into a checkout by an assigned variable, by a later `cd`, by a
+        // subshell's, by git's `-C` and through a link.
+        format!("W={worktree} && cd \"$W\" && {write}"),
+        format!("cd {scratch}/repo && ls && cd {worktree} && {write}"),
+        format!("cd {scratch}/repo && (cd {worktree} && {write})"),
+        format!("cd {scratch}/repo && git -C {worktree} checkout -- seams.toml"),
+        format!("cd {scratch}/links && sed -i '' 's/a/b/' seams.toml"),
+        // Where `permit` cannot say: a variable the line did not assign,
+        // `cd -`, a directory not on disk or no directory, a change that
+        // may fail or run in a shell of its own before what follows it,
+        // one a program runs unread, and a program's own directory.
+        format!("cd \"$S/repo\" && {write}"),
+        format!("cd {scratch}/repo && cd - && {write}"),
+        format!("cd {scratch}/missing && {write}"),
+        format!("cd {scratch}/file && {write}"),
+        format!("cd {scratch}/repo; {write}"),
+        format!("cd {scratch}/repo || true && {write}"),
+        format!("cd {scratch}/repo & {write}"),
+        format!("cd {scratch}/repo | true && {write}"),
+        format!("cd {scratch}/repo\n{write}"),
+        format!("cd {scratch}/repo && xargs sh -c 'cd {worktree} && {write}' < /dev/null"),
+        format!("cd {scratch}/repo && env -C {worktree} sed -i '' 's/a/b/' seams.toml"),
+        format!("cd {scratch}/repo && patch -d {worktree} seams.toml < fix.diff"),
+        format!("cd {scratch}/repo && GIT_WORK_TREE={worktree} git checkout -- seams.toml"),
+        format!("cd {scratch}/repo && ln -sf {main_dir}/seams.toml . && {write}"),
+    ] {
+        assert!(refused(main, &line), "{line}");
+    }
+}
+
 /// `git.merge-commits-itself` as #2751 ruled it: a merge that commits
 /// itself is refused in the main checkout and let through in a linked
 /// worktree, where a builder merges `main` into its branch; a neighbour
@@ -3335,7 +3418,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
                 Where::Ticketed => ticketed.path(),
                 Where::Anywhere => workspace(),
                 Where::Operating => merging.path(),
-                Where::Main => main.path(),
+                Where::Main | Where::Checkout => main.path(),
             };
             let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
             let fired = judged

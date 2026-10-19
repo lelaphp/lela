@@ -133,9 +133,9 @@ pub(crate) fn run(
         own.write(name, &entry.program)?;
     }
     let log = own.join("errors");
-    let ini = ["log_errors=1".to_owned()];
-    let server = Server::start(recipe, &host, own.path(), &ini, None, &log, &[])?;
     let timeout = Duration::from_secs(recipe.limits.timeout_s);
+    let ini = ["log_errors=1".to_owned(), past_patience(timeout)];
+    let server = Server::start(recipe, &host, own.path(), &ini, None, &log, &[])?;
     let ask = |n: usize| -> Result<Vec<u8>> {
         let response = server.ask(&entries[n].http, &names[n], timeout)?.0;
         Ok(entries[n].randoms_named_alike(&from_http(&response)))
@@ -177,6 +177,20 @@ pub(crate) fn run(
     let mismatched = (found.named.into_inner()).unwrap_or_else(PoisonError::into_inner);
     judged(&mut reading, &mismatched, &unstable, &borked);
     Ok(reading)
+}
+
+/// The `max_execution_time` every request is served under: twice the
+/// client's patience, `timeout`. php's deadline is wall-clock time where
+/// the oracle runs (`ITIMER_REAL` on Apple silicon,
+/// `Z/Zend/zend_execute_API.c:1611-1614`), as the engine's is, so under a
+/// shared machine's load a kernel of the bench workloads ran past the
+/// default 30 seconds among 64 clients and its body was php's fatal: a
+/// mismatch made by the load and by no request beside it (#2337). Past
+/// the client's patience the timer is still armed and disarmed on every
+/// request, and a request slower than that is a failure the client
+/// counts, never a body that differs.
+fn past_patience(timeout: Duration) -> String {
+    format!("max_execution_time={}", timeout.as_secs() * 2)
 }
 
 /// What each entry served alone came to.
@@ -386,6 +400,16 @@ mod tests {
         let mut idle = reading(&[]);
         judged(&mut idle, &[], &[], &[]);
         assert_eq!(idle.status, Status::Fail, "nothing served is no pass");
+    }
+
+    /// Every request is served under a deadline past the client's
+    /// patience, so the load reaches the client's timeout first.
+    #[test]
+    fn the_deadline_stands_past_the_client_s_patience() {
+        assert_eq!(
+            past_patience(Duration::from_mins(1)),
+            "max_execution_time=120"
+        );
     }
 
     /// The process's own resident memory reads as a number of KiB.

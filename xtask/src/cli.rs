@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::phpt::Lane;
 
@@ -48,10 +48,6 @@ pub(crate) enum Command {
         section: Option<Section>,
         #[arg(long, default_value = "md")]
         format: Format,
-        /// One row of the `week` section: the Nth bar of the manifest's
-        /// `[[week]]` table, counted from 1.
-        #[arg(long, value_name = "N", requires = "section")]
-        week: Option<usize>,
         /// "This session" of the `permits` section: the session whose
         /// denials are counted apart. `--session` takes it from the hook's
         /// stdin head instead.
@@ -74,14 +70,14 @@ pub(crate) enum Command {
         /// column, so the bytes are the same on any checkout (#2377); a
         /// section whose rows are this checkout's alone is refused
         /// (harness-design.md §5, revision 6).
-        #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "every"])]
+        #[arg(long, requires = "section", conflicts_with_all = ["session_id", "every"])]
         tracked: bool,
         /// Every reading of a section that keeps one per scope, in the
         /// log's order, rather than the one that stands, as
         /// `--format jsonl`: one line per reading carrying `v`, the version
         /// of its shape, which a reader refuses when it does not know it.
         /// Built for phpt (harness-design.md §4.6).
-        #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "uncut"])]
+        #[arg(long, requires = "section", conflicts_with_all = ["session_id", "uncut"])]
         every: bool,
         /// The log `--every` renders in place of the store's: another
         /// store's log file or the published history, whose lean rows
@@ -877,9 +873,6 @@ pub enum Section {
     /// log per instrument, with the candidates for silent (the CI section
     /// of §7).
     Permits,
-    /// The weekly exit bar table: each `[[week]]` of the manifest with
-    /// pass, fail or "no reading" from the readings it names.
-    Week,
     /// The log and the status of the working tree; volatile.
     Git,
     /// The bundle's registration order against the crate graph.
@@ -931,13 +924,4 @@ pub enum Format {
     /// One JSON line per reading, each carrying `v`, the version of its
     /// shape; `--every`'s alone.
     Jsonl,
-}
-
-/// The subcommands `xtask` has, by name: what a reading's `instrument`
-/// and a `[[week]]` read may name. `xtask --help` is the same list.
-pub(crate) fn instruments() -> Vec<String> {
-    Cli::command()
-        .get_subcommands()
-        .map(|c| c.get_name().to_owned())
-        .collect()
 }

@@ -522,6 +522,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
     if flag & INFO_GENERAL != 0 {
         general(req);
     }
+    req.ini_sort_entries();
     if flag & INFO_CONFIGURATION != 0 {
         hr(req);
         if html(req) {
@@ -626,6 +627,29 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// bool(true)
 /// bool(true)
 /// bool(true)
+/// ```
+///
+/// Whatever the flags, the ini table is sorted by name before anything
+/// past the general block is printed, so each extension's directives are
+/// listed sorted, and so is every walk of the table after the call
+/// ([`Request::ini_sort_entries`]):
+///
+/// ```php
+/// ob_start(); phpinfo(INFO_MODULES); preg_match_all('/^session\.\w+/m', ob_get_clean(), $m);
+/// echo implode(' ', array_slice($m[0], 0, 4)), "\n";
+/// ```
+/// ```expect
+/// session.auto_start session.cache_expire session.cache_limiter session.cookie_domain
+/// ```
+///
+/// ```php
+/// $iconv = fn () => implode(' ', array_keys((new ReflectionExtension('iconv'))->getINIEntries())) . "\n";
+/// echo $iconv(); phpinfo(0); echo $iconv();
+/// ```
+/// ```expect
+/// iconv.input_encoding iconv.output_encoding iconv.internal_encoding
+/// phpinfo()
+/// iconv.input_encoding iconv.internal_encoding iconv.output_encoding
 /// ```
 ///
 /// A host serving the web prints `info.c`'s HTML page: the head with its
