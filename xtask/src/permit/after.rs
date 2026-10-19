@@ -85,7 +85,7 @@ use super::audit;
 use super::call::Call;
 use super::kept;
 use super::operation;
-use super::rules::runs_in;
+use super::rules::{at, runs_in};
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
@@ -409,19 +409,11 @@ impl OnDisk {
             name,
         }
     }
-
-    /// `word` as a path where the call stands, `~/` read as the home.
-    fn at(&self, word: &str) -> PathBuf {
-        match (word.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(home)) => Path::new(&home).join(rest),
-            _ => self.cwd.join(word),
-        }
-    }
 }
 
 impl Place for OnDisk {
     fn is(&self, word: &str) -> bool {
-        !word.is_empty() && resolved(&self.at(word)) == self.file
+        !word.is_empty() && resolved(&at(&self.cwd, word)) == self.file
     }
 
     fn name(&self) -> &str {
@@ -432,7 +424,7 @@ impl Place for OnDisk {
     /// `None` for no regular file, or one larger than any such program.
     fn read(&self, word: &str) -> Option<Vec<u8>> {
         const LARGEST: u64 = 16 << 20;
-        let path = self.at(word);
+        let path = at(&self.cwd, word);
         let meta = fs::metadata(&path).ok()?;
         (meta.is_file() && meta.len() <= LARGEST)
             .then(|| fs::read(&path).ok())

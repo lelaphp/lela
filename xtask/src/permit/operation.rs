@@ -759,7 +759,9 @@ mod tests {
     /// starter's to commit and abort and stays foreign to the sibling. A
     /// git command the line runs before any such change is read where the
     /// shell starts, and finding nothing standing there it leaves a start
-    /// still waiting for its marker to its starter (#2723).
+    /// still waiting for its marker to its starter (#2723). The sibling's
+    /// `cd` is joined by `&&`: one joined by `;` may fail and run the
+    /// merge where the shell starts, which contests the record (#2995).
     #[test]
     fn a_sibling_s_git_line_past_a_later_cd_leaves_the_starter_s_record() {
         let (starter, sibling) = (Some("the-starter-agent"), Some("a-sibling"));
@@ -768,7 +770,7 @@ mod tests {
         record(&dir, &call("s1", starter), &start).unwrap();
         for elsewhere in [
             format!(
-                "S=/var/empty; cat $S/owner; cd /var/empty/t2645; git status --short; \
+                "S=/var/empty; cat $S/owner; cd /var/empty/t2645 && git status --short && \
                  git merge --ff-only main 2>&1 | tail -1; cd {}; git log --oneline -3",
                 dir.display()
             ),
@@ -1112,7 +1114,10 @@ mod tests {
         let ran_in = |line: &str| super::ran_in(&dir, Some(&Line::read(line)));
         let at = linked.display();
         assert_eq!(ran_in(&format!("W={at} && cd \"$W\" && touch x")), top);
-        assert_eq!(ran_in(&format!("W={at}; cd $W/sub; touch x")), top);
+        assert_eq!(ran_in(&format!("W={at}; cd $W/sub && touch x")), top);
+        // #2995: a `cd` joined by `;` may fail, and the line may run where
+        // it started as well, so it is held there.
+        assert_eq!(ran_in(&format!("W={at}; cd $W/sub; touch x")), workspace);
         let exported = format!("export A=1 W={at} && cd \"${{W}}\" && touch x");
         assert_eq!(ran_in(&exported), top);
         assert_eq!(ran_in("cd \"$UNSET_BY_THE_LINE\" && touch x"), workspace);

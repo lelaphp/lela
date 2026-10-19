@@ -3117,6 +3117,37 @@ fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() 
     assert!(denied(&manifest, main.path(), line));
 }
 
+/// #2995: a `cd` joined to what follows by anything but `&&` may fail,
+/// or runs in a shell of its own, so `where = "ticketed"` judges what
+/// follows where the line stood as well, at the root; a program moved by
+/// its own words is judged where they move it.
+#[test]
+fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
+    let manifest = probe(|rule| {
+        rule.within = Where::Ticketed;
+        rule.predicate.deny_pattern = Some(r"\bgit\s+add\b".to_owned());
+    });
+    let ticketed = checkout("where-ticketed-joints", Some(2995));
+    let main = checkout("where-main-joints", None);
+    let (wt, root) = (ticketed.path(), main.path());
+    let denied = |root: &Path, line: String| denied(&manifest, root, &line);
+    // Judged at the root, the ticketed checkout, though the `cd` names
+    // main's; joined by `&&`, the `cd` moves it.
+    let other = root.display();
+    assert!(denied(wt, format!("cd {other}; git add x")));
+    assert!(denied(wt, format!("cd {other} | true; git add x")));
+    assert!(!denied(wt, format!("cd {other} && git add x")));
+    // From main: piped, the `cd` moves nothing; sequenced, it may.
+    let into = wt.display();
+    assert!(!denied(root, format!("cd {into} | true; git add x")));
+    assert!(denied(root, format!("cd {into}; git add x")));
+    // A program's own words move it.
+    assert!(denied(root, format!("env -C {into} git add x")));
+    assert!(denied(root, format!("env --chdir {into} git add x")));
+    assert!(!denied(wt, format!("env -C {other} git add x")));
+    assert!(denied(root, format!("GIT_WORK_TREE={into} git add x")));
+}
+
 /// `where = "main"` (#2751): the rule judges a call in the repository's
 /// main checkout and not one in a linked worktree, wherever the line
 /// stands when a leading `cd` moves it; of a line's commands, the one the

@@ -13,7 +13,7 @@ use regex_lite::Regex;
 use serde_json::{Value, json};
 
 use super::approval::{Admission, LIFTED};
-use super::argv::{Argv, Line};
+use super::argv::{Argv, Joint, Line, Move};
 use super::call::Call;
 use super::label;
 use super::operation;
@@ -324,12 +324,14 @@ fn judges_where(root: &Path, rule: &Rule, line: Option<&Line>, call: &Call) -> S
 /// canonical path, so a scratch repository's `docs/divergence.toml` is not
 /// this repository's (#2887), and a relative path the line names that
 /// resolves into one, through a link, is in one. It fails safe, reading
-/// as inside one: a line `permit` does not follow past its directory
-/// changes ([`unfollowed`]); a place that is no directory on disk, which
-/// a `cd` cannot enter; and a repository git cannot list.
+/// as inside one: a line that changes directory, or moves a program,
+/// where it does not say ([`Walk::lost`]), or spells a change it did not
+/// read as a command ([`spells_unread_changes`]); a place that is no
+/// directory on disk, which a `cd` cannot enter; and a repository git
+/// cannot list.
 fn in_a_checkout(root: &Path, line: Option<&Line>) -> bool {
-    let (placed, lost) = line.map(|line| walk(root, line)).unwrap_or_default();
-    if lost || line.is_some_and(unfollowed) {
+    let walk = Walk::of(root, line);
+    if walk.lost || line.is_some_and(spells_unread_changes) {
         return true;
     }
     let Ok(checkouts) = crate::track::checkouts(root) else {
@@ -347,50 +349,23 @@ fn in_a_checkout(root: &Path, line: Option<&Line>) -> bool {
                 && fs::canonicalize(dir.join(name)).is_ok_and(|path| inside(&path))
         })
     };
-    let stands = placed.into_iter().map(|(_, at)| at);
-    std::iter::once(runs_in(root, line))
-        .chain(stands)
+    std::iter::once(walk.runs_in(root))
+        .chain(walk.placed.into_iter().map(|(_, at)| at))
         .any(|dir| match fs::canonicalize(dir) {
             Ok(dir) => !dir.is_dir() || inside(&dir) || reaches(&dir),
             Err(_) => true,
         })
 }
 
-/// Whether `permit` cannot follow a line past its directory changes
-/// ([`UNFOLLOWED`]), or the line spells a change it did not read as a
-/// command, one a program it does not peel runs (`xargs sh -c 'cd …'`).
-fn unfollowed(line: &Line) -> bool {
+/// Whether the line spells a directory change it did not read as a
+/// command, one a program it does not peel runs (`xargs sh -c 'cd …'`):
+/// the one reading of a line's text where its commands cannot say.
+fn spells_unread_changes(line: &Line) -> bool {
     let changes = |argv: &&Argv| matches!(argv.program(), "cd" | "pushd" | "popd");
     let read = line.commands().iter().filter(changes).count();
     let spelled = regex(r"(?:^|[^\w./-])(?:cd|pushd|popd)\b");
     spelled.find_iter(line.text()).count() > read
-        || (read > 0 && regex(SEQUENCED).is_match(line.text()))
-        || regex(UNFOLLOWED).is_match(line.text())
 }
-
-/// What runs a command where the shell did not move to: a program moved
-/// by its own option the argv does not place (`env -C`, `find -execdir`,
-/// `patch -d`, a target directory of `cp`, `mv` or `install`; git's `-C`
-/// is placed by [`moved`]), git pointed at a tree by its environment, and
-/// a link the line makes, through which a write lands elsewhere.
-const UNFOLLOWED: &str = r"(?x)
-  \benv\b[^|;&\n]*\s(?:-[a-zA-Z]*C|--chdir)
-| \bfind\b[^|;&\n]*\s-(?:execdir|okdir)\b
-| \bpatch\b[^|;&\n]*\s(?:-[a-zA-Z]*d|--directory)\b
-| \b(?:cp|mv|install)\b[^|;&\n]*\s(?:-[a-zA-Z]*t|--target-directory)\b
-| \bGIT_(?:DIR|WORK_TREE)=
-| \bln\b";
-
-/// What runs a command after a directory change that failed, where the
-/// shell stood before it, or runs the change in a shell of its own: `;`,
-/// `||`, a lone `&` and a newline between commands, and a change piped.
-/// A line of changes joined by `&&` alone stops where one fails.
-const SEQUENCED: &str = r"(?x)
-  ;
-| \|\|
-| (?:^|[^&<>|])&(?:[^&>]|$)
-| (?:^|[^\\])\n\s*\S
-| \b(?:cd|pushd|popd)\b[^;&|\n]*\|";
 
 /// Whether a command the rule fires on runs in a checkout whose branch
 /// records a ticket, or one the harness cannot tell does not
@@ -500,192 +475,274 @@ fn command_around(text: &str, hit: std::ops::Range<usize>) -> &str {
 }
 
 /// Where a shell line's shell stands once its leading directory changes
-/// have run ([`standing`]), which is how a session whose shell stands in
-/// one checkout runs a command in another.
+/// have run ([`Walk::stands`]), which is how a session whose shell stands
+/// in one checkout runs a command in another.
 pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
-    standing(root, line).0
+    Walk::of(root, line).runs_in(root)
 }
 
-/// The commands of `line` whose place is read, each with where it runs:
-/// `root` moved by each `cd`, `pushd` and `popd` before it as [`change`]
-/// reads one, and, for git, by each `-C` among the options before its
-/// subcommand ([`moved`]); none past a change the line does not say where
-/// it goes, in the shell that change was made in. What records whose operation stands in a checkout
-/// reads a command past a later change where that change took the shell,
-/// never where the shell started (#2720): an orchestrator's `cat $S/owner; cd <main>;
-/// git merge --no-commit t1955` started a merge no record named (#2723).
-/// A change inside a subshell, a substitution or a child shell moves the
-/// commands in it alone, and the one after it is read where the shell
-/// stood before it ([`Line::shells`], #2764), as [`standing`] reads the
-/// line's leading changes (#2787).
+/// The commands of `line` whose place is read, each with every place it
+/// may run or reach, one pair per place ([`Walk::placed`]). What records
+/// whose operation stands in a checkout reads a command past a later
+/// change where that change took the shell, never where the shell
+/// started (#2720): an orchestrator's `cat $S/owner; cd <main>; git merge
+/// --no-commit t1955` started a merge no record named (#2723).
 pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)> {
-    walk(root, line).0
+    Walk::of(root, Some(line)).placed
 }
 
-/// [`placed`], and whether the line made a change it does not say where
-/// it goes, past which a command in that shell is placed nowhere.
-fn walk<'a>(root: &Path, line: &'a Line) -> (Vec<(&'a Argv, PathBuf)>, bool) {
-    let (mut dir, mut pushed) = (root.to_path_buf(), Vec::new());
-    let mut entered: Vec<(u32, PathBuf, Vec<PathBuf>)> = Vec::new();
-    // How many shells were open at a change the line does not say where
-    // it goes: nothing is placed until that shell has closed.
-    let mut lost_at: Option<usize> = None;
-    let (mut placed, mut lost) = (Vec::new(), false);
-    for (argv, shells) in line.commands().iter().zip(line.shells()) {
-        let kept = entered
-            .iter()
-            .zip(shells)
-            .take_while(|((id, ..), s)| id == *s)
-            .count();
-        while entered.len() > kept {
-            if let Some((_, back, stack)) = entered.pop() {
-                (dir, pushed) = (back, stack);
-            }
-        }
-        lost_at = lost_at.filter(|depth| entered.len() >= *depth);
-        let left = shells.get(kept..).unwrap_or_default();
-        entered.extend(left.iter().map(|id| (*id, dir.clone(), pushed.clone())));
-        if lost_at.is_some() || change(&mut dir, &mut pushed, argv) {
-            continue;
-        }
-        if matches!(argv.program(), "cd" | "pushd" | "popd") {
-            (lost_at, lost) = (Some(entered.len()), true);
-            continue;
-        }
-        placed.push((argv, moved(dir.clone(), argv)));
-    }
-    (placed, lost)
-}
-
-/// Where each command of `line` that `fires` runs: where the line stands
-/// moved by its `-C`, and where [`placed`] reads it too, past a later
-/// directory change or after a subshell's, the side that judges in both:
-/// a rule scoped by `where` judges the commands it fires on there, so
-/// `git -C /wt commit` is judged in `/wt` and `(cd /wt && ls); git add x`
-/// where the shell stands as well (#2764).
+/// Where each command of `line` that `fires` may run or reach
+/// ([`Walk::placed`]), or, for one placed nowhere, past a change the line
+/// does not say where it goes, where the line stands moved by its own
+/// words ([`moved`]): a rule scoped by `where` judges the commands it
+/// fires on there, so `git -C /wt commit` is judged in `/wt`, `(cd /wt &&
+/// ls); git add x` where the shell stands (#2764), and `cd /wt; git add
+/// x` both in `/wt` and where it started, the `cd` being one that may
+/// fail (#2995).
 pub(super) fn fired_in(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Vec<PathBuf> {
-    let dir = runs_in(root, Some(line));
-    let placed = placed(root, line);
+    let walk = Walk::of(root, Some(line));
     let mut checkouts = Vec::new();
     for argv in line.commands().iter().filter(|argv| fires(argv)) {
-        checkouts.push(moved(dir.clone(), argv));
-        let at = placed
-            .iter()
-            .find(|(placed, _)| std::ptr::eq(*placed, argv));
-        checkouts.extend(at.map(|(_, at)| at.clone()));
+        let mut at: Vec<PathBuf> = walk.places_of(argv).cloned().collect();
+        if at.is_empty() {
+            at = moved(&walk.runs_in(root), argv);
+        }
+        for dir in at {
+            add(&mut checkouts, dir);
+        }
     }
-    checkouts.dedup();
     checkouts
 }
 
 /// Where the call acts: where the line stands ([`runs_in`]), or, where
-/// every command past its leading directory changes is git and each
-/// names one directory by its `-C`, that directory ([`moved`]), so `git
-/// -C /wt checkout -- seams.toml` and `git -C /wt add x && git -C /wt
-/// commit` act in `/wt`. git's `-C` moves one command and not the shell,
-/// so a line any of whose other commands runs where the shell stands
-/// (`git -C /wt status && git checkout -- seams.toml`, `touch x && git
-/// -C /wt status`) acts where the shell stands, the call being held in
-/// one checkout.
+/// every command past its leading directory changes is git and each runs
+/// in one and the same other place, by its `-C` or a subshell's change,
+/// that place, so `git -C /wt checkout -- seams.toml` and `git -C /wt add
+/// x && git -C /wt commit` act in `/wt`. git's `-C` moves one command and
+/// not the shell, so a line any of whose other commands runs where the
+/// shell stands (`git -C /wt status && git checkout -- seams.toml`,
+/// `touch x && git -C /wt status`), or may run in more than one place,
+/// acts where the shell stands, the call being held in one checkout.
 pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
-    let (dir, rest) = standing(root, line);
-    let placed = line.map(|line| placed(root, line)).unwrap_or_default();
-    // Where a git command runs, a subshell's change and its `-C` read.
-    let mut named = rest.iter().map(|argv| {
-        (argv.program() == "git")
-            .then(|| placed.iter().find(|(at, _)| std::ptr::eq(*at, argv)))
-            .flatten()
-            .map(|(_, at)| at.clone())
+    let walk = Walk::of(root, line);
+    let dir = walk.runs_in(root);
+    let mut named = walk.rest.iter().map(|argv| {
+        let mut at = walk.places_of(argv);
+        let one = at.next().filter(|_| at.next().is_none());
+        one.filter(|_| argv.program() == "git")
     });
     match named.next() {
-        Some(Some(first)) if first != dir && named.all(|other| other.as_ref() == Some(&first)) => {
-            first
+        Some(Some(first)) if *first != dir && named.all(|other| other == Some(first)) => {
+            first.clone()
         }
         _ => dir,
     }
 }
 
-/// The one reading of where a shell line stands, from which [`runs_in`],
-/// [`fired_in`] and [`acts_in`] are read, so `where = "ticketed"`, `where
-/// = "operating"`, the checkout `permit --after` holds and the approvals
-/// it reads move together (#2597, #2607); [`placed`] reads the same
-/// changes with the subshells that hold them (#2764): the call's
-/// `root`, moved by each `cd` and `pushd` before the first command that
-/// does anything else and back by each `popd` to where its `pushd` left;
-/// and the commands past those changes.
+/// The one reading of where a shell line's commands run, from which
+/// [`runs_in`], [`placed`], [`fired_in`] and [`acts_in`] are read, so
+/// `where = "ticketed"`, `where = "main"`, `where = "operating"`,
+/// `where = "checkout"`, the checkout `permit --after` holds and the
+/// approvals it reads move together (#2597, #2607, #2995).
 ///
-/// An `export` of assignments alone moves nothing and is read past, as a
-/// bare assignment is, and `~/` is the home. A `cd` or `pushd` to a
-/// variable the line assigned before it, `W=/wt && cd "$W"` or `export
-/// W=/wt; cd $W/sub`, goes where the value names ([`Argv::directories`]).
+/// Each `cd`, `pushd` and `popd` the line says the target of moves the
+/// shell it runs in, from the call's `root`, `~/` being the home; a `cd`
+/// or `pushd` to a variable the line assigned before it, `W=/wt && cd
+/// "$W"`, goes where the value names ([`Argv::directory`]). A change may
+/// fail, a file or a directory without search permission, and the shell
+/// then stays where it stood: each shell keeps the places it may stand
+/// where every command since the last separator other than `&&`
+/// succeeded apart from those where one of them failed, and a command
+/// after any other separator ([`Joint`]) runs at both, so `cd /wt && x;
+/// y` runs `x` in `/wt` and `y` in `/wt` and where the line started. A
+/// change piped or sent to the background runs in a shell of its own and
+/// moves nothing. A change inside a subshell, a substitution or a child
+/// shell moves the commands in it alone ([`Line::shells`], #2764), and
+/// never the line: `(cd /other && git status); git add x` stands where
+/// it started, and its `git add` runs there (#2787).
+///
 /// A change the line does not say where it goes is not followed, and the
-/// line stands where it stood before it, `root` for the first: a
-/// variable the line did not assign (one the environment holds), `cd`
-/// with no operand or `-`, `pushd` with an option, a stack place (`+1`)
-/// or none, and `popd` with an option or no `pushd` before it.
-///
-/// A change inside a subshell, a substitution or a child shell moves the
-/// commands in it alone, as [`placed`] reads it, and never the line:
-/// `(cd /other && git status); git add x` stands where it started, and
-/// its `git add` runs there (#2787).
-fn standing<'a>(root: &Path, line: Option<&'a Line>) -> (PathBuf, &'a [Argv]) {
-    let Some(line) = line else {
-        return (root.to_path_buf(), &[]);
-    };
-    let commands = line.commands();
-    let mut dir = root.to_path_buf();
-    let mut pushed = Vec::new();
-    for (at_command, (argv, shells)) in commands.iter().zip(line.shells()).enumerate() {
+/// line is lost there: a variable the line did not assign, `cd` with no
+/// operand or `-`, `pushd` with an option, a stack place (`+1`) or none,
+/// and `popd` with an option or no `pushd` before it; nothing past it in
+/// that shell is placed. A program moved by its own words runs where they
+/// say ([`Move`]), and one moved where they do not say loses the line.
+#[derive(Default)]
+struct Walk<'a> {
+    /// Each command with each place it may run or reach, one pair per
+    /// place; none for a change, nor for a command past a change its
+    /// shell lost.
+    placed: Vec<(&'a Argv, PathBuf)>,
+    /// Where the line's own shell may stand at its first command past
+    /// its leading changes and its `export`s of assignments alone, which
+    /// move nothing, a subshell's changes among them.
+    stands: Vec<PathBuf>,
+    /// The commands from that one on.
+    rest: &'a [Argv],
+    /// Whether the line makes a change, or moves a program, where it does
+    /// not say.
+    lost: bool,
+}
+
+/// One shell the walk is in: its id, the places it may stand where every
+/// command of its `&&` chain succeeded, those where one of them failed,
+/// its `pushd` stack, each entry the places it pushed, and whether it
+/// lost.
+#[derive(Default)]
+struct Shell {
+    id: u32,
+    sure: Vec<PathBuf>,
+    failed: Vec<PathBuf>,
+    pushed: Vec<Vec<PathBuf>>,
+    lost: bool,
+}
+
+impl Shell {
+    fn new(id: u32, sure: Vec<PathBuf>, lost: bool) -> Shell {
+        Shell {
+            id,
+            sure,
+            lost,
+            ..Shell::default()
+        }
+    }
+
+    /// Where a command joined by `before` runs: after `&&` or a pipe where
+    /// the chain succeeded, and after any other separator wherever the
+    /// shell may stand, which ends the chain.
+    fn runs_at(&mut self, before: Joint) -> Vec<PathBuf> {
+        if !matches!(before, Joint::And | Joint::Pipe) {
+            for dir in std::mem::take(&mut self.failed) {
+                add(&mut self.sure, dir);
+            }
+        }
+        self.sure.clone()
+    }
+
+    /// The shell once `argv`, a `cd`, `pushd` or `popd`, ran at `from`:
+    /// moved where it succeeded and standing where it failed, or lost
+    /// where the line does not say where it goes.
+    fn change(&mut self, from: Vec<PathBuf>, argv: &Argv) {
         let words = argv.words();
-        let exports = words.first().is_some_and(|w| w == "export")
-            && words.iter().skip(1).all(|w| w.contains('='));
-        let changes = if shells.is_empty() {
-            change(&mut dir, &mut pushed, argv)
-        } else {
-            change(&mut dir.clone(), &mut pushed.clone(), argv)
+        let to = argv
+            .directory()
+            .filter(|to| !to.starts_with(['-', '+', '$']));
+        let moved = |to: &str| Some(from.iter().map(|dir| at(dir, to)).collect());
+        let moved = match (words.first().map(String::as_str), to) {
+            (Some("cd"), Some(to)) => moved(to),
+            (Some("pushd"), Some(to)) if words.len() == 2 => {
+                self.pushed.push(from.clone());
+                moved(to)
+            }
+            (Some("popd"), _) if words.len() == 1 => self.pushed.pop(),
+            _ => None,
         };
-        if !exports && !changes {
-            return (dir, commands.get(at_command..).unwrap_or_default());
+        self.lost = moved.is_none();
+        self.sure = moved.unwrap_or_default();
+        self.sure.dedup();
+        for dir in from {
+            add(&mut self.failed, dir);
         }
     }
-    (dir, &[])
 }
 
-/// `dir` moved by `argv` where it is a `cd`, `pushd` or `popd` the line
-/// says where it goes ([`standing`]), `pushed` the `pushd` stack; whether
-/// it was one.
-fn change(dir: &mut PathBuf, pushed: &mut Vec<PathBuf>, argv: &Argv) -> bool {
-    let words = argv.words();
-    let to = argv
-        .directories()
-        .next()
-        .filter(|to| !to.starts_with(['-', '+', '$']));
-    match (words.first().map(String::as_str), to) {
-        (Some("cd"), Some(to)) => *dir = at(dir, to),
-        (Some("pushd"), Some(to)) if words.len() == 2 => {
-            pushed.push(dir.clone());
-            *dir = at(dir, to);
+impl<'a> Walk<'a> {
+    fn of(root: &Path, line: Option<&'a Line>) -> Walk<'a> {
+        let mut walk = Walk::default();
+        walk.stands.push(root.to_path_buf());
+        let Some(line) = line else {
+            return walk;
+        };
+        let mut top = Shell::new(0, walk.stands.clone(), false);
+        let (mut nested, mut leading): (Vec<Shell>, _) = (Vec::new(), true);
+        let commands = line.commands();
+        let each = commands.iter().zip(line.shells()).zip(line.joints());
+        for (n, ((argv, ids), joints)) in each.enumerate() {
+            let kept = nested.iter().zip(ids).take_while(|(s, id)| s.id == **id);
+            nested.truncate(kept.count());
+            for id in ids.get(nested.len()..).unwrap_or_default() {
+                let parent = nested.last_mut().unwrap_or(&mut top);
+                let (sure, lost) = (parent.runs_at(joints.before), parent.lost);
+                if leading && nested.is_empty() {
+                    walk.stands.clone_from(&sure);
+                }
+                nested.push(Shell::new(*id, sure, lost));
+            }
+            let shell = nested.last_mut().unwrap_or(&mut top);
+            let at = shell.runs_at(joints.before);
+            let changes = matches!(argv.program(), "cd" | "pushd" | "popd");
+            let apart = joints.before == Joint::Pipe
+                || matches!(joints.after, Joint::Pipe | Joint::Background);
+            if changes && !apart && !shell.lost {
+                shell.change(at.clone(), argv);
+                walk.lost |= shell.lost;
+            }
+            walk.lost |= argv.moves().contains(&Move::Unsaid);
+            for dir in at.iter().flat_map(|dir| moved(dir, argv)) {
+                if !changes && !shell.lost && !walk.places_of(argv).any(|at| *at == dir) {
+                    walk.placed.push((argv, dir));
+                }
+            }
+            let words = argv.words();
+            let exports = words.first().is_some_and(|w| w == "export")
+                && words.iter().skip(1).all(|w| w.contains('='));
+            let read_past = exports || (changes && (apart || !shell.lost));
+            if leading && ids.is_empty() {
+                walk.stands = at;
+            }
+            if leading && !read_past {
+                leading = false;
+                walk.rest = commands.get(n..).unwrap_or_default();
+            }
         }
-        (Some("popd"), _) if words.len() == 1 => match pushed.pop() {
-            Some(back) => *dir = back,
-            None => return false,
-        },
-        _ => return false,
+        if leading {
+            walk.stands = top.sure;
+        }
+        walk
     }
-    true
+
+    /// Where the line stands: the one place its shell may stand at its
+    /// first command past its leading changes, or `root` where it may
+    /// stand in more than one.
+    fn runs_in(&self, root: &Path) -> PathBuf {
+        match self.stands.as_slice() {
+            [one] => one.clone(),
+            _ => root.to_path_buf(),
+        }
+    }
+
+    /// Each place `argv`, one of the line's commands, may run or reach.
+    fn places_of(&self, argv: &'a Argv) -> impl Iterator<Item = &PathBuf> {
+        let placed = self.placed.iter();
+        placed.filter_map(move |(at, dir)| std::ptr::eq(*at, argv).then_some(dir))
+    }
 }
 
-/// `dir` moved, for a git command, by each `-C` among its options before
-/// its subcommand ([`Argv::directories`]); any other command runs there.
-fn moved(dir: PathBuf, argv: &Argv) -> PathBuf {
-    if argv.program() != "git" {
-        return dir;
+/// `one` added to `set` where it is not there already.
+fn add<T: PartialEq>(set: &mut Vec<T>, one: T) {
+    if !set.contains(&one) {
+        set.push(one);
     }
-    argv.directories().fold(dir, |dir, to| at(&dir, to))
 }
 
-/// `to` read as a directory from `dir`, `~/` as the home.
-fn at(dir: &Path, to: &str) -> PathBuf {
+/// Where a command its shell runs in `dir` runs, moved by each
+/// [`Move::Into`] of its words, then each place it reaches besides
+/// ([`Move::Reaches`]), each read from where the moves before it left
+/// the program.
+fn moved(dir: &Path, argv: &Argv) -> Vec<PathBuf> {
+    let (mut runs, mut reached) = (dir.to_path_buf(), Vec::new());
+    for one in argv.moves() {
+        match one {
+            Move::Into(to) => runs = at(&runs, to),
+            Move::Reaches(to) => reached.push(at(&runs, to)),
+            Move::Unsaid => {}
+        }
+    }
+    std::iter::once(runs).chain(reached).collect()
+}
+
+/// `to` read as a path from `dir`, `~/` as the home.
+pub(super) fn at(dir: &Path, to: &str) -> PathBuf {
     match (to.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => Path::new(&home).join(rest),
         _ => dir.join(to),
@@ -830,8 +887,9 @@ mod tests {
 
     /// #2787: a leading `cd` inside a subshell moves that subshell alone,
     /// so the line stands where it started, its `git add` runs and acts
-    /// there and is judged there; a line whose every git command runs in
-    /// the subshell's checkout acts in it, and a change outside a
+    /// there and is judged there, and its `git status` is judged where the
+    /// subshell's change took it alone; a line whose every git command
+    /// runs in the subshell's checkout acts in it, and a change outside a
     /// subshell still moves the line.
     #[test]
     fn a_leading_change_inside_a_subshell_moves_that_subshell_alone() {
@@ -842,13 +900,47 @@ mod tests {
         let adds = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "add");
         assert_eq!(fired_in(root, &line, adds), [root]);
         let statuses = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "status");
-        assert_eq!(fired_in(root, &line, statuses), [root, other]);
+        assert_eq!(fired_in(root, &line, statuses), [other]);
         let inside = Line::read("(cd /other && git add x && git commit -m y)");
         assert_eq!(runs_in(root, Some(&inside)), root);
         assert_eq!(acts_in(root, Some(&inside)), other);
         let outside = Line::read("cd /wt && (cd sub && ls); git add x");
         assert_eq!(runs_in(root, Some(&outside)), Path::new("/wt"));
         assert_eq!(acts_in(root, Some(&outside)), Path::new("/wt"));
+    }
+
+    /// #2995: a change is followed only as far as the `&&` chain it
+    /// stands in, since it may fail; one piped or sent to the background
+    /// moves nothing; a program's own words move it.
+    #[test]
+    fn a_change_is_followed_as_far_as_its_and_chain_and_a_program_where_its_words_say() {
+        let (root, wt) = (Path::new("/shell"), Path::new("/wt"));
+        let fired = |text: &str, program: &str| {
+            fired_in(root, &Line::read(text), |argv| argv.program() == program)
+        };
+        assert_eq!(fired("cd /wt && x; y", "x"), [wt]);
+        assert_eq!(fired("cd /wt && x; y", "y"), [wt, root]);
+        assert_eq!(fired("cd /wt &&\n  y", "y"), [wt]);
+        assert_eq!(fired("cd /wt && X=1; y", "y"), [wt, root]);
+        assert_eq!(fired("cd /wt || true && y", "y"), [wt, root]);
+        assert_eq!(fired("cd /wt | true; y", "y"), [root]);
+        assert_eq!(fired("x | cd /wt && y", "y"), [root]);
+        assert_eq!(fired("cd /wt & y", "y"), [root]);
+        assert_eq!(fired("cd /wt; cd /a && y", "y"), [Path::new("/a")]);
+        assert_eq!(fired("env -C /wt y", "y"), [wt]);
+        assert_eq!(
+            fired("cd /a && GIT_DIR=/wt git x", "git"),
+            [Path::new("/a"), wt]
+        );
+        let line = |text: &str| Line::read(text);
+        assert_eq!(runs_in(root, Some(&line("cd /wt; git add x"))), root);
+        assert_eq!(runs_in(root, Some(&line("cd /wt && x; git add x"))), wt);
+        assert_eq!(acts_in(root, Some(&line("cd /a; git -C sub add x"))), root);
+        assert_eq!(acts_in(root, Some(&line("env -C /wt git add x"))), wt);
+        assert_eq!(acts_in(root, Some(&line("git -C /wt add x"))), wt);
+        let walk = |text: &str| Walk::of(root, Some(&line(text))).lost;
+        assert!(walk("cd $X; y") && walk("find . -execdir y {} +"));
+        assert!(!walk("cd $X | true; y") && !walk("X=/wt && cd $X"));
     }
 
     #[test]
