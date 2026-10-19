@@ -202,6 +202,11 @@ fn ended(s: &mut Session, plan: Plan, observed: &Observables) {
     if std::mem::take(&mut s.inline_run) {
         inline_ran(s, plan);
     } else {
+        // `run`'s `phpdbg_clean(1, 0)` once its program is over lets the
+        // line the cycle parsed last go.
+        if execution == Execution::Run && s.stopped.is_none() {
+            s.command_line = None;
+        }
         stopped(s, execution, cycle_ended);
     }
     // The next cycle's `main` sets `PHPDBG_G(flags)` from the line again
@@ -274,7 +279,7 @@ fn inline_ran(s: &mut Session, plan: Plan) {
     // A startup run the init files counted resubmits the line the last
     // cycle kept, which bails out at once, where it kept one.
     let counted = std::mem::take(&mut s.startup_run);
-    if plan == Plan::Run || counted && !s.resubmit {
+    if plan == Plan::Run || counted && s.first_command.is_none() {
         // `-rr` quits whatever the answer. Else a yes asks for the run
         // again and a no does not; the input's end bails out quitting,
         // which the cycle being cleaned turns into its end, so the
@@ -290,7 +295,9 @@ fn inline_ran(s: &mut Session, plan: Plan) {
             return;
         }
         match answer {
-            input::Answer::Yes if !s.read_after_run => s.stopped = Some(Stop::Restart(None)),
+            input::Answer::Yes if s.command_line.is_none() => {
+                s.stopped = Some(Stop::Restart(None));
+            }
             input::Answer::No => cycle_notice(s),
             input::Answer::Yes | input::Answer::End => {}
         }

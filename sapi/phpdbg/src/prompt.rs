@@ -215,13 +215,17 @@ fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
                     s.stopped = Some(Stop::Quit);
                     return Outcome::Stopped;
                 }
-                Line::Read(mut line) => match cmd::parse(&mut line) {
-                    Ok(commands) => commands,
-                    Err(cmd::Malformed(message)) => {
-                        s.out.error(format!("Parse Error: {message}").as_bytes());
-                        continue;
+                Line::Read(mut line) => {
+                    // `phpdbg_do_parse`'s `PHPDBG_G(cur_command)`.
+                    s.command_line = Some(line.clone());
+                    match cmd::parse(&mut line) {
+                        Ok(commands) => commands,
+                        Err(cmd::Malformed(message)) => {
+                            s.out.error(format!("Parse Error: {message}").as_bytes());
+                            continue;
+                        }
                     }
-                },
+                }
             }
         } else {
             std::mem::take(&mut s.queued)
@@ -956,6 +960,8 @@ fn exec(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     } else {
         Context::Unannounced
     };
+    // `phpdbg_clean(.., 0)` lets the line the cycle parsed last go.
+    s.command_line = None;
     s.stopped = Some(Stop::Exec);
     Ret::Success
 }
@@ -1034,6 +1040,9 @@ fn run(s: &mut Session, here: &mut Here<'_>, args: Option<&[u8]>) -> Ret {
             if s.initializing {
                 s.startup_run = true;
             } else {
+                // php keeps this line for the next cycle to resubmit,
+                // which is this `run` again, the restart's.
+                s.command_line = None;
                 s.stopped = Some(Stop::Restart(args));
             }
         }
@@ -2352,6 +2361,8 @@ fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     s.out.writeln(format!("Functions  {functions}").as_bytes());
     s.out.writeln(format!("Constants  {constants}").as_bytes());
     s.out.writeln(format!("Includes   {includes}").as_bytes());
+    // `phpdbg_clean(1, 0)` lets the line the cycle parsed last go.
+    s.command_line = None;
     s.stopped = Some(Stop::Clean);
     Ret::Success
 }

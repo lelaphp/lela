@@ -427,6 +427,29 @@ files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = nu
 stdin = "y\nq\n"
 streams = "merged"
 
+# The restarted cycle's startup run is not `run` but the line the cycle
+# before parsed last, `first_command`, here the init file's `ev` (#2912): `c`
+# leaves the auto compile's invisible log prompt, its fatal displayed, and
+# the resubmitted `ev` meets the memory limit again, whose fatal emits the
+# record the refusal left standing first, the refusal's fatal last with the
+# trace of where the `ev` stands, which bails out of it to the prompt; `ev`'s
+# `zend_catch` writes the status 0, and nothing asks to restart again.
+[[line]]
+name = "under-r-a-restart-resubmits-the-line-the-cycle-before-parsed-last"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = null) {}\nbreak 2;\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "y\nev 1\nc\nq\n"
+streams = "merged"
+
+# The same over a context that compiles: the resubmitted `ev` meets the
+# memory limit again, and the prompt stands where nothing executes.
+[[line]]
+name = "a-restart-resubmits-the-init-file-s-line-over-a-context-that-compiles"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"hi\\n\";\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "y\nev 7\nq\n"
+streams = "merged"
+
 # `run` with arguments in the init file rebuilds `argv` in the request the
 # file runs in and runs the program there, as php's `run` does with
 # `php_build_argv`, every cycle: the first cycles.

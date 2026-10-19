@@ -254,16 +254,18 @@ pub struct Session {
     pub init_cleaning: bool,
     /// A `run` in the init files asked for the program inline.
     pub inline_run: bool,
-    /// A command line of the init files was read after a `run` among
-    /// them, which a yes to the question after it has php's next cycle
-    /// resubmit at its startup run (`first_command`) instead of `run`.
-    pub read_after_run: bool,
+    /// `PHPDBG_G(cur_command)`: the command line the cycle parsed last,
+    /// an init file's or the prompt's, since the last `phpdbg_clean` that
+    /// let it go, at a run's end, `clean` and `exec`; a restart keeps it,
+    /// and the next cycle resubmits it ([`Session::first_command`]).
+    pub command_line: Option<Vec<u8>>,
     /// A yes to a `run` the init files read after their run, php's
     /// `phpdbg_startup_run++`: the cycle's startup run asks after them.
     pub startup_run: bool,
-    /// The last cycle's init files read a line after their run, which
-    /// php keeps as `first_command` for this cycle's startup run.
-    pub resubmit: bool,
+    /// `first_command`: the line the last cycle parsed last, which this
+    /// cycle's startup run resubmits at a prompt in place of `run`
+    /// (`Z/sapi/phpdbg/phpdbg.c:1588-1592`, `:1694`).
+    pub first_command: Option<Vec<u8>>,
     /// A refusal inside the log's prompt bailed out of it.
     pub left_log: bool,
     /// The request the init files run in holds the execution context's
@@ -339,9 +341,9 @@ impl Session {
             init_rest: None,
             init_cleaning: false,
             inline_run: false,
-            read_after_run: false,
+            command_line: None,
             startup_run: false,
-            resubmit: false,
+            first_command: None,
             left_log: false,
             program_held: false,
             ran_code: None,
