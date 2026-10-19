@@ -124,6 +124,23 @@ impl State {
 /// Deprecated: The filter.default ini setting is deprecated in Unknown on line 0
 /// string(6) "'"&lt;"
 /// ```
+///
+/// `parse_str()`'s value is handed back as bytes and registered by
+/// `php_register_variable_safe` as `ZVAL_STRINGL_FAST`, so a value of one
+/// byte costs nothing and one of two bytes is a string of its own:
+///
+/// ```php
+/// foreach (['x=', 'x=1', 'x=12', '1=1', 'x=1&y=2'] as $q) {
+///     $m = memory_get_usage(); parse_str($q, $r); $n = memory_get_usage() - $m; unset($r); echo $q, " ", $n, "\n";
+/// }
+/// ```
+/// ```expect regime=jit-off
+/// x= 408
+/// x=1 408
+/// x=12 440
+/// 1=1 248
+/// x=1&y=2 408
+/// ```
 fn sapi_filter(
     req: &mut Request,
     input: Input,
@@ -165,20 +182,35 @@ fn sapi_filter(
                 .find(|(name, _, _)| name.as_bytes().eq_ignore_ascii_case(named))
         })
         .map_or(FILTER_DEFAULT, |(_, id, _)| *id);
-    if value.is_empty() || default == FILTER_UNSAFE_RAW {
-        return Ok(Some(raw));
-    }
-    // `OnUpdateFlags`: no value is `FILTER_FLAG_NO_ENCODE_QUOTES`, any
-    // value its `atoi`, so the empty string is 0.
-    let flags = req
-        .ini_value(b"filter.default_flags")
-        .map_or(FILTER_FLAG_NO_ENCODE_QUOTES, |value| i64::from(atoi(value)));
-    let run = Run {
-        flags,
-        options: None,
-        native: "filter",
+    let handed = if value.is_empty() || default == FILTER_UNSAFE_RAW {
+        raw
+    } else {
+        // `OnUpdateFlags`: no value is `FILTER_FLAG_NO_ENCODE_QUOTES`, any
+        // value its `atoi`, so the empty string is 0.
+        let flags = req
+            .ini_value(b"filter.default_flags")
+            .map_or(FILTER_FLAG_NO_ENCODE_QUOTES, |value| i64::from(atoi(value)));
+        let run = Run {
+            flags,
+            options: None,
+            native: "filter",
+        };
+        zval_filter(req, raw, default, &run)?
     };
-    zval_filter(req, raw, default, &run).map(Some)
+    if input != Input::String {
+        return Ok(Some(handed));
+    }
+    // `parse_str()`'s variable php hands back as bytes, `retval` 1 and
+    // `*val = estrndup(Z_STRVAL(new_var), ...)`, for
+    // `php_default_treat_data` to register with
+    // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`: a value of one
+    // byte is the process's string, and allocates nothing.
+    let ValueRef::Str(&filtered) = handed.as_ref() else {
+        return Ok(Some(handed));
+    };
+    let fast = string_value(req, filtered.as_bytes());
+    handed.give_up(req);
+    fast.map(Some)
 }
 
 /// `PHP_RSHUTDOWN_FUNCTION(filter)`: `IF_G`'s arrays given up.
