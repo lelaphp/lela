@@ -826,10 +826,8 @@ impl Request {
     /// ([`Request::name_unit`]). The `Err` is the memory limit.
     fn eval_name(&mut self, file: &[u8], line: u32) -> Result<PhpString, Thrown> {
         const TAIL: &[u8] = b") : eval()'d code";
-        let mut buffer = [0; 10];
-        let at = decimal(line, &mut buffer);
-        let digits = buffer.get(at..).unwrap_or_default();
-        let parts = [file, b"(", digits, TAIL];
+        let line = crate::c_number::Long::of(i64::from(line));
+        let parts = [file, b"(", line.as_bytes(), TAIL];
         let len = parts.iter().map(|part| part.len()).sum();
         self.string_with(len, |mut into| {
             for part in parts {
@@ -1222,19 +1220,4 @@ fn unreadable(path: &[u8]) -> std::io::Error {
     readable(path)
         .err()
         .unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-}
-
-/// `n` in decimal, written at the end of `digits`: where the first
-/// digit stands.
-fn decimal(mut n: u32, digits: &mut [u8; 10]) -> usize {
-    let mut at = digits.len();
-    for digit in digits.iter_mut().rev() {
-        *digit = b'0' + u8::try_from(n % 10).unwrap_or(0);
-        at -= 1;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    at
 }
