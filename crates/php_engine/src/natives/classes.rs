@@ -1131,16 +1131,6 @@ fn reserved_class_name(lowered: &[u8]) -> bool {
     .contains(&unqualified)
 }
 
-/// `zend_get_object_type`: the word php names a class's kind by.
-fn kind_word(kind: ClassKind) -> &'static str {
-    match kind {
-        ClassKind::Class => "class",
-        ClassKind::Interface => "interface",
-        ClassKind::Trait => "trait",
-        ClassKind::Enum => "enum",
-    }
-}
-
 /// `class_alias(string $class, string $alias, bool $autoload = true):
 /// bool`, php's `ZEND_FUNCTION(class_alias)`
 /// (`Z/Zend/zend_builtin_functions.c:1229`) over
@@ -1222,17 +1212,7 @@ fn class_alias(
     if req.class_alias(class, alias) {
         return Ok(true);
     }
-    let shown = String::from_utf8_lossy(&alias_bytes).into_owned();
-    let message = match req.class_decl(class) {
-        Some(decl) if !decl.file.0.is_empty() => format!(
-            "Cannot redeclare {} {shown} (previously declared in {}:{})",
-            kind_word(decl.kind),
-            String::from_utf8_lossy(&decl.file.0),
-            decl.line
-        ),
-        Some(decl) => format!("Cannot redeclare {} {shown}", kind_word(decl.kind)),
-        None => format!("Cannot redeclare class {shown}"),
-    };
+    let message = req.alias_redeclaration(class, &alias_bytes);
     warning(req, &message);
     Ok(false)
 }

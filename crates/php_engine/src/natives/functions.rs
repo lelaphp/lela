@@ -194,15 +194,6 @@ pub(crate) fn copied_arguments(
     Ok(array)
 }
 
-/// `memcmp`'s answer on this host, which php hands back as it is:
-/// the difference of the first two bytes that differ.
-fn memcmp(a: &[u8], b: &[u8]) -> i64 {
-    a.iter()
-        .zip(b)
-        .find(|(x, y)| x != y)
-        .map_or(0, |(x, y)| i64::from(*x) - i64::from(*y))
-}
-
 /// `ZEND_THREEWAY_COMPARE`.
 fn threeway(a: usize, b: usize) -> i64 {
     match a.cmp(&b) {
@@ -212,25 +203,18 @@ fn threeway(a: usize, b: usize) -> i64 {
     }
 }
 
-/// `zend_binary_strncmp` (`Z/Zend/zend_operators.c:3259`), and
-/// `zend_binary_strcmp` with no length: `memcmp` over the shorter, and
-/// the lengths compared where the bytes agree.
-fn binary_strncmp(a: &[u8], b: &[u8], length: usize) -> i64 {
-    let (a, b) = (&a[..a.len().min(length)], &b[..b.len().min(length)]);
-    match memcmp(a, b) {
-        0 => threeway(a.len(), b.len()),
-        differ => differ,
-    }
-}
-
-/// `zend_binary_strncasecmp` (`Z/Zend/zend_operators.c:3297`): the bytes
-/// lowered by `zend_tolower_ascii`, the first pair that differs
-/// answered by its difference, and the lengths where none does.
-fn binary_strncasecmp(a: &[u8], b: &[u8], length: usize) -> i64 {
+/// `zend_binary_strncmp` (`Z/Zend/zend_operators.c:3259`) with `fold`
+/// the identity, `memcmp` over the shorter, whose answer on this host
+/// php hands back as it is; and `zend_binary_strncasecmp` (`:3297`)
+/// with `fold` `zend_tolower_ascii`. Either way the first pair of bytes
+/// that differ once folded is answered by its difference, and the
+/// lengths are compared where none does; with no length, they are
+/// `zend_binary_strcmp` and `zend_binary_strcasecmp`.
+fn binary_strncmp(a: &[u8], b: &[u8], length: usize, fold: fn(&u8) -> u8) -> i64 {
     let (a, b) = (&a[..a.len().min(length)], &b[..b.len().min(length)]);
     a.iter()
         .zip(b)
-        .map(|(x, y)| (x.to_ascii_lowercase(), y.to_ascii_lowercase()))
+        .map(|(x, y)| (fold(x), fold(y)))
         .find(|(x, y)| x != y)
         .map_or_else(
             || threeway(a.len(), b.len()),
@@ -263,7 +247,12 @@ fn compared(req: &mut Request, length: i64) -> Result<usize, Thrown> {
 /// ```
 #[php_function]
 fn strcmp(string1: PhpString, string2: PhpString) -> i64 {
-    binary_strncmp(string1.as_bytes(), string2.as_bytes(), usize::MAX)
+    binary_strncmp(
+        string1.as_bytes(),
+        string2.as_bytes(),
+        usize::MAX,
+        u8::clone,
+    )
 }
 
 /// `strncmp(string $string1, string $string2, int $length): int`, php's
@@ -298,6 +287,7 @@ fn strncmp(
         string1.as_bytes(),
         string2.as_bytes(),
         length,
+        u8::clone,
     ))
 }
 
@@ -316,7 +306,8 @@ fn strncmp(
 /// ```
 #[php_function]
 fn strcasecmp(string1: PhpString, string2: PhpString) -> i64 {
-    binary_strncasecmp(string1.as_bytes(), string2.as_bytes(), usize::MAX)
+    let lower = u8::to_ascii_lowercase;
+    binary_strncmp(string1.as_bytes(), string2.as_bytes(), usize::MAX, lower)
 }
 
 /// `strncasecmp(string $string1, string $string2, int $length): int`,
@@ -345,10 +336,11 @@ fn strncasecmp(
     length: i64,
 ) -> Result<i64, Thrown> {
     let length = compared(req, length)?;
-    Ok(binary_strncasecmp(
+    Ok(binary_strncmp(
         string1.as_bytes(),
         string2.as_bytes(),
         length,
+        u8::to_ascii_lowercase,
     ))
 }
 

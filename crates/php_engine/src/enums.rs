@@ -18,7 +18,7 @@
 use php_unit::decl::{ClassKind, EnumBacking, Type};
 
 use crate::api::abi::{Entry, Refusals};
-use crate::api::raising::{Thrown, arg_count_error, throw_error};
+use crate::api::raising::{Thrown, arity, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, Value, adopted};
 
@@ -96,19 +96,6 @@ fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
         })
 }
 
-/// `ZEND_PARSE_PARAMETERS_NONE` and `ZEND_PARSE_PARAMETERS_START(1, 1)`.
-fn exactly(req: &mut Request, wanted: usize) -> Result<(), Thrown> {
-    let count = req.argument_count();
-    if count == wanted {
-        return Ok(());
-    }
-    let noun = if wanted == 1 { "argument" } else { "arguments" };
-    Err(arg_count_error(
-        req,
-        &format!("exactly {wanted} {noun}, {count} given"),
-    ))
-}
-
 /// The names of an enum's cases in declaration order, the constants
 /// `ZEND_CLASS_CONST_IS_CASE` marks.
 pub(crate) fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
@@ -139,7 +126,7 @@ pub(crate) fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
 /// bool(true)
 /// ```
 fn cases(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    exactly(req, 0)?;
+    arity(req, 0, Some(0))?; // `ZEND_PARSE_PARAMETERS_NONE`
     let class = called_enum(req)?;
     let mut out = req.array()?;
     for name in case_names(req, class) {
@@ -239,7 +226,7 @@ fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result
 /// #1 {main}
 /// ```
 fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
-    exactly(req, 1)?;
+    arity(req, 1, Some(1))?; // `ZEND_PARSE_PARAMETERS_START(1, 1)`
     let class = called_enum(req)?;
     let backing = req
         .class_decl(class)
