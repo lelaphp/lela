@@ -3,7 +3,7 @@
 //! natives of `phpdbg.stub.php` and its four constants, declared here
 //! beside the debugger whose state they read and write (#1348), and handed
 //! to the engine as the host's own extension. A native reaches the session
-//! where it stands in its cell; inside what the prompt serves, an `ev`,
+//! where it stands in the request's sink; inside what the prompt serves, an `ev`,
 //! the prompt holds it and the native finds none, as it finds no
 //! debugger to talk to.
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
@@ -22,7 +22,7 @@ use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::bp::At;
 use crate::opcodes;
-use crate::out::{self, Element};
+use crate::out::Element;
 use crate::read::{self, Code};
 use crate::session::{self, Logged};
 
@@ -100,7 +100,7 @@ pub fn extension() -> Extension {
 /// ```
 #[php_function]
 fn phpdbg_break_next(req: &mut Request) {
-    let Some(frame) = session::with(|s| s.standing).flatten() else {
+    let Some(frame) = session::with(req, |s| s.standing).flatten() else {
         return;
     };
     let Some(position) = read::position(req, frame) else {
@@ -120,7 +120,9 @@ fn phpdbg_break_next(req: &mut Request) {
         function,
         class,
     };
-    session::with(|s| s.breaks.set_opline(&at, position.opline + 1));
+    session::with(req, |s| {
+        s.breaks.set_opline(&mut s.out, &at, position.opline + 1);
+    });
 }
 
 /// `phpdbg_break_file(string $file, int $line): void`, as `break
@@ -145,8 +147,8 @@ fn phpdbg_break_next(req: &mut Request) {
 /// prompt>
 /// ```
 #[php_function]
-fn phpdbg_break_file(file: PhpString, line: i64) {
-    session::with(|s| crate::host::file_break(s, file.as_bytes(), line));
+fn phpdbg_break_file(req: &mut Request, file: PhpString, line: i64) {
+    session::with(req, |s| crate::host::file_break(s, file.as_bytes(), line));
 }
 
 /// `phpdbg_break_method(string $class, string $method): void`.
@@ -173,8 +175,11 @@ fn phpdbg_break_file(file: PhpString, line: i64) {
 /// prompt>
 /// ```
 #[php_function]
-fn phpdbg_break_method(class: PhpString, method: PhpString) {
-    session::with(|s| s.breaks.set_method(class.as_bytes(), method.as_bytes()));
+fn phpdbg_break_method(req: &mut Request, class: PhpString, method: PhpString) {
+    session::with(req, |s| {
+        s.breaks
+            .set_method(&mut s.out, class.as_bytes(), method.as_bytes());
+    });
 }
 
 /// `phpdbg_break_function(string $function): void`.
@@ -201,8 +206,10 @@ fn phpdbg_break_method(class: PhpString, method: PhpString) {
 /// prompt>
 /// ```
 #[php_function]
-fn phpdbg_break_function(function: PhpString) {
-    session::with(|s| s.breaks.set_symbol(function.as_bytes()));
+fn phpdbg_break_function(req: &mut Request, function: PhpString) {
+    session::with(req, |s| {
+        s.breaks.set_symbol(&mut s.out, function.as_bytes());
+    });
 }
 
 /// `phpdbg_color(int $element, string $color): void`: the element's
@@ -250,7 +257,7 @@ fn phpdbg_color(req: &mut Request, element: i64, color: PhpString) -> Result<(),
             ));
         }
     };
-    out::set_colour_named(element, color.as_bytes());
+    session::with(req, |s| s.out.set_colour_named(element, color.as_bytes()));
     Ok(())
 }
 
@@ -273,13 +280,13 @@ fn phpdbg_color(req: &mut Request, element: i64, color: PhpString) -> Result<(),
 /// dbg>
 /// ```
 #[php_function]
-fn phpdbg_prompt(string: PhpString) {
+fn phpdbg_prompt(req: &mut Request, string: PhpString) {
     let text: Vec<u8> = string
         .as_bytes()
         .iter()
         .map(|b| if *b & 0x80 == 0 { *b } else { b'?' })
         .collect();
-    session::with(|s| s.prompt = text);
+    session::with(req, |s| s.prompt = text);
 }
 
 /// `phpdbg_exec(string $context): string|bool`: the execution context
@@ -316,7 +323,8 @@ fn phpdbg_exec(
     let shown = String::from_utf8_lossy(context.as_bytes()).into_owned();
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => {
-            let previous = session::with(|s| s.exec.replace(context.as_bytes().to_vec())).flatten();
+            let previous =
+                session::with(req, |s| s.exec.replace(context.as_bytes().to_vec())).flatten();
             match previous {
                 Some(previous) => Ok(Union::A(PhpString::new(req, &previous)?)),
                 None => Ok(Union::B(true)),
@@ -358,8 +366,8 @@ fn phpdbg_exec(
 /// prompt>
 /// ```
 #[php_function]
-fn phpdbg_clear() {
-    session::with(|s| s.breaks.clean());
+fn phpdbg_clear(req: &mut Request) {
+    session::with(req, |s| s.breaks.clean());
 }
 
 /// `phpdbg_start_oplog(): void`: an oplog opened, the one each opline
@@ -390,8 +398,8 @@ fn phpdbg_clear() {
 /// prompt>
 /// ```
 #[php_function]
-fn phpdbg_start_oplog() {
-    session::with(|s| s.oplogs.push(Vec::new()));
+fn phpdbg_start_oplog(req: &mut Request) {
+    session::with(req, |s| s.oplogs.push(Vec::new()));
 }
 
 /// `phpdbg_end_oplog(array $options = []): ?array`: the oplog opened
@@ -431,7 +439,7 @@ fn phpdbg_end_oplog(
     req: &mut Request,
     #[php(default = [])] options: PhpArray,
 ) -> Result<Option<Owner<PhpArray>>, Thrown> {
-    let Some(log) = session::with(|s| s.oplogs.pop()).flatten() else {
+    let Some(log) = session::with(req, |s| s.oplogs.pop()).flatten() else {
         raise(
             req,
             Level::Warning,
@@ -478,7 +486,7 @@ fn phpdbg_get_executable(
     #[php(default = [])] options: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let (by_function, by_opcode) = shape(req, options)?;
-    let sources = session::with(|s| s.sources.clone()).unwrap_or_default();
+    let sources = session::with(req, |s| s.sources.clone()).unwrap_or_default();
     let named = options.find(b"files").map(|value| value.deref());
     let files: Vec<Vec<u8>> = if let Some(named) = named
         .as_ref()

@@ -392,10 +392,10 @@ impl ReflectionAttribute {
     /// ```expect
     /// string(10) "Deprecated"
     /// ```
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let name = kept.attribute.name.0.to_vec();
-        PhpString::interned(req, &name)
+        PhpString::declared(req, &name)
     }
 
     /// `ReflectionAttribute::getTarget()`: `attr->target`, the one

@@ -14,6 +14,7 @@
 //! alone, an `eval`'s or an include no cache holds, took the request's
 //! offsets, and no row stands for it: it reads the sealed word.
 
+use php_unit::decl::Parameter;
 use php_unit::{MapPtrOffset, OpArray, PublishedUnit};
 
 use super::{SafepointIdx, Word};
@@ -39,6 +40,34 @@ impl Func {
     /// The op array itself.
     pub(crate) fn op_array(&self) -> Option<&OpArray> {
         exec::body_of(&self.unit, self.body)
+    }
+
+    /// Whether the op array is its file's own code, the main op array.
+    pub(crate) fn is_main(&self) -> bool {
+        matches!(self.body, Body::Main)
+    }
+
+    /// The parameters the op array's declaration lists: none for a
+    /// file's own code.
+    pub(crate) fn parameters(&self) -> Option<&[Parameter]> {
+        let unit = &self.unit;
+        let decl = match self.body {
+            Body::Main => return Some(&[]),
+            Body::Function(at) => &unit.functions.get(at as usize)?.0,
+            Body::Dynamic(at) => &unit.dynamic.get(at as usize)?.0,
+            Body::Method(at) => {
+                let method = unit.methods.get(at as usize)?;
+                let class = unit.classes.get(method.class as usize)?;
+                &class.methods.get(method.method as usize)?.function
+            }
+            Body::Hook(at) => {
+                let hook = unit.hooks.get(at as usize)?;
+                let class = unit.classes.get(hook.class as usize)?;
+                let property = class.properties.get(hook.property as usize)?;
+                &property.hooks.as_ref()?.of(hook.kind)?.function
+            }
+        };
+        Some(&decl.parameters)
     }
 
     /// The word of safepoint `at`; the sealed word past the last.

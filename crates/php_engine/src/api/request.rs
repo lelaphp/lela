@@ -95,7 +95,6 @@ pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
-pub(crate) use memory::ConstantHome;
 pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
 pub use memory::{ecalloc, efree, emalloc, erealloc};
 mod methods;
@@ -358,8 +357,6 @@ pub struct Request {
     /// The umask, the locale names and the start time
     /// ([`environment::Environment`]).
     environment: environment::Environment,
-    /// `CWDG(realpath_cache)` ([`paths::Paths`]).
-    paths: paths::Paths,
     cwd: PathBuf,
     /// The fibers running on this request, innermost last, each with the
     /// execution state of the stack that resumed it, and where each
@@ -474,6 +471,10 @@ pub struct Request {
     /// constants and their names, held while each unit lives
     /// ([`unit_strings::UnitStrings`]).
     unit_strings: unit_strings::UnitStrings,
+    /// `CG(loop_var_stack)`'s elements and how many they hold, laid down
+    /// by the first compile of the request that pushed one and kept to
+    /// its end ([`Request::note_loop_vars`]).
+    loop_var_stack: Option<(php_heap::Block, u32)>,
     /// php's `EG(function_table)` past the natives, each function under
     /// its name: the preload's, published, in the order its table holds
     /// them, then each the request declared, in the order declared. A
@@ -959,7 +960,7 @@ impl Request {
         // VM stack, out of the heap the object store's table stands in.
         // The main chunk holds it, so nothing refuses it; a heap that
         // did would refuse the first push again, with php's fatal.
-        let mut heap = Heap::new();
+        let mut heap = Heap::new_in(Arc::clone(&shared.chunks));
         #[cfg(debug_assertions)]
         if shared.sense_leaks == crate::engine::LeakSensor::Traced {
             heap.trace_allocations();
@@ -977,10 +978,8 @@ impl Request {
         let typed_ini = shared.typed_ini;
         let mut req = Request {
             // Fields are made in the order written: the request stands
-            // inside the engine before its deadlines are laid, and the
-            // paths are read before `shared` moves in.
+            // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
-            paths: paths::Paths::startup(&shared),
             limits: limits::Limits::new(&shared.timer),
             shared,
             description,
@@ -1046,6 +1045,7 @@ impl Request {
             user_functions: PinnedRows::default(),
             named_callees: std::collections::HashMap::new(),
             unit_strings: unit_strings::UnitStrings::default(),
+            loop_var_stack: None,
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,

@@ -1162,6 +1162,7 @@ test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::loaded_zend_extensions
 test::Engine::parse_ini
+test::Engine::realpath
 test::Engine::refused
 test::Engine::serve
 test::Engine::serve_capture
@@ -1371,6 +1372,7 @@ values::PhpRef::separate_array
 values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
+values::PhpString::declared
 values::PhpString::existing_interned
 values::PhpString::filled
 values::PhpString::interned

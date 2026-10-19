@@ -71,9 +71,9 @@ fn object_or_class_name(req: &mut Request, given: Value, position: u32) -> Resul
     Err(arg_type_error(req, position, &tail))
 }
 
-/// `ce->name`: the declared name of a class, the interned string php
-/// keeps on the class entry ([`Request::declared_string`]).
-fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
+/// `ce->name`: the declared name of a class, the string php keeps on the
+/// class entry, one more owner ([`Request::declared_string`]).
+fn class_name(req: &mut Request, class: ClassId) -> Result<Owner<PhpString>, Thrown> {
     let name = req.class_name_bytes(class);
     req.declared_string(&name)
 }
@@ -100,7 +100,7 @@ fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
 /// get_called_class() must be called from within a class at 1
 /// ```
 #[php_function]
-fn get_called_class(req: &mut Request) -> Result<PhpString, Thrown> {
+fn get_called_class(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     match req.called_scope() {
         Some(class) => class_name(req, class),
         None => Err(throw_error(
@@ -140,7 +140,7 @@ fn get_called_class(req: &mut Request) -> Result<PhpString, Thrown> {
 fn get_parent_class(
     req: &mut Request,
     object_or_class: Passed<Raw<Union<PhpObject, PhpString>>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let class = if let Passed::Given(given) = object_or_class {
         Some(object_or_class_name(req, given.value(), 1)?)
     } else {
@@ -816,8 +816,8 @@ fn get_class_methods(
     let mut array = PhpArray::new(req)?;
     for name in names {
         // `ZVAL_STR_COPY(&method_name, mptr->common.function_name)`.
-        let name = Value::string(req.declared_string(&name)?);
-        array.append(req, Owner::take(req, name))?;
+        let name = req.declared_string(&name)?;
+        array.append(req, name.into_value())?;
     }
     Ok(array)
 }
@@ -1238,8 +1238,8 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Owner<PhpArray>, T
     let mut array = PhpArray::new(req)?;
     for name in names {
         // `copy_class_or_interface_name`: `ce->name`, or the alias's key.
-        let name = Value::string(req.declared_string(&name)?);
-        array.append(req, Owner::take(req, name))?;
+        let name = req.declared_string(&name)?;
+        array.append(req, name.into_value())?;
     }
     Ok(array)
 }

@@ -1043,7 +1043,7 @@ impl Request {
         object: PhpObject,
         lead: &mut usize,
         by_ref: bool,
-    ) -> Result<Option<(PhpString, super::Walked)>, Thrown> {
+    ) -> Result<Option<(Owner<PhpString>, super::Walked)>, Thrown> {
         let class = object.class();
         let keys = self.hooked_object_keys(class);
         while let Some((name, declaring, _)) = keys.get(*lead).cloned() {
@@ -1079,7 +1079,13 @@ impl Request {
                     continue;
                 }
                 let value = self.read_hooked(object, &name, hooked, PropertyRead::Silent)?;
-                let key = self.declared_string(&name)?;
+                let key = match self.declared_string(&name) {
+                    Ok(key) => key,
+                    Err(thrown) => {
+                        self.release(value);
+                        return Err(thrown);
+                    }
+                };
                 return Ok(Some((key, super::Walked::Hooked(value))));
             }
             let Some(slot) = self.slot_declared_by(class, declaring, &name) else {
@@ -1214,13 +1220,6 @@ impl Request {
         let keys = self.hooked_object_keys(class);
         let mut rows: Vec<HookedRow> = Vec::with_capacity(keys.len());
         for (name, declaring, visibility) in keys {
-            let interned = match self.declared_string(&name) {
-                Ok(interned) => Key::Str(interned),
-                Err(thrown) => {
-                    HookedRow::give_up_all(self, rows);
-                    return Err(thrown);
-                }
-            };
             let declared = Some((declaring, visibility));
             if let Some(hooked) = self.row_hooked(declaring, &name) {
                 if hooked.is_virtual && hooked.get.is_none() {
@@ -1233,7 +1232,14 @@ impl Request {
                         return Err(thrown);
                     }
                 };
-                let key = Owner::take(self, interned);
+                let key = match self.declared_string(&name) {
+                    Ok(key) => key.into_key(),
+                    Err(thrown) => {
+                        value.give_up(self);
+                        HookedRow::give_up_all(self, rows);
+                        return Err(thrown);
+                    }
+                };
                 rows.push(HookedRow {
                     key,
                     value,
@@ -1248,7 +1254,13 @@ impl Request {
             if z.is_undef() {
                 continue;
             }
-            let key = Owner::take(self, interned);
+            let key = match self.declared_string(&name) {
+                Ok(key) => key.into_key(),
+                Err(thrown) => {
+                    HookedRow::give_up_all(self, rows);
+                    return Err(thrown);
+                }
+            };
             let value = Owner::take(self, Value::of_zval(z));
             rows.push(HookedRow {
                 key,
@@ -1342,7 +1354,7 @@ impl Request {
                     let mangled =
                         self.declared_string(&[prefix.as_slice(), name.as_bytes()].concat());
                     key.give_up(self);
-                    mangled.map(|mangled| Owner::take(self, Key::Str(mangled)))
+                    mangled.map(Owner::into_key)
                 }
                 _ => Ok(key),
             };

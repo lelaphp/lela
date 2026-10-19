@@ -13,11 +13,13 @@
 //! phpdbg is built with libedit, under which `phpdbg_get_prompt` writes
 //! it plain (`Z/sapi/phpdbg/phpdbg_utils.c:321-331`).
 
-use std::cell::Cell;
 use std::io::Write;
 
 use php_ext::abi::AfterLog;
+use php_sapi::tier::Request;
 use php_sapi::{Aborted, OutputSink, ResponseHead};
+
+use crate::session::{Session, Stop};
 
 /// A row of php's colour table (`colors[]`,
 /// `Z/sapi/phpdbg/phpdbg_utils.c:41-67`): its name and the SGR code it
@@ -118,112 +120,212 @@ impl Palette {
     };
 }
 
-thread_local! {
-    static PALETTE: Cell<Palette> = const { Cell::new(Palette::DEFAULT) };
+/// What phpdbg keeps of its own stream (`phpdbg_out.c`'s part of
+/// `PHPDBG_G`): the palette, whether the last byte written was a newline,
+/// `PHPDBG_DISCARD_OUTPUT`, the log's guard, and whether a write of its
+/// own through the program's output is under way. The session holds it
+/// ([`crate::session::Session::out`]), and the program's bytes reach it
+/// through [`Sink`], which holds the session while a request runs.
+#[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // flags of `PHPDBG_G` and `PG(in_error_log)`, one field each
+pub struct Out {
+    palette: Palette,
     /// `PHPDBG_G(last_was_newline)`.
-    static LAST_WAS_NEWLINE: Cell<bool> = const { Cell::new(true) };
-    /// A write of the debugger's own through the program's output is
-    /// under way, [`interruptible`].
-    static INTERRUPTIBLE: Cell<bool> = const { Cell::new(false) };
+    last_was_newline: bool,
     /// `PHPDBG_DISCARD_OUTPUT`, [`discarded`].
-    static DISCARDING: Cell<bool> = const { Cell::new(false) };
+    discarding: bool,
     /// `PG(in_error_log)`: a prompt inside `php_sapi_phpdbg_log_message`
     /// stands, [`in_log`].
-    static IN_LOG: Cell<bool> = const { Cell::new(false) };
+    in_log: bool,
     /// `PG(in_error_log)` left set by a bailout out of the log,
-    /// [`stick_log`].
-    static STUCK: Cell<bool> = const { Cell::new(false) };
+    /// [`Out::stick_log`].
+    stuck: bool,
+    /// A write of the debugger's own through the program's output is
+    /// under way, [`interruptible`].
+    interruptible: bool,
+}
+
+impl Default for Out {
+    fn default() -> Out {
+        Out {
+            palette: Palette::DEFAULT,
+            last_was_newline: true,
+            discarding: false,
+            in_log: false,
+            stuck: false,
+            interruptible: false,
+        }
+    }
 }
 
 /// `f` inside the host's log: `php_log_err` guards against itself, so
 /// whatever is logged while `f` runs, the compiler's refusal of the
 /// context among it, is logged nowhere.
-pub fn in_log<R>(f: impl FnOnce() -> R) -> R {
-    let outer = IN_LOG.replace(true);
-    let result = f();
-    IN_LOG.set(outer);
+pub fn in_log<R>(s: &mut Session, f: impl FnOnce(&mut Session) -> R) -> R {
+    let outer = std::mem::replace(&mut s.out.in_log, true);
+    let result = f(s);
+    s.out.in_log = outer;
     result
-}
-
-/// Whether a prompt inside the host's log stands, or the log's guard
-/// was left set.
-pub fn logging() -> bool {
-    IN_LOG.get() || STUCK.get()
-}
-
-/// Whether a prompt inside the host's log stands.
-pub fn in_log_prompt() -> bool {
-    IN_LOG.get()
-}
-
-/// A refusal inside the log's prompt bails out of `php_log_err`, past
-/// the line that clears `PG(in_error_log)` (`Z/main/main.c:928-990`), so
-/// nothing is logged until the next cycle's `php_request_startup` clears
-/// it ([`unstick_log`]).
-pub fn stick_log() {
-    STUCK.set(true);
-}
-
-/// `php_request_startup`'s `PG(in_error_log) = 0`.
-pub fn unstick_log() {
-    STUCK.set(false);
 }
 
 /// `f` with `PHPDBG_DISCARD_OUTPUT` set: what phpdbg writes in it goes
 /// nowhere and leaves the newline fact as it stood, as `phpdbg_print`,
 /// `phpdbg_out` and `phpdbg_xml_internal` return first
 /// (`Z/sapi/phpdbg/phpdbg_out.c:178-233`).
-pub fn discarded(f: impl FnOnce()) {
-    let outer = DISCARDING.replace(true);
-    f();
-    DISCARDING.set(outer);
-}
-
-/// Whether notices and errors are coloured.
-pub fn colours() -> Colours {
-    PALETTE.get().colours
-}
-
-/// Notices and errors coloured from here, or not.
-pub fn set_colours(colours: Colours) {
-    PALETTE.set(Palette {
-        colours,
-        ..PALETTE.get()
-    });
-}
-
-/// `phpdbg_set_color`: the element's colour from here.
-pub fn set_colour(element: Element, colour: &'static Colour) {
-    let mut palette = PALETTE.get();
-    match element {
-        Element::Prompt => {}
-        Element::Error => palette.error = colour,
-        Element::Notice => palette.notice = colour,
-    }
-    PALETTE.set(palette);
-}
-
-/// `phpdbg_set_color_ex`: the element's colour by its name, `none` for a
-/// name the table does not hold.
-pub fn set_colour_named(element: Element, name: &[u8]) {
-    set_colour(element, find_colour(name).unwrap_or(&COLOURS[0]));
+pub fn discarded(s: &mut Session, f: impl FnOnce(&mut Session)) {
+    let outer = std::mem::replace(&mut s.out.discarding, true);
+    f(s);
+    s.out.discarding = outer;
 }
 
 /// `f`, a write of the debugger's own that goes through the program's
-/// output, run so that what it still sends once a prompt inside it quit
-/// is dropped: php's `quit` bails out of the write it interrupted
-/// (`zend_bailout`), which never finishes.
-pub fn interruptible(f: impl FnOnce()) {
-    let outer = INTERRUPTIBLE.replace(true);
-    f();
-    INTERRUPTIBLE.set(outer);
+/// output of the request standing, run so that what it still sends once
+/// a prompt inside it quit is dropped: php's `quit` bails out of the
+/// write it interrupted (`zend_bailout`), which never finishes.
+pub fn interruptible(req: &mut Request, f: impl FnOnce(&mut Request)) {
+    let outer = crate::session::with(req, |s| std::mem::replace(&mut s.out.interruptible, true));
+    f(req);
+    if let Some(outer) = outer {
+        crate::session::with(req, |s| s.out.interruptible = outer);
+    }
 }
 
-/// Whether the program's bytes are dropped: inside an interruptible
-/// write, after the session quit.
-fn dropped() -> bool {
-    INTERRUPTIBLE.get()
-        && crate::session::with(|s| s.stopped == Some(crate::session::Stop::Quit)).unwrap_or(false)
+impl Out {
+    /// Whether a prompt inside the host's log stands, or the log's guard
+    /// was left set.
+    pub fn logging(&self) -> bool {
+        self.in_log || self.stuck
+    }
+
+    /// Whether a prompt inside the host's log stands.
+    pub fn in_log_prompt(&self) -> bool {
+        self.in_log
+    }
+
+    /// A refusal inside the log's prompt bails out of `php_log_err`, past
+    /// the line that clears `PG(in_error_log)` (`Z/main/main.c:928-990`),
+    /// so nothing is logged until the next cycle's `php_request_startup`
+    /// clears it ([`Out::unstick_log`]).
+    pub fn stick_log(&mut self) {
+        self.stuck = true;
+    }
+
+    /// `php_request_startup`'s `PG(in_error_log) = 0`.
+    pub fn unstick_log(&mut self) {
+        self.stuck = false;
+    }
+
+    /// Whether notices and errors are coloured.
+    pub fn colours(&self) -> Colours {
+        self.palette.colours
+    }
+
+    /// Notices and errors coloured from here, or not.
+    pub fn set_colours(&mut self, colours: Colours) {
+        self.palette.colours = colours;
+    }
+
+    /// `phpdbg_set_color`: the element's colour from here.
+    pub fn set_colour(&mut self, element: Element, colour: &'static Colour) {
+        match element {
+            Element::Prompt => {}
+            Element::Error => self.palette.error = colour,
+            Element::Notice => self.palette.notice = colour,
+        }
+    }
+
+    /// `phpdbg_set_color_ex`: the element's colour by its name, `none`
+    /// for a name the table does not hold.
+    pub fn set_colour_named(&mut self, element: Element, name: &[u8]) {
+        self.set_colour(element, find_colour(name).unwrap_or(&COLOURS[0]));
+    }
+
+    /// `phpdbg_out`: the bytes as they are, the newline fact untouched.
+    pub fn out(&mut self, bytes: &[u8]) {
+        if !self.discarding {
+            raw(bytes);
+        }
+    }
+
+    /// `phpdbg_write`, `P_WRITE`: the bytes, and the fact read off their
+    /// last.
+    pub fn write(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() || self.discarding {
+            return;
+        }
+        raw(bytes);
+        self.last_was_newline = bytes.last() == Some(&b'\n');
+    }
+
+    /// `phpdbg_writeln`, `P_WRITELN`: the bytes and a newline.
+    pub fn writeln(&mut self, bytes: &[u8]) {
+        if self.discarding {
+            return;
+        }
+        let mut line = bytes.to_vec();
+        line.push(b'\n');
+        raw(&line);
+        self.last_was_newline = true;
+    }
+
+    /// `phpdbg_process_print`'s `P_NOTICE` and `P_ERROR`: a newline
+    /// first where the last byte was none, then `[message]`, inside the
+    /// element's colour while colours are on.
+    fn bracketed(&mut self, message: &[u8], colour: &'static Colour) {
+        if message.is_empty() || self.discarding {
+            return;
+        }
+        let mut line = Vec::with_capacity(message.len() + 16);
+        if !self.last_was_newline {
+            line.push(b'\n');
+        }
+        let coloured = self.palette.colours == Colours::On;
+        if coloured {
+            line.extend_from_slice(format!("\x1b[{}m", colour.code).as_bytes());
+        }
+        line.push(b'[');
+        line.extend_from_slice(message);
+        line.push(b']');
+        if coloured {
+            line.extend_from_slice(b"\x1b[0m");
+        }
+        line.push(b'\n');
+        raw(&line);
+        self.last_was_newline = true;
+    }
+
+    /// `phpdbg_notice`.
+    pub fn notice(&mut self, message: &[u8]) {
+        self.bracketed(message, self.palette.notice);
+    }
+
+    /// `phpdbg_error`: a notice's bytes in the error's colour.
+    pub fn error(&mut self, message: &[u8]) {
+        self.bracketed(message, self.palette.error);
+    }
+
+    /// The line the prompt reads was taken, `phpdbg_consume_stdin_line`:
+    /// the next notice starts where it stands.
+    pub fn line_read(&mut self) {
+        self.last_was_newline = true;
+    }
+
+    /// The program's output, `P_STDOUT`: the bytes, the newline fact read
+    /// off their last.
+    pub fn program(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            raw(bytes);
+            self.last_was_newline = bytes.last() == Some(&b'\n');
+        }
+    }
+
+    /// `php_sapi_phpdbg_log_message`'s entry through `phpdbg_error`
+    /// (`Z/sapi/phpdbg/phpdbg.c:731-770`), where the log is open.
+    pub fn log(&mut self, entry: &[u8]) {
+        if !self.logging() {
+            self.error(entry);
+        }
+    }
 }
 
 /// The bytes to stdout as they are.
@@ -231,14 +333,6 @@ fn raw(bytes: &[u8]) {
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(bytes).ok();
     stdout.flush().ok();
-}
-
-/// `phpdbg_out`: the bytes as they are, the newline fact untouched.
-pub fn out(bytes: &[u8]) {
-    if DISCARDING.get() {
-        return;
-    }
-    raw(bytes);
 }
 
 /// `zend_dump_op_array`'s listing, which it writes to stderr
@@ -249,80 +343,28 @@ pub fn dump(bytes: &[u8]) {
     stderr.flush().ok();
 }
 
-/// `phpdbg_write`, `P_WRITE`: the bytes, and the fact read off their last.
-pub fn write(bytes: &[u8]) {
-    if bytes.is_empty() || DISCARDING.get() {
-        return;
-    }
-    raw(bytes);
-    LAST_WAS_NEWLINE.set(bytes.last() == Some(&b'\n'));
-}
-
-/// `phpdbg_writeln`, `P_WRITELN`: the bytes and a newline.
-pub fn writeln(bytes: &[u8]) {
-    if DISCARDING.get() {
-        return;
-    }
-    let mut line = bytes.to_vec();
-    line.push(b'\n');
-    raw(&line);
-    LAST_WAS_NEWLINE.set(true);
-}
-
-/// `phpdbg_process_print`'s `P_NOTICE` and `P_ERROR`: a newline first
-/// where the last byte was none, then `[message]`, inside the element's
-/// colour while colours are on.
-fn bracketed(message: &[u8], pick: fn(&Palette) -> &'static Colour) {
-    if message.is_empty() || DISCARDING.get() {
-        return;
-    }
-    let mut line = Vec::with_capacity(message.len() + 16);
-    if !LAST_WAS_NEWLINE.get() {
-        line.push(b'\n');
-    }
-    let palette = PALETTE.get();
-    let colour = pick(&palette);
-    if palette.colours == Colours::On {
-        line.extend_from_slice(format!("\x1b[{}m", colour.code).as_bytes());
-    }
-    line.push(b'[');
-    line.extend_from_slice(message);
-    line.push(b']');
-    if palette.colours == Colours::On {
-        line.extend_from_slice(b"\x1b[0m");
-    }
-    line.push(b'\n');
-    raw(&line);
-    LAST_WAS_NEWLINE.set(true);
-}
-
-/// `phpdbg_notice`.
-pub fn notice(message: &[u8]) {
-    bracketed(message, |palette| palette.notice);
-}
-
-/// `phpdbg_error`: a notice's bytes in the error's colour.
-pub fn error(message: &[u8]) {
-    bracketed(message, |palette| palette.error);
-}
-
-/// The line the prompt reads was taken, `phpdbg_consume_stdin_line`: the
-/// next notice starts where it stands.
-pub fn line_read() {
-    LAST_WAS_NEWLINE.set(true);
-}
-
-/// The program's output, `P_STDOUT`: the bytes, the newline fact read off
-/// their last; the header block nowhere, the error stream on stderr, and
-/// the log as `php_sapi_phpdbg_log_message` writes it.
+/// The program's output, `P_STDOUT`, as `php_sapi_phpdbg_ub_write` sends
+/// it; the header block nowhere, the error stream on stderr, and the log
+/// as `php_sapi_phpdbg_log_message` writes it. It is the value the host
+/// lends each request it serves and takes back at its end, so it holds
+/// the session ([`crate::session`]) while the request runs: what phpdbg
+/// keeps across the cycles of its main loop, which the tier and the
+/// natives reach through the request ([`php_sapi::tier::sink`]) and the
+/// program's bytes reach here, as php's `ub_write` reads `PHPDBG_G`.
 #[derive(Debug, Default)]
-pub struct Sink;
+pub struct Sink {
+    /// The session, none while the debugger holds it.
+    pub session: Option<Session>,
+}
 
 impl OutputSink for Sink {
+    /// The bytes, unless a write of the debugger's own through the
+    /// program's output was interrupted by a prompt inside it that quit.
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
-        if !bytes.is_empty() && !dropped() {
-            raw(bytes);
-            LAST_WAS_NEWLINE.set(bytes.last() == Some(&b'\n'));
+        match &mut self.session {
+            Some(s) if s.out.interruptible && s.stopped == Some(Stop::Quit) => {}
+            Some(s) => s.out.program(bytes),
+            None => raw(bytes),
         }
         Ok(())
     }
@@ -333,12 +375,12 @@ impl OutputSink for Sink {
 
     fn send_headers(&mut self, _head: &ResponseHead) {}
 
-    /// `php_sapi_phpdbg_log_message`: the entry through `phpdbg_error`
-    /// (`Z/sapi/phpdbg/phpdbg.c:731-770`); what follows a fatal's is
+    /// `php_sapi_phpdbg_log_message`: what follows a fatal's entry is
     /// [`crate::debugger::fatal_logged`].
     fn log(&mut self, entry: &[u8]) {
-        if !logging() {
-            error(entry);
+        match &mut self.session {
+            Some(s) => s.out.log(entry),
+            None => Out::default().log(entry),
         }
     }
 
@@ -392,24 +434,31 @@ impl OutputSink for Kept {
 /// that bailed out leaves the display unwritten; nothing logged serves
 /// no `fatal`. Which of the two it was is the answer, `Returned` where
 /// nothing was logged.
-pub fn replay(written: &[Written], fatal: impl FnOnce() -> AfterLog) -> AfterLog {
+pub fn replay(
+    s: &mut Session,
+    written: &[Written],
+    fatal: impl FnOnce(&mut Session) -> AfterLog,
+) -> AfterLog {
     let logged = written
         .iter()
         .rposition(|each| matches!(each, Written::Log(_)))
         .map_or(0, |at| at + 1);
     let (through_fatal, displayed) = written.split_at(logged);
-    let mut sink = Sink;
-    let mut write = |each: &Written| match each {
-        Written::Out(bytes) => {
-            sink.write(bytes).ok();
+    let write = |s: &mut Session, each: &Written| match each {
+        Written::Out(bytes) => s.out.program(bytes),
+        Written::Log(entry) => s.out.log(entry),
+        Written::Err(bytes) => {
+            std::io::stderr().lock().write_all(bytes).ok();
         }
-        Written::Log(entry) => sink.log(entry),
-        Written::Err(bytes) => sink.write_stderr(bytes),
     };
-    through_fatal.iter().for_each(&mut write);
-    if logged > 0 && fatal() == AfterLog::BailedOut {
+    for each in through_fatal {
+        write(s, each);
+    }
+    if logged > 0 && fatal(s) == AfterLog::BailedOut {
         return AfterLog::BailedOut;
     }
-    displayed.iter().for_each(write);
+    for each in displayed {
+        write(s, each);
+    }
     AfterLog::Returned
 }

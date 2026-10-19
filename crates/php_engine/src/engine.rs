@@ -37,8 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, ConstantHome, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo,
-    Request, TypedIni, placed_of,
+    BuildDefs, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request,
+    TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -930,17 +930,22 @@ pub(crate) struct Shared {
     /// started by the first deadline a request sets, parked between
     /// requests, and joined before a fork and at the engine's end.
     pub(crate) timer: crate::interrupt::Timer,
-    /// The engine's interned strings (design §5.2, §5.14): what a unit's
-    /// constant strings enter as it is published, grown here alone and
-    /// read by every request thread with nothing taken.
-    strings: Mutex<Strings>,
-    /// php's `interned_strings_permanent` as `zend_interned_strings_switch_storage`
-    /// leaves it after `MINIT`: `zend_known_strings`, and every name and
-    /// string the engine's and the bundle's registrations intern
-    /// ([`permanent_names`]), interned at startup and frozen, so a request
-    /// asking for one finds it here and allocates nothing
-    /// ([`Shared::permanent`]).
-    names: Strings,
+    /// What `zend_mm_shutdown(full=0)` leaves of each ended heap, which
+    /// the next request's heap starts from (design §5.13, §5.14): what a
+    /// php-fpm child keeps of its heap from one request to the next, kept
+    /// by the engine because a heap is its request's and dropped with it
+    /// (#2940).
+    pub(crate) chunks: Arc<php_heap::ChunkCache>,
+    /// `CWDG(realpath_cache)` (design §5.14): the process's in php's
+    /// non-ZTS build, so every request of the engine reads what earlier
+    /// ones entered until an entry's `realpath_cache_ttl` expires, as
+    /// every request of one php-fpm child does (#2941).
+    pub(crate) realpath_cache: crate::virtual_cwd::RealpathCache,
+    /// The engine's interned strings (design §5.2, §5.14), the permanent
+    /// names and the table a unit's constant strings enter as it is
+    /// published, which every epoch keeps too
+    /// ([`crate::arena::Interned`]).
+    interned: crate::arena::Interned,
     /// The string a native's parameter defaults to where its stub writes
     /// a string, made once at startup and immutable after: an omitted
     /// argument is php's C default, which costs the request nothing, and
@@ -1626,7 +1631,7 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<Unit, CompileError> {
-        let mut strings = match self.strings.lock() {
+        let mut strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             // The table is append-only and every string in it was
             // finished before it was published, so what a thread that
@@ -1640,7 +1645,7 @@ impl Shared {
             self.declared(),
             stack,
             &mut PermanentStrings {
-                names: &self.names,
+                names: &self.interned.names,
                 strings: &mut strings,
             },
             // A unit for every request is compiled on the thread that
@@ -1662,11 +1667,11 @@ impl Shared {
 
     /// One source compiled for one request alone, under the request's
     /// ini and working directory, its constant strings made in the
-    /// request's own memory and kept where `home` says (design §5.2): a
-    /// source the host handed over, its strings the request's to its
-    /// end, and the string an `eval` hands over ([`SourceKind::EVAL`]) or
-    /// an uncached include's bytes, their strings the unit's and gone
-    /// with it, as php holds what it compiles for `-r` and for `eval`. Such a unit is never published: nothing outside
+    /// request's own memory, the unit's and gone with it (design §5.2):
+    /// a source the host handed over, piped, the string an `eval` hands
+    /// over ([`SourceKind::EVAL`]) and an uncached include's bytes, as
+    /// php under opcache holds what it compiles for stdin, `-r` and
+    /// `eval` ([`crate::api::request::Request::hold_compiled`]). Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
     /// it or the functions and classes it declared.
     ///
@@ -1690,7 +1695,6 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
-        home: ConstantHome,
     ) -> Result<PublishedUnit, CompileError> {
         let ini = CompileIni {
             precision: req.precision(),
@@ -1707,7 +1711,7 @@ impl Shared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
-        let unit = req.compiling(home, |heap, request_classes, arena| {
+        let unit = req.compiling(|heap, request_classes, arena| {
             let origin = Origin {
                 filename,
                 cwd: &cwd,
@@ -1726,10 +1730,9 @@ impl Shared {
             }
         };
         req.count_keys_made(unit.runtime_keys.len());
+        req.note_loop_vars(unit.loop_vars);
         let unit = req.take_unit(unit);
-        if home == ConstantHome::Unit {
-            req.hold_compiled(&unit);
-        }
+        req.hold_compiled(&unit);
         Ok(unit)
     }
 
@@ -1825,7 +1828,7 @@ impl Shared {
     /// ([`Shared::publish_compiled`]); none where the bytes are no whole
     /// unit.
     pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
-        let mut strings = match self.strings.lock() {
+        let mut strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             // As in `publish`: the table is append-only and consistent.
             Err(poisoned) => poisoned.into_inner(),
@@ -1833,7 +1836,7 @@ impl Shared {
         crate::unit_cache::decode(
             body,
             &mut PermanentStrings {
-                names: &self.names,
+                names: &self.interned.names,
                 strings: &mut strings,
             },
         )
@@ -1884,14 +1887,14 @@ impl Shared {
     /// declared, or `None` for one no declaration made
     /// (`zend_string_init_interned_request`'s first lookup).
     pub(crate) fn permanent(&self, bytes: &[u8]) -> Option<php_heap::Str> {
-        self.names.find(bytes)
+        self.interned.names.find(bytes)
     }
 
     /// `ZSTR_KNOWN(known)`: the permanent string startup interned for
     /// it, read by its position with no hash; `None` where the table
     /// refused it.
     pub(crate) fn known(&self, known: Known) -> Option<php_heap::Str> {
-        self.names.known(known as usize)
+        self.interned.names.known(known as usize)
     }
 
     /// The string a native's parameter defaults to where its stub writes
@@ -1909,7 +1912,7 @@ impl Shared {
         if let Some(name) = self.permanent(bytes) {
             return Some(name);
         }
-        let strings = match self.strings.lock() {
+        let strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1919,7 +1922,7 @@ impl Shared {
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
-        match self.strings.lock() {
+        match self.interned.strings.lock() {
             Ok(strings) => strings.count(),
             Err(poisoned) => poisoned.into_inner().count(),
         }
@@ -1960,9 +1963,11 @@ impl Shared {
     }
 
     /// The master value of the entry `name` set to `value`, the entry
-    /// moved last, and the typed entries with it.
+    /// moved last, and the typed entries and the realpath cache's
+    /// `CWDG` values with it.
     fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
         self.typed_ini.update(&name, value.as_deref());
+        self.realpath_cache.update(&name, value.as_deref());
         self.ini.retain(|(n, _)| *n != name);
         self.ini.push((name, value));
     }
@@ -2008,7 +2013,7 @@ impl Shared {
         if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
             return Some(exec::value_of(*z));
         }
-        let mut strings = match self.strings.lock() {
+        let mut strings = match self.interned.strings.lock() {
             Ok(strings) => strings,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -3542,12 +3547,18 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let sapi_names = crate::constants::host_names(&mut strings);
         let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
+        let interned = crate::arena::Interned {
+            names: Arc::new(names),
+            strings: Arc::new(Mutex::new(strings)),
+        };
         let arena = crate::arena::Epochs::of(crate::arena::Arena::of_engine(
             Arc::clone(&records),
             functions.len().saturating_add(methods.len()),
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
+            interned.clone(),
         ));
         let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
+        let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| master_of(&ini, name));
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -3608,8 +3619,9 @@ impl EngineBuilder {
                 arena,
                 layer,
                 timer: crate::interrupt::Timer::default(),
-                strings: Mutex::new(strings),
-                names,
+                chunks: Arc::default(),
+                realpath_cache,
+                interned,
                 default_strings,
                 map_ptr_last: AtomicU32::new(0),
                 started: OnceLock::new(),
@@ -4356,6 +4368,7 @@ impl Engine {
         for (name, value) in taken {
             shared.set_ini_default(name, value);
         }
+        (shared.realpath_cache).engine_startup(shared.ini_default(b"open_basedir"));
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
@@ -4598,6 +4611,35 @@ impl Engine {
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.shared.ini_default(name).map(<[u8]>::to_vec)
+    }
+
+    /// `tsrm_realpath(path, NULL)` outside any request
+    /// (`Z/Zend/zend_virtual_cwd.c:1717`): `path` with every link
+    /// resolved, through the engine's realpath cache, which it reads and
+    /// enters as a request's resolutions do; a relative path against the
+    /// process's working directory, and an empty one that directory.
+    /// php-cgi's and php-fpm's `init_request_info` asks it whether the
+    /// program's path resolves before the request starts, so a child's
+    /// next request stats nothing for that path while the entries' time
+    /// to live holds. `None` where the path is not there.
+    #[must_use]
+    pub fn realpath(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let getcwd = || {
+            std::env::current_dir()
+                .map(|dir| dir.into_os_string().into_encoded_bytes())
+                .unwrap_or_default()
+        };
+        let (cwd, path) = match path.first() {
+            None => (Vec::new(), std::borrow::Cow::Owned(getcwd())),
+            Some(b'/') => (Vec::new(), std::borrow::Cow::Borrowed(path)),
+            Some(_) => (getcwd(), std::borrow::Cow::Borrowed(path)),
+        };
+        crate::virtual_cwd::virtual_file_ex(
+            &self.shared.realpath_cache,
+            &cwd,
+            &path,
+            crate::virtual_cwd::Resolve::RealPath,
+        )
     }
 
     /// `INI_STR` outside any request: the value each request starts
@@ -4939,9 +4981,9 @@ impl Engine {
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,
-        // and a source the host handed over is this request's alone,
-        // interned into this request's own memory and gone with it, as
-        // php holds what it compiles for `-r` and for `eval`.
+        // and a source the host handed over is this request's alone, its
+        // strings made in this request's own memory and gone with the
+        // unit, as php holds what it compiles for `-r` and for `eval`.
         if matches!(work, Work::Highlight | Work::Strip) {
             // `open_file_for_scanning` over the program: the source the
             // host handed over, or the file read whole.
@@ -5045,6 +5087,7 @@ impl Engine {
         // extensions' `RINIT`; what can fail is the memory limit, which the
         // first allocation after it meets again.
         req.apply_host_ini();
+        req.realpath_cache_startup();
         req.read_post_at_startup();
         if web && req.ini_flag(b"expose_php") && req.headers_sent().is_none() {
             let line = format!("X-Powered-By: PHP/{}", crate::api::request::PHP_VERSION);
@@ -5216,6 +5259,25 @@ impl Engine {
     /// 1 1
     /// 1 2
     /// ```
+    ///
+    /// A source the host handed over, piped, is compiled for the request
+    /// alone and never cached, so under opcache its constant strings are
+    /// its unit's and counted, where a file's are the engine's
+    /// ([`Shared::compile_for`]):
+    ///
+    /// ```php
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w']], $pipes);
+    /// fwrite($pipes[0], '<?php debug_zval_dump("abcdefgh");'); fclose($pipes[0]);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// $f = sys_get_temp_dir() . '/piped' . getmypid() . '.php';
+    /// file_put_contents($f, '<?php debug_zval_dump("abcdefgh");'); touch($f, time() - 60);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', $f], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
+    /// ```
+    /// ```expect process
+    /// string(8) "abcdefgh" refcount(2)
+    /// string(8) "abcdefgh" interned
+    /// ```
     fn primary(
         &self,
         req: &mut Request,
@@ -5228,13 +5290,10 @@ impl Engine {
             let script = req
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
-            return Some(self.shared.compile_for(
-                req,
-                source,
-                &script,
-                SourceKind::File,
-                ConstantHome::Request,
-            ));
+            return Some(
+                self.shared
+                    .compile_for(req, source, &script, SourceKind::File),
+            );
         }
         let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
         // A bare program is opened as phpdbg's `phpdbg_compile` opens it,
@@ -5480,6 +5539,7 @@ impl Engine {
         // `zend_deactivate`'s `zend_ini_deactivate`, after
         // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
         req.ini_deactivate();
+        req.free_loop_var_stack();
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
         // `zend_post_deactivate_modules`, after the executor is shut
@@ -7370,7 +7430,7 @@ mod tests {
 
     /// How many strings the engine's table holds.
     fn strings_of(engine: &Engine) -> usize {
-        match engine.shared.strings.lock() {
+        match engine.shared.interned.strings.lock() {
             Ok(strings) => strings.count(),
             Err(poisoned) => poisoned.into_inner().count(),
         }
@@ -7533,6 +7593,123 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.dir).ok();
         }
+    }
+
+    /// The realpath cache is the engine's, as php's is a php-fpm child's
+    /// (#2941): the second request resolves its program's path, and an
+    /// include's, from what the first entered, asking the file system
+    /// nothing while the entries' time to live holds; once the cache is
+    /// cleaned, as `clearstatcache(true)` cleans it, the next request asks
+    /// again.
+    #[test]
+    fn a_second_request_resolves_its_paths_from_the_engine_s_realpath_cache() {
+        let files = Files::new(
+            "realpath-cache",
+            &[
+                ("b.php", "<?php\n"),
+                ("main.php", "<?php\ninclude 'b.php';\necho \"ok\\n\";\n"),
+            ],
+        );
+        let engine = Engine::cli_builder().build();
+        let mut asked = Vec::new();
+        let mut serve = || {
+            let before = engine.shared.realpath_cache.looked_up();
+            let (body, observables) = files.serve(&engine, "main.php");
+            assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+            asked.push(engine.shared.realpath_cache.looked_up() - before);
+        };
+        serve();
+        serve();
+        let entered = engine
+            .shared
+            .realpath_cache
+            .listed(|bucket| bucket.path.clone());
+        assert!(
+            entered.iter().any(|path| path.ends_with(b"/b.php")),
+            "the include's path stands in the cache"
+        );
+        engine.shared.realpath_cache.clean();
+        serve();
+        assert!(asked[0] > 0, "the first request asks the file system");
+        assert_eq!(asked[1], 0, "the second asks nothing: {asked:?}");
+        assert!(asked[2] > 0, "once the cache is cleaned it asks again");
+    }
+
+    /// What turns php's cache off or past its entries still asks the
+    /// file system on every request: an expired entry, and an
+    /// `open_basedir`, which turns the cache off.
+    #[test]
+    fn an_expired_entry_and_an_open_basedir_ask_the_file_system_again() {
+        let files = Files::new("realpath-ttl", &[("main.php", "<?php\n")]);
+        for (name, value) in [("realpath_cache_ttl", "-1"), ("open_basedir", "/")] {
+            let engine = Engine::cli_builder().ini_default(name, value).build();
+            for request in 0..2 {
+                let before = engine.shared.realpath_cache.looked_up();
+                let (body, observables) = files.serve(&engine, "main.php");
+                assert_eq!(observables.exit_code, 0, "{body}");
+                let asked = engine.shared.realpath_cache.looked_up() - before;
+                assert!(asked > 0, "{name}={value}: request {request} asked nothing");
+            }
+        }
+    }
+
+    /// A `realpath_cache_ttl` of zero leaves the time unread, `*t` at
+    /// php's `-1` (`Z/Zend/zend_virtual_cwd.c:1140`), which each bucket
+    /// is entered as expiring at, as the oracle's
+    /// `php -n -d realpath_cache_ttl=0` lists it in `realpath_cache_get()`;
+    /// no entry expires.
+    #[test]
+    fn a_time_to_live_of_zero_enters_each_bucket_expiring_at_minus_one() {
+        let files = Files::new("realpath-ttl0", &[("main.php", "<?php\n")]);
+        let engine = Engine::cli_builder()
+            .ini_default("realpath_cache_ttl", "0")
+            .build();
+        for _ in 0..2 {
+            let (_, observables) = files.serve(&engine, "main.php");
+            assert_eq!(observables.exit_code, 0);
+        }
+        let expires = engine.shared.realpath_cache.listed(|bucket| bucket.expires);
+        assert!(!expires.is_empty(), "the program's path was entered");
+        assert!(expires.iter().all(|&at| at == -1), "{expires:?}");
+    }
+
+    /// The host's `tsrm_realpath`, which php-fpm's `init_request_info`
+    /// asks of the program's path before each request, reads and enters
+    /// the engine's realpath cache: the first asks the file system, the
+    /// next asks nothing, and the request after it resolves its program
+    /// from what the host entered. A path that is not there resolves to
+    /// nothing.
+    #[test]
+    fn the_host_s_realpath_reads_and_enters_the_engine_s_realpath_cache() {
+        let files = Files::new("realpath-host", &[("main.php", "<?php\necho \"ok\\n\";\n")]);
+        let engine = Engine::cli_builder().build();
+        let program = files
+            .dir
+            .join("main.php")
+            .into_os_string()
+            .into_encoded_bytes();
+        let mut asked = Vec::new();
+        let mut resolved = Vec::new();
+        for _ in 0..2 {
+            let before = engine.shared.realpath_cache.looked_up();
+            resolved.push(engine.realpath(&program));
+            asked.push(engine.shared.realpath_cache.looked_up() - before);
+        }
+        let before = engine.shared.realpath_cache.looked_up();
+        let (body, observables) = files.serve(&engine, "main.php");
+        assert_eq!((body.as_str(), observables.exit_code), ("ok\n", 0));
+        asked.push(engine.shared.realpath_cache.looked_up() - before);
+        assert!(resolved[0].is_some(), "the program resolves");
+        assert_eq!(resolved[0], resolved[1]);
+        assert!(asked[0] > 0, "the first resolution asks the file system");
+        assert_eq!(
+            &asked[1..],
+            [0, 0],
+            "the second and the request ask nothing"
+        );
+        let mut missing = files.dir.as_os_str().as_encoded_bytes().to_vec();
+        missing.extend_from_slice(b"/missing.php");
+        assert_eq!(engine.realpath(&missing), None);
     }
 
     /// The once forms over a second file (#396): the file is served the
@@ -7751,8 +7928,8 @@ mod tests {
     }
 
     /// What `memory_get_usage()` reads (design §5.13) after a request
-    /// that built strings: a request that compiles for itself interns
-    /// into its own memory, and the next request starts where the first
+    /// that built strings: a request that compiles for itself makes its
+    /// constants in its own memory, and the next request starts where the first
     /// one did, because the first request's end took every byte of it
     /// (design §5.2). The native that asks is #165; the accountant it
     /// asks is this one.
@@ -7764,33 +7941,37 @@ mod tests {
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
-            let compiled = compile(
-                source,
-                Origin {
-                    filename: b"witness.php",
-                    cwd: Path::new(""),
-                    kind: SourceKind::File,
-                    keys_before: 0,
-                    request_classes: RequestClasses::default(),
-                    multibyte: None,
-                },
-                CompileIni {
-                    precision: 14,
-                    short_open_tag: true,
-                    assertions: true,
-                    shebang: php_compile::Shebang::Read,
-                    multibyte: false,
-                },
-                Declared::default(),
-                StackLimit::UNCHECKED,
-                req.heap_mut(),
-                &mut php_compile::syntax::Arena::new(),
-            );
+            let before = req.memory_usage(false);
+            let compiled = req.compiling(|strings, _, _| {
+                compile(
+                    source,
+                    Origin {
+                        filename: b"witness.php",
+                        cwd: Path::new(""),
+                        kind: SourceKind::File,
+                        keys_before: 0,
+                        request_classes: RequestClasses::default(),
+                        multibyte: None,
+                    },
+                    CompileIni {
+                        precision: 14,
+                        short_open_tag: true,
+                        assertions: true,
+                        shebang: php_compile::Shebang::Read,
+                        multibyte: false,
+                    },
+                    Declared::default(),
+                    StackLimit::UNCHECKED,
+                    strings,
+                    &mut php_compile::syntax::Arena::new(),
+                )
+            });
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
-                req.memory_usage(false) > 0,
-                "what the request interned is the request's own memory"
+                req.memory_usage(false) > before,
+                "what the request made of its constants is the request's own memory"
             );
+            req.release_compiled();
         }
         // The compiler's arena, the object store's table and the VM
         // stack's first page, and nothing else, before a line runs
@@ -7809,7 +7990,7 @@ mod tests {
     }
 
     /// A source the host handed over is the request's alone, as php's
-    /// `-r` and `eval` are: its constant strings are interned into the
+    /// `-r` and `eval` are: its constant strings are made in the
     /// request's own memory and the engine's table never hears of them.
     #[test]
     fn what_the_host_handed_over_interns_into_the_request_and_not_the_engine() {

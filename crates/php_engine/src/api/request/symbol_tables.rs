@@ -89,13 +89,14 @@ impl Request {
                 Some(Symbol::Held(cell)) => self.unhold(cell),
                 Some(Symbol::Indirect(other, slot)) => self.take_slot(other, slot),
                 None => {
-                    // The interned string the unit's compile made of the
-                    // name ([`Request::frame_var_names`]); a refusal has
-                    // ended the request.
+                    // The string the unit's compile made of the name
+                    // ([`Request::frame_var_names`]), the table's owner
+                    // of it taken; a refusal has ended the request.
                     let Ok(name) = self.declared_string(&name.0) else {
                         return;
                     };
-                    self.table_push(table, name, Symbol::Indirect(frame, at));
+                    self.table_push(table, *name, Symbol::Indirect(frame, at));
+                    name.give_up(self);
                     continue;
                 }
             };
@@ -145,7 +146,10 @@ impl Request {
                 continue;
             }
             match self.declared_string(&name.0) {
-                Ok(name) => self.symbol_update(table, name, value),
+                Ok(name) => {
+                    self.symbol_update(table, *name, value);
+                    name.give_up(self);
+                }
                 Err(_) => self.release(value),
             }
         }
@@ -182,8 +186,8 @@ impl Request {
         if let Some(table) = self.annex_of(frame).and_then(|extra| extra.symbol_table) {
             return table;
         }
-        // The names are the interned strings the unit's compile made,
-        // which take no owner; a refusal has ended the request, and the
+        // The names are the strings the unit's compile made, an owner of
+        // each the table's; a refusal has ended the request, and the
         // table it leaves holds nothing.
         let entries = self
             .frame_var_names(frame)
@@ -192,7 +196,7 @@ impl Request {
             .enumerate()
             .map(|(at, name)| {
                 (
-                    name,
+                    name.hand_on(),
                     Symbol::Indirect(frame, u32::try_from(at).unwrap_or(u32::MAX)),
                 )
             })
@@ -212,16 +216,19 @@ impl Request {
     }
 
     /// The names of the CVs of the op array `frame` serves, in the
-    /// order the compiler numbered them, `op_array->vars`: the interned
-    /// strings its unit's compile made of them
+    /// order the compiler numbered them, `op_array->vars`, one owner of
+    /// each the caller's: the strings its unit's compile made of them
     /// ([`php_compile::intern_declared`]), found where it made them, in
-    /// the engine's table for a published unit and in the request's for
-    /// one of its own, so a symbol table keys a variable by its CV's
-    /// name, as php's `zend_attach_symbol_table` and
-    /// `zend_rebuild_symbol_table` key it by `op_array->vars[i]`. The
-    /// `Err` is the memory limit, met only by a unit no compile
-    /// interned.
-    pub(super) fn frame_var_names(&mut self, frame: FrameRef) -> Result<Vec<PhpString>, Thrown> {
+    /// the engine's table for a published unit and in the unit for one
+    /// of the request's own ([`Request::declared_string`]), so a symbol
+    /// table keys a variable by its CV's name, as php's
+    /// `zend_attach_symbol_table` and `zend_rebuild_symbol_table` key it
+    /// by `op_array->vars[i]`. The `Err` is the memory limit, met only
+    /// where nothing holds a name.
+    pub(super) fn frame_var_names(
+        &mut self,
+        frame: FrameRef,
+    ) -> Result<Vec<Owner<PhpString>>, Thrown> {
         let Some((unit, body)) = self.frame_unit(frame) else {
             return Ok(Vec::new());
         };
@@ -232,6 +239,15 @@ impl Request {
             .iter()
             .map(|name| self.declared_string(&name.0))
             .collect()
+    }
+
+    /// The number of the CV named `name` in the op array `frame` serves,
+    /// `lookup_cv` over `op_array->vars`; `None` where it has none.
+    pub(super) fn frame_var_at(&self, frame: FrameRef, name: &[u8]) -> Option<u32> {
+        let (unit, body) = self.frame_unit(frame)?;
+        let code = exec::body_of(&unit, body)?;
+        let at = code.vars.iter().position(|var| &*var.0 == name)?;
+        u32::try_from(at).ok()
     }
 
     /// The unit and the body of the op array `frame` serves, one more
@@ -867,6 +883,9 @@ impl Request {
     /// the request by now, `zend_objects_store_call_destructors` having
     /// marked every object, so this frees and serves nothing.
     pub(crate) fn destroy_symbol_table(&mut self) {
+        // php's fast shutdown frees none of it, so no chunk it empties
+        // leaves the heap php's child keeps (#2940).
+        self.heap.fast_shutdown();
         while let Some((name, symbol)) = self.globals().pop() {
             self.release_symbol(symbol);
             self.release(Value::string(name));

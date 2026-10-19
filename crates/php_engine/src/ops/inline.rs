@@ -17,7 +17,8 @@ use php_unit::Opcode;
 
 use crate::api::values::Value;
 
-/// The three operators php computes inline over two numbers.
+/// The three operators php computes inline over any two numbers, which
+/// [`computed`] answers for every pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Arith {
     Add,
@@ -25,39 +26,105 @@ pub(crate) enum Arith {
     Mul,
 }
 
+/// The two shifts, `ZEND_SL` and `ZEND_SR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shift {
+    Left,
+    Right,
+}
+
+/// The three bitwise operators, `ZEND_BW_OR`, `ZEND_BW_XOR` and
+/// `ZEND_BW_AND`: the one thing `bitwise_or_function`,
+/// `bitwise_xor_function` and `bitwise_and_function` differ by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bitwise {
+    Or,
+    Xor,
+    And,
+}
+
+/// Every binary operator with an inline pair, as the handler of its
+/// opcode and a compound assignment over it take it: [`Arith`]'s three
+/// over any two numbers, `/` over two numbers it can divide
+/// ([`quotient`]), `%` over two longs with a divisor that is not zero
+/// ([`remainder`]), a shift over two longs with a count in `0..64`
+/// ([`shifted`]), and a bitwise operator over two longs
+/// ([`Bitwise::long`]). What a rule refuses is the kernel's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Binary {
+    Arith(Arith),
+    Div,
+    Mod,
+    Shift(Shift),
+    Bitwise(Bitwise),
+}
+
 /// The operator of a compound assignment, `ZEND_ASSIGN_OP`'s and
 /// `ZEND_ASSIGN_DIM_OP`'s `extended_value`, where it is one the binary
-/// opcodes compute inline over two numbers ([`arith`]); None for every
-/// other operator, which is the kernel's. An operator that gains an
-/// inline pair joins here, and every compound assignment's inline path
-/// takes it.
+/// opcodes compute inline ([`Binary`]); None for every other operator,
+/// `.`, `**` and `??` among them, which is the kernel's. Every compound
+/// assignment's inline path takes what this names.
 ///
 /// ```php
-/// $a = [3, 3, 3, 3, 3]; $a[0] += 2; $a[1] -= 2; $a[2] *= 2; $a[3] /= 2; $a[4] %= 2;
-/// var_dump($a);
+/// $a = [3, 3, 3, 3, 3, 6, 6, 6, 6, 6]; $a[0] += 2; $a[1] -= 2; $a[2] *= 2; $a[3] /= 2; $a[4] %= 2;
+/// $a[5] <<= 2; $a[6] >>= 1; $a[7] |= 1; $a[8] ^= 3; $a[9] &= 3;
+/// echo implode(",", $a), "\n";
+/// $x = 7; $x /= 7; $y = PHP_INT_MAX; $y += 1; $z = 2.5; $z *= 2; $w = -7; $w %= -1; $v = 5; $v .= 1; $u = 2; $u **= 3;
+/// var_dump($x, $y, $z, $w, $v, $u);
 /// ```
 /// ```expect
-/// array(5) {
-///   [0]=>
-///   int(5)
-///   [1]=>
-///   int(1)
-///   [2]=>
-///   int(6)
-///   [3]=>
-///   float(1.5)
-///   [4]=>
-///   int(1)
-/// }
+/// 5,1,6,1.5,1,24,3,7,5,2
+/// int(1)
+/// float(9.223372036854776E+18)
+/// float(5)
+/// int(0)
+/// string(2) "51"
+/// int(8)
+/// ```
+///
+/// A variable bound to a reference a typed property holds is the
+/// kernel's, which holds what the operator came to to the property's
+/// type under the frame's regime:
+///
+/// ```php
+/// declare(strict_types=1);
+/// class T { public int $i = 1; }
+/// $t = new T; $r = &$t->i; $r += 2; $r <<= 1;
+/// try { $r += 1.5; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $r /= 4; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($t->i);
+/// ```
+/// ```expect
+/// Cannot assign float to reference held by property T::$i of type int
+/// Cannot assign float to reference held by property T::$i of type int
+/// int(6)
 /// ```
 #[inline]
-pub(crate) fn compound(extended_value: u32) -> Option<Arith> {
-    match Opcode::from_u8(u8::try_from(extended_value).ok()?)? {
-        Opcode::Add => Some(Arith::Add),
-        Opcode::Sub => Some(Arith::Sub),
-        Opcode::Mul => Some(Arith::Mul),
-        _ => None,
-    }
+pub(crate) fn compound(extended_value: u32) -> Option<Binary> {
+    // php's numbers for the opcodes, matched as the field holds them.
+    const ADD: u32 = Opcode::Add as u32;
+    const SUB: u32 = Opcode::Sub as u32;
+    const MUL: u32 = Opcode::Mul as u32;
+    const DIV: u32 = Opcode::Div as u32;
+    const MOD: u32 = Opcode::Mod as u32;
+    const SL: u32 = Opcode::Sl as u32;
+    const SR: u32 = Opcode::Sr as u32;
+    const BW_OR: u32 = Opcode::BwOr as u32;
+    const BW_XOR: u32 = Opcode::BwXor as u32;
+    const BW_AND: u32 = Opcode::BwAnd as u32;
+    Some(match extended_value {
+        ADD => Binary::Arith(Arith::Add),
+        SUB => Binary::Arith(Arith::Sub),
+        MUL => Binary::Arith(Arith::Mul),
+        DIV => Binary::Div,
+        MOD => Binary::Mod,
+        SL => Binary::Shift(Shift::Left),
+        SR => Binary::Shift(Shift::Right),
+        BW_OR => Binary::Bitwise(Bitwise::Or),
+        BW_XOR => Binary::Bitwise(Bitwise::Xor),
+        BW_AND => Binary::Bitwise(Bitwise::And),
+        _ => return None,
+    })
 }
 
 /// A zval that is a number as it stands, nothing converted.
@@ -68,6 +135,38 @@ fn number(z: Zval) -> Option<Number> {
         ZvalType::Long => z.as_long().map(Number::Long),
         ZvalType::Double => z.as_double().map(Number::Double),
         _ => None,
+    }
+}
+
+/// The number a value is as it stands, nothing converted and a
+/// reference not followed.
+#[inline(always)] // as `number`
+#[allow(clippy::inline_always)]
+fn value_number(v: &Value) -> Option<Number> {
+    v.as_int()
+        .map(Number::Long)
+        .or_else(|| v.as_float().map(Number::Double))
+}
+
+/// The value a number is, which a kernel hands back for what a rule
+/// computed over the numbers it converted.
+///
+/// ```php
+/// $six = "6"; $seven = "7.0";
+/// var_dump($six / 3, $seven / 2, $six / "4", 9 / $six);
+/// ```
+/// ```expect
+/// int(2)
+/// float(3.5)
+/// float(1.5)
+/// float(1.5)
+/// ```
+#[inline(always)] // as `number`
+#[allow(clippy::inline_always)]
+pub(crate) fn number_value(n: Number) -> Value {
+    match n {
+        Number::Long(n) => Value::int(n),
+        Number::Double(d) => Value::float(d),
     }
 }
 
@@ -97,9 +196,194 @@ fn computed(op: Arith, a: Number, b: Number) -> Number {
     })
 }
 
-/// `ZEND_ADD`'s, `ZEND_SUB`'s and `ZEND_MUL`'s inline pairs over two
-/// zvals as they stand, and `ZEND_PRE_INC`'s and `ZEND_PRE_DEC`'s, which
-/// are `+ 1` and `- 1` with the same overflow (`fast_long_increment_function`).
+/// `div_function_base` (`Z/Zend/zend_operators.c:1454`) over two
+/// numbers: two longs as a long where the division comes out whole and
+/// a double where it does not, and any pair with a double as doubles.
+/// None for a divisor of zero, `0`, `0.0` and `-0.0` alike, and for
+/// `PHP_INT_MIN / -1`, which php computes as a double to keep the long
+/// from overflowing; [`crate::ops::div`] serves both.
+///
+/// ```php
+/// function d($a, $b) { try { var_dump($a / $b); } catch (DivisionByZeroError $e) { echo $e->getMessage(), "\n"; } }
+/// d(6, 3); d(7, 2); d(-7, 2); d(0, -1); d(7.5, 2); d(1, 0.5); d(INF, 2); d("9", 3);
+/// d(1, 0); d(1.5, 0.0); d(1, -0.0); d(PHP_INT_MIN, -1); d(PHP_INT_MIN, 1);
+/// ```
+/// ```expect
+/// int(2)
+/// float(3.5)
+/// float(-3.5)
+/// int(0)
+/// float(3.75)
+/// float(2)
+/// float(INF)
+/// int(3)
+/// Division by zero
+/// Division by zero
+/// Division by zero
+/// float(9.223372036854776E+18)
+/// int(-9223372036854775808)
+/// ```
+#[inline(always)] // the arithmetic of an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn quotient(a: Number, b: Number) -> Option<Number> {
+    match (a, b) {
+        (Number::Long(_), Number::Long(0)) | (Number::Long(i64::MIN), Number::Long(-1)) => None,
+        (Number::Long(x), Number::Long(y)) if x % y == 0 => Some(Number::Long(x / y)),
+        _ => {
+            let y = b.double();
+            (y != 0.0).then(|| Number::Double(a.double() / y))
+        }
+    }
+}
+
+/// `ZEND_MOD`'s inline pair (`Z/Zend/zend_vm_def.h:251`) over two longs:
+/// the remainder, and zero for a divisor of `-1`, which keeps
+/// `PHP_INT_MIN % -1` from overflowing as php's own case does. None for
+/// a divisor of zero, which php hands to `zend_mod_by_zero_helper` and
+/// [`crate::ops::r#mod`] serves.
+///
+/// ```php
+/// function m($a, $b) { try { var_dump($a % $b); } catch (DivisionByZeroError $e) { echo $e->getMessage(), "\n"; } }
+/// m(7, 3); m(-7, 3); m(7, -3); m(5, -1); m(PHP_INT_MIN, -1); m(PHP_INT_MIN, 3); m(5, 0); m(7.5, 2);
+/// ```
+/// ```expect
+/// int(1)
+/// int(-1)
+/// int(1)
+/// int(0)
+/// int(0)
+/// int(-2)
+/// Modulo by zero
+///
+/// Deprecated: Implicit conversion from float 7.5 to int loses precision in %s on line 2
+/// int(1)
+/// ```
+#[inline(always)] // the arithmetic of an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn remainder(a: i64, b: i64) -> Option<i64> {
+    match b {
+        0 => None,
+        -1 => Some(0),
+        _ => Some(a % b),
+    }
+}
+
+/// `ZEND_SL`'s and `ZEND_SR`'s inline pair (`Z/Zend/zend_vm_def.h:271-311`)
+/// over two longs: the shift by a count in `0..64`, as
+/// [`php_heap::shift_left`] and [`php_heap::shift_right`] compute it.
+/// None for a negative count, php's `ArithmeticError`, and for a count
+/// of 64 or more, which php's handler hands to `shift_left_function`;
+/// [`crate::ops::shift_left`] and [`crate::ops::shift_right`] serve both.
+///
+/// ```php
+/// function s($a, $b) { try { echo $a << $b, " ", $a >> $b, "\n"; } catch (ArithmeticError $e) { echo $e->getMessage(), "\n"; } }
+/// s(1, 0); s(1, 63); s(-8, 1); s(PHP_INT_MAX, 1); s(1, 64); s(-1, 64); s(-1, 65); s(1, -1); s(-1, PHP_INT_MIN);
+/// ```
+/// ```expect
+/// 1 1
+/// -9223372036854775808 0
+/// -16 -4
+/// -2 4611686018427387903
+/// 0 0
+/// 0 -1
+/// 0 -1
+/// Bit shift by negative number
+/// Bit shift by negative number
+/// ```
+#[inline(always)] // the arithmetic of an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn shifted(op: Shift, a: i64, b: i64) -> Option<i64> {
+    let by = u64::try_from(b).ok().filter(|by| *by < 64)?;
+    Some(match op {
+        Shift::Left => php_heap::shift_left(a, by),
+        Shift::Right => php_heap::shift_right(a, by),
+    })
+}
+
+impl Bitwise {
+    /// `ZEND_BW_OR`'s, `ZEND_BW_XOR`'s and `ZEND_BW_AND`'s inline pair
+    /// (`Z/Zend/zend_vm_def.h:824-940`), the operator over two longs,
+    /// which is also what [`crate::ops::bitwise_or`] and its kin come to
+    /// over the longs they converted.
+    ///
+    /// ```php
+    /// function b($a, $b) { echo $a | $b, " ", $a ^ $b, " ", $a & $b, "\n"; }
+    /// b(6, 3); b(-1, PHP_INT_MIN); b(0, 0); b(6, 3.0); b("6", 3);
+    /// ```
+    /// ```expect
+    /// 7 5 2
+    /// -1 9223372036854775807 -9223372036854775808
+    /// 0 0 0
+    /// 7 5 2
+    /// 7 5 2
+    /// ```
+    #[inline(always)] // the arithmetic of an inline path
+    #[allow(clippy::inline_always)]
+    pub(crate) const fn long(self, left: i64, right: i64) -> i64 {
+        match self {
+            Bitwise::Or => left | right,
+            Bitwise::Xor => left ^ right,
+            Bitwise::And => left & right,
+        }
+    }
+}
+
+/// What `op` comes to over two numbers, by its rule, or None where the
+/// rule leaves the pair to the kernel.
+#[inline(always)] // the arithmetic of an inline path
+#[allow(clippy::inline_always)]
+fn binary_numbers(op: Binary, a: Number, b: Number) -> Option<Number> {
+    // The type pair first, then the operator, as php's handlers test.
+    if let (Number::Long(x), Number::Long(y)) = (a, b) {
+        return match op {
+            Binary::Arith(op) => Some(computed(op, a, b)),
+            Binary::Div => quotient(a, b),
+            Binary::Mod => remainder(x, y).map(Number::Long),
+            Binary::Shift(op) => shifted(op, x, y).map(Number::Long),
+            Binary::Bitwise(op) => Some(Number::Long(op.long(x, y))),
+        };
+    }
+    match op {
+        Binary::Arith(op) => Some(computed(op, a, b)),
+        Binary::Div => quotient(a, b),
+        Binary::Mod | Binary::Shift(_) | Binary::Bitwise(_) => None,
+    }
+}
+
+/// A binary opcode's inline pair over two zvals as they stand, and a
+/// compound assignment's: what `op` comes to over two numbers, by its
+/// rule ([`Binary`]), and None for everything else.
+///
+/// ```php
+/// $max = PHP_INT_MAX; $one = 1; $half = 1.5; $two = -2;
+/// var_dump($max + $one, $max / $two, $half / $two, $max % $two, $two << $one, $two >> $one, $two | $one, $two ^ $one, $two & $one);
+/// ```
+/// ```expect
+/// float(9.223372036854776E+18)
+/// float(-4.611686018427388E+18)
+/// float(-0.75)
+/// int(1)
+/// int(-4)
+/// int(-1)
+/// int(-1)
+/// int(-1)
+/// int(0)
+/// ```
+#[inline(always)] // as `computed`
+#[allow(clippy::inline_always)]
+pub(crate) fn binary(op: Binary, a: Zval, b: Zval) -> Option<Zval> {
+    Some(match binary_numbers(op, number(a)?, number(b)?)? {
+        Number::Long(n) => Zval::long(n),
+        Number::Double(d) => Zval::double(d),
+    })
+}
+
+/// [`binary`] for [`Arith`]'s three, which every pair of numbers meets:
+/// the inline pair `ZEND_ADD`, `ZEND_SUB` and `ZEND_MUL` are
+/// monomorphised over (design §5.8), and the step of `ZEND_PRE_INC`
+/// and its kin, read with the operator known where it is written.
+/// `ZEND_PRE_INC`'s and `ZEND_PRE_DEC`'s step is `+ 1` and `- 1` with the
+/// same overflow (`fast_long_increment_function`).
 ///
 /// ```php
 /// $max = PHP_INT_MAX; $one = 1; $half = 1.5; $two = -2;
@@ -128,8 +412,68 @@ pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
     })
 }
 
-/// The same arithmetic over the numbers a kernel converted its operands
-/// to, a numeric string's among them, as the value it hands back.
+/// An operator a handler's inline path computes over two zvals as they
+/// stand: [`Arith`] by [`arith`], where `ZEND_ADD` and its two kin name
+/// it as they are written, and [`Binary`] by [`binary`], where a
+/// handler or a compound assignment reads it off the opline.
+pub(crate) trait Operator: Copy {
+    /// The operator's inline pair over `a` and `b`, None where its rule
+    /// leaves them to the kernel.
+    fn apply(self, a: Zval, b: Zval) -> Option<Zval>;
+}
+
+impl Operator for Arith {
+    #[inline(always)] // as `computed`
+    #[allow(clippy::inline_always)]
+    fn apply(self, a: Zval, b: Zval) -> Option<Zval> {
+        arith(self, a, b)
+    }
+}
+
+impl Operator for Binary {
+    #[inline(always)] // as `computed`
+    #[allow(clippy::inline_always)]
+    fn apply(self, a: Zval, b: Zval) -> Option<Zval> {
+        binary(self, a, b)
+    }
+}
+
+/// The same pair over two values as a kernel is handed them, which it
+/// tests before any other: two numbers as they stand meet neither the
+/// array pair nor a class's `do_operation`, so testing them first moves
+/// nothing php observes. A reference, a numeric string and every pair
+/// the rule refuses go on to the kernel's conversions.
+///
+/// ```php
+/// $a = 6; $r = &$a; $s = "3";
+/// var_dump($r + 1, $r / 4, $s * 2, $a % $s, $r << 1, $s | 4, [1] + [2, 3], 1.5 % 1);
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 3
+/// int(7)
+/// float(1.5)
+/// int(6)
+/// int(0)
+/// int(12)
+/// int(7)
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(3)
+/// }
+/// int(0)
+/// ```
+#[inline(always)] // the kernel's first test
+#[allow(clippy::inline_always)]
+pub(crate) fn binary_values(op: Binary, a: &Value, b: &Value) -> Option<Value> {
+    binary_numbers(op, value_number(a)?, value_number(b)?).map(number_value)
+}
+
+/// The arithmetic of [`computed`] over the numbers a kernel converted
+/// its operands to, a numeric string's among them, as the value it
+/// hands back.
 ///
 /// ```php
 /// $s = "9223372036854775807"; $t = " 2"; $u = "1.5";
@@ -142,10 +486,109 @@ pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
 /// int(12)
 /// ```
 pub(crate) fn arith_numbers(op: Arith, a: Number, b: Number) -> Value {
-    match computed(op, a, b) {
-        Number::Long(n) => Value::int(n),
-        Number::Double(d) => Value::float(d),
+    number_value(computed(op, a, b))
+}
+
+/// `ZEND_TYPE_CHECK`'s test (`Z/Zend/zend_vm_def.h:8821`): whether the
+/// type `kind`, in php's `IS_*` numbering, is one of the `MAY_BE_*` bits
+/// in `mask`, `(extended_value >> Z_TYPE_P(value)) & 1`. What
+/// [`crate::ops::type_check`] reads of the value it dereferenced.
+///
+/// ```php
+/// $s = "x"; $r = &$s; $i = 1; $q = &$i; $a = [1]; $p = &$a;
+/// var_dump(is_string($r), is_scalar($r), is_int($q), is_float($q), is_array($p), is_null($p), is_bool($q));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
+#[inline(always)] // a shift and a test, on an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn has_type(mask: u32, kind: ZvalType) -> bool {
+    (mask >> (kind as u32)) & 1 != 0
+}
+
+/// `ZEND_TYPE_CHECK` over a zval as it stands ([`has_type`]): a value
+/// that is no reference and no resource. None for a variable nothing
+/// wrote, which warns, a reference, which is followed, a resource, which
+/// `is_resource` asks whether it is closed, and anything that is no
+/// value; the kernel serves each.
+///
+/// ```php
+/// $f = fopen("php://memory", "r"); $c = fopen("php://memory", "r"); fclose($c);
+/// $i = 1; $r = &$i; $n = null; $s = "1"; $o = new stdClass;
+/// var_dump(is_int($i), is_int($s), is_int($r), is_null($n), is_scalar($s), is_scalar($n), is_object($o), is_array($o));
+/// var_dump(is_resource($f), is_resource($c), is_int($u), is_null($v));
+/// $p = [explode(",", "a,b")]; var_dump($p[0] === null, is_array($p[0]), explode(",", "a") === null);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+///
+/// Warning: Undefined variable $u in %s on line 5
+///
+/// Warning: Undefined variable $v in %s on line 5
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+#[inline(always)] // as `has_type`
+#[allow(clippy::inline_always)]
+pub(crate) fn type_check(z: Zval, mask: u32) -> Option<bool> {
+    match z.kind() {
+        ZvalType::Null
+        | ZvalType::False
+        | ZvalType::True
+        | ZvalType::Long
+        | ZvalType::Double
+        | ZvalType::String
+        | ZvalType::Array
+        | ZvalType::Object => Some(has_type(mask, z.kind())),
+        _ => None,
     }
+}
+
+/// `ZEND_STRLEN`'s inline arm (`Z/Zend/zend_vm_def.h:8781`): the length
+/// of a zval that is a string as it stands. None for everything else,
+/// a reference among it, which [`crate::ops::strlen`] follows, converts
+/// or refuses under the frame's regime.
+///
+/// ```php
+/// $s = str_repeat("ab", 3); $r = &$s; $i = 12; $n = null; $e = "";
+/// var_dump(strlen($s), strlen($r), strlen($e), strlen($s . "c"), strlen($i), strlen(1.5));
+/// var_dump(strlen($n));
+/// ```
+/// ```expect
+/// int(6)
+/// int(6)
+/// int(0)
+/// int(7)
+/// int(2)
+/// int(3)
+///
+/// Deprecated: strlen(): Passing null to parameter #1 ($string) of type string is deprecated in %s on line 4
+/// int(0)
+/// ```
+#[inline(always)] // a test of the type byte, on an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn string_length(z: Zval) -> Option<i64> {
+    z.as_str()
+        .map(|s| i64::try_from(s.len()).unwrap_or(i64::MAX))
 }
 
 /// `ZEND_IS_SMALLER`'s, `ZEND_IS_SMALLER_OR_EQUAL`'s and `ZEND_IS_EQUAL`'s

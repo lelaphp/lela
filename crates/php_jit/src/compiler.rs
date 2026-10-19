@@ -1,21 +1,24 @@
 //! What becomes of a recording (`jit-design.md` §4.8), so far the
 //! pipeline's ends without its middle: no `Backend` lowers a trace yet
 //! (#2955), so [`submit`] runs on the request, writes the stop php
-//! writes, numbers a trace that would compile as published, and settles
-//! the claim, so the tier records and dumps under `jit.mode=force` and
+//! writes, numbers a trace that would compile as published in the
+//! epoch's table (`TraceTable::number`), and settles the claim, so the
+//! tier records and dumps under `jit.mode=force` and
 //! `jit.compile=inline` as php does under `opcache.jit_debug`.
 //!
-//! A published trace has a number and no code: its word reads
-//! `compiled` and enters nothing, which every reader takes as "not
-//! compiled" (`jit-design.md` §3.2, §4.9), and a later recording that
-//! reaches it links to it by that number, as php's does. #2958 replaces
-//! the middle of [`pipeline`], `types::build`, `Backend::compile` and the
-//! table's publish of the bytes, on one worker or inline, and keeps its
-//! two ends and this one representation of a job.
+//! A numbered trace has no code: its word reads `compiled` and enters
+//! nothing, since the table's `get` answers none for it, which every
+//! reader takes as "not compiled" (`jit-design.md` §3.2, §4.9), and a
+//! later recording that reaches it links to it by that number, as php's
+//! does. #2958 replaces the middle of [`pipeline`], `types::build`,
+//! `Backend::compile` and `TraceTable::publish` of the `Compiled`, on one
+//! worker or inline, and keeps its two ends and this one representation
+//! of a job.
 
 use crate::Shared;
 use crate::policy::{self, Claim, Outcome, State, TraceEvent};
 use crate::record::{Recorded, Stop};
+use crate::table::{self, Unpublished};
 
 /// A recording and the claim on the word it grew from: what the pipeline
 /// takes, on the request or off it.
@@ -34,23 +37,27 @@ pub(crate) fn submit(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcome 
 
 /// php's `zend_jit_trace_hot_root` after the recording
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:8200-8245`): a stop that compiles
-/// is written as `TRACE n stop` and the trace numbered as published, or
-/// `too many traces` where no number is left; any other is an attempt
-/// failed, written as `TRACE n abort` and, where it blacklisted the word,
+/// is written as `TRACE n stop` and the trace numbered in the table of
+/// the epoch its claim holds, or blacklisted with the stop of the bound
+/// the table met; any other is an attempt failed, written as
+/// `TRACE n abort` and, where it blacklisted the word,
 /// `TRACE n blacklisted`, each added to `lines`. The claim is settled
 /// once, here.
 pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcome {
     let Job { recorded, claim } = job;
     let stop = recorded.record.stop;
-    let number = shared.table.next();
+    let table = table::of_epoch(claim.epoch());
+    let number = table.and_then(table::TraceTable::next);
     let outcome = if stop.compiles() {
         if let Some(trace) = number {
             shared.dump(lines, &TraceEvent::Stop { trace, stop });
         }
-        shared
-            .table
-            .publish()
-            .map_or(Outcome::Blacklist(Stop::TooManyTraces), Outcome::Published)
+        match table.map(|table| table.number(claim.start())) {
+            Some(Ok(trace)) => Outcome::Published(trace),
+            Some(Err(Unpublished::Full(full))) => Outcome::Blacklist(full.stop()),
+            Some(Err(Unpublished::Malformed(_))) => Outcome::Abort(Stop::CompilerError),
+            None => Outcome::Blacklist(Stop::TooManyTraces),
+        }
     } else if stop.recovers() {
         Outcome::Abort(stop)
     } else {

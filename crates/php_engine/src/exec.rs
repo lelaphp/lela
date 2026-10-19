@@ -2674,7 +2674,7 @@ pub(crate) fn starting_statics(
             value_of(var.value)
         };
         let set = req.declared_string(&var.name.0).and_then(|name| {
-            let name = Owner::take(req, crate::api::values::Key::Str(name));
+            let name = name.into_key();
             table.set(req, name, Owner::take(req, value))
         });
         if let Err(thrown) = set {

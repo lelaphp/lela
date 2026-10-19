@@ -30,14 +30,13 @@ fn ours(entered: &[Entered]) -> Vec<(Option<&'static str>, &'static str)> {
 
 #[test]
 fn a_traced_request_records_what_it_entered_and_nothing_it_only_named() {
-    let dir = std::env::temp_dir();
-    let served = engine().serve_capture_traced_in(
-        &dir,
-        b"trace.php",
-        SCRIPT,
-        Vec::new(),
-        Capture::default(),
-    );
+    // The traced face serves a file, as the witness lane writes its fence.
+    let dir = std::env::temp_dir().join(format!("php-bundle-trace-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("trace.php"), SCRIPT).unwrap();
+    let served =
+        engine().serve_capture_traced_in(&dir, b"trace.php", Vec::new(), Capture::default());
+    std::fs::remove_dir_all(&dir).ok();
     let entered = ours(&served.entered);
     assert!(
         entered.contains(&(Some("ProtoBox"), "__construct")),

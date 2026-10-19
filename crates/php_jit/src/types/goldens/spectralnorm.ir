@@ -1,0 +1,82 @@
+trace loop e2, stop loop
+frame f0 e2 root, 6 cvs 13 temps
+frame f1 e1 callee of f0, 3 cvs 8 temps
+entry
+  #0 f0.CV4 [double]
+  #2 f0.CV5 [long]
+  #4 f0.CV3 [long]
+  #8 f1.CV2 [undef]
+  #18 f0.CV1 [packed array]
+  #23 f0.CV0 [long]
+  guard #4 long -> exit 0
+  guard #2 long -> exit 1
+  guard #18 packed -> exit 2
+  guard #0 double -> exit 3
+loop at 0, loop, interrupt exit 4
+  #1 f0.CV4 [double] reg = phi(#0, #21)
+  #3 f0.CV5 [long] reg = phi(#2, #22)
+0008 f0 INIT_FCALL const#4 inline map 0 leaves -> exit 5
+     f0 init e1
+0009 f0 SEND_VAR #4 inline
+0010 f0 SEND_VAR #3 inline
+0011 f0 DO_UCALL inline leaves -> exit 6
+     f1 enter e1
+  -> #5 f1.CV0 [long]
+  -> #6 f1.CV1 [long]
+0002 f1 ADD #5, #6 inline
+  -> #7 f1.T0 [long] reg
+  checks #7 long -> exit 7
+0003 f1 ASSIGN #8, #7 inline
+  -> #9 f1.CV2 [long] reg
+0004 f1 ADD #9, int(1) inline
+  -> #10 f1.T2 [long] reg
+  checks #10 long -> exit 8
+0005 f1 MUL #9, #10 inline
+  -> #11 f1.T3 [long, double]
+0006 f1 DIV #11, int(2) step leaves -> exit 9
+  -> #12 f1.T4 [long]
+  guard #12 long -> exit 10
+0007 f1 ADD #12, #5 inline
+  -> #13 f1.T5 [long] reg
+  checks #13 long -> exit 11
+0008 f1 ADD #13, int(1) inline
+  -> #14 f1.T6 [long, double]
+0009 f1 DIV float(1), #14 step leaves -> exit 12
+  -> #15 f1.T7 [double]
+0010 f1 VERIFY_RETURN_TYPE #15 inline
+  -> #16 f1.T7 [double] reg
+0011 f1 RETURN #16 inline
+     f0 back to #17
+  -> #17 f0.T4 [double]
+0012 f0 FETCH_DIM_R #18, #3 inline leaves -> exit 14
+  -> #19 f0.T5 [double] reg
+  checks #19 double -> exit 13
+0013 f0 MUL #17, #19 inline
+  -> #20 f0.T6 [double] reg
+0014 f0 ASSIGN_OP #1, #20 inline leaves -> exit 15
+  -> #21 f0.CV4 [double] reg
+0015 f0 PRE_INC #3 inline
+  -> #22 f0.CV5 [long] reg
+  checks #22 long -> exit 16
+0016 f0 IS_SMALLER #22, #23 fused inline
+  checks direction taken -> exit 17
+end: back to 0
+exit 0: f0 0008 plain
+exit 1: f0 0008 plain
+exit 2: f0 0008 plain
+exit 3: f0 0008 plain
+exit 4: f0 0008 plain f0.CV4=#1 f0.CV5=#3
+exit 5: f0 0008 plain f0.CV4=#1 f0.CV5=#3
+exit 6: f0 0011 restore call f0.CV4=#1 f0.CV5=#3
+exit 7: f1 0002 plain f0.CV4=#1 f0.CV5=#3
+exit 8: f1 0004 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
+exit 9: f1 0006 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
+exit 10: f1 0007 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
+exit 11: f1 0007 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
+exit 12: f1 0009 plain f0.CV4=#1 f0.CV5=#3 f1.CV2=#9
+exit 13: f0 0013 plain f0.CV4=#1 f0.CV5=#3 f0.T5=#19
+exit 14: f0 0012 plain f0.CV4=#1 f0.CV5=#3
+exit 15: f0 0014 plain f0.CV4=#1 f0.CV5=#3 f0.T6=#20
+exit 16: f0 0015 plain f0.CV4=#21 f0.CV5=#3
+exit 17: f0 0017 plain f0.CV4=#21 f0.CV5=#22 f0.T9=false
+map 0: offset 2 slot 0

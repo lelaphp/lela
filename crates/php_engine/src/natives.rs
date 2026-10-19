@@ -804,7 +804,7 @@ fn class_exists(
 /// Error: get_class() without arguments must be called from within a class
 /// ```
 #[php_function]
-fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<PhpString, Thrown> {
+fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<Owner<PhpString>, Thrown> {
     let class = if let Passed::Given(object) = object {
         object.class()
     } else {

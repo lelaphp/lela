@@ -28,6 +28,8 @@ use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
 use php_engine::tier::{Epoch, FuncRef, Request, SafepointIdx, StartupIni, Word};
+
+use crate::types::ExitId;
 use php_unit::decl::{IniDecl, Name};
 
 use crate::record::{Start, Stop};
@@ -76,6 +78,10 @@ pub(crate) enum Compile {
 pub(crate) struct JitDebug(u32);
 
 impl JitDebug {
+    /// A `/tmp/perf-<pid>.map` line per trace.
+    pub(crate) const PERF: u32 = 1 << 4;
+    /// A jitdump record per trace, where php writes one.
+    pub(crate) const PERF_DUMP: u32 = 1 << 5;
     pub(crate) const TRACE_START: u32 = 1 << 12;
     pub(crate) const TRACE_STOP: u32 = 1 << 13;
     pub(crate) const TRACE_COMPILED: u32 = 1 << 14;
@@ -468,6 +474,28 @@ impl Policy {
         self.max_root_traces
     }
 
+    /// `opcache.jit_max_side_traces`: how many side traces one root
+    /// grows before a side stops with `TooManyChildren`.
+    pub(crate) fn max_side_traces(&self) -> u32 {
+        self.max_side_traces
+    }
+
+    /// `opcache.jit_max_exit_counters`: how many exits the traces of an
+    /// epoch hold before a trace stops with `TooManyExits`.
+    pub(crate) fn max_exit_counters(&self) -> u32 {
+        self.max_exit_counters
+    }
+
+    /// `opcache.jit_buffer_size`: how many bytes of code an epoch holds.
+    pub(crate) fn buffer_size(&self) -> u64 {
+        self.buffer_size
+    }
+
+    /// `opcache.jit_debug`'s bits.
+    pub(crate) fn debug(&self) -> JitDebug {
+        self.debug
+    }
+
     /// `opcache.jit_max_loop_unrolls`.
     pub(crate) fn max_loop_unrolls(&self) -> u8 {
         self.max_loop_unrolls
@@ -659,9 +687,8 @@ pub(crate) fn bump(word: &Word) -> u32 {
 
 /// Where a claimed word lives (`jit-design.md` §4.7), owned, so a claim
 /// can leave the thread that made it: a root's word by its op array and
-/// safepoint under the epoch it holds, which keeps the word. An exit's
-/// word joins as `Exit { epoch, trace, exit }` with the trace table it
-/// stands in.
+/// safepoint, an exit's by its trace and exit, each under the epoch it
+/// holds, which keeps the word, the op array's row or the trace table's.
 #[derive(Debug, Clone)]
 pub(crate) enum Holder {
     Root {
@@ -669,13 +696,27 @@ pub(crate) enum Holder {
         func: FuncRef,
         at: SafepointIdx,
     },
+    Exit {
+        epoch: Epoch,
+        trace: TraceId,
+        exit: ExitId,
+    },
 }
 
 impl Holder {
-    /// The word it holds.
+    /// The word it holds: the sealed one for an exit the epoch's table
+    /// holds no trace for, which nothing claims.
     pub(crate) fn word(&self) -> &Word {
         match self {
             Holder::Root { epoch, func, at } => epoch.word(*func, *at),
+            Holder::Exit { epoch, trace, exit } => crate::table::exit_word(epoch, *trace, *exit),
+        }
+    }
+
+    /// The epoch it holds.
+    pub(crate) fn epoch(&self) -> &Epoch {
+        match self {
+            Holder::Root { epoch, .. } | Holder::Exit { epoch, .. } => epoch,
         }
     }
 }
@@ -699,6 +740,12 @@ impl Claim {
     /// What the recording starts as.
     pub(crate) fn start(&self) -> Start {
         self.start
+    }
+
+    /// The epoch its word stands in, whose trace table the trace is
+    /// published into.
+    pub(crate) fn epoch(&self) -> &Epoch {
+        self.holder.epoch()
     }
 
     /// The one release store that ends the claim; the state it left.

@@ -52,38 +52,17 @@ pub(super) struct RequestStrings<'a> {
     pub(super) shared: &'a crate::engine::Shared,
     pub(super) hold: SharedHold,
     pub(super) heap: &'a mut Heap,
-    pub(super) keeper: Keeper<'a>,
-}
-
-/// Where a compile for one request alone keeps the constant strings it
-/// makes ([`RequestStrings`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ConstantHome {
-    /// The unit, which gives them up with its op arrays: an `eval`'s
-    /// and an uncached include's, as opcache leaves them.
-    Unit,
-    /// The request's own table, to its end: the program a host handed
-    /// over as its source, which stands where php reads the file its
-    /// cache interns, the witness lane's snippet among them.
-    Request,
-}
-
-/// [`ConstantHome`] with what the unit's home keeps the strings in.
-pub(super) enum Keeper<'a> {
-    Unit(&'a mut super::unit_strings::Compiling),
-    Request,
+    /// The strings and arrays the compile has made, which the unit
+    /// takes.
+    pub(super) made: &'a mut super::unit_strings::Compiling,
 }
 
 impl Intern for RequestStrings<'_> {
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
-        let Keeper::Unit(made) = &mut self.keeper else {
-            return match self.shared.existing_interned(bytes) {
-                Some(held) => Ok(held),
-                None => self.heap.intern_marked(bytes, valid_utf8),
-            };
-        };
-        if bytes.len() <= 1 {
-            return self.heap.intern_marked(bytes, valid_utf8);
+        if bytes.len() <= 1
+            && let Some(frozen) = self.shared.permanent(bytes)
+        {
+            return Ok(frozen);
         }
         if self.hold == SharedHold::Taken
             && let Some(held) = self.shared.existing_interned(bytes)
@@ -94,43 +73,80 @@ impl Intern for RequestStrings<'_> {
         if valid_utf8 {
             s.mark_valid_utf8();
         }
-        made.add(s);
+        self.made.add(Zval::string(s));
         Ok(s)
     }
 
-    /// The constant array lives to the request's end, immutable, where a
-    /// value copied out of it takes no owner, so the strings it is
-    /// written with are the request's own table's ([`Heap`]'s
-    /// [`Intern`]), never the unit's, which go with the unit.
+    /// A constant array of a unit this request alone serves, as php's
+    /// compile leaves it where no cache keeps the unit
+    /// (`zend_try_ct_eval_array`, `Z/Zend/zend_compile.c:10085`): a plain
+    /// array of the request's, `array_init_size` and each entry written
+    /// in order, which the unit owns and gives up with its op arrays as
+    /// `destroy_op_array` frees its literals ([`super::unit_strings`]); a
+    /// value copied out of it takes an owner of its own (`ZVAL_COPY`), so
+    /// what a variable keeps outlives the unit and what nothing keeps is
+    /// gone with it. A value the compile made for the unit is moved into
+    /// the array, as php's fold moves the zval it evaluated, and any
+    /// other is one more owner; a key the compile made is the array's
+    /// alone once written. So 100 `eval`s of one array cost nothing
+    /// past the variable that keeps the last:
+    ///
+    /// ```php
+    /// eval('$x = ["alpha" => "beta", "gamma" => [1, 2, "delta"]];');
+    /// $m = memory_get_usage();
+    /// for ($i = 0; $i < 100; $i++) { eval('$x = ["alpha" => "beta", "gamma" => [1, 2, "delta"]];'); }
+    /// echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage();
+    /// for ($i = 0; $i < 100; $i++) { eval('$y = ["k1" => "zzzzzzzzzz", "k2" => [1, 2, "qqqqqqqqqqq"]]; unset($y);'); }
+    /// echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('$z = ["k3" => "wwwwwwwwwwww"];'); echo memory_get_usage() - $m, "\n";
+    /// eval('debug_zval_dump(["k4" => "vvvvvvvvvvvv"]);');
+    /// eval('$w = ["k5" => "uuuuuuuuuuuu"]; debug_zval_dump($w);');
+    /// debug_zval_dump($w);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 0
+    /// 448
+    /// array(1) refcount(2){
+    ///   ["k4"]=>
+    ///   string(12) "vvvvvvvvvvvv" refcount(1)
+    /// }
+    /// array(1) refcount(3){
+    ///   ["k5"]=>
+    ///   string(12) "uuuuuuuuuuuu" refcount(1)
+    /// }
+    /// array(1) refcount(2){
+    ///   ["k5"]=>
+    ///   string(12) "uuuuuuuuuuuu" refcount(1)
+    /// }
+    /// ```
     fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
-        let unit_owned = |s: Str| !s.is_interned();
-        let any = entries.iter().any(|(key, z)| {
-            matches!(*key, Key::Str(s) if unit_owned(s)) || z.as_str().is_some_and(unit_owned)
-        });
-        if !any {
-            return self.heap.constant_array(entries);
+        if entries.is_empty() {
+            return Ok(Arr::empty());
         }
-        let mut held = Vec::with_capacity(entries.len());
+        let a = self
+            .heap
+            .array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
+        self.made.add(Zval::array(a));
         for &(key, z) in entries {
-            let key = match key {
-                Key::Str(s) if unit_owned(s) => Key::Str(self.held_to_the_end(s)?),
-                key => key,
-            };
-            let z = match z.as_str() {
-                Some(s) if unit_owned(s) => Zval::string(self.held_to_the_end(s)?),
-                _ => z,
-            };
-            held.push((key, z));
+            let moved = self.made.take(z);
+            if !moved {
+                self.heap.addref(z);
+            }
+            if let Err(fatal) = self.heap.array_add_new(a, key, z) {
+                if moved {
+                    self.made.add(z);
+                }
+                return Err(fatal);
+            }
+            if let Key::Str(s) = key
+                && self.made.take(Zval::string(s))
+            {
+                self.heap.release_string(s);
+            }
         }
-        self.heap.constant_array(&held)
-    }
-}
-
-impl RequestStrings<'_> {
-    /// The request's own string for the bytes of `s`, a string the unit
-    /// owns, which lives to the request's end.
-    fn held_to_the_end(&mut self, s: Str) -> Result<Str, Fatal> {
-        self.heap.intern_marked(s.bytes(), s.is_valid_utf8())
+        Ok(a)
     }
 }
 
@@ -217,11 +233,12 @@ impl Request {
     /// here where `zend_mm` leaves the request, and the `Thrown` that
     /// carries no throwable ends the native.
     pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        let allocated = if bytes.len() <= 1 {
-            self.heap.intern(bytes)
-        } else {
-            self.heap.string(bytes)
-        };
+        if bytes.len() <= 1
+            && let Some(frozen) = self.shared.permanent(bytes)
+        {
+            return Ok(PhpString::of(frozen));
+        }
+        let allocated = self.heap.string(bytes);
         self.allocated(allocated)
     }
 
@@ -844,20 +861,37 @@ impl Request {
         Ok(array)
     }
 
-    /// The string a declaration holds for `bytes`, never refcounted: what
-    /// php copies out of `ce->name`, `function_name`, `prop_info->name`,
-    /// `op_array->vars`, an op array's constant or `ZSTR_KNOWN` with
-    /// `ZVAL_STR_COPY`, which allocates nothing. The engine's
-    /// declarations keep their names as bytes, so the string is the one
-    /// the engine holds already, a name its startup interned
-    /// ([`crate::engine::Shared::permanent`]) or a string a published
-    /// unit's compilation interned (design §5.2), which costs the request
-    /// nothing, else the request's own ([`php_heap::Heap`]'s [`Intern`]),
-    /// made on the first ask and the same string at every ask after, where
-    /// php reads the string a unit compiled for the request alone owns;
-    /// the `Err` is the memory limit refusing it. Not php's
-    /// `zend_string_init_interned`, which hands a string of its own to
-    /// its caller.
+    /// `ZVAL_STR_COPY` of a name a declaration or an op array holds, with
+    /// one owner for the caller: what php copies out of `ce->name`,
+    /// `function_name`, `prop_info->name`, `op_array->vars`,
+    /// `op_array->filename` or `ZSTR_KNOWN`. The engine's declarations
+    /// keep their names as bytes, so the string is the engine's where
+    /// its startup or a published unit's compile interned the bytes
+    /// (design §5.2), which counts nothing, else the string the
+    /// request-only unit that carries the name holds, one more owner
+    /// ([`Request::hold_compiled`]), else a string of the request's made
+    /// for the caller, which no declaration of a living unit names. So
+    /// a throwable made in an `eval`'d unit costs nothing past the unit's
+    /// end once it is gone, as php's costs nothing, and an `eval` that
+    /// throws nothing costs what php's does:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); eval('try { intdiv(1,0); } catch (Error $e) {} unset($e);'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('try { intdiv(1,0); } catch (Error $e) {} unset($e);'); echo memory_get_usage() - $m, "\n";
+    /// $f = eval('return function () { try { intdiv(1, 0); } catch (Error $e) {} };');
+    /// $m = memory_get_usage(); $f(); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('$e = new Exception;'); unset($e); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('$x = 1;'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('$x = 1;'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// 0
+    /// ```
     ///
     /// A class's and a method's names are `ce->name` and
     /// `function_name`, so only the array of names is counted:
@@ -871,20 +905,121 @@ impl Request {
     /// ```expect
     /// int(216)
     /// ```
-    pub(crate) fn declared_string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        if let Some(held) = self.shared.existing_interned(bytes) {
-            return Ok(PhpString::of(held));
+    ///
+    /// A name an `eval`'d class or variable holds is its unit's string,
+    /// which what copies it keeps once the unit is gone:
+    ///
+    /// ```php
+    /// eval('class Kept { public $propname = 1; protected $other = 2; }');
+    /// $m = memory_get_usage(); eval('$varname = get_class(new Kept);'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('$o = new Kept; $a = (array) $o; $b = get_object_vars($o);'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); foreach (new Kept as $k => $v) { $keys[] = $k; } echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); unset($varname, $o, $a, $b, $keys); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 1208
+    /// 216
+    /// -1424
+    /// ```
+    pub(crate) fn declared_string(&mut self, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        match self.held_name(bytes) {
+            Some(held) => Ok(Owner::take(self, held)),
+            None => PhpString::new(self, bytes),
         }
-        let interned = self.heap.intern(bytes);
-        self.fatal_of(interned).map(PhpString::of)
     }
 
-    /// `ZSTR_KNOWN(known)`: [`Request::declared_string`] of a known name, read
-    /// off the engine's table by its position.
-    pub(crate) fn known(&mut self, known: crate::engine::Known) -> Result<PhpString, Thrown> {
+    /// The string a declaration that lives holds for `bytes`, a view with
+    /// no owner taken, as php reads `ce->name` or `prop_info->name` where
+    /// nothing keeps it: the engine's, else the one a request-only unit
+    /// holds for the name ([`Request::hold_compiled`]); `None` where
+    /// neither holds one.
+    pub(crate) fn held_name(&self, bytes: &[u8]) -> Option<PhpString> {
+        if let Some(held) = self.shared.existing_interned(bytes) {
+            return Some(PhpString::of(held));
+        }
+        self.unit_strings.find(bytes)
+    }
+
+    /// [`Request::held_name`], else a string the request keeps to its
+    /// end for `bytes`, made on the first ask and the same at every ask
+    /// after: a view with no owner taken. What a name a class that lives
+    /// declares is read as where no unit holds it, a name the class's
+    /// link made, as php's `zend_declare_typed_property` mangles a
+    /// trait's private property under the name of the class that uses
+    /// it and the class owns it to the request's end; and what a native
+    /// that keeps a name for the rest of the request reads
+    /// ([`PhpString::interned`]). The `Err` is the memory limit.
+    pub(crate) fn kept_string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        if let Some(held) = self.held_name(bytes) {
+            return Ok(held);
+        }
+        let made = self.string(bytes)?;
+        self.unit_strings.keep(bytes, made);
+        Ok(made)
+    }
+
+    /// A name the program wrote, which php hands on as the string its
+    /// cached unit holds, interned by opcache's persist, a class named
+    /// in an attribute or a type among them: [`Request::kept_string`]
+    /// of the bytes, with one owner for the caller.
+    pub(crate) fn standing_string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        let kept = self.kept_string(bytes)?;
+        self.addref(&Value::string(kept));
+        Ok(kept)
+    }
+
+    /// `ZSTR_KNOWN(known)`: [`Request::declared_string`] of a known name,
+    /// read off the engine's table by its position, with one owner for
+    /// the caller.
+    pub(crate) fn known(
+        &mut self,
+        known: crate::engine::Known,
+    ) -> Result<Owner<PhpString>, Thrown> {
         match self.shared.known(known) {
-            Some(held) => Ok(PhpString::of(held)),
+            Some(held) => Ok(Owner::adopt(PhpString::of(held))),
             None => self.declared_string(known.bytes()),
+        }
+    }
+
+    /// What a compile of the request left `CG(loop_var_stack)` holding
+    /// room for, `loops` being the most entries it held
+    /// ([`php_unit::Unit::loop_vars`]): `zend_stack_push` grows the
+    /// stack's elements sixteen 12-byte `zend_loop_var`s at a time with
+    /// `safe_erealloc`, and nothing shrinks them before
+    /// `shutdown_compiler`, so the request holds them from the first
+    /// compile that pushed one, a loop or a function body, to its end:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); eval('$x = 1;'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('while (false) {}'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('switch (1) {}'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { break 17; } } } } } } } } } } } } } } } } }'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 192
+    /// 0
+    /// 192
+    /// ```
+    pub(crate) fn note_loop_vars(&mut self, loops: u32) {
+        let wanted = loops.div_ceil(16).saturating_mul(16);
+        if wanted <= self.loop_var_stack.as_ref().map_or(0, |(_, held)| *held) {
+            return;
+        }
+        let len = wanted as usize * 12;
+        let grown = match self.loop_var_stack.take() {
+            Some((held, _)) => self.heap.block_resize(held, len),
+            None => self.heap.block(len),
+        };
+        // A refusal is the memory limit's fatal, which ends the request.
+        self.loop_var_stack = grown.ok().map(|grown| (grown, wanted));
+    }
+
+    /// `shutdown_compiler`'s `zend_stack_destroy(&CG(loop_var_stack))`.
+    pub(crate) fn free_loop_var_stack(&mut self) {
+        if let Some((held, _)) = self.loop_var_stack.take() {
+            self.heap.free_block(held);
         }
     }
 

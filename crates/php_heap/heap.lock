@@ -43,6 +43,8 @@ Block::bytes_mut
 Block::is_empty
 Block::len
 CallStack
+ChunkCache
+ChunkCache::new
 DeclaredRows
 Direction
 EntryGuard
@@ -107,6 +109,7 @@ Heap::call_destructors
 Heap::carve
 Heap::close_resources
 Heap::dup_value
+Heap::fast_shutdown
 Heap::fatal_leaving
 Heap::free_block
 Heap::free_object_storage
@@ -121,7 +124,6 @@ Heap::gc_startup
 Heap::gc_status
 Heap::holds
 Heap::in_memory_limit_error
-Heap::interned
 Heap::iterator_add
 Heap::iterator_del
 Heap::iterator_lead
@@ -143,6 +145,7 @@ Heap::memory_usage
 Heap::native
 Heap::native_mut
 Heap::new
+Heap::new_in
 Heap::object
 Heap::object_clone
 Heap::object_clone_members_into
@@ -168,6 +171,7 @@ Heap::reference_set
 Heap::release
 Heap::release_held
 Heap::release_nogc
+Heap::release_nogc_kept
 Heap::release_quietly
 Heap::release_string
 Heap::releases_quietly

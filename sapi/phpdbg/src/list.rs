@@ -7,18 +7,21 @@ use php_ext::abi::{Beneath, Compiled, chain};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 
-use crate::out;
 use crate::read;
 use crate::session::{self, Session, Source};
 
 /// The source of `file`: the code `stdin` read where that is the file,
 /// and the bytes a file was compiled from where the request compiled it;
 /// none for a file not compiled, of which php has no information.
-fn source<'s>(session: &'s Session, file: &[u8]) -> Option<&'s [u8]> {
+fn source<'s>(
+    stdin_code: Option<&'s [u8]>,
+    sources: &'s [Source],
+    file: &[u8],
+) -> Option<&'s [u8]> {
     if file == b"Standard input code" {
-        return session.stdin_code.as_deref();
+        return stdin_code;
     }
-    let kept = session.sources.iter().find(|kept| kept.file == file)?;
+    let kept = sources.iter().find(|kept| kept.file == file)?;
     Some(&kept.bytes)
 }
 
@@ -118,7 +121,7 @@ pub fn compile_file(
     if let Some(code) = compiled.as_ref().and_then(Compiled::op_array) {
         let file = code.filename().to_vec();
         let ops = read::ops_of(&code);
-        session::with(|s| {
+        session::with(req, |s| {
             s.sources.retain(|kept| kept.file != file);
             s.breaks.resolve_pending(&file);
             s.sources.push(Source { file, ops, bytes });
@@ -129,9 +132,15 @@ pub fn compile_file(
 
 /// `phpdbg_list_file`: `count` lines from `offset`, the zero-based
 /// index of the first, the line numbered `highlight` marked with `>`.
-pub fn file(session: &Session, file: &[u8], count: i64, offset: i64, highlight: u32) {
-    let Some(buf) = source(session, file) else {
-        out::error(b"Could not find information about included file...");
+pub fn file(session: &mut Session, file: &[u8], count: i64, offset: i64, highlight: u32) {
+    let Session {
+        stdin_code,
+        sources,
+        out,
+        ..
+    } = session;
+    let Some(buf) = source(stdin_code.as_deref(), sources, file) else {
+        out.error(b"Could not find information about included file...");
         return;
     };
     // `data->line[]`: where each line starts, and one past the end.
@@ -165,14 +174,14 @@ pub fn file(session: &Session, file: &[u8], count: i64, offset: i64, highlight: 
         let mut shown = vec![mark];
         shown.extend_from_slice(format!("{line:05}: ").as_bytes());
         shown.extend_from_slice(text);
-        out::write(&shown);
+        out.write(&shown);
         if text.last() != Some(&b'\n') || text.is_empty() {
-            out::out(b"\n");
+            out.out(b"\n");
         }
     }
 }
 
 /// `list_code`: three lines from the current one, it marked.
-pub fn code(session: &Session, file: &[u8], line: u32) {
+pub fn code(session: &mut Session, file: &[u8], line: u32) {
     self::file(session, file, 3, i64::from(line) - 1, line);
 }

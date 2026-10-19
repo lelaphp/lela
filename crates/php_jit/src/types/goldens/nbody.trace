@@ -1,0 +1,45 @@
+start loop
+root e3
+op e3 14 array.packed.reference long - -
+op e3 15 array.packed.reference long - -
+op e3 16 double double - -
+op e3 17 undef double - -
+op e3 18 array.packed.reference long - -
+op e3 19 array.packed.reference long - -
+op e3 20 double double - -
+op e3 21 undef double - -
+op e3 22 array.packed.reference long - -
+op e3 23 array.packed.reference long - -
+op e3 24 double double - -
+op e3 25 undef double - -
+op e3 26 double double - -
+op e3 27 double double - -
+op e3 28 double double - -
+op e3 29 double double - -
+op e3 30 double double - -
+op e3 31 undef double - -
+op e3 32 double - - -
+op e3 33 double double - -
+op e3 34 double double - -
+op e3 35 undef double - -
+op e3 36 array.packed long - -
+op e3 37 double double - -
+op e3 38 undef double - -
+op e3 39 array.packed long - -
+op e3 40 double double - -
+op e3 41 undef double - -
+op e3 42 double double - -
+op e3 43 array.packed.reference long double -
+op e3 45 double double - -
+op e3 46 array.packed.reference long double -
+op e3 48 double double - -
+op e3 49 array.packed.reference long double -
+op e3 51 double double - -
+op e3 52 array.packed.reference long double -
+op e3 54 double double - -
+op e3 55 array.packed.reference long double -
+op e3 57 double double - -
+op e3 58 array.packed.reference long double -
+op e3 60 long - - -
+op e3 61 long long - taken
+stop loop

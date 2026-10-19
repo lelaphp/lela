@@ -2290,6 +2290,36 @@ impl State<'_> {
     /// int(416)
     /// int(376)
     /// ```
+    ///
+    /// A name the program's own compile holds is found again as well,
+    /// in the table php compiles a file's names into, whether opcache
+    /// keeps the file or not:
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties] class P {}
+    /// $o = new P; $o->dyn = 5; $s = serialize($o); $w = unserialize($s);
+    /// $m = memory_get_usage(); $u = unserialize($s); var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $n = new P; $n->dyn = 5; var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $a = unserialize('a:1:{s:3:"dyn";i:5;}'); var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(416)
+    /// int(416)
+    /// int(376)
+    /// ```
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties] class P {}
+    /// $o = new P; $o->dyn = 5; $s = serialize($o); $w = unserialize($s);
+    /// $m = memory_get_usage(); $u = unserialize($s); var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $n = new P; $n->dyn = 5; var_dump(memory_get_usage() - $m);
+    /// $m = memory_get_usage(); $a = unserialize('a:1:{s:3:"dyn";i:5;}'); var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(416)
+    /// int(416)
+    /// int(376)
+    /// ```
     fn object_body(
         &mut self,
         req: &mut Request,

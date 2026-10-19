@@ -1,0 +1,17 @@
+start enter
+root e1
+op e1 1 long - - taken
+op e1 5 - - - -
+init e1
+op e1 6 long - - -
+op e1 7 long - - -
+op e1 8 - - - -
+enter e1
+op e1 1 long - - taken
+op e1 5 - - - -
+init e1
+op e1 6 long - - -
+op e1 7 long - - -
+op e1 8 - - - -
+enter e1
+stop recursive call
