@@ -66,7 +66,7 @@ use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, non_static_method_call, none_pending, undefined_method};
 use crate::api::request::ropes::RopeAt;
-use crate::api::request::{Opened, Raised, Request};
+use crate::api::request::{CodeFrom, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
@@ -3521,10 +3521,13 @@ pub(crate) fn include_or_eval<T: Tier>(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let edge = match crate::ops::to_string(req, &operand) {
+        // `tmp_inc_filename`, held across the compile and given up after
+        // it, as `zend_include_or_eval` holds it.
         Ok(string) => {
-            let written = string.as_bytes().to_vec();
+            let site = (&*code.filename.0, op.lineno);
+            let edge = included(req, frame, kind, string.as_bytes(), site, returns_to);
             req.release(Value::string(string));
-            included(req, frame, kind, &written, returns_to)
+            edge
         }
         Err(thrown) => threw(req, frame, &thrown),
     };
@@ -3580,10 +3583,11 @@ fn included(
     frame: FrameRef,
     kind: exec::IncludeKind,
     written: &[u8],
+    site: (&[u8], u32),
     returns_to: Option<(FrameRef, u32)>,
 ) -> Edge {
     let opened = match kind {
-        exec::IncludeKind::Eval => req.eval_string(written),
+        exec::IncludeKind::Eval => req.eval_string(written, site),
         exec::IncludeKind::Include
         | exec::IncludeKind::IncludeOnce
         | exec::IncludeKind::Require
@@ -3621,7 +3625,8 @@ fn included(
         req.release_unit_strings(Some(&unit));
         return answered(req, frame, returns_to, value);
     }
-    let callee = req.push_code_frame(unit, frame, returns_to)?;
+    let callee = req.push_code_frame(unit, CodeFrom::Nested(frame, returns_to))?;
+    crate::observer::call(req, callee);
     if let Err(thrown) = req.hold_op_array(callee, copy) {
         return threw(req, callee, &thrown);
     }

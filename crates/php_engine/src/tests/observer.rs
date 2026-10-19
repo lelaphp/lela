@@ -927,6 +927,31 @@ fn destroy(n: u8, context: &str) -> Event {
     Ext(n, FiberDestroy(context.to_owned()))
 }
 
+/// What a program observed from its file's begin to `Fiber::start`'s
+/// end, where it makes a fiber over a closure that calls `inner`, which
+/// suspends at once; `fiber` names the fiber in a status.
+fn fiber_started(file: &str, fiber: &impl Fn(&str) -> String, closure: &str) -> Vec<Event> {
+    vec![
+        init(0, file),
+        begin(0, file),
+        init(0, "Fiber::__construct"),
+        begin(0, "Fiber::__construct"),
+        end(0, "Fiber::__construct", Some("null")),
+        init(0, "Fiber::start"),
+        begin(0, "Fiber::start"),
+        fiber_init(0, &fiber("init")),
+        switch(0, "main running", &fiber("init")),
+        init(0, closure),
+        begin(0, closure),
+        init(0, "inner"),
+        begin(0, "inner"),
+        init(0, "Fiber::suspend"),
+        begin(0, "Fiber::suspend"),
+        switch(0, &fiber("running"), "main suspended"),
+        end(0, "Fiber::start", Some("null")),
+    ]
+}
+
 /// A generator's frame is begun at each resumption and ended at each
 /// suspension with what it yielded, and not at its call
 /// (`observer_generator_01.phpt` to `_03`): the frame's slot is
@@ -1144,37 +1169,24 @@ fn a_fiber_is_noticed_at_its_creation_each_switch_and_its_destruction() {
     assert_eq!(
         events,
         [
-            init(0, file),
-            begin(0, file),
-            init(0, "Fiber::__construct"),
-            begin(0, "Fiber::__construct"),
-            end(0, "Fiber::__construct", Some("null")),
-            init(0, "Fiber::start"),
-            begin(0, "Fiber::start"),
-            fiber_init(0, &fiber("init")),
-            switch(0, "main running", &fiber("init")),
-            init(0, closure),
-            begin(0, closure),
-            init(0, "inner"),
-            begin(0, "inner"),
-            init(0, "Fiber::suspend"),
-            begin(0, "Fiber::suspend"),
-            switch(0, &fiber("running"), "main suspended"),
-            end(0, "Fiber::start", Some("null")),
-            init(0, "Fiber::resume"),
-            begin(0, "Fiber::resume"),
-            switch(0, "main running", &fiber("suspended")),
-            end(0, "Fiber::suspend", Some("'r'")),
-            end(0, "inner", Some("'ri'")),
-            end(0, closure, Some("'ri'")),
-            switch(0, &fiber("dead"), "main suspended"),
-            destroy(0, &fiber("dead")),
-            end(0, "Fiber::resume", Some("null")),
-            init(0, "Fiber::getReturn"),
-            begin(0, "Fiber::getReturn"),
-            end(0, "Fiber::getReturn", Some("'ri'")),
-            end(0, file, Some("1")),
+            fiber_started(file, &fiber, closure),
+            vec![
+                init(0, "Fiber::resume"),
+                begin(0, "Fiber::resume"),
+                switch(0, "main running", &fiber("suspended")),
+                end(0, "Fiber::suspend", Some("'r'")),
+                end(0, "inner", Some("'ri'")),
+                end(0, closure, Some("'ri'")),
+                switch(0, &fiber("dead"), "main suspended"),
+                destroy(0, &fiber("dead")),
+                end(0, "Fiber::resume", Some("null")),
+                init(0, "Fiber::getReturn"),
+                begin(0, "Fiber::getReturn"),
+                end(0, "Fiber::getReturn", Some("'ri'")),
+                end(0, file, Some("1")),
+            ],
         ]
+        .concat()
     );
 }
 
@@ -1209,38 +1221,25 @@ fn a_frame_open_in_a_suspended_fiber_is_ended_in_that_fiber_and_nowhere_else() {
     assert_eq!(
         same_height,
         [
-            init(0, file),
-            begin(0, file),
-            init(0, "Fiber::__construct"),
-            begin(0, "Fiber::__construct"),
-            end(0, "Fiber::__construct", Some("null")),
-            init(0, "Fiber::start"),
-            begin(0, "Fiber::start"),
-            fiber_init(0, &fiber("init")),
-            switch(0, "main running", &fiber("init")),
-            init(0, closure),
-            begin(0, closure),
-            init(0, "inner"),
-            begin(0, "inner"),
-            init(0, "Fiber::suspend"),
-            begin(0, "Fiber::suspend"),
-            switch(0, &fiber("running"), "main suspended"),
-            end(0, "Fiber::start", Some("null")),
-            init(0, "declined"),
-            init(0, "Fiber::resume"),
-            begin(0, "Fiber::resume"),
-            switch(0, "main running", &fiber("suspended")),
-            end(0, "Fiber::suspend", Some("null")),
-            end(0, "inner", Some("'i'")),
-            end(0, closure, Some("'i'")),
-            switch(0, &fiber("dead"), "main suspended"),
-            destroy(0, &fiber("dead")),
-            end(0, "Fiber::resume", Some("null")),
-            init(0, "Fiber::getReturn"),
-            begin(0, "Fiber::getReturn"),
-            end(0, "Fiber::getReturn", Some("'i'")),
-            end(0, file, Some("1")),
+            fiber_started(file, &fiber, closure),
+            vec![
+                init(0, "declined"),
+                init(0, "Fiber::resume"),
+                begin(0, "Fiber::resume"),
+                switch(0, "main running", &fiber("suspended")),
+                end(0, "Fiber::suspend", Some("null")),
+                end(0, "inner", Some("'i'")),
+                end(0, closure, Some("'i'")),
+                switch(0, &fiber("dead"), "main suspended"),
+                destroy(0, &fiber("dead")),
+                end(0, "Fiber::resume", Some("null")),
+                init(0, "Fiber::getReturn"),
+                begin(0, "Fiber::getReturn"),
+                end(0, "Fiber::getReturn", Some("'i'")),
+                end(0, file, Some("1")),
+            ],
         ]
+        .concat()
     );
 }
 
@@ -1501,31 +1500,18 @@ fn a_fiber_destroyed_while_suspended_ends_its_frames_inside_it() {
     assert_eq!(
         events,
         [
-            init(0, file),
-            begin(0, file),
-            init(0, "Fiber::__construct"),
-            begin(0, "Fiber::__construct"),
-            end(0, "Fiber::__construct", Some("null")),
-            init(0, "Fiber::start"),
-            begin(0, "Fiber::start"),
-            fiber_init(0, &fiber("init")),
-            switch(0, "main running", &fiber("init")),
-            init(0, closure),
-            begin(0, closure),
-            init(0, "inner"),
-            begin(0, "inner"),
-            init(0, "Fiber::suspend"),
-            begin(0, "Fiber::suspend"),
-            switch(0, &fiber("running"), "main suspended"),
-            end(0, "Fiber::start", Some("null")),
-            end(0, file, Some("1")),
-            switch(0, "main running", &fiber("suspended destroyed")),
-            end(0, "Fiber::suspend", None),
-            end(0, "inner", None),
-            end(0, closure, None),
-            switch(0, &fiber("dead destroyed"), "main suspended"),
-            destroy(0, &fiber("dead destroyed")),
+            fiber_started(file, &fiber, closure),
+            vec![
+                end(0, file, Some("1")),
+                switch(0, "main running", &fiber("suspended destroyed")),
+                end(0, "Fiber::suspend", None),
+                end(0, "inner", None),
+                end(0, closure, None),
+                switch(0, &fiber("dead destroyed"), "main suspended"),
+                destroy(0, &fiber("dead destroyed")),
+            ],
         ]
+        .concat()
     );
 }
 

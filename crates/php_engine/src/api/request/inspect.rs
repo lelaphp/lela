@@ -233,13 +233,11 @@ impl Request {
     /// left.
     fn serve_eval(&mut self, scope: Option<FrameRef>, unit: PublishedUnit) -> Result<(), Fatal> {
         let standing = self.vm.depth();
-        let callee = if let Some(frame) = scope {
-            self.push_code_frame(unit, frame, None)?
-        } else {
-            let frame = self.push_frame(unit)?;
-            crate::observer::call(self, frame);
-            frame
-        };
+        let from = scope.map_or(super::CodeFrom::Top(None), |frame| {
+            super::CodeFrom::Nested(frame, None)
+        });
+        let callee = self.push_code_frame(unit, from)?;
+        crate::observer::call(self, callee);
         let reenter = self.shared.loops.reenter;
         let served = self.serve_host_string(|req| reenter(req, callee));
         // `zend_leave_helper`'s arm for a nested code frame: its CVs

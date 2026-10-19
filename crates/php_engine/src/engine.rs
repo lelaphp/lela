@@ -5856,6 +5856,11 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
             raised.line,
         );
     }
+    // A string that declares no function and no class has no load to
+    // make, nothing to tell and nothing recorded.
+    if recording.is_none() && unit.functions.is_empty() && unit.classes.is_empty() {
+        return true;
+    }
     // The observers are told what the load declares as it declares
     // it, where php tells them: as its compile declares, before the
     // compile's record is raised, or, where opcache serves the unit, as
@@ -5980,7 +5985,8 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
     let Ok(copy) = crate::api::values::Emalloc::new(req, crate::exec::OP_ARRAY_SIZE) else {
         return false;
     };
-    let frame = match req.push_frame(PublishedUnit::clone(unit)) {
+    let program = crate::api::request::CodeFrom::Top(None);
+    let frame = match req.push_code_frame(PublishedUnit::clone(unit), program) {
         Ok(frame) => frame,
         Err(fatal) => {
             copy.free(req);
@@ -5995,11 +6001,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
-    while req.vm().depth() > standing + 1 {
-        req.pop_frame();
-    }
-    req.detach_symbol_table(frame);
-    req.pop_frame();
+    req.leave_code(standing, frame);
     let exited = req.unwind_exit();
     // What the loop left pending for the user exception handler, served
     // with the main frame left (`zend_execute_scripts`).

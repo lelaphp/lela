@@ -196,6 +196,7 @@ impl SymbolTable {
             owner: None,
             entries: Vec::new(),
             bytes: Some(HashBytes::embedded(64)),
+            changes: 0,
         }
     }
 
