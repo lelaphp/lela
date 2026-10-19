@@ -38,8 +38,8 @@ pub(crate) fn submit(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcome 
 /// php's `zend_jit_trace_hot_root` after the recording
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:8200-8245`): a stop that compiles
 /// is written as `TRACE n stop` and the trace numbered in the table of
-/// the epoch its claim holds, or blacklisted with the stop of the bound
-/// the table met; any other is an attempt failed, written as
+/// the epoch its claim holds, or failed with the stop of the bound the
+/// table met; any other is an attempt failed ([`failed`]), written as
 /// `TRACE n abort` and, where it blacklisted the word,
 /// `TRACE n blacklisted`, each added to `lines`. The claim is settled
 /// once, here.
@@ -54,14 +54,12 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcom
         }
         match table.map(|table| table.number(claim.start())) {
             Some(Ok(trace)) => Outcome::Published(trace),
-            Some(Err(Unpublished::Full(full))) => Outcome::Blacklist(full.stop()),
-            Some(Err(Unpublished::Malformed(_))) => Outcome::Abort(Stop::CompilerError),
-            None => Outcome::Blacklist(Stop::TooManyTraces),
+            Some(Err(Unpublished::Full(full))) => failed(full.stop()),
+            Some(Err(Unpublished::Malformed(_))) => failed(Stop::CompilerError),
+            None => failed(Stop::TooManyTraces),
         }
-    } else if stop.recovers() {
-        Outcome::Abort(stop)
     } else {
-        Outcome::Blacklist(stop)
+        failed(stop)
     };
     let settled = policy::settle(claim, &outcome);
     match (outcome, number) {
@@ -75,4 +73,16 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcom
         _ => {}
     }
     outcome
+}
+
+/// An attempt failed with `stop`: one counted toward the word's
+/// blacklist where php recovers from it, a full arena's `COMPILER_ERROR`
+/// among them (#3015's ruling), and the word blacklisted where it does
+/// not.
+fn failed(stop: Stop) -> Outcome {
+    if stop.recovers() {
+        Outcome::Abort(stop)
+    } else {
+        Outcome::Blacklist(stop)
+    }
 }

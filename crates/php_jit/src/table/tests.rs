@@ -1,7 +1,7 @@
 //! The table at its seam (`jit-design.md` §4.5, §7's `table` row): under
 //! Miri with `HeapPages`, publish and get, ids across a segment boundary,
-//! `Full` for each of php's three bounds and for the arena, a table that
-//! stops compiling, a new epoch with no table, a publish that panics and
+//! `Full` for each of php's three bounds and for the arena, which stops
+//! nothing, a table that stops compiling, a new epoch with no table, a publish that panics and
 //! leaves the counts as they were, and a dropped table that returns its
 //! chunks; natively, `mov; ret` through `publish` and `get`; and one
 //! trace's `PERF` map line against php's.
@@ -208,10 +208,11 @@ fn the_epochs_exits_are_bounded() {
     assert!(!table.full());
 }
 
-/// An arena with no room is `Full::Code`, php's full buffer, and the
-/// table is full: nothing it holds is freed before the restart.
+/// An arena with no room for a body is `Full::Code`, php's
+/// `COMPILER_ERROR`, an attempt the word recovers from, and the table is
+/// not full: it numbers on, and nothing stops (#3015's ruling).
 #[test]
-fn a_full_arena_is_full_of_code_and_stops_the_table() {
+fn a_full_arena_is_a_compiler_error_and_stops_nothing() {
     let table = table(&[]);
     assert_eq!(
         table.publish(compiled(&vec![0; CHUNK - 8], vec![]), Start::Loop),
@@ -219,18 +220,16 @@ fn a_full_arena_is_full_of_code_and_stops_the_table() {
     );
     let full = Err(Unpublished::Full(Full::Code));
     assert_eq!(table.publish(compiled(&[0; 16], vec![]), Start::Loop), full);
-    assert!(table.full());
-    assert_eq!(
-        table.publish(compiled(&[0; 4], vec![]), Start::Loop),
-        full,
-        "a body the tail would hold is refused too: the table compiles nothing more"
-    );
     assert_eq!(table.next(), Some(trace(2)), "no id was taken");
+    assert!(!table.full(), "a full arena is no bound");
+    assert_eq!(Full::Code.stop(), crate::record::Stop::CompilerError);
+    assert!(Full::Code.stop().recovers());
+    assert_eq!(table.number(Start::Loop), Ok(trace(2)));
 }
 
 /// A table whose arena could not be mapped, as on a target with no
-/// adapter yet, numbers as the interim pipeline does and finds its
-/// first publish full, which fills it.
+/// adapter yet, numbers as the interim pipeline does and finds no room
+/// at any publish, which fills no bound.
 #[test]
 fn a_table_with_no_arena_numbers_and_publishes_nothing() {
     let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
@@ -241,7 +240,7 @@ fn a_table_with_no_arena_numbers_and_publishes_nothing() {
         table.publish(compiled(&[0; 4], vec![]), Start::Loop),
         Err(Unpublished::Full(Full::Code))
     );
-    assert!(table.full());
+    assert!(!table.full());
 }
 
 /// What does not hold together is refused before anything is counted.
@@ -605,5 +604,58 @@ mod epoch {
         assert_eq!(second.published, Some(Ok(trace(2))));
         assert_eq!(second.before, Some(true), "the epoch's table stands");
         Ok(())
+    }
+
+    /// `Lane` with the epoch's arena spent before its first site is
+    /// asked, as a spent `opcache.jit_buffer_size` leaves it: a body of
+    /// the whole arena published, and one more that finds no room.
+    struct Spent;
+
+    impl Tier for Spent {
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+            if let Some(engine) = req.engine::<crate::JitEngine>() {
+                let shared = &engine.shared;
+                let table = table::of(req, &shared.policy, &shared.perf);
+                if let Some(table) = table.filter(|table| table.next() == Some(trace(1))) {
+                    let whole =
+                        table.publish(compiled(&vec![0; super::CHUNK], vec![]), Start::Loop);
+                    let more = table.publish(compiled(&[0; 16], vec![]), Start::Loop);
+                    debug_assert!(whole.is_ok() && more.is_err(), "{whole:?} {more:?}");
+                }
+            }
+            crate::dispatch::safepoint(req, frame, site)
+        }
+
+        fn extension() -> Option<Extension> {
+            <testing::Lane as Tier>::extension()
+        }
+    }
+
+    /// A spent arena stops nothing (#3015's ruling): the hot root after
+    /// it is recorded, not refused with `too many traces`, and the next
+    /// request's hot root is recorded too, the table never stopped.
+    /// Until a pipeline publishes through a `Backend` (#2958) the
+    /// recording is numbered as compiled; php's writes `TRACE 2 abort (JIT
+    /// compilation error)` for it.
+    #[test]
+    fn a_spent_arena_refuses_no_hot_root() {
+        let engine = testing::engine::<Spent>(&[
+            ("jit.mode", "force"),
+            ("jit.compile", "inline"),
+            ("opcache.jit_debug", "258048"),
+            ("opcache.jit_buffer_size", "64K"),
+        ]);
+        let scratch = testing::Scratch::new();
+        let program = "function f() { return 1; } echo f();";
+        let first = String::from_utf8_lossy(&scratch.serve(&engine, program).stderr).into_owned();
+        assert!(
+            first.contains("---- TRACE 2 start (enter) $main()") && !first.contains("too many"),
+            "{first}"
+        );
+        let second = String::from_utf8_lossy(&scratch.serve(&engine, program).stderr).into_owned();
+        assert!(
+            second.contains("---- TRACE 3 start (enter) f()"),
+            "{second}"
+        );
     }
 }
