@@ -304,7 +304,7 @@ async fn accept(listener: &tokio::net::TcpListener, accepting: Accepting<'_>) ->
         // A connection that failed before it was accepted, or a process
         // out of descriptors: the next is tried after a pause, so a full
         // table does not spin the loop.
-        let Ok((stream, peer)) = listener.accept().await else {
+        let Ok((stream, peer)) = accepted(listener).await else {
             drop(slot);
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             continue;
@@ -329,6 +329,20 @@ async fn accept(listener: &tokio::net::TcpListener, accepting: Accepting<'_>) ->
             open.clone(),
         ));
     }
+}
+
+/// The next connection `listener` accepts, its socket set as a served
+/// connection's is: no Nagle. hyper flushes a response's head alone when
+/// the body is not ready yet, and on a kept-alive connection the kernel
+/// would then hold the body until the client's delayed ACK of the head,
+/// 40 ms on Linux; nginx sets the same for kept-alive connections. A
+/// socket that refuses the option still serves, only slower.
+async fn accepted(
+    listener: &tokio::net::TcpListener,
+) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
+    let (stream, peer) = listener.accept().await?;
+    stream.set_nodelay(true).ok();
+    Ok((stream, peer))
 }
 
 /// A connection accepted, its TLS handshake made where its listener
@@ -1011,5 +1025,23 @@ impl Drop for Reply {
         if let Some(access) = &self.access {
             access.ended();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_accepted_socket_sets_tcp_nodelay() -> std::io::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()?;
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let client = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+            let (served, peer) = super::accepted(&listener).await?;
+            assert_eq!(peer, client.local_addr()?);
+            assert!(served.nodelay()?, "the accepted socket keeps Nagle on");
+            Ok(())
+        })
     }
 }
