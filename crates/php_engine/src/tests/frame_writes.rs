@@ -6,13 +6,12 @@
 //! xdebug's `property_set` and `eval` do in php through
 //! `zend_eval_stringl` with `EG(current_execute_data)` at the frame.
 //!
-//! What the debugger does at each stop is the test's plan: which frame,
+//! What the debugger does at each stop is the test's plan, which the
+//! debugger registers with the engine it is built into: which frame,
 //! counted down from the caller of `pause()`, the variable to write and
 //! the code to evaluate. Every expectation is what the oracle prints for
 //! the same program with the write and the evaluation typed into the
 //! paused frame by hand, where php's own code can reach that frame.
-
-use std::cell::Cell;
 
 use crate::api::abi::{ExtensionBuilder, Observed, ObserverHandlers};
 use crate::api::raising::{Cause, Thrown};
@@ -21,7 +20,13 @@ use crate::api::values::{Owner, Value};
 use crate::engine::Engine;
 use crate::test::Capture;
 
-/// What the debugger does at a stop.
+/// What the debugger does at every stop.
+trait Stop: Copy + Send + Sync + 'static {
+    fn stop(self, observed: &mut Observed<'_>);
+}
+
+/// What the debugger does at a stop: write and evaluate in the frame
+/// it names.
 #[derive(Clone, Copy)]
 struct Plan {
     /// How many frames below the caller of `pause()` the frame stands.
@@ -32,11 +37,6 @@ struct Plan {
     code: &'static str,
     /// Whether what the evaluation throws is shown with its trace.
     traced: bool,
-}
-
-thread_local! {
-    /// The plan of the test this thread serves.
-    static PLAN: Cell<Option<Plan>> = const { Cell::new(None) };
 }
 
 /// The frame the plan names.
@@ -91,43 +91,54 @@ fn shown(
     }
 }
 
-/// `pause()` begun: the plan carried out where the program stands.
-fn stop(observed: &mut Observed<'_>) {
-    let Some(plan) = PLAN.get() else {
-        return;
-    };
-    let Some(frame) = paused(observed, plan.depth) else {
-        observed.write(b"[no frame]");
-        return;
-    };
-    if let Some((name, value)) = plan.write {
-        let set = observed.set_frame_var(frame, name.as_bytes(), Owner::int(value));
-        let line = format!("[set {}]", if set { "ok" } else { "refused" });
+impl Stop for Plan {
+    /// The plan carried out where the program stands.
+    fn stop(self, observed: &mut Observed<'_>) {
+        let Some(frame) = paused(observed, self.depth) else {
+            observed.write(b"[no frame]");
+            return;
+        };
+        if let Some((name, value)) = self.write {
+            let set = observed.set_frame_var(frame, name.as_bytes(), Owner::int(value));
+            let line = format!("[set {}]", if set { "ok" } else { "refused" });
+            observed.write(line.as_bytes());
+        }
+        let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
+        let line = format!("[eval {}]", shown(observed, answered, self.traced));
         observed.write(line.as_bytes());
     }
-    let answered = observed.eval_in_frame(frame, plan.code.as_bytes(), b"debugger");
-    let line = format!("[eval {}]", shown(observed, answered, plan.traced));
-    observed.write(line.as_bytes());
 }
 
-fn init(observed: &mut Observed<'_>) -> ObserverHandlers {
+/// `pause()` begun: the plan the debugger registered carried out.
+fn stopped<P: Stop>(observed: &mut Observed<'_>) {
+    let plan = observed.registered::<P>().next().copied();
+    if let Some(plan) = plan {
+        plan.stop(observed);
+    }
+}
+
+fn init<P: Stop>(observed: &mut Observed<'_>) -> ObserverHandlers {
     let named = observed
         .function()
         .and_then(|function| observed.function_decl(function))
         .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
     ObserverHandlers {
-        begin: named.then_some(stop as fn(&mut Observed<'_>)),
+        begin: named.then_some(stopped::<P> as fn(&mut Observed<'_>)),
         end: None,
     }
 }
 
-fn serve(plan: Plan, source: &str) -> String {
-    PLAN.set(Some(plan));
+/// `source` served with a debugger that carries `plan` out at every
+/// stop.
+fn serve<P: Stop>(plan: P, source: &str) -> String {
     let engine = Engine::cli_builder()
-        .extensions(&[ExtensionBuilder::default().observer(init).build("debugger")])
+        .extensions(&[ExtensionBuilder::default()
+            .observer(init::<P>)
+            .register(plan)
+            .request_state::<Kept>()
+            .build("debugger")])
         .build();
     let served = engine.serve_capture(source, Capture::default());
-    PLAN.set(None);
     String::from_utf8_lossy(&served.stdout).into_owned()
 }
 
@@ -228,45 +239,34 @@ fn a_frame_below_a_fiber_is_written_and_evaluated_in() {
     assert_eq!(out, "[set ok][eval int(18)]9\n");
 }
 
-thread_local! {
-    /// The frame the first stop kept, for the stops after it.
-    static KEPT: Cell<Option<FrameId>> = const { Cell::new(None) };
-    /// What the stops after the first evaluate in the kept frame, and
-    /// whether what it throws is shown with its trace.
-    static KEPT_CODE: Cell<(&'static str, bool)> = const { Cell::new(("$x * 2", false)) };
+/// The frame the first stop kept, for the stops after it: the
+/// debugger's request state.
+#[derive(Default)]
+struct Kept(Option<FrameId>);
+
+/// What a debugger does whose first stop keeps its caller's frame and
+/// whose every stop after it writes `$x` of the kept frame and evaluates
+/// `code` there, its throwable shown with its trace where `traced`.
+#[derive(Clone, Copy)]
+struct Revisit {
+    code: &'static str,
+    traced: bool,
 }
 
-/// `pause()` begun: the first stop keeps its caller's frame; every one
-/// after writes `$x` of the kept frame and evaluates [`KEPT_CODE`]
-/// there, `$x * 2` unless a test says otherwise.
-fn stop_kept(observed: &mut Observed<'_>) {
-    let Some(frame) = KEPT.get() else {
-        KEPT.set(observed.caller().map(|caller| caller.id()));
-        return;
-    };
-    let set = observed.set_frame_var(frame, b"x", Owner::int(5));
-    let line = format!("[set {}]", if set { "ok" } else { "refused" });
-    observed.write(line.as_bytes());
-    let (code, traced) = KEPT_CODE.get();
-    let answered = observed.eval_in_frame(frame, code.as_bytes(), b"debugger");
-    let line = format!("[eval {}]", shown(observed, answered, traced));
-    observed.write(line.as_bytes());
-}
-
-/// `source` served with a debugger whose first stop keeps its caller's
-/// frame and whose stops after it evaluate `code` there.
-fn serve_kept(code: &'static str, traced: bool, source: &str) -> String {
-    KEPT.set(None);
-    KEPT_CODE.set((code, traced));
-    let engine = Engine::cli_builder()
-        .extensions(&[ExtensionBuilder::default()
-            .observer(init_kept)
-            .build("debugger")])
-        .build();
-    let served = engine.serve_capture(source, Capture::default());
-    KEPT.set(None);
-    KEPT_CODE.set(("$x * 2", false));
-    String::from_utf8_lossy(&served.stdout).into_owned()
+impl Stop for Revisit {
+    fn stop(self, observed: &mut Observed<'_>) {
+        let Some(frame) = observed.state::<Kept>().0 else {
+            let caller = observed.caller().map(|caller| caller.id());
+            observed.state::<Kept>().0 = caller;
+            return;
+        };
+        let set = observed.set_frame_var(frame, b"x", Owner::int(5));
+        let line = format!("[set {}]", if set { "ok" } else { "refused" });
+        observed.write(line.as_bytes());
+        let answered = observed.eval_in_frame(frame, self.code.as_bytes(), b"debugger");
+        let line = format!("[eval {}]", shown(observed, answered, self.traced));
+        observed.write(line.as_bytes());
+    }
 }
 
 /// A frame inside a fiber, kept while the fiber ran, is written and
@@ -276,9 +276,11 @@ fn serve_kept(code: &'static str, traced: bool, source: &str) -> String {
 /// frame is refused.
 #[test]
 fn a_suspended_fibers_frame_is_written_and_evaluated_in() {
-    let out = serve_kept(
-        "$x * 2",
-        false,
+    let out = serve(
+        Revisit {
+            code: "$x * 2",
+            traced: false,
+        },
         "<?php\nfunction pause() {}\nfunction f() {\n    $x = 1;\n    pause();\n    Fiber::suspend();\n    echo $x, \"\\n\";\n}\n\
          $fiber = new Fiber(function () { f(); });\n$fiber->start();\npause();\n$fiber->resume();\npause();\n",
     );
@@ -292,9 +294,11 @@ fn a_suspended_fibers_frame_is_written_and_evaluated_in() {
 /// there.
 #[test]
 fn a_suspended_fiber_whose_last_owner_an_evaluation_gives_up_is_destroyed_after_it() {
-    let out = serve_kept(
-        "$GLOBALS['fiber'] = null",
-        false,
+    let out = serve(
+        Revisit {
+            code: "$GLOBALS['fiber'] = null",
+            traced: false,
+        },
         "<?php\nfunction pause() {}\nfunction f() {\n    $x = 1;\n    pause();\n    try { Fiber::suspend(); } finally { echo \"[finally]\"; }\n}\n\
          $fiber = new Fiber(function () { f(); });\n$fiber->start();\npause();\necho \"[on]\\n\";\n",
     );
@@ -313,9 +317,11 @@ fn a_suspended_fiber_whose_last_owner_an_evaluation_gives_up_is_destroyed_after_
 /// resumer's begin.
 #[test]
 fn what_an_evaluation_in_a_suspended_fibers_frame_throws_traces_to_its_bottom() {
-    let out = serve_kept(
-        "throw new Exception('no')",
-        true,
+    let out = serve(
+        Revisit {
+            code: "throw new Exception('no')",
+            traced: true,
+        },
         "<?php\nfunction pause() {}\nfunction f() {\n    $x = 1;\n    pause();\n    Fiber::suspend();\n}\n\
          $fiber = new Fiber(function () { f(); });\n$fiber->start();\npause();\n",
     );
@@ -332,9 +338,11 @@ fn what_an_evaluation_in_a_suspended_fibers_frame_throws_traces_to_its_bottom() 
 /// resumed.
 #[test]
 fn a_frame_of_a_fiber_suspended_above_another_is_written_and_evaluated_in() {
-    let out = serve_kept(
-        "$x * 2",
-        false,
+    let out = serve(
+        Revisit {
+            code: "$x * 2",
+            traced: false,
+        },
         "<?php\nfunction pause() {}\n\
          $outer = new Fiber(function () {\n\
              $inner = new Fiber(function () {\n        $x = 1;\n        pause();\n        Fiber::suspend();\n        echo $x, \"\\n\";\n    });\n\
@@ -344,39 +352,21 @@ fn a_frame_of_a_fiber_suspended_above_another_is_written_and_evaluated_in() {
     assert_eq!(out, "[set ok][eval int(10)]5\n");
 }
 
-fn init_kept(observed: &mut Observed<'_>) -> ObserverHandlers {
-    let named = observed
-        .function()
-        .and_then(|function| observed.function_decl(function))
-        .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
-    ObserverHandlers {
-        begin: named.then_some(stop_kept as fn(&mut Observed<'_>)),
-        end: None,
-    }
-}
-
 /// A suspended generator's frame, kept as a [`FrameId`] while it ran, is
 /// written and evaluated in, stood where a resumption stands it, and
 /// the generator reads the write when it is resumed; once the generator
 /// has returned, the frame is refused.
 #[test]
 fn a_suspended_generators_frame_is_written_and_evaluated_in() {
-    KEPT.set(None);
-    let engine = Engine::cli_builder()
-        .extensions(&[ExtensionBuilder::default()
-            .observer(init_kept)
-            .build("debugger")])
-        .build();
-    let served = engine.serve_capture(
+    let out = serve(
+        Revisit {
+            code: "$x * 2",
+            traced: false,
+        },
         "<?php\nfunction pause() {}\nfunction g() {\n    $x = 1;\n    pause();\n    yield 1;\n    echo $x, \"\\n\";\n}\n\
          $g = g();\n$g->current();\npause();\n$g->next();\npause();\n",
-        Capture::default(),
     );
-    KEPT.set(None);
-    assert_eq!(
-        String::from_utf8_lossy(&served.stdout),
-        "[set ok][eval int(10)]5\n[set refused][eval refused]"
-    );
+    assert_eq!(out, "[set ok][eval int(10)]5\n[set refused][eval refused]");
 }
 
 /// A fatal the evaluation ends in is rendered where it is raised, the

@@ -482,20 +482,21 @@ fn a_walk_meets_a_fibers_bottom_frame_and_its_resumer() {
     );
 }
 
-thread_local! {
-    /// The trace the `thrown` link below read at the first throw.
-    static TRACED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
+/// The trace the `thrown` link below read at the first throw, the
+/// tracer's request state, read back by the test once the request ended
+/// ([`crate::tier::serve_kept`]).
+#[derive(Default)]
+struct Traced(Option<String>);
 
 /// A `thrown` link that reads the trace where it is told, as xdebug's
 /// develop setting prints one from `zend_throw_exception_hook`.
 fn traced_at_throw(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
-    if TRACED.with_borrow(Option::is_none)
+    if req.state::<Traced>().0.is_none()
         && let Ok(trace) = req.backtrace_here(0, 0)
     {
         let rendered = req.trace_to_string(*trace, true);
         trace.give_up(req);
-        TRACED.with_borrow_mut(|traced| *traced = Some(rendered));
+        req.state::<Traced>().0 = Some(rendered);
     }
     beneath.serve(req);
 }
@@ -508,20 +509,22 @@ fn traced_at_throw(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
 /// destructor served at the same place reads (`Generator::throw`'s witness).
 #[test]
 fn a_thrown_link_at_a_generator_throw_reads_the_generators_frame_on_top() {
-    TRACED.with_borrow_mut(|traced| *traced = None);
     let engine = Engine::cli_builder()
         .extensions(&[ExtensionBuilder::default()
             .thrown(traced_at_throw)
+            .request_state::<Traced>()
             .build("tracer")])
         .build();
-    let served = engine.serve_capture(
+    let (served, traced) = crate::tier::serve_kept::<Traced>(
+        &engine,
+        &std::env::current_dir().unwrap_or_default(),
+        b"Standard input code",
         "<?php\nfunction g() { try { yield 1; } catch (Exception $e) { echo \"caught\\n\"; } }\n\
          $g = g();\n$g->current();\n$g->throw(new Exception(\"e\"));\n",
-        Capture::default(),
     );
     assert_eq!(String::from_utf8_lossy(&served.stdout), "caught\n");
     assert_eq!(
-        TRACED.with_borrow_mut(Option::take).as_deref(),
+        traced.and_then(|traced| traced.0).as_deref(),
         Some(
             "#0 [internal function]: g()\n\
              #1 Standard input code(5): Generator->throw(Object(Exception))\n#2 {main}"
