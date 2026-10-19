@@ -14461,11 +14461,31 @@ pub(crate) fn assign_dim<
 
 /// The inline path of `ZEND_ASSIGN_DIM` over a CV
 /// (`ZEND_ASSIGN_DIM_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:2621-2660`): an
-/// array the CV alone owns, whose element at the key holds a value that
-/// owns nothing, takes the `OP_DATA` value ([`data_value`]); nothing is
-/// given up, so nothing runs. `None`, with nothing touched, as
-/// [`inline_fetch_dim_w`]'s, for an append, an element holding an
-/// owner, and a value or a temporary [`data_value`] refuses.
+/// array the CV alone owns, or the one a reference it holds names
+/// ([`owned_array`]), whose element at the key holds a value and no
+/// reference, takes the `OP_DATA` value ([`taken_value`]), as
+/// `zend_assign_to_variable` writes it, and the temporary takes it
+/// under `RETURN_VALUE_USED`. What the element held is given up after
+/// both, `GC_DTOR_NO_REF(garbage)`: a string serves no destructor and is
+/// offered to no collector, so it is given up inline, and any other
+/// owner, an array or an object, is released with the opline standing,
+/// where a destructor it serves runs and a throw it leaves is the edge's.
+/// `None`, with nothing touched, as [`inline_fetch_dim_w`]'s, for an
+/// element that is a reference, and a value or a temporary
+/// [`taken_value`] refuses, which is asked before an element is laid
+/// down, so the kernel never lays down a second one for a key the
+/// table did not have or for an append.
+///
+/// ```php
+/// $a = [1]; $a[] = 7; $r = 2; $x = &$r; $a[] = $x; $a[9] = $x; $a["k"] = $u;
+/// function f() { static $n = 0, $seen = []; $n++; $seen[] = $n; return count($seen); }
+/// echo json_encode($a), f(), f(), f(), "\n";
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 2
+/// {"0":1,"1":7,"2":2,"9":2,"k":null}123
+/// ```
 ///
 /// ```php
 /// $a = [1, 2, 3]; $h = ["x" => 1, "y" => [1]]; $b = $a; $s = str_repeat("s", 2);
@@ -14493,6 +14513,79 @@ pub(crate) fn assign_dim<
 /// }
 /// string(2) "ss"
 /// ```
+///
+/// What the element held is given up after the write, so a destructor
+/// it serves reads the array with the value in it, before the next
+/// statement runs, and a throw from it is raised at the assignment:
+///
+/// ```php
+/// class D { function __construct(public $n) {} function __destruct() { global $a; echo "dtor {$this->n} sees ", $a[0] instanceof D ? "D" : $a[0], "\n"; } }
+/// class T { function __destruct() { throw new Exception("from dtor"); } }
+/// $a = [new D(1), str_repeat("s", 3), [1, [2]]]; $s = str_repeat("t", 2);
+/// $a[0] = 5; echo "next\n";
+/// $a[1] = $s; $a[1] = 7; debug_zval_dump($s);
+/// $c = [new T];
+/// try { $c[0] = 1; echo "never\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// var_dump($c, $a);
+/// ```
+/// ```expect
+/// dtor 1 sees 5
+/// next
+/// string(2) "tt" refcount(2)
+/// caught from dtor
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// array(3) {
+///   [0]=>
+///   int(5)
+///   [1]=>
+///   int(7)
+///   [2]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     array(1) {
+///       [0]=>
+///       int(2)
+///     }
+///   }
+/// }
+/// ```
+///
+/// An array given up is released as `zval_ptr_dtor` releases it, a
+/// possible root of the collector where an owner of it stands:
+///
+/// ```php
+/// $x = [new stdClass]; $a = [$x, [new stdClass], 2];
+/// $before = gc_status()["roots"];
+/// $a[0] = 0;
+/// $kept = gc_status()["roots"] - $before;
+/// $a[1] = 0;
+/// var_dump($kept, gc_status()["roots"] - $before, $a);
+/// function f(array &$v) { $v[1] = [3]; $v[1] = 4; }
+/// $b = [1, 2]; f($b); var_dump($b);
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// array(3) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   int(0)
+///   [2]=>
+///   int(2)
+/// }
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(4)
+/// }
+/// ```
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn inline_assign_dim(
@@ -14509,13 +14602,20 @@ fn inline_assign_dim(
         Ok(placed) => placed,
         Err(edge) => return Some(edge),
     };
-    if placed.entry.read().is_refcounted() {
-        return None;
-    }
+    let garbage = placed.entry.read();
     let z = taking.take(req, frame)?;
     placed.entry.write(z);
     free_dim_operands(req, frame, code, op, (a, placed.free_dim));
-    Some(Ok(Next::jump(at.saturating_add(2))))
+    if !garbage.is_refcounted() {
+        return Some(Ok(Next::jump(at.saturating_add(2))));
+    }
+    if let Some(text) = garbage.as_str() {
+        req.heap_mut().release_string(text);
+        return Some(Ok(Next::jump(at.saturating_add(2))));
+    }
+    req.vm_mut().stand(frame, at);
+    req.release(exec::value_of(garbage));
+    Some(Ok(advance_over_data(req, frame, at)))
 }
 
 /// `ASSIGN_DIM` past its inline path: the container placed for the
