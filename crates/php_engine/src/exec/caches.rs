@@ -172,7 +172,10 @@ impl RuntimeCaches {
     /// of its op arrays given a number of the request's, a number of a
     /// unit nothing holds any longer first, whose cache was emptied as
     /// the unit was found over, as php frees a heap cache with its op
-    /// array.
+    /// array. A unit whose main op array is its only one, an `eval`'s
+    /// that declares no function, closure, method or hook, is not kept
+    /// among those looked over: its number comes back as its execution
+    /// ends ([`RuntimeCaches::main_ended`]).
     pub(crate) fn take(&mut self, mut unit: Unit) -> PublishedUnit {
         let (free, request, spare) = (&mut self.free, &mut self.request, &mut self.spare);
         self.held.retain_mut(|(unit, numbers)| {
@@ -186,6 +189,10 @@ impl RuntimeCaches {
             spare.push(std::mem::take(numbers));
             false
         });
+        if main_alone(&unit) {
+            unit.main.runtime_cache = MapPtrOffset::Request(self.next_number());
+            return unit.published();
+        }
         let mut numbers = self.spare.pop().unwrap_or_default();
         for code in op_arrays_mut(&mut unit) {
             let number = self.next_number();
@@ -196,6 +203,29 @@ impl RuntimeCaches {
         self.held.push((PublishedUnit::downgrade(&unit), numbers));
         unit
     }
+
+    /// The number of `unit`'s main op array handed back as its execution
+    /// ends, its cache emptied, where the unit is one
+    /// [`RuntimeCaches::take`] took whose main op array is its only one,
+    /// as `destroy_op_array` frees the heap cache of an `eval`'s op array
+    /// at its return: nothing runs it again, whoever still holds the
+    /// unit. Every other unit's numbers stand while anything holds it.
+    pub(crate) fn main_ended(&mut self, unit: &Unit) {
+        if let MapPtrOffset::Request(number) = unit.main.runtime_cache
+            && main_alone(unit)
+        {
+            *self.request.map(MapPtr::new(number)) = RuntimeCache::default();
+            self.free.push(number);
+        }
+    }
+}
+
+/// Whether `unit` has no op array but its main one.
+pub(crate) fn main_alone(unit: &Unit) -> bool {
+    unit.functions.is_empty()
+        && unit.dynamic.is_empty()
+        && unit.methods.is_empty()
+        && unit.hooks.is_empty()
 }
 
 /// Every op array of `unit`: its main one, its functions', the ones no

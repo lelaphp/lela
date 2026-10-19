@@ -3523,11 +3523,13 @@ pub(crate) fn include_or_eval<T: Tier>(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let edge = match crate::ops::to_string(req, &operand) {
+        // `tmp_inc_filename`, held across the compile and given up after
+        // it, as `zend_include_or_eval` holds it.
         Ok(string) => {
-            let written = string.as_bytes().to_vec();
-            req.release(Value::string(string));
             let site = (&*code.filename.0, op.lineno);
-            included(req, frame, kind, &written, site, returns_to)
+            let edge = included(req, frame, kind, string.as_bytes(), site, returns_to);
+            req.release(Value::string(string));
+            edge
         }
         Err(thrown) => threw(req, frame, &thrown),
     };
@@ -3621,8 +3623,8 @@ fn included(
         let value = exec::constant(main, ConstIdx(only.op1));
         req.addref(&value);
         copy.free(req);
-        // `destroy_op_array`: its names go with it.
-        req.release_unit_strings(Some(&unit));
+        // `destroy_op_array`: its names and its cache go with it.
+        req.main_ended(&unit);
         return answered(req, frame, returns_to, value);
     }
     let callee = req.push_code_frame(unit, frame, returns_to)?;

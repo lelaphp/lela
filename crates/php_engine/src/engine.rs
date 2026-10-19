@@ -5776,6 +5776,11 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
             raised.line,
         );
     }
+    // A string that declares no function and no class has no load to
+    // make, nothing to tell and nothing recorded.
+    if recording.is_none() && unit.functions.is_empty() && unit.classes.is_empty() {
+        return true;
+    }
     // The observers are told what the load declares as it declares
     // it, where php tells them: as its compile declares, before the
     // compile's record is raised, or, where opcache serves the unit, as
