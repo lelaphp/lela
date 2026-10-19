@@ -258,3 +258,81 @@ fn a_carried_run_replaces_an_older_one_under_another_pin_and_no_other() {
         "an older run never replaces a newer"
     );
 }
+
+/// After each subset, a run whose engine sources nobody writes asks git
+/// nothing, however many subsets it runs (#2972); a source written while
+/// a subset ran is still the comparison's skip that says so, and a file
+/// touched and not written is asked of git once and then stands.
+#[test]
+fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
+    let tree = crate::key::fixture("against-after");
+    let root: &Path = &tree;
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let runs = Runs::new(root, &manifest, Some("HEAD")).unwrap();
+    let base = runs.base.as_ref().unwrap();
+    let file = path(root, &base.tree, "ext/ctype");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let was = Run {
+        commit: base.commit.clone(),
+        corpus: runs.corpus.clone(),
+        engine: "the linked engine".to_owned(),
+        recipe: runs.recipe.clone(),
+        verdicts: BTreeMap::new(),
+        misses: BTreeMap::new(),
+        skips: BTreeMap::new(),
+    };
+    fs::write(&file, serde_json::to_string(&was).unwrap()).unwrap();
+    let (held_as, subset) = (
+        Scope::of("ext/ctype"),
+        Reading::new(INSTRUMENT, "ext/ctype"),
+    );
+    let after = || {
+        let held = runs.after(
+            &manifest,
+            &held_as,
+            (&Tally::default(), &Runner::Linked),
+            &subset,
+            None,
+        );
+        held.unwrap().unwrap().message
+    };
+    let written = "the engine's sources were written while the subset ran";
+
+    let (said, asked) = git::asked(|| (0..5).map(|_| after()).collect::<Vec<_>>());
+    assert_eq!(asked, Vec::<Vec<String>>::new());
+    assert!(said.iter().all(|m| !m.contains(written)), "{said:?}");
+
+    // Outside the engine's sources, a file written is no question.
+    fs::write(root.join("notes.txt"), "beside the engine\n").unwrap();
+    let (said, asked) = git::asked(after);
+    assert!(
+        asked.is_empty() && !said.contains(written),
+        "{asked:?} {said}"
+    );
+
+    // Touched with the same bytes: asked of git once, and then it stands.
+    let source = root.join("crates/php_engine/src/lib.rs");
+    let bytes = fs::read(&source).unwrap();
+    fs::write(&source, &bytes).unwrap();
+    let (said, asked) = git::asked(|| (after(), after()));
+    assert!(!asked.is_empty() && !said.0.contains(written), "{said:?}");
+    assert!(!said.1.contains(written), "{said:?}");
+    let (_, again) = git::asked(after);
+    assert!(again.is_empty(), "{again:?}");
+
+    fs::write(&source, "// written while the subset ran\n").unwrap();
+    assert!(after().contains(written));
+    assert!(after().contains(written), "a source written stays written");
+    fs::write(&source, &bytes).unwrap();
+    assert!(
+        !after().contains(written),
+        "a source written back is the tree"
+    );
+
+    // A new source is the tree's once the index tracks it, and the index
+    // is what moved.
+    fs::write(root.join("crates/php_engine/src/new.rs"), "// new\n").unwrap();
+    assert!(!after().contains(written), "an untracked file is no source");
+    committing(root, &["add", "--", "crates/php_engine/src/new.rs"]);
+    assert!(after().contains(written));
+}
