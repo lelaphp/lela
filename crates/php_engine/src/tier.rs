@@ -36,6 +36,8 @@ pub use php_heap::{Fatal, FrameRef};
 
 mod frames;
 mod held;
+#[cfg(dispatch = "tailcall")]
+mod tail;
 pub use frames::{
     Argument, Aside, Called, Evaluated, Under, begin, below, call, catches, entry, evaluate,
     evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
@@ -581,14 +583,20 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
         let mut oplines = &*body.oplines;
         let mut at = req.vm().opline(frame);
         stepped = loop {
-            let Some(op) = oplines.get(at as usize) else {
-                return Err(past_the_end(frame, at));
+            #[cfg(not(dispatch = "tailcall"))]
+            let way = {
+                let Some(op) = oplines.get(at as usize) else {
+                    return Err(past_the_end(frame, at));
+                };
+                declared.before(req, frame, at, op.opcode);
+                let next = dispatch::dispatch::<T>(req, frame, body, op, at)?;
+                #[cfg(debug_assertions)]
+                req.sensed_after(body, op)?;
+                next.way()
             };
-            declared.before(req, frame, at, op.opcode);
-            let next = dispatch::dispatch::<T>(req, frame, body, op, at)?;
-            #[cfg(debug_assertions)]
-            req.sensed_after(body, op)?;
-            match next.way() {
+            #[cfg(dispatch = "tailcall")]
+            let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
+            match way {
                 // `at` is the index of an opline that stands, so it is
                 // under the length of an op array, which no 32-byte opline
                 // count brings to `u32::MAX`: the add does not wrap.
