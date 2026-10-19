@@ -11,6 +11,13 @@
 set -u
 cd "$(git rev-parse --show-toplevel)"
 git rev-parse --verify --quiet ORIG_HEAD >/dev/null || exit 0
+# A merge that changed the harness leaves main's target/release/xtask, the
+# judge every tool call tries first, a build of the code before it, which
+# then hands each call on (#2982): so it is rebuilt here, in the
+# background, since the merge stands either way.
+if [ -d .git ] && ! git diff --quiet ORIG_HEAD HEAD -- xtask/src xtask/build.rs xtask/Cargo.toml seams.toml Cargo.lock; then
+    nohup cargo build -q --release -p xtask >/dev/null 2>&1 &
+fi
 cargo xtask ticket merged --since ORIG_HEAD ||
     echo "post-merge: a ticket this merge names did not close; it is named above" >&2
 exit 0

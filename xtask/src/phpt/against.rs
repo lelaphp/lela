@@ -58,8 +58,10 @@
 //! this tree's itself ([`regressed`]), and never reads the `@against`
 //! reading (harness §4.5, #725).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -84,6 +86,73 @@ fn built_from() -> Vec<PathBuf> {
     let dirs = crate::layout::CRATE_DIRS.iter().map(|d| d.dir);
     files.into_iter().chain(dirs).map(PathBuf::from).collect()
 }
+
+/// The engine's sources as the run found them, by each file's stat data:
+/// every file under [`built_from`] the index tracks, and the index. What
+/// [`Runs::after`] asks after each subset before it asks git anything, as
+/// git's index takes a file whose stat data is the one it recorded as
+/// unchanged, so a run of many subsets over sources nobody writes asks
+/// git nothing after any of them (#2972).
+struct Stood {
+    /// Each tracked file under [`built_from`], then the index.
+    files: Vec<PathBuf>,
+    /// Each file's stat data, `None` for one gone, as of the last time the
+    /// sources were found where the run began.
+    stat: RefCell<Vec<Option<Stat>>>,
+}
+
+/// What a write to a file moves: its times, its length and, for a file
+/// replaced by a rename, its inode. The change time is the kernel's, which
+/// no tool that restores a modification time sets back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stat {
+    modified: (i64, i64),
+    changed: (i64, i64),
+    len: u64,
+    inode: u64,
+}
+
+impl Stood {
+    /// The files at `root` and their stat data now: one question to git,
+    /// over the engine's sources alone, and one for where the index is,
+    /// whose stat is taken before the listing read from it, so an entry
+    /// added after the listing moves it.
+    fn of(root: &Path) -> Result<Stood> {
+        let index = root.join(git::rev_parse(root, &["--git-path", "index"])?);
+        let indexed = Stood::stat(std::slice::from_ref(&index));
+        let paths = built_from();
+        let mut args = vec!["ls-files", "-z", "--cached", "--"];
+        for path in &paths {
+            args.push(path.to_str().context("a source path is not UTF-8")?);
+        }
+        let mut files: Vec<PathBuf> = (git::listed(root, &args)?.into_iter())
+            .map(|path| root.join(path))
+            .collect();
+        // A conflicted path is listed once per stage.
+        files.dedup();
+        let mut stat = Stood::stat(&files);
+        files.push(index);
+        stat.extend(indexed);
+        Ok(Stood {
+            files,
+            stat: RefCell::new(stat),
+        })
+    }
+
+    fn stat(files: &[PathBuf]) -> Vec<Option<Stat>> {
+        let stat = |file: &PathBuf| {
+            let meta = fs::symlink_metadata(file).ok()?;
+            Some(Stat {
+                modified: (meta.mtime(), meta.mtime_nsec()),
+                changed: (meta.ctime(), meta.ctime_nsec()),
+                len: meta.len(),
+                inode: meta.ino(),
+            })
+        };
+        files.iter().map(stat).collect()
+    }
+}
+
 /// Where a workspace keeps its runs, relative to its root: in the reading
 /// store, [`crate::reading::DIR`] (harness §4.2, #725).
 pub(crate) const RUNS: &str = "target/harness/phpt-runs";
@@ -142,7 +211,11 @@ pub(crate) struct Runs {
     /// The workspaces a base's run and a target are looked for in,
     /// [`roots`].
     roots: Vec<PathBuf>,
+    /// The engine's tree, [`built_from`], which the run keeps its own by.
     tree: String,
+    /// The engine's sources by their stat data, which [`Runs::moved`]
+    /// asks before git.
+    stood: Stood,
     commit: String,
     corpus: String,
     /// The pin's digest, which every run this one keeps carries.
@@ -169,11 +242,16 @@ impl Runs {
     pub(crate) fn new(root: &Path, manifest: &Manifest, against: Option<&str>) -> Result<Runs> {
         let base = against.map(|named| Base::at(root, named)).transpose()?;
         let source = &manifest.pin.source;
+        // Stat before the snapshot: a file written between the two is one
+        // whose stat has moved by the first subset's end, and is asked of
+        // git there.
+        let stood = Stood::of(root)?;
         let snapshot = Snapshot::disk(root)?;
         Ok(Runs {
             root: root.to_path_buf(),
             roots: roots(root),
             tree: snapshot.tracked_over(&built_from())?,
+            stood,
             snapshot,
             commit: git::head_commit(root)?,
             corpus: format!("{} {}", source.tag, source.commit),
@@ -224,7 +302,7 @@ impl Runs {
     ) -> Result<Option<Reading>> {
         let scope = &held_as.to_string();
         let run = self.run_of(tally, runner);
-        let moved = Snapshot::disk(&self.root)?.tracked_over(&built_from())? != self.tree;
+        let moved = self.moved()?;
         if let (Some(run), false) = (&run, moved) {
             let file = path(&self.root, &self.tree, scope);
             let text = serde_json::to_string_pretty(run).context("rendering the run")?;
@@ -252,6 +330,23 @@ impl Runs {
         held(manifest, &self.snapshot, held_as, &base.commit, diff).map(Some)
     }
 
+    /// Whether the engine's sources were written since the run began: not
+    /// where no file's stat data moved; where one did, the tree's tracked
+    /// files under [`built_from`] held to the tree the run keys its own by,
+    /// and, where they stand still, the stat data taken before that kept,
+    /// so a file touched and not written is asked of git once.
+    fn moved(&self) -> Result<bool> {
+        let now = Stood::stat(&self.stood.files);
+        if now == *self.stood.stat.borrow() {
+            return Ok(false);
+        }
+        let moved = Snapshot::disk(&self.root)?.tracked_over(&built_from())? != self.tree;
+        if !moved {
+            self.stood.stat.replace(now);
+        }
+        Ok(moved)
+    }
+
     /// The run a tally is where the engine judged every test the subset
     /// holds, and none where anything else ran or anything was left.
     fn run_of(&self, tally: &Tally, runner: &Runner) -> Option<Run> {
@@ -274,11 +369,7 @@ impl Runs {
         (tally, runner): (&Tally, &Runner),
     ) -> Option<PathBuf> {
         let engine = matches!(runner, Runner::Engine(_) | Runner::Linked);
-        (engine && whole(tally)).then(|| {
-            Path::new(RUNS)
-                .join(&self.tree)
-                .join(format!("{scope}.json"))
-        })
+        (engine && whole(tally)).then(|| path(Path::new(""), &self.tree, &scope.to_string()))
     }
 
     /// The run a tally is where it judged every test the subset holds,
