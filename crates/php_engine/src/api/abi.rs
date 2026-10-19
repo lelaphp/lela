@@ -2100,23 +2100,38 @@ impl Callable {
             .function_decl(function)
             .map(|decl| decl.name.0.clone())
             .unwrap_or_default();
-        let name = Value::string(PhpString::interned(req, &name)?);
+        let name = PhpString::declared(req, &name)?.into_value();
         let Some(first) = first else {
-            return Ok(Owner::take(req, name));
+            return Ok(name);
         };
         let first = match first {
-            Ok(this) => this.as_value(),
+            Ok(this) => Owner::take(req, this.as_value()),
             Err(scope) => {
                 let class = req
                     .class_decl(scope)
                     .map(|decl| decl.name.0.clone())
                     .unwrap_or_default();
-                Value::string(PhpString::interned(req, &class)?)
+                match PhpString::declared(req, &class) {
+                    Ok(class) => class.into_value(),
+                    Err(thrown) => {
+                        name.give_up(req);
+                        return Err(thrown);
+                    }
+                }
             }
         };
-        let mut pair = PhpArray::new(req)?;
-        for value in [first, name] {
-            if let Err(thrown) = pair.append(req, Owner::take(req, value)) {
+        let mut pair = match PhpArray::new(req) {
+            Ok(pair) => pair,
+            Err(thrown) => {
+                first.give_up(req);
+                name.give_up(req);
+                return Err(thrown);
+            }
+        };
+        let mut values = [first, name].into_iter();
+        while let Some(value) = values.next() {
+            if let Err(thrown) = pair.append(req, value) {
+                values.for_each(|value| value.give_up(req));
                 pair.give_up(req);
                 return Err(thrown);
             }

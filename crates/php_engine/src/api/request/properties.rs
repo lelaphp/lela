@@ -1754,13 +1754,14 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
-        let interned = self.declared_string(name)?;
+        let name = self.declared_string(name)?;
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
-        sent.push(Value::string(interned));
+        sent.push(Value::string(*name));
         sent.extend_from_slice(arguments);
         let held = Owner::take(self, object.as_value());
         let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
         held.give_up(self);
+        name.give_up(self);
         served
     }
 
@@ -3226,7 +3227,7 @@ impl Request {
         object: PhpObject,
         idx: u32,
         by_ref: bool,
-    ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
+    ) -> Result<Option<(Owner<Key>, Walked)>, Thrown> {
         let o = object.heap();
         let class = object.class();
         if self.object_handlers(o).properties_overloaded() {
@@ -3248,7 +3249,7 @@ impl Request {
             self.heap
                 .iterator_set_lead(idx, u32::try_from(lead).unwrap_or(u32::MAX));
             if let Some((key, walked)) = found? {
-                return Ok(Some((php_heap::Key::Str(key.heap()), walked)));
+                return Ok(Some((key.into_key(), walked)));
             }
             walk::Stepped::Dynamic
         } else {
@@ -3289,10 +3290,13 @@ impl Request {
                         "InternalError: an object walk's slot with no declaration",
                     ));
                 };
-                let key = php_heap::Key::Str(self.declared_string(&name)?.heap());
+                let key = self.declared_string(&name)?.into_key();
                 Ok(Some((key, Walked::Slot(slot))))
             }
-            Some((_, TableRow::Entry(key), _)) => Ok(Some((key, Walked::Dynamic(key)))),
+            Some((_, TableRow::Entry(key), _)) => Ok(Some((
+                Owner::take(self, Key::of(key)),
+                Walked::Dynamic(key),
+            ))),
         }
     }
 
@@ -3339,7 +3343,7 @@ impl Request {
         &mut self,
         object: PhpObject,
         idx: u32,
-    ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
+    ) -> Result<Option<(Owner<Key>, Walked)>, Thrown> {
         let class = object.class();
         let handlers = self.object_handlers(object.heap());
         let mut at = self.heap.iterator_lead(idx);
@@ -3372,7 +3376,7 @@ impl Request {
                     TableRow::Slot(slot) => Walked::Slot(slot),
                     TableRow::Entry(key) => Walked::Dynamic(key),
                 };
-                break Some((name.heap(), walked));
+                break Some((Owner::take(self, name), walked));
             },
             // A table the class keeps in place of the object's: each row
             // the value it answered.
@@ -3388,7 +3392,7 @@ impl Request {
                     Some((i, (key, value))) => {
                         at = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
                         self.addref(&value);
-                        Some((key.heap(), Walked::Answered(value)))
+                        Some((Owner::take(self, key), Walked::Answered(value)))
                     }
                     None => None,
                 }
@@ -3429,7 +3433,7 @@ impl Request {
                     return Ok(None);
                 };
                 let (visibility, name) = (decl.visibility, decl.name.0.clone());
-                let name = self.declared_string(&name)?;
+                let name = self.kept_string(&name)?;
                 let row = (Key::Str(name), value, Some((info.declaring, visibility)));
                 Ok(Some((row, TableRow::Slot(slot))))
             }
@@ -3453,16 +3457,18 @@ impl Request {
     /// string(1) "d"
     /// int(1)
     /// ```
-    pub(crate) fn walked_key(&mut self, key: php_heap::Key) -> Result<php_heap::Key, Thrown> {
-        let php_heap::Key::Str(name) = key else {
+    pub(crate) fn walked_key(&mut self, key: Owner<Key>) -> Result<Owner<Key>, Thrown> {
+        let Key::Str(name) = *key else {
             return Ok(key);
         };
         let crate::natives::Unmangled::Mangled { prop, .. } =
-            crate::natives::unmangle_property_name(name.bytes())
+            crate::natives::unmangle_property_name(name.as_bytes())
         else {
             return Ok(key);
         };
-        Ok(php_heap::Key::Str(self.declared_string(prop)?.heap()))
+        let made = self.string_init(prop);
+        key.give_up(self);
+        Ok(Owner::adopt(made?).into_key())
     }
 
     /// What [`Request::object_walk`] found at a place: the value, a view
@@ -3657,10 +3663,10 @@ impl Request {
 
     /// The properties in order, the declared slots that hold a value
     /// then the dynamic table, which is the order
-    /// `rebuild_object_properties` lays the table out in. Views, and a
-    /// declared name is the interned string php's `prop_info->name` is,
-    /// never refcounted, so a caller that takes an owner of it takes
-    /// none; the `Err` is the memory limit refusing the intern. A
+    /// `rebuild_object_properties` lays the table out in. Views, a
+    /// declared name the string php's `prop_info->name` is
+    /// ([`Request::kept_string`]), which a caller that keeps it takes
+    /// an owner of; the `Err` is the memory limit. A
     /// dynamic row is keyed as the table holds it, so an integer key,
     /// which `object_properties_load` and `zend_hash_copy` write with
     /// `zend_hash_index_update`, stays an integer beside the string that
@@ -3710,7 +3716,7 @@ impl Request {
             if z.is_undef() {
                 continue;
             }
-            let name = self.declared_string(name)?;
+            let name = self.kept_string(name)?;
             entries.push((Key::Str(name), Value::of_zval(z)));
         }
         if let Some(table) = o.properties() {
@@ -4160,13 +4166,16 @@ impl Request {
             }
             wrong = true;
         } else if let Some(table) = o.properties() {
-            let key = self.declared_string(name)?;
-            let key = php_heap::Key::Str(key.heap());
+            let name = self.declared_string(name)?;
+            let key = php_heap::Key::Str(name.heap());
             if table.contains(key) {
-                let table = self.separated_properties(o)?;
-                self.array_del(table, key);
-                return Ok(());
+                let deleted = self
+                    .separated_properties(o)
+                    .map(|table| self.array_del(table, key));
+                name.give_up(self);
+                return deleted.map(|_| ());
             }
+            name.give_up(self);
         }
         // GH-21478: a proxy that forwards, unset from inside the
         // instance's own `__unset` for this name, unsets the instance's.

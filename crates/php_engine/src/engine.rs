@@ -37,8 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, ConstantHome, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo,
-    Request, TypedIni, placed_of,
+    BuildDefs, CoreQuantity, Ending, ExtensionId, HandlePath, Placed, PropertyInfo, Request,
+    TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -1673,11 +1673,11 @@ impl Shared {
 
     /// One source compiled for one request alone, under the request's
     /// ini and working directory, its constant strings made in the
-    /// request's own memory and kept where `home` says (design §5.2): a
-    /// source the host handed over, its strings the request's to its
-    /// end, and the string an `eval` hands over ([`SourceKind::EVAL`]) or
-    /// an uncached include's bytes, their strings the unit's and gone
-    /// with it, as php holds what it compiles for `-r` and for `eval`. Such a unit is never published: nothing outside
+    /// request's own memory, the unit's and gone with it (design §5.2):
+    /// a source the host handed over, piped, the string an `eval` hands
+    /// over ([`SourceKind::EVAL`]) and an uncached include's bytes, as
+    /// php under opcache holds what it compiles for stdin, `-r` and
+    /// `eval` ([`crate::api::request::Request::hold_compiled`]). Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
     /// it or the functions and classes it declared.
     ///
@@ -1701,7 +1701,6 @@ impl Shared {
         source: &[u8],
         filename: &[u8],
         kind: SourceKind,
-        home: ConstantHome,
     ) -> Result<PublishedUnit, CompileError> {
         let ini = CompileIni {
             precision: req.precision(),
@@ -1718,7 +1717,7 @@ impl Shared {
             extended_info: self.extended_info && !req.compiling_host_string,
             ..self.declared()
         };
-        let unit = req.compiling(home, |heap, request_classes, arena| {
+        let unit = req.compiling(|heap, request_classes, arena| {
             let origin = Origin {
                 filename,
                 cwd: &cwd,
@@ -1737,10 +1736,9 @@ impl Shared {
             }
         };
         req.count_keys_made(unit.runtime_keys.len());
+        req.note_loop_vars(unit.loop_vars);
         let unit = req.take_unit(unit);
-        if home == ConstantHome::Unit {
-            req.hold_compiled(&unit);
-        }
+        req.hold_compiled(&unit);
         Ok(unit)
     }
 
@@ -4985,9 +4983,9 @@ impl Engine {
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,
-        // and a source the host handed over is this request's alone,
-        // interned into this request's own memory and gone with it, as
-        // php holds what it compiles for `-r` and for `eval`.
+        // and a source the host handed over is this request's alone, its
+        // strings made in this request's own memory and gone with the
+        // unit, as php holds what it compiles for `-r` and for `eval`.
         if matches!(work, Work::Highlight | Work::Strip) {
             // `open_file_for_scanning` over the program: the source the
             // host handed over, or the file read whole.
@@ -5263,6 +5261,25 @@ impl Engine {
     /// 1 1
     /// 1 2
     /// ```
+    ///
+    /// A source the host handed over, piped, is compiled for the request
+    /// alone and never cached, so under opcache its constant strings are
+    /// its unit's and counted, where a file's are the engine's
+    /// ([`Shared::compile_for`]):
+    ///
+    /// ```php
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w']], $pipes);
+    /// fwrite($pipes[0], '<?php debug_zval_dump("abcdefgh");'); fclose($pipes[0]);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// $f = sys_get_temp_dir() . '/piped' . getmypid() . '.php';
+    /// file_put_contents($f, '<?php debug_zval_dump("abcdefgh");'); touch($f, time() - 60);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', $f], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p); unlink($f);
+    /// ```
+    /// ```expect process
+    /// string(8) "abcdefgh" refcount(2)
+    /// string(8) "abcdefgh" interned
+    /// ```
     fn primary(
         &self,
         req: &mut Request,
@@ -5275,13 +5292,10 @@ impl Engine {
             let script = req
                 .script_name()
                 .map_or_else(|| b"Standard input code".to_vec(), <[u8]>::to_vec);
-            return Some(self.shared.compile_for(
-                req,
-                source,
-                &script,
-                SourceKind::File,
-                ConstantHome::Request,
-            ));
+            return Some(
+                self.shared
+                    .compile_for(req, source, &script, SourceKind::File),
+            );
         }
         let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();
         // A bare program is opened as phpdbg's `phpdbg_compile` opens it,
@@ -5527,6 +5541,7 @@ impl Engine {
         // `zend_deactivate`'s `zend_ini_deactivate`, after
         // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
         req.ini_deactivate();
+        req.free_loop_var_stack();
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
         // `zend_post_deactivate_modules`, after the executor is shut
@@ -7910,8 +7925,8 @@ mod tests {
     }
 
     /// What `memory_get_usage()` reads (design §5.13) after a request
-    /// that built strings: a request that compiles for itself interns
-    /// into its own memory, and the next request starts where the first
+    /// that built strings: a request that compiles for itself makes its
+    /// constants in its own memory, and the next request starts where the first
     /// one did, because the first request's end took every byte of it
     /// (design §5.2). The native that asks is #165; the accountant it
     /// asks is this one.
@@ -7923,33 +7938,37 @@ mod tests {
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
-            let compiled = compile(
-                source,
-                Origin {
-                    filename: b"witness.php",
-                    cwd: Path::new(""),
-                    kind: SourceKind::File,
-                    keys_before: 0,
-                    request_classes: RequestClasses::default(),
-                    multibyte: None,
-                },
-                CompileIni {
-                    precision: 14,
-                    short_open_tag: true,
-                    assertions: true,
-                    shebang: php_compile::Shebang::Read,
-                    multibyte: false,
-                },
-                Declared::default(),
-                StackLimit::UNCHECKED,
-                req.heap_mut(),
-                &mut php_compile::syntax::Arena::new(),
-            );
+            let before = req.memory_usage(false);
+            let compiled = req.compiling(|strings, _, _| {
+                compile(
+                    source,
+                    Origin {
+                        filename: b"witness.php",
+                        cwd: Path::new(""),
+                        kind: SourceKind::File,
+                        keys_before: 0,
+                        request_classes: RequestClasses::default(),
+                        multibyte: None,
+                    },
+                    CompileIni {
+                        precision: 14,
+                        short_open_tag: true,
+                        assertions: true,
+                        shebang: php_compile::Shebang::Read,
+                        multibyte: false,
+                    },
+                    Declared::default(),
+                    StackLimit::UNCHECKED,
+                    strings,
+                    &mut php_compile::syntax::Arena::new(),
+                )
+            });
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
-                req.memory_usage(false) > 0,
-                "what the request interned is the request's own memory"
+                req.memory_usage(false) > before,
+                "what the request made of its constants is the request's own memory"
             );
+            req.release_compiled();
         }
         // The compiler's arena, the object store's table and the VM
         // stack's first page, and nothing else, before a line runs
@@ -7968,7 +7987,7 @@ mod tests {
     }
 
     /// A source the host handed over is the request's alone, as php's
-    /// `-r` and `eval` are: its constant strings are interned into the
+    /// `-r` and `eval` are: its constant strings are made in the
     /// request's own memory and the engine's table never hears of them.
     #[test]
     fn what_the_host_handed_over_interns_into_the_request_and_not_the_engine() {

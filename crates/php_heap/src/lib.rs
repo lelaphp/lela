@@ -98,9 +98,7 @@ use std::ptr::NonNull;
 ///
 /// The heap owns what it handed out. Dropping it is php's mass release
 /// at request end: every chunk and every huge block goes back, so
-/// nothing a request allocated outlives the request. What the request
-/// interned is here for the same reason (design §5.2): those strings are
-/// allocated out of this heap and go back with everything else.
+/// nothing a request allocated outlives the request.
 #[derive(Debug)]
 pub struct Heap {
     /// php's `EG(objects_store)`: the table of ids, whose buckets are
@@ -118,14 +116,6 @@ pub struct Heap {
     /// anything else of the request's ([`Heap::new`]), carved and never
     /// freed a piece at a time ([`Heap::carve`]).
     arena: zend_arena::ZendArena,
-    /// The strings this request holds to its end where the engine's
-    /// table holds none, the names its declarations are read by and the
-    /// strings of its own units' constant arrays, each once ([`Heap`]'s
-    /// [`Intern`]): the request's own memory and counted as such, in a
-    /// table of the system allocator's, which nothing counts
-    /// ([`string::Table`]). A unit compiled for this request alone keeps
-    /// its other constant strings itself, as plain strings it owns.
-    interned: string::Table,
     /// php's `EG(ht_iterators)`: the positions the walks of this
     /// request's tables are registered at.
     iterators: iterators::Iterators,
@@ -140,12 +130,6 @@ pub struct Heap {
     /// allocates nothing off the request's heap; a walk inside a
     /// destructor a walk serves finds it taken and lays its own.
     destroying: Vec<array::Emptying>,
-    /// The constant arrays of the units this request alone serves, out of
-    /// this heap and immutable, so no release frees them: kept in a
-    /// debug build for its teardown to free by name before the request
-    /// leak sensor, as php's `destroy_op_array` frees a request's literals.
-    #[cfg(debug_assertions)]
-    constant_arrays: Vec<Arr>,
 }
 
 impl Default for Heap {
@@ -160,6 +144,39 @@ impl Heap {
     /// creates and the object store's table `init_executor` allocates,
     /// and nothing else: what a request's heap holds of the engine's own
     /// before the host and the extensions start it.
+    ///
+    /// Under opcache, the regime a request's memory is held to from its
+    /// first line (design §5.13, #2863), php keeps no
+    /// `CG(interned_strings)` on the request's heap:
+    /// `zend_string_init_interned` and `zend_new_interned_string` are
+    /// `accel_init_interned_string_for_php` and
+    /// `accel_new_interned_string_for_php` (`Z/ext/opcache/ZendAccelerator.c`),
+    /// which hand out a plain string of the request's heap, so php's
+    /// 40960-byte bucket array, which `php -n` `emalloc`s on the first
+    /// string a request interns, is not on it, and no table is here
+    /// either. That is the regime the witness reads: under `php -n`
+    /// php's compile lays the 40960 down before the first line, which
+    /// the divergence row `witness:cf4528199e…` accepts with the rest of
+    /// that compile.
+    ///
+    /// ```php
+    /// var_dump(memory_get_usage());
+    /// ```
+    /// ```expect exit=0
+    /// int(464552)
+    /// ```
+    ///
+    /// A name a class holds costs nothing to read, and no table is laid
+    /// down for it:
+    ///
+    /// ```php
+    /// $m = memory_get_usage();
+    /// $c = get_class(new ArrayObject);
+    /// echo memory_get_usage() - $m < 4096 ? "no table laid down here\n" : "a table laid down here\n";
+    /// ```
+    /// ```expect
+    /// no table laid down here
+    /// ```
     #[must_use]
     pub fn new() -> Heap {
         Heap::over(mm::Mm::new())
@@ -203,13 +220,10 @@ impl Heap {
             resources: resource::RegularList::new(),
             mm,
             arena,
-            interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
             gc,
             nested: gc::Nested::default(),
             destroying: Vec::new(),
-            #[cfg(debug_assertions)]
-            constant_arrays: Vec::new(),
         }
     }
 
@@ -423,13 +437,6 @@ impl Heap {
         Ok(unsafe { Str::init_with(at, size - header + l, 0, fill) })
     }
 
-    /// How many strings this request's own table holds ([`Heap`]'s
-    /// [`Intern`]).
-    #[must_use]
-    pub fn interned(&self) -> usize {
-        self.interned.count()
-    }
-
     /// `zend_string_release`: one owner fewer, and the string is freed
     /// when the last gives it up, its bytes kept while a pin names it
     /// ([`Heap::give_back`]). An interned string is never freed. A
@@ -515,11 +522,10 @@ impl Heap {
     /// php's debug `zend_mm_shutdown` (`Z/Zend/zend_alloc.c:2434`) once
     /// the engine has freed what the request held: the blocks the heap
     /// itself keeps for the request's lifetime freed by name, the
-    /// constant arrays of the units this request alone served, the
     /// resource list (`zend_destroy_rsrc_list`), the object store's
-    /// buckets (`zend_objects_store_destroy`), the strings the request
-    /// interned with their table (`zend_interned_strings_deactivate`)
-    /// and the compiler's arena (`shutdown_compiler`), then every block still held named, `zend_mm_check_leaks`. What it
+    /// buckets (`zend_objects_store_destroy`) and the compiler's arena
+    /// (`shutdown_compiler`), then every block still held named,
+    /// `zend_mm_check_leaks`. What it
     /// finds is recorded as the sensors record and raised by
     /// [`Heap::take_sensed`]: the blocks never freed, their bytes and the
     /// first of them, with what `name` calls the [`Origin`] that block was
@@ -530,15 +536,8 @@ impl Heap {
     /// given back whole.
     #[cfg(debug_assertions)]
     pub fn sense_leaks(&mut self, name: &dyn Fn(Origin) -> String) {
-        for a in std::mem::take(&mut self.constant_arrays) {
-            array::free_table_data(&mut self.mm, a);
-            // SAFETY: the header came from this heap's `mm`, and the
-            // array is immutable, so no owner gave it up before this.
-            unsafe { self.mm.free(a.address()) };
-        }
         self.resources.destroy(&mut self.mm);
         self.store.destroy(&mut self.mm);
-        self.interned.destroy(&mut self.mm);
         self.arena.destroy(&mut self.mm);
         self.mm.sense_leaks(name);
     }
@@ -899,61 +898,6 @@ pub(crate) enum Last {
     Cell(Ref),
 }
 
-impl Intern for Heap {
-    /// The home of the strings this request holds to its end where the
-    /// engine's table holds none: a name a declaration is read by, which
-    /// the engine's declarations keep as bytes and php reads off
-    /// `ce->name`, `function_name`, `prop_info->name` or a CV's name with
-    /// `ZVAL_STR_COPY`, and a string of a constant array of a unit
-    /// compiled for this request alone, which lives as long as the array
-    /// ([`Intern::constant_array`]). The frozen table, then this
-    /// request's own, then a string out of this request's memory at the
-    /// size `zend_string_init` takes, which the request's end takes with everything else. It is
-    /// flagged interned and never persistent, so no release frees it and
-    /// no thread but this one can name it, and the table that finds it
-    /// again costs nothing ([`string::Table`]).
-    ///
-    /// It is neither php's `zend_string_init_interned` nor its compile's
-    /// `zend_new_interned_string`: under opcache both hand their caller a
-    /// string of its own where opcache's buffer has none
-    /// (`accel_init_interned_string_for_php`,
-    /// `accel_new_interned_string_for_php`), which a request makes with
-    /// [`Heap::string`], and which a unit compiled for this request alone
-    /// owns and gives up with its op arrays.
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
-        if let Some(frozen) = string::frozen_string(bytes) {
-            return Ok(frozen);
-        }
-        let hash = string::hash_func(bytes);
-        if let Some(held) = self.interned.find(hash, bytes) {
-            return Ok(held);
-        }
-        let at = self.mm.alloc(Str::allocation_size(bytes.len()))?;
-        // SAFETY: the allocation is exactly the size `init` asks for and
-        // nothing else holds it.
-        let s = unsafe { Str::init(at, bytes, string::INTERNED) };
-        if valid_utf8 {
-            s.mark_valid_utf8();
-        }
-        self.interned.add(hash, s);
-        Ok(s)
-    }
-
-    /// A constant array of a unit this request alone serves, an `eval`
-    /// or an uncached include: out of this heap and gone with it, written
-    /// with strings of this table's, which no release frees, and
-    /// immutable as the published one is so that the engine reads one
-    /// kind of constant array.
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
-        let a = self.array_constant(entries)?;
-        #[cfg(debug_assertions)]
-        if !entries.is_empty() {
-            self.constant_arrays.push(a);
-        }
-        Ok(a)
-    }
-}
-
 /// What a fresh heap holds: the compiler's arena and the object
 /// store's table ([`Heap::new`]).
 #[cfg(test)]
@@ -1032,11 +976,11 @@ mod tests {
     /// them.
     ///
     /// **Every number here is php's own**, the bin arithmetic of design
-    /// §5.13 over php's sizes: 40 bytes for a string of eight, 32 for one
-    /// of four, and nothing for the table that finds them again, over
-    /// what every request starts with.
+    /// §5.13 over php's sizes: 32 bytes for a string of four, given back
+    /// at its release, over what every request starts with, and the
+    /// empty string and one byte the process's.
     #[test]
-    fn what_a_request_interned_is_its_own_and_the_next_request_starts_where_it_did() {
+    fn a_request_s_string_is_its_own_and_the_next_request_starts_where_it_did() {
         use std::sync::atomic::Ordering::Relaxed;
         let _alone = alone();
         let mappings = mm::MAPPINGS.load(Relaxed);
@@ -1045,40 +989,14 @@ mod tests {
             let mut heap = Heap::new();
             started_at.push(heap.memory_usage(false) - STARTED);
             let heap_start = STARTED;
-            // The frozen table answers first and allocates nothing.
-            let frozen = heap.intern(b"");
-            assert!(matches!(frozen, Ok(s) if s.is_empty()));
-            assert_eq!(heap.memory_usage(false), heap_start);
-            assert_eq!(heap.interned(), 0);
-            // Every other string is one allocation, once.
-            let first = heap.intern(b"var_dump");
-            let again = heap.intern(b"var_dump");
-            assert!(first.is_ok() && again.is_ok());
-            let (Ok(first), Ok(again)) = (first, again) else {
-                return;
-            };
-            assert_eq!(first.address(), again.address());
-            assert_eq!(heap.interned(), 1);
-            // Eight bytes, the header and the NUL: php's forty-byte bin,
-            // and nothing beside it.
-            assert_eq!(heap.memory_usage(false), heap_start + 40);
-            assert!(first.is_interned());
-            assert!(
-                !first.is_persistent(),
-                "a request's interned string is out of the request's heap"
-            );
-            // A release never frees an interned string, as php's does not;
-            // the request's end is what takes it.
-            heap.release_string(first);
-            assert_eq!(heap.memory_usage(false), heap_start + 40);
-            // A string the request made and gave up goes back at once.
             let made = heap.string(b"made");
             assert!(made.is_ok());
             if let Ok(made) = made {
-                assert_eq!(heap.memory_usage(false), heap_start + 72);
+                assert!(!made.is_interned() && !made.is_persistent());
+                assert_eq!(heap.memory_usage(false), heap_start + 32);
                 heap.release_string(made);
             }
-            assert_eq!(heap.memory_usage(false), heap_start + 40);
+            assert_eq!(heap.memory_usage(false), heap_start);
         }
         assert_eq!(started_at, vec![0, 0], "every request starts at zero");
         assert_eq!(
@@ -1086,29 +1004,6 @@ mod tests {
             mappings,
             "and leaves no mapping behind"
         );
-    }
-
-    /// The table's own storage is the system's (design §5.13, #2863):
-    /// under opcache php lays no `CG(interned_strings)` down on the
-    /// request's heap, so a request that interns 1025 strings pays their
-    /// bins and nothing else, where `php -n` pays a 40960-byte bucket
-    /// array on the first and doubles it on the 1025th. The frozen table
-    /// answers before this one and holds no string of the request's.
-    #[test]
-    fn the_interned_table_s_storage_is_off_the_request_s_heap() {
-        let _alone = alone();
-        let mut heap = Heap::new();
-        let start = heap.memory_usage(false);
-        assert!(matches!(heap.intern(b""), Ok(s) if s.is_empty()));
-        assert!(matches!(heap.intern(b"a"), Ok(s) if s.len() == 1));
-        assert_eq!(heap.memory_usage(false), start);
-        for i in 0..1025u32 {
-            let interned = heap.intern(format!("s{i}").as_bytes());
-            assert!(interned.is_ok(), "the heap would not intern s{i}");
-        }
-        assert_eq!(heap.interned(), 1025);
-        assert_eq!(heap.memory_usage(false), start + 1025 * 32);
-        assert_eq!(heap.memory_peak(), start + 1025 * 32);
     }
 
     /// A string past 2 MiB is a huge block, and php rounds one to the

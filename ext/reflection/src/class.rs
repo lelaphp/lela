@@ -756,10 +756,10 @@ impl ReflectionClass {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let class = this_class(req, this.object())?;
         let name = class_name_of(req, class);
-        PhpString::interned(req, &name)
+        PhpString::declared(req, &name)
     }
 
     /// `ReflectionClass::isInternal()`: `ce->type == ZEND_INTERNAL_CLASS`,

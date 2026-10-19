@@ -896,10 +896,10 @@ impl ReflectionFunctionAbstract {
     /// string(7) "getCode"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (_, decl) = this_function(req, this.object())?;
         let name = decl.name.0.to_vec();
-        PhpString::interned(req, &name)
+        PhpString::declared(req, &name)
     }
 
     /// `ReflectionFunctionAbstract::getNamespaceName()`: the name before

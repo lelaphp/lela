@@ -1382,9 +1382,13 @@ fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one(
 /// `Fiber::getCurrent()` answers there: `#n` for a fiber, `null` for
 /// none.
 fn current_at_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
-    let current = match PhpString::interned(req, b"Fiber::getCurrent")
+    let current = match PhpString::declared(req, b"Fiber::getCurrent")
         .ok()
-        .and_then(|name| callable_checked(req, &Value::string(name)).ok())
+        .and_then(|name| {
+            let callable = callable_checked(req, &Value::string(*name));
+            name.give_up(req);
+            callable.ok()
+        })
         .map(|callable| call(req, &callable, &[]))
     {
         Some(Ok(answer)) => {

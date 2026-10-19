@@ -579,7 +579,7 @@ impl Request {
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let name = match self.known(name) {
-            Ok(name) => Owner::take(self, name),
+            Ok(name) => name,
             Err(thrown) => {
                 value.give_up(self);
                 return Err(thrown);
