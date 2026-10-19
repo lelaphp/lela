@@ -678,8 +678,9 @@ impl Failed {
         }
     }
 
-    /// `Overflow` for a length libxml2's `int` cannot hold.
-    fn overflows(len: usize) -> Result<(), Failed> {
+    /// php's `>= INT_MAX` test of a length libxml2's `int` is to hold:
+    /// `Overflow` where it cannot.
+    fn length(len: usize) -> Result<(), Failed> {
         if i32::try_from(len).is_ok_and(|len| len < i32::MAX) {
             Ok(())
         } else {
@@ -723,7 +724,7 @@ fn convert_attributes(
             local = local.get(colon + 1..).unwrap_or_default();
         }
         let value = attr.value();
-        if let Err(failed) = Failed::overflows(local.len()).and(Failed::overflows(value.len())) {
+        if let Err(failed) = Failed::length(local.len()).and(Failed::length(value.len())) {
             return Ok(Err(failed));
         }
         let Some(lattr) = Node::new_attr(Some(doc), local, None) else {
@@ -870,7 +871,7 @@ fn convert<'doc>(
         let node = item.node;
         let converted = match node.kind() {
             NodeKind::Element => convert_element(req, private, work, item, to, &mut made)?,
-            NodeKind::Text => Failed::overflows(node.data().len()).and_then(|()| {
+            NodeKind::Text => Failed::length(node.data().len()).and_then(|()| {
                 let text = Node::new_text_len(Some(doc), node.data()).ok_or(Failed::Oom)?;
                 item.parent.add_child(text);
                 text.set_line(node.line());
@@ -1076,7 +1077,7 @@ fn convert_document(
 ) -> Result<Option<Converted>, Thrown> {
     let mut private = Private::new(req)?;
     let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
-    let bridged = match Node::new_html_doc() {
+    let failed = match Node::new_html_doc() {
         Some(doc) => {
             let start = parsed.node().last_child();
             match bridge(req, &mut private, start, doc, doc, create_default_ns) {
@@ -1088,16 +1089,20 @@ fn convert_document(
                         seen: parsed.observations(),
                     }));
                 }
-                failed => {
+                Ok(Err(failed)) => {
                     doc.free_document();
                     failed
                 }
+                Err(thrown) => {
+                    doc.free_document();
+                    private.free(req);
+                    return Err(thrown);
+                }
             }
         }
-        None => Ok(Err(Failed::Oom)),
+        None => Failed::Oom,
     };
     private.free(req);
-    let failed = bridged?.err().unwrap_or(Failed::Oom);
     let message = [failed.as_str().as_bytes(), b" in ", name].concat();
     php_ext_libxml::Errors::ctx_error(req, &message);
     Ok(None)

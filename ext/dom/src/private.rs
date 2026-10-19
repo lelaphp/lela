@@ -8,11 +8,12 @@
 //! `xmlns` attribute is an attribute like any other. The mapper's tables,
 //! the tables its walks keep, the template table, the strings they key
 //! by and the declarations the mapper makes are on the request's heap at
-//! php's sizes, made and freed where php's are (design §5.13, [`Table`]). Where php's declaration is its `emalloc`, whose strings are the
-//! tables' keys, a declaration here is libxml's, charged its `emalloc`
-//! and put on the document's old list, which `xmlFreeDoc` frees after the
-//! private data is gone; nothing reads the list but libxml's lookup of
-//! the `xml` prefix, which finds the same declaration either way.
+//! php's sizes, made and freed where php's are (design §5.13, [`Table`]).
+//! Where php's declaration is its `emalloc`, whose strings are the tables'
+//! keys, a declaration here is libxml's, charged its `emalloc` and put on
+//! the document's old list, which `xmlFreeDoc` frees after the private
+//! data is gone; nothing reads the list but libxml's lookup of the `xml`
+//! prefix, which finds the same declaration either way.
 //!
 //! A `template` element's contents are a fragment no tree holds, found
 //! through the element ([`Private::template`]); the element's namespace
@@ -96,7 +97,10 @@ impl<R> Table<R> {
             header: Some(Emalloc::new(req, HASH_TABLE)?),
             ..Table::default()
         };
-        table.real_init(req)?;
+        if let Err(thrown) = table.real_init(req) {
+            table.free(req);
+            return Err(thrown);
+        }
         Ok(table)
     }
 
@@ -1034,14 +1038,18 @@ pub(crate) fn ensure_template(
     };
     fragment.set_parent(Some(element));
     obj.add_ns_tag(element);
-    let added = match of(&mut obj) {
-        Some(private) => private.add_template(req, element, fragment).map(|()| true),
-        None => Ok(false),
-    };
-    if !matches!(added, Ok(true)) {
-        fragment.free();
+    let added = of(&mut obj).map(|private| private.add_template(req, element, fragment));
+    match added {
+        Some(Ok(())) => Ok(Some(fragment)),
+        Some(Err(thrown)) => {
+            fragment.free();
+            Err(thrown)
+        }
+        None => {
+            fragment.free();
+            Ok(None)
+        }
     }
-    Ok(added?.then_some(fragment))
 }
 
 /// `php_dom_ns_is_fast(node, token)`: whether the node's namespace is
