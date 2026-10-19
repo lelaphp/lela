@@ -1725,6 +1725,7 @@ impl Shared {
             }
         };
         req.count_keys_made(unit.runtime_keys.len());
+        req.note_loop_vars(unit.loop_vars);
         let unit = req.take_unit(unit);
         req.hold_compiled(&unit);
         Ok(unit)
@@ -5493,6 +5494,7 @@ impl Engine {
         // `zend_deactivate`'s `zend_ini_deactivate`, after
         // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
         req.ini_deactivate();
+        req.free_loop_var_stack();
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
         // `zend_post_deactivate_modules`, after the executor is shut

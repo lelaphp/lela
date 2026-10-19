@@ -473,6 +473,10 @@ pub struct Request {
     /// constants and their names, held while each unit lives
     /// ([`unit_strings::UnitStrings`]).
     unit_strings: unit_strings::UnitStrings,
+    /// `CG(loop_var_stack)`'s elements and how many they hold, laid down
+    /// by the first compile of the request that pushed one and kept to
+    /// its end ([`Request::note_loop_vars`]).
+    loop_var_stack: Option<(php_heap::Block, u32)>,
     /// php's `EG(function_table)` past the natives, each function under
     /// its name: the preload's, published, in the order its table holds
     /// them, then each the request declared, in the order declared. A
@@ -1045,6 +1049,7 @@ impl Request {
             user_functions: PinnedRows::default(),
             named_callees: std::collections::HashMap::new(),
             unit_strings: unit_strings::UnitStrings::default(),
+            loop_var_stack: None,
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,

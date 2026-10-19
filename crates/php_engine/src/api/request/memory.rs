@@ -864,6 +864,47 @@ impl Request {
         }
     }
 
+    /// What a compile of the request left `CG(loop_var_stack)` holding
+    /// room for, `loops` being the most entries it held
+    /// ([`php_unit::Unit::loop_vars`]): `zend_stack_push` grows the
+    /// stack's elements sixteen 12-byte `zend_loop_var`s at a time with
+    /// `safe_erealloc`, and nothing shrinks them before
+    /// `shutdown_compiler`, so the request holds them from the first
+    /// compile that pushed one, a loop or a function body, to its end:
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); eval('$x = 1;'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('while (false) {}'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('switch (1) {}'); echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); eval('for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { for (;;) { break 17; } } } } } } } } } } } } } } } } }'); echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 192
+    /// 0
+    /// 192
+    /// ```
+    pub(crate) fn note_loop_vars(&mut self, loops: u32) {
+        let wanted = loops.div_ceil(16).saturating_mul(16);
+        if wanted <= self.loop_var_stack.as_ref().map_or(0, |(_, held)| *held) {
+            return;
+        }
+        let len = wanted as usize * 12;
+        let grown = match self.loop_var_stack.take() {
+            Some((held, _)) => self.heap.block_resize(held, len),
+            None => self.heap.block(len),
+        };
+        // A refusal is the memory limit's fatal, which ends the request.
+        self.loop_var_stack = grown.ok().map(|grown| (grown, wanted));
+    }
+
+    /// `shutdown_compiler`'s `zend_stack_destroy(&CG(loop_var_stack))`.
+    pub(crate) fn free_loop_var_stack(&mut self) {
+        if let Some((held, _)) = self.loop_var_stack.take() {
+            self.heap.free_block(held);
+        }
+    }
+
     /// The heap's memory limit in bytes, `PG(memory_limit)` as
     /// `zend_set_memory_limit` set it.
     pub(crate) fn heap_memory_limit(&self) -> usize {

@@ -145,6 +145,13 @@ pub struct Unit {
     /// hit (`Z/ext/opcache/zend_accelerator_util_funcs.c:380`). The
     /// engine registers it where it raises [`Unit::diagnostics`].
     pub halt_offset: Option<i64>,
+    /// The most entries `CG(loop_var_stack)` held while the unit compiled
+    /// (`Z/Zend/zend_compile.c:738`, `:6777`, `:8548`), a loop's, a
+    /// `finally`'s or a function body's separator each, which the
+    /// stack's 12-byte elements were allocated for, sixteen at a time
+    /// (`zend_stack_push`), and which the request that compiled the unit
+    /// keeps to its end (`shutdown_compiler`).
+    pub loop_vars: u32,
     /// The cell every closure of the unit's constant expressions reaches
     /// the unit through, bound when the unit is published.
     pub cell: UnitCell,
