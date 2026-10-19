@@ -1707,7 +1707,6 @@ impl Shared {
             multibyte: req.typed_ini().multibyte,
         };
         let bound = crate::multibyte::bound(req, ini.multibyte);
-        let cwd = req.cwd();
         let keys_before = req.keys_made();
         let stack = req.stack_limit();
         let declared = Declared {
@@ -1715,10 +1714,10 @@ impl Shared {
             ..self.declared()
         };
         let room = req.compile_room();
-        let unit = req.compiling(|heap, request_classes, arena| {
+        let unit = req.compiling(|heap, request_classes, arena, cwd| {
             let origin = Origin {
                 filename,
-                cwd: &cwd,
+                cwd,
                 kind,
                 keys_before,
                 request_classes,
@@ -7982,7 +7981,7 @@ mod tests {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
             let before = req.memory_usage(false);
-            let compiled = req.compiling(|strings, _, _| {
+            let compiled = req.compiling(|strings, _, _, _| {
                 compile(
                     source,
                     Origin {
